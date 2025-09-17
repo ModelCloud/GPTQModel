@@ -29,6 +29,7 @@ class Phi4MMGPTQ(BaseQModel):
         "layers",
         "#",
         {
+            "input_layernorm": ("input_layernorm:!",),
             "self_attn": {
                 "qkv_proj": {
                     "base_layer": ("base_layer",),

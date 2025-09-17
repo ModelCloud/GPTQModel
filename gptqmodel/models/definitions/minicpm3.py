@@ -23,12 +23,13 @@ class MiniCpm3QModel(BaseQModel):
 
     layers_node = ["model.layers"]
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_a_proj","self_attn.kv_a_proj_with_mqa"],
-        ["self_attn.q_b_proj","self_attn.kv_b_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.gate_proj","mlp.up_proj"],
-        ["mlp.down_proj"],
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:1", "kv_b_proj:1", "o_proj:2"),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+        }
     ]

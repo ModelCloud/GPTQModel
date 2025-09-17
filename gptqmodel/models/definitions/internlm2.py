@@ -31,8 +31,8 @@ class InternLM2QModel(BaseQModel):
         "layers",
         "#",
         {
+            "ffn_norm": ("ffn_norm:!",),
             "attention": ("wqkv:0", "wo:0"),
             "feed_forward": ("w1:0", "w3:0", "w2:1"),
         }
     ]
-    

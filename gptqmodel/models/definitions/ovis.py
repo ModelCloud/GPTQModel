@@ -39,13 +39,14 @@ class OvisQModel(BaseQModel):
         "layers",
         "#",
         {
+            "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
             "mlp": ("up_proj:0", "gate_proj:0", "down_proj:1"),
         }
     ]
 
     layer_modules_strict = False # the layer modules are in different decode layers
-    
+
     require_monkeypatch = True
 
     modality = [MODALITY.IMAGE_TO_TEXT]

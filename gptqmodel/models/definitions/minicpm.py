@@ -28,6 +28,7 @@ class MiniCPMGPTQ(BaseQModel):
         "layers",
         "#",
         {
+            "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_proj:0", "k_proj:1", "v_proj:2", "o_proj:3"),
             "mlp": ("gate_proj", "up_proj", "down_proj"),
         }

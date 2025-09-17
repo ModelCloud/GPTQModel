@@ -28,6 +28,7 @@ class LlavaQwen2QModel(BaseQModel):
         "layers",
         "#",
         {
+            "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }

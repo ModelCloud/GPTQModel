@@ -40,6 +40,7 @@ class HymbaQModel(BaseQModel):
         "layers",
         "#",
         {
+            "input_layernorm": ("input_layernorm:!",),
             "mamba": ("in_proj:0", "out_proj:1"),
             "moe": {
                 "experts": {

@@ -39,6 +39,7 @@ class Llama4QModel(BaseQModel):
         "layers",
         "#",
         {
+            "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
             "feed_forward": {
                 "experts": {
