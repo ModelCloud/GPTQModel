@@ -28,7 +28,7 @@ class PhiQModel(BaseQModel):
         "layers",
         "#",
         {
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "dense:1"),
+            "self_attn": ("q_proj:0", "k_proj:1", "v_proj:2", "dense:3"),
             "mlp": ("fc1:0", "fc2:1"),
         }
     ]

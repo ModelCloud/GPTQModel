@@ -31,11 +31,7 @@ class MixtralQModel(BaseQModel):
             "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
             "block_sparse_moe": {
                 "experts": {
-                    "#": {
-                        "w1": ("w1",),
-                        "w3": ("w3",),
-                        "w2": ("w2",),
-                    }
+                    "#": ("w1:0", "w3:0", "w2:1"),
                 }
             }
         }

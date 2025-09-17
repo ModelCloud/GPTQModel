@@ -31,7 +31,7 @@ class TeleChat2QModel(BaseQModel):
         "h",
         "#",
         {
-            "self_attention": ("dense"),
+            "self_attention": {"dense": ("dense",)},
             "mlp": ("up_proj:0", "gate_proj:0", "down_proj:1"),
         }
     ]

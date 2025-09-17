@@ -39,8 +39,22 @@ class Phi4MMGPTQ(BaseQModel):
         "layers",
         "#",
         {
-            "self_attn": ("qkv_proj:0", "o_proj:1"),
-            "mlp": ("gate_up_proj:0", "down_proj:1"),
+            "self_attn": {
+                "qkv_proj": {
+                    "base_layer": ("base_layer",),
+                },
+                "o_proj": {
+                    "base_layer": ("base_layer",),
+                }
+            },
+            "mlp": {
+                "gate_up_proj": {
+                    "base_layer": ("base_layer",),
+                },
+                "down_proj": {
+                    "base_layer": ("base_layer",),
+                }
+            }
         }
     ]
 

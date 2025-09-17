@@ -35,10 +35,12 @@ class GptNeoQModel(BaseQModel):
 
     _layers_modules_tree = [
         "transformer",
-        "h",
+        "h", 
         "#",
         {
-            "attn": ("k_proj:0", "v_proj:0", "q_proj:0", "out_proj:1"),
+            "attn": {
+                "attention": ("k_proj:0", "v_proj:0", "q_proj:0", "out_proj:1")
+            },
             "mlp": ("c_fc:0", "c_proj:1"),
         }
     ]
