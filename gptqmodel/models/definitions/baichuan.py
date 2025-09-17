@@ -34,12 +34,3 @@ class BaiChuanQModel(BaseQModel):
             "mlp": ("up_proj:0", "gate_proj:0", "down_proj:1"),
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.W_pack"],
-        ["self_attn.o_proj"],
-        ["mlp.up_proj", "mlp.gate_proj"],
-        ["mlp.down_proj"],
-    ]

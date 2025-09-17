@@ -34,15 +34,6 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
 
     layers_node = ["thinker.model.layers"]
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.up_proj", "mlp.gate_proj"],
-        ["mlp.down_proj"],
-    ]
-
     _layers_modules_tree = [
         "thinker",
         "model",

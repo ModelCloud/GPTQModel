@@ -57,27 +57,3 @@ class DeepSeekV3QModel(BaseQModel):
             },
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
-        ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
-        ["self_attn.o_proj"],
-
-        ["mlp.gate_proj", "mlp.up_proj"],
-        ["mlp.down_proj"],
-
-        # included in layer 3-61, uses dynamic_expert_index
-        # DeepSeek-V3 uses 256 experts
-        # for quantization on A100, don't merge gate_proj and up_proj
-        # if you have enough vram to process 256 * 2 module inputs, then you can merge gate_proj and up_proj
-        # into single stage which will make the quantization process faster
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-
-        # included in layer 3-61
-        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
-        ["mlp.shared_experts.down_proj"],
-    ]

@@ -26,18 +26,6 @@ class NemotronHQModel(BaseQModel):
 
     layers_node = "backbone.layers"
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["mixer.k_proj", "mixer.v_proj", "mixer.q_proj"],
-        ["mixer.o_proj"],
-
-        ["mixer.in_proj", "mixer.out_proj"],
-
-        ["mixer.gate_proj", "mixer.up_proj"],
-        ["mixer.down_proj"],
-    ]
-
     _layers_modules_tree = [
         "backbone",
         "layers",

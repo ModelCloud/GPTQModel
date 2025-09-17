@@ -41,15 +41,3 @@ class PanguAlphaQModel(BaseQModel):
             "mlp": ("c_fc:0", "c_proj:1"),
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    # Inside each `LlamaDecoderLayer` layer are many internal modules
-    # List them in the order executed in model forward() code
-    # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
-    layer_modules = [
-        ["attn.k_proj", "attn.v_proj", "attn.q_proj"],
-        ["attn.c_proj"],
-        ["mlp.c_fc",],
-        ["mlp.c_proj"],
-    ]

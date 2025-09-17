@@ -23,15 +23,6 @@ class GptBigCodeQModel(BaseQModel):
 
     layers_node = ["transformer.h"]
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.c_attn"],
-        ["attn.c_proj"],
-        ["mlp.c_fc"],
-        ["mlp.c_proj"],
-    ]
-
     _layers_modules_tree = [
         "transformer",
         "h",

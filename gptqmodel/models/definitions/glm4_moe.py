@@ -37,25 +37,6 @@ class GLM4MoEGPTQ(BaseQModel):
 
     layers_node = ["model.layers"]
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-
-        # MoE components for layers 1-46 (all have shared_experts and individual experts)
-        ["mlp.shared_experts.up_proj", "mlp.shared_experts.gate_proj"],
-        ["mlp.shared_experts.down_proj"],
-        ["mlp.gate"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-
-        # Standard MLP components for layer 0 (no experts)
-        ["mlp.down_proj"],
-        ["mlp.gate_proj"],
-        ["mlp.up_proj"],
-    ]
-
     _layers_modules_tree = [
         "model",
         "layers",

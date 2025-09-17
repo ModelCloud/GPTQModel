@@ -33,13 +33,3 @@ class GPTNeoXQModel(BaseQModel):
             "mlp": ("dense_h_to_4h:0", "dense_4h_to_h:1"),
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attention.query_key_value"],
-        ["attention.dense"],
-        ["mlp.dense_h_to_4h"],
-        ["mlp.dense_4h_to_h"],
-    ]
-

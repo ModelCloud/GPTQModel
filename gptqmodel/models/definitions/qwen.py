@@ -37,12 +37,3 @@ class QwenQModel(BaseQModel):
             "mlp": ("w1:0", "w2:0", "c_proj:1"),
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.c_attn"],
-        ["attn.c_proj"],
-        ["mlp.w1", "mlp.w2"],
-        ["mlp.c_proj"],
-    ]

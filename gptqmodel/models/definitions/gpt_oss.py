@@ -145,17 +145,6 @@ class GPTOSSGPTQ(BaseQModel):
 
     layers_node = ["model.layers"]
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-        ["self_attn.o_proj"],
-
-        # uses dynamic_expert_index
-        [f"mlp.experts.gate_up.{EXPERT_INDEX_PLACEHOLDER}"],
-        [f"mlp.experts.down.{EXPERT_INDEX_PLACEHOLDER}"],
-    ]
-
     _layers_modules_tree = [
         "model",
         "layers",

@@ -32,15 +32,3 @@ class FalconH1QModel(BaseQModel):
             "feed_forward": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-
-        ["mamba.in_proj", "mamba.out_proj"],
-
-        ["feed_forward.gate_proj", "feed_forward.up_proj"],
-        ["feed_forward.down_proj"],
-    ]

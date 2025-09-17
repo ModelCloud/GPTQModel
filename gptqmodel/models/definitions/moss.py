@@ -32,12 +32,3 @@ class MossQModel(BaseQModel):
             "mlp": ("fc_in:0", "fc_out:1"),
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.qkv_proj"],
-        ["attn.out_proj"],
-        ["mlp.fc_in"],
-        ["mlp.fc_out"],
-    ]

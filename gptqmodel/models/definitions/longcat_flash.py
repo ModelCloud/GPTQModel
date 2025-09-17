@@ -46,21 +46,4 @@ class LongCatFlashQModel(BaseQModel):
             }
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.0.q_a_proj", "self_attn.0.q_b_proj", "self_attn.0.kv_a_proj_with_mqa", "self_attn.0.kv_b_proj"],
-        ["self_attn.0.o_proj"],
-        ["self_attn.1.q_a_proj", "self_attn.1.q_b_proj", "self_attn.1.kv_a_proj_with_mqa", "self_attn.1.kv_b_proj"],
-        ["self_attn.1.o_proj"],
-
-        ["mlps.0.gate_proj", "mlps.0.up_proj",],
-        ["mlps.0.down_proj"],
-        ["mlps.1.gate_proj", "mlps.1.up_proj",],
-        ["mlps.1.down_proj"],
-
-        # uses dynamic_expert_index
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-    ]
+    

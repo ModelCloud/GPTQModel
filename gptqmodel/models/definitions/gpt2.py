@@ -32,12 +32,3 @@ class GPT2QModel(BaseQModel):
             "mlp": ("c_fc:0", "c_proj:1"),
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.c_attn"],
-        ["attn.c_proj"],
-        ["mlp.c_fc"],
-        ["mlp.c_proj"],
-    ]

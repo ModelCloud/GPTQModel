@@ -29,17 +29,6 @@ class GrinMoeQModel(BaseQModel):
 
     layers_node = ["model.layers"]
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-        ["self_attn.o_proj"],
-
-        # uses dynamic_expert_index
-        [f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w1", f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w3"],
-        [f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w2"],
-    ]
-
     _layers_modules_tree = [
         "model",
         "layers",

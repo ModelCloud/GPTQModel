@@ -24,16 +24,6 @@ class Phi4MMGPTQ(BaseQModel):
 
     layers_node = "model.layers"
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    # text modules only
-    layer_modules = [
-        ["self_attn.qkv_proj.base_layer"],
-        ["self_attn.o_proj.base_layer"],
-        ["mlp.gate_up_proj.base_layer"],
-        ["mlp.down_proj.base_layer"],
-    ]
-
     _layers_modules_tree = [
         "model",
         "layers",

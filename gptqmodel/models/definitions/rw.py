@@ -23,15 +23,6 @@ class RwgQModel(BaseQModel):
 
     layers_node = ["transformer.h"]
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attention.query_key_value"],
-        ["self_attention.dense"],
-        ["mlp.dense_h_to_4h"],
-        ["mlp.dense_4h_to_h"],
-    ]
-
     _layers_modules_tree = [
         "transformer",
         "h",

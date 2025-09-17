@@ -35,14 +35,4 @@ class InternLM2QModel(BaseQModel):
             "feed_forward": ("w1:0", "w3:0", "w2:1"),
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attention.wqkv", "attention.wo"],
-
-        ["feed_forward.w1", "feed_forward.w3"],
-        ["feed_forward.w2"],
-    ]
-
-    lm_head = "output"
+    

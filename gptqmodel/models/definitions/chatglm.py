@@ -40,14 +40,6 @@ class ChatGLMQModel(BaseQModel):
         }
     ]
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attention.query_key_value"],
-        ["self_attention.dense"],
-        ["mlp.dense_h_to_4h"],
-        ["mlp.dense_4h_to_h"],
-    ]
     lm_head = "transformer.output_layer"
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:

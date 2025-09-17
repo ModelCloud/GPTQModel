@@ -33,17 +33,6 @@ class Llama4QModel(BaseQModel):
 
     dynamic_expert_index = "num_local_experts"
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj", "self_attn.o_proj"],
-
-        [f"feed_forward.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj", f"feed_forward.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
-        [f"feed_forward.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-
-        ["feed_forward.shared_expert.gate_proj", "feed_forward.shared_expert.up_proj", "feed_forward.shared_expert.down_proj"],
-    ]
-
     _layers_modules_tree = [
         "language_model",
         "model",

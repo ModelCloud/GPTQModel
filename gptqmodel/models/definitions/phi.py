@@ -32,14 +32,3 @@ class PhiQModel(BaseQModel):
             "mlp": ("fc1:0", "fc2:1"),
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_proj"],
-        ["self_attn.k_proj"],
-        ["self_attn.v_proj"],
-        ["self_attn.dense"],
-        ["mlp.fc1"],
-        ["mlp.fc2"],
-    ]

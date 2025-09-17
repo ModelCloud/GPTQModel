@@ -32,12 +32,3 @@ class MptQModel(BaseQModel):
             "ffn": ("up_proj:0", "down_proj:1"),
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.Wqkv"],
-        ["attn.out_proj"],
-        ["ffn.up_proj"],
-        ["ffn.down_proj"]
-    ]

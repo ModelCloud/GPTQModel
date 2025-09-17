@@ -34,18 +34,6 @@ class MLlamaQModel(BaseQModel):
     layers_node = ["language_model.model.layers"]
     # MLllama has two types of repeating layers. Repeats in groups of 4 layers: 0-2 (first 3 layers) is text layers, 3 (4th) is cross-attention layer for vision
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    # Inside each `LlamaDecoderLayer` layer are many internal modules
-    # List them in the order executed in model forward() code
-    # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.up_proj", "mlp.gate_proj"],
-        ["mlp.down_proj"],
-    ]
-
     _layers_modules_tree = [
         "language_model",
         "model",

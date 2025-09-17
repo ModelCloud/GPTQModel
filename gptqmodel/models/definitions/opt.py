@@ -45,15 +45,6 @@ class OptQModel(BaseQModel):
         }
     ]
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.out_proj"],
-        ["fc1"],
-        ["fc2"],
-    ]
-
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.config.do_layer_norm_before and not self.config._remove_final_layer_norm:
             inputs = super().lm_head_pre_quantize_generate_hook(inputs)

@@ -24,15 +24,6 @@ class GptNeoQModel(BaseQModel):
 
     layers_node = ["transformer.h"]
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.attention.k_proj", "attn.attention.v_proj","attn.attention.q_proj"],
-        ["attn.attention.out_proj"],
-        ["mlp.c_fc"],
-        ["mlp.c_proj"],
-    ]
-
     _layers_modules_tree = [
         "transformer",
         "h", 

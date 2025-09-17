@@ -44,14 +44,3 @@ class DbrxConvertedQModel(BaseQModel):
             },
         }
     ]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["norm_attn_norm.attn.q_proj", "norm_attn_norm.attn.k_proj", "norm_attn_norm.attn.v_proj"],
-        ["norm_attn_norm.attn.out_proj"],
-        [f"ffn.experts.mlp.{EXPERT_INDEX_PLACEHOLDER}.w1",  f"ffn.experts.mlp.{EXPERT_INDEX_PLACEHOLDER}.v1"],
-        [f"ffn.experts.mlp.{EXPERT_INDEX_PLACEHOLDER}.w2"]
-    ]
-
-    
