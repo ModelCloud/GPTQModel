@@ -1,3 +1,84 @@
 [build-system]
 requires = ["setuptools >= 64"]
 build-backend = "setuptools.build_meta:__legacy__"
+
+[project]
+name = "gptqmodel"
+description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
+]
+keywords = ["gptq", "quantization", "large-language-models", "transformers", "4bit", "llm"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: C++",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Information Technology",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dynamic = ["version", "dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[project.urls]
+Homepage = "https://github.com/ModelCloud/GPTQModel"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.2.2",
+    "parameterized",
+]
+quality = [
+    "ruff==0.13.0",
+    "isort==6.0.1",
+]
+vllm = [
+    "vllm>=0.8.5",
+    "flashinfer-python>=0.2.1",
+]
+sglang = [
+    "sglang[srt]>=0.4.6",
+    "flashinfer-python>=0.2.1",
+]
+bitblas = [
+    "bitblas==0.0.1-dev13",
+]
+hf = [
+    "optimum>=1.21.2",
+]
+ipex = [
+    "intel_extension_for_pytorch>=2.7.0",
+]
+auto_round = [
+    "auto_round>=0.3",
+]
+logger = [
+    "clearml",
+    "random_word",
+    "plotly",
+]
+eval = [
+    "lm_eval>=0.4.7",
+    "evalplus>=0.3.1",
+]
+triton = [
+    "triton>=3.0.0",
+]
+openai = [
+    "uvicorn",
+    "fastapi",
+    "pydantic",
+]
+mlx = [
+    "mlx_lm>=0.24.0",
+]
