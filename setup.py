@@ -641,8 +641,6 @@ common_setup_kwargs = {
     "platforms": ["linux", "windows", "darwin"],
     "classifiers": [
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
@@ -684,7 +682,7 @@ setup(
         "mlx": ["mlx_lm>=0.24.0"],
     },
     include_dirs=include_dirs,
-    python_requires=">=3.9.0",
+    python_requires=">=3.11",
     cmdclass=(
         {"bdist_wheel": CachedWheelsCommand, "build_ext": additional_setup_kwargs.get("cmdclass", {}).get("build_ext")}
         if (BUILD_CUDA_EXT == "1" and additional_setup_kwargs)
