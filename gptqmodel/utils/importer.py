@@ -27,7 +27,6 @@ from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -50,7 +49,6 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
     BACKEND.TORCH_FUSED: TorchFusedQuantLinear, # optimized for Intel XPU
     BACKEND.TRITON: TritonV2QuantLinear, # good all around kernel that JIT compiles
     # BACKEND.CUDA: DynamicCudaQuantLinear,
-    BACKEND.IPEX: IPEXQuantLinear, # best kernel Intel XPU and CPU with amx/avx512/xmx
     BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1
     BACKEND.TORCH: TorchQuantLinear, # slightly slower than Triton but getting close in Torch 2.6.0+
 
@@ -58,11 +56,10 @@ AUTO_SELECT_BACKEND_ORDER = OrderedDict({
 })
 
 FORMAT_DICT = {
-    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.IPEX, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
+    FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
     FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
     FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
     FORMAT.BITBLAS: [BACKEND.BITBLAS],
-    FORMAT.IPEX: [BACKEND.IPEX],
     FORMAT.QQQ: [BACKEND.QQQ],
 }
 
@@ -103,9 +100,7 @@ def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> 
     assert backend is None or isinstance(backend, BACKEND)
 
     if device is None:
-        if backend == BACKEND.IPEX:
-            device = DEVICE.XPU if HAS_XPU else DEVICE.CPU
-        elif HAS_CUDA:
+        if HAS_CUDA:
             device = DEVICE.CUDA
         elif HAS_XPU:
             device = DEVICE.XPU
@@ -168,8 +163,9 @@ def select_quant_linear(
         multi_select: bool = False, # return all valid kernels
         adapter: Optional[Adapter] = None,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
+    # TODO: this looks wrong
     if device is None:
-        device = DEVICE.XPU if backend == BACKEND.IPEX else DEVICE.CUDA
+        device = DEVICE.CUDA
 
     backend = BACKEND.AUTO if backend is None else backend
 
@@ -236,18 +232,6 @@ def select_quant_linear(
         qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
         qlinear = ExllamaQuantLinear
-    elif backend == BACKEND.IPEX:
-        from ..nn_modules.qlinear.ipex import HAS_IPEX
-        if not HAS_IPEX:
-            raise ValueError("{'Packing' if pack else ''} Kernel: IPEX is not installed. Please install it via `pip install gptqmodel['ipex']`")
-
-        from device_smi import Device
-
-        cpu_vendor = Device("cpu").vendor
-        if cpu_vendor != "intel":
-            log.warn(f"{'Packing' if pack else ''} Kernel: IPEX on cpu is only validated and optimized for Intel cpu with AVX512, AMX, or XMX. Current cpu vendor: `{cpu_vendor}`.")
-
-        qlinear = IPEXQuantLinear
     elif backend == BACKEND.QQQ:
         qlinear = QQQQuantLinear
     elif backend == BACKEND.TORCH:

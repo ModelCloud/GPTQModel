@@ -41,7 +41,6 @@ from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
@@ -511,9 +510,6 @@ def ModelLoader(cls):
                 device=device,
             )
 
-            if preload_qlinear_kernel == IPEXQuantLinear:
-                qcfg.runtime_format = FORMAT.IPEX
-
         if isinstance(device_map, str) and device_map not in [
                 "auto",
                 "balanced",
@@ -553,7 +549,7 @@ def ModelLoader(cls):
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if qcfg.format == FORMAT.GPTQ and backend not in [BACKEND.IPEX]:
+        if qcfg.format == FORMAT.GPTQ:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,

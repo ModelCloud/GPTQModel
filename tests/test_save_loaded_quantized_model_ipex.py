@@ -31,7 +31,7 @@ MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 class TestSave(unittest.TestCase):
     @parameterized.expand(
         [
-            (BACKEND.IPEX),
+            (BACKEND.TORCH_FUSED),
         ]
     )
     def test_save(self, backend: BACKEND):

@@ -17,6 +17,8 @@
 # -- do not touch
 import os
 
+from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -27,7 +29,6 @@ import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 # isort: on
 from gptqmodel import BACKEND  # noqa: E402
-from gptqmodel.nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.utils import dequantize_4bits_weight  # noqa: E402
@@ -80,8 +81,8 @@ class TestRepacking(unittest.TestCase):
         # BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
+        BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
         # BACKEND.BITBLAS: BitBLASQuantLinear,
-        BACKEND.IPEX: IPEXQuantLinear,
     }
 
 
@@ -115,8 +116,6 @@ class TestRepacking(unittest.TestCase):
         list(QLINEAR_DICT.keys())
     )
     def test_compare_exllama_triton_torch(self, backend):
-        if backend == BACKEND.IPEX and not HAS_IPEX:
-            self.skipTest("IPEX is not available")
         triton_linear = self.pack(self.QLINEAR_DICT[backend], backend=backend)
 
         dequantized_weight, dequantized_qzeros = dequantize_4bits_weight(triton_linear)

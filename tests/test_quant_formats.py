@@ -128,7 +128,7 @@ class TestQuantization(ModelTest):
             torch_empty_cache()
 
             # skip compat test with sym=False and v1 since we do meta version safety check
-            if not sym and format == FORMAT.GPTQ or format == FORMAT.IPEX:
+            if not sym and format == FORMAT.GPTQ:
                 return
 
             model = GPTQModel.load(
