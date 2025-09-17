@@ -34,6 +34,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
+from ..quantization.awq.utils.module import get_op_name
 from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
@@ -71,6 +72,24 @@ def filter_not_quantize_module(layer_modules):
         if any(NOT_QUANTIZE_FLAG not in name for name in block)
     ]
 
+
+def generate_node_for_awq_scaling(inp, block, prev_op, last_module_root, module, module_kwargs, nodes_size, subset):
+    n = {
+        "prev_op": prev_op,
+        "layers": subset,
+        "inp": inp,
+    }
+    if nodes_size == 0:
+        # Only the first node needs kwargs
+        n["kwargs"] = module_kwargs
+    root_split = block[0].split(".")
+    if len(root_split) >= 2:
+        root = root_split[0]
+        if root != last_module_root:
+            n["module2inspect"], _ = get_module_by_name_prefix(module, root)
+        return n, root
+
+    return n, None
 
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
@@ -232,10 +251,7 @@ class BaseQModel(nn.Module):
     def build_moe_modules_if_need(cls, model_config, layer_modules, is_awq_quantize: bool = False):
         # MoE models
         if model_config is not None and cls.dynamic_expert_index is not None:
-            if hasattr(model_config, "text_config"):
-                num_experts = getattr(model_config.text_config, cls.dynamic_expert_index)
-            else:
-                num_experts = getattr(model_config, cls.dynamic_expert_index)
+            num_experts = cls.get_num_experts(model_config)
 
             moe_simple = []
             for names in layer_modules:
@@ -262,6 +278,14 @@ class BaseQModel(nn.Module):
             return moe_simple
 
         return layer_modules
+
+    @classmethod
+    def get_num_experts(cls, model_config):
+        if hasattr(model_config, "text_config"):
+            num_experts = getattr(model_config.text_config, cls.dynamic_expert_index)
+        else:
+            num_experts = getattr(model_config, cls.dynamic_expert_index)
+        return num_experts
 
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
@@ -850,69 +874,86 @@ class BaseQModel(nn.Module):
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
         nodes = []
         last_module = None  # most recent norm obj (from a '!...' block)
+        last_module_name = None
         last_module_root = None  # self_attn.* has root == self_attn, mlp.* has root == mlp
 
+        num_experts = None
+        if self.model.config is not None and self.dynamic_expert_index is not None:
+            num_experts = self.get_num_experts(self.model.config)
+
         def strip_not_quantize_flag(module_name):
-            return module_name[:module_name.find(NOT_QUANTIZE_FLAG)]
+            if NOT_QUANTIZE_FLAG in module_name:
+                return module_name[:module_name.find(NOT_QUANTIZE_FLAG)]
+            else:
+                return module_name
 
         for i, block in enumerate(self.full_layer_modules(self.model.config, is_awq_quantize=True)):
             not_quantized = all(NOT_QUANTIZE_FLAG in name for name in block)
             if not_quantized:
                 # Remember the latest norm (use the last entry if multiple are present)
-                last_module, _ = get_module_by_name_prefix(module, strip_not_quantize_flag(block[-1]))
+                last_module_name = strip_not_quantize_flag(block[-1])
+                last_module, _ = get_module_by_name_prefix(module, last_module_name)
                 continue
 
-            # Normal execution subset
-            subset = []
-            skip = False
-            for name in block:
-                if NOT_QUANTIZE_FLAG not in name:
-                    if name == "mlp.gate":
-                        log.debug(f'"{name}" skipped.')
-                        skip = True
+            if num_experts is not None and len(block) == num_experts and last_module is not None and last_module_name is not None:
+                # mlp.experts.0.down_proj
+                target_suffix = last_module_name.split(".")[-1]
+                for name in block:
+                    prev_op_name = ".".join(name.split(".")[:-1] + [target_suffix])
+                    prev_op, _ = get_module_by_name_prefix(module, prev_op_name)
+                    assert prev_op is not None
 
-                    m, _ = get_module_by_name_prefix(module, name)
-                    # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
-                    # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
-                    if (self.awq_scale_optimize_shape_dependent_modules is not None
-                            and name in self.awq_scale_optimize_shape_dependent_modules
-                            and isinstance(last_module, nn.Linear)
-                            and last_module.weight.shape != m.weight.shape):
-                        log.debug(f'"{name}" attention out skipped.')
-                        skip = True
+                    m, _ = get_module_by_name_prefix(module, prev_op_name)
+                    subset = [m]
+                    n, root = generate_node_for_awq_scaling(inp=input_feat[name], block=block, prev_op=prev_op,
+                                                            last_module_root=last_module_root, module=module,
+                                                            module_kwargs=module_kwargs, nodes_size=len(nodes),
+                                                            subset=subset)
+                    if root is not None and last_module_root != root:
+                        last_module_root = root
 
-                    subset.append(m)
+                    nodes.append(n)
+            else:
+                # Normal execution subset
+                subset = []
+                skip = False
+                for name in block:
+                    if NOT_QUANTIZE_FLAG not in name:
+                        if name == "mlp.gate":
+                            log.debug(f'"{name}" skipped.')
+                            skip = True
 
-            if skip:
-                continue
+                        m, _ = get_module_by_name_prefix(module, name)
+                        # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
+                        # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
+                        if (self.awq_scale_optimize_shape_dependent_modules is not None
+                                and name in self.awq_scale_optimize_shape_dependent_modules
+                                and isinstance(last_module, nn.Linear)
+                                and last_module.weight.shape != m.weight.shape):
+                            log.debug(f'"{name}" attention out skipped.')
+                            skip = True
 
-            assert len(subset) > 0
+                        subset.append(m)
 
-            prev_op = last_module
+                if skip:
+                    continue
 
-            assert prev_op is not None
+                assert len(subset) > 0
+                prev_op = last_module
+                assert prev_op is not None
 
-            n = {
-                "prev_op": prev_op,
-                "layers": subset,
-                "inp": input_feat[block[0]],
-            }
-
-            if len(nodes) == 0:
-                # Only the first node needs kwargs
-                n["kwargs"] = module_kwargs
-
-            root_split = block[0].split(".", 2)
-            if len(root_split) >= 2:
-                root = root_split[0]
-                if root != last_module_root:
+                n, root = generate_node_for_awq_scaling(inp=input_feat[block[0]], block=block, prev_op=prev_op,
+                                                        last_module_root=last_module_root, module=module,
+                                                        module_kwargs=module_kwargs, nodes_size=len(nodes),
+                                                        subset=subset)
+                if root is not None and last_module_root != root:
                     last_module_root = root
-                    n["module2inspect"], _ = get_module_by_name_prefix(module, root)
 
-            nodes.append(n)
+                nodes.append(n)
 
             # Update tracker to the LAST item of this block
-            last_module, _ = get_module_by_name_prefix(module, strip_not_quantize_flag(block[-1]))
+            last_module_name = strip_not_quantize_flag(block[-1])
+            last_module, _ = get_module_by_name_prefix(module, last_module_name)
 
         import torch
         def format_nodes(nodes):
