@@ -27,7 +27,7 @@ log = setup_logger()
 
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
-class AwqGEMV(AWQuantLinear):
+class AwqGEMVQuantLinar(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -136,4 +136,4 @@ class AwqGEMV(AWQuantLinear):
             )
         )
 
-__all__ = ["AwqGEMV"]
+__all__ = ["AwqGEMVQuantLinar"]
