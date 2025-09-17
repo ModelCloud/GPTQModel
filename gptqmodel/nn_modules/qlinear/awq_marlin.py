@@ -24,7 +24,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger

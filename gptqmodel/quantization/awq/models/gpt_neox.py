@@ -1,8 +1,6 @@
+from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXForCausalLM, GPTNeoXLayer
+
 from .base import BaseAWQForCausalLM
-from transformers.models.gpt_neox.modeling_gpt_neox import (
-    GPTNeoXLayer,
-    GPTNeoXForCausalLM,
-)
 
 
 class GPTNeoXAWQForCausalLM(BaseAWQForCausalLM):
@@ -15,12 +13,12 @@ class GPTNeoXAWQForCausalLM(BaseAWQForCausalLM):
 
     @staticmethod
     def get_act_for_scaling(module: GPTNeoXLayer):
-        return dict(
-            is_scalable=True,
-            scale_name="mlp.act",
-            scale_layer=module.mlp.act,
-            scale_shape=module.mlp.dense_h_to_4h.out_features,
-        )
+        return {
+            "is_scalable": True,
+            "scale_name": "mlp.act",
+            "scale_layer": module.mlp.act,
+            "scale_shape": module.mlp.dense_h_to_4h.out_features,
+        }
 
     @staticmethod
     def move_embed(model: GPTNeoXForCausalLM, device: str):
@@ -33,11 +31,11 @@ class GPTNeoXAWQForCausalLM(BaseAWQForCausalLM):
 
         # attention input
         layers.append(
-            dict(
-                prev_op=module.input_layernorm,
-                layers=[module.attention.query_key_value],
-                inp=input_feat["attention.query_key_value"],
-            )
+            {
+                "prev_op": module.input_layernorm,
+                "layers": [module.attention.query_key_value],
+                "inp": input_feat["attention.query_key_value"],
+            }
         )
 
         # attention out
@@ -52,20 +50,20 @@ class GPTNeoXAWQForCausalLM(BaseAWQForCausalLM):
 
         # linear 1
         layers.append(
-            dict(
-                prev_op=module.post_attention_layernorm,
-                layers=[module.mlp.dense_h_to_4h],
-                inp=input_feat["mlp.dense_h_to_4h"],
-            )
+            {
+                "prev_op": module.post_attention_layernorm,
+                "layers": [module.mlp.dense_h_to_4h],
+                "inp": input_feat["mlp.dense_h_to_4h"],
+            }
         )
 
         # linear 2
         layers.append(
-            dict(
-                prev_op=module.mlp.act,
-                layers=[module.mlp.dense_4h_to_h],
-                inp=input_feat["mlp.dense_4h_to_h"],
-            )
+            {
+                "prev_op": module.mlp.act,
+                "layers": [module.mlp.dense_4h_to_h],
+                "inp": input_feat["mlp.dense_4h_to_h"],
+            }
         )
 
         return layers

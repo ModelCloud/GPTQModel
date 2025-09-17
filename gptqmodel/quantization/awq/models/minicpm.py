@@ -12,7 +12,7 @@ class MiniCPMAWQForCausalLM(BaseAWQForCausalLM):
 
     @staticmethod
     def get_act_for_scaling(module):
-        return dict(is_scalable=False)
+        return {"is_scalable": False}
 
     @staticmethod
     def move_embed(model, device: str):
@@ -22,39 +22,39 @@ class MiniCPMAWQForCausalLM(BaseAWQForCausalLM):
     def get_layers_for_scaling(module, input_feat, module_kwargs):
         layers = []
 
-        
+
 
         # # mlp
         layers.append(
-            dict(
-                prev_op=module.input_layernorm,
-                layers=[
+            {
+                "prev_op": module.input_layernorm,
+                "layers": [
                     module.self_attn.q_proj,
                     module.self_attn.k_proj,
                     module.self_attn.v_proj,
                 ],
-                inp=input_feat["self_attn.q_proj"],
-                module2inspect=module.self_attn,
-                kwargs=module_kwargs,
-            )
+                "inp": input_feat["self_attn.q_proj"],
+                "module2inspect": module.self_attn,
+                "kwargs": module_kwargs,
+            }
         )
 
         # linear 2
         layers.append(
-            dict(
-                prev_op=module.mlp.up_proj,
-                layers=[module.mlp.down_proj],
-                inp=input_feat["mlp.down_proj"],
-            )
+            {
+                "prev_op": module.mlp.up_proj,
+                "layers": [module.mlp.down_proj],
+                "inp": input_feat["mlp.down_proj"],
+            }
         )
 
         layers.append(
-            dict(
-                prev_op=module.post_attention_layernorm,
-                layers=[module.mlp.gate_proj,module.mlp.up_proj],
-                inp=input_feat["mlp.gate_proj"],
-                module2inspect=module.mlp
-            )
+            {
+                "prev_op": module.post_attention_layernorm,
+                "layers": [module.mlp.gate_proj,module.mlp.up_proj],
+                "inp": input_feat["mlp.gate_proj"],
+                "module2inspect": module.mlp
+            }
         )
 
         return layers

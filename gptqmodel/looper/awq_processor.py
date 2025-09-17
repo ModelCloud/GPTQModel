@@ -18,27 +18,27 @@ import functools
 import inspect
 import time
 from collections import defaultdict
-from typing import Callable, Optional, Tuple, List, Dict
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 import transformers
-from torch.nn import Module
 from torch import nn
+from torch.nn import Module
 
 from ..looper.loop_processor import LoopProcessor, get_max_memory
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, PROCESS_MAX_MEMORY)
+                             PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.awq_gemm import AWQuantLinear_GEMM
-from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_Marlin, WQLinear_GEMVFast
-from ..quantization.awq.quantize.scale import apply_scale, apply_clip
-from ..quantization.awq.utils.module import get_op_name, get_named_linears, exclude_layers_to_not_quantize, \
-    append_str_prefix, set_op_by_name
+from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_GEMVFast, WQLinear_Marlin
+from ..quantization.awq.quantize.scale import apply_clip, apply_scale
+from ..quantization.awq.utils.module import (append_str_prefix, exclude_layers_to_not_quantize,
+                                             get_named_linears, get_op_name, set_op_by_name)
 from ..quantization.awq.utils.utils import clear_memory, get_best_device
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.model import move_to, get_module_by_name_prefix
+from ..utils.model import get_module_by_name_prefix, move_to
 from ..utils.torch import CPU, torch_sync
 
 log = setup_logger()

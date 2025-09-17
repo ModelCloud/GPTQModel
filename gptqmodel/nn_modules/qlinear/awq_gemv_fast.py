@@ -13,14 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List
 
 import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
-from ...quantization.awq.modules.linear.gemm import WQLinearMMFunction
 from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger

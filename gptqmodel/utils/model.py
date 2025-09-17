@@ -49,11 +49,10 @@ from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
                              EXPERT_INDEX_PLACEHOLDER, SUPPORTS_MODULE_TYPES)
-from ..nn_modules.qlinear import BaseQuantLinear, AWQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.awq_exllamav2 import AWQuantLinear_ExllamaV2
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_JSON, QUANT_METHOD, dynamic_get
 from . import has_gil_disabled
@@ -208,7 +207,6 @@ def make_quant(
         sym=sym,
         backend=backend,
         format=format,
-        quant_method=qcfg.quant_method,
         pack=pack,
         dynamic=dynamic,
         device=device,
@@ -373,7 +371,7 @@ def hf_convert_gptq_v1_to_v2_format(
 ) -> Tuple[nn.Module, bool]:
     if checkpoint_format == "gptq":
         # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-        if qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear]:
+        if qlinear_kernel in [MarlinQuantLinear, ExllamaEoraQuantLinear]:
             return model, False
 
         cfg = QuantizeConfig(bits=bits)
@@ -498,7 +496,7 @@ def convert_gptq_v1_to_v2_format(
 
 def need_skip_gptq_v1_v2_convert(qlinear_kernel: Type[BaseQuantLinear]):
     # TODO FORMAT.GEMM EXLLAMA V1 V2 needs to convert between v1 and v2
-    return qlinear_kernel in [IPEXQuantLinear, MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]
+    return qlinear_kernel in [MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear]
 
 
 # public/stable api exposed to transformer/optimum
@@ -967,9 +965,10 @@ def auto_dtype(config: PretrainedConfig,
         log.info("Loader: Auto dtype (MPS or XPU): `torch.float16`")
         return torch.float16
 
-    # IPEX for CPU is optimized for bfloat16
-    if device in [DEVICE.CPU] and HAS_IPEX:
-        log.info("Loader: Auto dtype (CPU + IPEX): `torch.bfloat16`")
+    # TODO: need to verify this
+    # Torch 2.8 fused kernel for CPU is optimized for bfloat16
+    if device in [DEVICE.CPU]:
+        log.info("Loader: Auto dtype (CPU + Torch Fused): `torch.bfloat16`")
         return torch.bfloat16
 
     # Update: latest kernel accuracies have shown, with multiple ranges of shapes

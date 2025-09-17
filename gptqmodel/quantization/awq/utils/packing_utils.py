@@ -1,6 +1,5 @@
 import torch
 
-
 AWQ_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]
 AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 

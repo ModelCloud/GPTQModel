@@ -1,5 +1,6 @@
-import torch
 from typing import Dict
+
+import torch
 
 try:
     import awq_ext  # with CUDA kernels

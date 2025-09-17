@@ -1,4 +1,5 @@
 import os
+
 import torch.nn as nn
 from gptqmodel.quantization.awq.modules.fused.attn import QuantAttentionFused
 
@@ -134,7 +135,7 @@ class QwenBlock(nn.Module):
         o_proj,
         mlp,
         norm_1,
-        norm_2,        
+        norm_2,
         dev,
         max_seq_len,
         rope_theta=10000,

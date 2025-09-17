@@ -1,6 +1,5 @@
 import torch.nn as nn
 import torch.nn.functional as F
-from gptqmodel.quantization.awq.modules.linear.gemm import WQLinear_GEMM
 from gptqmodel.quantization.awq.modules.linear.gemv import WQLinear_GEMV
 
 try:

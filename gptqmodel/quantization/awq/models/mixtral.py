@@ -1,17 +1,17 @@
-import tqdm
-import torch
 from typing import List, Tuple
-from .base import BaseAWQForCausalLM
+
+import torch
+import tqdm
 from gptqmodel.quantization.awq.modules.fused.block import MixtralBlock
 from gptqmodel.quantization.awq.modules.fused.model import MixtralModel
 from gptqmodel.quantization.awq.modules.fused.moe import FusedSparseMoeBlock
-from gptqmodel.quantization.awq.utils.fused_utils import fuse_qkv, fuse_linears
-from transformers.models.mixtral.modeling_mixtral import (
-    MixtralDecoderLayer as OldMixtralDecoderLayer,
-    MixtralForCausalLM as OldMixtralForCausalLM,
-)
-from gptqmodel.quantization.awq.modules.linear import WQLinear_GEMM
 from gptqmodel.quantization.awq.modules.fused.norm import FasterTransformerRMSNorm
+from gptqmodel.quantization.awq.modules.linear import WQLinear_GEMM
+from gptqmodel.quantization.awq.utils.fused_utils import fuse_linears, fuse_qkv
+from transformers.models.mixtral.modeling_mixtral import MixtralDecoderLayer as OldMixtralDecoderLayer
+from transformers.models.mixtral.modeling_mixtral import MixtralForCausalLM as OldMixtralForCausalLM
+
+from .base import BaseAWQForCausalLM
 
 
 class MixtralAWQForCausalLM(BaseAWQForCausalLM):
@@ -30,7 +30,7 @@ class MixtralAWQForCausalLM(BaseAWQForCausalLM):
 
     @staticmethod
     def get_act_for_scaling(module):
-        return dict(is_scalable=False)
+        return {"is_scalable": False}
 
     @staticmethod
     def move_embed(model: OldMixtralForCausalLM, device: str):
@@ -44,51 +44,51 @@ class MixtralAWQForCausalLM(BaseAWQForCausalLM):
 
         # attention input
         layers.append(
-            dict(
-                prev_op=module.input_layernorm,
-                layers=[
+            {
+                "prev_op": module.input_layernorm,
+                "layers": [
                     module.self_attn.q_proj,
                     module.self_attn.k_proj,
                     module.self_attn.v_proj,
                 ],
-                inp=input_feat["self_attn.q_proj"],
-                module2inspect=module.self_attn,
-                kwargs=module_kwargs,
-            )
+                "inp": input_feat["self_attn.q_proj"],
+                "module2inspect": module.self_attn,
+                "kwargs": module_kwargs,
+            }
         )
 
         # attention out
         if module.self_attn.v_proj.weight.shape == module.self_attn.o_proj.weight.shape:
             layers.append(
-                dict(
-                    prev_op=module.self_attn.v_proj,
-                    layers=[module.self_attn.o_proj],
-                    inp=input_feat["self_attn.o_proj"],
-                )
+                {
+                    "prev_op": module.self_attn.v_proj,
+                    "layers": [module.self_attn.o_proj],
+                    "inp": input_feat["self_attn.o_proj"],
+                }
             )
 
         # linear in
         layers.append(
-            dict(
-                prev_op=module.post_attention_layernorm,
-                layers=[
+            {
+                "prev_op": module.post_attention_layernorm,
+                "layers": [
                     w
                     for expert in module.block_sparse_moe.experts
                     for w in [expert.w1, expert.w3]
                 ],
-                inp=input_feat["block_sparse_moe"],
-                module2inspect=module.block_sparse_moe,
-            )
+                "inp": input_feat["block_sparse_moe"],
+                "module2inspect": module.block_sparse_moe,
+            }
         )
 
         # linear out
         for i, expert in enumerate(module.block_sparse_moe.experts):
             layers.append(
-                dict(
-                    prev_op=expert.w3,
-                    layers=[expert.w2],
-                    inp=input_feat[f"block_sparse_moe.experts.{i}.w2"],
-                )
+                {
+                    "prev_op": expert.w3,
+                    "layers": [expert.w2],
+                    "inp": input_feat[f"block_sparse_moe.experts.{i}.w2"],
+                }
             )
 
         return layers
@@ -172,7 +172,7 @@ class MixtralFuser:
                     rope_theta=self.model.config.rope_theta,
                 )
             )
-        
+
         model_norm = FasterTransformerRMSNorm(
             self.model.model.norm.weight,
             self.model.model.norm.variance_epsilon,

@@ -1,8 +1,7 @@
-import gc
 import importlib
-import torch
-import accelerate
 
+import accelerate
+import torch
 
 ipex_available = importlib.util.find_spec("intel_extension_for_pytorch") is not None
 try:
@@ -20,7 +19,7 @@ def get_module_by_name_suffix(model, module_name: str):
 
 
 def simple_dispatch_model(model, device_map):
-    from accelerate.hooks import add_hook_to_module, AlignDevicesHook
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
     if "" in device_map:
         d = device_map[""]

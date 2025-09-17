@@ -108,9 +108,7 @@ def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
 
 
 def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:
-    if backend == BACKEND.IPEX:
-        return XPU_0 if HAS_XPU else CPU
-    elif HAS_CUDA:
+    if HAS_CUDA:
         return CUDA_0
     elif HAS_XPU:
         return XPU_0

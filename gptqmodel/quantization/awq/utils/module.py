@@ -1,5 +1,7 @@
-import torch.nn as nn
 import importlib
+
+import torch.nn as nn
+
 
 def try_import(module_name):
     try:

@@ -1,7 +1,8 @@
-import os
 import json
-from typing import Dict, Optional, List
+import os
 from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
 from transformers.utils.hub import PushToHubMixin, cached_file
 
 

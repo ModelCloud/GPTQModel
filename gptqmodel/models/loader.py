@@ -41,7 +41,6 @@ from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.ipex import IPEXQuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
@@ -49,9 +48,8 @@ from ..utils.importer import auto_select_device, normalize_device_device_map, se
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_device_support
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_config_seq_len, find_modules,
-                           get_checkpoints, get_moe_layer_modules, gptqmodel_post_init,
-                           load_checkpoint_in_model_then_tie_weights, make_quant, simple_dispatch_model,
-                           verify_model_hash, verify_sharded_model_hashes)
+                           get_checkpoints, gptqmodel_post_init, load_checkpoint_in_model_then_tie_weights, make_quant,
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
 from ._const import DEVICE, normalize_device
 
 log = setup_logger()
@@ -508,9 +506,6 @@ def ModelLoader(cls):
                 device=device,
             )
 
-            if preload_qlinear_kernel == IPEXQuantLinear:
-                qcfg.runtime_format = FORMAT.IPEX
-
         if isinstance(device_map, str) and device_map not in [
                 "auto",
                 "balanced",
@@ -550,7 +545,7 @@ def ModelLoader(cls):
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if (qcfg.format == FORMAT.GPTQ or qcfg.format == FORMAT.GEMM) and backend not in [BACKEND.IPEX]:
+        if qcfg.format in [FORMAT.GPTQ, FORMAT.GEMM]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,

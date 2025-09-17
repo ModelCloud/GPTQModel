@@ -1,14 +1,15 @@
-import tqdm
 from typing import List, Tuple
-from .base import BaseAWQForCausalLM
-from gptqmodel.quantization.awq.utils.fused_utils import fuse_qkv
+
+import tqdm
 from gptqmodel.quantization.awq.modules.fused.block import LlamaLikeBlock
 from gptqmodel.quantization.awq.modules.fused.model import LlamaLikeModel
+from gptqmodel.quantization.awq.utils.fused_utils import fuse_qkv
+
+from .base import BaseAWQForCausalLM
+
 try:
-    from transformers.models.exaone.modeling_exaone import (
-        ExaoneBlock as OldExaoneBlock,
-        ExaoneForCausalLM as OldExaoneForCausalLM,
-    )
+    from transformers.models.exaone.modeling_exaone import ExaoneBlock as OldExaoneBlock
+    from transformers.models.exaone.modeling_exaone import ExaoneForCausalLM as OldExaoneForCausalLM
 except:
     OldExaoneBlock = None
     OldExaoneForCausalLM = None
@@ -30,7 +31,7 @@ class ExaoneAWQForCausalLM(BaseAWQForCausalLM):
 
     @staticmethod
     def get_act_for_scaling(module: OldExaoneBlock):
-        return dict(is_scalable=False)
+        return {"is_scalable": False}
 
     @staticmethod
     def move_embed(model: OldExaoneForCausalLM, device: str):
@@ -43,47 +44,47 @@ class ExaoneAWQForCausalLM(BaseAWQForCausalLM):
 
         # attention input
         layers.append(
-            dict(
-                prev_op=module.ln_1,
-                layers=[
+            {
+                "prev_op": module.ln_1,
+                "layers": [
                     module.attn.attention.q_proj,
                     module.attn.attention.k_proj,
                     module.attn.attention.v_proj,
                 ],
-                inp=input_feat["attn.attention.q_proj"],
-                module2inspect=module.attn.attention,
-                kwargs=module_kwargs,
-            )
+                "inp": input_feat["attn.attention.q_proj"],
+                "module2inspect": module.attn.attention,
+                "kwargs": module_kwargs,
+            }
         )
 
         # attention out
         # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
         if module.attn.attention.v_proj.weight.shape == module.attn.attention.out_proj.weight.shape:
             layers.append(
-                dict(
-                    prev_op=module.attn.attention.v_proj,
-                    layers=[module.attn.attention.out_proj],
-                    inp=input_feat["attn.attention.out_proj"],
-                )
+                {
+                    "prev_op": module.attn.attention.v_proj,
+                    "layers": [module.attn.attention.out_proj],
+                    "inp": input_feat["attn.attention.out_proj"],
+                }
             )
 
         # linear 1
         layers.append(
-            dict(
-                prev_op=module.ln_2,
-                layers=[module.mlp.c_fc_0, module.mlp.c_fc_1],
-                inp=input_feat["mlp.c_fc_0"],
-                module2inspect=module.mlp,
-            )
+            {
+                "prev_op": module.ln_2,
+                "layers": [module.mlp.c_fc_0, module.mlp.c_fc_1],
+                "inp": input_feat["mlp.c_fc_0"],
+                "module2inspect": module.mlp,
+            }
         )
 
         # linear 2
         layers.append(
-            dict(
-                prev_op=module.mlp.c_fc_1,
-                layers=[module.mlp.c_proj],
-                inp=input_feat["mlp.c_proj"],
-            )
+            {
+                "prev_op": module.mlp.c_fc_1,
+                "layers": [module.mlp.c_proj],
+                "inp": input_feat["mlp.c_proj"],
+            }
         )
 
         return layers

@@ -19,38 +19,33 @@ from __future__ import annotations
 import copy
 import json
 import os
-import time
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Type, Union
 
 import torch
 import torch._dynamo
 import torch.nn as nn
-from gptqmodel.quantization.awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
 from tokenicer import Tokenicer
 from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
                           PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
 
 from ..adapter.adapter import Adapter
-from ..nn_modules.hooked_linear import replace_module_with_hooked_tree
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
-from ..quantization import GPTQ, QuantizeConfig
+from ..quantization import QuantizeConfig
+from ..quantization.awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
 from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
-from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.model import (MODALITY, find_modules, get_device, get_module, get_module_by_name_prefix,
-                          move_to, nested_move_to, pack_model)
+from ..utils.model import MODALITY, find_modules, get_device, get_module_by_name_prefix, move_to
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
-from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER, SUPPORTS_MODULE_TYPES
+from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER
 from .loader import ModelLoader
-from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_TIME,
-                     QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, ModelWriter)
+from .writer import ModelWriter
 
 
 class _ClassPropertyDescriptor:
@@ -463,9 +458,6 @@ class BaseQModel(nn.Module):
             log.warn("Quantize: batch_size overriden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
 
-        if backend == BACKEND.IPEX:
-            self.quantize_config.format = FORMAT.IPEX
-
         if self.quantize_config.format == FORMAT.MARLIN:
             raise ValueError(
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
@@ -561,6 +553,7 @@ class BaseQModel(nn.Module):
             quantize_processor = [QQQProcessor(**args)]
         elif self.quantize_config.quant_method == QUANT_METHOD.AWQ:
             from ..looper.awq_processor import AWQProcessor
+
             # TODO AWQ_BATCH_SIZE
             # os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
 
@@ -899,11 +892,11 @@ class BaseQModel(nn.Module):
 
             assert prev_op is not None
 
-            n = dict(
-                prev_op=prev_op,
-                layers=subset,
-                inp=input_feat[block[0]],
-            )
+            n = {
+                "prev_op": prev_op,
+                "layers": subset,
+                "inp": input_feat[block[0]],
+            }
 
             if len(nodes) == 0:
                 # Only the first node needs kwargs

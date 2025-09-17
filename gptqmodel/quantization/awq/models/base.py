@@ -1,7 +1,5 @@
 import torch
-import torch
 import torch.nn as nn
-
 from gptqmodel.quantization.awq.modules.act import ScaledActivation
 from gptqmodel.quantization.awq.utils.module import set_op_by_name
 
@@ -43,7 +41,6 @@ TRANSFORMERS_AUTO_MAPPING_DICT = {
     "minicpm": "AutoModelForCausalLM",
     "minicpm3": "AutoModelForCausalLM",
     "internlm2": "AutoModelForCausalLM",
-    "qwen2_vl": "AutoModelForVision2Seq",
     "qwen2_5_vl": "AutoModelForVision2Seq",
     "qwen2_5_omni": "AutoModelForTextToWaveform",
 }

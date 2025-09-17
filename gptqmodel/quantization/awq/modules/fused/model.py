@@ -1,20 +1,11 @@
+from typing import List
+
 import torch
 import torch.nn as nn
-from typing import List
+from gptqmodel.quantization.awq.modules.fused.block import (CohereBlock, FalconDecoderLayer, Gemma2LikeBlock,
+                                                            LlamaLikeBlock, MixtralBlock, MPTBlock, Phi3Block)
 from gptqmodel.quantization.awq.utils import fused_utils
-from transformers.modeling_outputs import (
-    BaseModelOutputWithPast,
-    MoeModelOutputWithPast,
-)
-from gptqmodel.quantization.awq.modules.fused.block import (
-    MPTBlock,
-    FalconDecoderLayer,
-    LlamaLikeBlock,
-    MixtralBlock,
-    Phi3Block,
-    CohereBlock,
-    Gemma2LikeBlock,
-)
+from transformers.modeling_outputs import BaseModelOutputWithPast, MoeModelOutputWithPast
 
 
 class MixtralModel(nn.Module):

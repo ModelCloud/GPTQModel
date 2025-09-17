@@ -1,5 +1,6 @@
 import torch
 
+
 class ScratchSpace:
     def __init__(self, scratch_bytes, dev):
         self.scratch_bytes = scratch_bytes

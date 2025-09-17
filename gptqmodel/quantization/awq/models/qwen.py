@@ -11,7 +11,7 @@ class QwenAWQForCausalLM(BaseAWQForCausalLM):
 
     @staticmethod
     def get_act_for_scaling(module):
-        return dict(is_scalable=False)
+        return {"is_scalable": False}
 
     @staticmethod
     def move_embed(model, device: str):
@@ -24,32 +24,32 @@ class QwenAWQForCausalLM(BaseAWQForCausalLM):
 
         # attention
         layers.append(
-            dict(
-                prev_op=module.ln_1,
-                layers=[module.attn.c_attn],
-                inp=input_feat["attn.c_attn"],
-                module2inspect=module.attn,
-                kwargs=module_kwargs,
-            )
+            {
+                "prev_op": module.ln_1,
+                "layers": [module.attn.c_attn],
+                "inp": input_feat["attn.c_attn"],
+                "module2inspect": module.attn,
+                "kwargs": module_kwargs,
+            }
         )
 
         # mlp
         layers.append(
-            dict(
-                prev_op=module.ln_2,
-                layers=[module.mlp.w2, module.mlp.w1],
-                inp=input_feat["mlp.w2"],
-                module2inspect=module.mlp,
-            )
+            {
+                "prev_op": module.ln_2,
+                "layers": [module.mlp.w2, module.mlp.w1],
+                "inp": input_feat["mlp.w2"],
+                "module2inspect": module.mlp,
+            }
         )
 
         # linear 2
         layers.append(
-            dict(
-                prev_op=module.mlp.w1,
-                layers=[module.mlp.c_proj],
-                inp=input_feat["mlp.c_proj"],
-            )
+            {
+                "prev_op": module.mlp.w1,
+                "layers": [module.mlp.c_proj],
+                "inp": input_feat["mlp.c_proj"],
+            }
         )
 
         return layers

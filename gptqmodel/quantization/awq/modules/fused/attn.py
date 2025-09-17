@@ -1,11 +1,10 @@
-import os
 import math
+import os
+
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
 from gptqmodel.quantization.awq.modules.fused.cache import WindowedCache
 from gptqmodel.quantization.awq.utils.fused_utils import get_attention_shapes
-
 
 try:
     from flash_attn import flash_attn_func, flash_attn_with_kvcache

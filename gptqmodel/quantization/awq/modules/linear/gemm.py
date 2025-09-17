@@ -1,10 +1,11 @@
-import torch
 import warnings
+
+import torch
 import torch.nn as nn
-from torch.autograd import Function
 from gptqmodel.quantization.awq.utils.module import try_import
-from gptqmodel.quantization.awq.utils.utils import get_best_device
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
+from gptqmodel.quantization.awq.utils.utils import get_best_device
+from torch.autograd import Function
 
 # NOTE: We check if awq_ext or triton is available. awq_ext will be preferred if both are installed.
 
@@ -12,7 +13,7 @@ awq_ext, msg = try_import("gptqmodel_awq_kernels")
 user_has_been_warned = False
 
 try:
-    from gptqmodel.quantization.awq.modules.triton.gemm import awq_gemm_triton, awq_dequantize_triton
+    from gptqmodel.quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
 
     # covers CUDA, ROCm and XPU. If we can import triton, then we can use it.
     TRITON_AVAILABLE = True
@@ -94,7 +95,7 @@ class WQLinearMMFunction(Function):
                 "either triton or autoawq-kernels is needed to be installed to use `.backward()`. Make sure to install the auto-awq kernels"
                 " by following the installation guides in https://github.com/casper-hansen/AutoAWQ_kernels"
             )
-        
+
         # Cast to correct dtype for mixed precision training
         if awq_ext is not None:
             weights = awq_ext.dequantize_weights_cuda(

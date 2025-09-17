@@ -1,14 +1,14 @@
-import tqdm
 from typing import List, Tuple
-from .base import BaseAWQForCausalLM
-from transformers.models.qwen3.modeling_qwen3 import (
-    Qwen3DecoderLayer as OldQwen3DecoderLayer,
-    Qwen3ForCausalLM as OldQwen3ForCausalLM,
-)
-from gptqmodel.quantization.awq.utils.fused_utils import fuse_qkv
+
+import tqdm
 from gptqmodel.quantization.awq.modules.fused.block import QwenBlock
 from gptqmodel.quantization.awq.modules.fused.model import LlamaLikeModel
 from gptqmodel.quantization.awq.modules.fused.norm import FasterTransformerRMSNorm
+from gptqmodel.quantization.awq.utils.fused_utils import fuse_qkv
+from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer as OldQwen3DecoderLayer
+from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM as OldQwen3ForCausalLM
+
+from .base import BaseAWQForCausalLM
 
 
 class Qwen3AWQForCausalLM(BaseAWQForCausalLM):
@@ -26,7 +26,7 @@ class Qwen3AWQForCausalLM(BaseAWQForCausalLM):
 
     @staticmethod
     def get_act_for_scaling(module: OldQwen3DecoderLayer):
-        return dict(is_scalable=False)
+        return {"is_scalable": False}
 
     @staticmethod
     def move_embed(model: OldQwen3ForCausalLM, device: str):
@@ -39,47 +39,47 @@ class Qwen3AWQForCausalLM(BaseAWQForCausalLM):
 
         # attention input
         layers.append(
-            dict(
-                prev_op=module.input_layernorm,
-                layers=[
+            {
+                "prev_op": module.input_layernorm,
+                "layers": [
                     module.self_attn.q_proj,
                     module.self_attn.k_proj,
                     module.self_attn.v_proj,
                 ],
-                inp=input_feat["self_attn.q_proj"],
-                module2inspect=module.self_attn,
-                kwargs=module_kwargs,
-            )
+                "inp": input_feat["self_attn.q_proj"],
+                "module2inspect": module.self_attn,
+                "kwargs": module_kwargs,
+            }
         )
 
         # attention out
         # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
         if module.self_attn.v_proj.weight.shape == module.self_attn.o_proj.weight.shape:
             layers.append(
-                dict(
-                    prev_op=module.self_attn.v_proj,
-                    layers=[module.self_attn.o_proj],
-                    inp=input_feat["self_attn.o_proj"],
-                )
+                {
+                    "prev_op": module.self_attn.v_proj,
+                    "layers": [module.self_attn.o_proj],
+                    "inp": input_feat["self_attn.o_proj"],
+                }
             )
 
         # linear 1
         layers.append(
-            dict(
-                prev_op=module.post_attention_layernorm,
-                layers=[module.mlp.gate_proj, module.mlp.up_proj],
-                inp=input_feat["mlp.gate_proj"],
-                module2inspect=module.mlp,
-            )
+            {
+                "prev_op": module.post_attention_layernorm,
+                "layers": [module.mlp.gate_proj, module.mlp.up_proj],
+                "inp": input_feat["mlp.gate_proj"],
+                "module2inspect": module.mlp,
+            }
         )
 
         # linear 2
         layers.append(
-            dict(
-                prev_op=module.mlp.up_proj,
-                layers=[module.mlp.down_proj],
-                inp=input_feat["mlp.down_proj"],
-            )
+            {
+                "prev_op": module.mlp.up_proj,
+                "layers": [module.mlp.down_proj],
+                "inp": input_feat["mlp.down_proj"],
+            }
         )
 
         return layers
@@ -93,7 +93,7 @@ class Qwen3Fuser:
             for name, module in self.model.named_modules()
             if "Qwen3DecoderLayer".lower() in module.__class__.__name__.lower()
         ]
-        
+
     def fuse_transformer(self):
         blocks = []
 

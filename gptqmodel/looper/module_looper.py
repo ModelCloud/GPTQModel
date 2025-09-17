@@ -17,11 +17,10 @@ import copy
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict
+from typing import Dict, List
 
 import torch
 
-from .awq_processor import AWQProcessor
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
@@ -38,6 +37,7 @@ from ..utils.model import (find_modules, get_device, get_module, get_module_by_n
 from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
                            HAS_CUDA, BalanceStrategy, device_next, device_next_reset,
                            torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
+from .awq_processor import AWQProcessor
 
 log = setup_logger()
 

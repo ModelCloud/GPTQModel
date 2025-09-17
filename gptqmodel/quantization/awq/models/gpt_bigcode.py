@@ -1,8 +1,7 @@
+from transformers.models.gpt_bigcode.modeling_gpt_bigcode import GPTBigCodeBlock as OldGptBigCodeBlock
+from transformers.models.gpt_bigcode.modeling_gpt_bigcode import GPTBigCodeForCausalLM
+
 from .base import BaseAWQForCausalLM
-from transformers.models.gpt_bigcode.modeling_gpt_bigcode import (
-    GPTBigCodeForCausalLM,
-    GPTBigCodeBlock as OldGptBigCodeBlock,
-)
 
 
 class GptBigCodeAWQForCausalLM(BaseAWQForCausalLM):
@@ -15,12 +14,12 @@ class GptBigCodeAWQForCausalLM(BaseAWQForCausalLM):
 
     @staticmethod
     def get_act_for_scaling(module: OldGptBigCodeBlock):
-        return dict(
-            is_scalable=True,
-            scale_name="mlp.act",
-            scale_layer=module.mlp.act,
-            scale_shape=module.mlp.c_fc.out_features,
-        )
+        return {
+            "is_scalable": True,
+            "scale_name": "mlp.act",
+            "scale_layer": module.mlp.act,
+            "scale_shape": module.mlp.c_fc.out_features,
+        }
 
     @staticmethod
     def move_embed(model: GPTBigCodeForCausalLM, device):
@@ -34,32 +33,32 @@ class GptBigCodeAWQForCausalLM(BaseAWQForCausalLM):
 
         # attention input
         layers.append(
-            dict(
-                prev_op=module.ln_1,
-                layers=[module.attn.c_attn],
-                inp=input_feat["attn.c_attn"],
-                module2inspect=module.attn,
-                kwargs=module_kwargs,
-            )
+            {
+                "prev_op": module.ln_1,
+                "layers": [module.attn.c_attn],
+                "inp": input_feat["attn.c_attn"],
+                "module2inspect": module.attn,
+                "kwargs": module_kwargs,
+            }
         )
 
         # linear 1
         layers.append(
-            dict(
-                prev_op=module.ln_2,
-                layers=[module.mlp.c_fc],
-                inp=input_feat["mlp.c_fc"],
-                module2inspect=module.mlp,
-            )
+            {
+                "prev_op": module.ln_2,
+                "layers": [module.mlp.c_fc],
+                "inp": input_feat["mlp.c_fc"],
+                "module2inspect": module.mlp,
+            }
         )
 
         # linear 2
         layers.append(
-            dict(
-                prev_op=module.mlp.act,
-                layers=[module.mlp.c_proj],
-                inp=input_feat["mlp.c_proj"],
-            )
+            {
+                "prev_op": module.mlp.act,
+                "layers": [module.mlp.c_proj],
+                "inp": input_feat["mlp.c_proj"],
+            }
         )
 
         return layers

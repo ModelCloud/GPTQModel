@@ -1,5 +1,6 @@
 from .base import BaseAWQForCausalLM
 
+
 class MiniCPM3AWQForCausalLM(BaseAWQForCausalLM):
     layer_type = "MiniCPMDecoderLayer"
     max_seq_len_key = "max_position_embeddings"
@@ -11,7 +12,7 @@ class MiniCPM3AWQForCausalLM(BaseAWQForCausalLM):
 
     @staticmethod
     def get_act_for_scaling(module):
-        return dict(is_scalable=False)
+        return {"is_scalable": False}
 
     @staticmethod
     def move_embed(model, device: str):
@@ -23,47 +24,47 @@ class MiniCPM3AWQForCausalLM(BaseAWQForCausalLM):
 
         # mlp
         layers.append(
-            dict(
-                prev_op=module.self_attn.q_a_layernorm,
-                layers=[
+            {
+                "prev_op": module.self_attn.q_a_layernorm,
+                "layers": [
                     module.self_attn.q_b_proj,
-                    
+
                 ],
-                inp=input_feat["self_attn.q_b_proj"],
-                module2inspect=module.self_attn.q_b_proj,
-                kwargs=module_kwargs,
-            )
+                "inp": input_feat["self_attn.q_b_proj"],
+                "module2inspect": module.self_attn.q_b_proj,
+                "kwargs": module_kwargs,
+            }
         )
 
         layers.append(
-            dict(
-                prev_op=module.self_attn.kv_a_layernorm,
-                layers=[
+            {
+                "prev_op": module.self_attn.kv_a_layernorm,
+                "layers": [
                     module.self_attn.kv_b_proj,
                 ],
-                inp=input_feat["self_attn.kv_b_proj"],
-                module2inspect=module.self_attn.kv_b_proj,
-                kwargs=module_kwargs,
-            )
+                "inp": input_feat["self_attn.kv_b_proj"],
+                "module2inspect": module.self_attn.kv_b_proj,
+                "kwargs": module_kwargs,
+            }
         )
-        
+
 
         # linear 2
         layers.append(
-            dict(
-                prev_op=module.mlp.up_proj,
-                layers=[module.mlp.down_proj],
-                inp=input_feat["mlp.down_proj"],
-            )
+            {
+                "prev_op": module.mlp.up_proj,
+                "layers": [module.mlp.down_proj],
+                "inp": input_feat["mlp.down_proj"],
+            }
         )
 
         layers.append(
-            dict(
-                prev_op=module.post_attention_layernorm,
-                layers=[module.mlp.gate_proj,module.mlp.up_proj],
-                inp=input_feat["mlp.gate_proj"],
-                module2inspect=module.mlp
-            )
+            {
+                "prev_op": module.post_attention_layernorm,
+                "layers": [module.mlp.gate_proj,module.mlp.up_proj],
+                "inp": input_feat["mlp.gate_proj"],
+                "module2inspect": module.mlp
+            }
         )
 
         return layers

@@ -75,7 +75,6 @@ class FORMAT(str, Enum):
     GPTQ_V2 = "gptq_v2"
     MARLIN = "marlin"
     BITBLAS = "bitblas"
-    IPEX = "ipex"
     QQQ = "qqq"
 
     GEMM = "gemm"
@@ -97,7 +96,6 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.GPTQ_V2,
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
-        FORMAT.IPEX,
     },
     QUANT_METHOD.AUTO_ROUND: {
         FORMAT.GPTQ,
@@ -391,7 +389,7 @@ class QuantizeConfig():
     @classmethod
     # normalize quant config for compat and also performs validation
     def from_quant_config(cls, quantize_cfg, format: str = None):
-        valid_formats = {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN, FORMAT.BITBLAS, FORMAT.IPEX}
+        valid_formats = {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN, FORMAT.BITBLAS}
         format_auto_inferred = False
         # compat: format can be passed in via from_quantized() if field missing from json
         if format:

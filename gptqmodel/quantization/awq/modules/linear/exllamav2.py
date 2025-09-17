@@ -1,7 +1,7 @@
-import torch
-import warnings
-import torch.nn as nn
 from typing import Dict
+
+import torch
+import torch.nn as nn
 from gptqmodel.quantization.awq.utils.module import try_import
 from gptqmodel.quantization.awq.utils.packing_utils import unpack_reorder_pack
 

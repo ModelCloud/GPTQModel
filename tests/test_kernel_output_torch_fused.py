@@ -2,8 +2,8 @@ import unittest
 
 import torch
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.ipex import HAS_IPEX, IPEXQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from gptqmodel.utils.model import find_modules
 from logbar import LogBar
 from parameterized import parameterized
@@ -16,7 +16,7 @@ class TestKernelOutput(unittest.TestCase):
     model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
     target_qliner_map = {
         BACKEND.TORCH: TorchQuantLinear,
-        BACKEND.IPEX: IPEXQuantLinear,
+        BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
     }
     target = 'model.layers.6.self_attn.v_proj'
     device_map = "cpu"
@@ -58,11 +58,9 @@ class TestKernelOutput(unittest.TestCase):
     @parameterized.expand([
         (BACKEND.TORCH, 0.0000, 0.0005),
         # (BACKEND.TRITON,  0.0000, 0.0005),
-        (BACKEND.IPEX,  r_tolerance, a_tolerance),
+        (BACKEND.TORCH_FUSED,  r_tolerance, a_tolerance),
     ])
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
-        if not HAS_IPEX and backend == BACKEND.IPEX:
-            self.skipTest("IPEX is not available")
         model = GPTQModel.load(self.model_path, backend=backend, device_map=self.device_map, dtype=self.dtype)
         log.info(f"device_map: {self.device_map} ")
         log.info(f"backend: {backend} ")

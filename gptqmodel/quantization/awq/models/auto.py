@@ -1,4 +1,3 @@
-from transformers import AutoConfig
 from gptqmodel.quantization.awq.models import *
 
 AWQ_CAUSAL_LM_MODEL_MAP = {

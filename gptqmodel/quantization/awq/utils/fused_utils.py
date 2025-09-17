@@ -1,14 +1,7 @@
 import torch
-
-from gptqmodel.quantization.awq.modules.linear import (
-    WQLinear_GEMM,
-    WQLinear_GEMV,
-    WQLinear_Marlin,
-    WQLinear_Exllama,
-    WQLinear_ExllamaV2,
-    WQLinear_GEMVFast,
-    WQLinear_IPEX,
-)
+from gptqmodel.quantization.awq.modules.linear import (WQLinear_Exllama, WQLinear_ExllamaV2,
+                                                       WQLinear_GEMM, WQLinear_GEMV, WQLinear_GEMVFast,
+                                                       WQLinear_IPEX, WQLinear_Marlin)
 
 
 def prepare_cache(blocks, seqlen: int) -> int:

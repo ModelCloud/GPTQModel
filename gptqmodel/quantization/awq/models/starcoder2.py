@@ -1,14 +1,13 @@
-import tqdm
 from typing import List, Tuple
-from .base import BaseAWQForCausalLM
-from gptqmodel.quantization.awq.utils.fused_utils import fuse_qkv
+
+import tqdm
 from gptqmodel.quantization.awq.modules.fused.block import LlamaLikeBlock
 from gptqmodel.quantization.awq.modules.fused.model import LlamaLikeModel
-from transformers.models.starcoder2.modeling_starcoder2 import (
-    Starcoder2ForCausalLM as OldStarcoder2ForCausalLM,
-    Starcoder2DecoderLayer as OldStarcoder2DecoderLayer,
-)
-from gptqmodel.quantization.awq.modules.fused.norm import FasterTransformerRMSNorm
+from gptqmodel.quantization.awq.utils.fused_utils import fuse_qkv
+from transformers.models.starcoder2.modeling_starcoder2 import Starcoder2DecoderLayer as OldStarcoder2DecoderLayer
+from transformers.models.starcoder2.modeling_starcoder2 import Starcoder2ForCausalLM as OldStarcoder2ForCausalLM
+
+from .base import BaseAWQForCausalLM
 
 
 class Starcoder2AWQForCausalLM(BaseAWQForCausalLM):
@@ -26,12 +25,12 @@ class Starcoder2AWQForCausalLM(BaseAWQForCausalLM):
 
     @staticmethod
     def get_act_for_scaling(module: OldStarcoder2DecoderLayer):
-        return dict(
-            is_scalable=True,
-            scale_name="mlp.act",
-            scale_layer=module.mlp.act,
-            scale_shape=module.mlp.c_fc.out_features,
-        )
+        return {
+            "is_scalable": True,
+            "scale_name": "mlp.act",
+            "scale_layer": module.mlp.act,
+            "scale_shape": module.mlp.c_fc.out_features,
+        }
         # return dict(is_scalable=False)
 
     @staticmethod
@@ -45,46 +44,46 @@ class Starcoder2AWQForCausalLM(BaseAWQForCausalLM):
 
         # attention input
         layers.append(
-            dict(
-                prev_op=module.input_layernorm,
-                layers=[
+            {
+                "prev_op": module.input_layernorm,
+                "layers": [
                     module.self_attn.q_proj,
                     module.self_attn.k_proj,
                     module.self_attn.v_proj,
                 ],
-                inp=input_feat["self_attn.q_proj"],
-                module2inspect=module.self_attn,
-                kwargs=module_kwargs,
-            )
+                "inp": input_feat["self_attn.q_proj"],
+                "module2inspect": module.self_attn,
+                "kwargs": module_kwargs,
+            }
         )
 
         # attention out
         if module.self_attn.v_proj.weight.shape == module.self_attn.o_proj.weight.shape:
             layers.append(
-                dict(
-                    prev_op=module.self_attn.v_proj,
-                    layers=[module.self_attn.o_proj],
-                    inp=input_feat["self_attn.o_proj"],
-                )
+                {
+                    "prev_op": module.self_attn.v_proj,
+                    "layers": [module.self_attn.o_proj],
+                    "inp": input_feat["self_attn.o_proj"],
+                }
             )
 
         # linear 1
         layers.append(
-            dict(
-                prev_op=module.post_attention_layernorm,
-                layers=[module.mlp.c_fc],
-                inp=input_feat["mlp.c_fc"],
-                module2inspect=module.mlp,
-            )
+            {
+                "prev_op": module.post_attention_layernorm,
+                "layers": [module.mlp.c_fc],
+                "inp": input_feat["mlp.c_fc"],
+                "module2inspect": module.mlp,
+            }
         )
 
         # linear 2
         layers.append(
-            dict(
-                prev_op=module.mlp.act,
-                layers=[module.mlp.c_proj],
-                inp=input_feat["mlp.c_proj"],
-            )
+            {
+                "prev_op": module.mlp.act,
+                "layers": [module.mlp.c_proj],
+                "inp": input_feat["mlp.c_proj"],
+            }
         )
 
         return layers

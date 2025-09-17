@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
-from .gemm import WQLinear_GEMM
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
+
+from .gemm import WQLinear_GEMM
 
 try:
     from intel_extension_for_pytorch.llm.quantization import IPEXWeightOnlyQuantizedLinear
@@ -107,7 +108,7 @@ class WQLinear_IPEX(WQLinear_GEMM):
             outputs = torch.matmul(x, outputs)
 
         return outputs
-    
+
     def backward(self, grad_output):
         weights = dequantize_gemm(self.qweight, self.qzeros, self.scales, self.w_bit, self.group_size).to(grad_output.dtype)
         batch_size = grad_output.shape[0]

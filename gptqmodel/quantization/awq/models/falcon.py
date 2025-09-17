@@ -1,9 +1,7 @@
+from transformers.models.falcon.modeling_falcon import FalconDecoderLayer as OldFalconDecoderLayer
+from transformers.models.falcon.modeling_falcon import FalconForCausalLM
+
 from .base import BaseAWQForCausalLM
-from transformers.models.falcon.modeling_falcon import (
-    FalconDecoderLayer as OldFalconDecoderLayer,
-    FalconForCausalLM,
-    FalconAttention,
-)
 
 
 class FalconAWQForCausalLM(BaseAWQForCausalLM):
@@ -23,12 +21,12 @@ class FalconAWQForCausalLM(BaseAWQForCausalLM):
 
     @staticmethod
     def get_act_for_scaling(module: OldFalconDecoderLayer):
-        return dict(
-            is_scalable=True,
-            scale_name="mlp.act",
-            scale_layer=module.mlp.act,
-            scale_shape=module.mlp.dense_h_to_4h.out_features,
-        )
+        return {
+            "is_scalable": True,
+            "scale_name": "mlp.act",
+            "scale_layer": module.mlp.act,
+            "scale_shape": module.mlp.dense_h_to_4h.out_features,
+        }
 
     @staticmethod
     def move_embed(model: FalconForCausalLM, device):
@@ -45,47 +43,47 @@ class FalconAWQForCausalLM(BaseAWQForCausalLM):
         if module.config.num_attention_heads == 71:
             # linear 1 + attention
             layers.append(
-                dict(
-                    prev_op=module.input_layernorm,
-                    layers=[
+                {
+                    "prev_op": module.input_layernorm,
+                    "layers": [
                         module.mlp.dense_h_to_4h,
                         module.self_attention.query_key_value,
                     ],
-                    inp=input_feat["self_attention.query_key_value"],
-                    module2inspect=module,
-                    kwargs=module_kwargs,
-                )
+                    "inp": input_feat["self_attention.query_key_value"],
+                    "module2inspect": module,
+                    "kwargs": module_kwargs,
+                }
             )
 
         # Falcon 40B (newer architecture)
         else:
             # linear 1 + attention
             layers.append(
-                dict(
-                    prev_op=module.ln_attn,
-                    layers=[module.self_attention.query_key_value],
-                    inp=input_feat["self_attention.query_key_value"],
-                    module2inspect=module,
-                    kwargs=module_kwargs,
-                )
+                {
+                    "prev_op": module.ln_attn,
+                    "layers": [module.self_attention.query_key_value],
+                    "inp": input_feat["self_attention.query_key_value"],
+                    "module2inspect": module,
+                    "kwargs": module_kwargs,
+                }
             )
 
             # linear 2
             layers.append(
-                dict(
-                    prev_op=module.ln_mlp,
-                    layers=[module.mlp.dense_h_to_4h],
-                    inp=input_feat["mlp.dense_h_to_4h"],
-                    module2inspect=module,
-                    kwargs=module_kwargs,
-                )
+                {
+                    "prev_op": module.ln_mlp,
+                    "layers": [module.mlp.dense_h_to_4h],
+                    "inp": input_feat["mlp.dense_h_to_4h"],
+                    "module2inspect": module,
+                    "kwargs": module_kwargs,
+                }
             )
 
         return layers
 
 
-from gptqmodel.quantization.awq.modules.fused.model import FalconModel
 from gptqmodel.quantization.awq.modules.fused.block import FalconDecoderLayer
+from gptqmodel.quantization.awq.modules.fused.model import FalconModel
 
 
 class FalconFuser:
