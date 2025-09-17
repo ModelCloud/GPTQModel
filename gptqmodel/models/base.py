@@ -73,7 +73,7 @@ def filter_not_quantize_module(layer_modules):
     ]
 
 
-def generate_node_for_awq_scaling(inp, block, prev_op, last_module_root, module, module_kwargs, nodes_size, subset):
+def generate_node_for_awq_scaling(inp, prev_op, module_kwargs, nodes_size, subset, module2inspect):
     n = {
         "prev_op": prev_op,
         "layers": subset,
@@ -82,12 +82,9 @@ def generate_node_for_awq_scaling(inp, block, prev_op, last_module_root, module,
     if nodes_size == 0:
         # Only the first node needs kwargs
         n["kwargs"] = module_kwargs
-    root_split = block[0].split(".")
-    if len(root_split) >= 2:
-        root = root_split[0]
-        if root != last_module_root:
-            n["module2inspect"], _ = get_module_by_name_prefix(module, root)
-        return n, root
+
+    if module2inspect is not None:
+        n["module2inspect"] = module2inspect
 
     return n, None
 
@@ -905,10 +902,9 @@ class BaseQModel(nn.Module):
 
                     m, _ = get_module_by_name_prefix(module, prev_op_name)
                     subset = [m]
-                    n, root = generate_node_for_awq_scaling(inp=input_feat[name], block=block, prev_op=prev_op,
-                                                            last_module_root=last_module_root, module=module,
+                    n, root = generate_node_for_awq_scaling(inp=input_feat[name], prev_op=prev_op,
                                                             module_kwargs=module_kwargs, nodes_size=len(nodes),
-                                                            subset=subset)
+                                                            subset=subset, module2inspect=None)
                     if root is not None and last_module_root != root:
                         last_module_root = root
 
@@ -942,12 +938,22 @@ class BaseQModel(nn.Module):
                 prev_op = last_module
                 assert prev_op is not None
 
-                n, root = generate_node_for_awq_scaling(inp=input_feat[block[0]], block=block, prev_op=prev_op,
-                                                        last_module_root=last_module_root, module=module,
+                root_split = block[0].split(".")
+                module2inspect = None
+                if len(root_split) >= 2:
+                    root = root_split[0]
+                    if root != last_module_root:
+                        last_module_root = root
+                        module2inspect, _ = get_module_by_name_prefix(module, root)
+
+                if num_experts is not None and len(block) == 2 * num_experts and module2inspect is not None:
+                    inp = input_feat[last_module_root]
+                else:
+                    inp = input_feat[block[0]]
+
+                n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
                                                         module_kwargs=module_kwargs, nodes_size=len(nodes),
-                                                        subset=subset)
-                if root is not None and last_module_root != root:
-                    last_module_root = root
+                                                        subset=subset, module2inspect=module2inspect)
 
                 nodes.append(n)
 
