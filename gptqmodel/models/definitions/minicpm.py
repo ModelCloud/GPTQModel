@@ -29,7 +29,7 @@ class MiniCPMGPTQ(BaseQModel):
         "#",
         {
             "self_attn": ("q_proj:0", "k_proj:1", "v_proj:2", "o_proj:3"),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj", "up_proj", "down_proj"),
         }
     ]
 
