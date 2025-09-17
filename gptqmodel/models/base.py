@@ -900,7 +900,7 @@ class BaseQModel(nn.Module):
                     prev_op, _ = get_module_by_name_prefix(module, prev_op_name)
                     assert prev_op is not None
 
-                    m, _ = get_module_by_name_prefix(module, prev_op_name)
+                    m, _ = get_module_by_name_prefix(module, name)
                     subset = [m]
                     n, root = generate_node_for_awq_scaling(inp=input_feat[name], prev_op=prev_op,
                                                             module_kwargs=module_kwargs, nodes_size=len(nodes),
