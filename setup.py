@@ -559,6 +559,7 @@ if BUILD_CUDA_EXT == "1":
                     )
                 ]
 
+        extensions = [] # TODO, for test
         additional_setup_kwargs = {
             "ext_modules": extensions,
             "cmdclass": {"build_ext": cpp_ext.BuildExtension},
