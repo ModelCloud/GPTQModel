@@ -164,7 +164,8 @@ class GPTOSSGPTQ(BaseQModel):
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "mlp": {
                 "experts": {
-                    "#": ("gate_up:0", "down:1"),
+                    "gate_up": {"#": ("#")},
+                    "down": {"#": ("#")},
                 }
             }
         }

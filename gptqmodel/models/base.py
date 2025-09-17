@@ -1071,9 +1071,15 @@ class BaseQModel(nn.Module):
                         template_parent = f"{parent}.{EXPERT_INDEX_PLACEHOLDER}"
                         # Use a higher offset for expert modules to avoid conflicts with parent level
                         expert_offset = current_offset + max_current_group + 100  # Large offset to avoid conflicts
-                        sub_groups = process_entries(template_parent, sub_entries, expert_offset)
-                        for grp, items in sub_groups.items():
-                            groups[grp].extend(items)
+                        
+                        # Handle special case where sub_entries is ("#",) or "#" - this means use the parent path directly
+                        if (isinstance(sub_entries, (tuple, list)) and len(sub_entries) == 1 and sub_entries[0] == "#") or sub_entries == "#":
+                            # For ("#",) or "#" format, use the template_parent directly with default group 0
+                            groups[expert_offset].append((template_parent, False))
+                        else:
+                            sub_groups = process_entries(template_parent, sub_entries, expert_offset)
+                            for grp, items in sub_groups.items():
+                                groups[grp].extend(items)
                     else:
                         # Nested structure: process recursively with full path
                         full_sub_parent = f"{parent}.{sub_parent}"
