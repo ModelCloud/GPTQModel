@@ -46,6 +46,7 @@ class Qwen3NextGPTQ(BaseQModel):
         "layers",
         "#",
         {
+            "input_layernorm": ("input_layernorm:!",),
             # Token mixers
             #"self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
             "linear_attn": ("in_proj_qkvz", "in_proj_ba", "out_proj"),  # conv1d intentionally excluded
