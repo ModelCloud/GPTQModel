@@ -20,7 +20,7 @@ class TeleChat2QModel(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attention": {"dense": ("dense",)},
-            "mlp": ("up_proj:0", "gate_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
 

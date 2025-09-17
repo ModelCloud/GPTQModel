@@ -60,7 +60,7 @@ class Qwen3NextGPTQ(BaseQModel):
 
                 # Experts list with dynamic index
                 "experts": {
-                    "#": ("up_proj", "gate_proj", "down_proj"),
+                    "#": ("gate_proj", "up_proj", "down_proj"),
                 },
             },
         },

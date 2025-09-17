@@ -33,7 +33,7 @@ class ExaOneQModel(BaseQModel):
         {
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "attn": {
-                "attention": ("k_proj:0", "v_proj:0", "q_proj:0", "out_proj:1"),
+                "attention": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
             },
             "mlp": ("c_fc_0:0", "c_fc_1:0", "c_proj:1"),
         }

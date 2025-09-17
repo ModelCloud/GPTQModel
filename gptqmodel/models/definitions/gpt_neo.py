@@ -31,7 +31,7 @@ class GptNeoQModel(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "attn": {
-                "attention": ("k_proj:0", "v_proj:0", "q_proj:0", "out_proj:1")
+                "attention": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1")
             },
             "mlp": ("c_fc:0", "c_proj:1"),
         }

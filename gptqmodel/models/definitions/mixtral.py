@@ -29,7 +29,7 @@ class MixtralQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "block_sparse_moe": {
                 "experts": {
                     "#": ("w1:0", "w3:0", "w2:1"),

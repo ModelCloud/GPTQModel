@@ -44,7 +44,7 @@ class HymbaQModel(BaseQModel):
             "mamba": ("in_proj:0", "out_proj:1"),
             "moe": {
                 "experts": {
-                    "0": ("up_proj:0", "gate_proj:0", "down_proj:1"),
+                    "0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 }
             }
         }
