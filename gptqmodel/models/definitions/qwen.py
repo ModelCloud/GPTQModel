@@ -28,6 +28,16 @@ class QwenQModel(BaseQModel):
 
     layers_node = ["transformer.h"]
 
+    _layers_modules_tree = [
+        "transformer",
+        "h",
+        "#",
+        {
+            "attn": ("c_attn:0", "c_proj:1"),
+            "mlp": ("w1:0", "w2:0", "c_proj:1"),
+        }
+    ]
+
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [

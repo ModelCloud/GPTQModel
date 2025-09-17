@@ -23,6 +23,16 @@ class PhiQModel(BaseQModel):
 
     layers_node = ["model.layers"]
 
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "dense:1"),
+            "mlp": ("fc1:0", "fc2:1"),
+        }
+    ]
+
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [

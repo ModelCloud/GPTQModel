@@ -23,6 +23,16 @@ class GptJQModel(BaseQModel):
 
     layers_node = ["transformer.h"]
 
+    _layers_modules_tree = [
+        "transformer",
+        "h",
+        "#",
+        {
+            "attn": ("k_proj:0", "v_proj:0", "q_proj:0", "out_proj:1"),
+            "mlp": ("fc_in:0", "fc_out:1"),
+        }
+    ]
+
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [

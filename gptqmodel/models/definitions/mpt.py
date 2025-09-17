@@ -23,6 +23,16 @@ class MptQModel(BaseQModel):
 
     layers_node = ["transformer.blocks"]
 
+    _layers_modules_tree = [
+        "transformer",
+        "blocks",
+        "#",
+        {
+            "attn": ("Wqkv:0", "out_proj:1"),
+            "ffn": ("up_proj:0", "down_proj:1"),
+        }
+    ]
+
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [

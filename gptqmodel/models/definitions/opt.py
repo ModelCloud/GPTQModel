@@ -33,6 +33,18 @@ class OptQModel(BaseQModel):
 
     layers_node = ["model.decoder.layers"]
 
+    _layers_modules_tree = [
+        "model",
+        "decoder",
+        "layers",
+        "#",
+        {
+            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "out_proj:1"),
+            "fc1": ("fc1",),
+            "fc2": ("fc2",),
+        }
+    ]
+
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [

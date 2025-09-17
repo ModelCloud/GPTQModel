@@ -29,6 +29,17 @@ class ChatGLMQModel(BaseQModel):
 
     layers_node = ["transformer.encoder.layers"]
 
+    _layers_modules_tree = [
+        "transformer",
+        "encoder",
+        "layers",
+        "#",
+        {
+            "self_attention": ("query_key_value:0", "dense:1"),
+            "mlp": ("dense_h_to_4h:0", "dense_4h_to_h:1"),
+        }
+    ]
+
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [

@@ -26,6 +26,16 @@ class InternLM2QModel(BaseQModel):
 
     layers_node = ["model.layers"]
 
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "attention": ("wqkv:0", "wo:0"),
+            "feed_forward": ("w1:0", "w3:0", "w2:1"),
+        }
+    ]
+
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [
