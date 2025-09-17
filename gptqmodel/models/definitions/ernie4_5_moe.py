@@ -56,9 +56,9 @@ class Ernie4_5_MoeQModel(BaseQModel):
         {
             "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
             "mlp": {
-                "up_proj": ("up_proj:0",),
-                "gate_proj": ("gate_proj:0",),
-                "down_proj": ("down_proj:1",),
+                "up_proj": ("up_proj",),
+                "gate_proj": ("gate_proj",),
+                "down_proj": ("down_proj",),
                 "gate": ("gate:!",),
                 "shared_experts": {
                     "up_proj": ("up_proj:0",),

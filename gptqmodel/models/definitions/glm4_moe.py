@@ -73,9 +73,9 @@ class GLM4MoEGPTQ(BaseQModel):
                     "#": ("up_proj:0", "gate_proj:0", "down_proj:1"),
                 },
                 # Standard MLP components for layer 0
-                "down_proj": ("down_proj:1",),
-                "gate_proj": ("gate_proj:0",),
-                "up_proj": ("up_proj:0",),
+                "down_proj": ("down_proj",),
+                "gate_proj": ("gate_proj",),
+                "up_proj": ("up_proj",),
             },
         }
     ]

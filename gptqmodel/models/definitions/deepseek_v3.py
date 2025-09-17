@@ -41,7 +41,7 @@ class DeepSeekV3QModel(BaseQModel):
         "layers",
         "#",
         {
-            "self_attn": ("q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:0", "kv_b_proj:0", "o_proj:1"),
+            "self_attn": ("q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:1", "kv_b_proj:1", "o_proj:2"),
             "mlp": {
                 "gate_proj": ("gate_proj",),
                 "up_proj": ("up_proj",),
