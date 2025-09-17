@@ -978,7 +978,7 @@ class BaseQModel(nn.Module):
         mapping = tree[3]
         out_blocks = []
 
-        def process_entries(parent, entries):
+        def process_entries(parent, entries, parent_group_offset=0):
             """Process entries recursively to handle nested dict structures for MoE"""
             groups = defaultdict(list)
 
@@ -992,6 +992,8 @@ class BaseQModel(nn.Module):
                     has_bang = ('!' in flags)
                     # first numeric tag is the group id; default 0
                     grp = next((int(p) for p in flags if p.isdigit()), 0)
+                    # Apply parent group offset to avoid conflicts between different nesting levels
+                    grp += parent_group_offset
 
                     # Store the full path including parent for later use
                     # Special case: if parent ends with the same name as child, don't duplicate
@@ -1003,20 +1005,37 @@ class BaseQModel(nn.Module):
 
             # Handle nested dict structure (MoE format)
             elif isinstance(entries, dict):
+                # Calculate max group number used at current level to avoid conflicts
+                max_current_group = 0
+                for sub_parent, sub_entries in entries.items():
+                    if isinstance(sub_entries, (tuple, list)):
+                        for ent in sub_entries:
+                            parts = ent.split(':')
+                            flags = parts[1:]
+                            grp = next((int(p) for p in flags if p.isdigit()), 0)
+                            max_current_group = max(max_current_group, grp)
+                
+                # Process nested entries with appropriate group offset
+                current_offset = parent_group_offset
                 for sub_parent, sub_entries in entries.items():
                     if sub_parent == "#":
                         # Special case: "#" means expert index placeholder
                         # Create a template path that will be expanded later by simple_layer_modules
                         template_parent = f"{parent}.{EXPERT_INDEX_PLACEHOLDER}"
-                        sub_groups = process_entries(template_parent, sub_entries)
+                        # Use a higher offset for expert modules to avoid conflicts with parent level
+                        expert_offset = current_offset + max_current_group + 100  # Large offset to avoid conflicts
+                        sub_groups = process_entries(template_parent, sub_entries, expert_offset)
                         for grp, items in sub_groups.items():
                             groups[grp].extend(items)
                     else:
                         # Nested structure: process recursively with full path
                         full_sub_parent = f"{parent}.{sub_parent}"
-                        sub_groups = process_entries(full_sub_parent, sub_entries)
+                        sub_groups = process_entries(full_sub_parent, sub_entries, current_offset)
                         for grp, items in sub_groups.items():
                             groups[grp].extend(items)
+                        # Update offset for next sibling to avoid conflicts
+                        if sub_groups:
+                            current_offset = max(sub_groups.keys()) + 1
 
             return groups
 
