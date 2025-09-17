@@ -41,6 +41,7 @@ class DeepSeekV2QModel(BaseQModel):
         "layers",
         "#",
         {
+            "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_a_proj:0", "q_b_proj:0", "q_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1"),
             "mlp": {
                 "gate_proj": ("gate_proj",),
