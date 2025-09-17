@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import copy
+import gc
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -95,6 +96,9 @@ class ModuleLooper():
                 target_submodule=layers[0],
                 device=self.gptq_model.quantize_config.device,
             )
+
+
+
             print(f"layer swapped------------from: {cur_layer_device}")
             # print_module_tree(self.gptq_model.model)
             cur_layer_device = self.gptq_model.quantize_config.device
@@ -102,6 +106,9 @@ class ModuleLooper():
             # and copy the layer[0] from turtle model to self.gptq_model.model which only holds fake meta tensors
         else:
             layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
+
+        # GC!
+        gc.collect()
 
 
         ori_outside_layer_module_devices = {}
@@ -123,6 +130,10 @@ class ModuleLooper():
                 )
                 #print(f"base module swapped: {module_name} -------device = {transferred.device}")
                 # print_module_tree(self.gptq_model.model)
+
+        # GC!
+        gc.collect()
+
 
         print(f"base module swapped done")
         # print_module_tree(self.gptq_model.model)
@@ -275,6 +286,8 @@ class ModuleLooper():
                 continue
 
             module = self.gptq_model.pre_quantize(module)
+            # GC!
+            gc.collect()
 
             cur_layer_device = get_device(module)
             print(f"XX0 cur_layer_device = {cur_layer_device}")
