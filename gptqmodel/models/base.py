@@ -905,7 +905,8 @@ class BaseQModel(nn.Module):
                 inp=input_feat[block[0]],
             )
 
-            if i == 0:
+            if len(nodes) == 0:
+                # Only the first node needs kwargs
                 n["kwargs"] = module_kwargs
 
             root_split = block[0].split(".", 2)
