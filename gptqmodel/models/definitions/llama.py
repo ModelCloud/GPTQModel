@@ -20,7 +20,7 @@ from ..base import BaseGPTQModel
 class LlamaGPTQ(BaseGPTQModel):
     # Non-repeating layers at the root level: same level as `layers_node`
     # Excluding `layers_node`.
-    base_modules = ["model.embed_tokens", "model.norm"]
+    base_modules = ["model.embed_tokens", "model.norm", "model.rotary_emb"]
     pre_lm_head_norm_module = "model.norm"
 
     # Below describes all the repeating layers in this transformer model

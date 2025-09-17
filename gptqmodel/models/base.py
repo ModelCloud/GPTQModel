@@ -44,8 +44,9 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to, pack_model)
+from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
-from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
+from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, META, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
 from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_TIME,
                      QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, ModelWriter)
@@ -135,10 +136,14 @@ class BaseGPTQModel(nn.Module):
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
         model_local_path: str = None,
+        # turtle model is a sympathetic model used to reduce cpu ram usage
+        # during quantization stage.
+        turtle_model: Optional[PreTrainedModel] = None,
     ):
         super().__init__()
 
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
+        self.turtle_model = turtle_model
 
         self.compiled = False # set to True while compile() is triggered successfully
         self.quantized = quantized
@@ -846,7 +851,7 @@ class BaseGPTQModel(nn.Module):
                 gpu_memorys.append(gpu_memory)
                 cpu_memorys.append(cpu_memory)
 
-            self.pre_quantize(module)
+            module = self.pre_quantize(module)
 
             cur_layer_device = get_device(module)
             full = find_modules(module, name=self.lm_head if is_lm_head_module else "")
@@ -1255,7 +1260,7 @@ class BaseGPTQModel(nn.Module):
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.pre_lm_head_norm_module:
             norm, _ = get_module_by_name_prefix(self.model, [self.pre_lm_head_norm_module])
-            self.pre_quantize(norm)
+            norm = self.pre_quantize(norm)
 
             for element in inputs:
                 for i in range(len(element)):
@@ -1265,13 +1270,36 @@ class BaseGPTQModel(nn.Module):
         return inputs
 
     def pre_quantize(self, module: nn.Module) -> nn.Module:
-        if get_device(module) == CPU and self.quantize_config.device != CPU:
+        if get_device(module) == META:
+            return self.turtle_power(
+                target_submodule=module,
+                device=self.quantize_config.device,
+            )
+        elif get_device(module) == CPU and self.quantize_config.device != CPU:
             return move_to(module, device=self.quantize_config.device)
-        return module
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         return move_to(module, device=CPU)
 
+    def turtle_power(
+            self,
+            target_submodule: torch.nn.Module,
+            device: torch.device,
+            non_blocking: bool = False,
+    ) -> torch.nn.Module:
+        module = alias_from_turtle_for_submodule(
+            target_model=self.model,
+            turtle_model=self.turtle_model,
+            target_submodule=target_submodule,
+            device=self.quantize_config.device,
+        )
+
+        # reload turle
+        # FIX ME..need trust remote true
+        model_init_kwargs = self.turtle_model._model_init_kwargs
+        self.turtle_model = self.loader.from_pretrained(self.model_local_path, config=self.turtle_model.config, low_cpu_mem_usage=True, **model_init_kwargs)
+        self.turtle_model._model_init_kwargs = model_init_kwargs
+        return module
     ## overrides nn.module.train()
     # def train(self, mode=True):
     #     old_mode = self.training

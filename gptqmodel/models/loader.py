@@ -25,6 +25,8 @@ import accelerate
 import torch
 import transformers
 
+from ..utils.structure import print_module_tree
+
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
     try:
         from modelscope import snapshot_download
@@ -187,10 +189,20 @@ def ModelLoader(cls):
         model_init_kwargs["device_map"] = cpu_device_map
         model_init_kwargs["dtype"] = dtype
         model_init_kwargs["_fast_init"] = cls.require_fast_init
-        # model_init_kwargs["low_cpu_mem_usage"] = True
+        #model_init_kwargs["low_cpu_mem_usage"] = True
 
         cls.before_model_load(cls, load_quantized_model=False)
-        model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
+        from ..utils.hf import build_shell_model
+
+        #model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
+        print("model-----------")
+        model = build_shell_model(config=config, **model_init_kwargs)
+        print_module_tree(model=model)
+        turtle_model = cls.loader.from_pretrained(model_local_path, config=config, low_cpu_mem_usage=True, **model_init_kwargs)
+        # TODO FIX ME...temp store model_init args
+        turtle_model._model_init_kwargs = model_init_kwargs
+        print("turtle-----------")
+        print_module_tree(model=turtle_model)
         # from concurrent.futures import ThreadPoolExecutor
         #
         # def fast_pin_model(model):
@@ -236,6 +248,7 @@ def ModelLoader(cls):
 
         return cls(
             model,
+            turtle_model=turtle_model,
             quantized=False,
             quantize_config=quantize_config,
             tokenizer=tokenizer,

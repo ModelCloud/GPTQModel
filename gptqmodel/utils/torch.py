@@ -189,6 +189,7 @@ def torch_devices() -> List[torch.device]:
         return [torch.device("cpu")]
 
 CPU = torch.device("cpu")
+META = torch.device("meta")
 DEVICE_0 = auto_select_torch_device(index=0)
 
 # device_1 may be same as device_0 if there is only 1 visible/active device

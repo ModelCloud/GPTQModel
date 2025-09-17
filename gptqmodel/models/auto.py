@@ -310,8 +310,8 @@ class GPTQModel:
             )
 
         # debug model structure
-        if debug:
-            print_module_tree(m.model)
+        # if debug:
+        #     print_module_tree(m.model)
 
         return m
 

@@ -34,7 +34,8 @@ from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
+from ..utils.structure import print_module_tree, alias_from_turtle_for_submodule
+from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, META, DEFAULT_BALANCE_STRATEGY,
                            HAS_CUDA, BalanceStrategy, device_next, device_next_reset,
                            torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
 
@@ -54,6 +55,7 @@ class ModuleLooper():
         layer_input_kwargs = []
 
         cur_layer_device = get_device(layers[0])
+        print(f"cur_layer_device = {cur_layer_device}")
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
 
         # TODO HookLinear add register_forward_pre_hook()
@@ -87,7 +89,21 @@ class ModuleLooper():
             raise ValueError
 
         # move layer to target device
-        layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
+        # layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
+        if cur_layer_device == META:
+            layers[0] = self.gptq_model.turtle_power(
+                target_submodule=layers[0],
+                device=self.gptq_model.quantize_config.device,
+            )
+            print(f"layer swapped------------from: {cur_layer_device}")
+            # print_module_tree(self.gptq_model.model)
+            cur_layer_device = self.gptq_model.quantize_config.device
+            # FIX ME use turtle_model, which has exactly same structure but holds the actual model tensors
+            # and copy the layer[0] from turtle model to self.gptq_model.model which only holds fake meta tensors
+        else:
+            layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
+
+
         ori_outside_layer_module_devices = {}
         for module_name in self.gptq_model.base_modules:
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
@@ -95,9 +111,22 @@ class ModuleLooper():
             if module is None:
                 continue
 
-            ori_outside_layer_module_devices[module_name] = get_device(module)
+            m_device = get_device(module)
+            ori_outside_layer_module_devices[module_name] = CPU if m_device == META else m_device
             if module is not None:
-                move_to(module, cur_layer_device)
+                print(f"base module swapped: {module_name} from: {m_device}, target = {cur_layer_device}")
+                #print_module_tree(self.gptq_model.model)
+                # move_to(module, cur_layer_device)
+                transferred = self.gptq_model.turtle_power(
+                    target_submodule=module,
+                    device=cur_layer_device,
+                )
+                #print(f"base module swapped: {module_name} -------device = {transferred.device}")
+                # print_module_tree(self.gptq_model.model)
+
+        print(f"base module swapped done")
+        # print_module_tree(self.gptq_model.model)
+
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
         is_ovis = self.gptq_model.__class__.__name__ == "OvisGPTQ"
@@ -245,9 +274,10 @@ class ModuleLooper():
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
 
-            self.gptq_model.pre_quantize(module)
+            module = self.gptq_model.pre_quantize(module)
 
             cur_layer_device = get_device(module)
+            print(f"XX0 cur_layer_device = {cur_layer_device}")
             full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
 
             for p_index, processor in enumerate(self.processors):
@@ -316,10 +346,13 @@ class ModuleLooper():
                     for name in subset:
                         m = subset[name]
                         m.module.target_device, m.module.target_device_stream = device_next()
+                        print(f"XX m.module.target_device, = {m.module.target_device}")
                         # log.info(f"Loop name = {name}")
                         if hasattr(subset[name], 'forward_hook'):
+                            print(f"XX pre_process_fwd_hook, = {name}")
                             subset[name].forward_hook = processor.pre_process_fwd_hook(name)
                         else:
+                            print(f"XX register forward hook, = {name}")
                             # TODO FIXME: do we even need to hook into modules that are not quantizable?
                             assert (f"forward_hook missing for module name: `{name}`, layer name: {layer_name}")
                             handle.append(subset[name].register_forward_hook(processor.pre_process_fwd_hook(name)))
@@ -329,6 +362,7 @@ class ModuleLooper():
                     fwd_start = time.time()
 
                     layer_outputs = []
+                    print(f"XX cur_layer_device = {cur_layer_device}")
                     for j in range(processor.num_batches):
                         layer_input = []
                         # log.info(f"batch: {processor.num_batches}, j = {j}, layer_inputs = {layer_inputs}")
@@ -351,6 +385,7 @@ class ModuleLooper():
                         # sync above stream copies
                         #torch_sync(device=cur_layer_device)
 
+                        # TODO remove hamba hack
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                         if hasattr(module, "reuse_kv"):
                             if module.reuse_kv:

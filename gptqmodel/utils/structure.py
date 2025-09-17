@@ -311,3 +311,98 @@ def print_module_tree(
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     frozen = total_p - trainable
     print("Trainable:", human_count(trainable), " | Frozen:", human_count(frozen))
+
+import torch
+from typing import Optional, Union
+
+def _get_qualified_name(root: torch.nn.Module, obj: torch.nn.Module) -> str:
+    for name, mod in root.named_modules():
+        if mod is obj:
+            if not name:
+                raise ValueError("Provided module is the root; expected a submodule.")
+            return name
+    raise ValueError("Could not find the given module within the target model.")
+
+def _get_parent_and_leaf_by_path(root: torch.nn.Module, dotted: str):
+    if "." in dotted:
+        parent_path, leaf = dotted.rsplit(".", 1)
+        parent = root.get_submodule(parent_path)
+    else:
+        parent, leaf = root, dotted
+    return parent, leaf
+
+def _ensure_target_storage_on_device_(param: torch.nn.Parameter, device: torch.device) -> torch.nn.Parameter:
+    """Make sure `param`'s storage is on `device` without using set_ across devices."""
+    # meta -> allocate fresh on device
+    if getattr(param, "is_meta", False) or param.device.type == "meta":
+        return torch.nn.Parameter(torch.empty_like(param, device=device), requires_grad=False)
+    # already on device -> keep
+    if param.device == device:
+        return param
+    # CPU or wrong GPU -> rebind data storage on target device
+    param.data = param.data.to(device, copy=True)  # alloc new storage on device; keeps Parameter identity
+    return param
+
+def alias_from_turtle_for_submodule(
+    target_model: torch.nn.Module,
+    turtle_model: torch.nn.Module,
+    target_submodule: torch.nn.Module,
+    device: torch.device,
+    non_blocking: bool = False,
+) -> torch.nn.Module:
+    assert device not in [None, torch.device("cpu"), torch.device("meta")]
+    print(f"alias device = {device}")
+
+    # Resolve path & source submodule (on CPU/mmap)
+    path = _get_qualified_name(target_model, target_submodule)
+    src_map = dict(turtle_model.named_modules())
+    if path not in src_map:
+        raise KeyError(f"Path '{path}' not found in turtle_model.")
+    src_sub = src_map[path]
+
+    # ---- copy params/buffers CPU->GPU into target_submodule (your existing code) ----
+    t_params = dict(target_submodule.named_parameters(recurse=True))
+    s_params = dict(src_sub.named_parameters(recurse=True))
+    with torch.no_grad():
+        for name, s_p in s_params.items():
+            t_p = t_params.get(name)
+            if t_p is None or t_p.shape != s_p.shape:
+                continue
+            t_p_new = _ensure_target_storage_on_device_(t_p, device)
+            if t_p_new is not t_p:
+                parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)
+                setattr(parent, leaf, t_p_new)
+                t_p = t_p_new
+            t_p.detach().copy_(s_p.detach(), non_blocking=(non_blocking and s_p.is_pinned()))
+
+    t_bufs = dict(target_submodule.named_buffers(recurse=True))
+    s_bufs = dict(src_sub.named_buffers(recurse=True))
+    for name, s_b in s_bufs.items():
+        tb = t_bufs.get(name)
+        parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)
+        if tb is None or getattr(tb, "is_meta", False) or tb.device.type == "meta":
+            new_b = torch.empty_like(s_b, device=device)
+            new_b.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))
+            parent.register_buffer(leaf, new_b, persistent=True)
+        else:
+            if tb.device != device:
+                new_tb = torch.empty_like(s_b, device=device)
+                new_tb.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))
+                parent.register_buffer(leaf, new_tb, persistent=True)
+            else:
+                tb.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))
+
+    if hasattr(target_model, "tie_weights"):
+        try: target_model.tie_weights()
+        except Exception: pass
+
+    print("Post alias: target_submodule device summary:")
+    for n, p in target_submodule.named_parameters(recurse=True):
+        print(f"  {n}: {p.device}")
+        break
+
+    # TODO this might not be the place to do this
+
+
+    # return the *target* submodule, which is the injected result
+    return target_submodule
