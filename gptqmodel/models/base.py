@@ -909,7 +909,7 @@ class BaseQModel(nn.Module):
                 n["kwargs"] = module_kwargs
 
             root_split = block[0].split(".", 2)
-            if len(root_split) == 2:
+            if len(root_split) >= 2:
                 root = root_split[0]
                 if root != last_module_root:
                     last_module_root = root
