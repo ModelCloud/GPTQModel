@@ -14,15 +14,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-def get_project_version() -> str:
-    import pathlib
-    import tomllib
-    _pyproject_path = pathlib.Path(__name__).parent.parent / "pyproject.toml"
-    with _pyproject_path.open("rb") as f:
-        _pyproject_data = tomllib.load(f)
-
-    _project_version = _pyproject_data.get("project", {}).get("version")
-
-    return _project_version
-
-__version__ = get_project_version()
+__version__ = "4.3-dev0"
