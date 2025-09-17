@@ -45,7 +45,7 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to, pack_model)
-from ..utils.structure import alias_from_turtle_for_submodule
+from ..utils.structure import alias_from_turtle_for_submodule, print_module_tree
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
 from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, META, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
@@ -1255,8 +1255,61 @@ class BaseGPTQModel(nn.Module):
     def pre_quantize_generate_hook_start(self):
         pass
 
+
+
     def pre_quantize_generate_hook_end(self):
-        pass
+        self.offload_to_disk(self.base_modules)
+
+    def offload_to_disk(self, module_list: List[str] = None):
+        def set_submodule(root: torch.nn.Module, path: str, new_mod: torch.nn.Module) -> None:
+            parts = path.split(".")
+            parent = root
+            for p in parts[:-1]:
+                parent = getattr(parent, p)
+            setattr(parent, parts[-1], new_mod)
+
+        def _get_submodule(root: torch.nn.Module, path: str) -> torch.nn.Module:
+            m = root
+            for part in path.split("."):
+                m = getattr(m, part)
+            return m
+
+        def _is_meta_module(m: torch.nn.Module) -> bool:
+            for p in m.parameters(recurse=True):
+                if getattr(p, "is_meta", False) or (hasattr(p, "device") and p.device.type == "meta"):
+                    return True
+            for b in m.buffers(recurse=True):
+                if hasattr(b, "device") and b.device.type == "meta":
+                    return True
+            return False
+
+        # move base_module tensors to disk
+        from accelerate import dispatch_model, disk_offload
+        for name in self.base_modules:
+            try:
+                sub = _get_submodule(self.model, name)
+            except AttributeError:
+                print(f"[warn] base_module '{name}' not found; skipping")
+                continue
+            if _is_meta_module(sub):
+                print(f"[skip] '{name}' is on meta; leaving as-is")
+                continue
+
+            #print(f"device_map base_modules: {device_map}")
+
+            sub = disk_offload(
+                sub,
+                # device_map={ "" : "disk" },  # only touch this subtree
+                offload_dir=".",
+                offload_buffers=True,  # needed for buffers
+                execution_device=CPU,
+            )
+
+            # set_submodule(self.model, name, sub)
+
+            print(f"pre_quantize_generate_hook_end tree")
+            print_module_tree(self.model)
+
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.pre_lm_head_norm_module:

@@ -110,7 +110,6 @@ class ModuleLooper():
         # GC!
         gc.collect()
 
-
         ori_outside_layer_module_devices = {}
         for module_name in self.gptq_model.base_modules:
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
@@ -130,9 +129,6 @@ class ModuleLooper():
                 )
                 #print(f"base module swapped: {module_name} -------device = {transferred.device}")
                 # print_module_tree(self.gptq_model.model)
-
-        # GC!
-        gc.collect()
 
 
         print(f"base module swapped done")
@@ -168,12 +164,12 @@ class ModuleLooper():
         self.gptq_model.pre_quantize_generate_hook_end()
         handle.remove()
         move_to(layers[0], device=CPU)
-        for module_name in self.gptq_model.base_modules:
-            module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
-            if module is not None:
-                move_to(module, device=ori_outside_layer_module_devices[module_name])
-        if auto_gc:
-            torch_empty_cache()
+        # for module_name in self.gptq_model.base_modules:
+        #     module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
+        #     if module is not None:
+        #         move_to(module, device=ori_outside_layer_module_devices[module_name])
+        # if auto_gc:
+        #     torch_empty_cache()
         return InputCache(layer_inputs=layer_inputs, layer_input_kwargs=layer_input_kwargs, position_ids=position_ids,
                           attention_masks=attention_masks)
 
