@@ -21,7 +21,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from .awq_gemm import AWQuantLinear_GEMM
+from .awq_gemm import AwqGEMMQuantLinear
 
 log = setup_logger()
 
@@ -34,7 +34,7 @@ except:
     IPEX_INSTALLED = False
 
 
-class AWQuantLinear_IPEX(AWQuantLinear_GEMM):
+class Awq_IPEXQuantLinear(AwqGEMMQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -155,4 +155,4 @@ class AWQuantLinear_IPEX(AWQuantLinear_GEMM):
         ))
 
 
-__all__ = ["AWQuantLinear_IPEX"]
+__all__ = ["Awq_IPEXQuantLinear"]

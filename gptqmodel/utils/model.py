@@ -50,7 +50,7 @@ from ..looper.named_module import NamedModule
 from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
                              EXPERT_INDEX_PLACEHOLDER, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.awq_exllamav2 import AWQuantLinear_ExllamaV2
+from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
@@ -766,7 +766,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
             fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
-        elif isinstance(submodule, AWQuantLinear_ExllamaV2):
+        elif isinstance(submodule, AwqExllamaV2QuantLinear):
             model_uses_exllamav2 = True
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed(
@@ -868,7 +868,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
 
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():
-        if isinstance(submodule, ExllamaV2QuantLinear) or isinstance(submodule, AWQuantLinear_ExllamaV2):
+        if isinstance(submodule, ExllamaV2QuantLinear) or isinstance(submodule, AwqExllamaV2QuantLinear):
             device = submodule.qweight.device
             submodule.post_init(scratch_space=model.device_tensors[device])
         elif isinstance(submodule, BaseQuantLinear):

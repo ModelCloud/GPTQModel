@@ -33,7 +33,7 @@ exlv2_ext, msg = try_import("gptqmodel_exllamav2_kernels")
 none_tensor = torch.empty((1, 1), device="meta")
 
 
-class AWQuantLinear_ExllamaV2(AWQuantLinear):
+class AwqExllamaV2QuantLinear(AWQuantLinear):
     SUPPORTS_BITS = [4]
     # TODO: intel is reporting v2 has accuracy issues with group-size == 16 for this kernel
     # disable for now until we can validate this issue: ref https://github.com/ModelCloud/GPTQModel/issues/1515
@@ -180,4 +180,4 @@ def next_multiple(x, multiple):
     return ((x + multiple - 1) // multiple) * multiple
 
 
-__all__ = ["AWQuantLinear_ExllamaV2"]
+__all__ = ["AwqExllamaV2QuantLinear"]

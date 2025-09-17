@@ -32,7 +32,7 @@ exl_ext, msg = try_import("gptqmodel_exllama_kernels")
 none_tensor = torch.empty((1, 1), device="meta")
 
 
-class AWQuantLinear_Exllama(AWQuantLinear):
+class AwqExllamaQuantLinear(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -148,4 +148,4 @@ class AWQuantLinear_Exllama(AWQuantLinear):
         return out.view(out_shape)
 
 
-__all__ = ["AWQuantLinear_Exllama"]
+__all__ = ["AwqExllamaQuantLinear"]

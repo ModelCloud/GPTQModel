@@ -30,7 +30,7 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..nn_modules.qlinear.awq_gemm import AWQuantLinear_GEMM
+from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
 from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_GEMVFast, WQLinear_Marlin
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import (append_str_prefix, exclude_layers_to_not_quantize,
@@ -779,7 +779,7 @@ class AWQProcessor(LoopProcessor):
         if self.stream:
             torch_sync()
 
-        model.qlinear_kernel = AWQuantLinear_GEMM
+        model.qlinear_kernel = AwqGEMMQuantLinear
 
         # set quantized state
         model.quantized = True

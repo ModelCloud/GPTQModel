@@ -23,11 +23,11 @@ from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
-from ..nn_modules.qlinear.awq_exllama import AWQuantLinear_Exllama
-from ..nn_modules.qlinear.awq_exllamav2 import AWQuantLinear_ExllamaV2
-from ..nn_modules.qlinear.awq_gemm import AWQuantLinear_GEMM
-from ..nn_modules.qlinear.awq_gemv import AWQuantLinear_GEMV
-from ..nn_modules.qlinear.awq_gemv_fast import AWQuantLinear_GEMVFast
+from ..nn_modules.qlinear.awq_exllama import AwqExllamaQuantLinear
+from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
+from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
+from ..nn_modules.qlinear.awq_gemv import AwqGEMV
+from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
@@ -62,11 +62,11 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
     }),
     QUANT_METHOD.AWQ: OrderedDict({
-        BACKEND.EXLLAMA_V2: AWQuantLinear_ExllamaV2,
-        BACKEND.EXLLAMA_V1: AWQuantLinear_Exllama,
-        BACKEND.GEMM: AWQuantLinear_GEMM, # TODO ADD more BACKEND
-        BACKEND.GEMV: AWQuantLinear_GEMV,
-        BACKEND.GEMV_FAST: AWQuantLinear_GEMVFast,
+        BACKEND.EXLLAMA_V2: AwqExllamaV2QuantLinear,
+        BACKEND.EXLLAMA_V1: AwqExllamaQuantLinear,
+        BACKEND.GEMM: AwqGEMMQuantLinear, # TODO ADD more BACKEND
+        BACKEND.GEMV: AwqGEMV,
+        BACKEND.GEMV_FAST: AwqGEMVFastQuantLinear,
     }),
 }
 
