@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
-import platform
 import re
 import subprocess
 import sys
@@ -21,6 +20,7 @@ def _read_env(name, default=None):
     v = os.environ.get(name)
     return v if (v is not None and str(v).strip() != "") else default
 
+
 def _probe_cmd(args):
     try:
         out = subprocess.check_output(args, stderr=subprocess.STDOUT, text=True, timeout=5)
@@ -28,11 +28,13 @@ def _probe_cmd(args):
     except Exception:
         return None
 
+
 def _bool_env(name, default=False):
     v = _read_env(name)
     if v is None:
         return default
     return str(v).lower() in ("1", "true", "yes", "y", "on")
+
 
 def _detect_rocm_version():
     v = _read_env("ROCM_VERSION")
@@ -51,6 +53,7 @@ def _detect_rocm_version():
     except Exception:
         pass
     return None
+
 
 def _detect_cuda_arch_list():
     """Return TORCH_CUDA_ARCH_LIST style string for the *installed* GPUs only.
@@ -87,10 +90,12 @@ def _detect_cuda_arch_list():
     # 3) conservative default for modern datacenter GPUs (A100 et al.)
     raise Exception("Could not get compute capability from nvidia-smi. Please check nvidia-utils package is installed.")
 
+
 def _parse_arch_list(s: str):
     # Accept semicolons, commas, and any whitespace as separators.
     # Keep tokens like "8.0", "8.0+PTX" intact (we’ll strip suffixes later).
     return [tok for tok in re.split(r"[;\s,]+", s) if tok.strip()]
+
 
 def _has_cuda_v8_from_arch_list(arch_list):
     try:
@@ -103,11 +108,13 @@ def _has_cuda_v8_from_arch_list(arch_list):
     except Exception:
         return False
 
+
 def _detect_cxx11_abi():
     v = _read_env("CXX11_ABI")
     if v in ("0", "1"):
         return int(v)
     return 1
+
 
 def _torch_version_for_release():
     # No torch import; allow env override
@@ -119,8 +126,10 @@ def _torch_version_for_release():
         raise Exception("TORCH_VERSION not passed for wheel generation.")
     return None
 
+
 def _is_rocm_available():
     return _detect_rocm_version() is not None
+
 
 # If you already have _probe_cmd elsewhere, you can delete this copy.
 def _probe_cmd(args, timeout=6):
@@ -129,12 +138,14 @@ def _probe_cmd(args, timeout=6):
     except Exception:
         return ""
 
+
 def _first_token_line(s: str) -> str | None:
     for line in (s or "").splitlines():
         t = line.strip()
         if t:
             return t
     return None
+
 
 def _detect_torch_version() -> str | None:
     # 1) uv pip show torch
@@ -171,9 +182,11 @@ def _detect_torch_version() -> str | None:
     except Exception:
         raise Exception("Unable to detect torch version via uv/pip/conda/importlib. Please install torch >= 2.7.1")
 
+
 def _major_minor(v: str) -> str:
     parts = v.split(".")
     return ".".join(parts[:2]) if parts else v
+
 
 def _detect_cuda_version() -> str | None:
     # Priority: env → nvidia-smi → nvcc
@@ -196,6 +209,7 @@ def _detect_cuda_version() -> str | None:
             return f"{m.group(1)}.{m.group(2)}"
 
     return None
+
 
 def get_version_tag() -> str:
     # TODO FIX ME: cpu wheels don't have torch version tags?
@@ -225,7 +239,6 @@ RELEASE_MODE = _read_env("RELEASE_MODE")
 CUDA_VERSION = _read_env("CUDA_VERSION")
 ROCM_VERSION = _read_env("ROCM_VERSION")
 TORCH_CUDA_ARCH_LIST = _read_env("TORCH_CUDA_ARCH_LIST")
-
 
 # respect user env then detect
 if not TORCH_VERSION:
@@ -291,6 +304,7 @@ WHEEL_URL_TEMPLATE = os.environ.get("GPTQMODEL_WHEEL_URL_TEMPLATE")
 WHEEL_BASE_URL = os.environ.get("GPTQMODEL_WHEEL_BASE_URL")
 WHEEL_TAG = os.environ.get("GPTQMODEL_WHEEL_TAG")  # Optional override of release tag
 
+
 def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
     """
     Build the final wheel URL based on:
@@ -319,25 +333,6 @@ def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
     # Fallback: default GitHub template
     return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
 
-def get_version_for_release() -> str:
-    # TODO FIX ME: cpu wheels don't have torch version tags?
-    if BUILD_CUDA_EXT != "1":
-        return "cpu"
-
-    # TODO FIX ME: rocm wheels don't have torch version tags?
-    if ROCM_VERSION:
-        return f"rocm{'.'.join(str(ROCM_VERSION).split('.')[:2])}"
-
-    if not CUDA_VERSION:
-        print(
-            "Trying to compile GPTQModel for CUDA, but no CUDA version was detected. "
-            "Set CUDA_VERSION env (e.g. 12.1)."
-        )
-        sys.exit(1)
-
-    # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
-    return f"cu{CUDA_VERSION[:3]}torch{_major_minor(TORCH_VERSION)}"
-
 requirements = []
 if not os.getenv("CI"):
     with open("requirements.txt", encoding="utf-8") as f:
@@ -357,12 +352,13 @@ else:
             HAS_CUDA_V8 = False
 
 if RELEASE_MODE == "1":
-    gptqmodel_version = f"{gptqmodel_version}+{get_version_for_release()}"
+    gptqmodel_version = f"{gptqmodel_version}+{get_version_tag()}"
 
-include_dirs = ["gptqmodel_cuda"]
+include_dirs = ["gptqmodel_ext"]
 
 extensions = []
 additional_setup_kwargs = {}
+
 
 # ---------------------------
 # Build CUDA/ROCm extensions (only when enabled)
@@ -375,19 +371,21 @@ def _env_enabled(val: str) -> bool:
         return True
     return str(val).strip().lower() not in ("0", "false", "off", "no")
 
+
 def _env_enabled_any(names, default="1") -> bool:
     for n in names:
         if n in os.environ:
             return _env_enabled(os.environ.get(n))
     return _env_enabled(default)
 
-BUILD_MARLIN      = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
-BUILD_EXLLAMA_V2  = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
+
+BUILD_MARLIN = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
+BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
 
 # Optional kernels and not build by default. Enable compile with env flags
-BUILD_QQQ         = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "0"))
-BUILD_EORA        = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EORA", "0"))
-BUILD_EXLLAMA_V1  = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V1", "0"))
+BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "0"))
+BUILD_EORA = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EORA", "0"))
+BUILD_EXLLAMA_V1 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V1", "0"))
 
 if BUILD_CUDA_EXT == "1":
     # Import torch's cpp_extension only if we're truly building GPU extensions
@@ -463,6 +461,8 @@ if BUILD_CUDA_EXT == "1":
                     else:
                         modified_flags.append(flag)
                 return modified_flags
+
+
             extra_compile_args["nvcc"] = _hipify_compile_flags(extra_compile_args["nvcc"])
 
         # Extensions (gate marlin/qqq/eora/exllamav2 on CUDA sm_80+ and non-ROCm)
@@ -554,15 +554,9 @@ class CachedWheelsCommand(_bdist_wheel):
         if FORCE_BUILD or xpu_avail:
             return super().run()
 
-        system_name = platform.system().lower()
-
         python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
-        wheel_filename = (
-            f"{common_setup_kwargs['name']}-{gptqmodel_version}-"
-            f"{python_version}-{python_version}-{system_name}_x86_64.whl"
-        )
 
-        wheel_filename = f"{common_setup_kwargs['name']}-{gptqmodel_version}+{get_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
+        wheel_filename = f"gptqmodel-{gptqmodel_version}+{get_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
 
         # Allow tag override via env; default to "v{gptqmodel_version}"
         tag_name = WHEEL_TAG if WHEEL_TAG else f"v{gptqmodel_version}"
@@ -578,9 +572,7 @@ class CachedWheelsCommand(_bdist_wheel):
                 os.makedirs(self.dist_dir)
 
             impl_tag, abi_tag, plat_tag = self.get_tag()
-            archive_basename = (
-                f"{common_setup_kwargs['name']}-{gptqmodel_version}-{impl_tag}-{abi_tag}-{plat_tag}"
-            )
+            archive_basename = (f"gptqmodel-{gptqmodel_version}-{impl_tag}-{abi_tag}-{plat_tag}")
             wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
             print("Raw wheel path", wheel_path)
             os.rename(wheel_filename, wheel_path)
@@ -588,36 +580,6 @@ class CachedWheelsCommand(_bdist_wheel):
             print(f"Precompiled wheel not found at: {wheel_url}. Building from source...")
             super().run()
 
-# ---------------------------
-# Core metadata
-# ---------------------------
-
-common_setup_kwargs = {
-    "version": gptqmodel_version,
-    "name": "gptqmodel",
-    "author": "ModelCloud",
-    "author_email": "qubitium@modelcloud.ai",
-    "description": "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang.",
-    "long_description": (Path(__file__).parent / "README.md").read_text(encoding="UTF-8"),
-    "long_description_content_type": "text/markdown",
-    "url": "https://github.com/ModelCloud/GPTQModel",
-    "project_urls": {"Homepage": "https://github.com/ModelCloud/GPTQModel"},
-    "keywords": ["gptq", "quantization", "large-language-models", "transformers", "4bit", "llm"],
-    "platforms": ["linux", "windows", "darwin"],
-    "classifiers": [
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "Programming Language :: Python :: 3.13",
-        "Programming Language :: C++",
-        "Intended Audience :: Developers",
-        "Intended Audience :: Education",
-        "Intended Audience :: Science/Research",
-        "Intended Audience :: Information Technology",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
-        "Topic :: Scientific/Engineering :: Information Analysis",
-    ],
-}
 
 # ---------------------------
 # setup()
@@ -625,11 +587,11 @@ common_setup_kwargs = {
 print(f"CUDA {CUDA_ARCH_LIST}")
 print(f"HAS_CUDA_V8 {HAS_CUDA_V8}")
 print(f"SETUP_KWARGS {additional_setup_kwargs}")
+print(f"gptqmodel_version={gptqmodel_version}")
 
 setup(
+    version = gptqmodel_version,
     packages=find_packages(),
-    # setup_requires=["setuptools>=80.9.0", "torch>=2.7.1"],
-    install_requires=requirements,
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
         "quality": ["ruff==0.13.0", "isort==6.0.1"],
@@ -644,13 +606,10 @@ setup(
         "mlx": ["mlx_lm>=0.24.0"],
     },
     include_dirs=include_dirs,
-    python_requires=">=3.11",
     cmdclass=(
         {"bdist_wheel": CachedWheelsCommand, "build_ext": additional_setup_kwargs.get("cmdclass", {}).get("build_ext")}
         if (BUILD_CUDA_EXT == "1" and additional_setup_kwargs)
         else {"bdist_wheel": CachedWheelsCommand}
     ),
     ext_modules=additional_setup_kwargs.get("ext_modules", []),
-    license="Apache-2.0",
-    **common_setup_kwargs,
 )
