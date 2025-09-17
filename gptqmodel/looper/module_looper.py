@@ -581,10 +581,17 @@ class ModuleLooper():
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
                             reverse_p.submodule_finalize(processed_subset[name])
+
+                    self.gptq_model.offload_to_disk(module=[f"model.layers.{layer_index}"])
+                    print(f"model.layers.{layer_index} complete tree")
                     del module
+                    #print(f"model.layers.{layer_index} complete tree")
+                    #print_module_tree(self.gptq_model.model)
 
                 if auto_gc:
                     torch_empty_cache()
+
+
 
         total_log = {}
 

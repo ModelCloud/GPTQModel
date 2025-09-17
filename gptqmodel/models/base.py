@@ -1258,9 +1258,9 @@ class BaseGPTQModel(nn.Module):
 
 
     def pre_quantize_generate_hook_end(self):
-        self.offload_to_disk(self.base_modules)
+        self.offload_to_disk(module=self.base_modules)
 
-    def offload_to_disk(self, module_list: List[str] = None):
+    def offload_to_disk(self, module: List[str] | nn.Module = None):
         def set_submodule(root: torch.nn.Module, path: str, new_mod: torch.nn.Module) -> None:
             parts = path.split(".")
             parent = root
@@ -1285,30 +1285,49 @@ class BaseGPTQModel(nn.Module):
 
         # move base_module tensors to disk
         from accelerate import dispatch_model, disk_offload
-        for name in self.base_modules:
-            try:
-                sub = _get_submodule(self.model, name)
-            except AttributeError:
-                print(f"[warn] base_module '{name}' not found; skipping")
-                continue
-            if _is_meta_module(sub):
-                print(f"[skip] '{name}' is on meta; leaving as-is")
-                continue
 
-            #print(f"device_map base_modules: {device_map}")
+        if isinstance(module, List):
+            for name in module:
+                try:
+                    sub = _get_submodule(self.model, name)
+                except AttributeError:
+                    print(f"[warn] base_module '{name}' not found; skipping")
+                    continue
+                if _is_meta_module(sub):
+                    print(f"[skip] '{name}' is on meta; leaving as-is")
+                    continue
 
-            sub = disk_offload(
-                sub,
+                #print(f"device_map base_modules: {device_map}")
+
+                _ = disk_offload(
+                    sub,
+                    # device_map={ "" : "disk" },  # only touch this subtree
+                    offload_dir="offload",
+                    offload_buffers=True,  # needed for buffers
+                    execution_device=CPU,
+                )
+
+                print(f"offload_disk: list item tree")
+                print_module_tree(sub)
+
+        elif isinstance(module, nn.Module):
+            if _is_meta_module(module):
+                print(f"[skip] '{module.name}' is on meta; leaving as-is")
+                return
+
+            module = disk_offload(
+                module,
                 # device_map={ "" : "disk" },  # only touch this subtree
                 offload_dir=".",
                 offload_buffers=True,  # needed for buffers
                 execution_device=CPU,
             )
 
-            # set_submodule(self.model, name, sub)
+            print(f"offload_disk: module tree")
+            print_module_tree(module)
 
-            print(f"pre_quantize_generate_hook_end tree")
-            print_module_tree(self.model)
+            return module
+        # set_submodule(self.model, name, sub)
 
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
@@ -1333,6 +1352,7 @@ class BaseGPTQModel(nn.Module):
             return move_to(module, device=self.quantize_config.device)
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
+        #return self.offload_to_disk(module=module)
         return move_to(module, device=CPU)
 
     def turtle_power(
