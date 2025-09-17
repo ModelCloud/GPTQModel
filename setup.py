@@ -333,27 +333,6 @@ def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
     # Fallback: default GitHub template
     return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
 
-
-def get_version_for_release() -> str:
-    # TODO FIX ME: cpu wheels don't have torch version tags?
-    if BUILD_CUDA_EXT != "1":
-        return "cpu"
-
-    # TODO FIX ME: rocm wheels don't have torch version tags?
-    if ROCM_VERSION:
-        return f"rocm{'.'.join(str(ROCM_VERSION).split('.')[:2])}"
-
-    if not CUDA_VERSION:
-        print(
-            "Trying to compile GPTQModel for CUDA, but no CUDA version was detected. "
-            "Set CUDA_VERSION env (e.g. 12.1)."
-        )
-        sys.exit(1)
-
-    # For the PyPI release, the version is simply x.x.x to comply with PEP 440.
-    return f"cu{CUDA_VERSION[:3]}torch{_major_minor(TORCH_VERSION)}"
-
-
 requirements = []
 if not os.getenv("CI"):
     with open("requirements.txt", encoding="utf-8") as f:
@@ -373,7 +352,7 @@ else:
             HAS_CUDA_V8 = False
 
 if RELEASE_MODE == "1":
-    gptqmodel_version = f"{gptqmodel_version}+{get_version_for_release()}"
+    gptqmodel_version = f"{gptqmodel_version}+{get_version_tag()}"
 
 include_dirs = ["gptqmodel_ext"]
 
@@ -609,6 +588,7 @@ class CachedWheelsCommand(_bdist_wheel):
 print(f"CUDA {CUDA_ARCH_LIST}")
 print(f"HAS_CUDA_V8 {HAS_CUDA_V8}")
 print(f"SETUP_KWARGS {additional_setup_kwargs}")
+print(f"gptqmodel_version={gptqmodel_version}")
 
 setup(
     version = gptqmodel_version,
