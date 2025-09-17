@@ -274,7 +274,8 @@ def ModelLoader(cls):
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
         if backend == BACKEND.TRITON:
-            from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
+            # from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
+            from ..nn_modules.qlinear.triton_a100 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
             if not TRITON_AVAILABLE:
                 raise ValueError(TRITON_INSTALL_HINT)
 
