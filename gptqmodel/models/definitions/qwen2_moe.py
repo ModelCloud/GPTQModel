@@ -48,12 +48,12 @@ class Qwen2MoeQModel(BaseQModel):
         "layers",
         "#",
         {
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
             "mlp": {
-                "gate": ("gate",),
-                "shared_expert": ("up_proj", "gate_proj", "down_proj"),
+                "gate": ("gate:0",),
+                "shared_expert": ("up_proj:0", "gate_proj:0", "down_proj:1"),
                 "experts": {
-                    "#": ("up_proj", "gate_proj", "down_proj"),
+                    "#": ("up_proj:0", "gate_proj:0", "down_proj:1"),
                 },
             },
         }

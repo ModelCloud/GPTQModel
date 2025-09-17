@@ -36,6 +36,28 @@ class DeepSeekV3QModel(BaseQModel):
     # DeepSeek V3 uses dynamic modules based on lora(rank):
     layer_modules_strict = False
 
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:0", "kv_b_proj:0", "o_proj:1"),
+            "mlp": {
+                "gate_proj": ("gate_proj",),
+                "up_proj": ("up_proj",),
+                "down_proj": ("down_proj",),
+                "experts": {
+                    "#": {
+                        "gate_proj": ("gate_proj",),
+                        "up_proj": ("up_proj",),
+                        "down_proj": ("down_proj",),
+                    },
+                },
+                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            },
+        }
+    ]
+
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [

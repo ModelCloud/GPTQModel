@@ -26,28 +26,26 @@ class LongCatFlashQModel(BaseQModel):
 
     layers_node = ["model.layers"]
 
-    # Define the hierarchical structure of quantizable modules within each layer
-    _layers_modules_tree = {
-        "model": {
-            "layers": {
-                "#": {
-                    "self_attn": {
-                        "0": {"q_a_proj": 0, "q_b_proj": 0, "kv_a_proj_with_mqa": 0, "kv_b_proj": 0, "o_proj": 1},
-                        "1": {"q_a_proj": 0, "q_b_proj": 0, "kv_a_proj_with_mqa": 0, "kv_b_proj": 0, "o_proj": 1}
-                    },
-                    "mlps": {
-                        "0": {"gate_proj": 0, "up_proj": 0, "down_proj": 1},
-                        "1": {"gate_proj": 0, "up_proj": 0, "down_proj": 1}
-                    },
-                    "mlp": {
-                        "experts": {
-                            "#": {"up_proj": 0, "gate_proj": 0, "down_proj": 1}
-                        }
-                    }
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": {
+                "0": ("q_a_proj:0", "q_b_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1"),
+                "1": ("q_a_proj:0", "q_b_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1")
+            },
+            "mlps": {
+                "0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "1": ("gate_proj:0", "up_proj:0", "down_proj:1")
+            },
+            "mlp": {
+                "experts": {
+                    "#": ("up_proj:0", "gate_proj:0", "down_proj:1")
                 }
             }
         }
-    }
+    ]
 
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree

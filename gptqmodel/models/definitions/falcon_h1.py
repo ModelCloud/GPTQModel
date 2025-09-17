@@ -22,6 +22,17 @@ class FalconH1QModel(BaseQModel):
 
     layers_node = "model.layers"
 
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
+            "mamba": ("in_proj:0", "out_proj:1"),
+            "feed_forward": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+        }
+    ]
+
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [

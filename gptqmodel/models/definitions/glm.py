@@ -24,6 +24,16 @@ class GlmQModel(BaseQModel):
 
     layers_node = ["model.layers"]
 
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
+            "mlp": ("gate_up_proj:0", "down_proj:1"),
+        }
+    ]
+
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
     layer_modules = [

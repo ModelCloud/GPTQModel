@@ -32,13 +32,13 @@ class PanguAlphaQModel(BaseQModel):
     # List[str] for serial linked nodes. List str are linear depth linked modules presented in a linear fashion with no divergence.
     # Dict{str: List[str] | Dict | Tuple[str]} for diverging nodes where a node splits into multiple paths/nodes.
     # Tuple(str) for final targeted modules/nodes: there are only strings representing the final targeted modules
-    layers_modules_tree = [
+    _layers_modules_tree = [
         "transformer",
         "h",
         "#",
         {
-            "attn": ("k_proj", "v_proj", "q_proj", "c_proj"),
-            "mlp": ("c_fc", "c_proj"),
+            "attn": ("k_proj:0", "v_proj:0", "q_proj:0", "c_proj:1"),
+            "mlp": ("c_fc:0", "c_proj:1"),
         }
     ]
 

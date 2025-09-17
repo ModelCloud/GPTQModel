@@ -43,14 +43,14 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
         ["mlp.down_proj"],
     ]
 
-    layers_modules_tree = [
+    _layers_modules_tree = [
         "thinker",
         "model",
         "layers",
         "#",
         {
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
-            "mlp": ("up_proj", "gate_proj", "down_proj"),
+            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
+            "mlp": ("up_proj:0", "gate_proj:0", "down_proj:1"),
         }
     ]
 

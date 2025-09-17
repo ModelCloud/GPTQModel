@@ -33,27 +33,16 @@ class OvisQModel(BaseQModel):
 
     layers_node = ["llm.model.layers"] #, "visual_tokenizer.backbone.trunk.blocks"]
 
-    _layers_modules_tree = {
-        # "visual_tokenizer": [
-        #     "backbone",
-        #     "trunk",
-        #     "blocks",
-        #     "#",
-        #     {
-        #         "attn": ("qkv", "proj"),
-        #         "mlp": ("fc1", "fc2", "fc3"),
-        #     },
-        # ],
-        "llm": [
-            "model",
-            "layers",
-            "#",
-            {
-                "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
-                "mlp": ("up_proj", "gate_proj", "down_proj"),
-            }
-        ],
-    }
+    _layers_modules_tree = [
+        "llm",
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
+            "mlp": ("up_proj:0", "gate_proj:0", "down_proj:1"),
+        }
+    ]
 
     layer_modules_strict = False # the layer modules are in different decode layers
 

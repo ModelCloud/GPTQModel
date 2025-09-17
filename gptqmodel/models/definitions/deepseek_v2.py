@@ -36,6 +36,24 @@ class DeepSeekV2QModel(BaseQModel):
     # https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/modeling_deepseek.py#L712
     layer_modules_strict = False
 
+    _layers_modules_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("q_a_proj:0", "q_b_proj:0", "q_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1"),
+            "mlp": {
+                "gate_proj": ("gate_proj",),
+                "up_proj": ("up_proj",),
+                "down_proj": ("down_proj",),
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
+                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            },
+        }
+    ]
+
     # TODO: full deprecation by gptqmodel v4.3
     # legacy definition (deprecated): migrate to layers_modules_tree
     # DeepSeek-V2 uses 160 experts, v2-lite is auto-switched during __init__

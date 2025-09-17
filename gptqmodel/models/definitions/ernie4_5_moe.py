@@ -49,20 +49,24 @@ class Ernie4_5_MoeQModel(BaseQModel):
         [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
     ]
 
-    layers_modules_tree = [
+    _layers_modules_tree = [
         "model",
         "layers",
         "#",
         {
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+            "self_attn": ("k_proj:0", "v_proj:0", "q_proj:0", "o_proj:1"),
             "mlp": {
-                "up_proj": ("up_proj",),
-                "gate_proj": ("gate_proj",),
-                "down_proj": ("down_proj",),
-                "gate": ("gate",),
-                "shared_experts": ("up_proj", "gate_proj", "down_proj"),
+                "up_proj": ("up_proj:0",),
+                "gate_proj": ("gate_proj:0",),
+                "down_proj": ("down_proj:1",),
+                "gate": ("gate:!",),
+                "shared_experts": {
+                    "up_proj": ("up_proj:0",),
+                    "gate_proj": ("gate_proj:0",),
+                    "down_proj": ("down_proj:1",),
+                },
                 "experts": {
-                    "#": ("up_proj", "gate_proj", "down_proj"),
+                    "#": ("up_proj:0", "gate_proj:0", "down_proj:1"),
                 },
             },
         }
