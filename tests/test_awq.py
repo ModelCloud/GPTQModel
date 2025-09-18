@@ -42,13 +42,18 @@ class TestGroupSize(unittest.TestCase):
     #     log.info(f"Output: {model.tokenizer.decode(result)}") # string output
 
     # @parameterized.expand([-1, 128])
-    @parameterized.expand([128])
-    def test_quant_and_inference(self, group_size: int):
+    @parameterized.expand([
+        # (FORMAT.GEMM, 128),
+        (FORMAT.GEMV, 128),
+        # (FORMAT.GEMV_FAST, 128),
+        # (FORMAT.MARLIN, 128),
+    ])
+    def test_quant_and_inference(self, checkpoint_format, group_size: int):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=group_size,
             quant_method=QUANT_METHOD.AWQ,
-            format=FORMAT.GEMM,
+            format=checkpoint_format,
         )
 
         model = GPTQModel.load(
@@ -58,6 +63,7 @@ class TestGroupSize(unittest.TestCase):
         )
         model.quantize(self.calibration_dataset, batch_size=1, calibration_dataset_concat_size=2048)
         with tempfile.TemporaryDirectory() as tmp_dir_name:
+            tmp_dir_name = "AWQ-Qwen3-30B-A3B-" + checkpoint_format
             model.save(tmp_dir_name)
 
             with open(tmp_dir_name + "/" + QUANT_CONFIG_FILENAME, "r") as f:
