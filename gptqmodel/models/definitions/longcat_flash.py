@@ -21,10 +21,7 @@ from ..base import BaseQModel
 class LongCatFlashQModel(BaseQModel):
     dynamic_expert_index = "n_routed_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = ["model.layers"]
 
     _layers_modules_tree = [
         "model",

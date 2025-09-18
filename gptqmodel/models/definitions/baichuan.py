@@ -18,12 +18,7 @@ from ..base import BaseQModel
 
 
 class BaiChuanQModel(BaseQModel):
-    # non-layer (root) modules
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    # repeating layers
-    layers_node = ["model.layers"]
 
     _layers_modules_tree = [
         "model",

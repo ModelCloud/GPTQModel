@@ -23,10 +23,7 @@ class Gemma3QModel(LlamaQModel):
 
 class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
     support_batch_quantize = False
-    base_modules = ["model.language_model.embed_tokens", "model.language_model.norm"]
     pre_lm_head_norm_module = "model.language_model.norm"
-
-    layers_node = "model.language_model.layers"
 
     _layers_modules_tree = [
         "model",

@@ -24,10 +24,7 @@ class ChatGLMQModel(BaseQModel):
     require_trust_remote_code = True
     require_monkeypatch = True
 
-    base_modules = ["transformer.embedding.word_embeddings", "transformer.output_layer"]
     pre_lm_head_norm_module = "transformer.encoder.final_layernorm"
-
-    layers_node = ["transformer.encoder.layers"]
 
     _layers_modules_tree = [
         "transformer",

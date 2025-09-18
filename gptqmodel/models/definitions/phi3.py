@@ -45,9 +45,6 @@ class Phi3QModel(BaseQModel):
 class PhiMoEGPTQForCausalLM(BaseQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
 
-    layers_node = "model.layers"
-    base_modules = ["model.embed_tokens", "model.norm"]
-
     _layers_modules_tree = [
         "model",
         "layers",

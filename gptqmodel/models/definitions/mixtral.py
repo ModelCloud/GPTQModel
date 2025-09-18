@@ -18,10 +18,7 @@ from ..base import BaseQModel
 from .._const import EXPERT_INDEX_PLACEHOLDER
 
 class MixtralQModel(BaseQModel):
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = ["model.layers"]
 
     _layers_modules_tree = [
         "model",

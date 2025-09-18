@@ -24,10 +24,7 @@ class GrinMoeQModel(BaseQModel):
 
     dynamic_expert_index = "num_local_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = ["model.layers"]
 
     _layers_modules_tree = [
         "model",

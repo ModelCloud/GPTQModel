@@ -21,10 +21,7 @@ class ExaOneQModel(BaseQModel):
     # exaone requires custom model code
     require_trust_remote_code = True
 
-    base_modules = ["transformer.ln_f", "transformer.wte"]
     pre_lm_head_norm_module = "transformer.ln_f"
-
-    layers_node = ["transformer.h"]
 
     _layers_modules_tree = [
         "transformer",

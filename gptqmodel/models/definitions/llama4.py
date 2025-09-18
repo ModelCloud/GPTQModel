@@ -26,10 +26,7 @@ class Llama4QModel(BaseQModel):
     support_batch_quantize = False
     loader = AutoModelForImageTextToText
 
-    base_modules = ["language_model.model.embed_tokens", "language_model.model.norm"]
     pre_lm_head_norm_module = "language_model.model.norm"
-
-    layers_node = "language_model.model.layers"
 
     dynamic_expert_index = "num_local_experts"
 

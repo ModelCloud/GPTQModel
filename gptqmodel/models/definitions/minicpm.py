@@ -18,10 +18,7 @@ from ..base import BaseQModel
 
 
 class MiniCPMGPTQ(BaseQModel):
-    base_modules = ["model.embed_tokens",]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = ["model.layers"]
 
     _layers_modules_tree = [
         "model",

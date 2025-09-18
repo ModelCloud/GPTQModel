@@ -30,10 +30,7 @@ class HymbaQModel(BaseQModel):
                             "causal_conv1d>=1.4.0",
                             "attn_gym>=0.0.3.dev5"]
 
-    base_modules = ["model.embed_tokens", "model.final_layernorm"]
     pre_lm_head_norm_module = "model.final_layernorm"
-
-    layers_node = ["model.layers"]
 
     _layers_modules_tree = [
         "model",

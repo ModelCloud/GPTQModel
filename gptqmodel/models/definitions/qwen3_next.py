@@ -28,14 +28,9 @@ class Qwen3NextGPTQ(BaseQModel):
 
     layer_modules_strict = False
 
-    # Embeddings & final norm (pre lm_head)
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
     dynamic_expert_index = "num_experts"
-
-    # Decoder layers container and per-layer type
-    layers_node = ["model.layers"]
 
     # -----------------------------------------------------------------------------
     # Preferred modern hierarchical spec. The loader will gracefully skip any

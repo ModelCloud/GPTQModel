@@ -18,10 +18,7 @@ from ..base import BaseQModel
 
 
 class GptBigCodeQModel(BaseQModel):
-    base_modules = ["transformer.wpe", "transformer.wte", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
-
-    layers_node = ["transformer.h"]
 
     _layers_modules_tree = [
         "transformer",

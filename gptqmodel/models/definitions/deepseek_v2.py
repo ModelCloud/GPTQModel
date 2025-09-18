@@ -27,10 +27,7 @@ class DeepSeekV2QModel(BaseQModel):
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "n_routed_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = ["model.layers"]
 
     # DeepSeek V2-Lite uses dynamic modules based on lora(rank):
     # https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/modeling_deepseek.py#L712

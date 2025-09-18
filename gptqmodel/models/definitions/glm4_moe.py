@@ -29,13 +29,10 @@ class GLM4MoEGPTQ(BaseQModel):
     # config.n_routed_experts contains the actual expert count used for index
     dynamic_expert_index = "n_routed_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
     # Set to False since GLM-4.5-Air may have dynamic module structures
     layer_modules_strict = False
-
-    layers_node = ["model.layers"]
 
     _layers_modules_tree = [
         "model",

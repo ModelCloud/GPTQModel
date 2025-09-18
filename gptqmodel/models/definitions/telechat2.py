@@ -9,8 +9,6 @@ class TeleChat2QModel(BaseQModel):
     # telechat2 requires float16
     require_dtype = torch.float16
 
-    layers_node = ["transformer.h"]
-    base_modules = ["transformer.word_embeddings", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
 
     _layers_modules_tree = [

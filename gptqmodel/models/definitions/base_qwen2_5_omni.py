@@ -29,10 +29,7 @@ from ..base import BaseQModel
 class BaseQwen2_5_OmniGPTQ(BaseQModel):
     loader = AutoModelForTextToWaveform
 
-    base_modules = ["thinker.model.embed_tokens", "thinker.model.norm"]
     pre_lm_head_norm_module = "thinker.model.norm"
-
-    layers_node = ["thinker.model.layers"]
 
     _layers_modules_tree = [
         "thinker",

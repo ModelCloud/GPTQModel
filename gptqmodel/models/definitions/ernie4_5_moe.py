@@ -26,10 +26,7 @@ class Ernie4_5_MoeQModel(BaseQModel):
 
     dynamic_expert_index = "moe_num_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = ["model.layers"]
 
     _layers_modules_tree = [
         "model",
