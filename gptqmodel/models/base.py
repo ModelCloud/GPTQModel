@@ -478,13 +478,20 @@ class BaseQModel(nn.Module):
             log.warn("Quantize: batch_size overriden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
 
-        if self.quantize_config.format == FORMAT.MARLIN:
+        if self.quantize_config.quant_method != QUANT_METHOD.AWQ and self.quantize_config.format == FORMAT.MARLIN:
             raise ValueError(
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
 
-        if self.quantize_config.format == FORMAT.GEMV_FAST:
-            self.quantize_config.pack_dtype = torch.int16
+        if self.quantize_config.quant_method == QUANT_METHOD.AWQ:
+            if self.quantize_config.format == FORMAT.GEMV_FAST:
+                # AWQ GEMV_FAST only supports pack_dtype is torch.int16
+                log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
+                self.quantize_config.pack_dtype = torch.int16
+            elif self.quantize_config.format == FORMAT.MARLIN:
+                # AWQ MARLIN only supports zero_point is false
+                log.info("Quantize Model: Auto fix `zero_point` to `False`")
+                self.quantize_config.zero_point = False
 
         if self.support_batch_quantize is False:
             batch_size = 1
