@@ -21,7 +21,7 @@ from torch.nn import Module
 
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
-from ..models import BaseGPTQModel
+from ..models import BaseQModel
 from ..quantization.config import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.torch import CPU, DEVICE_1
@@ -96,7 +96,7 @@ class NativeProcessor(LoopProcessor):
     def submodule_finalize(self, module: NamedModule):
         module.state.pop(NATIVE_INPUTS_STATE_KEY, None)
 
-    def finalize(self, model: BaseGPTQModel, **kwargs):
+    def finalize(self, model: BaseQModel, **kwargs):
         del self.native_inp_caches
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:

@@ -19,8 +19,8 @@ from __future__ import annotations
 import copy
 import json
 import os
-import time
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Type, Union
 
 import torch
 import torch._dynamo
@@ -30,29 +30,68 @@ from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
                           PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
 
 from ..adapter.adapter import Adapter
-from ..nn_modules.hooked_linear import replace_module_with_hooked_tree
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
-from ..quantization import GPTQ, QuantizeConfig
+from ..quantization import QuantizeConfig
+from ..quantization.awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
 from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
-from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.model import (MODALITY, find_modules, get_device, get_module, get_module_by_name_prefix,
-                           get_moe_layer_modules, move_to, nested_move_to, pack_model)
+from ..utils.model import MODALITY, find_modules, get_device, get_module_by_name_prefix, move_to
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
-from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
+from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER
 from .loader import ModelLoader
-from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_TIME,
-                     QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, ModelWriter)
+from .writer import ModelWriter
 
+
+class _ClassPropertyDescriptor:
+    def __init__(self, fget, fset=None):
+        self.fget = fget
+
+    def __get__(self, instance, owner=None):
+        if owner is None:
+            owner = type(instance)
+        return self.fget.__get__(instance, owner)()
+
+
+def classproperty(func):
+    if not isinstance(func, (classmethod, staticmethod)):
+        func = classmethod(func)
+    return _ClassPropertyDescriptor(func)
+
+
+def filter_not_quantize_module(layer_modules):
+    return [
+        [name for name in block if NOT_QUANTIZE_FLAG not in name]
+        for block in layer_modules
+        if any(NOT_QUANTIZE_FLAG not in name for name in block)
+    ]
+
+
+def generate_node_for_awq_scaling(inp, prev_op, module_kwargs, nodes_size, subset, module2inspect):
+    n = {
+        "prev_op": prev_op,
+        "layers": subset,
+        "inp": inp,
+    }
+    if nodes_size == 0:
+        # Only the first node needs kwargs
+        n["kwargs"] = module_kwargs
+
+    if module2inspect is not None:
+        n["module2inspect"] = module2inspect
+
+    return n, None
 
 def check_support_param_buffer_assignment(*args, **kwargs):
     return False
+
+
+NOT_QUANTIZE_FLAG = ":!"
 
 
 # Fix cpu memory leak.
@@ -61,29 +100,22 @@ modeling_utils.check_support_param_buffer_assignment = check_support_param_buffe
 
 log = setup_logger()
 
-class BaseGPTQModel(nn.Module):
-    # these modules are non-repeating and at the root level
-    # does not include the node which holds all the repeating layers
-    base_modules: List[str] = None
-
+class BaseQModel(nn.Module):
     # name of lm_head
     lm_head: str = "lm_head"
 
-    # repeating layers
-    # node holding all the repeating layers
-    layers_node: str = None
-    # repeating layer type
-    layer_type: Union[List[str], str] = None
-    # for each repeating layer there are multiple modules within each layer
-    layer_modules: List[List[str]] = None
     # a tree node of all the roots that contain quantizable modules
-    layers_modules_tree: List[str] = None
+    module_tree: List[str] = None
 
     # Strict=True -> all layer_modules must exists in model
     # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
     layer_modules_strict = True
 
     pre_lm_head_norm_module: str = None
+
+    # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module
+    # list modules where they must match the shape of previous module in execution to consider for scaling optimization
+    awq_scale_optimize_shape_dependent_modules: List[str] = None
 
     # some models require trust_remove_code = True (dbrx_converted)
     require_trust_remote_code = None
@@ -190,6 +222,86 @@ class BaseGPTQModel(nn.Module):
 
         # print kernel info:
         log.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
+
+    @classmethod
+    def extract_layers_node(cls):
+        """
+        Given a module_tree structure, return the layers_node string.
+        It concatenates everything up to (but not including) the first "#" with '.'.
+        Example:
+            ["model", "layers", "#", {...}] -> ["model.layers"]
+        """
+
+        prefix_parts = []
+        for node in cls.module_tree:
+            if node == "#":
+                break
+            if isinstance(node, str):
+                prefix_parts.append(node)
+            else:
+                break  # stop if unexpected nested structure
+
+        return [".".join(prefix_parts)] if prefix_parts else []
+
+    @classmethod
+    def build_moe_modules_if_need(cls, model_config, layer_modules, is_awq_quantize: bool = False):
+        # MoE models
+        if model_config is not None and cls.dynamic_expert_index is not None:
+            num_experts = cls.get_num_experts(model_config)
+
+            moe_simple = []
+            for names in layer_modules:
+                moe_simple.append([])
+
+                has_expert = all(EXPERT_INDEX_PLACEHOLDER in n for n in names)
+
+                if not has_expert:
+                    moe_simple[-1].extend(names)
+                    continue
+
+                if is_awq_quantize:
+                    # AWQ Required
+                    # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.1.up_proj', ...]
+                    for index in range(num_experts):
+                        for n in names:
+                            moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                else:
+                    # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.up_proj', ...]
+                    for n in names:
+                        for index in range(num_experts):
+                            moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+
+            return moe_simple
+
+        return layer_modules
+
+    @classmethod
+    def get_num_experts(cls, model_config):
+        if hasattr(model_config, "text_config"):
+            num_experts = getattr(model_config.text_config, cls.dynamic_expert_index)
+        else:
+            num_experts = getattr(model_config, cls.dynamic_expert_index)
+        return num_experts
+
+    # Inside each `LlamaDecoderLayer` layer are many internal modules
+    # List them in the order executed in model forward() code
+    # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
+    @classmethod
+    def simple_layer_modules(cls, model_config, is_awq_quantize: bool = False):
+        layer_modules = cls.build_layer_modules(cls.module_tree)
+
+        layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
+
+        layer_modules = filter_not_quantize_module(layer_modules)
+        print(f"simple_layer_modules layer_modules: {layer_modules}")
+        return layer_modules
+
+    @classmethod
+    def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False):
+        full = cls.build_layer_modules(cls.module_tree)
+        full = cls.build_moe_modules_if_need(model_config, full, is_awq_quantize)
+        print(f"full layer_modules: {full}")
+        return full
 
     def prepare_dataset(
         self,
@@ -371,6 +483,9 @@ class BaseGPTQModel(nn.Module):
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
 
+        if self.quantize_config.format == FORMAT.GEMV_FAST:
+            self.quantize_config.pack_dtype = torch.int16
+
         if self.support_batch_quantize is False:
             batch_size = 1
             log.warn("Batch quantization is not supported for this model. Setting batch_size to 1.")
@@ -383,9 +498,10 @@ class BaseGPTQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
             backend=backend,
+            format=self.quantize_config.format,
+            quant_method=self.quantize_config.quant_method,
             device=DEVICE(self.quantize_config.device),
             pack=True,
-            format=self.quantize_config.format,
             pack_dtype=self.quantize_config.pack_dtype,
         )
 
@@ -427,9 +543,9 @@ class BaseGPTQModel(nn.Module):
 
         # rotate model
         if self.quantize_config.rotation:
-            from gptqmodel.models.definitions.llama import LlamaGPTQ
-            from gptqmodel.models.definitions.qwen2 import Qwen2GPTQ
-            if not isinstance(self, (LlamaGPTQ, Qwen2GPTQ)):
+            from gptqmodel.models.definitions.llama import LlamaQModel
+            from gptqmodel.models.definitions.qwen2 import Qwen2QModel
+            if not isinstance(self, (LlamaQModel, Qwen2QModel)):
                 raise ValueError(f"rotation only supports: llama/qwen2 model, "
                                     f"current model is {self.__class__.__name__}")
 
@@ -440,7 +556,7 @@ class BaseGPTQModel(nn.Module):
                 lm_head.weight = nn.Parameter(lm_head.weight.data.clone())
 
             module_name_args = {
-                "layers_node": self.layers_node,
+                "layers_node": self.extract_layers_node(),
                 "lm_head_name": self.lm_head
             }
             self.model = fuse_layer_norms(model=self.model,
@@ -458,7 +574,20 @@ class BaseGPTQModel(nn.Module):
         if self.quantize_config.quant_method == QUANT_METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
             quantize_processor = [QQQProcessor(**args)]
+        elif self.quantize_config.quant_method == QUANT_METHOD.AWQ:
+            from ..looper.awq_processor import AWQProcessor
 
+            # TODO AWQ_BATCH_SIZE
+            # os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
+
+            if self.model.config.model_type not in AWQ_CAUSAL_LM_MODEL_MAP.keys():
+                raise TypeError(f"{self.model.config.model_type} isn't supported yet.")
+
+            args["gptq_model"] = self
+            args["model"] = self.model
+            args["batch_size"] = batch_size
+            awq_processor = AWQProcessor(**args)
+            quantize_processor = [awq_processor]
         else:
             from ..looper.gptq_processor import GPTQProcessor
             quantize_processor = [GPTQProcessor(**args)]
@@ -559,546 +688,6 @@ class BaseGPTQModel(nn.Module):
 
         self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)
         return
-
-    @torch.no_grad()
-    def quantize_old(
-        self,
-        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
-        calibration_dataset_concat_size: Optional[int] = None,
-        batch_size: int = 1,
-        calibration_enable_gpu_cache: bool = True,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        logger_board: Optional[str] = None,
-        backend: Optional[BACKEND] = BACKEND.AUTO,
-        # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
-        buffered_fwd: bool = False,
-        # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
-        auto_gc: bool = True,
-    ) -> Tuple[List[Dict[str, str]], Dict[str, torch.Tensor]]:
-        if self.quantized:
-            raise EnvironmentError("quantize() is called a model that is already quantized")
-
-        if self.quantize_config.quant_method in QUANTIZE_BLACK_LIST:
-            raise ValueError(
-                f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
-            )
-
-        if self.quantize_config.format == FORMAT.MARLIN:
-            raise ValueError(
-                "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
-            )
-
-        if len(calibration_dataset) == 0:
-            raise ValueError("Calibration dataset must not be empty.")
-
-        if logger_board == "clearml":
-            try:
-                from clearml import Task
-                from random_word import RandomWords
-
-                from ..utils.plotly import create_plotly
-            except ImportError as _:
-                raise ImportError(
-                    "The logger_board is set to 'clearml', but required dependencies are missing. "
-                    "Please install them by running: pip install gptqmodel[logger]"
-                )
-            task = Task.init(project_name='GPTQModel', task_name=f'Experiment-{RandomWords().get_random_word()}', task_type=Task.TaskTypes.optimizer)
-        else:
-            task = None
-
-        # Validate quant linear before quantization starts
-        _ = select_quant_linear(
-            bits=self.quantize_config.bits,
-            dynamic=self.quantize_config.dynamic,
-            group_size=self.quantize_config.group_size,
-            desc_act=self.quantize_config.desc_act,
-            sym=self.quantize_config.sym,
-            backend=backend,
-            device=DEVICE(self.quantize_config.device),
-            pack=True,
-            format=self.quantize_config.format,
-            pack_dtype=self.quantize_config.pack_dtype,
-        )
-
-        # Use the provided tokenizer if one is passed to quantize()
-        if tokenizer is not None:
-            if isinstance(tokenizer, PreTrainedTokenizerBase):
-                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
-            else:
-                raise ValueError(
-                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
-
-        min_calibration_dataset_size = 256
-        min_calibration_dataset_input_ids_avg_length = 256
-
-        if len(calibration_dataset) < min_calibration_dataset_size:
-            log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
-                           f"Current: {len(calibration_dataset)}.")
-
-        if self.quantize_config.format == FORMAT.BITBLAS:
-            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
-            if BITBLAS_AVAILABLE is False:
-                raise ValueError(BITBLAS_INSTALL_HINT)
-
-        calibration_dataset = self.prepare_dataset(calibration_dataset=calibration_dataset,
-                                                   calibration_dataset_concat_size=calibration_dataset_concat_size,
-                                                   batch_size=batch_size)
-
-        # Calculate the average length of the average input_ids
-        total_input_ids_length = 0
-        max_input_id_length = 0
-        for row in calibration_dataset:
-            input_ids = row["input_ids"]
-            if isinstance(input_ids, torch.Tensor):
-                if input_ids.dim() <= 2:
-                    input_ids_length = input_ids.shape[-1]
-                else:
-                    raise ValueError(
-                        "Expected a 1-dimensional tensor or 2-dimensional tensor for 'input_ids', but got a tensor with {0} dimensions.".format(
-                            input_ids.dim()))
-            else:
-                input_ids_length = len(input_ids)
-
-            if input_ids_length > max_input_id_length:
-                max_input_id_length = input_ids_length
-            total_input_ids_length += input_ids_length
-        avg = total_input_ids_length / len(calibration_dataset)
-
-        if avg < min_calibration_dataset_input_ids_avg_length:
-            log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
-                           f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
-
-        if self.quantize_config.lm_head:
-            if self.model.config.tie_word_embeddings and hasattr(self.model, "_tied_weights_keys"):
-                tied_keys = self.model._tied_weights_keys
-                for item in tied_keys:
-                    if self.lm_head in item:
-                        raise NotImplementedError("quantizing lm_head with tied weights has not been supported "
-                                                  "currently")
-
-            lm_head_module = get_module(self.model, key=self.lm_head)
-            if get_module(self.model, key=self.lm_head) is None:
-                raise ValueError(f"could not find layer {self.lm_head} in the model, exit...")
-
-            if not isinstance(lm_head_module, tuple(SUPPORTS_MODULE_TYPES)):
-                raise NotImplementedError(f"This type({type(lm_head_module)}) of lm_head quantization is currently not "
-                                          f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
-
-            lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
-            if self.quantize_config.dynamic is None:
-                self.quantize_config.dynamic = {self.lm_head: lm_head_quant_config}
-            elif self.quantize_config.dynamic_get(self.lm_head, default=None) is None:
-                self.quantize_config.dynamic[self.lm_head] = lm_head_quant_config
-
-        forward_pass_use_cache = self.model.config.use_cache if hasattr(self.model.config, "use_cache") else False
-        self.model.config.use_cache = False
-
-        layer_inputs = []
-        attention_masks = []
-        position_ids = []
-        layer_input_kwargs = []
-        layer_outputs = []
-
-        num_batches = len(calibration_dataset)
-        layers = get_module_by_name_prefix(self.model, self.layers_node)
-
-        cur_layer_device = get_device(layers[0])
-        data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
-
-        # TODO HookLinear add register_forward_pre_hook()
-        def store_input_hook(_, args, kwargs):
-            # Positional arguments.
-            layer_input = []
-            for inp in args:
-                layer_input.append(move_to(inp, device=data_device))
-            if len(layer_input) == 0:
-                # Some models put hidden_states in kwargs instead of args.
-                # For example, gptj ...
-                if kwargs.get("hidden_states") is not None:
-                    layer_input.append(move_to(kwargs["hidden_states"], device=data_device))
-
-            layer_inputs.append(layer_input)
-
-            # Keyword arguments.
-            if kwargs.get("attention_mask") is not None:
-                attention_masks.append(kwargs["attention_mask"].to(device=data_device))
-            else:
-                attention_masks.append(None)
-
-            pos_ids = kwargs.get("position_ids", None)
-            if pos_ids is not None:
-                position_ids.append(move_to(pos_ids, device=data_device))
-            one_kwargs = {}
-            for (k, v) in kwargs.items():  # make sure other arguments also be captured
-                if k not in ["hidden_states", "attention_mask", "position_ids"]:
-                    one_kwargs[k] = nested_move_to(v, device=data_device)
-            layer_input_kwargs.append(one_kwargs)
-
-            raise ValueError
-
-        # move layer to target device
-        layers[0] = layers[0].to(device=self.quantize_config.device)
-
-        ori_outside_layer_module_devices = {}
-        for module_name in self.base_modules:
-            module = get_module_by_name_prefix(self.model, module_name)
-
-            if module is None:
-                continue
-
-            ori_outside_layer_module_devices[module_name] = get_device(module)
-            if module is not None:
-                move_to(module, cur_layer_device)
-
-        # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
-        handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
-        is_ovis = self.__class__.__name__ == "OvisGPTQ"
-        self.pre_quantize_generate_hook_start()
-        for example in calibration_dataset:
-            for k, v in example.items():
-                data_device = self.quantize_config.device if k == "pixel_values" else cur_layer_device
-                if isinstance(v, list):
-                    for module_index in range(len(v)):
-                        if len(v[module_index].shape) == 1:
-                            v[module_index] = v[module_index].unsqueeze(0)
-                        v[module_index] = move_to(v[module_index].to(self.model.visual_tokenizer.dtype) if is_ovis else v[module_index], data_device)
-                else:
-                    if len(v.shape) == 1:
-                        v = v.unsqueeze(0)
-                    example[k] = move_to(v, data_device)
-            try:
-                if is_ovis:
-                    self.generate(inputs=example.pop("input_ids"), max_new_tokens=1024, **example)
-                else:
-                    self.model(**example)
-            except ValueError:
-                pass
-        self.pre_quantize_generate_hook_end()
-        handle.remove()
-
-        move_to(layers[0], CPU)
-
-        for module_name in self.base_modules:
-            module = get_module_by_name_prefix(self.model, module_name)
-            if module is not None:
-                move_to(module, ori_outside_layer_module_devices[module_name])
-
-        if auto_gc:
-            torch_empty_cache()
-
-        layer_modules = self.layer_modules
-
-        if not self.quantize_config.true_sequential:
-            layer_modules = [sum(layer_modules, [])]
-
-        # dynamic expert layer index for model defs
-        if self.dynamic_expert_index is not None:
-            num_experts = getattr(self.model.config, self.dynamic_expert_index)
-            layer_modules = get_moe_layer_modules(layer_modules=self.layer_modules,
-                                                  num_experts=num_experts)
-
-        quantizers = {}
-
-        layer_count = len(layers)
-        quant_modules_pb = log.pb(layer_count + 1 if self.quantize_config.lm_head else layer_count).manual()
-        gpu_memorys = []
-        cpu_memorys = []
-        durations = []
-        avg_losses = []
-        nsamples = []
-        module_names = []
-        shared_kv_cache_dict = {}
-
-        # replace linear with hooked linear
-        replace_module_with_hooked_tree(self.model)
-
-        quantized_weights = {}
-        for module_index in quant_modules_pb:
-            is_lm_head_module = module_index >= layer_count
-            if is_lm_head_module:
-                quant_modules_pb.title("Quantizing lm_head").draw()
-                module = get_module(self.model, key=self.lm_head)
-                layer_inputs = self.lm_head_pre_quantize_generate_hook(layer_inputs)
-            else:
-                quant_modules_pb.title(f"Quantizing layer {module_index} of {layer_count - 1}").draw()
-                module = layers[module_index]
-
-            if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
-                # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
-                continue
-            if task is not None:
-                gpu_memory = get_gpu_usage_memory()
-                cpu_memory = get_cpu_usage_memory()
-                task.get_logger().report_scalar(
-                    title='GPU Memory',
-                    series='GPU Memory',
-                    value=gpu_memory,
-                    iteration=module_index,
-                )
-
-                task.get_logger().report_scalar(
-                    title='CPU Memory',
-                    series='CPU Memory',
-                    value=cpu_memory,
-                    iteration=module_index,
-                )
-                gpu_memorys.append(gpu_memory)
-                cpu_memorys.append(cpu_memory)
-
-            self.pre_quantize(module)
-
-            cur_layer_device = get_device(module)
-            full = find_modules(module, name=self.lm_head if is_lm_head_module else "")
-            modules = [[self.lm_head]] if is_lm_head_module else layer_modules
-            for index, names in enumerate(modules):
-                subset = {n: full[n] for n in names if n in full}
-                skipped_modules = []
-                gptq = {}
-                for name in subset:
-                    qcfg_clone = copy.deepcopy(self.quantize_config)
-
-                    # dynamic overrides
-                    if self.quantize_config.dynamic is not None:
-                        layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
-
-                        if self.quantize_config.dynamic_get(layer_name=layer_name) == False: # noqa: E712
-                            log.info(f"skip module: {layer_name}")
-
-                            skipped_modules.append(name)
-                            continue
-
-                        qcfg_clone.bits = self.quantize_config.dynamic_get(layer_name, "bits", qcfg_clone.bits)
-                        qcfg_clone.sym = self.quantize_config.dynamic_get(layer_name, "sym", qcfg_clone.sym)
-                        qcfg_clone.mse = self.quantize_config.dynamic_get(layer_name, "mse", qcfg_clone.mse)
-                        qcfg_clone.group_size = self.quantize_config.dynamic_get(layer_name, "group_size", qcfg_clone.group_size)
-                        qcfg_clone.desc_act = self.quantize_config.dynamic_get(layer_name, "desc_act", qcfg_clone.desc_act)
-                        qcfg_clone.damp_percent = self.quantize_config.dynamic_get(layer_name, "damp_percent", qcfg_clone.damp_percent)
-                        qcfg_clone.static_groups = self.quantize_config.dynamic_get(layer_name, "static_groups", qcfg_clone.static_groups)
-
-                    tmp = GPTQ(module=subset[name], qcfg=qcfg_clone)
-                    gptq[name] = tmp
-
-                    # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
-                    # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
-                    # all sub-modules within a single layer needs to store all the inputs.
-                    # deepseek has massive # of sub-modules per layer, causing vram pressure
-                    # buffered mode is slower due to gpu<->cpu movement
-                    if buffered_fwd: # TODO tweak this number for masive MoE
-                        log.info(f"Experimental: enabling fwd buffered mode for: `{name}`")
-                        tmp.fwd_inputs_buffered = True
-
-                    tmp.quantizer.configure(
-                        perchannel=True,
-                    )
-
-                for name in skipped_modules:
-                    subset.pop(name)
-
-                if len(gptq) == 0:
-                    continue
-
-                def add_batch(name):
-                    def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
-                        # gptq is mutable.
-                        g = gptq[name] # noqa: F821
-                        g.add_batch(inp[0].data, out.data)  # noqa: F821
-
-                    return tmp
-
-                handle = []
-                for name in subset:
-                    if hasattr(subset[name], 'forward_hook'):
-                        subset[name].forward_hook = add_batch(name)
-                    else:
-                        handle.append(subset[name].register_forward_hook(add_batch(name)))
-
-                # logger.info(f"layer-{i}: Begin Forward() Pass")
-                fwd_start = time.time()
-                for j in range(num_batches):
-                    layer_input = []
-                    for k, layer_inp in enumerate(layer_inputs[j]):
-                        layer_input.append(move_to(layer_inp, cur_layer_device))
-
-                    mask = attention_masks[j]
-                    layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
-
-                    additional_layer_inputs = {"attention_mask": layer_attention_mask}
-                    layer_position_ids = (
-                        None if not position_ids else move_to(position_ids[j], cur_layer_device)
-                    )
-                    if layer_position_ids is not None:
-                        additional_layer_inputs["position_ids"] = layer_position_ids
-                    for k, v in layer_input_kwargs[j].items():
-                        additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
-
-                    # reuse_kv is a flag to reuse the kv cache, only for the hamba model
-                    if hasattr(module, "reuse_kv"):
-                        if module.reuse_kv:
-                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
-
-                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-                        if shared_kv_cache_dict.get(module_index) is None:
-                            shared_kv_cache_dict[module_index] = layer_output[-1]
-                    else:
-                        module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-
-                    del layer_input
-                    del additional_layer_inputs
-
-                fwd_end = time.time()
-                fwd_time = fwd_end - fwd_start
-
-                for h in handle:
-                    h.remove()
-
-                for name in subset:
-                    if hasattr(subset[name], 'forward_hook'):
-                        subset[name].forward_hook = None
-
-                if index == len(layer_modules) - 1:
-                    if auto_gc:
-                        torch_empty_cache()
-
-                for name_index, name in enumerate(subset):
-                    layer_name = self.lm_head if is_lm_head_module else f"{self.layers_node}.{module_index}.{name}"
-                    quant_modules_pb._subtitle(f"Quantizing {name} in layer {module_index} of {layer_count - 1}")
-
-                    # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
-                    ## Need to return the quantized_weight for offloading
-                    quantized_weight, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = gptq[name].quantize()
-
-                    ## Assign the quantized weight to the weight
-                    gptq[name].module.weight.data = quantized_weight.to(device=gptq[name].device)
-                    ## Offload the quantized weight to CPU for EoRA
-                    quantized_weights['model.layers.%d.%s' % (module_index, name)] = quantized_weight.cpu()
-
-
-                    if task is not None:
-                        task.get_logger().report_scalar(
-                            title='Quantization Loss',
-                            series=f'layer_{module_index}_loss',
-                            value=avg_loss,
-                            iteration=name_index,
-                        )
-
-                        task.get_logger().report_scalar(
-                            title='Quantization Time',
-                            series=f'layer_{module_index}_time',
-                            value=duration,
-                            iteration=name_index,
-                        )
-                    durations.append(duration)
-                    avg_losses.append(avg_loss)
-                    nsamples.append(nsamples)
-                    module_names.append(f"layer-{module_index}-{name}")
-
-                    stat = {PROCESS_LOG_LAYER: module_index, PROCESS_LOG_MODULE: name, QUANT_LOG_LOSS: f"{avg_loss:.5f}", QUANT_LOG_NSAMPLES: f"{nsamples}",
-                            QUANT_LOG_DAMP: f"{damp_percent:.5f}", PROCESS_LOG_TIME: f"{duration:.3f}", PROCESS_LOG_FWD_TIME: f"{fwd_time:.3f}"}
-                    if self.quantize_config.dynamic is not None:
-                        stat["dynamic"] = self.quantize_config.dynamic_get(layer_name=layer_name)
-
-                    self.quant_log.append(stat)
-                    log.info(stat)
-
-                    quantizers[layer_name] = (
-                        gptq[name].quantizer.to(CPU),
-                        move_to(scale, CPU),
-                        move_to(zero, CPU),
-                        move_to(g_idx, CPU),
-                    )
-                    gptq[name].free()
-                    # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-
-            # logger.info(f"layer-{i}: Begin Forward() Pass 2 Post-Quant")
-            is_last_quant = module_index == len(quant_modules_pb) - 1
-            if not is_last_quant:
-                for j in range(num_batches):
-                    layer_input = []
-                    for k, layer_inp in enumerate(layer_inputs[j]):
-                        layer_input.append(move_to(layer_inp, cur_layer_device))
-
-                    mask = attention_masks[j]
-                    layer_attention_mask = mask if mask is None else move_to(mask, cur_layer_device)
-
-                    additional_layer_inputs = {"attention_mask": layer_attention_mask}
-                    layer_position_ids = None if not position_ids else move_to(position_ids[j], cur_layer_device)
-                    if layer_position_ids is not None:
-                        additional_layer_inputs["position_ids"] = layer_position_ids
-                    for k, v in layer_input_kwargs[j].items():
-                        additional_layer_inputs[k] = nested_move_to(v, cur_layer_device)
-
-                    if hasattr(module, "reuse_kv"):
-                        if module.reuse_kv:
-                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(module_index - 1)
-
-                    layer_output = move_to(
-                        module(*layer_input)[0] if is_lm_head_module else module(*layer_input, **additional_layer_inputs)[0],
-                        cur_layer_device if calibration_enable_gpu_cache else CPU,
-                    )
-                    layer_outputs.append([layer_output])
-
-                    del layer_input
-                    del additional_layer_inputs
-                    if num_batches > 1 and j == num_batches - 1:
-                        if auto_gc:
-                            torch_empty_cache()
-
-            if not is_lm_head_module:
-                layers[module_index] = self.post_quantize(module)
-            else:
-                self.post_quantize(module)
-
-            del module
-            del gptq
-            del layer_inputs
-
-            if not is_last_quant:
-                layer_inputs, layer_outputs = (
-                    layer_outputs,
-                    [],
-                )  # TODO: is it really OK to cache only the first positional argument?
-
-            if auto_gc:
-                torch_empty_cache()
-
-        log.info(f"Quantization summary:\n{self.quant_log}")
-        for module_log in self.quant_log:
-            log.info(module_log)
-        if task is not None:
-            x = list(range(layer_count))
-            gpu_fig = create_plotly(x=x, y=gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
-            cpu_fig = create_plotly(x=x, y=cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
-            loss_fig = create_plotly(x=module_names, y=avg_losses, xaxis_title="layer", yaxis_title="loss")
-            time_fig = create_plotly(x=module_names, y=durations, xaxis_title="layer", yaxis_title="time")
-            task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
-            task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
-            task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
-            task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
-
-        self.qlinear_kernel = pack_model(
-            model=self.model,
-            quant_result=quantizers,
-            bits=self.quantize_config.bits,
-            group_size=self.quantize_config.group_size,
-            backend=backend,
-            desc_act=self.quantize_config.desc_act,
-            format=self.quantize_config.format,
-            quant_method=self.quantize_config.quant_method,
-            lm_head_name=self.lm_head,
-            dynamic=self.quantize_config.dynamic,
-            parallel_packing=self.quantize_config.parallel_packing,
-            pack_dtype=self.quantize_config.pack_dtype,
-        )
-
-        self.model.config.use_cache = forward_pass_use_cache
-
-        self.quantized = True
-        if auto_gc:
-            torch_empty_cache()
-
-        ## need to return quantized_weight for EoRA
-        return self.quant_log, quantized_weights
 
     def to(self, device: Union[str, torch.device]):
         if hasattr(self.model, "to"):
@@ -1272,6 +861,131 @@ class BaseGPTQModel(nn.Module):
     def post_quantize(self, module: nn.Module) -> nn.Module:
         return move_to(module, device=CPU)
 
+    def move_embed(self, device: str):
+        for embed_module_name in self.get_base_modules(self.model):
+            embed_module, _ = get_module_by_name_prefix(self.model, embed_module_name)
+            if embed_module is not None:
+                embed_module.to(device)
+
+    def awq_skip_modules_for_scaling(self) -> bool:
+        pass
+
+    def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
+        nodes = []
+        last_module = None  # most recent norm obj (from a '!...' block)
+        last_module_name = None
+        last_module_root = None  # self_attn.* has root == self_attn, mlp.* has root == mlp
+
+        num_experts = None
+        if self.model.config is not None and self.dynamic_expert_index is not None:
+            num_experts = self.get_num_experts(self.model.config)
+
+        def strip_not_quantize_flag(module_name):
+            if NOT_QUANTIZE_FLAG in module_name:
+                return module_name[:module_name.find(NOT_QUANTIZE_FLAG)]
+            else:
+                return module_name
+
+        for i, block in enumerate(self.full_layer_modules(self.model.config, is_awq_quantize=True)):
+            not_quantized = all(NOT_QUANTIZE_FLAG in name for name in block)
+            if not_quantized:
+                # Remember the latest norm (use the last entry if multiple are present)
+                last_module_name = strip_not_quantize_flag(block[-1])
+                last_module, _ = get_module_by_name_prefix(module, last_module_name)
+                continue
+
+            if num_experts is not None and len(block) == num_experts and last_module is not None and last_module_name is not None:
+                # mlp.experts.0.down_proj
+                target_suffix = last_module_name.split(".")[-1]
+                for name in block:
+                    prev_op_name = ".".join(name.split(".")[:-1] + [target_suffix])
+                    prev_op, _ = get_module_by_name_prefix(module, prev_op_name)
+                    assert prev_op is not None
+
+                    m, _ = get_module_by_name_prefix(module, name)
+                    subset = [m]
+                    n, root = generate_node_for_awq_scaling(inp=input_feat[name], prev_op=prev_op,
+                                                            module_kwargs=module_kwargs, nodes_size=len(nodes),
+                                                            subset=subset, module2inspect=None)
+                    if root is not None and last_module_root != root:
+                        last_module_root = root
+
+                    nodes.append(n)
+            else:
+                # Normal execution subset
+                subset = []
+                skip = False
+                for name in block:
+                    if NOT_QUANTIZE_FLAG not in name:
+                        if name == "mlp.gate":
+                            log.debug(f'"{name}" skipped.')
+                            skip = True
+
+                        m, _ = get_module_by_name_prefix(module, name)
+                        # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
+                        # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
+                        if (self.awq_scale_optimize_shape_dependent_modules is not None
+                                and name in self.awq_scale_optimize_shape_dependent_modules
+                                and isinstance(last_module, nn.Linear)
+                                and last_module.weight.shape != m.weight.shape):
+                            log.debug(f'"{name}" attention out skipped.')
+                            skip = True
+
+                        subset.append(m)
+
+                if skip:
+                    continue
+
+                assert len(subset) > 0
+                prev_op = last_module
+                assert prev_op is not None
+
+                root_split = block[0].split(".")
+                module2inspect = None
+                if len(root_split) >= 2:
+                    root = root_split[0]
+                    if root != last_module_root:
+                        last_module_root = root
+                        module2inspect, _ = get_module_by_name_prefix(module, root)
+
+                if num_experts is not None and len(block) == 2 * num_experts and module2inspect is not None:
+                    inp = input_feat[last_module_root]
+                else:
+                    inp = input_feat[block[0]]
+
+                n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
+                                                        module_kwargs=module_kwargs, nodes_size=len(nodes),
+                                                        subset=subset, module2inspect=module2inspect)
+
+                nodes.append(n)
+
+            # Update tracker to the LAST item of this block
+            last_module_name = strip_not_quantize_flag(block[-1])
+            last_module, _ = get_module_by_name_prefix(module, last_module_name)
+
+        import torch
+        def format_nodes(nodes):
+            out = []
+            for n in nodes:
+                entry = {}
+                for k, v in n.items():
+                    if isinstance(v, torch.Tensor):
+                        entry[k] = f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype})"
+                    elif isinstance(v, dict):
+                        entry[k] = [
+                            f"Key: {kk}, Value: Tensor(shape={tuple(x.shape)}, dtype={x.dtype}); " if isinstance(x,
+                                                                                                                 torch.Tensor) else type(
+                                x).__name__
+                            for kk, x in v.items()
+                        ]
+                    else:
+                        entry[k] = v
+                out.append(entry)
+            return out
+
+        print("DEBUG AWQ NODES:", format_nodes(nodes))
+        return nodes
+
     ## overrides nn.module.train()
     # def train(self, mode=True):
     #     old_mode = self.training
@@ -1291,6 +1005,169 @@ class BaseGPTQModel(nn.Module):
     #             log.info(f"{self.__class__.__name__}: MODEL switching to training mode.")
     #     else:
     #         log.info(f"{self.__class__.__name__}: `MODEL switching to eval mode.")
+    @classmethod
+    def build_layer_modules(cls, tree):
+        """
+        tree format:
+          [<model_name>, <submodule>, "#", { parent_module: ( "child[:!][:grp]", ... ), ... }]
+        Rules:
+          - ':!' means participates in inference but is NOT quantized; keep this marker in output.
+          - ':<digit>' means grouping; children with the same group id are emitted in the same block.
+          - Both can appear together, e.g. 'module_name:!:2'.
+          - Supports nested dict structures for MoE models with experts.
+          - Special key "#" in nested dicts means direct children under parent (no additional nesting).
+          - EXPERT_INDEX_PLACEHOLDER in keys will be handled by simple_layer_modules for MoE expansion.
+        Output:
+          _layer_modules = [ [items...], [items...], ... ]
+        """
+        mapping = tree[3]
+        out_blocks = []
+
+        def process_entries(parent, entries, parent_group_offset=0):
+            """Process entries recursively to handle nested dict structures for MoE"""
+            groups = defaultdict(list)
+
+            # Handle tuple/list of strings (traditional format)
+            if isinstance(entries, (tuple, list)):
+                for ent in entries:
+                    parts = ent.split(':')
+                    child = parts[0]
+
+                    flags = parts[1:]
+                    has_bang = ('!' in flags)
+                    # first numeric tag is the group id; default 0
+                    grp = next((int(p) for p in flags if p.isdigit()), 0)
+                    # Apply parent group offset to avoid conflicts between different nesting levels
+                    grp += parent_group_offset
+
+                    # Store the full path including parent for later use
+                    # Special case: if parent ends with the same name as child, don't duplicate
+                    if parent.endswith(f".{child}"):
+                        full_path = parent
+                    else:
+                        full_path = f"{parent}.{child}" if parent != child else child
+                    groups[grp].append((full_path, has_bang))
+
+            # Handle nested dict structure (MoE format)
+            elif isinstance(entries, dict):
+                # Calculate max group number used at current level to avoid conflicts
+                max_current_group = 0
+                for sub_parent, sub_entries in entries.items():
+                    if isinstance(sub_entries, (tuple, list)):
+                        for ent in sub_entries:
+                            parts = ent.split(':')
+                            flags = parts[1:]
+                            grp = next((int(p) for p in flags if p.isdigit()), 0)
+                            max_current_group = max(max_current_group, grp)
+
+                # Process nested entries with appropriate group offset
+                current_offset = parent_group_offset
+                for sub_parent, sub_entries in entries.items():
+                    if sub_parent == "#":
+                        # Special case: "#" means expert index placeholder
+                        # Create a template path that will be expanded later by simple_layer_modules
+                        template_parent = f"{parent}.{EXPERT_INDEX_PLACEHOLDER}"
+                        # Use a higher offset for expert modules to avoid conflicts with parent level
+                        expert_offset = current_offset + max_current_group + 100  # Large offset to avoid conflicts
+
+                        # Handle special case where sub_entries is ("#",) or "#" - this means use the parent path directly
+                        if (isinstance(sub_entries, (tuple, list)) and len(sub_entries) == 1 and sub_entries[0] == "#") or sub_entries == "#":
+                            # For ("#",) or "#" format, use the template_parent directly with default group 0
+                            groups[expert_offset].append((template_parent, False))
+                        else:
+                            sub_groups = process_entries(template_parent, sub_entries, expert_offset)
+                            for grp, items in sub_groups.items():
+                                groups[grp].extend(items)
+                    else:
+                        # Nested structure: process recursively with full path
+                        # Special case: empty string key means use parent path directly
+                        if sub_parent == "":
+                            full_sub_parent = parent
+                        else:
+                            full_sub_parent = f"{parent}.{sub_parent}"
+                        sub_groups = process_entries(full_sub_parent, sub_entries, current_offset)
+                        for grp, items in sub_groups.items():
+                            groups[grp].extend(items)
+                        # Update offset for next sibling to avoid conflicts
+                        if sub_groups:
+                            current_offset = max(sub_groups.keys()) + 1
+
+            return groups
+
+        for parent, entries in mapping.items():
+            groups = process_entries(parent, entries)
+
+            # Emit per-group, skipping pure-:! blocks (norm-only), but
+            # preserving :! markers on mixed blocks if they ever occur.
+            for g in sorted(groups):
+                items = groups[g]
+                # if every entry is :!, skip this block (matches your expected output)
+                # if all(has_bang for _, has_bang in items):
+                #     continue
+
+                block = []
+                for full_path, has_bang in items:
+                    # The full path is already constructed in process_entries
+                    if has_bang:
+                        full_path += NOT_QUANTIZE_FLAG
+                    block.append(full_path)
+
+                out_blocks.append(block)
+
+        return out_blocks
+
+    @classmethod
+    def get_base_modules(cls, model):
+        """
+        Return list of base modules directly under 'model' but not 'model.layers'.
+        """
+        root = cls.module_tree[0]  # "model"
+        exclude = cls.module_tree[1]  # "layers"
+
+        base = getattr(model, root)
+        out = []
+        for name, _ in base.named_children():
+            if name != exclude:  # skip second node which is parallel in scope
+                out.append(f"{root}.{name}")
+
+        print(f"Base Modules: {out}")
+        return out
+
+    def generate_layers_modules_tree_simple(self, node):
+        """
+        Recursively walk a nested list/dict structure and:
+          1. Drop dict entries where *all* values are ':!' flagged.
+          2. Remove ':!' and ':<digit>' markers from strings.
+        """
+
+        # If it's a list, recurse into each element
+        if isinstance(node, list):
+            return [self.generate_layers_modules_tree_simple(x) for x in node]
+
+        # If it's a dict, process each key -> value
+        if isinstance(node, dict):
+            new_dict = {}
+            for k, v in node.items():
+                # Expand tuple-of-strings blocks (special handling)
+                if isinstance(v, (tuple, list)) and all(isinstance(x, str) for x in v):
+                    # Rule 1: check if ALL entries are :!
+                    if all(any(p == "!" for p in x.split(":")[1:]) for x in v):
+                        continue  # skip this parent entirely
+
+                    # Rule 2: strip :! and :digit markers
+                    cleaned = tuple(x.split(":")[0] for x in v)
+                    new_dict[k] = cleaned
+                else:
+                    # Recurse deeper
+                    new_dict[k] = self.generate_layers_modules_tree_simple(v)
+            return new_dict
+
+        # If it's a plain string (unlikely here), strip markers
+        if isinstance(node, str):
+            return node.split(":")[0]
+
+        # For other types, return as-is
+        return node
 
     def __getattr__(self, item):
         try:
@@ -1298,6 +1175,6 @@ class BaseGPTQModel(nn.Module):
         except Exception:
             return getattr(self.model, item)
 
-__all__ = ["BaseGPTQModel"]
+__all__ = ["BaseQModel"]
 
-BaseGPTQModel = ModelLoader(ModelWriter(BaseGPTQModel))
+BaseQModel = ModelLoader(ModelWriter(BaseQModel))

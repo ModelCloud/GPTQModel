@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class HymbaGPTQ(BaseGPTQModel):
+class HymbaQModel(BaseQModel):
     supports_desc_act = [False]
     require_trust_remote_code = True
     require_monkeypatch = True
@@ -30,21 +30,22 @@ class HymbaGPTQ(BaseGPTQModel):
                             "causal_conv1d>=1.4.0",
                             "attn_gym>=0.0.3.dev5"]
 
-    base_modules = ["model.embed_tokens", "model.final_layernorm"]
     pre_lm_head_norm_module = "model.final_layernorm"
 
-    layers_node = ["model.layers"]
-    layer_type = "HymbaDecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["mamba.in_proj"],
-        ["mamba.out_proj"],
-        # ["mamba.x_proj.0"],
-        # ["mamba.dt_proj.0"], TODO We need to add auto pad to TritonV2QuantLinear before we can quantify the Module.
-        ["moe.experts.0.up_proj", "moe.experts.0.gate_proj"],
-        ["moe.experts.0.down_proj"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "mamba": ("in_proj:0", "out_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "moe": {
+                "experts": {
+                    "0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                }
+            }
+        }
     ]
 
     def monkey_patch(self):

@@ -14,11 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class DeepSeekV3GPTQ(BaseGPTQModel):
+class DeepSeekV3QModel(BaseQModel):
     # deepseek_v3 requires custom model code
     require_trust_remote_code = True
 
@@ -28,35 +27,25 @@ class DeepSeekV3GPTQ(BaseGPTQModel):
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "n_routed_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = ["model.layers"]
-    layer_type = "DeepseekV3DecoderLayer"
 
     # DeepSeek V3 uses dynamic modules based on lora(rank):
     layer_modules_strict = False
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"],
-        ["self_attn.q_b_proj", "self_attn.kv_b_proj"],
-        ["self_attn.o_proj"],
-
-        ["mlp.gate_proj", "mlp.up_proj"],
-        ["mlp.down_proj"],
-
-        # included in layer 3-61, uses dynamic_expert_index
-        # DeepSeek-V3 uses 256 experts
-        # for quantization on A100, don't merge gate_proj and up_proj
-        # if you have enough vram to process 256 * 2 module inputs, then you can merge gate_proj and up_proj
-        # into single stage which will make the quantization process faster
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-
-        # included in layer 3-61
-        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
-        ["mlp.shared_experts.down_proj"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:1", "kv_b_proj:1", "o_proj:2"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": {
+                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
+                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            },
+        }
     ]

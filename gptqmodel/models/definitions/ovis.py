@@ -24,50 +24,26 @@ from ...utils.calibration import batched
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY, move_to
 from .._const import CPU
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class OvisGPTQ(BaseGPTQModel):
-    base_modules = ["llm.model.embed_tokens", "llm.model.norm", "visual_tokenizer", "vte"]
+class OvisQModel(BaseQModel):
     pre_lm_head_norm_module = "llm.model.norm"
 
-    layers_node = ["llm.model.layers"] #, "visual_tokenizer.backbone.trunk.blocks"]
-    layer_type = ["LlamaDecoderLayer", "Gemma2DecoderLayer", "Qwen2DecoderLayer"]
-
-    layers_modules_tree = {
-        # "visual_tokenizer": [
-        #     "backbone",
-        #     "trunk",
-        #     "blocks",
-        #     "#",
-        #     {
-        #         "attn": ("qkv", "proj"),
-        #         "mlp": ("fc1", "fc2", "fc3"),
-        #     },
-        # ],
-        "llm": [
-            "model",
-            "layers",
-            "#",
-            {
-                "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
-                "mlp": ("up_proj", "gate_proj", "down_proj"),
-            }
-        ],
-    }
+    module_tree = [
+        "llm",
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+        }
+    ]
 
     layer_modules_strict = False # the layer modules are in different decode layers
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["qkv", "proj"],
-        ["fc1", "fc2", "fc3"],
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.up_proj", "mlp.gate_proj"],
-        ["mlp.down_proj"],
-    ]
 
     require_monkeypatch = True
 

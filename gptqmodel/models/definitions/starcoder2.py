@@ -14,21 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class Starcoder2GPTQ(BaseGPTQModel):
-    base_modules = ["model.embed_tokens", "model.norm"]
+class Starcoder2QModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = ["model.layers"]
-    layer_type = "Starcoder2DecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.c_fc"],
-        ["mlp.c_proj"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("c_fc:0", "c_proj:1"),
+        }
     ]

@@ -14,33 +14,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class LongCatFlashGPTQ(BaseGPTQModel):
+class LongCatFlashQModel(BaseQModel):
     dynamic_expert_index = "n_routed_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = ["model.layers"]
-    layer_type = "LongcatFlashDecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.0.q_a_proj", "self_attn.0.q_b_proj", "self_attn.0.kv_a_proj_with_mqa", "self_attn.0.kv_b_proj"],
-        ["self_attn.0.o_proj"],
-        ["self_attn.1.q_a_proj", "self_attn.1.q_b_proj", "self_attn.1.kv_a_proj_with_mqa", "self_attn.1.kv_b_proj"],
-        ["self_attn.1.o_proj"],
-
-        ["mlps.0.gate_proj", "mlps.0.up_proj",],
-        ["mlps.0.down_proj"],
-        ["mlps.1.gate_proj", "mlps.1.up_proj",],
-        ["mlps.1.down_proj"],
-
-        # uses dynamic_expert_index
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": {
+                "0": ("q_a_proj:0", "q_b_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1"),
+                "1": ("q_a_proj:0", "q_b_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1")
+            },
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlps": {
+                "0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "1": ("gate_proj:0", "up_proj:0", "down_proj:1")
+            },
+            "mlp": {
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1")
+                }
+            }
+        }
     ]

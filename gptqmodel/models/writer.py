@@ -44,9 +44,8 @@ from ..quantization.config import (FORMAT, META_FIELD_ACT_GROUP_AWARE, META_FIEL
                                    META_VALUE_URI, MIN_VERSION_WITH_V2)
 from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
-from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_modules,
-                           get_model_files_size, get_moe_layer_modules, get_state_dict_for_save,
-                           load_checkpoint_in_model_then_tie_weights, make_quant)
+from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_modules, get_model_files_size,
+                           get_state_dict_for_save, load_checkpoint_in_model_then_tie_weights, make_quant)
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import CPU, DEFAULT_MAX_SHARD_SIZE
@@ -220,7 +219,7 @@ def ModelWriter(cls):
         if not self.load_quantized_model:
             model = self.model
             # # internal is always gptq v2 but allow users to pass gptq (v1) via config
-            if quantize_config.format == FORMAT.GPTQ:
+            if quantize_config.format == FORMAT.GPTQ or quantize_config.format == FORMAT.GEMM:
                 # Model qzeros may be edited in place.
                 model = convert_gptq_v2_to_v1_format(
                     model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
@@ -443,13 +442,8 @@ def ModelWriter(cls):
                 config, dtype=torch.float16
             )
 
-            if self.dynamic_expert_index is not None:
-                num_experts = getattr(config, self.dynamic_expert_index)
-                _ = get_moe_layer_modules(layer_modules=self.layer_modules,
-                                                      num_experts=num_experts)
-
             modules = find_modules(model)
-            ignore_modules = [self.lm_head] + self.base_modules
+            ignore_modules = [self.lm_head] + self.get_base_modules(model)
 
             for name in list(modules.keys()):
                 # allow loading of quantized lm_head
@@ -457,7 +451,7 @@ def ModelWriter(cls):
                     continue
 
                 if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
-                        not name.endswith(ignore_module) for sublist in self.layer_modules for ignore_module in sublist
+                        not name.endswith(ignore_module) for sublist in self.simple_layer_modules(config) for ignore_module in sublist
                 ):
                     # log non-lm-head quantizerd modules only
                     if name is not self.lm_head:

@@ -17,7 +17,7 @@ import copy
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import Dict, List
 
 import torch
 
@@ -28,20 +28,21 @@ from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..looper.native_processor import NativeProcessor
-from ..models import BaseGPTQModel
+from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
-from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy, replace_module_with_hooked_tree
+from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
 from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
                            HAS_CUDA, BalanceStrategy, device_next, device_next_reset,
                            torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
+from .awq_processor import AWQProcessor
 
 log = setup_logger()
 
 class ModuleLooper():
-    def __init__(self, model: BaseGPTQModel, processors: List[LoopProcessor]):
+    def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
         self.processors = processors
         self.gptq_model = model
         self.support_batch_quantize = model.support_batch_quantize
@@ -66,7 +67,7 @@ class ModuleLooper():
                 # If hidden_states is not in kwargs, get it from the first positional argument
                 # If error occurs here, check the model's modeling code
                 layer_input.append(move_to(args[0], device=data_device))
-                
+
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
@@ -89,7 +90,7 @@ class ModuleLooper():
         # move layer to target device
         layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
         ori_outside_layer_module_devices = {}
-        for module_name in self.gptq_model.base_modules:
+        for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
 
             if module is None:
@@ -128,7 +129,7 @@ class ModuleLooper():
         self.gptq_model.pre_quantize_generate_hook_end()
         handle.remove()
         move_to(layers[0], device=CPU)
-        for module_name in self.gptq_model.base_modules:
+        for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
             if module is not None:
                 move_to(module, device=ori_outside_layer_module_devices[module_name])
@@ -162,7 +163,7 @@ class ModuleLooper():
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
-        layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.layers_node)
+        layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.extract_layers_node())
 
         for p_index, processor in enumerate(self.processors):
             if not processor.verify_calibration_dataset(p_index):
@@ -189,19 +190,10 @@ class ModuleLooper():
         for processor in self.processors:
             processor.release_calibration_dataset()
 
-        layer_modules = self.gptq_model.layer_modules
+        layer_modules = self.gptq_model.simple_layer_modules(model_config=self.gptq_model.model.config)
 
         if not self.gptq_model.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
-
-        # dynamic expert layer index for model defs
-        if self.gptq_model.dynamic_expert_index is not None:
-            if hasattr(self.gptq_model.model.config, "text_config"):
-                num_experts = getattr(self.gptq_model.model.config.text_config, self.gptq_model.dynamic_expert_index)
-            else:
-                num_experts = getattr(self.gptq_model.model.config, self.gptq_model.dynamic_expert_index)
-            layer_modules = get_moe_layer_modules(layer_modules=self.gptq_model.layer_modules,
-                                                  num_experts=num_experts)
 
         layer_count = len(layers)
         quant_modules_pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
@@ -214,11 +206,7 @@ class ModuleLooper():
 
         shared_kv_cache_dict = {}
 
-        # replace quantizable modules with hooked version
-        if self.gptq_model.layers_modules_tree:
-            replace_module_with_hooked_tree(self.gptq_model.model, self.gptq_model.layers_modules_tree, debug=False)
-        else:
-            replace_module_with_hooked_legacy(self.gptq_model.model)
+        replace_module_with_hooked_legacy(self.gptq_model.model)
 
         if self.gptq_model.quantize_config.lm_head:
             lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
@@ -254,6 +242,32 @@ class ModuleLooper():
                 processor.log_call_count = 0 # reset
                 processor.collect_memory_info(layer_index)
 
+                modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
+
+                # for NativeProcessor we process one time forward on all grouped module subsets
+                if processor.fwd_all_modules_in_single_pass:
+                    # merge all subsets into one
+                    modules = [sum(modules, [])]
+
+                # TODO: integrated AWQ module forward/hooks within module lopper so everything is unified
+                # AWQ does it's own per layer module hooks and calculations. Logic has not been fully integrated into
+                # the module_looper so we wil let awq handle per layer operations for now
+                if isinstance(processor, AWQProcessor):
+                    named_childs = dict()
+                    for index, names in enumerate(modules):
+                        named_modules = self.crate_named_modules(buffered_fwd=buffered_fwd, full=full,
+                                                                 is_lm_head_module=is_lm_head_module,
+                                                                 layer_index=layer_index, layers_prefix=layers_prefix,
+                                                                 names=names,
+                                                                 processor=processor,
+                                                                 fail_safe=fail_safe)
+                        named_childs.update(named_modules)
+
+                    # awq uses model.layers[0] for quantization instead of model.layers.0.self_attn.q_proj
+                    processor.layer_quantize(module, cur_layer_device, named_childs)
+                    # skip module_looper processing for awq
+                    continue
+
                 layer_inputs = processor.inputs_cache.layer_inputs
                 if is_lm_head_module:
                     layer_inputs = self.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
@@ -263,48 +277,12 @@ class ModuleLooper():
 
                 processed_subset = {}
 
-                modules = [[self.gptq_model.lm_head]] if is_lm_head_module else layer_modules
-
-                # for NativeProcessor we process one time forward on all grouped module subsets
-                if processor.fwd_all_modules_in_single_pass:
-                    # merge all subsets into one
-                    modules = [sum(modules, [])]
-
                 for index, names in enumerate(modules):
-                    subset = {}
-                    for n in names:
-                        if n in full:
-                            subset[n] = full[n]
-                        # some modules have layer_modules that are dynamic based on config
-                        # ref: deepseek v2/v3/r1
-                        elif self.gptq_model.layer_modules_strict:
-                            raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
-
-                    skipped_modules = []
-
-                    for name in subset:
-                        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{name}"
-
-                        # gptq task is created and stored inside processor
-                        if not isinstance(subset[name], NamedModule):
-                            named_module = NamedModule(subset[name], name=name, full_name=layer_name,
-                                                      layer_index=layer_index)
-                            if isinstance(processor, EoraProcessor):
-                                named_module.state.update({
-                                    "wq": processor.quantized_weights[layer_name],
-                                })
-                                # TODO processor.release_quantized_weights()
-
-                            subset[name] = named_module
-                            full[name] = named_module
-
-                        processor.preprocess(subset[name], buffered_fwd=buffered_fwd, fail_safe=fail_safe)
-                        # some modules are skipped
-                        if processor.is_skipped(subset[name]):
-                            skipped_modules.append(name)
-
-                    for name in skipped_modules:
-                        subset.pop(name)
+                    subset = self.crate_named_modules(buffered_fwd=buffered_fwd, full=full, is_lm_head_module=is_lm_head_module,
+                                                      layer_index=layer_index, layers_prefix=layers_prefix,
+                                                      names=names,
+                                                      processor=processor,
+                                                      fail_safe=fail_safe)
 
                     if len(subset) == 0:
                         continue
@@ -321,7 +299,7 @@ class ModuleLooper():
                             subset[name].forward_hook = processor.pre_process_fwd_hook(name)
                         else:
                             # TODO FIXME: do we even need to hook into modules that are not quantizable?
-                            assert (f"forward_hook missing for module name: `{name}`, layer name: {layer_name}")
+                            assert f"forward_hook missing for module name: `{name}`, layer name: {m.name}"
                             handle.append(subset[name].register_forward_hook(processor.pre_process_fwd_hook(name)))
 
                     # ---- Start Pre-Quantized Forward ----
@@ -500,13 +478,13 @@ class ModuleLooper():
                             layer_output = module_output[0]
                         else:
                             layer_output = module_output
-                            
+
                         layer_output = move_to(
                             layer_output,
                             device=cur_layer_device if calibration_enable_gpu_cache else CPU,
                             # stream=True,
                         )
-                        
+
                         layer_outputs.append([layer_output])
 
                         del layer_input
@@ -574,3 +552,43 @@ class ModuleLooper():
             torch_empty_cache()
 
         return total_log
+
+    def crate_named_modules(self, buffered_fwd, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe) -> Dict[str, NamedModule]:
+        is_awq_quant = isinstance(processor, AWQProcessor)
+        subset = {}
+        for n in names:
+            if n in full:
+                subset[n] = full[n]
+            # some modules have layer_modules that are dynamic based on config
+            # ref: deepseek v2/v3/r1
+            elif self.gptq_model.layer_modules_strict:
+                raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
+        skipped_modules = []
+        for name in subset:
+            layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{name}"
+
+            # gptq task is created and stored inside processor
+            if not isinstance(subset[name], NamedModule):
+                named_module = NamedModule(subset[name], name=name, full_name=layer_name,
+                                           layer_index=layer_index)
+                if isinstance(processor, EoraProcessor):
+                    named_module.state.update({
+                        "wq": processor.quantized_weights[layer_name],
+                    })
+                    # TODO processor.release_quantized_weights()
+
+                subset[name] = named_module
+                full[name] = named_module
+
+            # TODO awq unification
+            if not is_awq_quant:
+                processor.preprocess(subset[name], buffered_fwd=buffered_fwd, fail_safe=fail_safe)
+                # some modules are skipped
+                if processor.is_skipped(subset[name]):
+                    skipped_modules.append(name)
+
+        # TODO awq unification
+        if not is_awq_quant:
+            for name in skipped_modules:
+                subset.pop(name)
+        return subset

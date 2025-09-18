@@ -14,11 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import LlamaGPTQ
+from . import LlamaQModel
 
 
 # MiMo is based on Qwen2
 # https://huggingface.co/XiaomiMiMo/MiMo-7B-RL/blob/main/modeling_mimo.py
-class MimoGPTQ(LlamaGPTQ):
+class MimoQModel(LlamaQModel):
     require_trust_remote_code = True
-    layer_type = "MiMoMTPLayers"

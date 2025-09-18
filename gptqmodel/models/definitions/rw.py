@@ -14,21 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class RWGPTQ(BaseGPTQModel):
-    base_modules = ["transformer.word_embeddings", "transformer.ln_f"]
+class RwgQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_node = ["transformer.h"]
-    layer_type = "DecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attention.query_key_value"],
-        ["self_attention.dense"],
-        ["mlp.dense_h_to_4h"],
-        ["mlp.dense_4h_to_h"],
+    module_tree = [
+        "transformer",
+        "h",
+        "#",
+        {
+            "ln_1": ("ln_1:!",),
+            "self_attention": ("query_key_value:0", "dense:1"),
+            "ln_2":  ("ln_2:!",),
+            "mlp": ("dense_h_to_4h:0", "dense_4h_to_h:1"),
+        }
     ]

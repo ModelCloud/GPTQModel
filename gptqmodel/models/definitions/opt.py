@@ -18,29 +18,23 @@ from typing import List
 import torch
 
 from ...utils.model import get_module_by_name_prefix
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class OPTGPTQ(BaseGPTQModel):
-    base_modules = [
-        "model.decoder.embed_tokens",
-        "model.decoder.embed_positions",
-        "model.decoder.project_out",
-        "model.decoder.project_in",
-        "model.decoder.final_layer_norm",
-    ]
+class OptQModel(BaseQModel):
     pre_lm_head_norm_module = "model.decoder.final_layer_norm"
 
-    layers_node = ["model.decoder.layers"]
-    layer_type = "OPTDecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.out_proj"],
-        ["fc1"],
-        ["fc2"],
+    module_tree = [
+        "model",
+        "decoder",
+        "layers",
+        "#",
+        {
+            "final_layer_norm": ("final_layer_norm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
+            "fc1": ("fc1",),
+            "fc2": ("fc2",),
+        }
     ]
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:

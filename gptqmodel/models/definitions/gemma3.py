@@ -14,28 +14,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
-from . import LlamaGPTQ
+from ..base import BaseQModel
+from . import LlamaQModel
 
 
-class Gemma3GPTQ(LlamaGPTQ):
-    layer_type = "Gemma3DecoderLayer"
+class Gemma3QModel(LlamaQModel):
+    pass
 
-class Gemma3ForConditionalGenerationGPTQ(BaseGPTQModel):
+class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
     support_batch_quantize = False
-    base_modules = ["model.language_model.embed_tokens", "model.language_model.norm"]
     pre_lm_head_norm_module = "model.language_model.norm"
 
-    layers_node = "model.language_model.layers"
-    layer_type = "Gemma3DecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.up_proj", "mlp.gate_proj"],
-        ["mlp.down_proj"],
+    module_tree = [
+        "model",
+        "language_model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+        }
     ]
 
     lm_head_module = "model.lm_head"

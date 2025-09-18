@@ -14,21 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class GPTJGPTQ(BaseGPTQModel):
-    base_modules = ["transformer.wte", "transformer.ln_f"]
+class GptJQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_node = ["transformer.h"]
-    layer_type = "GPTJBlock"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.k_proj", "attn.v_proj", "attn.q_proj"],
-        ["attn.out_proj"],
-        ["mlp.fc_in"],
-        ["mlp.fc_out"],
+    module_tree = [
+        "transformer",
+        "h",
+        "#",
+        {
+            "ln_1": ("ln_1:!",),
+            "attn": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
+            "mlp": ("fc_in:0", "fc_out:1"),
+        }
     ]

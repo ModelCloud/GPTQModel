@@ -14,29 +14,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class NemotronHGPTQ(BaseGPTQModel):
+class NemotronHQModel(BaseQModel):
+    require_trust_remote_code = True
     require_monkeypatch = True
     layer_modules_strict = False
     require_pkgs_version = ["transformers<=4.48.3"]
 
-    base_modules = ["backbone.embeddings"]
-
-    layers_node = "backbone.layers"
-    layer_type = "NemotronHBlock"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["mixer.k_proj", "mixer.v_proj", "mixer.q_proj"],
-        ["mixer.o_proj"],
-
-        ["mixer.in_proj", "mixer.out_proj"],
-
-        ["mixer.gate_proj", "mixer.up_proj"],
-        ["mixer.down_proj"],
+    module_tree = [
+        "backbone",
+        "layers",
+        "#",
+        {
+            "norm": ("norm:!",),
+            "mixer": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1", "in_proj:2", "out_proj:2", "gate_proj:3", "up_proj:3", "down_proj:4"),
+        }
     ]
 
     def monkey_patch(self):

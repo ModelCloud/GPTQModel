@@ -582,3 +582,49 @@ class PackableQuantLinear(BaseQuantLinear):
         # assert t.equal(wq, wq_dequantized)
 
         # print("self qw", self.qweight, self.scales, self.qzeros)
+
+class AWQuantLinear(BaseQuantLinear):
+    def __init__(self, bias: bool = False, use_bf16: bool = False, register_awq_buffers: bool = True, **kwargs):
+        super().__init__(bias=bias, register_buffers=False, **kwargs)
+
+        self.use_bf16 = use_bf16
+
+        in_features = self.in_features
+        out_features = self.out_features
+
+        if register_awq_buffers:
+            self.register_buffer(
+                "qweight",
+                t.zeros((in_features, out_features // (self.pack_dtype_bits // self.bits)), dtype=self.pack_dtype),
+            )
+            self.register_buffer(
+                "qzeros",
+                t.zeros(
+                    (in_features // self.group_size, out_features // (self.pack_dtype_bits // self.bits)),
+                    dtype=self.pack_dtype,
+                ),
+            )
+            self.register_buffer(
+                "scales",
+                t.zeros(
+                    (in_features // self.group_size, out_features),
+                    dtype=t.bfloat16 if self.use_bf16 else t.float32,
+                ),
+            )
+
+            if bias:
+                self.register_buffer("bias", t.zeros(out_features, dtype=t.bfloat16 if self.use_bf16 else t.float32,))
+            else:
+                self.bias = None
+
+    def list_buffers(self) -> List:
+        buf = []
+        if hasattr(self, "qweight") and self.qweight is not None:
+            buf.append(self.qweight)
+        if hasattr(self, "qzeros") and self.qzeros is not None:
+            buf.append(self.qzeros)
+        if hasattr(self, "scales") and self.scales is not None:
+            buf.append(self.scales)
+        if hasattr(self, "bias") and self.bias is not None:
+            buf.append(self.bias)
+        return buf

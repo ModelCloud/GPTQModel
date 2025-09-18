@@ -14,11 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import LlamaGPTQ
+from . import LlamaQModel
 
 
-class DeciLMGPTQ(LlamaGPTQ):
+class DeciLMQModel(LlamaQModel):
     require_trust_remote_code = True
     layer_modules_strict = False # nemotron ultra skips modules
-
-    layer_type = "DeciLMDecoderLayer"

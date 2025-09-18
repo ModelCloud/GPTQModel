@@ -16,33 +16,35 @@
 
 from transformers import AutoModelForImageTextToText
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class Llama4GPTQ(BaseGPTQModel):
+class Llama4QModel(BaseQModel):
     # some bug in the attention_mask of transformers.modeling_llama4,
     # so batch quantization for Llama4 is temporarily not supported.
     support_batch_quantize = False
     loader = AutoModelForImageTextToText
 
-    base_modules = ["language_model.model.embed_tokens", "language_model.model.norm"]
     pre_lm_head_norm_module = "language_model.model.norm"
-
-    layers_node = "language_model.model.layers"
-    layer_type = "Llama4TextDecoderLayer"
 
     dynamic_expert_index = "num_local_experts"
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj", "self_attn.o_proj"],
-
-        [f"feed_forward.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj", f"feed_forward.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
-        [f"feed_forward.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-
-        ["feed_forward.shared_expert.gate_proj", "feed_forward.shared_expert.up_proj", "feed_forward.shared_expert.down_proj"],
+    module_tree = [
+        "language_model",
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "feed_forward": {
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
+                "shared_expert": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            },
+        }
     ]
 
     def before_model_load(self, load_quantized_model=False):

@@ -11,8 +11,8 @@ def patch_tostring(self):
     return self.config.name_or_path
 
 def patch_evalplus(model):
-    from ..models.base import BaseGPTQModel
-    if isinstance(model, BaseGPTQModel) or isinstance(model, PreTrainedModel):
+    from ..models.base import BaseQModel
+    if isinstance(model, BaseQModel) or isinstance(model, PreTrainedModel):
         model.strip = types.MethodType(patch_strip, model)
         model.__str__ = types.MethodType(patch_tostring, model)
         model.__repr__ = types.MethodType(patch_tostring, model)
@@ -23,7 +23,7 @@ def patch_evalplus(model):
     from evalplus.provider.utility import extra_eos_for_direct_completion
 
     from .. import GPTQModel
-    from ..models import BaseGPTQModel
+    from ..models import BaseQModel
 
     class PatchedGPTQModelDecoder(DecoderBase):
         def __init__(
@@ -56,7 +56,7 @@ def patch_evalplus(model):
             }
             self.skip_special_tokens = True
             self.force_base_prompt = force_base_prompt
-            if isinstance(name, BaseGPTQModel):
+            if isinstance(name, BaseQModel):
                 self.model = name
                 self.tokenizer = self.model.tokenizer
             elif isinstance(name, PreTrainedModel):
@@ -82,7 +82,7 @@ def patch_evalplus(model):
                 return self.model
             elif isinstance(self.model, PreTrainedModel):
                 return self.model.config.name_or_path
-            elif isinstance(self.model, BaseGPTQModel):
+            elif isinstance(self.model, BaseQModel):
                 return self.model.model_local_path
             else:
                 return self.model.__class__.__name__

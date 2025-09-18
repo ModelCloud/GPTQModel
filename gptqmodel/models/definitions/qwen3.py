@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import LlamaGPTQ
+from . import LlamaQModel
 
 
-class Qwen3GPTQ(LlamaGPTQ):
-    layer_type = "Qwen3DecoderLayer"
+class Qwen3QModel(LlamaQModel):
+    pass

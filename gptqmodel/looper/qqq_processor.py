@@ -23,7 +23,7 @@ from torch.nn import Module
 from .. import BACKEND
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
-from ..models import BaseGPTQModel
+from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
@@ -62,7 +62,7 @@ class QQQProcessor(LoopProcessor):
             task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
 
     def set_calibration_dataset(self, calibration_dataset):
-        raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
+        raise NotImplementedError("QQQProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
         # entire module is skipped
@@ -202,7 +202,7 @@ class QQQProcessor(LoopProcessor):
         module.weight.data = move_to(module.weight.data, device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
 
-    def finalize(self, model: BaseGPTQModel, **kwargs):
+    def finalize(self, model: BaseQModel, **kwargs):
         # block for streams
         if self.stream:
             torch_sync()

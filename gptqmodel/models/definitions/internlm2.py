@@ -14,26 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class InternLM2GPTQ(BaseGPTQModel):
+class InternLM2QModel(BaseQModel):
 
     require_pkgs_version = ["transformers<=4.44.2"]
-
-    base_modules = ["model.tok_embeddings", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = ["model.layers"]
-    layer_type = "InternLM2DecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attention.wqkv", "attention.wo"],
-
-        ["feed_forward.w1", "feed_forward.w3"],
-        ["feed_forward.w2"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "attention_norm": ("attention_norm:!",),
+            "attention": ("wqkv:0", "wo:0"),
+            "ffn_norm": ("ffn_norm:!",),
+            "feed_forward": ("w1:0", "w3:0", "w2:1"),
+        }
     ]
-
-    lm_head = "output"

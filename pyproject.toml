@@ -56,12 +56,6 @@ bitblas = [
 hf = [
     "optimum>=1.21.2",
 ]
-ipex = [
-    "intel_extension_for_pytorch>=2.7.0",
-]
-auto_round = [
-    "auto_round>=0.3",
-]
 logger = [
     "clearml",
     "random_word",

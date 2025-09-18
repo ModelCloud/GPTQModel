@@ -14,22 +14,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class GPTNeoGPTQ(BaseGPTQModel):
-    base_modules = ["transformer.wte", "transformer.wpe", "transformer.ln_f"]
+class GptNeoQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.ln_f"
     lm_head = "lm_head"
 
-    layers_node = ["transformer.h"]
-    layer_type = "GPTNeoBlock"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.attention.k_proj", "attn.attention.v_proj","attn.attention.q_proj"],
-        ["attn.attention.out_proj"],
-        ["mlp.c_fc"],
-        ["mlp.c_proj"],
+    module_tree = [
+        "transformer",
+        "h",
+        "#",
+        {
+            "ln_1": ("ln_1:!",),
+            "attn": {
+                "attention": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1")
+            },
+            "ln_2": ("ln_2:!",),
+            "mlp": ("c_fc:0", "c_proj:1"),
+        }
     ]

@@ -14,24 +14,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class ExaoneGPTQ(BaseGPTQModel):
+class ExaOneQModel(BaseQModel):
     # exaone requires custom model code
     require_trust_remote_code = True
 
-    base_modules = ["transformer.ln_f", "transformer.wte"]
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_node = ["transformer.h"]
-    layer_type = "ExaoneBlock"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.attention.k_proj", "attn.attention.v_proj", "attn.attention.q_proj"],
-        ["attn.attention.out_proj"],
-        ["mlp.c_fc_0", "mlp.c_fc_1"],
-        ["mlp.c_proj"],
+    module_tree= [
+        "transformer",
+        "h",
+        "#",
+        {
+            "ln_1": ("ln_1:!",),
+            "attn": {
+                "attention": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
+            },
+            "ln_2": ("ln_2:!",),
+            "mlp": ("c_fc_0:0", "c_fc_1:0", "c_proj:1"),
+        }
     ]

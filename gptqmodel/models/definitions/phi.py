@@ -14,23 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class PhiGPTQ(BaseGPTQModel):
-    base_modules = ["model.embed_tokens", "model.final_layernorm"]
+class PhiQModel(BaseQModel):
     pre_lm_head_norm_module = "model.final_layernorm"
 
-    layers_node = ["model.layers"]
-    layer_type = "PhiDecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_proj"],
-        ["self_attn.k_proj"],
-        ["self_attn.v_proj"],
-        ["self_attn.dense"],
-        ["mlp.fc1"],
-        ["mlp.fc2"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:1", "v_proj:2", "dense:3"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("fc1:0", "fc2:1"),
+        }
     ]
