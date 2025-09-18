@@ -30,7 +30,7 @@ from ..looper.named_module import NamedModule
 from ..looper.native_processor import NativeProcessor
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
-from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy, replace_module_with_hooked_tree
+from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
