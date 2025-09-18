@@ -28,6 +28,7 @@ class GptJQModel(BaseQModel):
         "h",
         "#",
         {
+            "ln_1": ("ln_1:!",),
             "attn": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
             "mlp": ("fc_in:0", "fc_out:1"),
         }

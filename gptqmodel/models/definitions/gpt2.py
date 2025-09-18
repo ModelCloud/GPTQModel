@@ -18,17 +18,16 @@ from ..base import BaseQModel
 
 
 class GPT2QModel(BaseQModel):
-    base_modules = ["transformer.wte", "transformer.wpe", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
-
-    layers_node = ["transformer.h"]
 
     _layers_modules_tree = [
         "transformer",
         "h",
         "#",
         {
+            "ln_1": ("ln_1:!",),
             "attn": ("c_attn:0", "c_proj:1"),
+            "ln_2": ("ln_2:!",),
             "mlp": ("c_fc:0", "c_proj:1"),
         }
     ]

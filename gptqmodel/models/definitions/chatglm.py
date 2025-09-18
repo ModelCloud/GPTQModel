@@ -37,6 +37,7 @@ class ChatGLMQModel(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attention": ("query_key_value:0", "dense:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": ("dense_h_to_4h:0", "dense_4h_to_h:1"),
         }
     ]

@@ -18,6 +18,7 @@ from ..base import BaseQModel
 
 
 class MossQModel(BaseQModel):
+    require_trust_remote_code = True
     base_modules = ["transformer.wte", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
 
@@ -28,6 +29,7 @@ class MossQModel(BaseQModel):
         "h",
         "#",
         {
+            "ln_1": ("ln_1:!",),
             "attn": ("qkv_proj:0", "out_proj:1"),
             "mlp": ("fc_in:0", "fc_out:1"),
         }

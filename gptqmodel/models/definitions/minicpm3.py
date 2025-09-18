@@ -18,6 +18,7 @@ from ..base import BaseQModel
 
 
 class MiniCpm3QModel(BaseQModel):
+    require_trust_remote_code = True
     base_modules = ["model.embed_tokens",]
     pre_lm_head_norm_module = "model.norm"
 
@@ -30,6 +31,7 @@ class MiniCpm3QModel(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:1", "kv_b_proj:1", "o_proj:2"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]

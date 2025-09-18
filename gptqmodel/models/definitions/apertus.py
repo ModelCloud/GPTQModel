@@ -30,6 +30,7 @@ class ApertusQModel(BaseQModel):
         {
             "attention_layernorm": ("attention_layernorm:!"),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "feedforward_layernorm": ("feedforward_layernorm:!"),
             "mlp": ("up_proj:0", "down_proj:1"),
         }
     ]
