@@ -1082,7 +1082,11 @@ class BaseQModel(nn.Module):
                                 groups[grp].extend(items)
                     else:
                         # Nested structure: process recursively with full path
-                        full_sub_parent = f"{parent}.{sub_parent}"
+                        # Special case: empty string key means use parent path directly
+                        if sub_parent == "":
+                            full_sub_parent = parent
+                        else:
+                            full_sub_parent = f"{parent}.{sub_parent}"
                         sub_groups = process_entries(full_sub_parent, sub_entries, current_offset)
                         for grp, items in sub_groups.items():
                             groups[grp].extend(items)
