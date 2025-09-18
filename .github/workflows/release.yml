@@ -305,7 +305,6 @@ jobs:
           if [ "${{ matrix.python }}" != "313t" ]; then # twine doesn't support python 3.13 yet
             twine check dist/$whl
           fi
-          pip install dist/$whl
 
       - name: Upload wheel
         continue-on-error: true
