@@ -35,9 +35,9 @@ from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
-from ..utils.structure import print_module_tree, alias_from_turtle_for_submodule
-from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, META, DEFAULT_BALANCE_STRATEGY,
-                           HAS_CUDA, BalanceStrategy, device_next, device_next_reset,
+from ..utils.structure import alias_from_turtle_for_submodule, print_module_tree
+from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
+                           HAS_CUDA, META, BalanceStrategy, device_next, device_next_reset,
                            torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
 
 log = setup_logger()
@@ -582,9 +582,16 @@ class ModuleLooper():
                         for name in processed_subset:
                             reverse_p.submodule_finalize(processed_subset[name])
 
-                    self.gptq_model.offload_to_disk(module=[f"model.layers.{layer_index}"])
-                    print(f"model.layers.{layer_index} complete tree")
-                    del module
+                    from ..utils import ASYNC_WORKER
+                    from ..utils.offload import offload_to_disk
+
+                    def _task(idx=layer_index):
+                        # bind layer_index & self at definition time
+                        offload_to_disk(model=self.gptq_model.model, module=[f"model.layers.{layer_index}"])
+                        print(f"model.layers.{layer_index} complete tree")
+
+                    ASYNC_WORKER.submit(_task)
+                    #del module
                     #print(f"model.layers.{layer_index} complete tree")
                     #print_module_tree(self.gptq_model.model)
 
@@ -592,6 +599,8 @@ class ModuleLooper():
                     torch_empty_cache()
 
 
+        # wait for all thread tasks
+        ASYNC_WORKER.join()
 
         total_log = {}
 

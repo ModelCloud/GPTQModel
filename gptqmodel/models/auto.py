@@ -21,7 +21,6 @@ import os
 import threadpoolctl
 
 from ..utils.logger import setup_logger
-from ..utils.structure import print_module_tree
 
 log = setup_logger()
 

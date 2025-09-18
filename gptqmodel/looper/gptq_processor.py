@@ -245,7 +245,7 @@ class GPTQProcessor(LoopProcessor):
         if self.stream:
             torch_sync()
 
-        from accelerate import dispatch_model, disk_offload
+        from accelerate import dispatch_model
 
         model.model = dispatch_model(model.model, device_map = { "" : CPU}, offload_buffers=True)
 

@@ -20,18 +20,6 @@ from typing import Optional, Set, Tuple
 from torch import nn
 
 
-def human_count(n: int) -> str:
-    if n < 1_000:
-        return str(n)
-    units = ["K", "M", "B", "T"]
-    k = 0
-    x = float(n)
-    while x >= 1000 and k < len(units) - 1:
-        x /= 1000.0
-        k += 1
-    return f"{x:.2f}{units[k]}"
-
-
 def _param_summary(mod: nn.Module, recurse: bool = False) -> Tuple[int, int]:
     p = sum(p.numel() for p in mod.parameters(recurse=recurse))
     b = sum(bf.numel() for bf in mod.buffers(recurse=recurse))
@@ -104,8 +92,10 @@ if hasattr(torch, "float8_e5m2"):
 class _FakeDType:
     """Sentinel dtype for experimental 4-bit formats."""
     def __init__(self, name: str): self.name = name
-    def __repr__(self): return self.name
-    def __str__(self): return self.name
+    def __repr__(self):
+        return self.name
+    def __str__(self):
+        return self.name
 
 MXFP4 = _FakeDType("MXFP4")
 NVFP4 = _FakeDType("NVFP4")
@@ -119,21 +109,28 @@ def _elem_size(d) -> float:
 #   Formatting helpers
 # =========================
 def human_count(n: int) -> str:
-    if n < 0: return str(n)
-    if n < 1_000: return str(n)
+    if n < 0:
+        return str(n)
+    if n < 1_000:
+        return str(n)
     for label, scale in (("T", 1_000_000_000_000),
                          ("B", 1_000_000_000),
                          ("M", 1_000_000),
                          ("K", 1_000)):
         if n >= scale:
             return f"{n/scale:.2f}{label}"
+
     return str(n)
 
 def _human_bytes(n: float) -> str:
-    if n <= 0: return "0B"
+    if n <= 0:
+        return "0B"
+
     for unit in ["B","KB","MB","GB","TB","PB"]:
-        if n < 1024: return f"{n:.0f}{unit}" if unit == "B" else f"{n:.2f}{unit}"
+        if n < 1024:
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.2f}{unit}"
         n /= 1024.0
+
     return f"{n:.2f}PB"
 
 # =========================
@@ -159,11 +156,15 @@ def _summarize_module_tensors(mod: nn.Module, *, recurse: bool = False):
     est_bytes = 0.0
 
     def _iter_tensors() -> Iterable[torch.Tensor]:
-        for _, t in mod.named_parameters(recurse=recurse): yield t
-        for _, t in mod.named_buffers(recurse=recurse): yield t
+        for _, t in mod.named_parameters(recurse=recurse):
+            yield t
+        for _, t in mod.named_buffers(recurse=recurse):
+            yield t
 
     for t in _iter_tensors():
-        if t is None: continue
+        if t is None:
+            continue
+
         is_meta = bool(getattr(t, "is_meta", False) or (hasattr(t, "device") and t.device.type == "meta"))
         dev_key = "meta" if is_meta else (str(t.device) if hasattr(t, "device") else "-")
         n = t.numel()
@@ -172,7 +173,10 @@ def _summarize_module_tensors(mod: nn.Module, *, recurse: bool = False):
         dt = getattr(t, "dtype", None)
         dtype_set.add(dt)
         esize = (t.element_size() if (not is_meta and hasattr(t, "element_size")) else _elem_size(dt)) or 0.0
-        if not is_meta: alloc_bytes += n * esize
+
+        if not is_meta:
+            alloc_bytes += n * esize
+
         est_bytes += n * esize
 
     # summarize
@@ -256,22 +260,28 @@ def print_module_tree(
     total_b = sum(b.numel() for b in model.buffers())
 
     def should_collapse(qual_name: str, container: nn.Module) -> bool:
-        if not experts_name_re: return False
-        if not experts_name_re.search(qual_name): return False
-        if not isinstance(container, (nn.ModuleList, nn.Sequential)): return False
+        if not experts_name_re:
+            return False
+        if not experts_name_re.search(qual_name):
+            return False
+        if not isinstance(container, (nn.ModuleList, nn.Sequential)):
+            return False
         names = [n for n, _ in container.named_children()]
-        if not names: return False
+        if not names:
+            return False
         return all(n.isdigit() for n in names) and len(names) > max(0, experts_show)
 
     def rec(mod: nn.Module, name: str, depth: int, prefix: str, is_last: bool):
-        if max_depth is not None and depth > max_depth: return
+        if max_depth is not None and depth > max_depth:
+            return
         mod_id = id(mod)
         shared = "" if mod_id not in seen else "  ↩ shared ref"
         seen.add(mod_id)
         trunk = "└─ " if is_last else "├─ "
         line = _format_line(prefix, trunk, name, mod, show_counts=True, color=color)
         print(line + " " + _annotate(mod, color=color) + shared)
-        if shared: return
+        if shared:
+            return
         if show_params or show_buffers:
             _print_params(prefix + ("   " if is_last else "│  "), mod, include_buffers=show_buffers, color=color)
         children = list(mod.named_children())
@@ -312,8 +322,10 @@ def print_module_tree(
     frozen = total_p - trainable
     print("Trainable:", human_count(trainable), " | Frozen:", human_count(frozen))
 
+from typing import Optional
+
 import torch
-from typing import Optional, Union
+
 
 def _get_qualified_name(root: torch.nn.Module, obj: torch.nn.Module) -> str:
     for name, mod in root.named_modules():
@@ -393,16 +405,15 @@ def alias_from_turtle_for_submodule(
                 tb.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))
 
     if hasattr(target_model, "tie_weights"):
-        try: target_model.tie_weights()
-        except Exception: pass
+        try:
+            target_model.tie_weights()
+        except Exception:
+            pass
 
     print("Post alias: target_submodule device summary:")
     for n, p in target_submodule.named_parameters(recurse=True):
         print(f"  {n}: {p.device}")
         break
-
-    # TODO this might not be the place to do this
-
 
     # return the *target* submodule, which is the injected result
     return target_submodule

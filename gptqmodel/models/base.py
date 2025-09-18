@@ -45,9 +45,9 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import (MODALITY, find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to, pack_model)
-from ..utils.structure import alias_from_turtle_for_submodule, print_module_tree
+from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
-from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, META, DEFAULT_MAX_SHARD_SIZE, DEVICE, SUPPORTS_MODULE_TYPES
+from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, META, SUPPORTS_MODULE_TYPES
 from .loader import ModelLoader
 from .writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_TIME,
                      QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, ModelWriter)
@@ -1255,80 +1255,9 @@ class BaseGPTQModel(nn.Module):
     def pre_quantize_generate_hook_start(self):
         pass
 
-
-
     def pre_quantize_generate_hook_end(self):
-        self.offload_to_disk(module=self.base_modules)
-
-    def offload_to_disk(self, module: List[str] | nn.Module = None):
-        def set_submodule(root: torch.nn.Module, path: str, new_mod: torch.nn.Module) -> None:
-            parts = path.split(".")
-            parent = root
-            for p in parts[:-1]:
-                parent = getattr(parent, p)
-            setattr(parent, parts[-1], new_mod)
-
-        def _get_submodule(root: torch.nn.Module, path: str) -> torch.nn.Module:
-            m = root
-            for part in path.split("."):
-                m = getattr(m, part)
-            return m
-
-        def _is_meta_module(m: torch.nn.Module) -> bool:
-            for p in m.parameters(recurse=True):
-                if getattr(p, "is_meta", False) or (hasattr(p, "device") and p.device.type == "meta"):
-                    return True
-            for b in m.buffers(recurse=True):
-                if hasattr(b, "device") and b.device.type == "meta":
-                    return True
-            return False
-
-        # move base_module tensors to disk
-        from accelerate import dispatch_model, disk_offload
-
-        if isinstance(module, List):
-            for name in module:
-                try:
-                    sub = _get_submodule(self.model, name)
-                except AttributeError:
-                    print(f"[warn] base_module '{name}' not found; skipping")
-                    continue
-                if _is_meta_module(sub):
-                    print(f"[skip] '{name}' is on meta; leaving as-is")
-                    continue
-
-                #print(f"device_map base_modules: {device_map}")
-
-                _ = disk_offload(
-                    sub,
-                    # device_map={ "" : "disk" },  # only touch this subtree
-                    offload_dir=f"offload/{name}",
-                    offload_buffers=True,  # needed for buffers
-                    execution_device=CPU,
-                )
-
-                print(f"offload_disk: list item tree")
-                print_module_tree(sub)
-
-        elif isinstance(module, nn.Module):
-            if _is_meta_module(module):
-                print(f"[skip] '{module.name}' is on meta; leaving as-is")
-                return
-
-            module = disk_offload(
-                module,
-                # device_map={ "" : "disk" },  # only touch this subtree
-                offload_dir="offload",
-                offload_buffers=True,  # needed for buffers
-                execution_device=CPU,
-            )
-
-            print(f"offload_disk: module tree")
-            print_module_tree(module)
-
-            return module
-        # set_submodule(self.model, name, sub)
-
+        from ..utils.offload import offload_to_disk
+        offload_to_disk(model=self.model, module=self.base_modules)
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.pre_lm_head_norm_module:
