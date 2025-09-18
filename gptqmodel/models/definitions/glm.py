@@ -19,10 +19,7 @@ from ..base import BaseQModel
 
 # GLM is HF-ied ChatGLM and marked by -HF suffix in THUDM hf repos
 class GlmQModel(BaseQModel):
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = ["model.layers"]
 
     _layers_modules_tree = [
         "model",

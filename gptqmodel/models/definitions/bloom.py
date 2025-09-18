@@ -18,16 +18,7 @@ from ..base import BaseQModel
 
 
 class BloomQModel(BaseQModel):
-    # non-layer (root) modules
-    base_modules = [
-        "transformer.word_embeddings",
-        "transformer.word_embeddings_layernorm",
-        "transformer.ln_f",
-    ]
     pre_lm_head_norm_module = "transformer.ln_f"
-
-    # repeating layers
-    layers_node = ["transformer.h"]
 
     _layers_modules_tree = [
         "transformer",

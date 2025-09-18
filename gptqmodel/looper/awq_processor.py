@@ -75,8 +75,7 @@ class AWQProcessor(LoopProcessor):
         # This argument avoids real quantization by only applying the scales without quantizing down to FP16.
         self.export_compatible = False
 
-        # FIXME Temporarily set the version to "gemm". Then use backend to do a mapping.
-        self.version = "gemm"
+        self.version = qcfg.format
 
         # TODO Can it be configured?
         # The maximum sequence length of the calibration dataset. Discard samples greater than max_calib_seq_len.

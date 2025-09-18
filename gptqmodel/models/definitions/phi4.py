@@ -19,10 +19,7 @@ from ..base import BaseQModel
 
 
 class Phi4MMGPTQ(BaseQModel):
-    base_modules = ["model.embed_tokens", "model.embed_tokens_extend", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = "model.layers"
 
     _layers_modules_tree = [
         "model",

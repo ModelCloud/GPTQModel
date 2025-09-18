@@ -27,6 +27,24 @@ log = setup_logger()
 
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
+def make_divisible(c, divisor):
+    return (c + divisor - 1) // divisor
+
+
+def calculate_zeros_width(in_features, group_size=128, pack_num=8):
+    if group_size >= 128:
+        size_multiplier = 1
+    elif group_size == 64:
+        size_multiplier = 2
+    elif group_size == 32:
+        size_multiplier = 4
+    else:
+        raise NotImplementedError
+
+    base_width = make_divisible(in_features // group_size, pack_num)
+    base_width = make_divisible(base_width, size_multiplier) * size_multiplier
+    return base_width
+
 class AwqGEMVQuantLinar(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
@@ -72,7 +90,36 @@ class AwqGEMVQuantLinar(AWQuantLinear):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.GEMV),
             adapter=adapter,
+            register_awq_buffers=False,
             **kwargs)
+
+        self.split_k_iters = 8
+
+        self.register_buffer(
+            "qweight",
+            torch.zeros((out_features, in_features // self.pack_factor), dtype=self.pack_dtype),
+        )
+        self.register_buffer(
+            "qzeros",
+            torch.zeros(
+                out_features,
+                calculate_zeros_width(in_features, self.group_size),
+                dtype=self.pack_dtype,
+            ),
+        )
+        self.register_buffer(
+            "scales",
+            torch.zeros(
+                out_features,
+                calculate_zeros_width(in_features, self.group_size) * self.pack_factor,
+                dtype=torch.float16,
+            ),
+        )
+
+        if bias:
+            self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
+        else:
+            self.bias = None
 
     def post_init(self):
         # if self.padded_infeatures != self.in_features:

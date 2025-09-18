@@ -18,11 +18,7 @@ from ..base import BaseQModel
 
 
 class MossQModel(BaseQModel):
-    require_trust_remote_code = True
-    base_modules = ["transformer.wte", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
-
-    layers_node = ["transformer.h"]
 
     _layers_modules_tree = [
         "transformer",

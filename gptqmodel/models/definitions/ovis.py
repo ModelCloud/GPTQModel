@@ -28,10 +28,7 @@ from ..base import BaseQModel
 
 
 class OvisQModel(BaseQModel):
-    base_modules = ["llm.model.embed_tokens", "llm.model.norm", "visual_tokenizer", "vte"]
     pre_lm_head_norm_module = "llm.model.norm"
-
-    layers_node = ["llm.model.layers"] #, "visual_tokenizer.backbone.trunk.blocks"]
 
     _layers_modules_tree = [
         "llm",

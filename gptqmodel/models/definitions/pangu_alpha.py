@@ -18,14 +18,7 @@ from ..base import BaseQModel
 
 
 class PanguAlphaQModel(BaseQModel):
-    # Non-repeating layers at the root level: same level as `layers_node`
-    # Excluding `layers_node`.
-    base_modules = ["transformer.wte", "transformer.wpe", "transformer.wqe", "transformer.ln_f"]
     pre_lm_head_norm_module = "transformer.ln_f"
-
-    # Below describes all the repeating layers in this transformer model
-    # `model.layers` is a node/module that hold all the repeating layers. The parent node for all n-layers.
-    layers_node = ["transformer.h"]
 
     # Full tree of quantizable modules
     # `#` str will match any number: useful for layers and moe indexing.

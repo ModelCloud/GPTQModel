@@ -29,10 +29,7 @@ from ..base import BaseQModel
 class BaseQwen2VLGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = ["model.layers", "model.language_model.layers"]
 
     _layers_modules_tree = [
         "model",
