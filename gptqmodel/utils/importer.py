@@ -26,7 +26,7 @@ from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..nn_modules.qlinear.awq_exllama import AwqExllamaQuantLinear
 from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
-from ..nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinar
+from ..nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
@@ -65,7 +65,7 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.EXLLAMA_V2: AwqExllamaV2QuantLinear,
         BACKEND.EXLLAMA_V1: AwqExllamaQuantLinear,
         BACKEND.GEMM: AwqGEMMQuantLinear, # TODO ADD more BACKEND
-        BACKEND.GEMV: AwqGEMVQuantLinar,
+        BACKEND.GEMV: AwqGEMVQuantLinear,
         BACKEND.GEMV_FAST: AwqGEMVFastQuantLinear,
     }),
 }

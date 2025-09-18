@@ -483,6 +483,9 @@ class BaseQModel(nn.Module):
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
 
+        if self.quantize_config.format == FORMAT.GEMV_FAST:
+            self.quantize_config.pack_dtype = torch.int16
+
         if self.support_batch_quantize is False:
             batch_size = 1
             log.warn("Batch quantization is not supported for this model. Setting batch_size to 1.")
