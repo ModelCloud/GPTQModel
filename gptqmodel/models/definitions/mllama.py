@@ -26,7 +26,7 @@ class MLlamaQModel(BaseQModel):
 
     pre_lm_head_norm_module = "language_model.model.norm"
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "language_model",
         "model",
         "layers",

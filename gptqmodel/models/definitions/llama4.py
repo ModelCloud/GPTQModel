@@ -30,7 +30,7 @@ class Llama4QModel(BaseQModel):
 
     dynamic_expert_index = "num_local_experts"
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "language_model",
         "model",
         "layers",

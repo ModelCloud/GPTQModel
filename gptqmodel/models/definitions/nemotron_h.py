@@ -23,7 +23,7 @@ class NemotronHQModel(BaseQModel):
     layer_modules_strict = False
     require_pkgs_version = ["transformers<=4.48.3"]
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "backbone",
         "layers",
         "#",

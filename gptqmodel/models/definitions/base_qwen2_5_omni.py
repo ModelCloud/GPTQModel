@@ -31,7 +31,7 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
 
     pre_lm_head_norm_module = "thinker.model.norm"
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "thinker",
         "model",
         "layers",

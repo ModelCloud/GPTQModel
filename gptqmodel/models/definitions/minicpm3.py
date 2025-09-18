@@ -20,7 +20,7 @@ from ..base import BaseQModel
 class MiniCpm3QModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "model",
         "layers",
         "#",

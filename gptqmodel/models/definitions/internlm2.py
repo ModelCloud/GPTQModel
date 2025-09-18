@@ -22,7 +22,7 @@ class InternLM2QModel(BaseQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
     pre_lm_head_norm_module = "model.norm"
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "model",
         "layers",
         "#",

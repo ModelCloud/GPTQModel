@@ -106,7 +106,7 @@ class BaseQModel(nn.Module):
     lm_head: str = "lm_head"
 
     # a tree node of all the roots that contain quantizable modules
-    _layers_modules_tree: List[str] = None
+    layers_modules_tree: List[str] = None
 
     # Strict=True -> all layer_modules must exists in model
     # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
@@ -227,14 +227,14 @@ class BaseQModel(nn.Module):
     @classmethod
     def extract_layers_node(cls):
         """
-        Given a _layers_modules_tree structure, return the layers_node string.
+        Given a layers_modules_tree structure, return the layers_node string.
         It concatenates everything up to (but not including) the first "#" with '.'.
         Example:
             ["model", "layers", "#", {...}] -> ["model.layers"]
         """
 
         prefix_parts = []
-        for node in cls._layers_modules_tree:
+        for node in cls.layers_modules_tree:
             if node == "#":
                 break
             if isinstance(node, str):
@@ -289,7 +289,7 @@ class BaseQModel(nn.Module):
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
     @classmethod
     def simple_layer_modules(cls, model_config, is_awq_quantize: bool = False):
-        layer_modules = cls.build_layer_modules(cls._layers_modules_tree)
+        layer_modules = cls.build_layer_modules(cls.layers_modules_tree)
 
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
@@ -299,7 +299,7 @@ class BaseQModel(nn.Module):
 
     @classmethod
     def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False):
-        full = cls.build_layer_modules(cls._layers_modules_tree)
+        full = cls.build_layer_modules(cls.layers_modules_tree)
         full = cls.build_moe_modules_if_need(model_config, full, is_awq_quantize)
         print(f"full layer_modules: {full}")
         return full
@@ -1123,8 +1123,8 @@ class BaseQModel(nn.Module):
         """
         Return list of base modules directly under 'model' but not 'model.layers'.
         """
-        root = cls._layers_modules_tree[0]  # "model"
-        exclude = cls._layers_modules_tree[1]  # "layers"
+        root = cls.layers_modules_tree[0]  # "model"
+        exclude = cls.layers_modules_tree[1]  # "layers"
 
         base = getattr(model, root)
         out = []

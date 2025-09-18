@@ -32,7 +32,7 @@ class HymbaQModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.final_layernorm"
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "model",
         "layers",
         "#",

@@ -33,7 +33,7 @@ class DeepSeekV2QModel(BaseQModel):
     # https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/modeling_deepseek.py#L712
     layer_modules_strict = False
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "model",
         "layers",
         "#",

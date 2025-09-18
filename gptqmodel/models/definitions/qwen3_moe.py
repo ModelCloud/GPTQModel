@@ -28,7 +28,7 @@ class Qwen3MoeQModel(BaseQModel):
     # the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "model",
         "layers",
         "#",

@@ -26,7 +26,7 @@ class ChatGLMQModel(BaseQModel):
 
     pre_lm_head_norm_module = "transformer.encoder.final_layernorm"
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "transformer",
         "encoder",
         "layers",

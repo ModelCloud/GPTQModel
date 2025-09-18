@@ -34,7 +34,7 @@ class GLM4MoEGPTQ(BaseQModel):
     # Set to False since GLM-4.5-Air may have dynamic module structures
     layer_modules_strict = False
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "model",
         "layers",
         "#",

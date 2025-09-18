@@ -30,7 +30,7 @@ from ..base import BaseQModel
 class OvisQModel(BaseQModel):
     pre_lm_head_norm_module = "llm.model.norm"
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "llm",
         "model",
         "layers",

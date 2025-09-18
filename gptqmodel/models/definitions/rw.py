@@ -20,7 +20,7 @@ from ..base import BaseQModel
 class RwgQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "transformer",
         "h",
         "#",

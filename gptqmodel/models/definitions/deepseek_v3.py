@@ -33,7 +33,7 @@ class DeepSeekV3QModel(BaseQModel):
     # DeepSeek V3 uses dynamic modules based on lora(rank):
     layer_modules_strict = False
 
-    _layers_modules_tree = [
+    layers_modules_tree = [
         "model",
         "layers",
         "#",
