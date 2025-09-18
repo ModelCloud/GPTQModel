@@ -77,12 +77,17 @@ class FORMAT(str, Enum):
     BITBLAS = "bitblas"
     QQQ = "qqq"
 
+    GEMM = "gemm"
+    GEMV = "gemv"
+    GEMV_FAST = "gemv_fast"
+
 
 # quant methods
 class QUANT_METHOD(str, Enum):
     GPTQ = "gptq"
     AUTO_ROUND = "auto_round"
     QQQ = "qqq"
+    AWQ = "awq"
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
@@ -100,6 +105,12 @@ QUANT_METHOD_FORMAT_MAPPING = {
     },
     QUANT_METHOD.QQQ: {
         FORMAT.QQQ,
+    },
+    QUANT_METHOD.AWQ: {
+        FORMAT.GEMM,
+        FORMAT.GEMV,
+        FORMAT.GEMV_FAST,
+        FORMAT.MARLIN,
     },
 }
 
@@ -215,6 +226,8 @@ class QuantizeConfig():
     v2_alpha: float = 0.25
     v2_memory_device: str = "auto" #
 
+    zero_point: bool = field(default=True) # awq config
+
     # Skip all heavy computations for testing model loading
     mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
 
@@ -245,6 +258,11 @@ class QuantizeConfig():
         if self.quant_method == QUANT_METHOD.QQQ and self.format != FORMAT.QQQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
             self.format = FORMAT.QQQ
+
+        # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
+        if self.quant_method == QUANT_METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM]:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
+            self.format = FORMAT.GEMM
 
         if self.format not in valid_formats:
             raise ValueError(
@@ -411,7 +429,7 @@ class QuantizeConfig():
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif val == FORMAT.BITBLAS:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
-                elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND, QUANT_METHOD.QQQ}:
+                elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND, QUANT_METHOD.QQQ, QUANT_METHOD.AWQ}:
                     raise ValueError(f"QuantizeConfig: Unknown quantization method: `{val}`.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
@@ -476,6 +494,9 @@ class QuantizeConfig():
             # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
+
+        if self.quant_method == QUANT_METHOD.AWQ:
+            out["zero_point"] = self.zero_point
 
         dynamic = out["dynamic"]
         if dynamic:

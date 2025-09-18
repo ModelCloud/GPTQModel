@@ -21,9 +21,9 @@ from typing import Callable, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import LoopProcessor, get_max_memory
 from ..looper.named_module import NamedModule
-from ..models import BaseGPTQModel
+from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ, GPTQv2
@@ -174,18 +174,7 @@ class GPTQProcessor(LoopProcessor):
         #         iteration=name_index,
         #     )
 
-        stats_0 = torch.cuda.memory_stats(DEVICE_0)
-        active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
-        peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
 
-        if torch.cuda.device_count() > 1:
-            stats_1 = torch.cuda.memory_stats(DEVICE_1)
-            active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
-            peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
-
-            max_memory = f"{active_0:.2f}MB, {active_1:.2f}MB"
-        else:
-            max_memory = f"{active_0:.2f}MB"
 
         stat = {
             PROCESS_LOG_NAME:  self.name(),
@@ -196,7 +185,7 @@ class GPTQProcessor(LoopProcessor):
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
-            PROCESS_MAX_MEMORY: max_memory,
+            PROCESS_MAX_MEMORY: get_max_memory(),
         }
 
         if self.qcfg.dynamic is not None:
@@ -240,7 +229,7 @@ class GPTQProcessor(LoopProcessor):
         module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
 
-    def finalize(self, model: BaseGPTQModel, **kwargs):
+    def finalize(self, model: BaseQModel, **kwargs):
         # block for streams
         if self.stream:
             torch_sync()

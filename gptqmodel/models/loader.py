@@ -50,7 +50,7 @@ from ..utils.importer import auto_select_device, normalize_device_device_map, se
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_device_support
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_config_seq_len, find_modules,
-                           get_checkpoints, get_moe_layer_modules, gptqmodel_post_init,
+                           get_checkpoints, get_module_by_name_prefix, gptqmodel_post_init,
                            load_checkpoint_in_model_then_tie_weights, make_quant, simple_dispatch_model,
                            verify_model_hash, verify_sharded_model_hashes)
 from ._const import DEVICE, normalize_device
@@ -319,6 +319,11 @@ def ModelLoader(cls):
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 
+        if qcfg.format == FORMAT.GEMV_FAST:
+            # GEMV_FAST only supports torch.float16
+            log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
+            dtype = torch.float16
+
         # inject adapter into qcfg
         if adapter is not None:
             qcfg.adapter = adapter
@@ -434,7 +439,8 @@ def ModelLoader(cls):
 
         init_contexts = [no_init_weights()]
 
-        with ContextManagers(init_contexts):
+        layer_type = ""
+        with (ContextManagers(init_contexts)):
             cls.before_model_load(cls, load_quantized_model=True)
 
             if config.architectures:
@@ -466,24 +472,22 @@ def ModelLoader(cls):
             )
             model.checkpoint_file_name = model_save_name
 
-            if cls.dynamic_expert_index is not None:
-                if hasattr(config, "text_config"):
-                    num_experts = getattr(config.text_config, cls.dynamic_expert_index)
-                else:
-                    num_experts = getattr(config, cls.dynamic_expert_index)
-                cls.layer_modules = get_moe_layer_modules(layer_modules=cls.layer_modules,
-                                                          num_experts=num_experts)
+            # Get the first layer to determine layer type
+            layers, _ = get_module_by_name_prefix(model, cls.extract_layers_node())
+
+            layer0 = layers[0]
+            layer_type = layer0.__class__.__name__
 
             modules = find_modules(model)
-            ignore_modules = [cls.lm_head] + cls.base_modules
+            ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
 
             for name in list(modules.keys()):
                 # allow loading of quantized lm_head
                 if qcfg.lm_head and name == cls.lm_head:
                     continue
 
-                if not any(name.startswith(prefix) for prefix in cls.layers_node) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
-                        not name.endswith(ignore_module) for sublist in cls.layer_modules for ignore_module in sublist
+                if not any(name.startswith(prefix) for prefix in cls.extract_layers_node()) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
+                        not name.endswith(ignore_module) for sublist in cls.simple_layer_modules(config) for ignore_module in sublist
                 ):
                     # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
@@ -526,19 +530,19 @@ def ModelLoader(cls):
                 max_memory = accelerate.utils.get_balanced_memory(
                     model=model,
                     max_memory=max_memory,
-                    no_split_module_classes=[cls.layer_type],
+                    no_split_module_classes=[layer_type],
                     low_zero=(device_map == "balanced_low_0"),
                 )
         if not isinstance(device_map, dict):
             device_map = accelerate.infer_auto_device_map(
                 model,
                 max_memory=max_memory,
-                no_split_module_classes=[cls.layer_type],
+                no_split_module_classes=[layer_type],
             )
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if qcfg.format == FORMAT.GPTQ:
+        if qcfg.format in [FORMAT.GPTQ, FORMAT.GEMM]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
@@ -622,6 +626,7 @@ def ModelLoader(cls):
             sym=qcfg.sym,
             backend=backend,
             format=qcfg.format,
+            quant_method=qcfg.quant_method,
             device=device,
             pack_dtype=qcfg.pack_dtype,
         )

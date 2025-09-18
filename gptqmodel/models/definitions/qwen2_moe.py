@@ -14,47 +14,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class Qwen2MoeGPTQ(BaseGPTQModel):
+class Qwen2MoeQModel(BaseQModel):
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "num_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = ["model.layers"]
-    layer_type = "Qwen2DecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-        ["self_attn.o_proj"],
-
-        ["mlp.gate"],
-        ["mlp.shared_expert.up_proj", "mlp.shared_expert.gate_proj"],
-        ["mlp.shared_expert.down_proj"],
-
-        # uses dynamic_expert_index
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-    ]
-
-    layers_modules_tree = [
+    module_tree = [
         "model",
         "layers",
         "#",
         {
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": {
-                "gate": ("gate",),
-                "shared_expert": ("up_proj", "gate_proj", "down_proj"),
+                "gate": ("gate:0",),
+                "shared_expert": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "experts": {
-                    "#": ("up_proj", "gate_proj", "down_proj"),
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },
         }

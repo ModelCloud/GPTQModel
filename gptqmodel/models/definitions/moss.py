@@ -14,21 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class MOSSGPTQ(BaseGPTQModel):
-    base_modules = ["transformer.wte", "transformer.ln_f"]
+class MossQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_node = ["transformer.h"]
-    layer_type = "MossBlock"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.qkv_proj"],
-        ["attn.out_proj"],
-        ["mlp.fc_in"],
-        ["mlp.fc_out"],
+    module_tree = [
+        "transformer",
+        "h",
+        "#",
+        {
+            "ln_1": ("ln_1:!",),
+            "attn": ("qkv_proj:0", "out_proj:1"),
+            "mlp": ("fc_in:0", "fc_out:1"),
+        }
     ]

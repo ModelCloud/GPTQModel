@@ -14,14 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import LlamaGPTQ
+from . import LlamaQModel
 
 
-class ERNIE4_5GPTQ(LlamaGPTQ):
+class Ernie4_5QModel(LlamaQModel):
     require_trust_remote_code = True
     support_batch_quantize = False
     require_monkeypatch = True
-    layer_type = "Ernie4_5_DecoderLayer"
 
     def monkey_patch(self):
         from typing import Optional, Tuple

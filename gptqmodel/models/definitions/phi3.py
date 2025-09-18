@@ -13,40 +13,39 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class Phi3GPTQ(BaseGPTQModel):
-    base_modules = ["model.embed_tokens", "embed_dropout", "model.norm"]
+class Phi3QModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = "model.layers"
-    layer_type = ["Phi3DecoderLayer"]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.qkv_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.gate_up_proj"],
-        ["mlp.down_proj"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("qkv_proj:0", "o_proj:1"),
+            "mlp": ("gate_up_proj:0", "down_proj:1"),
+        }
     ]
 
-class PhiMoEGPTQForCausalLM(BaseGPTQModel):
+class PhiMoEGPTQForCausalLM(BaseQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
 
-    layer_type = "PhiMoEDecoderLayer"
-    layers_node = "model.layers"
-    base_modules = ["model.embed_tokens", "model.norm"]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-        [f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w1"],
-        [f"block_sparse_moe.experts.{EXPERT_INDEX_PLACEHOLDER}.w2"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "block_sparse_moe": {
+                "experts": {
+                    "#": ("w1:0", "w2:1"),
+                },
+            },
+        }
     ]
 
-__all__ = ["Phi3GPTQ", "PhiMoEGPTQForCausalLM"]
+__all__ = ["Phi3QModel", "PhiMoEGPTQForCausalLM"]

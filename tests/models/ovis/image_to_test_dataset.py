@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from gptqmodel.models import OvisGPTQ
+from gptqmodel.models import OvisQModel
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
 
@@ -79,7 +79,7 @@ def prepare_dataset(format_func, n_sample: int = 20) -> list[list[dict]]:
 
 
 def get_calib_dataset(model):
-    if isinstance(model, OvisGPTQ):
+    if isinstance(model, OvisQModel):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
 
     if isinstance(model, BaseQwen2VLGPTQ):

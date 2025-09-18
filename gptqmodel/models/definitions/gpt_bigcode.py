@@ -14,21 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class GPTBigCodeGPTQ(BaseGPTQModel):
-    base_modules = ["transformer.wpe", "transformer.wte", "transformer.ln_f"]
+class GptBigCodeQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_node = ["transformer.h"]
-    layer_type = "GPTBigCodeBlock"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.c_attn"],
-        ["attn.c_proj"],
-        ["mlp.c_fc"],
-        ["mlp.c_proj"],
+    module_tree = [
+        "transformer",
+        "h",
+        "#",
+        {
+            "ln_1": ("ln_1:!",),
+            "attn": ("c_attn:0", "c_proj:1"),
+            "ln_2": ("ln_2:!",),
+            "mlp": ("c_fc:0", "c_proj:1"),
+        }
     ]

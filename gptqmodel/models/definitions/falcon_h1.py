@@ -14,23 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class FalconH1GPTQ(BaseGPTQModel):
-    base_modules = ["model.embed_tokens"]
-
+class FalconH1QModel(BaseQModel):
     layers_node = "model.layers"
-    layer_type = "FalconH1DecoderLayer"
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-
-        ["mamba.in_proj", "mamba.out_proj"],
-
-        ["feed_forward.gate_proj", "feed_forward.up_proj"],
-        ["feed_forward.down_proj"],
+    module_tree= [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "mamba": ("in_proj:0", "out_proj:1"),
+            "feed_forward": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+        }
     ]

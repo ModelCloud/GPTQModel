@@ -14,11 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class ERNIE4_5_MOEGPTQ(BaseGPTQModel):
+class Ernie4_5_MoeQModel(BaseQModel):
     require_trust_remote_code = True
     support_batch_quantize = False
     require_monkeypatch = True
@@ -26,44 +25,28 @@ class ERNIE4_5_MOEGPTQ(BaseGPTQModel):
 
     dynamic_expert_index = "moe_num_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = ["model.layers"]
-    layer_type = "Ernie4_5_DecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-        ["self_attn.o_proj"],
-
-        ["mlp.gate_proj", "mlp.up_proj"],
-        ["mlp.down_proj"],
-
-        ["mlp.gate"],
-        ["mlp.shared_experts.up_proj", "mlp.shared_experts.gate_proj"],
-        ["mlp.shared_experts.down_proj"],
-
-        # uses dynamic_expert_index
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-    ]
-
-    layers_modules_tree = [
+    module_tree = [
         "model",
         "layers",
         "#",
         {
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": {
-                "up_proj": ("up_proj",),
                 "gate_proj": ("gate_proj",),
+                "up_proj": ("up_proj",),
                 "down_proj": ("down_proj",),
-                "gate": ("gate",),
-                "shared_experts": ("up_proj", "gate_proj", "down_proj"),
+                "gate": ("gate:!",),
+                "shared_experts": {
+                    "gate_proj": ("gate_proj:0",),
+                    "up_proj": ("up_proj:0",),
+                    "down_proj": ("down_proj:1",),
+                },
                 "experts": {
-                    "#": ("up_proj", "gate_proj", "down_proj"),
+                    "#": ("gate_proj:0", "upe_proj:0", "down_proj:1"),
                 },
             },
         }

@@ -113,46 +113,43 @@ jobs:
         include:
           - cuda: 128
             torch: 2.8.0
-            python: 311
+            python: 313t
           - cuda: 128
             torch: 2.8.0
             python: 312
-          # - cuda: 128
-          #   torch: 2.8.0
-          #   python: 313
+          - cuda: 128
+            torch: 2.8.0
+            python: 313
+          - cuda: 128
+            torch: 2.7.0
+            python: 313t
           - cuda: 128
             torch: 2.7.0
             python: 313
-          # - cuda: 128
-          #   torch: 2.6.0
-          #   python: 313
           - cuda: 128
             torch: 2.7.0
             python: 312
-          # - cuda: 128
-          #   torch: 2.6.0
-          #   python: 312
           - cuda: 128
             torch: 2.7.0
             python: 311
-          # - cuda: 128
-          #   torch: 2.6.0
-          #   python: 311
           - cuda: 126
             torch: 2.8.0
             python: 311
           - cuda: 126
             torch: 2.8.0
             python: 312
-          # - cuda: 126
-          #   torch: 2.8.0
-          #   python: 313
+          - cuda: 126
+            torch: 2.7.0
+            python: 313t
           - cuda: 126
             torch: 2.7.0
             python: 313
           - cuda: 126
             torch: 2.6.0
             python: 313
+          - cuda: 126
+            torch: 2.6.0
+            python: 313t
           - cuda: 126
             torch: 2.7.0
             python: 312
@@ -273,13 +270,11 @@ jobs:
           env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${python_version}_release"
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
             echo "env: ${env_name} exists, skip"
-            pyenv global $env_name
             pyenv local $env_name
             pyenv activate $env_name
           else
             echo "creating venv: ${env_name}..."
             pyenv virtualenv "$python_version" "$env_name" || true
-            pyenv global $env_name
             pyenv local $env_name
             pyenv activate $env_name
             bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
@@ -304,8 +299,10 @@ jobs:
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
-          twine check dist/$whl
-          pip install dist/$whl
+          if [ "${{ matrix.python }}" != "313t" ]; then # twine doesn't support python 3.13 yet
+            twine check dist/$whl
+          fi
+
       - name: Upload wheel
         continue-on-error: true
         run: |
@@ -314,6 +311,7 @@ jobs:
           if [ "$response" -eq 0 ]; then
             echo "UPLOADED=1" >> $GITHUB_ENV
           fi
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         continue-on-error: ${{ env.UPLOADED == '1' }}

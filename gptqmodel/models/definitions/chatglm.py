@@ -17,27 +17,28 @@ from typing import List
 
 import torch
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class ChatGLM(BaseGPTQModel):
+class ChatGLMQModel(BaseQModel):
     require_trust_remote_code = True
     require_monkeypatch = True
 
-    base_modules = ["transformer.embedding.word_embeddings", "transformer.output_layer"]
     pre_lm_head_norm_module = "transformer.encoder.final_layernorm"
 
-    layers_node = ["transformer.encoder.layers"]
-    layer_type = "GLMBlock"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attention.query_key_value"],
-        ["self_attention.dense"],
-        ["mlp.dense_h_to_4h"],
-        ["mlp.dense_4h_to_h"],
+    module_tree = [
+        "transformer",
+        "encoder",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attention": ("query_key_value:0", "dense:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("dense_h_to_4h:0", "dense_4h_to_h:1"),
+        }
     ]
+
     lm_head = "transformer.output_layer"
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:

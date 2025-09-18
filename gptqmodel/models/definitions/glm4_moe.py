@@ -14,11 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class GLM4MoEGPTQ(BaseGPTQModel):
+class GLM4MoEGPTQ(BaseQModel):
     # GLM-4.5-Air MoE Model Structure:
     # Layer 0: Standard MLP (no MoE experts) - handled by ["mlp.down_proj"], ["mlp.gate_proj"], ["mlp.up_proj"]
     # Layers 1-46: MoE with shared_experts and individual experts (128 experts total) - handled by MoE components
@@ -29,49 +28,32 @@ class GLM4MoEGPTQ(BaseGPTQModel):
     # config.n_routed_experts contains the actual expert count used for index
     dynamic_expert_index = "n_routed_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
     # Set to False since GLM-4.5-Air may have dynamic module structures
     layer_modules_strict = False
 
-    layers_node = ["model.layers"]
-    layer_type = "GLM4MoEDecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-
-        # MoE components for layers 1-46 (all have shared_experts and individual experts)
-        ["mlp.shared_experts.up_proj", "mlp.shared_experts.gate_proj"],
-        ["mlp.shared_experts.down_proj"],
-        ["mlp.gate"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-
-        # Standard MLP components for layer 0 (no experts)
-        ["mlp.down_proj"],
-        ["mlp.gate_proj"],
-        ["mlp.up_proj"],
-    ]
-
-    layers_modules_tree = [
+    module_tree = [
         "model",
         "layers",
         "#",
         {
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": {
-                "shared_experts": ("up_proj", "gate_proj", "down_proj"),
-                "gate": ("gate",),
-                "experts": {
-                    "#": ("up_proj", "gate_proj", "down_proj"),
+                "shared_experts": {
+                    "gate_proj": ("gate_proj:0",),
+                    "up_proj": ("up_proj:0",),
+                    "down_proj": ("down_proj:1",),
                 },
-                # Standard MLP components for layer 0 (no experts)
-                "down_proj": ("down_proj",),
+                "gate": ("gate:!",),
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
+                # Standard MLP components for layer 0
                 "gate_proj": ("gate_proj",),
+                "down_proj": ("down_proj",),
                 "up_proj": ("up_proj",),
             },
         }

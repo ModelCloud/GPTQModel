@@ -18,4 +18,4 @@ from .base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 
 
 class Qwen2_5_OmniGPTQ(BaseQwen2_5_OmniGPTQ):
-    layer_type = "Qwen2_5OmniDecoderLayer"
+    pass

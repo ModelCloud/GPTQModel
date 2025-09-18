@@ -14,11 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class Qwen3NextGPTQ(BaseGPTQModel):
+class Qwen3NextGPTQ(BaseQModel):
     """
     GPTQ config for Qwen3-Next (HF: Qwen3Next*), supporting:
       - Mixed token mixers per layer: 'full_attention' (self_attn.*) and 'linear_attention' (linear_attn.*)
@@ -28,40 +27,24 @@ class Qwen3NextGPTQ(BaseGPTQModel):
 
     layer_modules_strict = False
 
-    # Embeddings & final norm (pre lm_head)
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
     dynamic_expert_index = "num_experts"
-
-    # Decoder layers container and per-layer type
-    layers_node = ["model.layers"]
-    layer_type = "Qwen3NextDecoderLayer"
-
-    layer_modules = [
-            ['linear_attn.in_proj_qkvz', 'linear_attn.in_proj_ba'],
-            ['linear_attn.out_proj'],
-
-            ['mlp.gate'],
-            ['mlp.shared_expert_gate'],
-            ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.shared_expert.down_proj'],
-            [f'mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj', f'mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj'],
-            [f'mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj']
-        ]
 
     # -----------------------------------------------------------------------------
     # Preferred modern hierarchical spec. The loader will gracefully skip any
     # subpaths that don't exist on a given layer (e.g., dense vs MoE, or mixer type).
     # -----------------------------------------------------------------------------
-    layers_modules_tree = [
+    module_tree = [
         "model",
         "layers",
         "#",
         {
+            "input_layernorm": ("input_layernorm:!",),
             # Token mixers
             #"self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
             "linear_attn": ("in_proj_qkvz", "in_proj_ba", "out_proj"),  # conv1d intentionally excluded
-
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
             # MLP / MoE
             "mlp": {
                 # MoE router + shared expert (Qwen3NextSparseMoeBlock)
@@ -71,7 +54,7 @@ class Qwen3NextGPTQ(BaseGPTQModel):
 
                 # Experts list with dynamic index
                 "experts": {
-                    "#": ("up_proj", "gate_proj", "down_proj"),
+                    "#": ("gate_proj", "up_proj", "down_proj"),
                 },
             },
         },

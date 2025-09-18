@@ -14,23 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class GPTNeoXGPTQ(BaseGPTQModel):
-    base_modules = ["gpt_neox.embed_in", "gpt_neox.final_layer_norm"]
+class GPTNeoXQModel(BaseQModel):
     pre_lm_head_norm_module = "gpt_neox.final_layer_norm"
     lm_head = "embed_out"
 
-    layers_node = ["gpt_neox.layers"]
-    layer_type = "GPTNeoXLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attention.query_key_value"],
-        ["attention.dense"],
-        ["mlp.dense_h_to_4h"],
-        ["mlp.dense_4h_to_h"],
+    module_tree= [
+        "gpt_neox",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "attention": ("query_key_value:0", "dense:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("dense_h_to_4h:0", "dense_4h_to_h:1"),
+        }
     ]
-

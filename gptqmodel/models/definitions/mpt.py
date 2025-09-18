@@ -14,21 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class MPTGPTQ(BaseGPTQModel):
-    base_modules = ["transformer.wte", "transformer.norm_f"]
+class MptQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.norm_f"
 
-    layers_node = ["transformer.blocks"]
-    layer_type = "MPTBlock"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.Wqkv"],
-        ["attn.out_proj"],
-        ["ffn.up_proj"],
-        ["ffn.down_proj"]
+    module_tree = [
+        "transformer",
+        "blocks",
+        "#",
+        {
+            "attn": ("Wqkv:0", "out_proj:1"),
+            "ffn": ("up_proj:0", "down_proj:1"),
+        }
     ]

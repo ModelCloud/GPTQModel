@@ -64,81 +64,69 @@ from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
-from .base import BaseGPTQModel, QuantizeConfig  # noqa: E402
-from .definitions.apertus import ApertusGPTQ  # noqa: E402
-from .definitions.baichuan import BaiChuanGPTQ  # noqa: E402
-from .definitions.bloom import BloomGPTQ  # noqa: E402
-from .definitions.chatglm import ChatGLM  # noqa: E402
-from .definitions.codegen import CodeGenGPTQ  # noqa: E402
-from .definitions.cohere import CohereGPTQ  # noqa: E402
-from .definitions.cohere2 import Cohere2GPTQ  # noqa: E402
-from .definitions.dbrx import DbrxGPTQ  # noqa: E402
-from .definitions.dbrx_converted import DbrxConvertedGPTQ  # noqa: E402
-from .definitions.decilm import DeciLMGPTQ  # noqa: E402
-from .definitions.deepseek_v2 import DeepSeekV2GPTQ  # noqa: E402
-from .definitions.deepseek_v3 import DeepSeekV3GPTQ  # noqa: E402
-from .definitions.dream import DreamGPTQ  # noqa: E402
-from .definitions.ernie4_5 import ERNIE4_5GPTQ  # noqa: E402
-from .definitions.ernie4_5_moe import ERNIE4_5_MOEGPTQ  # noqa: E402
-from .definitions.exaone import ExaoneGPTQ  # noqa: E402
-from .definitions.falcon_h1 import FalconH1GPTQ  # noqa: E402
-from .definitions.gemma import GemmaGPTQ  # noqa: E402
-from .definitions.gemma2 import Gemma2GPTQ  # noqa: E402
-from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3GPTQ  # noqa: E402
-from .definitions.glm import GLM  # noqa: E402
+from .base import BaseQModel, QuantizeConfig  # noqa: E402
+from .definitions.apertus import ApertusQModel  # noqa: E402
+from .definitions.baichuan import BaiChuanQModel  # noqa: E402
+from .definitions.bloom import BloomQModel  # noqa: E402
+from .definitions.chatglm import ChatGLMQModel  # noqa: E402
+from .definitions.codegen import CodeGenQModel  # noqa: E402
+from .definitions.dbrx import DbrxQModel  # noqa: E402
+from .definitions.dbrx_converted import DbrxConvertedQModel  # noqa: E402
+from .definitions.decilm import DeciLMQModel  # noqa: E402
+from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
+from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
+from .definitions.dream import DreamQModel  # noqa: E402
+from .definitions.ernie4_5 import Ernie4_5QModel  # noqa: E402
+from .definitions.ernie4_5_moe import Ernie4_5_MoeQModel  # noqa: E402
+from .definitions.exaone import ExaOneQModel  # noqa: E402
+from .definitions.falcon_h1 import FalconH1QModel  # noqa: E402
+from .definitions.gemma2 import Gemma2QModel  # noqa: E402
+from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel  # noqa: E402
+from .definitions.glm import GlmQModel  # noqa: E402
 from .definitions.glm4_moe import GLM4MoEGPTQ  # noqa: E402
-from .definitions.gpt2 import GPT2GPTQ  # noqa: E402
-from .definitions.gpt_bigcode import GPTBigCodeGPTQ  # noqa: E402
-from .definitions.gpt_neo import GPTNeoGPTQ  # noqa: E402
-from .definitions.gpt_neox import GPTNeoXGPTQ  # noqa: E402
+from .definitions.gpt2 import GPT2QModel  # noqa: E402
+from .definitions.gpt_bigcode import GptBigCodeQModel  # noqa: E402
+from .definitions.gpt_neo import GptNeoQModel  # noqa: E402
+from .definitions.gpt_neox import GPTNeoXQModel  # noqa: E402
 from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
-from .definitions.gptj import GPTJGPTQ  # noqa: E402
-from .definitions.granite import GraniteGPTQ  # noqa: E402
-from .definitions.grinmoe import GrinMOEGPTQ  # noqa: E402
-from .definitions.hymba import HymbaGPTQ  # noqa: E402
-from .definitions.instella import InstellaGPTQ  # noqa: E402
-from .definitions.internlm import InternLMGPTQ  # noqa: E402
-from .definitions.internlm2 import InternLM2GPTQ  # noqa: E402
-from .definitions.kimi_k2 import KimiK2GPTQ  # noqa: E402
-from .definitions.klear import KlearGPTQ  # noqa: E402
-from .definitions.llama import LlamaGPTQ  # noqa: E402
-from .definitions.llama4 import Llama4GPTQ  # noqa: E402
-from .definitions.llava_qwen2 import LlavaQwen2GPTQ  # noqa: E402
-from .definitions.longcat_flash import LongCatFlashGPTQ  # noqa: E402
-from .definitions.longllama import LongLlamaGPTQ  # noqa: E402
-from .definitions.mimo import MimoGPTQ  # noqa: E402
+from .definitions.gptj import GptJQModel  # noqa: E402
+from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
+from .definitions.hymba import HymbaQModel  # noqa: E402
+from .definitions.instella import InstellaQModel  # noqa: E402
+from .definitions.internlm import InternLMQModel  # noqa: E402
+from .definitions.internlm2 import InternLM2QModel  # noqa: E402
+from .definitions.klear import KlearQModel  # noqa: E402
+from .definitions.llama import LlamaQModel  # noqa: E402
+from .definitions.llama4 import Llama4QModel  # noqa: E402
+from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
+from .definitions.longcat_flash import LongCatFlashQModel  # noqa: E402
+from .definitions.mimo import MimoQModel  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
-from .definitions.minicpm3 import MiniCPM3GPTQ  # noqa: E402
-from .definitions.mistral import MistralGPTQ  # noqa: E402
-from .definitions.mixtral import MixtralGPTQ  # noqa: E402
-from .definitions.mllama import MLlamaGPTQ  # noqa: E402
-from .definitions.mobilellm import MobileLLMGPTQ  # noqa: E402
-from .definitions.moss import MOSSGPTQ  # noqa: E402
-from .definitions.mpt import MPTGPTQ  # noqa: E402
-from .definitions.nemotron_h import NemotronHGPTQ  # noqa: E402
-from .definitions.olmo2 import Olmo2GPTQ  # noqa: E402
-from .definitions.opt import OPTGPTQ  # noqa: E402
-from .definitions.ovis import OvisGPTQ  # noqa: E402
-from .definitions.pangu_alpha import PanguAlphaGPTQ  # noqa: E402
-from .definitions.phi import PhiGPTQ  # noqa: E402
-from .definitions.phi3 import Phi3GPTQ, PhiMoEGPTQForCausalLM  # noqa: E402
+from .definitions.minicpm3 import MiniCpm3QModel  # noqa: E402
+from .definitions.mixtral import MixtralQModel  # noqa: E402
+from .definitions.mllama import MLlamaQModel  # noqa: E402
+from .definitions.mobilellm import MobileLLMQModel  # noqa: E402
+from .definitions.moss import MossQModel  # noqa: E402
+from .definitions.mpt import MptQModel  # noqa: E402
+from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
+from .definitions.opt import OptQModel  # noqa: E402
+from .definitions.ovis import OvisQModel  # noqa: E402
+from .definitions.pangu_alpha import PanguAlphaQModel  # noqa: E402
+from .definitions.phi import PhiQModel  # noqa: E402
+from .definitions.phi3 import Phi3QModel, PhiMoEGPTQForCausalLM  # noqa: E402
 from .definitions.phi4 import Phi4MMGPTQ  # noqa: E402
-from .definitions.qwen import QwenGPTQ  # noqa: E402
-from .definitions.qwen2 import Qwen2GPTQ  # noqa: E402
+from .definitions.qwen import QwenQModel  # noqa: E402
 from .definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
-from .definitions.qwen2_5_vl import Qwen2_5_VLGPTQ  # noqa: E402
-from .definitions.qwen2_moe import Qwen2MoeGPTQ  # noqa: E402
-from .definitions.qwen2_vl import Qwen2VLGPTQ  # noqa: E402
-from .definitions.qwen3 import Qwen3GPTQ  # noqa: E402
-from .definitions.qwen3_moe import Qwen3MoeGPTQ  # noqa: E402
+from .definitions.qwen2_5_vl import Qwen2_5_VLQModel  # noqa: E402
+from .definitions.qwen2_moe import Qwen2MoeQModel  # noqa: E402
+from .definitions.qwen2_vl import Qwen2VLQModel  # noqa: E402
+from .definitions.qwen3 import Qwen3QModel  # noqa: E402
+from .definitions.qwen3_moe import Qwen3MoeQModel  # noqa: E402
 from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
-from .definitions.rw import RWGPTQ  # noqa: E402
-from .definitions.seed_oss import SeedOSSGPTQ  # noqa: E402
-from .definitions.stablelmepoch import StableLMEpochGPTQ  # noqa: E402
-from .definitions.starcoder2 import Starcoder2GPTQ  # noqa: E402
-from .definitions.telechat2 import TeleChat2GPTQ
-from .definitions.xverse import XverseGPTQ  # noqa: E402
-from .definitions.yi import YiGPTQ  # noqa: E402
+from .definitions.rw import RwgQModel  # noqa: E402
+from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
+from .definitions.telechat2 import TeleChat2QModel
+from .definitions.xverse import XverseQModel  # noqa: E402
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -146,87 +134,87 @@ random.seed(787)
 numpy.random.seed(787)
 
 MODEL_MAP = {
-    "apertus": ApertusGPTQ,
-    "dream": DreamGPTQ,
-    "bloom": BloomGPTQ,
-    "gpt_neo": GPTNeoGPTQ,
-    "kimi_k2": KimiK2GPTQ,
-    "klear": KlearGPTQ,
-    "gpt_neox": GPTNeoXGPTQ,
-    "gptj": GPTJGPTQ,
-    "gpt2": GPT2GPTQ,
-    "llama": LlamaGPTQ,
-    "llama4": Llama4GPTQ,
-    "opt": OPTGPTQ,
-    "moss": MOSSGPTQ,
-    "chatglm": ChatGLM,
-    "glm": GLM,
-    "glm4": GLM,
+    "apertus": ApertusQModel,
+    "dream": DreamQModel,
+    "bloom": BloomQModel,
+    "gpt_neo": GptNeoQModel,
+    "kimi_k2": DeepSeekV3QModel, # 100% DeepSeekV3QModel clone
+    "klear": KlearQModel,
+    "gpt_neox": GPTNeoXQModel,
+    "gptj": GptJQModel,
+    "gpt2": GPT2QModel,
+    "llama": LlamaQModel,
+    "llama4": Llama4QModel,
+    "opt": OptQModel,
+    "moss": MossQModel,
+    "chatglm": ChatGLMQModel,
+    "glm": GlmQModel,
+    "glm4": GlmQModel,
     "glm4_moe": GLM4MoEGPTQ,
-    "gpt_bigcode": GPTBigCodeGPTQ,
-    "codegen": CodeGenGPTQ,
-    "cohere": CohereGPTQ,
-    "cohere2": Cohere2GPTQ,
-    "refinedWebModel": RWGPTQ,
-    "refinedWeb": RWGPTQ,
-    "falcon": RWGPTQ,
-    "baichuan": BaiChuanGPTQ,
-    "internlm": InternLMGPTQ,
-    "internlm2": InternLM2GPTQ,
-    "qwen": QwenGPTQ,
-    "mistral": MistralGPTQ,
-    "yi": YiGPTQ,
-    "xverse": XverseGPTQ,
-    "deci": DeciLMGPTQ,
-    "nemotron-nas": DeciLMGPTQ,
-    "stablelm_epoch": StableLMEpochGPTQ,
-    "stablelm": StableLMEpochGPTQ,
-    "starcoder2": Starcoder2GPTQ,
-    "mixtral": MixtralGPTQ,
-    "qwen2": Qwen2GPTQ,
-    "qwen3": Qwen3GPTQ,
-    "longllama": LongLlamaGPTQ,
-    "gemma": GemmaGPTQ,
-    "gemma2": Gemma2GPTQ,
-    "gemma3_text": Gemma3GPTQ,
+    "gpt_bigcode": GptBigCodeQModel,
+    "codegen": CodeGenQModel,
+    "cohere": LlamaQModel, # 100% llama clone
+    "cohere2": LlamaQModel, # 100% llama clone
+    "refinedWebModel": RwgQModel,
+    "refinedWeb": RwgQModel,
+    "falcon": RwgQModel,
+    "baichuan": BaiChuanQModel,
+    "internlm": InternLMQModel,
+    "internlm2": InternLM2QModel,
+    "qwen": QwenQModel,
+    "mistral": LlamaQModel, # 100% llama clone
+    "yi": LlamaQModel, # 100% llama clone
+    "xverse": XverseQModel,
+    "deci": DeciLMQModel,
+    "nemotron-nas": DeciLMQModel,
+    "stablelm_epoch": LlamaQModel, # 100% llama clone
+    "stablelm": LlamaQModel, # 100% llama clone
+    "starcoder2": Starcoder2QModel,
+    "mixtral": MixtralQModel,
+    "qwen2": LlamaQModel, # 100% llama clone
+    "qwen3": Qwen3QModel,
+    "longllama": LlamaQModel,  # 100% llama clone
+    "gemma": LlamaQModel, # 100% llama clone
+    "gemma2": Gemma2QModel,
+    "gemma3_text": Gemma3QModel,
     "gemma3": Gemma3ForConditionalGenerationGPTQ,
-    "phi": PhiGPTQ,
-    "phi3": Phi3GPTQ,
+    "phi": PhiQModel,
+    "phi3": Phi3QModel,
     "phi4mm": Phi4MMGPTQ,
     "phimoe": PhiMoEGPTQForCausalLM,
-    "mpt": MPTGPTQ,
+    "mpt": MptQModel,
     "minicpm": MiniCPMGPTQ,
-    "minicpm3": MiniCPM3GPTQ,
-    "qwen2_moe": Qwen2MoeGPTQ,
-    "qwen3_moe": Qwen3MoeGPTQ,
+    "minicpm3": MiniCpm3QModel,
+    "qwen2_moe": Qwen2MoeQModel,
+    "qwen3_moe": Qwen3MoeQModel,
     "qwen3_next": Qwen3NextGPTQ,
-    "qwen2_vl": Qwen2VLGPTQ,
-    "qwen2_5_vl": Qwen2_5_VLGPTQ,
+    "qwen2_vl": Qwen2VLQModel,
+    "qwen2_5_vl": Qwen2_5_VLQModel,
     "qwen2_5_omni": Qwen2_5_OmniGPTQ,
-    "dbrx": DbrxGPTQ,
-    "dbrx_converted": DbrxConvertedGPTQ,
-    "deepseek_v2": DeepSeekV2GPTQ,
-    "deepseek_v3": DeepSeekV3GPTQ,
-    "exaone": ExaoneGPTQ,
-    "grinmoe": GrinMOEGPTQ,
-    "mllama": MLlamaGPTQ,
-    "granite": GraniteGPTQ,
-    "mobilellm": MobileLLMGPTQ,
-    "hymba": HymbaGPTQ,
-    "olmo2": Olmo2GPTQ,
-    "ovis": OvisGPTQ,
-    "telechat": TeleChat2GPTQ,
-    "instella": InstellaGPTQ,
-    "mimo": MimoGPTQ,
-    "falcon_h1": FalconH1GPTQ,
-    "gpt_pangu": PanguAlphaGPTQ,
-    "ernie4_5": ERNIE4_5GPTQ,
-    "ernie4_5_moe": ERNIE4_5_MOEGPTQ,
-    "seed_oss": SeedOSSGPTQ,
+    "dbrx": DbrxQModel,
+    "dbrx_converted": DbrxConvertedQModel,
+    "deepseek_v2": DeepSeekV2QModel,
+    "deepseek_v3": DeepSeekV3QModel,
+    "exaone": ExaOneQModel,
+    "grinmoe": GrinMoeQModel,
+    "mllama": MLlamaQModel,
+    "granite": LlamaQModel, # 100% llama clone
+    "mobilellm": MobileLLMQModel,
+    "hymba": HymbaQModel,
+    "olmo2": LlamaQModel, # 100% llama clone
+    "ovis": OvisQModel,
+    "telechat": TeleChat2QModel,
+    "instella": InstellaQModel,
+    "mimo": MimoQModel,
+    "falcon_h1": FalconH1QModel,
+    "gpt_pangu": PanguAlphaQModel,
+    "ernie4_5": Ernie4_5QModel,
+    "ernie4_5_moe": Ernie4_5_MoeQModel,
+    "seed_oss": LlamaQModel, # 100% llama clone
     "gpt_oss": GPTOSSGPTQ,
-    "longcat_flash": LongCatFlashGPTQ,
-    "llava_qwen2": LlavaQwen2GPTQ,
-    "nemotron_h": NemotronHGPTQ,
+    "longcat_flash": LongCatFlashQModel,
+    "llava_qwen2": LlavaQwen2QModel,
+    "nemotron_h": NemotronHQModel,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
@@ -322,7 +310,7 @@ class GPTQModel:
             quantize_config: QuantizeConfig,
             trust_remote_code: bool = False,
             **model_init_kwargs,
-    ) -> BaseGPTQModel:
+    ) -> BaseQModel:
         if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
                    "quantization_config"):
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
@@ -356,7 +344,7 @@ class GPTQModel:
             # supports all hashlib hash methods
             verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
-    ) -> BaseGPTQModel:
+    ) -> BaseQModel:
         # normalize adapter to instance
         adapter = normalize_adapter(adapter)
 
@@ -421,14 +409,14 @@ class GPTQModel:
             log.info(f"Eval: loading using backend = `{backend}`")
             model = GPTQModel.load(model_id_or_path=model_or_id_or_path, backend=backend)
             model_id_or_path = model_or_id_or_path
-        elif isinstance(model_or_id_or_path, BaseGPTQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
+        elif isinstance(model_or_id_or_path, BaseQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
             model = model_or_id_or_path
             model_id_or_path = model.config.name_or_path  #
         else:
             raise ValueError(f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`")
 
         if tokenizer is None:
-            if isinstance(model, BaseGPTQModel):
+            if isinstance(model, BaseQModel):
                 tokenizer = model.tokenizer
             elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
                 tokenizer = Tokenicer.load(model_id_or_path)

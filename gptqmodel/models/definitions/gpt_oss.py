@@ -17,8 +17,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
 class GptOssExpertsNew(nn.Module):
@@ -137,24 +136,26 @@ class GptOssTopKRouterNew(nn.Module):
         router_scores = torch.zeros_like(router_logits).scatter_(1, router_indices, router_top_value)
         return router_scores, router_indices
 
-class GPTOSSGPTQ(BaseGPTQModel):
+class GPTOSSGPTQ(BaseQModel):
     dynamic_expert_index = "num_local_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = ["model.layers"]
-    layer_type = "GptOssDecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-        ["self_attn.o_proj"],
-
-        # uses dynamic_expert_index
-        [f"mlp.experts.gate_up.{EXPERT_INDEX_PLACEHOLDER}"],
-        [f"mlp.experts.down.{EXPERT_INDEX_PLACEHOLDER}"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": {
+                "experts": {
+                    "gate_up": {"#": ("#")},
+                    "down": {"#": ("#")},
+                }
+            }
+        }
     ]
 
     def before_model_load(self, load_quantized_model=False):

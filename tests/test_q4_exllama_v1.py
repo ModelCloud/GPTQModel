@@ -25,7 +25,7 @@ import torch  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, exllama_set_max_input_length  # noqa: E402
 from gptqmodel.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
-from gptqmodel.quantization import FORMAT  # noqa: E402
+from gptqmodel.quantization import FORMAT, QUANT_METHOD  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
 from gptqmodel.utils.model import gptqmodel_post_init  # noqa: E402
 from gptqmodel_exllama_kernels import prepare_buffers, set_tuning_params  # noqa: E402
@@ -1087,6 +1087,7 @@ class TestsQ4ExllamaV1(ModelTest):
             sym=True,
             backend=BACKEND.EXLLAMA_V1,
             format=FORMAT.GPTQ,
+            quant_method=QUANT_METHOD.GPTQ,
             pack_dtype=pack_dtype,
         )
 

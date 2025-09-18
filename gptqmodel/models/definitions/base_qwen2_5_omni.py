@@ -23,34 +23,24 @@ from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
 from .._const import CPU
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class BaseQwen2_5_OmniGPTQ(BaseGPTQModel):
+class BaseQwen2_5_OmniGPTQ(BaseQModel):
     loader = AutoModelForTextToWaveform
 
-    base_modules = ["thinker.model.embed_tokens", "thinker.model.norm"]
     pre_lm_head_norm_module = "thinker.model.norm"
 
-    layers_node = ["thinker.model.layers"]
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.up_proj", "mlp.gate_proj"],
-        ["mlp.down_proj"],
-    ]
-
-    layers_modules_tree = [
+    module_tree = [
         "thinker",
         "model",
         "layers",
         "#",
         {
-            "self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
-            "mlp": ("up_proj", "gate_proj", "down_proj"),
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
 

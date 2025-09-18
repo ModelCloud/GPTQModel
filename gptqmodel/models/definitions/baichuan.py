@@ -14,23 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class BaiChuanGPTQ(BaseGPTQModel):
-    # non-layer (root) modules
-    base_modules = ["model.embed_tokens", "model.norm"]
+class BaiChuanQModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
-    # repeating layers
-    layers_node = ["model.layers"]
-    layer_type = "DecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.W_pack"],
-        ["self_attn.o_proj"],
-        ["mlp.up_proj", "mlp.gate_proj"],
-        ["mlp.down_proj"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("W_pack:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+        }
     ]

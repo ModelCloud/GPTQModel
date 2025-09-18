@@ -14,26 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class QwenGPTQ(BaseGPTQModel):
-    base_modules = [
-        "transformer.wte",
-        "transformer.wpe",
-        "transformer.ln_f",
-        "transformer.visual",
-    ]
+class QwenQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_node = ["transformer.h"]
-    layer_type = "QWenBlock"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["attn.c_attn"],
-        ["attn.c_proj"],
-        ["mlp.w1", "mlp.w2"],
-        ["mlp.c_proj"],
+    module_tree = [
+        "transformer",
+        "h",
+        "#",
+        {
+            "ln_1": ("ln_1:!",),
+            "attn": ("c_attn:0", "c_proj:1"),
+            "ln_2": ("ln_2:!",),
+            "mlp": ("w1:0", "w2:0", "c_proj:1"),
+        }
     ]

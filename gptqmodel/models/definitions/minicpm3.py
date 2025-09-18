@@ -14,22 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class MiniCPM3GPTQ(BaseGPTQModel):
-    base_modules = ["model.embed_tokens",]
+class MiniCpm3QModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = ["model.layers"]
-    layer_type = "MiniCPM3DecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.q_a_proj","self_attn.kv_a_proj_with_mqa"],
-        ["self_attn.q_b_proj","self_attn.kv_b_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.gate_proj","mlp.up_proj"],
-        ["mlp.down_proj"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:1", "kv_b_proj:1", "o_proj:2"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+        }
     ]

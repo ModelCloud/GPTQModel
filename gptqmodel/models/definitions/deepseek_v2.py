@@ -14,12 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
 # Both DeepSeek-v2 and DeepSeek-v2-lite are supported in this model def
-class DeepSeekV2GPTQ(BaseGPTQModel):
+class DeepSeekV2QModel(BaseQModel):
     # deepseek_v2 requires custom model code
     require_trust_remote_code = True
 
@@ -27,42 +26,26 @@ class DeepSeekV2GPTQ(BaseGPTQModel):
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "n_routed_experts"
 
-    base_modules = ["model.embed_tokens", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = ["model.layers"]
-    layer_type = "DeepseekV2DecoderLayer"
 
     # DeepSeek V2-Lite uses dynamic modules based on lora(rank):
     # https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/modeling_deepseek.py#L712
     layer_modules_strict = False
 
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    # DeepSeek-V2 uses 160 experts, v2-lite is auto-switched during __init__
-    layer_modules = [
-        # DeepSeek-V2 and DeepSeek-V2-Lite use same model_type, but different self_attn
-        # so we provide different layer_modules usage.
-        # DeepSeek-V2-Lite usage
-        #["self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
-
-        # DeepSeek-V2 usage, included in layer 0-59
-        #["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
-
-        # merged v2-lite and v2
-        ["self_attn.q_a_proj", "self_attn.q_b_proj", "self_attn.q_proj", "self_attn.kv_a_proj_with_mqa", "self_attn.kv_b_proj"],
-
-        ["self_attn.o_proj"],
-
-        # included in layer 0
-        ["mlp.gate_proj", "mlp.up_proj"],
-        ["mlp.down_proj"],
-
-        # included in layer 1-59, uses dynamic_expert_index
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.gate_proj", f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.up_proj"],
-        [f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}.down_proj"],
-
-        # included in layer 1-59
-        ["mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"],
-        ["mlp.shared_experts.down_proj"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_a_proj:0", "q_b_proj:0", "q_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": {
+                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
+                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            },
+        }
     ]

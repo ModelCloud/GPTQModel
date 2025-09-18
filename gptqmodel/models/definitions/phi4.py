@@ -15,24 +15,36 @@
 # limitations under the License.
 
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class Phi4MMGPTQ(BaseGPTQModel):
-    base_modules = ["model.embed_tokens", "model.embed_tokens_extend", "model.norm"]
+class Phi4MMGPTQ(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = "model.layers"
-    layer_type = "Phi4MMDecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    # text modules only
-    layer_modules = [
-        ["self_attn.qkv_proj.base_layer"],
-        ["self_attn.o_proj.base_layer"],
-        ["mlp.gate_up_proj.base_layer"],
-        ["mlp.down_proj.base_layer"],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": {
+                "qkv_proj": {
+                    "base_layer": ("base_layer",),
+                },
+                "o_proj": {
+                    "base_layer": ("base_layer",),
+                }
+            },
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "mlp": {
+                "gate_up_proj": {
+                    "base_layer": ("base_layer",),
+                },
+                "down_proj": {
+                    "base_layer": ("base_layer",),
+                }
+            }
+        }
     ]
 
     require_monkeypatch = True

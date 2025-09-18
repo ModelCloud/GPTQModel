@@ -3,7 +3,7 @@ from typing import Union
 import torch
 from transformers import PreTrainedModel
 
-from ..models import BaseGPTQModel
+from ..models import BaseQModel
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from .log import setup_logger
@@ -19,7 +19,7 @@ except ImportError:
 
 log = setup_logger()
 
-def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedModel, BaseGPTQModel], gptq_config: QuantizeConfig, lm_head_name: str):
+def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedModel, BaseQModel], gptq_config: QuantizeConfig, lm_head_name: str):
     if not MLX_AVAILABLE:
         raise ValueError("MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
@@ -42,7 +42,7 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
 
     config = load_config(get_model_path(model_id_or_path))
 
-    if isinstance(model, BaseGPTQModel):
+    if isinstance(model, BaseQModel):
         model = model.model
 
     # Convert weights

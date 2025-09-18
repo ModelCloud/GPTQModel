@@ -14,47 +14,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ..base import BaseGPTQModel
+from ..base import BaseQModel
 
 
-class MixtralGPTQ(BaseGPTQModel):
-    base_modules = ["model.embed_tokens", "model.norm"]
+class MixtralQModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
-    layers_node = ["model.layers"]
-    layer_type = "MixtralDecoderLayer"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
-        ["self_attn.o_proj"],
-        [
-            "block_sparse_moe.experts.0.w1",
-            "block_sparse_moe.experts.1.w1",
-            "block_sparse_moe.experts.2.w1",
-            "block_sparse_moe.experts.3.w1",
-            "block_sparse_moe.experts.4.w1",
-            "block_sparse_moe.experts.5.w1",
-            "block_sparse_moe.experts.6.w1",
-            "block_sparse_moe.experts.7.w1",
-            "block_sparse_moe.experts.0.w3",
-            "block_sparse_moe.experts.1.w3",
-            "block_sparse_moe.experts.2.w3",
-            "block_sparse_moe.experts.3.w3",
-            "block_sparse_moe.experts.4.w3",
-            "block_sparse_moe.experts.5.w3",
-            "block_sparse_moe.experts.6.w3",
-            "block_sparse_moe.experts.7.w3",
-        ],
-        [
-            "block_sparse_moe.experts.0.w2",
-            "block_sparse_moe.experts.1.w2",
-            "block_sparse_moe.experts.2.w2",
-            "block_sparse_moe.experts.3.w2",
-            "block_sparse_moe.experts.4.w2",
-            "block_sparse_moe.experts.5.w2",
-            "block_sparse_moe.experts.6.w2",
-            "block_sparse_moe.experts.7.w2",
-        ],
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "input_layernorm": ("input_layernorm:!",),
+            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "block_sparse_moe": {
+                "experts": {
+                    "#": ("w1:0", "w3:0", "w2:1"),
+                }
+            }
+        }
     ]
