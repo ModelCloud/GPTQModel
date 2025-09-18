@@ -34,7 +34,6 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
-from ..quantization.awq.utils.module import get_op_name
 from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
@@ -1061,7 +1060,7 @@ class BaseQModel(nn.Module):
                             flags = parts[1:]
                             grp = next((int(p) for p in flags if p.isdigit()), 0)
                             max_current_group = max(max_current_group, grp)
-                
+
                 # Process nested entries with appropriate group offset
                 current_offset = parent_group_offset
                 for sub_parent, sub_entries in entries.items():
@@ -1071,7 +1070,7 @@ class BaseQModel(nn.Module):
                         template_parent = f"{parent}.{EXPERT_INDEX_PLACEHOLDER}"
                         # Use a higher offset for expert modules to avoid conflicts with parent level
                         expert_offset = current_offset + max_current_group + 100  # Large offset to avoid conflicts
-                        
+
                         # Handle special case where sub_entries is ("#",) or "#" - this means use the parent path directly
                         if (isinstance(sub_entries, (tuple, list)) and len(sub_entries) == 1 and sub_entries[0] == "#") or sub_entries == "#":
                             # For ("#",) or "#" format, use the template_parent directly with default group 0

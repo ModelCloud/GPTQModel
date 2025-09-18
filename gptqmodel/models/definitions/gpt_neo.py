@@ -23,7 +23,7 @@ class GptNeoQModel(BaseQModel):
 
     layers_modules_tree = [
         "transformer",
-        "h", 
+        "h",
         "#",
         {
             "ln_1": ("ln_1:!",),

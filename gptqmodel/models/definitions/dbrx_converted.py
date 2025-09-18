@@ -15,7 +15,6 @@
 # limitations under the License.
 
 from ..base import BaseQModel
-from .._const import EXPERT_INDEX_PLACEHOLDER
 
 
 class DbrxConvertedQModel(BaseQModel):

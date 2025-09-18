@@ -17,7 +17,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseQModel
 
 

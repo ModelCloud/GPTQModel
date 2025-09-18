@@ -16,7 +16,6 @@
 
 from transformers import AutoModelForImageTextToText
 
-from .._const import EXPERT_INDEX_PLACEHOLDER
 from ..base import BaseQModel
 
 
