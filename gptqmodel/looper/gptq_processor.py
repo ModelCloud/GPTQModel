@@ -245,6 +245,10 @@ class GPTQProcessor(LoopProcessor):
         if self.stream:
             torch_sync()
 
+        from accelerate import dispatch_model, disk_offload
+
+        model.model = dispatch_model(model.model, device_map = { "" : CPU}, offload_buffers=True)
+
         backend = kwargs.pop("backend")
         model.qlinear_kernel = pack_model(
             model=model.model,

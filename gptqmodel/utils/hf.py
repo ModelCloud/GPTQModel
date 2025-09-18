@@ -87,7 +87,7 @@ def build_shell_model(
     with init_empty_weights(include_buffers=True):
         shell = AutoModelForCausalLM.from_config(
             config,
-            dtype=dtype,  # new style (Transformers >= 4.50)
+            dtype=dtype,
             trust_remote_code=trust_remote_code,
             **init_kwargs
         )
