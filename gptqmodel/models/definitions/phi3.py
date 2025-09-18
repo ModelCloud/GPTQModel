@@ -18,19 +18,7 @@ from ..base import BaseQModel
 
 
 class Phi3QModel(BaseQModel):
-    base_modules = ["model.embed_tokens", "embed_dropout", "model.norm"]
     pre_lm_head_norm_module = "model.norm"
-
-    layers_node = "model.layers"
-
-    # TODO: full deprecation by gptqmodel v4.3
-    # legacy definition (deprecated): migrate to layers_modules_tree
-    layer_modules = [
-        ["self_attn.qkv_proj"],
-        ["self_attn.o_proj"],
-        ["mlp.gate_up_proj"],
-        ["mlp.down_proj"],
-    ]
 
     _layers_modules_tree = [
         "model",
@@ -52,6 +40,7 @@ class PhiMoEGPTQForCausalLM(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
             "block_sparse_moe": {
                 "experts": {
                     "#": ("w1:0", "w2:1"),

@@ -35,6 +35,7 @@ class Phi4MMGPTQ(BaseQModel):
                     "base_layer": ("base_layer",),
                 }
             },
+            "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": {
                 "gate_up_proj": {
                     "base_layer": ("base_layer",),
