@@ -206,14 +206,7 @@ class ModuleLooper():
 
         shared_kv_cache_dict = {}
 
-        # replace quantizable modules with hooked version
-        layers_modules_tree = self.gptq_model.generate_layers_modules_tree_simple(self.gptq_model._layers_modules_tree)
-        print(f"layers_modules_tree: {layers_modules_tree}")
-        if layers_modules_tree:
-            replace_module_with_hooked_tree(self.gptq_model.model, layers_modules_tree, debug=False)
-        else:
-            raise Exception("layers_modules_tree is now required for all model defs")
-            replace_module_with_hooked_legacy(self.gptq_model.model)
+        replace_module_with_hooked_legacy(self.gptq_model.model)
 
         if self.gptq_model.quantize_config.lm_head:
             lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
