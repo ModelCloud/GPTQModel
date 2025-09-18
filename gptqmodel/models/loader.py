@@ -331,7 +331,7 @@ def ModelLoader(cls):
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 
         # FIXME FORMAT.MARLIN may also support bf16
-        if qcfg.quant_method == QUANT_METHOD.AWQ and (qcfg.format == FORMAT.GEMV_FAST or qcfg.format == FORMAT.MARLIN):
+        if qcfg.quant_method == QUANT_METHOD.AWQ and qcfg.format in [FORMAT.GEMV_FAST, FORMAT.MARLIN]:
             # GEMV_FAST only supports torch.float16
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
