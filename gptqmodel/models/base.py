@@ -1017,10 +1017,6 @@ class BaseQModel(nn.Module):
         Output:
           _layer_modules = [ [items...], [items...], ... ]
         """
-        # Be lenient: just require a dict as the 4th element.
-        if not (isinstance(tree, list) and len(tree) >= 4 and isinstance(tree[3], dict)):
-            raise ValueError("module_tree must be ['model','layers','#',{...}] (4th element a dict)")
-
         mapping = tree[3]
         out_blocks = []
 
