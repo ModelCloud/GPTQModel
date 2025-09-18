@@ -49,7 +49,7 @@ from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_device_support
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_config_seq_len, find_modules,
                            get_checkpoints, gptqmodel_post_init, load_checkpoint_in_model_then_tie_weights, make_quant,
-                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes)
+                           simple_dispatch_model, verify_model_hash, verify_sharded_model_hashes, get_module_by_name_prefix)
 from ._const import DEVICE, normalize_device
 
 log = setup_logger()
@@ -478,7 +478,9 @@ def ModelLoader(cls):
             model.checkpoint_file_name = model_save_name
 
             # Get the first layer to determine layer type
-            layer0 = model.model.layers[0]
+            layers, _ = get_module_by_name_prefix(model, cls.extract_layers_node())
+
+            layer0 = layers[0]
             layer_type = layer0.__class__.__name__
 
             modules = find_modules(model)
