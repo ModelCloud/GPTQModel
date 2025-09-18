@@ -273,13 +273,11 @@ jobs:
           env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${python_version}_release"
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
             echo "env: ${env_name} exists, skip"
-            pyenv global $env_name
             pyenv local $env_name
             pyenv activate $env_name
           else
             echo "creating venv: ${env_name}..."
             pyenv virtualenv "$python_version" "$env_name" || true
-            pyenv global $env_name
             pyenv local $env_name
             pyenv activate $env_name
             bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
