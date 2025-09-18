@@ -31,12 +31,15 @@ from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
+from ..nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
+from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
+from ..nn_modules.qlinear.awq_marlin import AWQMarlinQuantLinear
 from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_GEMVFast, WQLinear_Marlin
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import (append_str_prefix, exclude_layers_to_not_quantize,
                                              get_named_linears, get_op_name, set_op_by_name)
 from ..quantization.awq.utils.utils import clear_memory, get_best_device
-from ..quantization.config import QUANT_METHOD, QuantizeConfig
+from ..quantization.config import QUANT_METHOD, QuantizeConfig, FORMAT
 from ..utils.logger import setup_logger
 from ..utils.model import get_module_by_name_prefix, move_to
 from ..utils.torch import CPU, torch_sync
@@ -778,7 +781,16 @@ class AWQProcessor(LoopProcessor):
         if self.stream:
             torch_sync()
 
-        model.qlinear_kernel = AwqGEMMQuantLinear
+        if model.quantize_config.format == FORMAT.GEMM:
+            model.qlinear_kernel = AwqGEMMQuantLinear
+        elif model.quantize_config.format == FORMAT.GEMV:
+            model.qlinear_kernel = AwqGEMVQuantLinear
+        elif model.quantize_config.format == FORMAT.GEMV_FAST:
+            model.qlinear_kernel = AwqGEMVFastQuantLinear
+        elif model.quantize_config.format == FORMAT.MARLIN:
+            model.qlinear_kernel = AWQMarlinQuantLinear
+        else:
+            raise Exception(f"unkown format: {model.quantize_config.format}")
 
         # set quantized state
         model.quantized = True

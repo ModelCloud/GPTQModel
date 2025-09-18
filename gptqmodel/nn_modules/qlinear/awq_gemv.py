@@ -21,31 +21,14 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
+from ...utils.gemv import calculate_zeros_width
 from ...utils.logger import setup_logger
 
 log = setup_logger()
 
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
-def make_divisible(c, divisor):
-    return (c + divisor - 1) // divisor
-
-
-def calculate_zeros_width(in_features, group_size=128, pack_num=8):
-    if group_size >= 128:
-        size_multiplier = 1
-    elif group_size == 64:
-        size_multiplier = 2
-    elif group_size == 32:
-        size_multiplier = 4
-    else:
-        raise NotImplementedError
-
-    base_width = make_divisible(in_features // group_size, pack_num)
-    base_width = make_divisible(base_width, size_multiplier) * size_multiplier
-    return base_width
-
-class AwqGEMVQuantLinar(AWQuantLinear):
+class AwqGEMVQuantLinear(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -183,4 +166,4 @@ class AwqGEMVQuantLinar(AWQuantLinear):
             )
         )
 
-__all__ = ["AwqGEMVQuantLinar"]
+__all__ = ["AwqGEMVQuantLinear"]

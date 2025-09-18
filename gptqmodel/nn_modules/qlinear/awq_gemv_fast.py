@@ -21,6 +21,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
+from ...utils.gemv import calculate_zeros_width
 from ...utils.logger import setup_logger
 
 log = setup_logger()
@@ -40,10 +41,10 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
-    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_PACK_DTYPES = [torch.int16]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float16]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemm"
@@ -72,7 +73,39 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.GEMV_FAST),
             adapter=adapter,
+            register_awq_buffers=False,
             **kwargs)
+
+        self.split_k_iters = 8
+        self.interleave = 4
+
+        int32_pack_factor = 32 // self.bits
+
+        self.register_buffer(
+            "qweight",
+            torch.zeros((out_features // self.interleave, in_features // self.pack_factor * self.interleave), dtype=self.pack_dtype),
+        )
+        self.register_buffer(
+            "qzeros",
+            torch.zeros(
+                calculate_zeros_width(in_features, self.group_size) * int32_pack_factor,
+                out_features,
+                dtype=torch.float16,
+            ),
+        )
+        self.register_buffer(
+            "scales",
+            torch.zeros(
+                calculate_zeros_width(in_features, self.group_size) * int32_pack_factor,
+                out_features,
+                dtype=torch.float16,
+            ),
+        )
+
+        if bias:
+            self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
+        else:
+            self.bias = None
 
     def post_init(self):
         # if self.padded_infeatures != self.in_features:
@@ -85,9 +118,6 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
         #                               device=self.g_idx.device)
 
-        # awq only accepts float16
-        self.scales = self.scales.to(dtype=torch.float16)
-
         super().post_init()
 
     def forward(self, x: torch.Tensor):
@@ -96,6 +126,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
         inputs = x
         batch_size, n_tokens, _ = inputs.shape
+
         if batch_size < 8 and n_tokens == 1:
             out = awq_v2_ext.gemv_forward_cuda_decode(
                 inputs,

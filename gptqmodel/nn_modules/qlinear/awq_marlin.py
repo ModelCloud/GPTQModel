@@ -167,7 +167,7 @@ def apply_gptq_marlin_linear(
 
     return output.reshape(out_shape)
 
-class AWQuantLinear_Marlin(AWQuantLinear):
+class AWQMarlinQuantLinear(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -418,4 +418,4 @@ def dequantize_qzeros(layer):
 
     return unpacked_qzeros
 
-__all__ = ["AWQuantLinear_Marlin"]
+__all__ = ["AWQMarlinQuantLinear"]
