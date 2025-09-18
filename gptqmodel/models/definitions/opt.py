@@ -24,7 +24,7 @@ from ..base import BaseQModel
 class OptQModel(BaseQModel):
     pre_lm_head_norm_module = "model.decoder.final_layer_norm"
 
-    layers_modules_tree = [
+    module_tree = [
         "model",
         "decoder",
         "layers",

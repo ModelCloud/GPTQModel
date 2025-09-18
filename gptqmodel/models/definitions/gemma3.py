@@ -25,7 +25,7 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
     support_batch_quantize = False
     pre_lm_head_norm_module = "model.language_model.norm"
 
-    layers_modules_tree = [
+    module_tree = [
         "model",
         "language_model",
         "layers",

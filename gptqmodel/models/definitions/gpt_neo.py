@@ -21,7 +21,7 @@ class GptNeoQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.ln_f"
     lm_head = "lm_head"
 
-    layers_modules_tree = [
+    module_tree = [
         "transformer",
         "h",
         "#",

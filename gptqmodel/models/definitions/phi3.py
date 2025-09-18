@@ -19,7 +19,7 @@ from ..base import BaseQModel
 class Phi3QModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
-    layers_modules_tree = [
+    module_tree = [
         "model",
         "layers",
         "#",
@@ -32,7 +32,7 @@ class Phi3QModel(BaseQModel):
 class PhiMoEGPTQForCausalLM(BaseQModel):
     require_pkgs_version = ["transformers<=4.44.2"]
 
-    layers_modules_tree = [
+    module_tree = [
         "model",
         "layers",
         "#",

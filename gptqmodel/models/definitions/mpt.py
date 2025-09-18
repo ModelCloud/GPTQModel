@@ -20,7 +20,7 @@ from ..base import BaseQModel
 class MptQModel(BaseQModel):
     pre_lm_head_norm_module = "transformer.norm_f"
 
-    layers_modules_tree = [
+    module_tree = [
         "transformer",
         "blocks",
         "#",

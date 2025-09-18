@@ -20,7 +20,7 @@ from ..base import BaseQModel
 class ApertusQModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
-    layers_modules_tree = [
+    module_tree = [
         "model",
         "layers",
         "#",

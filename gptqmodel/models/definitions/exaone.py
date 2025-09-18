@@ -23,7 +23,7 @@ class ExaOneQModel(BaseQModel):
 
     pre_lm_head_norm_module = "transformer.ln_f"
 
-    layers_modules_tree= [
+    module_tree= [
         "transformer",
         "h",
         "#",

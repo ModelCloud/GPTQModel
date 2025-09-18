@@ -20,7 +20,7 @@ from ..base import BaseQModel
 class FalconH1QModel(BaseQModel):
     layers_node = "model.layers"
 
-    layers_modules_tree= [
+    module_tree= [
         "model",
         "layers",
         "#",

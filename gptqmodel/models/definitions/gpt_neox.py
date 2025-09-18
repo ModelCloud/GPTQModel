@@ -21,7 +21,7 @@ class GPTNeoXQModel(BaseQModel):
     pre_lm_head_norm_module = "gpt_neox.final_layer_norm"
     lm_head = "embed_out"
 
-    layers_modules_tree= [
+    module_tree= [
         "gpt_neox",
         "layers",
         "#",

@@ -35,7 +35,7 @@ class Qwen3NextGPTQ(BaseQModel):
     # Preferred modern hierarchical spec. The loader will gracefully skip any
     # subpaths that don't exist on a given layer (e.g., dense vs MoE, or mixer type).
     # -----------------------------------------------------------------------------
-    layers_modules_tree = [
+    module_tree = [
         "model",
         "layers",
         "#",
