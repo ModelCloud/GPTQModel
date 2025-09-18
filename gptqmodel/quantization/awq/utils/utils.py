@@ -5,7 +5,6 @@ import torch
 
 ipex_available = importlib.util.find_spec("intel_extension_for_pytorch") is not None
 try:
-    import triton as tl
     triton_available = True
 except ImportError:
     triton_available = False

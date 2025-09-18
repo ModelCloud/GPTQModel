@@ -48,7 +48,7 @@ def apply_scale(module, scales_list, input_feat_dict=None):
 
         if (
             isinstance(prev_op, nn.Linear)
-            and type(layers) == list
+            and type(layers) is list
             and isinstance(layers[0], nn.Linear)
         ):
             scale_fc_fcs(prev_op, layers, scales)
