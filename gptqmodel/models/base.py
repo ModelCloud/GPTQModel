@@ -1020,7 +1020,14 @@ class BaseQModel(nn.Module):
         Output:
           _layer_modules = [ [items...], [items...], ... ]
         """
-        mapping = tree[3]
+        mapping = None
+        for item in tree:
+            if isinstance(item, dict):
+                mapping = item
+                break
+        if mapping is None:
+            raise ValueError("Mapping configuration not found in the tree.")
+            
         out_blocks = []
 
         def process_entries(parent, entries, parent_group_offset=0):
