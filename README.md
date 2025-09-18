@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 09/18/2025 5.0.0-dev `main`: 🎉 AWQ quantization support! Complete refractor and simplification of model definitions in prepreation for future quantization formats.  
 * 09/16/2025 [4.2.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.5): `hyb_act` renamed to `act_group_aware`. Removed finicky `torch` import within `setup.py`. Packing bug fix and prebuilt Pytorch 2.8 whls. 
 * 09/12/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.0): ✨ New Models Support: Qwen3-Next, Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compat. Patch fix GIL=0 cuda error for multi-gpu. Fix compat with autoround + new transformers. 
 * 09/04/2025 [4.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ Meituan LongCat Flash Chat, Llama 4, GPT-OSS (BF16), and GLM-4.5-Air support.  New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
@@ -126,9 +127,11 @@ GPTQ-Model is a modular design supporting multiple quantization methods and feat
 |----------------------|---|---|---|---|---------------|
 | GPTQ                 | ✅ | ✅ | ✅ | ✅ | ✅             | 
 | EoRA                 | ✅ | ✅ | ✅ | ✅ | x             | 
+| AWQ                 | ✅ | ✅* | ✅* | ✅* | ✅*             | 
 | GPTQ v2              | ✅ | ✅ | ✅ | ✅ | ✅             | 
 | QQQ                  | ✅ | x | x | x | x             | 
 | Rotation             | ✅ | x | x | x | x             |  
+| Group Aware Activitation Reordering (GPTQ) | ✅ | ✅ | ✅ | ✅ | ✅             |  
 
 ## Multi-Modal
 
@@ -424,7 +427,7 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * EoRA: Nvidia, main-author: Shih-Yang Liu, arXiv preprint arXiv:2410.21271.
 * GAR: Intel, main-author: T Gafni, A Karnieli, Y Hanani, [Paper](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
-
+* AWQ: main-authors: Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song
 
 ## Citation
 
@@ -479,6 +482,14 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
       author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
       journal={arXiv preprint arXiv:2406.09904},
       year={2024}
+}
+
+# AWQ
+@article{lin2023awq,
+  title={AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration},
+  author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song},
+  journal={arXiv},
+  year={2023}
 }
 
 # GPTQ v2
