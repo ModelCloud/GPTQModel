@@ -217,7 +217,7 @@ class QuantizeConfig():
 
     # deprecated: only used for compat
     is_marlin_format: bool = False
-    
+
     # use mock quantization to quantize module so the gptq process can continue and not fail
     fail_safe: bool = field(default=False)
 

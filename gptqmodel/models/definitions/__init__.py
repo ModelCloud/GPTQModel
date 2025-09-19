@@ -45,7 +45,6 @@ from .hymba import HymbaQModel
 from .instella import InstellaQModel
 from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
-from .llama import LlamaQModel
 from .llama4 import Llama4QModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel

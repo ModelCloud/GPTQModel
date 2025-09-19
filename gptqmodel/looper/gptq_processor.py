@@ -31,8 +31,7 @@ from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
 from ..utils.offload import undo_offload_to_disk
-from ..utils.structure import print_module_tree
-from ..utils.torch import CPU, DEVICE_0, DEVICE_0_STREAM, DEVICE_1, torch_empty_cache, torch_streamCtx, torch_sync
+from ..utils.torch import CPU, torch_streamCtx, torch_sync
 
 log = setup_logger()
 lock = threading.Lock()

@@ -30,7 +30,7 @@ from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
-from ..utils.torch import CPU, DEVICE_0, DEVICE_0_STREAM, torch_streamCtx, torch_sync
+from ..utils.torch import CPU, DEVICE_0, torch_streamCtx, torch_sync
 
 log = setup_logger()
 

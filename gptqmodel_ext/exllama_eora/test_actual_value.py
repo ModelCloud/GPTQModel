@@ -1,4 +1,3 @@
-import copy
 import math
 
 import gptqmodel_exllama_eora

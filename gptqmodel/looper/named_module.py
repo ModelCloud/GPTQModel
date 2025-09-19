@@ -3,11 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from typing import Any, Dict
+from typing import Any
 
 import torch
 import transformers
-from gptqmodel.utils.torch import device_next
 from torch import nn
 from torch.nn.modules.conv import _ConvNd
 

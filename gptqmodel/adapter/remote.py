@@ -57,7 +57,7 @@ def resolve_path(path: str, filename: str) -> str: # return a valid file path to
             path = f"{path_split[0]}/{path_split[1]}"
             subfolder = "/".join(path_split[2:])
 
-        from huggingface_hub import HfApi, hf_hub_download
+        from huggingface_hub import hf_hub_download
 
         # _ = HfApi().list_repo_files(path)
 
