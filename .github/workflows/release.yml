@@ -61,7 +61,7 @@ env:
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
-  MAX_JOBS: 8
+  MAX_JOBS: 4
   GPTQMODEL_BUILD_QQQ: 0
   GTTQMODEL_BUILD_EORA: 0
   GPTQMODEL_BUILD_EXLLAMA_V1: 0
@@ -238,7 +238,7 @@ jobs:
     needs:
       - check-vm
     container:
-      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04
+      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_0919
       volumes:
         - /home/ci/models/pyenv:/opt/pyenv
     steps:
