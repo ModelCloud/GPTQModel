@@ -238,7 +238,7 @@ jobs:
     needs:
       - check-vm
     container:
-      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04
+      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_0919
       volumes:
         - /home/ci/models/pyenv:/opt/pyenv
     steps:
