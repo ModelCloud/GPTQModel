@@ -405,10 +405,11 @@ class QuantizeConfig():
 
         field_names = [field.name for field in fields(cls)]
 
+        # FIXME convert awg quantize_config to gptq quantize_config
         normalized = {
-            QUANT_METHOD_FIELD: QUANT_METHOD.GPTQ,
+            QUANT_METHOD_FIELD: QUANT_METHOD.AWQ,
             # compat: default to gptq(v1) when loading models
-            FORMAT_FIELD_CODE: format if format else FORMAT.GPTQ,
+            FORMAT_FIELD_CODE: FORMAT.GEMM,
         }
         for key, val in quantize_cfg.items():
             key = key.lower()

@@ -253,15 +253,15 @@ class MarlinQuantLinear(BaseQuantLinear):
             ),
         )
 
-        set_weight_attrs(
-            self.qweight,
-            {
-                "input_dim": 0,
-                "output_dim": 1,
-                "packed_dim": 0,
-                "pack_factor": self.pack_factor,
-            },
-        )
+        # set_weight_attrs(
+        #     self.qweight,
+        #     {
+        #         "input_dim": 0,
+        #         "output_dim": 1,
+        #         "packed_dim": 0,
+        #         "pack_factor": self.pack_factor,
+        #     },
+        # )
 
         # Activation order
         self.register_buffer(
@@ -272,14 +272,14 @@ class MarlinQuantLinear(BaseQuantLinear):
             ),
         )
 
-        # Ignore warning from fused linear layers such as QKVParallelLinear.
-        set_weight_attrs(
-            self.g_idx,
-            {
-                "input_dim": 0,
-                "ignore_warning": True
-            },
-        )
+        # # Ignore warning from fused linear layers such as QKVParallelLinear.
+        # set_weight_attrs(
+        #     self.g_idx,
+        #     {
+        #         "input_dim": 0,
+        #         "ignore_warning": True
+        #     },
+        # )
 
         # Scales
         self.register_buffer(
@@ -291,13 +291,13 @@ class MarlinQuantLinear(BaseQuantLinear):
             ),
         )
 
-        set_weight_attrs(
-            self.scales,
-            {
-                "input_dim": scales_and_zp_input_dim,
-                "output_dim": 1,
-            },
-        )
+        # set_weight_attrs(
+        #     self.scales,
+        #     {
+        #         "input_dim": scales_and_zp_input_dim,
+        #         "output_dim": 1,
+        #     },
+        # )
 
         # Quantized zero-points
         self.register_buffer(
@@ -308,16 +308,16 @@ class MarlinQuantLinear(BaseQuantLinear):
                 dtype=torch.int32,
             ),
         )
-
-        set_weight_attrs(
-            self.qzeros,
-            {
-                "input_dim": scales_and_zp_input_dim,
-                "output_dim": 1,
-                "packed_dim": 1,
-                "pack_factor": self.pack_factor,
-            },
-        )
+        #
+        # set_weight_attrs(
+        #     self.qzeros,
+        #     {
+        #         "input_dim": scales_and_zp_input_dim,
+        #         "output_dim": 1,
+        #         "packed_dim": 1,
+        #         "pack_factor": self.pack_factor,
+        #     },
+        # )
 
         self.is_k_full = marlin_is_k_full(self.desc_act, is_row_parallel=False)
 

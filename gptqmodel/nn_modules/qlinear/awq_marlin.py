@@ -244,7 +244,55 @@ def get_scale_perms():
             [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
     return scale_perm, scale_perm_single
 
-def apply_gptq_marlin_linear(
+
+def maybe_warn_marlin_atomic_add_env():
+    if torch.compiler.is_dynamo_compiling():
+        return
+
+    return
+    # if envs.VLLM_MARLIN_USE_ATOMIC_ADD:
+    #     return
+    # log.info_once(
+    #     "Marlin kernel can achieve better performance for small size_n "
+    #     "with experimental use_atomic_add feature. "
+    #     "You can consider set environment variable "
+    #     "VLLM_MARLIN_USE_ATOMIC_ADD to 1 if possible.")
+
+def maybe_warn_marlin_atomic_add(device, dtype):
+    if torch.compiler.is_dynamo_compiling():
+        return
+    device_capability = torch.cuda.get_device_capability(device)
+    if device_capability[0] < 9 and dtype == torch.bfloat16:
+        logger.info_once(
+            "You are running Marlin kernel with bf16 on GPUs before SM90. "
+            "You can consider change to fp16 to achieve better performance "
+            "if possible.")
+
+def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
+                                 dtype: torch.dtype) -> bool:
+
+    # the performance of atomicAdd is better than global reduce
+    # only when m*n is small and k is large
+    if n >= 2048 or k < 2048 or device.type != "cuda":
+        return False
+
+    # TODO
+    # disable atomicAdd reduce by default,
+    # one can enable it with VLLM_MARLIN_USE_ATOMIC_ADD=1
+    # if not envs.VLLM_MARLIN_USE_ATOMIC_ADD:
+    #     maybe_warn_marlin_atomic_add_env()
+    #     return False
+
+    # sm8x doesn't support atomicAdd + bfloat16 natively
+    device_capability = torch.cuda.get_device_capability(device)
+    if device_capability[0] < 9 and dtype == torch.bfloat16:
+        maybe_warn_marlin_atomic_add(device, dtype)
+        return False
+
+    return True
+
+
+def apply_awq_marlin_linear(
         input: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
@@ -252,36 +300,37 @@ def apply_gptq_marlin_linear(
         g_idx: torch.Tensor,
         g_idx_sort_indices: torch.Tensor,
         workspace: torch.Tensor,
-        num_bits: int,
+        quant_type: ScalarType,
         output_size_per_partition: int,
         input_size_per_partition: int,
-        is_k_full: bool,
-        bias: torch.Tensor,
-        fp32: bool,
-) -> torch.Tensor:
-
+        bias: Optional[torch.Tensor] = None,
+        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
-    output = gptqmodel_marlin_kernels.gptq_marlin_gemm(
-        reshaped_x,
-        weight,
-        weight_scale,
-        weight_zp,
-        g_idx,
-        g_idx_sort_indices,
-        workspace,
-        num_bits,
-        reshaped_x.shape[0],
-        output_size_per_partition,
-        input_size_per_partition,
-        is_k_full,
-        False,
-        fp32, # <- True: enable fp32 reduce for higher accuracy, False: fp16
-    )
+    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+                                                  n=output_size_per_partition,
+                                                  k=reshaped_x.size(1),
+                                                  device=input.device,
+                                                  dtype=input.dtype)
 
-    if bias is not None:
-        output.add_(bias)  # In-place add
+    output = gptqmodel_marlin_kernels.gptq_marlin_gemm(reshaped_x,
+                                  None,
+                                  weight,
+                                  bias,
+                                  weight_scale,
+                                  None,
+                                  weight_zp,
+                                  g_idx,
+                                  g_idx_sort_indices,
+                                  workspace,
+                                  quant_type,
+                                  size_m=reshaped_x.shape[0],
+                                  size_n=output_size_per_partition,
+                                  size_k=input_size_per_partition,
+                                  use_atomic_add=use_atomic_add,
+                                  use_fp32_reduce=use_fp32_reduce,
+                                  is_zp_float=False)
 
     return output.reshape(out_shape)
 
@@ -338,23 +387,31 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             register_awq_buffers=False,
             **kwargs)
 
-        ######################################################
-        ## These shapes are only specific for Marlin models ##
         self.register_buffer(
             "qweight",
-            torch.zeros(
-                (in_features // 16, out_features * 16 // 8),
+            torch.empty(
+                self.in_features,
+                self.out_features // self.pack_factor,
                 dtype=torch.int32,
             ),
         )
         self.register_buffer(
+            "qzeros",
+            torch.empty(
+                self.in_features // self.group_size,
+                self.out_features // self.pack_factor,
+                dtype=torch.int32,
+            ),
+        )
+
+        self.register_buffer(
             "scales",
-            torch.zeros(
-                (in_features // group_size, out_features),
+            torch.empty(
+                self.in_features // self.group_size,
+                self.out_features,
                 dtype=torch.float16,
             ),
         )
-        ######################################################
 
         if bias:
             self.register_buffer(

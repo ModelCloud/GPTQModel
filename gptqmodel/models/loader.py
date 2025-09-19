@@ -543,7 +543,7 @@ def ModelLoader(cls):
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if qcfg.format in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.MARLIN]:
+        if qcfg.format in [FORMAT.GPTQ, FORMAT.GEMM]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
