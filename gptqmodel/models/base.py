@@ -867,6 +867,8 @@ class BaseQModel(nn.Module):
             )
         elif get_device(module) == CPU and self.quantize_config.device != CPU:
             return move_to(module, device=self.quantize_config.device)
+        else:
+            return module
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         #return self.offload_to_disk(module=module)
@@ -875,7 +877,8 @@ class BaseQModel(nn.Module):
     def move_embed(self, device: str):
         for embed_module_name in self.get_base_modules(self.model):
             embed_module, _ = get_module_by_name_prefix(self.model, embed_module_name)
-            if embed_module is not None:
+            if embed_module is not None and hasattr(embed_module, 'weight'):
+                embed_module = self.pre_quantize(embed_module)
                 embed_module.to(device)
 
     def awq_skip_modules_for_scaling(self) -> bool:
