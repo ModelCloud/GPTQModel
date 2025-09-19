@@ -23,6 +23,7 @@ from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from ..nn_modules.qlinear.awq_exllama import AwqExllamaQuantLinear
 from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
@@ -62,9 +63,10 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
     }),
     QUANT_METHOD.AWQ: OrderedDict({
+        BACKEND.MARLIN: AwqMarlinQuantLinear,
         BACKEND.EXLLAMA_V2: AwqExllamaV2QuantLinear,
         BACKEND.EXLLAMA_V1: AwqExllamaQuantLinear,
-        BACKEND.GEMM: AwqGEMMQuantLinear, # TODO ADD more BACKEND
+        BACKEND.GEMM: AwqGEMMQuantLinear,
         BACKEND.GEMV: AwqGEMVQuantLinear,
         BACKEND.GEMV_FAST: AwqGEMVFastQuantLinear,
     }),
@@ -254,15 +256,30 @@ def select_quant_linear(
     elif backend == BACKEND.BITBLAS:
         qlinear = BitBLASQuantLinear
     elif backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16]:
-        qlinear = MarlinQuantLinear
+        if quant_method == QUANT_METHOD.AWQ:
+            qlinear = AwqMarlinQuantLinear
+        else:
+            qlinear = MarlinQuantLinear
     elif backend == BACKEND.EXLLAMA_EORA:
         qlinear = ExllamaEoraQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
-        qlinear = ExllamaV2QuantLinear
+        if quant_method == QUANT_METHOD.AWQ:
+            qlinear = AwqExllamaV2QuantLinear
+        else:
+            qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
-        qlinear = ExllamaQuantLinear
+        if quant_method == QUANT_METHOD.AWQ:
+            qlinear = AwqExllamaQuantLinear
+        else:
+            qlinear = ExllamaQuantLinear
     elif backend == BACKEND.QQQ:
         qlinear = QQQQuantLinear
+    elif backend == BACKEND.GEMM:
+        qlinear = AwqGEMMQuantLinear
+    elif backend == BACKEND.GEMV:
+        qlinear = AwqGEMVQuantLinear
+    elif backend == BACKEND.GEMV_FAST:
+        qlinear = AwqGEMVFastQuantLinear
     elif backend == BACKEND.TORCH:
         qlinear = TorchQuantLinear
     elif backend == BACKEND.TORCH_FUSED:

@@ -33,7 +33,6 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
 from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
@@ -300,14 +299,14 @@ class BaseQModel(nn.Module):
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
         layer_modules = filter_not_quantize_module(layer_modules)
-        print(f"simple_layer_modules layer_modules: {layer_modules}")
+        # print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 
     @classmethod
     def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False):
         full = cls.build_layer_modules(cls.module_tree)
         full = cls.build_moe_modules_if_need(model_config, full, is_awq_quantize)
-        print(f"full layer_modules: {full}")
+        # print(f"full layer_modules: {full}")
         return full
 
     def prepare_dataset(
@@ -483,13 +482,20 @@ class BaseQModel(nn.Module):
             log.warn("Quantize: batch_size overriden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
 
-        if self.quantize_config.format == FORMAT.MARLIN:
+        if self.quantize_config.quant_method != QUANT_METHOD.AWQ and self.quantize_config.format == FORMAT.MARLIN:
             raise ValueError(
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
 
-        if self.quantize_config.format == FORMAT.GEMV_FAST:
-            self.quantize_config.pack_dtype = torch.int16
+        if self.quantize_config.quant_method == QUANT_METHOD.AWQ:
+            if self.quantize_config.format == FORMAT.GEMV_FAST:
+                # AWQ GEMV_FAST only supports pack_dtype is torch.int16
+                log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
+                self.quantize_config.pack_dtype = torch.int16
+            elif self.quantize_config.format == FORMAT.MARLIN:
+                # AWQ MARLIN only supports zero_point is false
+                log.info("Quantize Model: Auto fix `zero_point` to `False`")
+                self.quantize_config.zero_point = False
 
         if self.support_batch_quantize is False:
             batch_size = 1
@@ -582,11 +588,10 @@ class BaseQModel(nn.Module):
         elif self.quantize_config.quant_method == QUANT_METHOD.AWQ:
             from ..looper.awq_processor import AWQProcessor
 
-            # TODO AWQ_BATCH_SIZE
-            # os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
+            os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
 
-            if self.model.config.model_type not in AWQ_CAUSAL_LM_MODEL_MAP.keys():
-                raise TypeError(f"{self.model.config.model_type} isn't supported yet.")
+            # if self.model.config.model_type not in AWQ_CAUSAL_LM_MODEL_MAP.keys():
+            #     raise TypeError(f"{self.model.config.model_type} isn't supported yet.")
 
             args["gptq_model"] = self
             args["model"] = self.model
@@ -1171,7 +1176,7 @@ class BaseQModel(nn.Module):
             if name != exclude:  # skip second node which is parallel in scope
                 out.append(f"{root}.{name}")
 
-        print(f"Base Modules: {out}")
+        # print(f"Base Modules: {out}")
         return out
 
     def generate_layers_modules_tree_simple(self, node):
