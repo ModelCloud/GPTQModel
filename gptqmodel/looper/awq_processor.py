@@ -21,27 +21,26 @@ from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
-import transformers
 from torch import nn
 from torch.nn import Module
 
 from ..looper.loop_processor import LoopProcessor, get_max_memory
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
+                             PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
 from ..nn_modules.qlinear.awq_marlin import AWQMarlinQuantLinear
 from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_GEMVFast, WQLinear_Marlin
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
-from ..quantization.awq.utils.module import (append_str_prefix, exclude_layers_to_not_quantize,
-                                             get_named_linears, get_op_name, set_op_by_name)
+from ..quantization.awq.utils.module import append_str_prefix, get_op_name, set_op_by_name
 from ..quantization.awq.utils.utils import clear_memory, get_best_device
 from ..quantization.config import FORMAT, QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import get_module_by_name_prefix, move_to
+from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import CPU, torch_sync
 
 log = setup_logger()
@@ -161,7 +160,7 @@ class AWQProcessor(LoopProcessor):
 
             print(f"AWQProcessor: model parameters are on meta device, using {target_device} instead")
             
-            modules[0](samples.to(torch.device(target_device)), use_cache=False)
+            self.model(samples.to(torch.device(target_device)), use_cache=False)
         except ValueError:  # work with early exit
             pass
         modules[0] = modules[0].module  # restore
@@ -790,6 +789,8 @@ class AWQProcessor(LoopProcessor):
         # block for streams
         if self.stream:
             torch_sync()
+
+        model.model = undo_offload_to_disk(module=model.model, include_buffers=True, delete_offload_folders=True)
 
         if model.quantize_config.format == FORMAT.GEMM:
             model.qlinear_kernel = AwqGEMMQuantLinear

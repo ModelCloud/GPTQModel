@@ -28,19 +28,15 @@ from ..looper.gptq_processor import GPTQProcessor
 from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
-from ..looper.native_processor import NativeProcessor
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
 from ..utils import ASYNC_WORKER
 from ..utils.logger import setup_logger
-from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
-                           get_moe_layer_modules, move_to, nested_move_to)
+from ..utils.model import find_modules, get_device, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
-from ..utils.structure import alias_from_turtle_for_submodule, print_module_tree
-from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
-                           HAS_CUDA, META, BalanceStrategy, device_next, device_next_reset,
-                           torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
+from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, META, BalanceStrategy,
+                           device_next, device_next_reset, torch_empty_cache, torch_sync)
 from .awq_processor import AWQProcessor
 
 log = setup_logger()
