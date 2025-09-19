@@ -33,7 +33,6 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
 from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
@@ -585,9 +584,6 @@ class BaseQModel(nn.Module):
             # TODO AWQ_BATCH_SIZE
             # os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
 
-            if self.model.config.model_type not in AWQ_CAUSAL_LM_MODEL_MAP.keys():
-                raise TypeError(f"{self.model.config.model_type} isn't supported yet.")
-
             args["gptq_model"] = self
             args["model"] = self.model
             args["batch_size"] = batch_size
@@ -867,6 +863,8 @@ class BaseQModel(nn.Module):
             )
         elif get_device(module) == CPU and self.quantize_config.device != CPU:
             return move_to(module, device=self.quantize_config.device)
+        else:
+            return module
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         #return self.offload_to_disk(module=module)
@@ -876,7 +874,10 @@ class BaseQModel(nn.Module):
         for embed_module_name in self.get_base_modules(self.model):
             embed_module, _ = get_module_by_name_prefix(self.model, embed_module_name)
             if embed_module is not None:
-                embed_module.to(device)
+                self.shell_module_materialize(
+                    target_submodule=embed_module,
+                    device=device,
+                )
 
     def awq_skip_modules_for_scaling(self) -> bool:
         pass

@@ -117,6 +117,7 @@ class AWQProcessor(LoopProcessor):
         layer_kwargs = {}
 
         best_device = get_best_device()
+        modules[0] = self.gptq_model.pre_quantize(modules[0])
         modules[0] = modules[0].to(best_device)
 
         # embed should be on same gpu/best device
@@ -149,7 +150,18 @@ class AWQProcessor(LoopProcessor):
             # If use_cache=True, layer_kwargs will contain past_key_values instead of attention_mask.
             # Autoawq does not pass the use_cache parameter here.
             # I haven't found the root cause yet.
-            self.model(samples.to(next(self.model.parameters()).device), use_cache=False)
+            
+            # Check if model parameters are on meta device and use best_device instead
+            # to avoid torch.autocast(device_type="meta") error in transformers
+            model_device = next(self.model.parameters()).device
+            if model_device.type == "meta":
+                target_device = best_device
+            else:
+                target_device = model_device
+
+            print(f"AWQProcessor: model parameters are on meta device, using {target_device} instead")
+            
+            modules[0](samples.to(torch.device(target_device)), use_cache=False)
         except ValueError:  # work with early exit
             pass
         modules[0] = modules[0].module  # restore
@@ -162,9 +174,7 @@ class AWQProcessor(LoopProcessor):
 
         del samples
         inps = inps[0]
-
-        modules[0] = modules[0].cpu()
-
+        
         # we no longer need embed, reduce vram
         self.gptq_model.move_embed("cpu")
 
