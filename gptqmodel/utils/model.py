@@ -54,7 +54,7 @@ from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import FORMAT_FIELD_JSON, QUANT_METHOD, dynamic_get
+from ..quantization.config import FORMAT_FIELD_CHECKPOINT, QUANT_METHOD, dynamic_get
 from . import has_gil_disabled
 from .backend import BACKEND
 from .importer import select_quant_linear
@@ -480,7 +480,7 @@ def convert_gptq_v1_to_v2_format(
     with tctl.threadpool_limits(limits=1):
         t = time.time()
         log.info(
-            f"Format: Converting `{FORMAT_FIELD_JSON}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
+            f"Format: Converting `{FORMAT_FIELD_CHECKPOINT}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
 
         for _, submodule in model.named_modules():
             # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
