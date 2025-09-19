@@ -221,6 +221,9 @@ class QuantizeConfig():
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
     is_marlin_format: bool = False
+    
+    # use mock quantization to quantize module so the gptq process can continue and not fail
+    fail_safe: bool = field(default=False)
 
     v2: bool = False
     v2_alpha: float = 0.25
