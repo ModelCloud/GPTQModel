@@ -43,6 +43,7 @@ from ..quantization.config import FORMAT, QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import get_module_by_name_prefix, move_to
 from ..utils.torch import CPU, torch_sync
+from ..utils.offload import undo_offload_to_disk
 
 log = setup_logger()
 
@@ -161,7 +162,7 @@ class AWQProcessor(LoopProcessor):
 
             print(f"AWQProcessor: model parameters are on meta device, using {target_device} instead")
             
-            modules[0](samples.to(torch.device(target_device)), use_cache=False)
+            self.model(samples.to(torch.device(target_device)), use_cache=False)
         except ValueError:  # work with early exit
             pass
         modules[0] = modules[0].module  # restore
@@ -790,6 +791,8 @@ class AWQProcessor(LoopProcessor):
         # block for streams
         if self.stream:
             torch_sync()
+
+        model.model = undo_offload_to_disk(module=model.model, include_buffers=True, delete_offload_folders=True)
 
         if model.quantize_config.format == FORMAT.GEMM:
             model.qlinear_kernel = AwqGEMMQuantLinear
