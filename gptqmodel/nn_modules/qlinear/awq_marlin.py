@@ -45,6 +45,12 @@ GPTQ_MARLIN_MIN_THREAD_N = 64
 GPTQ_MARLIN_MIN_THREAD_K = 128
 GPTQ_MARLIN_MAX_PARALLEL = 16
 
+def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
+    origin_shape = s.shape
+    _, scale_perm_single = get_scale_perms()
+    s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
+    return s.reshape(*origin_shape).contiguous()
+
 def set_weight_attrs(
     weight: torch.Tensor,
     weight_attrs: Optional[Dict[str, Any]],
@@ -404,9 +410,9 @@ class AwqMarlinQuantLinear(AWQuantLinear):
         # Repack weights from AWQ format to marlin format.
         marlin_qweight = gptqmodel_marlin_kernels.awq_marlin_repack(
             self.qweight,
-            size_k=self.in_features,
-            size_n=self.out_features,
-            num_bits=self.quant_config.quant_type.size_bits)
+            self.in_features,
+            self.out_features,
+            self.bits)
         replace_tensor(self, "qweight", marlin_qweight)
 
         # Permute scales from AWQ format to marlin format.
@@ -422,32 +428,15 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             self.qzeros,
             size_k=self.in_features // self.group_size,
             size_n=self.out_features,
-            num_bits=self.quant_config.quant_type.size_bits)
-        replace_parameter(layer, "qzeros", marlin_zp)
+            num_bits=self.bits)
+        replace_tensor(self, "qzeros", marlin_zp)
 
-        self.g_idx = marlin_make_empty_g_idx(self.qweight.device)
-        self.g_idx_sort_indices = marlin_make_empty_g_idx(self.qweight.device)
+        # Not-used
+        self.g_idx = marlin_make_empty_g_idx(device)
+        self.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
-        # No zero-point
-        self.zp = marlin_make_empty_g_idx(device)
-
-        # Repack weights from autogptq format to marlin format.
-        marlin_qweight = gptqmodel_marlin_kernels.gptq_marlin_repack(
-            self.qweight,
-            self.g_idx_sort_indices,
-            self.in_features,
-            self.out_features,
-            self.bits,
-            self.pack_dtype_bits)
-        replace_tensor(self, "qweight", marlin_qweight)
-
-        # Permute scales from autogptq format to marlin format.
-        marlin_scales = marlin_permute_scales(
-            self.scales,
-            size_k=self.in_features,
-            size_n=self.out_features,
-            group_size=self.group_size)
-        replace_tensor(self, "scales", marlin_scales)
+        if hasattr(self, "bias") and self.bias is not None:
+            self.bias.data = marlin_permute_bias(self.bias)
 
         super().post_init()
 
