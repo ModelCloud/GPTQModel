@@ -21,7 +21,6 @@ import os
 import threadpoolctl
 
 from ..utils.logger import setup_logger
-from ..utils.structure import print_module_tree
 
 log = setup_logger()
 
@@ -298,8 +297,8 @@ class GPTQModel:
             )
 
         # debug model structure
-        if debug:
-            print_module_tree(m.model)
+        # if debug:
+        #     print_module_tree(m.model)
 
         return m
 

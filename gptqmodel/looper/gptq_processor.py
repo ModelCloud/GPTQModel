@@ -30,6 +30,8 @@ from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
+from ..utils.offload import undo_offload_to_disk
+from ..utils.structure import print_module_tree
 from ..utils.torch import CPU, DEVICE_0, DEVICE_0_STREAM, DEVICE_1, torch_empty_cache, torch_streamCtx, torch_sync
 
 log = setup_logger()
@@ -233,6 +235,10 @@ class GPTQProcessor(LoopProcessor):
         # block for streams
         if self.stream:
             torch_sync()
+
+        model.model = undo_offload_to_disk(module=model.model, include_buffers=True, delete_offload_folders=True)
+        # print("finalize")
+        # print_module_tree(model.model)
 
         backend = kwargs.pop("backend")
         model.qlinear_kernel = pack_model(

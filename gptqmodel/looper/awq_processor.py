@@ -39,7 +39,7 @@ from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import (append_str_prefix, exclude_layers_to_not_quantize,
                                              get_named_linears, get_op_name, set_op_by_name)
 from ..quantization.awq.utils.utils import clear_memory, get_best_device
-from ..quantization.config import QUANT_METHOD, QuantizeConfig, FORMAT
+from ..quantization.config import FORMAT, QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import get_module_by_name_prefix, move_to
 from ..utils.torch import CPU, torch_sync

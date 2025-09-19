@@ -17,8 +17,12 @@
 from .backend import BACKEND
 from .logger import setup_logger
 from .python import gte_python_3_13_3, has_gil_control, has_gil_disabled, log_gil_requirements_for
+from .threads import AsyncManager
+from .vram import get_vram
 
 log = setup_logger()
+
+ASYNC_WORKER = AsyncManager(threads=1)
 
 # TODO: datasets is not compatible with free threading
 if has_gil_disabled():
@@ -33,7 +37,3 @@ else:
         "Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.")
 
     log_gil_requirements_for("utils/Perplexity")
-
-
-
-from .vram import get_vram

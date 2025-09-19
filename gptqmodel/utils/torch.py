@@ -1,18 +1,8 @@
-# Copyright 2024-2025 ModelCloud.ai
-# Copyright 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
 import contextlib
 import gc as py_gc
 from enum import Enum
@@ -34,6 +24,9 @@ HAS_CUDA = False
 HAS_XPU = False
 HAS_MPS = False
 HAS_MLX = False
+
+CPU = torch.device("cpu")
+META = torch.device("meta")
 
 class BalanceStrategy(str, Enum):
     MEMORY = "memory", # make vram more spread out
@@ -173,7 +166,7 @@ def auto_select_torch_device(index: int = 0):
     elif HAS_MPS:
         device = torch.device("mps") # mps has no index
     else:
-        device = torch.device("cpu") # cpu has no index
+        device = CPU # cpu has no index
 
     return device
 
@@ -186,13 +179,7 @@ def torch_devices() -> List[torch.device]:
     elif HAS_MPS:
         return [torch.device("mps")]
     else:
-        return [torch.device("cpu")]
-
-CPU = torch.device("cpu")
-DEVICE_0 = auto_select_torch_device(index=0)
-
-# device_1 may be same as device_0 if there is only 1 visible/active device
-DEVICE_1 = auto_select_torch_device(index=1)
+        return [CPU]
 
 ALL_DEVICES = torch_devices()
 
@@ -202,6 +189,10 @@ elif HAS_XPU:
     ALL_STREAMS = [torch.xpu.Stream(device=device) for device in ALL_DEVICES]
 else:
     ALL_STREAMS = [contextlib.nullcontext()]
+
+DEVICE_0 = auto_select_torch_device(index=0)
+# device_1 may be same as device_0 if there is only 1 visible/active device
+DEVICE_1 = auto_select_torch_device(index=1)
 
 DEVICE_0_STREAM = ALL_STREAMS[0]
 

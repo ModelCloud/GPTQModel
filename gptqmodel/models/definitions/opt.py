@@ -43,7 +43,7 @@ class OptQModel(BaseQModel):
 
         project_out, _ = get_module_by_name_prefix(self.model, ["model.decoder.project_out"])
         if project_out is not None:
-            self.pre_quantize(project_out)
+            project_out = self.pre_quantize(project_out)
 
             for element in inputs:
                 for i in range(len(element)):
