@@ -26,7 +26,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.quantization import FORMAT, FORMAT_FIELD_JSON  # noqa: E402
+from gptqmodel.quantization import FORMAT, FORMAT_FIELD_CHECKPOINT  # noqa: E402
 
 
 class TestSerialization(unittest.TestCase):
@@ -56,4 +56,4 @@ class TestSerialization(unittest.TestCase):
             with open(os.path.join(tmpdir, "quantize_config.json"), "r") as f:
                 quantize_config = json.load(f)
 
-            self.assertEqual(quantize_config[FORMAT_FIELD_JSON], "gptq")
+            self.assertEqual(quantize_config[FORMAT_FIELD_CHECKPOINT], "gptq")
