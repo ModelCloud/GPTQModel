@@ -311,6 +311,7 @@ class LoopProcessor:
     # submodule_finalize is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule):
         pass
+        #self.offload_to_disk(module=module)
 
     # last step, after all loop processor is called
     # finalize is called in reverse after all next sequential processes are called

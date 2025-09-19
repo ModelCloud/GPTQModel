@@ -55,6 +55,8 @@ RAND_SEED = 898
 log = LogBar.shared()
 
 class ModelTest(unittest.TestCase):
+    DEBUG = True # enable extra debug output
+
     TASK_NAME = EVAL.LM_EVAL.ARC_CHALLENGE
     # sub test can modify
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15  # -15%
@@ -198,6 +200,7 @@ class ModelTest(unittest.TestCase):
             trust_remote_code=trust_remote_code,
             dtype=dtype,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.TORCH_FUSED else "auto",
+            debug=self.DEBUG,
             **args,
         )
 
@@ -271,6 +274,7 @@ class ModelTest(unittest.TestCase):
             trust_remote_code=trust_remote_code,
             backend=self.LOAD_BACKEND,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.TORCH_FUSED else "auto",
+            debug=self.DEBUG,
             **kargs
         )
 

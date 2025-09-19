@@ -25,6 +25,8 @@ import accelerate
 import torch
 import transformers
 
+from ..utils.structure import print_module_tree
+
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
     try:
         from modelscope import snapshot_download
@@ -187,40 +189,24 @@ def ModelLoader(cls):
         model_init_kwargs["device_map"] = cpu_device_map
         model_init_kwargs["dtype"] = dtype
         model_init_kwargs["_fast_init"] = cls.require_fast_init
-        # model_init_kwargs["low_cpu_mem_usage"] = True
+        #model_init_kwargs["low_cpu_mem_usage"] = True
 
         cls.before_model_load(cls, load_quantized_model=False)
-        model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
-        # from concurrent.futures import ThreadPoolExecutor
-        #
-        # def fast_pin_model(model):
-        #     # Get total size needed in bytes
-        #     total_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
-        #
-        #     # Create pinned memory buffer (byte tensor)
-        #     pinned_buffer = torch.ByteTensor(total_bytes).pin_memory()
-        #
-        #     # Copy all parameters into the buffer
-        #     offset = 0
-        #     for param in model.parameters():
-        #         num_bytes = param.numel() * param.element_size()
-        #
-        #         # Create view into buffer
-        #         param_bytes = pinned_buffer[offset:offset + num_bytes].view(param.dtype)
-        #         param_bytes.copy_(param.data.view(-1))
-        #
-        #         # Replace parameter data with pinned version
-        #         param.data = param_bytes.view_as(param.data)
-        #         offset += num_bytes
-        #
-        #     return model
+        from ..utils.hf import build_shell_model
 
-        # model = fast_pin_model(model)  # 10-100x faster than per-tensor pinning
+        #model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
+        print("shell model-----------")
+        model = build_shell_model(config=config, **model_init_kwargs)
+        model._model_init_kwargs = model_init_kwargs
 
-        # log.info("Model: pinned memory to cpu")
-        # model = fast_pin_model(model)
+        print_module_tree(model=model)
+        # enable mmap with low_cpu_mem_usage
+        turtle_model = cls.loader.from_pretrained(model_local_path, config=config, low_cpu_mem_usage=True, **model_init_kwargs)
 
-        # log.info(f"pinned memory == {next(model.parameters()).is_pinned()}")  # Should return `True`
+        # TODO FIX ME...temp store model_init args
+        turtle_model._model_init_kwargs = model_init_kwargs
+        print("actual turtle model-----------")
+        print_module_tree(model=turtle_model)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
@@ -230,12 +216,15 @@ def ModelLoader(cls):
         else:
             log.warn("Model: can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
+
         model.eval()
+        turtle_model.eval()
 
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
 
         return cls(
             model,
+            turtle_model=turtle_model,
             quantized=False,
             quantize_config=quantize_config,
             tokenizer=tokenizer,

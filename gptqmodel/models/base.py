@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 import json
 import os
 from collections import defaultdict
@@ -42,8 +43,11 @@ from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import MODALITY, find_modules, get_device, get_module_by_name_prefix, move_to
+from ..utils.offload import offload_to_disk
+from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
-from ._const import CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER
+from ._const import (CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE,
+                     DEVICE, EXPERT_INDEX_PLACEHOLDER, META)
 from .loader import ModelLoader
 from .writer import ModelWriter
 
@@ -167,10 +171,14 @@ class BaseQModel(nn.Module):
         load_quantized_model: bool = False,
         trust_remote_code: bool = False,
         model_local_path: str = None,
+        # turtle model is a sympathetic model used to reduce cpu ram usage
+        # during quantization stage.
+        turtle_model: Optional[PreTrainedModel] = None,
     ):
         super().__init__()
 
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
+        self.turtle_model = turtle_model
 
         self.compiled = False # set to True while compile() is triggered successfully
         self.quantized = quantized
@@ -839,12 +847,13 @@ class BaseQModel(nn.Module):
         pass
 
     def pre_quantize_generate_hook_end(self):
-        pass
+        if self.quantize_config.offload_to_disk:
+            offload_to_disk(model=self.model, module=self.get_base_modules(model=self.model), disk_path=self.quantize_config.offload_to_disk_path)
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.pre_lm_head_norm_module:
             norm, _ = get_module_by_name_prefix(self.model, [self.pre_lm_head_norm_module])
-            self.pre_quantize(norm)
+            norm = self.pre_quantize(norm)
 
             for element in inputs:
                 for i in range(len(element)):
@@ -854,11 +863,16 @@ class BaseQModel(nn.Module):
         return inputs
 
     def pre_quantize(self, module: nn.Module) -> nn.Module:
-        if get_device(module) == CPU and self.quantize_config.device != CPU:
+        if get_device(module) == META:
+            return self.turtle_power(
+                target_submodule=module,
+                device=self.quantize_config.device,
+            )
+        elif get_device(module) == CPU and self.quantize_config.device != CPU:
             return move_to(module, device=self.quantize_config.device)
-        return module
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
+        #return self.offload_to_disk(module=module)
         return move_to(module, device=CPU)
 
     def move_embed(self, device: str):
@@ -986,6 +1000,28 @@ class BaseQModel(nn.Module):
         print("DEBUG AWQ NODES:", format_nodes(nodes))
         return nodes
 
+    def turtle_power(
+            self,
+            target_submodule: torch.nn.Module,
+            device: torch.device,
+            non_blocking: bool = False,
+    ) -> torch.nn.Module:
+        module = alias_from_turtle_for_submodule(
+            target_model=self.model,
+            turtle_model=self.turtle_model,
+            target_submodule=target_submodule,
+            device=self.quantize_config.device,
+        )
+
+        # reload turle
+        # FIX ME..need trust remote true
+        model_init_kwargs = self.turtle_model._model_init_kwargs
+        self.turtle_model = self.loader.from_pretrained(self.model_local_path, config=self.turtle_model.config, low_cpu_mem_usage=True, **model_init_kwargs)
+        self.turtle_model._model_init_kwargs = model_init_kwargs
+
+        gc.collect()
+        return module
+
     ## overrides nn.module.train()
     # def train(self, mode=True):
     #     old_mode = self.training
@@ -1027,7 +1063,7 @@ class BaseQModel(nn.Module):
                 break
         if mapping is None:
             raise ValueError("Mapping configuration not found in the tree.")
-            
+
         out_blocks = []
 
         def process_entries(parent, entries, parent_group_offset=0):

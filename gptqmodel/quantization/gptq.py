@@ -190,14 +190,19 @@ class GPTQ:
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor):
         self.fwd_counter += 1
 
+        # print(f"self.module.target_device = {self.module.target_device}")
+
         if self.fwd_inputs_buffered:
             # with torch_streamCtx(self.module.target_device_stream):
             #     self.fwd_inputs_buffered_data.append(inp.to(device=self.module.target_device, non_blocking=True))
+
             self.fwd_inputs_buffered_data.append(inp.to(device=self.module.target_device, non_blocking=False))
         else:
             self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
+        # print(f"inp = {inp}")
+        # print(f"self.module = {self.module} device = {self.module.target_device}")
         inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
         # input reshaping

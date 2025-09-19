@@ -1,4 +1,8 @@
-from transformers import GenerationConfig, PreTrainedModel
+from typing import Any, Optional
+
+import torch
+from accelerate import init_empty_weights
+from transformers import AutoModelForCausalLM, GenerationConfig, PreTrainedModel
 
 from ..utils.logger import setup_logger
 
@@ -57,3 +61,35 @@ def autofix_hf_generation_config(cfg: GenerationConfig):
             cfg.do_sample = True
             log.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
 
+# load hf model with empty tensors on meta device (zero tensor memory usage)
+def build_shell_model(
+    config: Any,
+    dtype: Optional[torch.dtype] = None,
+    trust_remote_code: bool = True,
+    **model_init_kwargs,
+):
+    """
+    Instantiate the HF architecture with all parameters and buffers on 'meta' (no CPU RAM).
+    Preserves the full module topology (Linear/MLP/Attention/etc.).
+
+    Args:
+        model_id_or_path: Hugging Face model ID or local path.
+        dtype: Target dtype for model parameters (replaces `torch_dtype`).
+        trust_remote_code: Allow loading custom model classes.
+    """
+    init_kwargs = model_init_kwargs.copy()
+
+    del init_kwargs["device_map"]
+    del init_kwargs["_fast_init"]
+    # All nn.Parameters and buffers are created
+
+    # All nn.Parameters and buffers are created on 'meta' and initializers are skipped.
+    with init_empty_weights(include_buffers=True):
+        shell = AutoModelForCausalLM.from_config(
+            config,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
+            **init_kwargs
+        )
+
+    return shell
