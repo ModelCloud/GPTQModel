@@ -847,7 +847,7 @@ class BaseQModel(nn.Module):
 
     def pre_quantize_generate_hook_end(self):
         from ..utils.offload import offload_to_disk
-        offload_to_disk(model=self.model, module=self.base_modules)
+        offload_to_disk(model=self.model, module=self.get_base_modules(model=self.model))
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.pre_lm_head_norm_module:
