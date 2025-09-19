@@ -113,7 +113,7 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 * 06/20/2924 ✨ [0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0): Thanks for all the work from ModelCloud team and the opensource ML community for their contributions!
 </details>
 
-## What is GPT-QModel?
+## What is GPTQ-Model?
 GPTQ-Model is a production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF Transformers, vLLM, and SGLang.
 
 Public and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
