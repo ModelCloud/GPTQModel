@@ -280,6 +280,8 @@ jobs:
             bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
           fi
 
+          pip uninstall uv
+
           echo "== pyenv =="
           pyenv version
           echo "== python path =="
