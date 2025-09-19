@@ -6,7 +6,6 @@ import torch
 from accelerate import disk_offload
 from torch import nn
 
-from .structure import print_module_tree
 from .torch import CPU, META
 
 _lock = threading.Lock()
@@ -57,7 +56,7 @@ def offload_to_disk(module: List[str] | nn.Module, model: Optional[nn.Module] ):
 
 def _offload_disk(module: nn.Module, name: str):
     if is_meta_module(module):
-        print(f"[skip] '{name}' is on meta; leaving as-is")
+        # print(f"[skip] '{name}' is on meta; leaving as-is")
         return
 
     # print(f"device_map base_modules: {device_map}")
@@ -278,8 +277,8 @@ def undo_offload_to_disk(
     remove_hook_from_module(module, recurse=False)  # ensure root is also clean
 
     # 3) Tie embedding if module is model and enabled/tied
-    if hasattr(module, "config") and hasattr(module.config, "tie_word_embeddings") and model.config.tie_word_embeddings:
-        model.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after undo_offload
+    if hasattr(module, "config") and hasattr(module.config, "tie_word_embeddings") and module.config.tie_word_embeddings:
+        module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after undo_offload
 
     # 4) Optionally delete offload folders.
     if delete_offload_folders:

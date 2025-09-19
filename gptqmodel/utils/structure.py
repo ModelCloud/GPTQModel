@@ -363,7 +363,7 @@ def alias_from_turtle_for_submodule(
     non_blocking: bool = False,
 ) -> torch.nn.Module:
     assert device not in [None, torch.device("cpu"), torch.device("meta")]
-    print(f"alias device = {device}")
+    # print(f"alias device = {device}")
 
     # Resolve path & source submodule (on CPU/mmap)
     path = _get_qualified_name(target_model, target_submodule)
@@ -410,10 +410,9 @@ def alias_from_turtle_for_submodule(
         except Exception:
             pass
 
-    print("Post alias: target_submodule device summary:")
-    for n, p in target_submodule.named_parameters(recurse=True):
-        print(f"  {n}: {p.device}")
-        break
+    #print("Post alias: target_submodule device summary:")
+    # for n, p in target_submodule.named_parameters(recurse=True):
+        # print(f"  {n}: {p.device}")
 
     # return the *target* submodule, which is the injected result
     return target_submodule
