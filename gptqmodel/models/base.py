@@ -43,6 +43,7 @@ from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import MODALITY, find_modules, get_device, get_module_by_name_prefix, move_to
+from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
 from ._const import (CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE,
@@ -846,8 +847,8 @@ class BaseQModel(nn.Module):
         pass
 
     def pre_quantize_generate_hook_end(self):
-        from ..utils.offload import offload_to_disk
-        offload_to_disk(model=self.model, module=self.get_base_modules(model=self.model))
+        if self.quantize_config.off_load_to_disk:
+            offload_to_disk(model=self.model, module=self.get_base_modules(model=self.model))
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.pre_lm_head_norm_module:

@@ -218,17 +218,26 @@ class QuantizeConfig():
     # pending used field
     adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
 
+    # quantization only:
+    # controls cpu memory saving by offloading layers/modules to disk in the slow quantization process
+    # default to true as the benefit of ~73.5% cpu memory saving is tremendous
+    off_load_to_disk: bool = field(default=True, metadata={"help": "Offload completed module memory to disk during quantization loop"})
+
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
+    # deprecated: only used for compat
     is_marlin_format: bool = False
 
-    v2: bool = False
-    v2_alpha: float = 0.25
-    v2_memory_device: str = "auto" #
+    # gptq v2* only:
+    v2: bool = field(default=False)
+    v2_alpha: float = field(default=0.25)
+    v2_memory_device: str = field(default="auto")
 
-    zero_point: bool = field(default=True) # awq config
+    # awq only:
+    zero_point: bool = field(default=True)
 
-    # Skip all heavy computations for testing model loading
+    # gptq only:
+    # skip all heavy computations for testing model loading
     mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
 
     def __post_init__(self):

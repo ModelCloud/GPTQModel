@@ -11,6 +11,7 @@ from accelerate.hooks import remove_hook_from_module, remove_hook_from_submodule
 from accelerate.utils import align_module_device, has_offloaded_params
 from torch import nn
 
+from ..looper.named_module import NamedModule
 from .torch import CPU, META
 
 _lock = threading.Lock()
@@ -20,7 +21,8 @@ def get_module_fullname(model: torch.nn.Module, module: torch.nn.Module) -> str:
         if mod is module:
             return name  # dotted path like "model.embed_tokens" or "model.layers.0.self_attn.q_proj"
 
-    raise Exception("module not found in model")
+    name = module.full_name if module is NamedModule else ""
+    raise Exception(f"module not found in model: name = {name}, module = {module}")
 
 def set_submodule(root: torch.nn.Module, path: str, new_mod: torch.nn.Module) -> None:
     parts = path.split(".")
@@ -53,10 +55,21 @@ def offload_to_disk(module: List[str] | nn.Module, model: Optional[nn.Module] ):
         if isinstance(module, List):
             for name in module:
                 m = get_submodule(model, name)
+                # unwrap named module
+                if isinstance(m, NamedModule):
+                    # print(f"offloading named module: {module.full_name}")
+                    m = m.module
+
                 full_name = get_module_fullname(model=model, module=m)
                 _offload_disk(module=m, name=full_name)
         else:
+            # unwrap named module
+            if isinstance(module, NamedModule):
+                # print(f"offloading named module: {module.full_name}")
+                module = module.module
+
             full_name = get_module_fullname(model=model, module=module)
+
             _offload_disk(module=module, name=full_name)
 
         if hasattr(module, "config") and hasattr(module.config,

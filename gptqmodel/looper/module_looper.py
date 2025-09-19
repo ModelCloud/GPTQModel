@@ -32,9 +32,11 @@ from ..looper.native_processor import NativeProcessor
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
+from ..utils import ASYNC_WORKER
 from ..utils.logger import setup_logger
 from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
                            get_moe_layer_modules, move_to, nested_move_to)
+from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule, print_module_tree
 from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
                            HAS_CUDA, META, BalanceStrategy, device_next, device_next_reset,
@@ -558,18 +560,18 @@ class ModuleLooper():
                         for name in processed_subset:
                             reverse_p.submodule_finalize(processed_subset[name])
 
-                    from ..utils import ASYNC_WORKER
-                    from ..utils.offload import offload_to_disk
+                            # checking for disk offloading
+                            if self.gptq_model.quantize_config.off_load_to_disk:
+                                def _task(idx=layer_index, module=processed_subset[name]):
+                                    # bind layer_index & self at definition time
+                                    offload_to_disk(model=self.gptq_model.model, module=module)
+                                    # print(f"{name} complete tree")
+                                    # print_module_tree(processed_subset[name])
 
-                    def _task(idx=layer_index):
-                        # bind layer_index & self at definition time
-                        offload_to_disk(model=self.gptq_model.model, module=[f"model.layers.{layer_index}"])
-                        # print(f"model.layers.{layer_index} complete tree")
+                                ASYNC_WORKER.submit(_task)
 
-                    ASYNC_WORKER.submit(_task)
                     #del module
-                    #print(f"model.layers.{layer_index} complete tree")
-                    #print_module_tree(self.gptq_model.model)
+
 
                 if auto_gc:
                     torch_empty_cache()
