@@ -85,6 +85,118 @@ def marlin_make_workspace(output_size_per_partition: int,
                        device=device,
                        requires_grad=False)
 
+def get_pack_factor(num_bits):
+    assert 32 % num_bits == 0, f"Unsupported num_bits = {num_bits}"
+    return 32 // num_bits
+
+def pack_cols(
+    q_w: torch.Tensor,
+    num_bits: int,
+    size_k: int,
+    size_n: int,
+):
+    assert q_w.shape == (size_k, size_n)
+
+    pack_factor = get_pack_factor(num_bits)
+    assert size_n % pack_factor == 0
+
+    orig_device = q_w.device
+
+    q_w = q_w.cpu().numpy().astype(np.uint32)
+
+    q_res = np.zeros((size_k, size_n // pack_factor), dtype=np.uint32)
+
+    for i in range(pack_factor):
+        q_res |= q_w[:, i::pack_factor] << num_bits * i
+
+    q_res = torch.from_numpy(q_res.astype(np.int32)).to(orig_device)
+    q_res = q_res.contiguous()
+
+    return q_res
+
+
+def unpack_cols(
+    packed_q_w: torch.Tensor,
+    num_bits: int,
+    size_k: int,
+    size_n: int,
+):
+    pack_factor = get_pack_factor(num_bits)
+    assert size_n % pack_factor == 0
+    assert packed_q_w.shape == (
+        size_k, size_n // pack_factor
+    ), "packed_q_w.shape = {} size_k = {}, size_n = {} pack_Factor = {}".format(
+        packed_q_w.shape, size_k, size_n, pack_factor)
+
+    orig_device = packed_q_w.device
+
+    packed_q_w_cpu = packed_q_w.cpu().numpy().astype(np.uint32)
+    q_res = np.zeros((size_k, size_n), dtype=np.uint32)
+
+    mask = (1 << num_bits) - 1
+    for i in range(pack_factor):
+        vals = packed_q_w_cpu & mask
+        packed_q_w_cpu >>= num_bits
+        q_res[:, i::pack_factor] = vals
+
+    q_res = torch.from_numpy(q_res.astype(np.int32)).to(orig_device)
+    q_res = q_res.contiguous()
+
+    return q_res
+
+def marlin_make_workspace_new(device: torch.device,
+                              max_blocks_per_sm: int = 1) -> torch.Tensor:
+    # In the new marlin kernel, we use the num of threadblocks as workspace
+    # size. The num of threadblocks is sms_count * max_blocks_per_sm.
+    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    return torch.zeros(sms * max_blocks_per_sm,
+                       dtype=torch.int,
+                       device=device,
+                       requires_grad=False)
+
+def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
+                       num_bits: int) -> torch.Tensor:
+    # Permute zero-points in a similar way to scales, but do not use the
+    # "single" permutation, since zero-points are applied on every MMA
+    scale_perm, _ = get_scale_perms()
+    zp = zp.reshape((-1, len(scale_perm)))[:, scale_perm]
+
+    # Interleave column dim (for the dequantize code) and pack it to int32
+    if num_bits == 4:
+        interleave = np.array([0, 2, 4, 6, 1, 3, 5, 7])
+    elif num_bits == 8:
+        interleave = np.array([0, 2, 1, 3])
+    else:
+        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+
+    zp = zp.reshape((-1, len(interleave)))[:, interleave].ravel()
+    zp = zp.reshape((-1, size_n)).contiguous()
+    zp = pack_cols(zp, num_bits, size_k, size_n)
+
+    return zp
+
+def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
+                              size_n: int, num_bits: int) -> torch.Tensor:
+    # AWQ zero-points are quantized and packed on the column dim.
+    # In addition, the values are permuted based on dequantizer.
+    # Here we undo both of these, and then apply marlin permutation
+    # and pack it back.
+    q_zp = unpack_cols(q_zp_packed, num_bits, size_k, size_n)
+
+    # Undo interleaving (use argsort(..) to get inverse perm)
+    if num_bits == 4:
+        undo_interleave = np.argsort(np.array([0, 2, 4, 6, 1, 3, 5, 7]))
+    elif num_bits == 8:
+        undo_interleave = np.argsort(np.array([0, 2, 1, 3]))
+    else:
+        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+
+    q_zp = q_zp.reshape((-1, len(undo_interleave)))[:, undo_interleave].ravel()
+    q_zp = q_zp.reshape((-1, size_n)).contiguous()
+
+    marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits)
+    return marlin_zp
+
 def marlin_sort_g_idx(
         g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
@@ -167,7 +279,7 @@ def apply_gptq_marlin_linear(
 
     return output.reshape(out_shape)
 
-class AWQMarlinQuantLinear(AWQuantLinear):
+class AwqMarlinQuantLinear(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -217,7 +329,6 @@ class AWQMarlinQuantLinear(AWQuantLinear):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.MARLIN),
             adapter=adapter,
-            register_buffers=False,
             register_awq_buffers=False,
             **kwargs)
 
@@ -286,18 +397,36 @@ class AWQMarlinQuantLinear(AWQuantLinear):
 
     def post_init(self):
         device = self.qweight.device
-        # Allocate marlin workspace
-        self.workspace = marlin_make_workspace(
-            self.out_features, device)
 
-        # Handle sorting for activation reordering if needed.
-        if self.desc_act:
-            g_idx, g_idx_sort_indices = marlin_sort_g_idx(self.g_idx)
-            self.g_idx_sort_indices = g_idx_sort_indices
-            replace_tensor(self, "g_idx", g_idx)
-        else:
-            self.g_idx = marlin_make_empty_g_idx(device)
-            self.g_idx_sort_indices = marlin_make_empty_g_idx(device)
+        # Allocate marlin workspace
+        self.workspace = marlin_make_workspace_new(device)
+
+        # Repack weights from AWQ format to marlin format.
+        marlin_qweight = gptqmodel_marlin_kernels.awq_marlin_repack(
+            self.qweight,
+            size_k=self.in_features,
+            size_n=self.out_features,
+            num_bits=self.quant_config.quant_type.size_bits)
+        replace_tensor(self, "qweight", marlin_qweight)
+
+        # Permute scales from AWQ format to marlin format.
+        marlin_scales = marlin_permute_scales(
+            self.scales,
+            size_k=self.in_features,
+            size_n=self.out_features,
+            group_size=self.group_size)
+        replace_tensor(self, "scales", marlin_scales)
+
+        # Permute zero-points from AWQ format to marlin format.
+        marlin_zp = awq_to_marlin_zero_points(
+            self.qzeros,
+            size_k=self.in_features // self.group_size,
+            size_n=self.out_features,
+            num_bits=self.quant_config.quant_type.size_bits)
+        replace_parameter(layer, "qzeros", marlin_zp)
+
+        self.g_idx = marlin_make_empty_g_idx(self.qweight.device)
+        self.g_idx_sort_indices = marlin_make_empty_g_idx(self.qweight.device)
 
         # No zero-point
         self.zp = marlin_make_empty_g_idx(device)
@@ -418,4 +547,4 @@ def dequantize_qzeros(layer):
 
     return unpacked_qzeros
 
-__all__ = ["AWQMarlinQuantLinear"]
+__all__ = ["AwqMarlinQuantLinear"]
