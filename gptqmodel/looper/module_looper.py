@@ -95,7 +95,7 @@ class ModuleLooper():
         # move layer to target device
         # layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
         if cur_layer_device == META:
-            layers[0] = self.gptq_model.turtle_power(
+            layers[0] = self.gptq_model.shell_module_materialize(
                 target_submodule=layers[0],
                 device=self.gptq_model.quantize_config.device,
             )
@@ -124,7 +124,7 @@ class ModuleLooper():
                 # print(f"base module swapped: {module_name} from: {m_device}, target = {cur_layer_device}")
                 # print_module_tree(self.gptq_model.model)
                 # move_to(module, cur_layer_device)
-                transferred = self.gptq_model.turtle_power(
+                transferred = self.gptq_model.shell_module_materialize(
                     target_submodule=module,
                     device=cur_layer_device,
                 )

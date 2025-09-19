@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import copy
-import gc
 import json
 import os
 from collections import defaultdict
@@ -864,7 +863,7 @@ class BaseQModel(nn.Module):
 
     def pre_quantize(self, module: nn.Module) -> nn.Module:
         if get_device(module) == META:
-            return self.turtle_power(
+            return self.shell_module_materialize(
                 target_submodule=module,
                 device=self.quantize_config.device,
             )
@@ -1000,7 +999,8 @@ class BaseQModel(nn.Module):
         print("DEBUG AWQ NODES:", format_nodes(nodes))
         return nodes
 
-    def turtle_power(
+    # transfer actually materizlied module from turtle (real) to shell
+    def shell_module_materialize(
             self,
             target_submodule: torch.nn.Module,
             device: torch.device,
@@ -1019,7 +1019,7 @@ class BaseQModel(nn.Module):
         self.turtle_model = self.loader.from_pretrained(self.model_local_path, config=self.turtle_model.config, low_cpu_mem_usage=True, **model_init_kwargs)
         self.turtle_model._model_init_kwargs = model_init_kwargs
 
-        gc.collect()
+        # gc.collect()
         return module
 
     ## overrides nn.module.train()
