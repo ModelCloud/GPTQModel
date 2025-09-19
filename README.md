@@ -17,7 +17,8 @@
 </p>
 
 ## Latest News
-* 09/18/2025 5.0.0-dev `main`: 🎉 AWQ quantization support! Complete refractor and simplification of model definitions in prepreation for future quantization formats.  
+* 09/19/2025 5.0.0-dev `main`: 👀 Cpu memory saving of ~73.5% during quantization stage with new `offload_to_disk` quantization config property default to `True`. 
+* 09/18/2025 5.0.0-dev `main`: 🎉 AWQ quantization support! Complete refractor and simplification of model definitions in prepreation for future quantization formats. 
 * 09/16/2025 [4.2.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.5): `hyb_act` renamed to `act_group_aware`. Removed finicky `torch` import within `setup.py`. Packing bug fix and prebuilt Pytorch 2.8 whls. 
 * 09/12/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.0): ✨ New Models Support: Qwen3-Next, Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compat. Patch fix GIL=0 cuda error for multi-gpu. Fix compat with autoround + new transformers. 
 * 09/04/2025 [4.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ Meituan LongCat Flash Chat, Llama 4, GPT-OSS (BF16), and GLM-4.5-Air support.  New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
@@ -36,13 +37,13 @@
 * 05/19/2025 4.0.0-dev `main`: Qwen 2.5 Omni model support. 
 * 05/05/2025 4.0.0-dev `main`: Python 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. 
 * 04/29/2025 3.1.0-dev (Now 4.) `main`: Xiaomi Mimo model support. Qwen 3 and 3 MoE model support. New arg for `quantize(..., calibration_dataset_min_length=10)` to filter out bad calibration data that exists in public dataset (wikitext). 
-* 04/13/2025 [3.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v3.0.0): 🎉 New experimental `GPTQ v2` quantization option for improved model quantization accuracy validated by `GSM8K_PLATINUM` [benchmarks](https://github.com/ModelCloud/GPTQModel#quantization-using-gptq-v2) vs original `gptq`. New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
+* 04/13/2025 [3.0.0](https://github.com/ModelCloud/Model/releases/tag/v3.0.0): 🎉 New experimental ` v2` quantization option for improved model quantization accuracy validated by `GSM8K_PLATINUM` [benchmarks](https://github.com/ModelCloud/Model#quantization-using-gptq-v2) vs original `gptq`. New `Phi4-MultiModal` model support . New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-gpu` quantization support. Reduced vram usage. Faster quantization.
 * 04/2/2025 [2.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.2.0): New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16`  dtype loading for models based on model config. Fix kernel compile for Pytorch/ROCm. Slightly faster quantization and auto-resolve some low-level oom issues for smaller vram gpus. 
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
 New Google `Gemma 3` zero-day model support.
 New Alibaba `Ovis 2` VL model support. 
 New AMD `Instella` zero-day model model support. New `GSM8K Platinum` and `MMLU-Pro` benchmarking suppport.
-Peft Lora training with GPTQModel is now 30%+ faster on all gpu and IPEX devices.
+Peft Lora training with GPT-QModel is now 30%+ faster on all gpu and IPEX devices.
 Auto detect MoE modules not activated during quantization due to insufficient calibration data. 
 `ROCm` `setup.py` compat fixes. `Optimum` and `Peft` compat fixes.
 Fixed `Peft` `bfloat16` training. 
@@ -58,7 +59,7 @@ Fix ROCm version auto detection in `setup` install.
 * 02/08/2025 [1.8.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.8.1): ⚡ `DeepSeek v3/R1` model support. New flexible weight `packing`: allow quantized weights to be packed to `[int32, int16, int8]` dtypes. 
 `Triton` and `Torch` kernels supports full range of new `QuantizeConfig.pack_dtype`. 
 New `auto_gc: bool` control in `quantize()` which can reduce quantization time for small model with no chance of oom. 
-New `GPTQModel.push_to_hub()` api for easy quant model upload to HF repo. New `buffered_fwd: bool` control in `model.quantize()`. Over 50% quantization speed-up for visual (vl) models.  
+New `GPT-QModel.push_to_hub()` api for easy quant model upload to HF repo. New `buffered_fwd: bool` control in `model.quantize()`. Over 50% quantization speed-up for visual (vl) models.  
 Fixed `bits=3` packing and `group_size=-1` regression in v1.7.4.
 * 01/26/2025 [1.7.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.4): New `compile()` api for ~4-8% inference tps improvement. Faster `pack()` for post-quantiztion model save. `Triton` kernel validated for Intel/`XPU` when Intel Triton packages are installed. Fixed Transformers (bug) downcasting tokenizer class on save. 
 * 01/20/2025 [1.7.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.3): New Telechat2 (China Telecom) and PhiMoE model support. Fixed `lm_head` weights duplicated in post-quantize save() for models with tied-embedding. 
@@ -253,7 +254,7 @@ model.serve(host="0.0.0.0",port="12345")
 ```
 
 ### Quantization
-Basic example of using `GPTQModel` to quantize a llm model:
+Basic example of using `GPT-QModel` to quantize a llm model:
 
 ```py
 from datasets import load_dataset
@@ -359,19 +360,19 @@ pip install lm-eval>=0.4.7
 pip install -U "evalplus @ git+https://github.com/evalplus/evalplus"
 ```
 
-Below is a basic sample using `GPTQModel.eval` API
+Below is a basic sample using `GPT-QModel.eval` API
 
 ```py
-from gptqmodel import GPTQModel
+from gptqmodel import GPT-QModel
 from gptqmodel.utils.eval import EVAL
 
 model_id = "ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
 
 # Use `lm-eval` as framework to evaluate the model
-lm_eval_results = GPTQModel.eval(model_id, framework=EVAL.LM_EVAL, tasks=[EVAL.LM_EVAL.ARC_CHALLENGE], output_file='lm-eval_result.json')
+lm_eval_results = GPTQ-Model.eval(model_id, framework=EVAL.LM_EVAL, tasks=[EVAL.LM_EVAL.ARC_CHALLENGE], output_file='lm-eval_result.json')
 
 # Use `evalplus` as framework to evaluate the model
-evalplus_results = GPTQModel.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVAL.EVALPLUS.HUMAN], output_file='evalplus_result.json')
+evalplus_results = GPTQ-Model.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVAL.EVALPLUS.HUMAN], output_file='evalplus_result.json')
 ```
 ### Dynamic Quantization (Per Module QuantizeConfig Override)
 
@@ -432,10 +433,10 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 ## Citation
 
 ```bibtex
-# GPTQModel
+# GPT-QModel
 @misc{qubitium2024gptqmodel,
   author = {ModelCloud.ai and qubitium@modelcloud.ai},
-  title = {GPTQModel},
+  title = {GPT-QModel},
   publisher = {GitHub},
   journal = {GitHub repository},
   howpublished = {\url{https://github.com/modelcloud/gptqmodel}},
