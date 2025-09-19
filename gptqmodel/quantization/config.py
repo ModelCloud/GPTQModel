@@ -221,7 +221,8 @@ class QuantizeConfig():
     # quantization only:
     # controls cpu memory saving by offloading layers/modules to disk in the slow quantization process
     # default to true as the benefit of ~73.5% cpu memory saving is tremendous
-    off_load_to_disk: bool = field(default=True, metadata={"help": "Offload completed module memory to disk during quantization loop"})
+    offload_to_disk: bool = field(default=True, metadata={"help": "Offload completed module memory to disk during quantization loop"})
+    offload_to_disk_path: str = field(default="gptqmodel_offload", metadata={"help": "Offload disk path. Only applicable if Offload to disk is enabled"})
 
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 

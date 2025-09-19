@@ -47,7 +47,7 @@ def is_meta_module(m: nn.Module) -> bool:
             return True
     return False
 
-def offload_to_disk(module: List[str] | nn.Module, model: Optional[nn.Module] ):
+def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "." ):
     assert module is not None
     assert model is not None
 
@@ -61,7 +61,7 @@ def offload_to_disk(module: List[str] | nn.Module, model: Optional[nn.Module] ):
                     m = m.module
 
                 full_name = get_module_fullname(model=model, module=m)
-                _offload_disk(module=m, name=full_name)
+                _offload_disk(module=m, name=full_name, disk_path=disk_path)
         else:
             # unwrap named module
             if isinstance(module, NamedModule):
@@ -70,7 +70,7 @@ def offload_to_disk(module: List[str] | nn.Module, model: Optional[nn.Module] ):
 
             full_name = get_module_fullname(model=model, module=module)
 
-            _offload_disk(module=module, name=full_name)
+            _offload_disk(module=module, name=full_name, disk_path=disk_path)
 
         if hasattr(module, "config") and hasattr(module.config,
                                                  "tie_word_embeddings") and module.config.tie_word_embeddings:
@@ -79,7 +79,7 @@ def offload_to_disk(module: List[str] | nn.Module, model: Optional[nn.Module] ):
     # print("offload_disk: list item tree")
             # print_module_tree(module)
 
-def _offload_disk(module: nn.Module, name: str):
+def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
     if is_meta_module(module):
         # print(f"[skip] '{name}' is on meta; leaving as-is")
         return
@@ -89,7 +89,7 @@ def _offload_disk(module: nn.Module, name: str):
     _ = disk_offload(
         module,
         # device_map={ "" : "disk" },  # only touch this subtree
-        offload_dir=f"offload/{name}",
+        offload_dir=f"{disk_path}/{name}",
         offload_buffers=True,  # needed for buffers
         execution_device=CPU,
     )

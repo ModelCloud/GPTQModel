@@ -561,10 +561,10 @@ class ModuleLooper():
                             reverse_p.submodule_finalize(processed_subset[name])
 
                             # checking for disk offloading
-                            if self.gptq_model.quantize_config.off_load_to_disk:
-                                def _task(idx=layer_index, module=processed_subset[name]):
+                            if self.gptq_model.quantize_config.offload_to_disk:
+                                def _task(idx=layer_index, module=processed_subset[name], disk_path=self.gptq_model.quantize_config.offload_to_disk_path):
                                     # bind layer_index & self at definition time
-                                    offload_to_disk(model=self.gptq_model.model, module=module)
+                                    offload_to_disk(model=self.gptq_model.model, module=module, disk_path=disk_path)
                                     # print(f"{name} complete tree")
                                     # print_module_tree(processed_subset[name])
 
