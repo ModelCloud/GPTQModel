@@ -25,6 +25,7 @@ class TestLlama3_2(ModelTest):
     APPLY_CHAT_TEMPLATE = True
     V2 = False
     DEBUG = True
+    ACT_GROUP_AWARE = True
 
     def test_llama3_2(self):
         self.quant_lm_eval()

@@ -35,6 +35,9 @@ HAS_XPU = False
 HAS_MPS = False
 HAS_MLX = False
 
+CPU = torch.device("cpu")
+META = torch.device("meta")
+
 class BalanceStrategy(str, Enum):
     MEMORY = "memory", # make vram more spread out
     GPU = "gpu" # vram is less balanced (gpu0) but gpu0 is also used for quantization
@@ -173,7 +176,7 @@ def auto_select_torch_device(index: int = 0):
     elif HAS_MPS:
         device = torch.device("mps") # mps has no index
     else:
-        device = torch.device("cpu") # cpu has no index
+        device = CPU # cpu has no index
 
     return device
 
@@ -186,14 +189,7 @@ def torch_devices() -> List[torch.device]:
     elif HAS_MPS:
         return [torch.device("mps")]
     else:
-        return [torch.device("cpu")]
-
-CPU = torch.device("cpu")
-META = torch.device("meta")
-DEVICE_0 = auto_select_torch_device(index=0)
-
-# device_1 may be same as device_0 if there is only 1 visible/active device
-DEVICE_1 = auto_select_torch_device(index=1)
+        return [CPU]
 
 ALL_DEVICES = torch_devices()
 
@@ -203,6 +199,10 @@ elif HAS_XPU:
     ALL_STREAMS = [torch.xpu.Stream(device=device) for device in ALL_DEVICES]
 else:
     ALL_STREAMS = [contextlib.nullcontext()]
+
+DEVICE_0 = auto_select_torch_device(index=0)
+# device_1 may be same as device_0 if there is only 1 visible/active device
+DEVICE_1 = auto_select_torch_device(index=1)
 
 DEVICE_0_STREAM = ALL_STREAMS[0]
 
