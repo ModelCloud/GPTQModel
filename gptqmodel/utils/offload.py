@@ -70,8 +70,8 @@ def _offload_disk(module: nn.Module, name: str):
         execution_device=CPU,
     )
 
-    print("offload_disk: list item tree")
-    print_module_tree(module)
+    # print("offload_disk: list item tree")
+    # print_module_tree(module)
 
 # undo offload
 

@@ -57,7 +57,7 @@ class ModuleLooper():
         layer_input_kwargs = []
 
         cur_layer_device = get_device(layers[0])
-        print(f"cur_layer_device = {cur_layer_device}")
+        # print(f"cur_layer_device = {cur_layer_device}")
         data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
 
         # TODO HookLinear add register_forward_pre_hook()
@@ -98,9 +98,7 @@ class ModuleLooper():
                 device=self.gptq_model.quantize_config.device,
             )
 
-
-
-            print(f"layer swapped------------from: {cur_layer_device}")
+            # print(f"layer swapped------------from: {cur_layer_device}")
             # print_module_tree(self.gptq_model.model)
             cur_layer_device = self.gptq_model.quantize_config.device
             # FIX ME use turtle_model, which has exactly same structure but holds the actual model tensors
@@ -121,18 +119,18 @@ class ModuleLooper():
             m_device = get_device(module)
             ori_outside_layer_module_devices[module_name] = CPU if m_device == META else m_device
             if module is not None:
-                print(f"base module swapped: {module_name} from: {m_device}, target = {cur_layer_device}")
-                #print_module_tree(self.gptq_model.model)
+                # print(f"base module swapped: {module_name} from: {m_device}, target = {cur_layer_device}")
+                # print_module_tree(self.gptq_model.model)
                 # move_to(module, cur_layer_device)
                 transferred = self.gptq_model.turtle_power(
                     target_submodule=module,
                     device=cur_layer_device,
                 )
-                #print(f"base module swapped: {module_name} -------device = {transferred.device}")
+                # print(f"base module swapped: {module_name} -------device = {transferred.device}")
                 # print_module_tree(self.gptq_model.model)
 
 
-        print(f"base module swapped done")
+        # print(f"base module swapped done")
         # print_module_tree(self.gptq_model.model)
 
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
@@ -274,7 +272,7 @@ class ModuleLooper():
             gc.collect()
 
             cur_layer_device = get_device(module)
-            print(f"XX0 cur_layer_device = {cur_layer_device}")
+            # print(f"XX0 cur_layer_device = {cur_layer_device}")
             full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
 
             for p_index, processor in enumerate(self.processors):
@@ -333,13 +331,13 @@ class ModuleLooper():
                     for name in subset:
                         m = subset[name]
                         m.module.target_device, m.module.target_device_stream = device_next()
-                        print(f"XX m.module.target_device, = {m.module.target_device}")
+                        # print(f"XX m.module.target_device, = {m.module.target_device}")
                         # log.info(f"Loop name = {name}")
                         if hasattr(subset[name], 'forward_hook'):
-                            print(f"XX pre_process_fwd_hook, = {name}")
+                            # print(f"XX pre_process_fwd_hook, = {name}")
                             subset[name].forward_hook = processor.pre_process_fwd_hook(name)
                         else:
-                            print(f"XX register forward hook, = {name}")
+                            # print(f"XX register forward hook, = {name}")
                             # TODO FIXME: do we even need to hook into modules that are not quantizable?
                             assert f"forward_hook missing for module name: `{name}`, layer name: {m.name}"
                             handle.append(subset[name].register_forward_hook(processor.pre_process_fwd_hook(name)))
@@ -349,7 +347,7 @@ class ModuleLooper():
                     fwd_start = time.time()
 
                     layer_outputs = []
-                    print(f"XX cur_layer_device = {cur_layer_device}")
+                    # print(f"XX cur_layer_device = {cur_layer_device}")
                     for j in range(processor.num_batches):
                         layer_input = []
                         # log.info(f"batch: {processor.num_batches}, j = {j}, layer_inputs = {layer_inputs}")
@@ -566,7 +564,7 @@ class ModuleLooper():
                     def _task(idx=layer_index):
                         # bind layer_index & self at definition time
                         offload_to_disk(model=self.gptq_model.model, module=[f"model.layers.{layer_index}"])
-                        print(f"model.layers.{layer_index} complete tree")
+                        # print(f"model.layers.{layer_index} complete tree")
 
                     ASYNC_WORKER.submit(_task)
                     #del module
