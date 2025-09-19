@@ -33,7 +33,6 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.awq.models.auto import AWQ_CAUSAL_LM_MODEL_MAP
 from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
@@ -584,9 +583,6 @@ class BaseQModel(nn.Module):
 
             # TODO AWQ_BATCH_SIZE
             # os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
-
-            if self.model.config.model_type not in AWQ_CAUSAL_LM_MODEL_MAP.keys():
-                raise TypeError(f"{self.model.config.model_type} isn't supported yet.")
 
             args["gptq_model"] = self
             args["model"] = self.model
