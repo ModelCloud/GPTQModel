@@ -873,9 +873,11 @@ class BaseQModel(nn.Module):
     def move_embed(self, device: str):
         for embed_module_name in self.get_base_modules(self.model):
             embed_module, _ = get_module_by_name_prefix(self.model, embed_module_name)
-            if embed_module is not None and hasattr(embed_module, 'weight'):
-                embed_module = self.pre_quantize(embed_module)
-                embed_module.to(device)
+            if embed_module is not None:
+                self.shell_module_materialize(
+                    target_submodule=embed_module,
+                    device=device,
+                )
 
     def awq_skip_modules_for_scaling(self) -> bool:
         pass
