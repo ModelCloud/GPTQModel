@@ -300,14 +300,14 @@ class BaseQModel(nn.Module):
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
         layer_modules = filter_not_quantize_module(layer_modules)
-        print(f"simple_layer_modules layer_modules: {layer_modules}")
+        # print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 
     @classmethod
     def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False):
         full = cls.build_layer_modules(cls.module_tree)
         full = cls.build_moe_modules_if_need(model_config, full, is_awq_quantize)
-        print(f"full layer_modules: {full}")
+        # (f"full layer_modules: {full}")
         return full
 
     def prepare_dataset(
