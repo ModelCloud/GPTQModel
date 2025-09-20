@@ -72,8 +72,8 @@ class ModelTest(unittest.TestCase):
     LOAD_BACKEND = BACKEND.AUTO
     QUANT_BACKEND = BACKEND.AUTO
     USE_VLLM = False
-    INPUTS_MAX_LENGTH = 2048
-    MODEL_MAX_LEN = 4096
+    INPUTS_MAX_LENGTH = 4096
+    MODEL_MAX_LEN = 8196
     DATASET_SIZE = 256
     DELETE_QUANTIZED_MODEL = True
     BUFFERED_FWD = False
@@ -149,7 +149,9 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     @classmethod
-    def load_dataset(self, tokenizer=None, rows: int = DATASET_SIZE):
+    def load_dataset(self, tokenizer=None):
+        rows = self.DATASET_SIZE
+        print(f"Dataset {rows} rows")
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
         # Load data directly from gzipped JSON file
         # with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
