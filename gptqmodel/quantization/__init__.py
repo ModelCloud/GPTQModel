@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .config import (FORMAT, FORMAT_FIELD_CODE, FORMAT_FIELD_CHECKPOINT, QUANT_CONFIG_FILENAME,
+from .config import (FORMAT, FORMAT_FIELD_CHECKPOINT, FORMAT_FIELD_CODE, QUANT_CONFIG_FILENAME,
                      QUANT_METHOD, QUANT_METHOD_FIELD, BaseQuantizeConfig, QuantizeConfig)
 from .gptq import GPTQ
 from .gptqv2 import GPTQv2

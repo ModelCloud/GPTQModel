@@ -18,6 +18,7 @@ import gc
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Dict, List
 
 import torch
@@ -559,10 +560,12 @@ class ModuleLooper():
 
                             # checking for disk offloading
                             if self.gptq_model.quantize_config.offload_to_disk:
-                                ASYNC_WORKER.submit(
+                                ASYNC_WORKER.submit(partial(
                                     offload_to_disk,
-                                    model=self.gptq_model.model, module=module, disk_path=self.gptq_model.quantize_config.offload_to_disk_path
-                                )
+                                    model=self.gptq_model.model,
+                                    module=module,
+                                    disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
+                                ))
 
                     #del module
 
