@@ -47,10 +47,12 @@ from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
-from packaging.version import Version  # noqa: E402
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
 
 RAND_SEED = 898
+
+# make sure ci tests is more deterministic
+transformers.set_seed(RAND_SEED, False)
 
 log = LogBar.shared()
 
@@ -64,6 +66,7 @@ class ModelTest(unittest.TestCase):
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
+    # set to 1 for stability of scores
     EVAL_BATCH_SIZE = "auto"
     QUANT_BATCH_SIZE = 1
     LOAD_BACKEND = BACKEND.AUTO
@@ -83,7 +86,8 @@ class ModelTest(unittest.TestCase):
     DESC_ACT = True
     SYM = True
 
-    USE_FLASH_ATTN = True
+    # false uses SDPA
+    USE_FLASH_ATTN = False
 
     INFERENCE_PROMPT = "The capital city of France is named"
     INFERENCE_RESULT_KEYWORDS = ["paris"]
@@ -95,6 +99,7 @@ class ModelTest(unittest.TestCase):
 
     QUANTIZE_CONFIG_BITS = 4
     QUANTIZE_CONFIG_GROUP_SIZE = 128
+    QUANTIZE_CONFIG_DAMP = 0.1
 
     V2 = False
     ACT_GROUP_AWARE = False
@@ -177,6 +182,7 @@ class ModelTest(unittest.TestCase):
             format=self.QUANT_FORMAT,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
+            damp_percent=self.QUANTIZE_CONFIG_DAMP,
             sym=self.SYM,
             v2=self.V2
         )
@@ -186,13 +192,12 @@ class ModelTest(unittest.TestCase):
 
         args = kwargs if kwargs else {}
 
-        has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-        if has_attn_implementation:
-            if self.USE_FLASH_ATTN:
-                args["attn_implementation"] = "flash_attention_2"
+        if self.USE_FLASH_ATTN:
+            args["attn_implementation"] = "flash_attention_2"
         else:
-            args["use_flash_attention_2"] = not self.USE_FLASH_ATTN
+            args["attn_implementation"] = "sdpa"
 
+        print(f"Pre lm-eval model loading args: {args}")
         log.info(f"args: {args}")
         model = GPTQModel.load(
             model_id_or_path,
@@ -262,12 +267,10 @@ class ModelTest(unittest.TestCase):
 
         kargs = args if args else {}
 
-        has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-        if has_attn_implementation:
-            if self.USE_FLASH_ATTN:
-                args["attn_implementation"] = "flash_attention_2"
+        if self.USE_FLASH_ATTN:
+            args["attn_implementation"] = "flash_attention_2"
         else:
-            args["use_flash_attention_2"] = not self.USE_FLASH_ATTN
+            args["attn_implementation"] = "sdpa"
 
         model = GPTQModel.load(
             model_id_or_path,
