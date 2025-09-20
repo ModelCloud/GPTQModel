@@ -119,6 +119,8 @@ def torch_sync(device: torch.device = None):
         torch.xpu.synchronize(device=device)
     elif device.type == "mps":
         torch.mps.synchronize()
+    elif device.type == "cpu":
+        torch.cpu.synchronize()
 
 def torch_empty_cache(device: torch.device = None, gc: bool = True):
     if gc:
