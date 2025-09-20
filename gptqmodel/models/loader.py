@@ -527,6 +527,7 @@ def ModelLoader(cls):
                     low_zero=(device_map == "balanced_low_0"),
                 )
         if not isinstance(device_map, dict):
+            model.tie_weights()
             device_map = accelerate.infer_auto_device_map(
                 model,
                 max_memory=max_memory,

@@ -281,7 +281,7 @@ def undo_offload_to_disk(
         remove_hook_from_module(module, recurse=False)  # ensure root is also clean
 
         # 3) Tie embedding if module is model and enabled/tied
-        if hasattr(module, "config") and hasattr(module.config, "tie_word_embeddings") and module.config.tie_word_embeddings:
+        if hasattr(module, "tie_weights"):
             module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after undo_offload
 
         # 4) Optionally delete offload folders.
