@@ -410,10 +410,7 @@ def alias_from_turtle_for_submodule(
                 tb.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))
 
     if hasattr(target_model, "tie_weights"):
-        try:
-            target_model.tie_weights()
-        except Exception:
-            pass
+        target_model.tie_weights()
 
     #print("Post alias: target_submodule device summary:")
     # for n, p in target_submodule.named_parameters(recurse=True):

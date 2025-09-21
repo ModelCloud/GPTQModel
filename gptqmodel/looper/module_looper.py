@@ -573,9 +573,10 @@ class ModuleLooper():
                 if auto_gc:
                     torch_empty_cache()
 
-
         # wait for all thread tasks
         ASYNC_WORKER.join()
+        torch_sync()  # auto gpu
+        torch_sync(CPU) # cpu
 
         total_log = {}
 
