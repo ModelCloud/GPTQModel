@@ -188,7 +188,7 @@ class ModelTest(unittest.TestCase):
         rows = self.DATASET_SIZE
         print(f"Dataset {rows} rows")
         calibration = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train").select(range(rows))
-        return self.build_calibration_batches(calibration, tokenizer=tokenizer, max_length=self.INPUTS_MAX_LENGTH)
+        #return self.build_calibration_batches(calibration, tokenizer=tokenizer, max_length=self.INPUTS_MAX_LENGTH)
         #calibration = load_dataset("neuralmagic/calibration", "LLM", split="train")
         #return calibration.select(range(rows))["text"]
         # Load data directly from gzipped JSON file
@@ -200,16 +200,15 @@ class ModelTest(unittest.TestCase):
         #     return traindata[:rows]
 
         datas = []
-        row = None
         for index, sample in enumerate(calibration):
             tokenized = tokenizer(
                 sample['text'],
                 max_length=self.INPUTS_MAX_LENGTH,
                 # padding="max_length",
-                truncation=True)["input_ids"]
-            if len(tokenized["input_ids"]) == self.INPUTS_MAX_LENGTH:
-                datas.append(row)
+                truncation=True)
+
             datas.append(tokenized)
+
         return datas
 
     def check_kernel(self, model, expected_kernels):
