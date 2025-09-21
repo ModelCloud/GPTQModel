@@ -525,6 +525,7 @@ def ModelLoader(cls):
                     no_split_module_classes=[layer_type],
                     low_zero=(device_map == "balanced_low_0"),
                 )
+
         if not isinstance(device_map, dict):
             device_map = accelerate.infer_auto_device_map(
                 model,

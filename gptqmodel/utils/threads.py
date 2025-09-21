@@ -42,7 +42,7 @@ class AsyncManager:
             self._last_future = fut
         return fut
 
-    def join(self, timeout=None, future: cf.Future | None = None):
+    def join(self, timeout=None, future: cf.Future = None):
         """
         Wait for tasks to complete.
           - If `future` is given, wait for that specific one.
