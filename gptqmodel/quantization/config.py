@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from packaging import version
+from random_word import random_word
 
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
@@ -213,7 +214,7 @@ class QuantizeConfig():
     # controls cpu memory saving by offloading layers/modules to disk in the slow quantization process
     # default to true as the benefit of ~73.5% cpu memory saving is tremendous
     offload_to_disk: bool = field(default=True, metadata={"help": "Offload completed module memory to disk during quantization loop"})
-    offload_to_disk_path: str = field(default="gptqmodel_offload", metadata={"help": "Offload disk path. Only applicable if Offload to disk is enabled"})
+    offload_to_disk_path: str = field(default=None, metadata={"help": "Offload disk path. Only applicable if Offload to disk is enabled"})
 
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
@@ -316,6 +317,12 @@ class QuantizeConfig():
         self.adapter = normalize_adapter(self.adapter)
 
         #print(f"adapter: {self.adapter}")
+
+        if self.offload_to_disk and not self.offload_to_disk_path:
+            randWords = random_word.RandomWords()
+            path_key = f"{randWords.get_random_word()}-{randWords.get_random_word()}"
+            self.offload_to_disk_path = f"./gptqmodel_offload/{path_key}/"
+            log.info(f"QuantizeConfig: offload_to_disk_path auto set to `{self.offload_to_disk_path}`")
 
     def extension_set(self, key: str, value: Any):
         if self.adapter is None:
