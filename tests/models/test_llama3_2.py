@@ -19,13 +19,15 @@ from model_test import ModelTest
 
 class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
-    NATIVE_ARC_CHALLENGE_ACC = 0.3567
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
+    NATIVE_ARC_CHALLENGE_ACC = 0.3267 # a100
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3575 # a100
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
     APPLY_CHAT_TEMPLATE = True
     V2 = False
     DEBUG = True
     ACT_GROUP_AWARE = False
+    #QUANTIZE_DAMP = 0.05
+    #DATASET_SIZE = 512
 
     def test_llama3_2(self):
         self.quant_lm_eval()

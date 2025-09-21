@@ -73,7 +73,7 @@ class ModelTest(unittest.TestCase):
     QUANT_BACKEND = BACKEND.AUTO
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 4096
-    MODEL_MAX_LEN = 8196
+    MODEL_MAX_LEN = INPUTS_MAX_LENGTH * 2
     DATASET_SIZE = 256
     DELETE_QUANTIZED_MODEL = True
     BUFFERED_FWD = False
@@ -97,9 +97,9 @@ class ModelTest(unittest.TestCase):
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
     EXPECT_LM_HEAD_LOSS = None
 
-    QUANTIZE_CONFIG_BITS = 4
-    QUANTIZE_CONFIG_GROUP_SIZE = 128
-    QUANTIZE_CONFIG_DAMP = 0.1
+    QUANTIZE_BITS = 4
+    QUANTIZE_GROUP_SIZE = 128
+    QUANTIZE_DAMP = 0.1
 
     V2 = False
     ACT_GROUP_AWARE = False
@@ -148,27 +148,68 @@ class ModelTest(unittest.TestCase):
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
         return tokenizer
 
+
+    @classmethod
+    def build_calibration_batches(cls, calibration, tokenizer, max_length: int):
+        from itertools import chain
+        """
+        Tokenize dataset texts, concatenate, and slice into rows of fixed max_length.
+
+        Args:
+            calibration: iterable of {"text": str}
+            tokenizer: HuggingFace tokenizer
+            max_length: int, fixed row length
+
+        Returns:
+            List[List[int]] of input_ids, each row exactly max_length long
+        """
+        # tokenize without padding/truncation
+        tokenized = [
+            tokenizer(sample["text"], add_special_tokens=False)["input_ids"]
+            for sample in calibration
+        ]
+
+        # flatten into one long stream
+        all_ids = list(chain.from_iterable(tokenized))
+
+        # cut into rows
+        batches = []
+        for i in range(0, len(all_ids), max_length):
+            chunk = all_ids[i:i + max_length]
+            if len(chunk) < max_length:
+                # pad last row
+                chunk = chunk + [tokenizer.pad_token_id] * (max_length - len(chunk))
+            batches.append(chunk)
+
+        return batches
+
     @classmethod
     def load_dataset(self, tokenizer=None):
         rows = self.DATASET_SIZE
         print(f"Dataset {rows} rows")
-        traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
+        calibration = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train").select(range(rows))
+        return self.build_calibration_batches(calibration, tokenizer=tokenizer, max_length=self.INPUTS_MAX_LENGTH)
+        #calibration = load_dataset("neuralmagic/calibration", "LLM", split="train")
+        #return calibration.select(range(rows))["text"]
         # Load data directly from gzipped JSON file
         # with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
         #     traindata = [json.loads(line) for line in f]
         #
         if not tokenizer:
-            return traindata.select(range(rows))
+            return calibration.select(range(rows))
         #     return traindata[:rows]
 
         datas = []
-        for index, sample in enumerate(traindata):
-            tokenized = tokenizer(sample['text'])
-            if len(tokenized.data['input_ids']) < self.INPUTS_MAX_LENGTH:
-                datas.append(tokenized)
-                if len(datas) >= rows:
-                    break
-
+        row = None
+        for index, sample in enumerate(calibration):
+            tokenized = tokenizer(
+                sample['text'],
+                max_length=self.INPUTS_MAX_LENGTH,
+                # padding="max_length",
+                truncation=True)["input_ids"]
+            if len(tokenized["input_ids"]) == self.INPUTS_MAX_LENGTH:
+                datas.append(row)
+            datas.append(tokenized)
         return datas
 
     def check_kernel(self, model, expected_kernels):
@@ -179,12 +220,12 @@ class ModelTest(unittest.TestCase):
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, **kwargs):
         quantize_config = QuantizeConfig(
-            bits=self.QUANTIZE_CONFIG_BITS,
-            group_size=self.QUANTIZE_CONFIG_GROUP_SIZE,
+            bits=self.QUANTIZE_BITS,
+            group_size=self.QUANTIZE_GROUP_SIZE,
             format=self.QUANT_FORMAT,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
-            damp_percent=self.QUANTIZE_CONFIG_DAMP,
+            damp_percent=self.QUANTIZE_DAMP,
             sym=self.SYM,
             v2=self.V2
         )
@@ -211,16 +252,8 @@ class ModelTest(unittest.TestCase):
             **args,
         )
 
-        tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
-
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
-        calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer)
-
-        # mpt model need
-        if not model.config.pad_token_id:
-            model.config.pad_token_id = tokenizer.pad_token_id or 0
-        if not model.config.eos_token_id:
-            model.config.eos_token_id = tokenizer.eos_token_id or 0
+        calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(model.tokenizer)
 
         is_quantized = model.quantized
 
@@ -228,7 +261,12 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=batch_size, buffered_fwd=self.BUFFERED_FWD)
+            model.quantize(calibration_dataset,
+                           backend=self.QUANT_BACKEND,
+                           batch_size=batch_size,
+                           buffered_fwd=self.BUFFERED_FWD,
+                           # calibration_dataset_concat_size=self.INPUTS_MAX_LENGTH,
+                           )
 
             self.check_kernel(model, self.KERNEL_QUANT)
 
@@ -238,7 +276,6 @@ class ModelTest(unittest.TestCase):
                 self.clear_directory(path)
 
                 model.save(path)
-                tokenizer.save_pretrained(path)
                 log.info(f"Quantized Model saved to tmp dir: {path}")
                 q_model, q_tokenizer = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
                 if need_create_processor:
@@ -260,13 +297,7 @@ class ModelTest(unittest.TestCase):
             else:
                 return model, tokenizer
 
-    def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, **args):
-        if tokenizer_path is None:
-            tokenizer_path = model_id_or_path
-        else:
-            trust_remote_code = True
-        tokenizer = self.load_tokenizer(tokenizer_path, trust_remote_code)
-
+    def loadQuantModel(self, model_id_or_path, trust_remote_code=False, **args):
         kargs = args if args else {}
 
         if self.USE_FLASH_ATTN:
@@ -283,7 +314,7 @@ class ModelTest(unittest.TestCase):
             **kargs
         )
 
-        return model, tokenizer
+        return model, model.tokenizer
 
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
         try:
