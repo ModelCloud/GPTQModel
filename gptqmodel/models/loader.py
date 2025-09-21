@@ -58,7 +58,6 @@ from ._const import DEVICE, normalize_device
 log = setup_logger()
 
 ATTN_IMPLEMENTATION = "attn_implementation"
-USE_FLASH_ATTENTION_2 = "use_flash_attention_2"
 def parse_version_string(version_str: str):
     try:
         return Version(version_str)
@@ -456,16 +455,9 @@ def ModelLoader(cls):
             if supports_flash_attn and device in [DEVICE.CUDA, DEVICE.ROCM]:
                 if ATTN_IMPLEMENTATION in kwargs:
                     args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
-                if USE_FLASH_ATTENTION_2 in kwargs:
-                    args[USE_FLASH_ATTENTION_2] = kwargs.pop(USE_FLASH_ATTENTION_2, None)
-                if not args and importlib.util.find_spec("flash_attn") is not None:
-                    has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-                    if is_flash_attn_2_available() and has_attn_implementation:
-                        args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
-                    elif is_flash_attn_2_available() and not has_attn_implementation:
-                        args = {USE_FLASH_ATTENTION_2: True}
-
-                    log.info("Optimize: Auto enabling flash attention2")
+                elif is_flash_attn_2_available():
+                    args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
+                    log.info("Loader: Auto enabling flash attention2")
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, dtype=dtype, **args
@@ -533,6 +525,7 @@ def ModelLoader(cls):
                     no_split_module_classes=[layer_type],
                     low_zero=(device_map == "balanced_low_0"),
                 )
+
         if not isinstance(device_map, dict):
             device_map = accelerate.infer_auto_device_map(
                 model,

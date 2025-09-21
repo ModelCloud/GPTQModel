@@ -24,6 +24,7 @@ HAS_CUDA = False
 HAS_XPU = False
 HAS_MPS = False
 HAS_MLX = False
+HAS_NPU = False
 
 CPU = torch.device("cpu")
 META = torch.device("meta")
@@ -54,6 +55,10 @@ if hasattr(torch, "xpu") and hasattr(torch.xpu, "is_available") and torch.xpu.is
 
 if hasattr(torch, "mps") and hasattr(torch.mps, "is_available") and torch.mps.is_available():
     HAS_MPS = True
+
+if hasattr(torch, "npu") and hasattr(torch.npu, "is_available") and torch.npu.is_available():
+    HAS_NPU = True
+
 
 # mlx check
 try:
@@ -107,10 +112,14 @@ def torch_sync(device: torch.device = None):
     if device is None:
         if HAS_CUDA:
             torch.cuda.synchronize()
-        if HAS_XPU:
+        elif HAS_XPU:
             torch.xpu.synchronize()
-        if HAS_MPS:
+        elif HAS_MPS:
             torch.mps.synchronize()
+        elif HAS_NPU:
+            torch.npu.synchronize()
+        else:
+            torch.cpu.synchronize()
         return
 
     if device.type == "cuda":
@@ -119,6 +128,10 @@ def torch_sync(device: torch.device = None):
         torch.xpu.synchronize(device=device)
     elif device.type == "mps":
         torch.mps.synchronize()
+    elif device.type == "npu":
+        torch.npu.synchronize()
+    elif device.type == "cpu":
+        torch.cpu.synchronize()
 
 def torch_empty_cache(device: torch.device = None, gc: bool = True):
     if gc:
@@ -217,7 +230,6 @@ def device_next(balance_strategy: BalanceStrategy = DEFAULT_BALANCE_STRATEGY) ->
             NEXT_DEVICE_INDEX = 1
         else:
             NEXT_DEVICE_INDEX = 0
-
 
     return (device, device_stream)
 
