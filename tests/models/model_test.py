@@ -37,7 +37,6 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch.cuda  # noqa: E402
-import transformers  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
@@ -47,7 +46,6 @@ from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
-from packaging.version import Version  # noqa: E402
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
 
 RAND_SEED = 898
