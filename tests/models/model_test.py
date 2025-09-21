@@ -186,12 +186,9 @@ class ModelTest(unittest.TestCase):
 
         args = kwargs if kwargs else {}
 
-        has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-        if has_attn_implementation:
-            if self.USE_FLASH_ATTN:
-                args["attn_implementation"] = "flash_attention_2"
-        else:
-            args["use_flash_attention_2"] = not self.USE_FLASH_ATTN
+        if self.USE_FLASH_ATTN:
+            args["attn_implementation"] = "flash_attention_2"
+
 
         log.info(f"args: {args}")
         model = GPTQModel.load(
@@ -262,12 +259,8 @@ class ModelTest(unittest.TestCase):
 
         kargs = args if args else {}
 
-        has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-        if has_attn_implementation:
-            if self.USE_FLASH_ATTN:
-                args["attn_implementation"] = "flash_attention_2"
-        else:
-            args["use_flash_attention_2"] = not self.USE_FLASH_ATTN
+        if self.USE_FLASH_ATTN:
+            args["attn_implementation"] = "flash_attention_2"
 
         model = GPTQModel.load(
             model_id_or_path,
