@@ -3,21 +3,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import concurrent.futures as cf
 import threading
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 
 class AsyncManager:
-    """Single-worker async offloader. Submit only callables (fn or lambda)."""
+    """Single-queue async offloader. Submit only callables (fn or lambda)."""
     def __init__(self, name="asyncmanager-", threads: int = 1):
         assert threads > 0
         self._exec = ThreadPoolExecutor(max_workers=threads, thread_name_prefix=name)
         self._lock = threading.Lock()
+        self._futures = set()         # all in-flight futures
         self._last_future = None
 
+    def _discard_future(self, f: cf.Future) -> None:
+        with self._lock:
+            self._futures.discard(f)
+
     def submit(self, fn):
-        """Submit a callable (function or lambda)."""
+        """Submit a callable (function or lambda). Returns a Future."""
         if not callable(fn):
             raise TypeError("AsyncOffloader.submit expects a callable")
 
@@ -26,21 +33,54 @@ class AsyncManager:
                 return fn()
             except Exception:
                 traceback.print_exc()
-                return None
+                raise  # propagate to Future so .result() fails
 
+        fut = self._exec.submit(_runner)
+        fut.add_done_callback(self._discard_future)
         with self._lock:
-            fut = self._exec.submit(_runner)
+            self._futures.add(fut)
             self._last_future = fut
-            return fut
+        return fut
 
-    def join(self, timeout=None):
-        """Wait for the last submitted task to complete."""
-        with self._lock:
-            fut = self._last_future
-        if fut is not None:
-            fut.result(timeout=timeout)
+    def join(self, timeout=None, future: cf.Future | None = None):
+        """
+        Wait for tasks to complete.
+          - If `future` is given, wait for that specific one.
+          - Else, wait for all currently in-flight tasks.
+        Respects `timeout` as a total budget (seconds).
+        """
+        deadline = None if timeout is None else (time.time() + timeout)
 
-    def shutdown(self, wait=True):
+        if future is not None:
+            # Wait only for the specified future
+            remaining = None if deadline is None else max(0.0, deadline - time.time())
+            future.result(timeout=remaining)
+            return
+
+        # Wait for all in-flight tasks
+        while True:
+            with self._lock:
+                pending = {f for f in self._futures if not f.done()}
+            if not pending:
+                return
+            remaining = None if deadline is None else max(0.0, deadline - time.time())
+            if remaining == 0.0:
+                # Give a final short poll so we raise a TimeoutError consistently
+                remaining = 0.0
+            done, not_done = cf.wait(pending, timeout=remaining, return_when=cf.ALL_COMPLETED)
+            if not_done:
+                raise TimeoutError(f"{len(not_done)} task(s) not finished before timeout")
+
+    def shutdown(self, wait=True, cancel_pending=False):
+        """
+        Shut down the executor.
+          - If `cancel_pending` is True, attempts to cancel futures that haven't started.
+          - If `wait` is True, waits for all in-flight tasks first.
+        """
+        if cancel_pending:
+            with self._lock:
+                for f in list(self._futures):
+                    f.cancel()
+        if wait:
+            self.join()  # wait for remaining tasks
         self._exec.shutdown(wait=wait)
-
-
