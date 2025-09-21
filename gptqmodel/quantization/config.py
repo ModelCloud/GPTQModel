@@ -321,7 +321,7 @@ class QuantizeConfig():
         if self.offload_to_disk and not self.offload_to_disk_path:
             randWords = random_word.RandomWords()
             path_key = f"{randWords.get_random_word()}-{randWords.get_random_word()}"
-            self.offload_to_disk_path = f".gptqmodel_offload/{path_key}/"
+            self.offload_to_disk_path = f"./gptqmodel_offload/{path_key}/"
             log.info(f"QuantizeConfig: offload_to_disk_path auto set to `{self.offload_to_disk_path}`")
 
     def extension_set(self, key: str, value: Any):
