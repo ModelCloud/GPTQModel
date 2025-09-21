@@ -132,7 +132,7 @@ class EoraProcessor(LoopProcessor):
         # log.info(f"EoRA: module native dtype = `{module_native_dtype}")
         A, B = self.eora_compute_lora(
             w_wq_delta=w_wq_delta,
-            module=module,
+            name=module.name,
             eigen_scaling_diag_matrix=eigen_scaling_diag_matrix,
             rank=module.adapter_cfg.rank,
             dtype=module.module_dtype,

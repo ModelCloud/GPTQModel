@@ -188,12 +188,8 @@ class GPTQProcessor(LoopProcessor):
         self.log_new_row(stat)
 
         if self.calculate_w_wq_diff:
-            if module.weight.data.dtype == torch.float16:
-                # diff in float16
-                w_wq_diff = module.weight.data - wq
-            else:
-                # diff in float32
-                w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+            # diff in float32
+            w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
 
             module.state.update({
                 "w_wq_diff": w_wq_diff,

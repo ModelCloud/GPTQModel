@@ -89,8 +89,6 @@ class ModuleLooper():
             # print(f"layer swapped------------from: {cur_layer_device}")
             # print_module_tree(self.gptq_model.model)
             cur_layer_device = self.gptq_model.quantize_config.device
-            # FIX ME use turtle_model, which has exactly same structure but holds the actual model tensors
-            # and copy the layer[0] from turtle model to self.gptq_model.model which only holds fake meta tensors
         else:
             layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
 
@@ -123,8 +121,13 @@ class ModuleLooper():
 
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
+
+        # TODO FIX ME.. remove hard coded Ovis code
         is_ovis = self.gptq_model.__class__.__name__ == "OvisGPTQ"
+
+        # LifeCycle: start pre-first layer embedding hook
         self.gptq_model.pre_quantize_generate_hook_start()
+
         for example in calibration_data:
             for k, v in example.items():
                 if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
@@ -148,19 +151,14 @@ class ModuleLooper():
                     self.gptq_model.model(**example, use_cache=use_cache)
             except ValueError:
                 pass
+
+        # LifeCycle: pre-first layer embedding hook
         self.gptq_model.pre_quantize_generate_hook_end()
         handle.remove()
-        move_to(layers[0], device=CPU)
-        # for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
-        #     module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
-        #     if module is not None:
-        #         move_to(module, device=ori_outside_layer_module_devices[module_name])
-        # if auto_gc:
-        #     torch_empty_cache()
+
         return InputCache(layer_inputs=layer_inputs, layer_input_kwargs=layer_input_kwargs, position_ids=position_ids,
                           attention_masks=attention_masks)
 
-    @torch.no_grad()
     def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, fail_safe: bool = False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
@@ -358,7 +356,7 @@ class ModuleLooper():
                         # sync above stream copies
                         #torch_sync(device=cur_layer_device)
 
-                        # TODO remove hamba hack
+                        # TODO FIX ME remove hamba hack
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                         if hasattr(module, "reuse_kv"):
                             if module.reuse_kv:
@@ -562,6 +560,8 @@ class ModuleLooper():
                 if auto_gc:
                     torch_empty_cache()
 
+        # LifeCycle: All sub-modules have finalized meaning quantization work is complete
+        # Below starts packing: TODO FIXME. move packing to sub-module finalize
         # wait for all thread tasks
         ASYNC_WORKER.join()
         # paranoid safety check
