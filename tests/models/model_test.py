@@ -1,18 +1,7 @@
-# Copyright 2024-2025 ModelCloud.ai
-# Copyright 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 # -- do not touch
 import os
 import sys
@@ -199,7 +188,7 @@ class ModelTest(unittest.TestCase):
             **args,
         )
 
-        tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
+        tokenizer = model.tokenizer
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer)
@@ -228,7 +217,8 @@ class ModelTest(unittest.TestCase):
                 model.save(path)
                 tokenizer.save_pretrained(path)
                 log.info(f"Quantized Model saved to tmp dir: {path}")
-                q_model, q_tokenizer = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
+                q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
+                q_tokenizer = q_model.tokenizer
                 if need_create_processor:
                     processor = AutoProcessor.from_pretrained(path)
 
@@ -249,11 +239,6 @@ class ModelTest(unittest.TestCase):
                 return model, tokenizer
 
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, **args):
-        if tokenizer_path is None:
-            tokenizer_path = model_id_or_path
-        else:
-            trust_remote_code = True
-        tokenizer = self.load_tokenizer(tokenizer_path, trust_remote_code)
 
         kargs = args if args else {}
 
@@ -269,7 +254,7 @@ class ModelTest(unittest.TestCase):
             **kargs
         )
 
-        return model, tokenizer
+        return model
 
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
         try:
