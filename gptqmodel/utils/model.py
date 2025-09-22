@@ -262,7 +262,10 @@ def create_quant_module(
     if name not in quant_result:
         return
     
-    submodule = module.get_submodule(name)
+    # unwrap named module
+    if isinstance(submodule, NamedModule):
+        # print(f"offloading named module: {module.full_name}")
+        submodule = submodule.module
 
     # submodule may be BaseQuantLinear, and the next QuantLinear is selected because of in_features/out_features
     # mismatch and other reasons.

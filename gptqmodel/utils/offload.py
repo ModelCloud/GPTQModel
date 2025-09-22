@@ -74,8 +74,9 @@ def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: 
                 module = module.module
 
             full_name = get_module_fullname(model=model, module=module)
-
-            _offload_disk(module=module, name=full_name, disk_path=disk_path)
+            
+            if full_name != "":
+                _offload_disk(module=module, name=full_name, disk_path=disk_path)
 
         if hasattr(module, "config") and hasattr(module.config,
                                                  "tie_word_embeddings") and module.config.tie_word_embeddings:
