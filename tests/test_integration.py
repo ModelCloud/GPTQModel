@@ -1,27 +1,14 @@
-# Copyright 2024-2025 ModelCloud.ai
-# Copyright 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 import os
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-import transformers  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-from packaging.version import Version  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
 
 
@@ -32,7 +19,7 @@ class TestIntegration(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        assert Version(transformers.__version__) > Version("4.48.99")
+        pass
 
     def _test_load_quantized_model_gptq_v1(self, device_map):
         model_id_or_path = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"

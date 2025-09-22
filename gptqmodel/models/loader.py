@@ -1,22 +1,10 @@
-# Copyright 2024-2025 ModelCloud.ai
-# Copyright 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
@@ -58,7 +46,6 @@ from ._const import DEVICE, normalize_device
 log = setup_logger()
 
 ATTN_IMPLEMENTATION = "attn_implementation"
-USE_FLASH_ATTENTION_2 = "use_flash_attention_2"
 def parse_version_string(version_str: str):
     try:
         return Version(version_str)
@@ -456,16 +443,9 @@ def ModelLoader(cls):
             if supports_flash_attn and device in [DEVICE.CUDA, DEVICE.ROCM]:
                 if ATTN_IMPLEMENTATION in kwargs:
                     args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
-                if USE_FLASH_ATTENTION_2 in kwargs:
-                    args[USE_FLASH_ATTENTION_2] = kwargs.pop(USE_FLASH_ATTENTION_2, None)
-                if not args and importlib.util.find_spec("flash_attn") is not None:
-                    has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-                    if is_flash_attn_2_available() and has_attn_implementation:
-                        args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
-                    elif is_flash_attn_2_available() and not has_attn_implementation:
-                        args = {USE_FLASH_ATTENTION_2: True}
-
-                    log.info("Optimize: Auto enabling flash attention2")
+                elif is_flash_attn_2_available():
+                    args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
+                    log.info("Loader: Auto enabling flash attention2")
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, dtype=dtype, **args
@@ -533,6 +513,7 @@ def ModelLoader(cls):
                     no_split_module_classes=[layer_type],
                     low_zero=(device_map == "balanced_low_0"),
                 )
+
         if not isinstance(device_map, dict):
             device_map = accelerate.infer_auto_device_map(
                 model,

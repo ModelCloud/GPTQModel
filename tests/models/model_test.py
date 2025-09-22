@@ -1,18 +1,7 @@
-# Copyright 2024-2025 ModelCloud.ai
-# Copyright 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 # -- do not touch
 import os
 import sys
@@ -37,7 +26,6 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch.cuda  # noqa: E402
-import transformers  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
@@ -47,7 +35,6 @@ from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
-from packaging.version import Version  # noqa: E402
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
 
 RAND_SEED = 898
@@ -186,12 +173,9 @@ class ModelTest(unittest.TestCase):
 
         args = kwargs if kwargs else {}
 
-        has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-        if has_attn_implementation:
-            if self.USE_FLASH_ATTN:
-                args["attn_implementation"] = "flash_attention_2"
-        else:
-            args["use_flash_attention_2"] = not self.USE_FLASH_ATTN
+        if self.USE_FLASH_ATTN:
+            args["attn_implementation"] = "flash_attention_2"
+
 
         log.info(f"args: {args}")
         model = GPTQModel.load(
@@ -204,7 +188,7 @@ class ModelTest(unittest.TestCase):
             **args,
         )
 
-        tokenizer = self.load_tokenizer(model_id_or_path, trust_remote_code=trust_remote_code)
+        tokenizer = model.tokenizer
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer)
@@ -233,7 +217,8 @@ class ModelTest(unittest.TestCase):
                 model.save(path)
                 tokenizer.save_pretrained(path)
                 log.info(f"Quantized Model saved to tmp dir: {path}")
-                q_model, q_tokenizer = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
+                q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
+                q_tokenizer = q_model.tokenizer
                 if need_create_processor:
                     processor = AutoProcessor.from_pretrained(path)
 
@@ -254,20 +239,11 @@ class ModelTest(unittest.TestCase):
                 return model, tokenizer
 
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, **args):
-        if tokenizer_path is None:
-            tokenizer_path = model_id_or_path
-        else:
-            trust_remote_code = True
-        tokenizer = self.load_tokenizer(tokenizer_path, trust_remote_code)
 
         kargs = args if args else {}
 
-        has_attn_implementation = Version(transformers.__version__) >= Version("4.46.0")
-        if has_attn_implementation:
-            if self.USE_FLASH_ATTN:
-                args["attn_implementation"] = "flash_attention_2"
-        else:
-            args["use_flash_attention_2"] = not self.USE_FLASH_ATTN
+        if self.USE_FLASH_ATTN:
+            args["attn_implementation"] = "flash_attention_2"
 
         model = GPTQModel.load(
             model_id_or_path,
@@ -278,7 +254,7 @@ class ModelTest(unittest.TestCase):
             **kargs
         )
 
-        return model, tokenizer
+        return model
 
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
         try:

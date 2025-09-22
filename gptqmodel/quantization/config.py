@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from packaging import version
+from random_word import random_word
 
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
@@ -20,7 +21,7 @@ from ..utils.logger import setup_logger
 log = setup_logger()
 
 FORMAT_FIELD_CODE = "format"
-FORMAT_FIELD_JSON = "checkpoint_format"
+FORMAT_FIELD_CHECKPOINT = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
 PACK_DTYPE_FIELD = "pack_dtype"
@@ -110,8 +111,10 @@ QUANTIZE_BLACK_LIST = {}
 QUANT_CONFIG_ARG_SYNONYMS = {
     "w_bit": "bits",
     "q_group_size": "group_size",
+    # awq compat
+    "version" : FORMAT_FIELD_CODE,
     # map format field (checkpoint_format) to class/code (format)
-    FORMAT_FIELD_JSON: FORMAT_FIELD_CODE,
+    FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
 }
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
@@ -211,7 +214,7 @@ class QuantizeConfig():
     # controls cpu memory saving by offloading layers/modules to disk in the slow quantization process
     # default to true as the benefit of ~73.5% cpu memory saving is tremendous
     offload_to_disk: bool = field(default=True, metadata={"help": "Offload completed module memory to disk during quantization loop"})
-    offload_to_disk_path: str = field(default="gptqmodel_offload", metadata={"help": "Offload disk path. Only applicable if Offload to disk is enabled"})
+    offload_to_disk_path: str = field(default=None, metadata={"help": "Offload disk path. Only applicable if Offload to disk is enabled"})
 
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
@@ -315,6 +318,12 @@ class QuantizeConfig():
 
         #print(f"adapter: {self.adapter}")
 
+        if self.offload_to_disk and not self.offload_to_disk_path:
+            randWords = random_word.RandomWords()
+            path_key = f"{randWords.get_random_word()}-{randWords.get_random_word()}"
+            self.offload_to_disk_path = f"./gptqmodel_offload/{path_key}/"
+            log.info(f"QuantizeConfig: offload_to_disk_path auto set to `{self.offload_to_disk_path}`")
+
     def extension_set(self, key: str, value: Any):
         if self.adapter is None:
             self.adapter = {}
@@ -397,10 +406,10 @@ class QuantizeConfig():
         if format:
             if format not in valid_formats:
                 raise ValueError(f"QuantizeConfig: Unknown quantization checkpoint format: {format}.")
-            if quantize_cfg.get(FORMAT_FIELD_JSON):
+            if quantize_cfg.get(FORMAT_FIELD_CHECKPOINT):
                 raise ValueError("QuantizeConfig: Conflicting quantization format passed in manually and also exists in model config.")
         # compat: warn if checkpoint_format is missing
-        elif quantize_cfg.get(FORMAT_FIELD_JSON) is None:
+        elif quantize_cfg.get(FORMAT_FIELD_CHECKPOINT) is None:
             format_auto_inferred = True
 
         field_names = [field.name for field in fields(cls)]
@@ -417,7 +426,7 @@ class QuantizeConfig():
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
                 key = QUANT_CONFIG_ARG_SYNONYMS[key]
 
-            if key == FORMAT_FIELD_JSON:
+            if key == FORMAT_FIELD_CHECKPOINT:
                 val = val.lower()
 
                 if val in {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN, FORMAT.BITBLAS}:
@@ -441,7 +450,7 @@ class QuantizeConfig():
                 log.info(f"QuantizeConfig: Ignoring unknown parameter in the quantization configuration: {key}.")
 
         if format_auto_inferred:
-            log.info(f"QuantizeConfig: `{FORMAT_FIELD_JSON}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}")
+            log.info(f"QuantizeConfig: `{FORMAT_FIELD_CHECKPOINT}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}")
 
         if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
             # AWQ and Marlin do not reorder the rows.
@@ -489,7 +498,7 @@ class QuantizeConfig():
             "sym": self.sym,
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,
-            FORMAT_FIELD_JSON: self.format,
+            FORMAT_FIELD_CHECKPOINT: self.format,
             # torch.dtype convert to string
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: self.meta,
@@ -497,8 +506,11 @@ class QuantizeConfig():
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
 
+        # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm
         if self.quant_method == QUANT_METHOD.AWQ:
             out["zero_point"] = self.zero_point
+            # awq compat with vllm/sglang/transformers loaders
+            out["version"] = self.format
 
         dynamic = out["dynamic"]
         if dynamic:
