@@ -158,13 +158,13 @@ def get_scale_perms():
 USE_FP32_REDUCE_DEFAULT = True
 
 # Whether to use atomicAdd reduce in gptq/awq marlin kernel. experimental
-VLLM_MARLIN_USE_ATOMIC_ADD = False
+GPTQMODEL_MARLIN_USE_ATOMIC_ADD = True
 
 
 def maybe_warn_marlin_atomic_add_env():
     if torch.compiler.is_dynamo_compiling():
         return
-    if VLLM_MARLIN_USE_ATOMIC_ADD:
+    if GPTQMODEL_MARLIN_USE_ATOMIC_ADD:
         return
     log.info_once(
         "Marlin kernel can achieve better performance for small size_n "
@@ -192,8 +192,8 @@ def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
         return False
 
     # disable atomicAdd reduce by default,
-    # one can enable it with VLLM_MARLIN_USE_ATOMIC_ADD=1
-    if not VLLM_MARLIN_USE_ATOMIC_ADD:
+    # one can enable it with GPTQMODEL_MARLIN_USE_ATOMIC_ADD=1
+    if not GPTQMODEL_MARLIN_USE_ATOMIC_ADD:
         maybe_warn_marlin_atomic_add_env()
         return False
 

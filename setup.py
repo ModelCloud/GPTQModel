@@ -444,7 +444,6 @@ if BUILD_CUDA_EXT == "1":
                 "-Xfatbin", "-compress-all",
                 "--expt-relaxed-constexpr",
                 "--expt-extended-lambda",
-                "--use_fast_math",
                 "-diag-suppress=179,39,177",
             ]
         else:
@@ -638,7 +637,7 @@ setup(
         "hf": ["optimum>=1.21.2"],
         "logger": ["clearml", "random_word", "plotly"],
         "eval": ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
-        "triton": ["triton>=3.0.0"],
+        "triton": ["triton>=3.4.0"],
         "openai": ["uvicorn", "fastapi", "pydantic"],
         "mlx": ["mlx_lm>=0.24.0"],
     },
