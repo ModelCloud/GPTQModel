@@ -152,11 +152,6 @@ def get_scale_perms():
     return scale_perm, scale_perm_single
 
 
-# In case there is a performance issue with Marlin, the variable below can be
-# changed to False, which allows Marlin to perform global reductions in fp16
-# precision (instead of fp32), and therefore, save on some memory movements.
-USE_FP32_REDUCE_DEFAULT = True
-
 # Whether to use atomicAdd reduce in gptq/awq marlin kernel. experimental
 GPTQMODEL_MARLIN_USE_ATOMIC_ADD = True
 
@@ -219,7 +214,7 @@ def apply_gptq_marlin_linear(
         input_size_per_partition: int,
         is_k_full: bool,
         bias: Optional[torch.Tensor] = None,
-        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
+        use_fp32_reduce: bool = True) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
@@ -538,6 +533,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             input_size_per_partition=self.in_features,
             is_k_full=self.is_k_full,
             bias=self.bias,
+            use_fp32_reduce=self.fp32,
         )
 
         if self.adapter:
