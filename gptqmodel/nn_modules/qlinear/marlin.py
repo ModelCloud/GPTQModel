@@ -478,7 +478,7 @@ class MarlinQuantLinear(BaseQuantLinear):
         # Handle sorting for activation reordering if needed.
         if self.desc_act:
             g_idx, g_idx_sort_indices = marlin_sort_g_idx(getattr(self, "g_idx"))
-            self._transform_param(self, "g_idx", lambda _: g_idx)
+            _transform_param(self, "g_idx", lambda _: g_idx)
             self.g_idx_sort_indices = g_idx_sort_indices
         else:
             setattr(self, "g_idx", marlin_make_empty_g_idx(device))
@@ -486,8 +486,8 @@ class MarlinQuantLinear(BaseQuantLinear):
 
         setattr(self, "qzeros", marlin_make_empty_g_idx(device))
 
-        self._transform_param(self, "qweight", transform_w_q)
-        self._transform_param(self, "scales", transform_w_s)
+        _transform_param(self, "qweight", transform_w_q)
+        _transform_param(self, "scales", transform_w_s)
 
         super().post_init()
 
