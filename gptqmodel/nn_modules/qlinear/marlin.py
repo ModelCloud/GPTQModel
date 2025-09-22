@@ -532,9 +532,14 @@ class MarlinQuantLinear(BaseQuantLinear):
             output_size_per_partition=self.out_features,
             input_size_per_partition=self.in_features,
             is_k_full=self.is_k_full,
-            bias=self.bias,
+            # TODO FIX ME...marlin kernel fused bias is failing CI
+            bias=None, # self.bias,
             use_fp32_reduce=self.fp32,
         )
+
+        # TODO FIX ME...marlin kernel fused bias is failing CI, bypass marlin fused bias
+        if self.bias is not None:
+            out = out.add_(self.bias)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
