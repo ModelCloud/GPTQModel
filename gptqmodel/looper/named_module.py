@@ -3,11 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import transformers
-from torch import nn
+from torch import nn, Tensor
+from torch.nn import Parameter
 from torch.nn.modules.conv import _ConvNd
 
 
@@ -54,6 +55,18 @@ class NamedModule(torch.nn.Module):
             "in_features": in_features,
             "out_features": out_features,
         })
+
+    def register_buffer(
+        self, name: str, tensor: Optional[Tensor], persistent: bool = True
+    ) -> None:
+        return self.module.register_buffer(name, tensor, persistent)
+
+    def unregister_buffer(self, name: str):
+        del self.module._buffers[name]
+        delattr(self.module, "mask")
+
+    def register_parameter(self, name: str, param: Optional[Parameter]) -> None:
+        return self.module.register_parameter(name, param)
 
     # return stats for mo
     # def stats(self) -> Dict[str, float]:
