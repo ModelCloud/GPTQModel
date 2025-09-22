@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-
+import glob
 import os
 import re
 import subprocess
@@ -406,10 +406,10 @@ if BUILD_CUDA_EXT == "1":
 
     if cpp_ext is not None:
         # Optional conda CUDA runtime headers
-        conda_cuda_include_dir = os.path.join(get_python_lib(), "nvidia/cuda_runtime/include")
-        if os.path.isdir(conda_cuda_include_dir):
-            include_dirs.append(conda_cuda_include_dir)
-            print(f"appending conda cuda include dir {conda_cuda_include_dir}")
+        #conda_cuda_include_dir = os.path.join(get_python_lib(), "nvidia/cuda_runtime/include")
+        # if os.path.isdir(conda_cuda_include_dir):
+        #     include_dirs.append(conda_cuda_include_dir)
+        #     print(f"appending conda cuda include dir {conda_cuda_include_dir}")
 
         extra_link_args = []
         extra_compile_args = {
@@ -444,7 +444,6 @@ if BUILD_CUDA_EXT == "1":
                 "-Xfatbin", "-compress-all",
                 "--expt-relaxed-constexpr",
                 "--expt-extended-lambda",
-                "--use_fast_math",
                 "-diag-suppress=179,39,177",
             ]
         else:
@@ -471,14 +470,16 @@ if BUILD_CUDA_EXT == "1":
         if sys.platform != "win32":
             if not ROCM_VERSION and HAS_CUDA_V8:
                 if BUILD_MARLIN:
+                    marlin_template_kernel_srcs = glob.glob("gptqmodel_ext/marlin/kernel_*.cu")
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_marlin_kernels",
                             [
                                 "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                                "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                                "gptqmodel_ext/marlin/marlin_repack.cu",
-                            ],
+                                "gptqmodel_ext/marlin/gptq_marlin.cu",
+                                "gptqmodel_ext/marlin/gptq_marlin_repack.cu",
+                                "gptqmodel_ext/marlin/awq_marlin_repack.cu",
+                            ] + marlin_template_kernel_srcs,
                             extra_link_args=extra_link_args,
                             extra_compile_args=extra_compile_args,
                         )
@@ -636,7 +637,7 @@ setup(
         "hf": ["optimum>=1.21.2"],
         "logger": ["clearml", "random_word", "plotly"],
         "eval": ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
-        "triton": ["triton>=3.0.0"],
+        "triton": ["triton>=3.4.0"],
         "openai": ["uvicorn", "fastapi", "pydantic"],
         "mlx": ["mlx_lm>=0.24.0"],
     },
