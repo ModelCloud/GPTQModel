@@ -476,8 +476,9 @@ if BUILD_CUDA_EXT == "1":
                             "gptqmodel_marlin_kernels",
                             [
                                 "gptqmodel_ext/marlin/marlin_cuda.cpp",
-                                "gptqmodel_ext/marlin/marlin_cuda_kernel.cu",
-                                "gptqmodel_ext/marlin/marlin_repack.cu",
+                                "gptqmodel_ext/marlin/gptq_marlin.cu",
+                                "gptqmodel_ext/marlin/gptq_marlin_repack.cu",
+                                "gptqmodel_ext/marlin/awq_marlin_repack.cu",
                             ],
                             extra_link_args=extra_link_args,
                             extra_compile_args=extra_compile_args,
