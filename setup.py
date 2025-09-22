@@ -471,6 +471,7 @@ if BUILD_CUDA_EXT == "1":
         if sys.platform != "win32":
             if not ROCM_VERSION and HAS_CUDA_V8:
                 if BUILD_MARLIN:
+                    marlin_template_kernel_srcs = glob.glob("gptqmodel_ext/marlin/kernel_*.cu")
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_marlin_kernels",
@@ -479,7 +480,7 @@ if BUILD_CUDA_EXT == "1":
                                 "gptqmodel_ext/marlin/gptq_marlin.cu",
                                 "gptqmodel_ext/marlin/gptq_marlin_repack.cu",
                                 "gptqmodel_ext/marlin/awq_marlin_repack.cu",
-                            ],
+                            ] + marlin_template_kernel_srcs,
                             extra_link_args=extra_link_args,
                             extra_compile_args=extra_compile_args,
                         )
