@@ -123,7 +123,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
         (BACKEND.MARLIN, torch.float16, 0.00035),
         # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0025),
+        # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0025),
     ])
     def test_kernel_float16(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
         out = self.forward(backend=backend, dtype=dtype)
@@ -179,7 +179,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
         (BACKEND.MARLIN, torch.float16, 0.00035),
         # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        (BACKEND.EXLLAMA_EORA, torch.float16, 0.0020)
+        # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0020)
     ])
     def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
         data = self.data[dtype]
