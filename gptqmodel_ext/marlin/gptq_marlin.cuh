@@ -1,4 +1,5 @@
-#include "kernel.h"
+#include <torch/extension.h>
+#include "core/scalar_type.hpp"
 
 torch::Tensor gptq_marlin_gemm(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
