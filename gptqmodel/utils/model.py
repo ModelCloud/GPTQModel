@@ -261,6 +261,8 @@ def create_quant_module(
     # skip non-quantized modules
     if name not in quant_result:
         return
+    
+    submodule = module.get_submodule(name)
 
     # submodule may be BaseQuantLinear, and the next QuantLinear is selected because of in_features/out_features
     # mismatch and other reasons.

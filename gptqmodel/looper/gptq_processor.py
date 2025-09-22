@@ -19,7 +19,7 @@ from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.importer import select_quant_linear
-from ..utils.model import move_to, pack_model, create_quant_module
+from ..utils.model import move_to, pack_model, create_quant_module, pack_module, find_modules
 from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import CPU, torch_streamCtx, torch_sync
 
@@ -216,14 +216,14 @@ class GPTQProcessor(LoopProcessor):
         module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
 
+        layers = find_modules(model.model)
+
         # select correct quant linear
         quant_linear_cls = select_quant_linear(
                 bits=self.qcfg.bits,
                 group_size=self.qcfg.group_size,
                 desc_act=self.qcfg.desc_act,
                 sym=self.qcfg.sym,
-                format=format,
-                quant_method=self.qcfg.quant_method,
                 pack=True,
                 dynamic=self.qcfg.dynamic,
                 device=self.qcfg.device,
@@ -231,9 +231,10 @@ class GPTQProcessor(LoopProcessor):
                 multi_select=False,
             )
         
+
         # replace module with quantized module
         create_quant_module(
-            name=module.name,
+            name=module.full_name,
             linear_cls=quant_linear_cls,
             bits=self.qcfg.bits,
             desc_act=self.qcfg.desc_act,
@@ -244,10 +245,22 @@ class GPTQProcessor(LoopProcessor):
             quant_result=self.results(),
             sym=self.qcfg.sym,
             device=self.qcfg.device,
-            lm_head_name=model.lm_head_name,
+            lm_head_name=model.lm_head,
             pack_dtype=self.qcfg.pack_dtype,
         )
 
+        # pack module
+        qModules = {name: submodule for name, submodule in find_modules(model.model, [quant_linear_cls]).items() if name == module.full_name}
+        pack_module(
+            name=module.full_name,
+            qModules=qModules,
+            quant_result=self.results(),
+            layers=layers,
+            quant_linear_cls=quant_linear_cls,
+            lock=self.lock,
+        )
+
+        model.qlinear_kernel = quant_linear_cls
         
 
     def finalize(self, model: BaseQModel, **kwargs):
@@ -258,22 +271,6 @@ class GPTQProcessor(LoopProcessor):
         model.model = undo_offload_to_disk(module=model.model, include_buffers=True, delete_offload_folders=True)
         # print("finalize")
         # print_module_tree(model.model)
-
-        backend = kwargs.pop("backend")
-        model.qlinear_kernel = pack_model(
-            model=model.model,
-            quant_result=self.results(),
-            bits=self.qcfg.bits,
-            group_size=self.qcfg.group_size,
-            backend=backend,
-            desc_act=self.qcfg.desc_act,
-            format=self.qcfg.format,
-            quant_method=self.qcfg.quant_method,
-            lm_head_name=model.lm_head,
-            dynamic=self.qcfg.dynamic,
-            parallel_packing=self.qcfg.parallel_packing,
-            pack_dtype=self.qcfg.pack_dtype,
-        )
 
         # set quantized state
         model.quantized = True
