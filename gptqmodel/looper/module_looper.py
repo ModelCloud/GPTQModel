@@ -630,7 +630,10 @@ class ModuleLooper():
 
             # TODO awq unification
             if not is_awq_quant:
-                processor.preprocess(subset[name], buffered_fwd=buffered_fwd, fail_safe=fail_safe)
+                if isinstance(processor, GPTQProcessor):
+                    processor.preprocess(subset[name], buffered_fwd=buffered_fwd, fail_safe=fail_safe)
+                else:
+                    processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
                 # some modules are skipped
                 if processor.is_skipped(subset[name]):
                     skipped_modules.append(name)
