@@ -241,6 +241,112 @@ def make_quant(
 
     raise ValueError(f"No compatible quant linear was found for this module: {module.__class__.__name__}")
 
+def create_quant_module(
+    name: str,
+    linear_cls: Type[BaseQuantLinear],
+    bits: int,
+    desc_act: bool,
+    dynamic,
+    group_size: int,
+    module: nn.Module,
+    submodule: nn.Module,
+    quant_result: Dict[str, Dict[str, Any]],
+    sym: bool,
+    device: DEVICE,
+    lm_head_name: str,
+    pack_dtype: torch.dtype,
+    backend: BACKEND,
+    adapter: Optional[Adapter] = None,
+):
+    # skip non-quantized modules
+    if name not in quant_result:
+        return
+
+    # submodule may be BaseQuantLinear, and the next QuantLinear is selected because of in_features/out_features
+    # mismatch and other reasons.
+    # In this case, need to call list_buffer() to get the device.
+    if not isinstance(submodule, BaseQuantLinear):
+        ori_layer_device = next(submodule.parameters()).device
+    else:
+        ori_layer_device = submodule.list_buffers()[0].device
+
+    if isinstance(submodule, NamedModule):
+        in_features = submodule.state.get("in_features")
+        out_features = submodule.state.get("out_features")
+    elif isinstance(submodule, nn.Linear):
+        in_features = submodule.in_features
+        out_features = submodule.out_features
+    elif isinstance(submodule, _ConvNd):
+        in_features = submodule.in_channels
+        out_features = submodule.out_channels
+    elif isinstance(submodule, transformers.Conv1D):
+        in_features = submodule.weight.shape[0]
+        out_features = submodule.weight.shape[1]
+    elif isinstance(submodule, BaseQuantLinear):
+        # if submodule is already a quant layer, we need to get in_features and out_features from the submodule
+        in_features = submodule.in_features
+        out_features = submodule.out_features
+    else:
+        raise NotImplementedError(f"Unsupported module {submodule}")
+
+    bias = submodule.bias is not None
+
+    # need copies as dynamic config may override these in for loop
+    tmp_bits = bits
+    tmp_group_size = group_size
+    tmp_desc_act = desc_act
+    tmp_sym = sym
+    tmp_pack_dtype = pack_dtype
+
+    # dynamic bits, group_size, sym, pack_dtype for each layer/module
+    if dynamic is not None:
+        overrides = dynamic_get(dynamic=dynamic, module_name=name)
+        # negative module match, skip this module
+        if overrides == False:  # noqa: E712
+            return
+
+        # positive module match
+        if overrides:
+            # override base QuantizeConfig for every quant config key/value
+            tmp_bits = overrides.get("bits", bits)
+            tmp_group_size = overrides.get("group_size", group_size)
+            tmp_desc_act = overrides.get("desc_act", desc_act)
+            tmp_sym = overrides.get("sym", sym)
+            tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
+
+    # when loading a quantized model, device is target device passed in GPTQModel.load()
+    # check in_features and out_features validate
+    _, err = linear_cls.validate(
+        bits=tmp_bits,
+        group_size=tmp_group_size,
+        desc_act=tmp_desc_act,
+        sym=tmp_sym,
+        pack_dtype=tmp_pack_dtype,
+        in_features=in_features,
+        out_features=out_features,
+        device=device,
+        adapter=adapter, # TODO FIX ME..need to pass Eora if loaded
+    )
+    if err is not None:
+        raise err
+
+    new_layer = linear_cls(
+        bits=tmp_bits,
+        group_size=tmp_group_size,
+        desc_act=tmp_desc_act,
+        sym=tmp_sym,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=tmp_pack_dtype,
+        bias=bias,
+        #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
+        name=name,
+        lm_head_name=lm_head_name,
+        backend=backend,
+        adapter=adapter,
+    )
+    new_layer.device = ori_layer_device
+    recurse_setattr(module, name, new_layer.to(ori_layer_device))
 
 def create_quant_layer(
         linear_cls: Type[BaseQuantLinear],
@@ -260,95 +366,24 @@ def create_quant_layer(
     if isinstance(module, linear_cls):
         return linear_cls
     for name, submodule in module.named_modules():
-        # skip non-quantized modules
-        if name not in quant_result:
-            continue
-
-        # submodule may be BaseQuantLinear, and the next QuantLinear is selected because of in_features/out_features
-        # mismatch and other reasons.
-        # In this case, need to call list_buffer() to get the device.
-        if not isinstance(submodule, BaseQuantLinear):
-            ori_layer_device = next(submodule.parameters()).device
-        else:
-            ori_layer_device = submodule.list_buffers()[0].device
-
-        if isinstance(submodule, NamedModule):
-            in_features = submodule.state.get("in_features")
-            out_features = submodule.state.get("out_features")
-        elif isinstance(submodule, nn.Linear):
-            in_features = submodule.in_features
-            out_features = submodule.out_features
-        elif isinstance(submodule, _ConvNd):
-            in_features = submodule.in_channels
-            out_features = submodule.out_channels
-        elif isinstance(submodule, transformers.Conv1D):
-            in_features = submodule.weight.shape[0]
-            out_features = submodule.weight.shape[1]
-        elif isinstance(submodule, BaseQuantLinear):
-            # if submodule is already a quant layer, we need to get in_features and out_features from the submodule
-            in_features = submodule.in_features
-            out_features = submodule.out_features
-        else:
-            raise NotImplementedError(f"Unsupported module {submodule}")
-
-        bias = submodule.bias is not None
-
-        # need copies as dynamic config may override these in for loop
-        tmp_bits = bits
-        tmp_group_size = group_size
-        tmp_desc_act = desc_act
-        tmp_sym = sym
-        tmp_pack_dtype = pack_dtype
-
-        # dynamic bits, group_size, sym, pack_dtype for each layer/module
-        if dynamic is not None:
-            overrides = dynamic_get(dynamic=dynamic, module_name=name)
-            # negative module match, skip this module
-            if overrides == False:  # noqa: E712
-                continue
-
-            # positive module match
-            if overrides:
-                # override base QuantizeConfig for every quant config key/value
-                tmp_bits = overrides.get("bits", bits)
-                tmp_group_size = overrides.get("group_size", group_size)
-                tmp_desc_act = overrides.get("desc_act", desc_act)
-                tmp_sym = overrides.get("sym", sym)
-                tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
-
-        # when loading a quantized model, device is target device passed in GPTQModel.load()
-        # check in_features and out_features validate
-        _, err = linear_cls.validate(
-            bits=tmp_bits,
-            group_size=tmp_group_size,
-            desc_act=tmp_desc_act,
-            sym=tmp_sym,
-            pack_dtype=tmp_pack_dtype,
-            in_features=in_features,
-            out_features=out_features,
-            device=device,
-            adapter=adapter, # TODO FIX ME..need to pass Eora if loaded
-        )
-        if err is not None:
-            raise err
-
-        new_layer = linear_cls(
-            bits=tmp_bits,
-            group_size=tmp_group_size,
-            desc_act=tmp_desc_act,
-            sym=tmp_sym,
-            in_features=in_features,
-            out_features=out_features,
-            pack_dtype=tmp_pack_dtype,
-            bias=bias,
-            #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
+        create_quant_module(
             name=name,
+            linear_cls=linear_cls,
+            bits=bits,
+            desc_act=desc_act,
+            dynamic=dynamic,
+            group_size=group_size,
+            module=module,
+            submodule=submodule,
+            quant_result=quant_result,
+            sym=sym,
+            device=device,
             lm_head_name=lm_head_name,
+            pack_dtype=pack_dtype,
             backend=backend,
             adapter=adapter,
         )
-        new_layer.device = ori_layer_device
-        recurse_setattr(module, name, new_layer.to(ori_layer_device))
+        
     return linear_cls
 
 # public/stable api exposed to transformer/optimum
