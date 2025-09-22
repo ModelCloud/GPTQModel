@@ -406,10 +406,10 @@ if BUILD_CUDA_EXT == "1":
 
     if cpp_ext is not None:
         # Optional conda CUDA runtime headers
-        conda_cuda_include_dir = os.path.join(get_python_lib(), "nvidia/cuda_runtime/include")
-        if os.path.isdir(conda_cuda_include_dir):
-            include_dirs.append(conda_cuda_include_dir)
-            print(f"appending conda cuda include dir {conda_cuda_include_dir}")
+        #conda_cuda_include_dir = os.path.join(get_python_lib(), "nvidia/cuda_runtime/include")
+        # if os.path.isdir(conda_cuda_include_dir):
+        #     include_dirs.append(conda_cuda_include_dir)
+        #     print(f"appending conda cuda include dir {conda_cuda_include_dir}")
 
         extra_link_args = []
         extra_compile_args = {
@@ -445,7 +445,7 @@ if BUILD_CUDA_EXT == "1":
                 "--expt-relaxed-constexpr",
                 "--expt-extended-lambda",
                 "--use_fast_math",
-                "-diag-suppress=179,39,177",
+                "-diag-suppress=179,39,177,20281",
             ]
         else:
             # hipify CUDA-like flags
