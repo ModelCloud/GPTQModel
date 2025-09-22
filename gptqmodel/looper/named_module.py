@@ -91,7 +91,7 @@ class NamedModule(torch.nn.Module):
     # setattr is always called by python even if attr exists in `self`
     def __setattr__(self, name: str, value: Any) -> None:
         with self._lock:
-            if name in ["module", "name", "full_name", "layer_index", "state"]:
+            if name in ["module", "module_dtype", "name", "full_name", "layer_index", "state", "target_device", "register_buffer", "unregister_buffer", "register_parameter"]:
                 self.__dict__[name] = value
             else:
                 self.module.__dict__[name] = value
