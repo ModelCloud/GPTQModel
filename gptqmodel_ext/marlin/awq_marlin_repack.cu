@@ -256,11 +256,3 @@ torch::Tensor awq_marlin_repack_meta(torch::Tensor& b_q_weight,
       {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
       options);
 }
-
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("awq_marlin_repack", &awq_marlin_repack);
-}
-
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, Meta, m) {
-  m.impl("awq_marlin_repack", &awq_marlin_repack_meta);
-}
