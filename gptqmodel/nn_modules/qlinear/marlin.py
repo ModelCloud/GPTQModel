@@ -17,7 +17,7 @@
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
 import os
-from typing import Any, Dict, List, Optional, Tuple, Callable, Union
+from typing import List, Optional, Tuple, Callable, Union
 
 import numpy as np
 import torch
@@ -28,7 +28,7 @@ from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
-from ...utils.scalar_type import scalar_types, ScalarType
+from ...utils.marlin_scalar_type import scalar_types, ScalarType
 
 marlin_import_exception = None
 try:
@@ -37,32 +37,6 @@ except ImportError as e:
     marlin_import_exception = str(e)
 
 log = setup_logger()
-
-GPTQ_MARLIN_TILE = 16
-GPTQ_MARLIN_MIN_THREAD_N = 64
-GPTQ_MARLIN_MIN_THREAD_K = 128
-GPTQ_MARLIN_MAX_PARALLEL = 16
-
-
-def set_weight_attrs(
-        weight: torch.Tensor,
-        weight_attrs: Optional[Dict[str, Any]],
-):
-    """Set attributes on a weight tensor.
-
-    This method is used to set attributes on a weight tensor. This method
-    will not overwrite existing attributes.
-
-    Args:
-        weight: The weight tensor.
-        weight_attrs: A dictionary of attributes to set on the weight tensor.
-    """
-    if weight_attrs is None:
-        return
-    for key, value in weight_attrs.items():
-        assert not hasattr(
-            weight, key), (f"Overwriting existing tensor attribute: {key}")
-        setattr(weight, key, value)
 
 
 def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:
@@ -255,26 +229,60 @@ def apply_gptq_marlin_linear(
                                                   device=input.device,
                                                   dtype=input.dtype)
 
-    output = gptqmodel_marlin_kernels.gptq_marlin_gemm(reshaped_x,
-                                                       None,
-                                                       weight,
-                                                       bias,
-                                                       weight_scale,
-                                                       None,
-                                                       weight_zp,
-                                                       g_idx,
-                                                       g_idx_sort_indices,
-                                                       workspace,
-                                                       wtype.id,
-                                                       size_m=reshaped_x.shape[0],
-                                                       size_n=output_size_per_partition,
-                                                       size_k=input_size_per_partition,
-                                                       is_k_full=is_k_full,
-                                                       use_atomic_add=use_atomic_add,
-                                                       use_fp32_reduce=use_fp32_reduce,
-                                                       is_zp_float=False)
+    output = gptq_marlin_gemm(reshaped_x,
+                              None,
+                              weight,
+                              bias,
+                              weight_scale,
+                              None,
+                              weight_zp,
+                              g_idx,
+                              g_idx_sort_indices,
+                              workspace,
+                              wtype,
+                              size_m=reshaped_x.shape[0],
+                              size_n=output_size_per_partition,
+                              size_k=input_size_per_partition,
+                              is_k_full=is_k_full,
+                              use_atomic_add=use_atomic_add,
+                              use_fp32_reduce=use_fp32_reduce,
+                              is_zp_float=False)
 
     return output.reshape(out_shape)
+
+
+def gptq_marlin_gemm(a: torch.Tensor,
+                     c: Optional[torch.Tensor],
+                     b_q_weight: torch.Tensor,
+                     b_bias: Optional[torch.Tensor],
+                     b_scales: torch.Tensor,
+                     global_scale: Optional[torch.Tensor],
+                     b_zeros: Optional[torch.Tensor],
+                     g_idx: Optional[torch.Tensor],
+                     perm: Optional[torch.Tensor],
+                     workspace: torch.Tensor,
+                     b_q_type: ScalarType,
+                     size_m: int,
+                     size_n: int,
+                     size_k: int,
+                     is_k_full: bool = True,
+                     use_atomic_add: bool = False,
+                     use_fp32_reduce: bool = False,
+                     is_zp_float: bool = False) -> torch.Tensor:
+    return gptqmodel_marlin_kernels.gptq_marlin_gemm(a, c, b_q_weight, b_bias, b_scales,
+                                                     global_scale, b_zeros, g_idx, perm,
+                                                     workspace, b_q_type.id, size_m,
+                                                     size_n, size_k, is_k_full,
+                                                     use_atomic_add, use_fp32_reduce,
+                                                     is_zp_float)
+
+
+# gptq_marlin
+def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
+                       size_k: int, size_n: int,
+                       num_bits: int) -> torch.Tensor:
+    return gptqmodel_marlin_kernels.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
+                                                       num_bits)
 
 
 class MarlinQuantLinear(BaseQuantLinear):
@@ -364,12 +372,15 @@ class MarlinQuantLinear(BaseQuantLinear):
             scales_and_zp_size = self.in_features // self.group_size
 
         # Quantized weights
-        self.register_buffer(
+        self.register_parameter(
             "qweight",
-            torch.empty(
-                self.in_features // self.pack_factor,
-                self.out_features,
-                dtype=torch.int32,
+            torch.nn.Parameter(
+                torch.empty(
+                    self.in_features // self.pack_factor,
+                    self.out_features,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False
             ),
         )
 
@@ -383,23 +394,29 @@ class MarlinQuantLinear(BaseQuantLinear):
         )
 
         # Scales
-        self.register_buffer(
+        self.register_parameter(
             "scales",
-            torch.empty(
-                scales_and_zp_size,
-                self.out_features,
-                dtype=torch.float16,
+            torch.nn.Parameter(
+                torch.empty(
+                    scales_and_zp_size,
+                    self.out_features,
+                    dtype=torch.float16,
+                ),
+                requires_grad=False
             ),
         )
 
         # Quantized zero-points
-        self.register_buffer(
+        self.register_parameter(
             "qzeros",
-            torch.empty(
-                scales_and_zp_size,
-                self.out_features // self.pack_factor,
-                dtype=torch.int32,
-            ),
+            torch.nn.Parameter(
+                torch.empty(
+                    scales_and_zp_size,
+                    self.out_features // self.pack_factor,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False,
+            )
         )
 
         if bias:
@@ -431,7 +448,6 @@ class MarlinQuantLinear(BaseQuantLinear):
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        print("marlin_import_exception", marlin_import_exception)
         if marlin_import_exception is not None:
             return False, ImportError(marlin_import_exception)
         return cls._validate(**args)
@@ -461,11 +477,11 @@ class MarlinQuantLinear(BaseQuantLinear):
         self.workspace = marlin_make_workspace_new(device)
 
         def transform_w_q(x):
-            x.data = gptqmodel_marlin_kernels.gptq_marlin_repack(x.data.contiguous(),
-                                                                 perm=self.g_idx_sort_indices,
-                                                                 size_k=self.in_features,
-                                                                 size_n=self.out_features,
-                                                                 num_bits=self.bits)
+            x.data = gptq_marlin_repack(x.data.contiguous(),
+                                        perm=self.g_idx_sort_indices,
+                                        size_k=self.in_features,
+                                        size_n=self.out_features,
+                                        num_bits=self.bits)
             return x
 
         def transform_w_s(x):
