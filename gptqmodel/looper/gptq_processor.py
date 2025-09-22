@@ -250,7 +250,7 @@ class GPTQProcessor(LoopProcessor):
         )
 
         # pack module
-        qModules = {name: submodule for name, submodule in find_modules(model.model, [quant_linear_cls]).items() if name == module.full_name}
+        qModules = {name: submodule for name, submodule in find_modules(model.model, [self.quant_linear_pack_cls]).items() if name == module.full_name}
         pack_module(
             name=module.full_name,
             qModules=qModules,
