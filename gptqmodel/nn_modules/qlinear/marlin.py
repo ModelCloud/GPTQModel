@@ -17,7 +17,7 @@
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
 import os
-from typing import List, Optional, Tuple, Callable, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -27,8 +27,8 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.marlin_scalar_type import ScalarType, scalar_types
 from ...utils.rocm import IS_ROCM
-from ...utils.marlin_scalar_type import scalar_types, ScalarType
 
 marlin_import_exception = None
 try:
@@ -153,31 +153,7 @@ def get_scale_perms():
 
 
 # Whether to use atomicAdd reduce in gptq/awq marlin kernel. experimental
-GPTQMODEL_MARLIN_USE_ATOMIC_ADD = True
-
-
-def maybe_warn_marlin_atomic_add_env():
-    if torch.compiler.is_dynamo_compiling():
-        return
-    if GPTQMODEL_MARLIN_USE_ATOMIC_ADD:
-        return
-    log.info_once(
-        "Marlin kernel can achieve better performance for small size_n "
-        "with experimental use_atomic_add feature. "
-        "You can consider set environment variable "
-        "GPTQMODEL_MARLIN_USE_ATOMIC_ADD to 1 if possible.")
-
-
-def maybe_warn_marlin_atomic_add(device, dtype):
-    if torch.compiler.is_dynamo_compiling():
-        return
-    device_capability = torch.cuda.get_device_capability(device)
-    if device_capability[0] < 9 and dtype == torch.bfloat16:
-        log.info_once(
-            "You are running Marlin kernel with bf16 on GPUs before SM90. "
-            "You can consider change to fp16 to achieve better performance "
-            "if possible.")
-
+GPTQMODEL_MARLIN_USE_ATOMIC_ADD = False
 
 def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
                                  dtype: torch.dtype) -> bool:
@@ -189,13 +165,11 @@ def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
     # disable atomicAdd reduce by default,
     # one can enable it with GPTQMODEL_MARLIN_USE_ATOMIC_ADD=1
     if not GPTQMODEL_MARLIN_USE_ATOMIC_ADD:
-        maybe_warn_marlin_atomic_add_env()
         return False
 
     # sm8x doesn't support atomicAdd + bfloat16 natively
     device_capability = torch.cuda.get_device_capability(device)
     if device_capability[0] < 9 and dtype == torch.bfloat16:
-        maybe_warn_marlin_atomic_add(device, dtype)
         return False
 
     return True
@@ -358,12 +332,10 @@ class MarlinQuantLinear(BaseQuantLinear):
                                              is_row_parallel=False):
             # By setting scale_dim == None, weight_loader will
             # repeat the scales on each GPU in TP>1 case.
-            scales_and_zp_input_dim = None
             scales_and_zp_size = self.in_features // self.group_size
         else:
             # By setting scale_dim == 0, weight_loader will
             # shard the scales in TP>1 case.
-            scales_and_zp_input_dim = 0
             scales_and_zp_size = self.in_features // self.group_size
 
         # Quantized weights
