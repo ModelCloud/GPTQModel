@@ -63,7 +63,7 @@ class NamedModule(torch.nn.Module):
 
     def unregister_buffer(self, name: str):
         del self.module._buffers[name]
-        delattr(self.module, "mask")
+        delattr(self.module, name)
 
     def register_parameter(self, name: str, param: Optional[Parameter]) -> None:
         return self.module.register_parameter(name, param)
