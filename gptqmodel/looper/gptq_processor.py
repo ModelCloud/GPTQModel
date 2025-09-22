@@ -18,7 +18,8 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
 from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.model import move_to, pack_model
+from ..utils.importer import select_quant_linear
+from ..utils.model import move_to, pack_model, create_quant_module
 from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import CPU, torch_streamCtx, torch_sync
 
@@ -210,10 +211,44 @@ class GPTQProcessor(LoopProcessor):
         #     torch_empty_cache()
 
     # submodule_finalized is called in reverse after all next sequential processes are called
-    def submodule_finalize(self, module: NamedModule):
+    def submodule_finalize(self, module: NamedModule, model: BaseQModel):
         # generate complete, safe to move to cpu
         module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
+
+        # select correct quant linear
+        quant_linear_cls = select_quant_linear(
+                bits=self.qcfg.bits,
+                group_size=self.qcfg.group_size,
+                desc_act=self.qcfg.desc_act,
+                sym=self.qcfg.sym,
+                format=format,
+                quant_method=self.qcfg.quant_method,
+                pack=True,
+                dynamic=self.qcfg.dynamic,
+                device=self.qcfg.device,
+                pack_dtype=self.qcfg.pack_dtype,
+                multi_select=False,
+            )
+        
+        # replace module with quantized module
+        create_quant_module(
+            name=module.name,
+            linear_cls=quant_linear_cls,
+            bits=self.qcfg.bits,
+            desc_act=self.qcfg.desc_act,
+            dynamic=self.qcfg.dynamic,
+            group_size=self.qcfg.group_size,
+            module=model.model,
+            submodule=module,
+            quant_result=self.results(),
+            sym=self.qcfg.sym,
+            device=self.qcfg.device,
+            lm_head_name=model.lm_head_name,
+            pack_dtype=self.qcfg.pack_dtype,
+        )
+
+        
 
     def finalize(self, model: BaseQModel, **kwargs):
         # block for streams

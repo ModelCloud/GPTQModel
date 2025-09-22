@@ -255,7 +255,7 @@ def create_quant_module(
     device: DEVICE,
     lm_head_name: str,
     pack_dtype: torch.dtype,
-    backend: BACKEND,
+    backend: BACKEND = BACKEND.AUTO,
     adapter: Optional[Adapter] = None,
 ):
     # skip non-quantized modules
