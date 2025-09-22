@@ -61,7 +61,7 @@ env:
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
-  MAX_JOBS: 8
+  MAX_JOBS: 4
   GPTQMODEL_BUILD_QQQ: 0
   GTTQMODEL_BUILD_EORA: 0
   GPTQMODEL_BUILD_EXLLAMA_V1: 0
@@ -238,7 +238,7 @@ jobs:
     needs:
       - check-vm
     container:
-      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04
+      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_0919
       volumes:
         - /home/ci/models/pyenv:/opt/pyenv
     steps:
@@ -335,7 +335,7 @@ jobs:
     needs:
       - check-vm
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/modelcloud/gptqmodel:compiler_cuda124-torch2.4.1-python311
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_0919
     env:
       RELEASE_MODE: 0
     steps:
@@ -365,6 +365,7 @@ jobs:
           whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
           twine check dist/$whl
+
       - name: Upload to local
         continue-on-error: true
         run: |
@@ -373,6 +374,7 @@ jobs:
           if [ "$response" -eq 0 ]; then
             echo "UPLOADED=1" >> $GITHUB_ENV
           fi
+
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         continue-on-error: ${{ env.UPLOADED == '1' }}
@@ -408,6 +410,7 @@ jobs:
               echo "PYPI_RELEASE_CONFIRMATION=$status" >> $GITHUB_ENV
             fi
           done
+
       - name: Upload sdist to pypi
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && env.PYPI_RELEASE_CONFIRMATION == '1' && !cancelled()
         env:

@@ -2,17 +2,19 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-
-from typing import Any, Dict
+import threading
+from typing import Any, Optional
 
 import torch
 import transformers
-from gptqmodel.utils.torch import device_next
-from torch import nn
+from torch import Tensor, nn
+from torch.nn import Parameter
 from torch.nn.modules.conv import _ConvNd
 
 
 class NamedModule(torch.nn.Module):
+    _lock = threading.Lock()
+
     def __init__(self, module: torch.nn.Module, name: str, full_name:str, layer_index: int) -> None:
         super().__init__()
 
@@ -56,6 +58,21 @@ class NamedModule(torch.nn.Module):
             "out_features": out_features,
         })
 
+    def register_buffer(
+        self, name: str, tensor: Optional[Tensor], persistent: bool = True
+    ) -> None:
+        with self._lock:
+            return self.module.register_buffer(name, tensor, persistent)
+
+    def unregister_buffer(self, name: str):
+        with self._lock:
+            del self.module._buffers[name]
+            delattr(self.module, name)
+
+    def register_parameter(self, name: str, param: Optional[Parameter]) -> None:
+        with self._lock:
+            return self.module.register_parameter(name, param)
+
     # return stats for mo
     # def stats(self) -> Dict[str, float]:
     #     # -1 means no stats have yet to gathered for the stat property
@@ -68,11 +85,13 @@ class NamedModule(torch.nn.Module):
 
     # getattr is only called if python cannot find attr for `self`
     def __getattr__(self, name: str):
-        return getattr(self.module, name)
+        with self._lock:
+            return getattr(self.module, name)
 
     # setattr is always called by python even if attr exists in `self`
     def __setattr__(self, name: str, value: Any) -> None:
-        if name in ["module", "name", "full_name", "layer_index", "state"]:
-            self.__dict__[name] = value
-        else:
-            self.module.__dict__[name] = value
+        with self._lock:
+            if name in ["module", "module_dtype", "name", "full_name", "layer_index", "state", "target_device", "register_buffer", "unregister_buffer", "register_parameter"]:
+                self.__dict__[name] = value
+            else:
+                self.module.__dict__[name] = value

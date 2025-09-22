@@ -482,7 +482,7 @@ class BaseQModel(nn.Module):
             log.warn("Quantize: batch_size overriden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
 
-        if self.quantize_config.quant_method != QUANT_METHOD.AWQ and self.quantize_config.format == FORMAT.MARLIN:
+        if self.quantize_config.format == FORMAT.MARLIN:
             raise ValueError(
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
@@ -872,6 +872,8 @@ class BaseQModel(nn.Module):
             )
         elif get_device(module) == CPU and self.quantize_config.device != CPU:
             return move_to(module, device=self.quantize_config.device)
+        else:
+            return module
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         #return self.offload_to_disk(module=module)
@@ -881,7 +883,10 @@ class BaseQModel(nn.Module):
         for embed_module_name in self.get_base_modules(self.model):
             embed_module, _ = get_module_by_name_prefix(self.model, embed_module_name)
             if embed_module is not None:
-                embed_module.to(device)
+                self.shell_module_materialize(
+                    target_submodule=embed_module,
+                    device=device,
+                )
 
     def awq_skip_modules_for_scaling(self) -> bool:
         pass

@@ -1,6 +1,3 @@
-// License: GPTQModel/licenses/LICENSE.apache
-// Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/csrc/quantization/gptq_marlin/marlin.cuh
-
 #pragma once
 
 #include <torch/all.h>
@@ -12,7 +9,11 @@
 #include <cuda_runtime.h>
 #include <iostream>
 
-namespace marlin {
+#ifndef MARLIN_NAMESPACE_NAME
+  #define MARLIN_NAMESPACE_NAME marlin
+#endif
+
+namespace MARLIN_NAMESPACE_NAME {
 
 // Marlin params
 
@@ -26,6 +27,7 @@ static constexpr int pipe_stages =
 
 static constexpr int min_thread_n = 64;
 static constexpr int min_thread_k = 64;
+static constexpr int max_thread_n = 256;
 
 static constexpr int tile_size = 16;
 static constexpr int max_par = 16;
@@ -87,4 +89,4 @@ __device__ inline void cp_async_wait() {
 
 #endif
 
-}  // namespace marlin
+}  // namespace MARLIN_NAMESPACE_NAME

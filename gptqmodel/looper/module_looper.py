@@ -1,23 +1,13 @@
-# Copyright 2024-2025 ModelCloud.ai
-# Copyright 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 import copy
 import gc
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Dict, List
 
 import torch
@@ -28,19 +18,15 @@ from ..looper.gptq_processor import GPTQProcessor
 from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
-from ..looper.native_processor import NativeProcessor
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
 from ..utils import ASYNC_WORKER
 from ..utils.logger import setup_logger
-from ..utils.model import (find_modules, get_device, get_module, get_module_by_name_prefix,
-                           get_moe_layer_modules, move_to, nested_move_to)
+from ..utils.model import find_modules, get_device, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
-from ..utils.structure import alias_from_turtle_for_submodule, print_module_tree
-from ..utils.torch import (ALL_DEVICES, ALL_STREAMS, CPU, DEFAULT_BALANCE_STRATEGY,
-                           HAS_CUDA, META, BalanceStrategy, device_next, device_next_reset,
-                           torch_devices, torch_empty_cache, torch_streamCtx, torch_sync)
+from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, META, BalanceStrategy,
+                           device_next, device_next_reset, torch_empty_cache, torch_sync)
 from .awq_processor import AWQProcessor
 
 log = setup_logger()
@@ -103,8 +89,6 @@ class ModuleLooper():
             # print(f"layer swapped------------from: {cur_layer_device}")
             # print_module_tree(self.gptq_model.model)
             cur_layer_device = self.gptq_model.quantize_config.device
-            # FIX ME use turtle_model, which has exactly same structure but holds the actual model tensors
-            # and copy the layer[0] from turtle model to self.gptq_model.model which only holds fake meta tensors
         else:
             layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
 
@@ -137,8 +121,13 @@ class ModuleLooper():
 
         # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
+
+        # TODO FIX ME.. remove hard coded Ovis code
         is_ovis = self.gptq_model.__class__.__name__ == "OvisGPTQ"
+
+        # LifeCycle: start pre-first layer embedding hook
         self.gptq_model.pre_quantize_generate_hook_start()
+
         for example in calibration_data:
             for k, v in example.items():
                 if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
@@ -162,19 +151,14 @@ class ModuleLooper():
                     self.gptq_model.model(**example, use_cache=use_cache)
             except ValueError:
                 pass
+
+        # LifeCycle: pre-first layer embedding hook
         self.gptq_model.pre_quantize_generate_hook_end()
         handle.remove()
-        move_to(layers[0], device=CPU)
-        # for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
-        #     module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
-        #     if module is not None:
-        #         move_to(module, device=ori_outside_layer_module_devices[module_name])
-        # if auto_gc:
-        #     torch_empty_cache()
+
         return InputCache(layer_inputs=layer_inputs, layer_input_kwargs=layer_input_kwargs, position_ids=position_ids,
                           attention_masks=attention_masks)
 
-    @torch.no_grad()
     def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, fail_safe: bool = False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
@@ -372,7 +356,7 @@ class ModuleLooper():
                         # sync above stream copies
                         #torch_sync(device=cur_layer_device)
 
-                        # TODO remove hamba hack
+                        # TODO FIX ME remove hamba hack
                         # reuse_kv is a flag to reuse the kv cache, only for the hamba model
                         if hasattr(module, "reuse_kv"):
                             if module.reuse_kv:
@@ -558,17 +542,17 @@ class ModuleLooper():
 
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
-                            reverse_p.submodule_finalize(processed_subset[name])
+                            module = processed_subset[name]
+                            reverse_p.submodule_finalize(module)
 
                             # checking for disk offloading
                             if self.gptq_model.quantize_config.offload_to_disk:
-                                def _task(idx=layer_index, module=processed_subset[name], disk_path=self.gptq_model.quantize_config.offload_to_disk_path):
-                                    # bind layer_index & self at definition time
-                                    offload_to_disk(model=self.gptq_model.model, module=module, disk_path=disk_path)
-                                    # print(f"{name} complete tree")
-                                    # print_module_tree(processed_subset[name])
-
-                                ASYNC_WORKER.submit(_task)
+                                ASYNC_WORKER.submit(partial(
+                                    offload_to_disk,
+                                    model=self.gptq_model.model,
+                                    module=module,
+                                    disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
+                                ))
 
                     #del module
 
@@ -576,9 +560,13 @@ class ModuleLooper():
                 if auto_gc:
                     torch_empty_cache()
 
-
+        # LifeCycle: All sub-modules have finalized meaning quantization work is complete
+        # Below starts packing: TODO FIXME. move packing to sub-module finalize
         # wait for all thread tasks
         ASYNC_WORKER.join()
+        # paranoid safety check
+        torch_sync()
+        torch_sync(device=CPU)
 
         total_log = {}
 
@@ -642,7 +630,10 @@ class ModuleLooper():
 
             # TODO awq unification
             if not is_awq_quant:
-                processor.preprocess(subset[name], buffered_fwd=buffered_fwd, fail_safe=fail_safe)
+                if isinstance(processor, GPTQProcessor):
+                    processor.preprocess(subset[name], buffered_fwd=buffered_fwd, fail_safe=fail_safe)
+                else:
+                    processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
                 # some modules are skipped
                 if processor.is_skipped(subset[name]):
                     skipped_modules.append(name)

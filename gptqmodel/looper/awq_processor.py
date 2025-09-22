@@ -1,18 +1,7 @@
-# Copyright 2024-2025 ModelCloud.ai
-# Copyright 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import functools
 import inspect
@@ -21,27 +10,26 @@ from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
-import transformers
 from torch import nn
 from torch.nn import Module
 
 from ..looper.loop_processor import LoopProcessor, get_max_memory
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
+                             PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
 from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_GEMVFast, WQLinear_Marlin
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
-from ..quantization.awq.utils.module import (append_str_prefix, exclude_layers_to_not_quantize,
-                                             get_named_linears, get_op_name, set_op_by_name)
+from ..quantization.awq.utils.module import append_str_prefix, get_op_name, set_op_by_name
 from ..quantization.awq.utils.utils import clear_memory, get_best_device
 from ..quantization.config import FORMAT, QUANT_METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import get_module_by_name_prefix, move_to
+from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import CPU, torch_sync
 
 log = setup_logger()
@@ -117,6 +105,7 @@ class AWQProcessor(LoopProcessor):
         layer_kwargs = {}
 
         best_device = get_best_device()
+        modules[0] = self.gptq_model.pre_quantize(modules[0])
         modules[0] = modules[0].to(best_device)
 
         # embed should be on same gpu/best device
@@ -149,7 +138,18 @@ class AWQProcessor(LoopProcessor):
             # If use_cache=True, layer_kwargs will contain past_key_values instead of attention_mask.
             # Autoawq does not pass the use_cache parameter here.
             # I haven't found the root cause yet.
-            self.model(samples.to(next(self.model.parameters()).device), use_cache=False)
+            
+            # Check if model parameters are on meta device and use best_device instead
+            # to avoid torch.autocast(device_type="meta") error in transformers
+            model_device = next(self.model.parameters()).device
+            if model_device.type == "meta":
+                target_device = best_device
+            else:
+                target_device = model_device
+
+            print(f"AWQProcessor: model parameters are on meta device, using {target_device} instead")
+            
+            self.model(samples.to(torch.device(target_device)), use_cache=False)
         except ValueError:  # work with early exit
             pass
         modules[0] = modules[0].module  # restore
@@ -162,9 +162,7 @@ class AWQProcessor(LoopProcessor):
 
         del samples
         inps = inps[0]
-
-        modules[0] = modules[0].cpu()
-
+        
         # we no longer need embed, reduce vram
         self.gptq_model.move_embed("cpu")
 
@@ -780,6 +778,8 @@ class AWQProcessor(LoopProcessor):
         # block for streams
         if self.stream:
             torch_sync()
+
+        model.model = undo_offload_to_disk(module=model.model, include_buffers=True, delete_offload_folders=True)
 
         if model.quantize_config.format == FORMAT.GEMM:
             model.qlinear_kernel = AwqGEMMQuantLinear
