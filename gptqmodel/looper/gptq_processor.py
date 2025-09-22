@@ -260,6 +260,7 @@ class GPTQProcessor(LoopProcessor):
             lock=self.lock,
         )
 
+        # TODO FIX ME..remove this, only used for v2-> v1 conversion during pack/save
         model.qlinear_kernel = quant_linear_cls
         
 
