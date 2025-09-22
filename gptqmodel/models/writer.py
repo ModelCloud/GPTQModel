@@ -211,7 +211,7 @@ def ModelWriter(cls):
             if quantize_config.format == FORMAT.GPTQ or quantize_config.format == FORMAT.GEMM:
                 # Model qzeros may be edited in place.
                 model = convert_gptq_v2_to_v1_format(
-                    model, quantize_config=quantize_config
+                    model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
                 )
         else:
             model = self.get_model_with_quantize(

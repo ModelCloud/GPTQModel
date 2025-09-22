@@ -39,19 +39,6 @@ class GPTQProcessor(LoopProcessor):
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
 
-        # select correct quant linear
-        self.quant_linear_pack_cls = select_quant_linear(
-                bits=self.qcfg.bits,
-                group_size=self.qcfg.group_size,
-                desc_act=self.qcfg.desc_act,
-                sym=self.qcfg.sym,
-                pack=True,
-                dynamic=self.qcfg.dynamic,
-                device=self.qcfg.device,
-                pack_dtype=self.qcfg.pack_dtype,
-                multi_select=False,
-            )
-
     def log_plotly(self):
         task = self.logger_task
         if task is not None:
@@ -229,13 +216,26 @@ class GPTQProcessor(LoopProcessor):
         module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
 
-        # get unpacked quantized weights before creating quantized module
-        layers = find_modules(model.model)        
+        layers = find_modules(model.model)
+
+        # select correct quant linear
+        quant_linear_cls = select_quant_linear(
+                bits=self.qcfg.bits,
+                group_size=self.qcfg.group_size,
+                desc_act=self.qcfg.desc_act,
+                sym=self.qcfg.sym,
+                pack=True,
+                dynamic=self.qcfg.dynamic,
+                device=self.qcfg.device,
+                pack_dtype=self.qcfg.pack_dtype,
+                multi_select=False,
+            )
+        
 
         # replace module with quantized module
         create_quant_module(
             name=module.full_name,
-            linear_cls=self.quant_linear_pack_cls,
+            linear_cls=quant_linear_cls,
             bits=self.qcfg.bits,
             desc_act=self.qcfg.desc_act,
             dynamic=self.qcfg.dynamic,
@@ -256,9 +256,13 @@ class GPTQProcessor(LoopProcessor):
             qModules=qModules,
             quant_result=self.results(),
             layers=layers,
-            quant_linear_cls=self.quant_linear_pack_cls,
+            quant_linear_cls=quant_linear_cls,
             lock=self.lock,
         )
+
+        # TODO FIX ME..remove this, only used for v2-> v1 conversion during pack/save
+        model.qlinear_kernel = quant_linear_cls
+        
 
     def finalize(self, model: BaseQModel, **kwargs):
         # block for streams
