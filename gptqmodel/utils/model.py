@@ -402,7 +402,7 @@ def hf_convert_gptq_v1_to_v2_format(
             return model, False
 
         cfg = QuantizeConfig(bits=bits)
-        return convert_gptq_v1_to_v2_format(model, cfg, qlinear_kernel), True
+        return convert_gptq_v1_to_v2_format(model, cfg), True
     else:
         return model, False
 
@@ -494,14 +494,7 @@ def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack
 def convert_gptq_v1_to_v2_format(
     model,
     cfg: QuantizeConfig,
-    qlinear_kernel: Type[BaseQuantLinear],
 ):
-    # skip v2 to v1 conversion for gptq_v1 kernels
-    if need_skip_gptq_v1_v2_convert(qlinear_kernel):
-        log.info(
-            f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
-        return model
-
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         t = time.time()
@@ -509,11 +502,17 @@ def convert_gptq_v1_to_v2_format(
             f"Format: Converting `{FORMAT_FIELD_CHECKPOINT}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
 
         for _, submodule in model.named_modules():
+            # skip v2 to v1 conversion for gptq_v1 kernels
+            if need_skip_gptq_v1_v2_convert(submodule.__class__):
+                log.info(
+                    f"Format: Skipped v1 to v2 conversion due to Kernel  `{submodule.__class__}`.")
+                return model
+                
             # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
             # additions here do not overflow.
             # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
             # overflow ~<=13% based on testing
-            if isinstance(submodule, qlinear_kernel):
+            if isinstance(submodule, BaseQuantLinear):
                 convert_gptq_v1_to_v2_format_module(module=submodule, bits=cfg.bits, pack_dtype=cfg.pack_dtype)
 
         log.info(f"Format: Conversion complete: {time.time() - t}s")
@@ -538,7 +537,7 @@ def hf_convert_gptq_v2_to_v1_format(
     # note: sym=False is valid for gptq_v2 for all gptqmodel and gptq(v1) for gptqmodel >= `0.9.0`
     if sym and checkpoint_format == "gptq_v2":
         quantize_config = QuantizeConfig(bits=bits)
-        return convert_gptq_v2_to_v1_format(model, quantize_config, qlinear_kernel), True
+        return convert_gptq_v2_to_v1_format(model, quantize_config), True
     else:
         return model, False
 
@@ -575,18 +574,16 @@ def convert_gptq_v2_to_v1_format_module(
 def convert_gptq_v2_to_v1_format(
     model,
     quantize_config: QuantizeConfig,
-    qlinear_kernel: Type[BaseQuantLinear],
 ):
-
-    # skip v2 to v1 conversion for gptq_v1 kernels
-    if need_skip_gptq_v1_v2_convert(qlinear_kernel):
-        return model
-
     # Limit thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         for _, submodule in model.named_modules():
+            # skip all v2 to v1 conversion for kernels if submodule is not compatible with v2
+            if need_skip_gptq_v1_v2_convert(submodule.__class__):
+                return model
+
             # sym=False has underflow probability of ~<=13% during testing. No underflow possible for sym=True.
-            if isinstance(submodule, qlinear_kernel):
+            if isinstance(submodule, BaseQuantLinear):
                 convert_gptq_v2_to_v1_format_module(module=submodule, quantize_config=quantize_config)
 
     return model

@@ -542,7 +542,6 @@ def ModelLoader(cls):
             model = convert_gptq_v1_to_v2_format(
                 model,
                 cfg=qcfg,
-                qlinear_kernel=preload_qlinear_kernel,
             )
 
             load_checkpoint_in_model = False

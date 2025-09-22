@@ -59,7 +59,7 @@ class TestPackable(unittest.TestCase):
     )
     def test_post_init(self, backend: BACKEND, equal: Dict[str, bool]):
         model = GPTQModel.load(self.model_id, backend=backend, device_map="auto")
-        model = convert_gptq_v2_to_v1_format(model, model.quantize_config, self.QLINEAR_DICT[backend])
+        model = convert_gptq_v2_to_v1_format(model, model.quantize_config)
 
         module = find_modules(model.model, [self.QLINEAR_DICT[backend]])[self.TARGET]
         state_dict = module.state_dict()
