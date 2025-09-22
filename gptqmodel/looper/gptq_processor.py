@@ -39,6 +39,7 @@ class GPTQProcessor(LoopProcessor):
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
 
+
     def log_plotly(self):
         task = self.logger_task
         if task is not None:
@@ -218,24 +219,10 @@ class GPTQProcessor(LoopProcessor):
 
         layers = find_modules(model.model)
 
-        # select correct quant linear
-        quant_linear_cls = select_quant_linear(
-                bits=self.qcfg.bits,
-                group_size=self.qcfg.group_size,
-                desc_act=self.qcfg.desc_act,
-                sym=self.qcfg.sym,
-                pack=True,
-                dynamic=self.qcfg.dynamic,
-                device=self.qcfg.device,
-                pack_dtype=self.qcfg.pack_dtype,
-                multi_select=False,
-            )
-        
-
         # replace module with quantized module
         create_quant_module(
             name=module.full_name,
-            linear_cls=quant_linear_cls,
+            linear_cls=model.qlinear_kernel,
             bits=self.qcfg.bits,
             desc_act=self.qcfg.desc_act,
             dynamic=self.qcfg.dynamic,
@@ -250,18 +237,15 @@ class GPTQProcessor(LoopProcessor):
         )
 
         # pack module
-        qModules = {name: submodule for name, submodule in find_modules(model.model, [self.quant_linear_pack_cls]).items() if name == module.full_name}
+        qModules = {name: submodule for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items() if name == module.full_name}
         pack_module(
             name=module.full_name,
             qModules=qModules,
             quant_result=self.results(),
             layers=layers,
-            quant_linear_cls=quant_linear_cls,
+            quant_linear_cls=model.qlinear_kernel,
             lock=self.lock,
         )
-
-        # TODO FIX ME..remove this, only used for v2-> v1 conversion during pack/save
-        model.qlinear_kernel = quant_linear_cls
         
 
     def finalize(self, model: BaseQModel, **kwargs):
