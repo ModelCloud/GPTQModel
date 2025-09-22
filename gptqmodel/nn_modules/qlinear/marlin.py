@@ -170,7 +170,7 @@ def maybe_warn_marlin_atomic_add_env():
         "Marlin kernel can achieve better performance for small size_n "
         "with experimental use_atomic_add feature. "
         "You can consider set environment variable "
-        "VLLM_MARLIN_USE_ATOMIC_ADD to 1 if possible.")
+        "GPTQMODEL_MARLIN_USE_ATOMIC_ADD to 1 if possible.")
 
 
 def maybe_warn_marlin_atomic_add(device, dtype):
