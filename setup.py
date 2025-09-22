@@ -392,7 +392,6 @@ BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
 if BUILD_CUDA_EXT == "1":
     # Import torch's cpp_extension only if we're truly building GPU extensions
     try:
-        from distutils.sysconfig import get_python_lib
 
         from torch.utils import cpp_extension as cpp_ext  # type: ignore
     except Exception:
