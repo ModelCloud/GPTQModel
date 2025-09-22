@@ -374,12 +374,12 @@ class MarlinQuantLinear(BaseQuantLinear):
         )
 
         # Activation order
-        self.register_buffer(
+        self.register_parameter(
             "g_idx",
-            torch.empty(
+            torch.nn.Parameter(data=torch.empty(
                 self.in_features,
                 dtype=torch.int32,
-            ),
+            ), requires_grad=False),
         )
 
         # Scales
