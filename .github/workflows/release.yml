@@ -356,7 +356,7 @@ jobs:
             pyenv activate $env_name
           else
             echo "creating venv: ${env_name}..."
-            pyenv virtualenv "$python_version" "$env_name" || true
+            pyenv virtualenv 3.13 "$env_name" || true
             pyenv local $env_name
             pyenv activate $env_name
             pip install pip build setuptools wheel twine -U
