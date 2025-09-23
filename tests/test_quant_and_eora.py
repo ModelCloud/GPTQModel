@@ -28,7 +28,7 @@ from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-# from lm_eval.utils import make_table  # noqa: E402
+from lm_eval.utils import make_table  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
@@ -56,7 +56,8 @@ class Test(ModelTest):
     def test_quant_and_eora(self, quant_method: METHOD, format: FORMAT, v2: bool):
         bits = 4
         group_size = 128
-        desc_act = True
+        desc_act = False
+        act_group_aware = True
         rank = 128
         batch_size = 1
         calibration_dataset_rows = 512
@@ -88,6 +89,7 @@ class Test(ModelTest):
                 bits=bits,
                 group_size=group_size,
                 desc_act=desc_act,  # bitblas only supports DESC_ACT=False
+                act_group_aware=act_group_aware,
                 adapter=eora,
                 format=format,
                 quant_method=quant_method,
@@ -115,25 +117,25 @@ class Test(ModelTest):
             torch_empty_cache()
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
-            # for backend in [ BACKEND.AUTO ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
-            #     base_bench = self.bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
-            #     eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
-            #
-            #     print('--------GPTQModel + EoRA Config ---------')
-            #
-            #     # Convert the dictionary to a list of lists for tabulate
-            #     table_data = [[key, value] for key, value in config_dict.items()]
-            #     print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
-            #
-            #     print(f'--------Eval {quant_method} Result---------')
-            #     print(make_table(base_bench))
-            #     if "groups" in base_bench:
-            #         print(make_table(base_bench, "groups"))
-            #
-            #     print(f'--------Eval {quant_method} + EoRA Result---------')
-            #     print(make_table(eora_bench))
-            #     if "groups" in eora_bench:
-            #         print(make_table(eora_bench, "groups"))
+            for backend in [ BACKEND.AUTO ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+                base_bench = self.bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
+                eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
+
+                print('--------GPTQModel + EoRA Config ---------')
+
+                # Convert the dictionary to a list of lists for tabulate
+                # table_data = [[key, value] for key, value in config_dict.items()]
+                # print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
+
+                print(f'--------Eval {quant_method} Result---------')
+                print(make_table(base_bench))
+                if "groups" in base_bench:
+                    print(make_table(base_bench, "groups"))
+
+                print(f'--------Eval {quant_method} + EoRA Result---------')
+                print(make_table(eora_bench))
+                if "groups" in eora_bench:
+                    print(make_table(eora_bench, "groups"))
 
     def bench(self, path: str, backend: BACKEND, adapter: Optional[Lora]):
         # test post-quant inference
@@ -151,7 +153,9 @@ class Test(ModelTest):
         bench_result = GPTQModel.eval(
             model_or_id_or_path=model,
             framework=EVAL.LM_EVAL,
-            tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU],
+            tasks=[EVAL.LM_EVAL.ARC_CHALLENGE],
+            # MMLU is too slow for ci test
+            # EVAL.LM_EVAL.MMLU
         )
 
         del model
