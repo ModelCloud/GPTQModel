@@ -32,11 +32,11 @@ from transformers.utils.generic import ContextManagers
 from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, MIN_VERSION_WITH_V2
+from ..quantization.config import FORMAT, MIN_VERSION_WITH_V2, QUANT_METHOD
 from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.marlin import _validate_marlin_compatibility, _validate_marlin_device_support
+from ..utils.marlin import _validate_marlin_device_support
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_config_seq_len, find_modules,
                            get_checkpoints, get_module_by_name_prefix, gptqmodel_post_init,
                            load_checkpoint_in_model_then_tie_weights, make_quant, simple_dispatch_model,
@@ -306,7 +306,7 @@ def ModelLoader(cls):
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 
-        if qcfg.format == FORMAT.GEMV_FAST:
+        if qcfg.quant_method == QUANT_METHOD.AWQ and qcfg.format in [FORMAT.GEMV_FAST]:
             # GEMV_FAST only supports torch.float16
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
@@ -562,8 +562,6 @@ def ModelLoader(cls):
             # Validate the model can run in Marlin.
             if dtype != torch.float16:
                 raise ValueError("Marlin kernel requires dtype=torch.float16.")
-
-            _validate_marlin_compatibility(qcfg, throw_error=True)
 
 
         if backend == BACKEND.BITBLAS:
