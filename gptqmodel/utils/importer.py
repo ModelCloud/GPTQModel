@@ -27,7 +27,7 @@ from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
-from ..quantization import FORMAT, QUANT_METHOD
+from ..quantization import FORMAT, METHOD
 from ..utils.logger import setup_logger
 from . import BACKEND
 from .rocm import IS_ROCM
@@ -37,7 +37,7 @@ message_logged = False
 log = setup_logger()
 
 AUTO_SELECT_BACKEND_ORDER_MAP = {
-    QUANT_METHOD.GPTQ: OrderedDict({
+    METHOD.GPTQ: OrderedDict({
         BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
         # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear, #
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
@@ -48,10 +48,10 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1
         BACKEND.TORCH: TorchQuantLinear, # slightly slower than Triton but getting close in Torch 2.6.0+
     }),
-    QUANT_METHOD.QQQ: OrderedDict({
+    METHOD.QQQ: OrderedDict({
         BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
     }),
-    QUANT_METHOD.AWQ: OrderedDict({
+    METHOD.AWQ: OrderedDict({
         BACKEND.MARLIN: AwqMarlinQuantLinear,
         BACKEND.EXLLAMA_V2: AwqExllamaV2QuantLinear,
         BACKEND.EXLLAMA_V1: AwqExllamaQuantLinear,
@@ -62,16 +62,16 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
 }
 
 SUPPORTS_BACKEND_MAP = {
-    QUANT_METHOD.GPTQ: {
+    METHOD.GPTQ: {
         FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH_FUSED, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
         FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
         FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
         FORMAT.BITBLAS: [BACKEND.BITBLAS],
     },
-    QUANT_METHOD.QQQ: {
+    METHOD.QQQ: {
         FORMAT.QQQ: [BACKEND.QQQ],
     },
-    QUANT_METHOD.AWQ: {
+    METHOD.AWQ: {
         FORMAT.GEMM: [BACKEND.GEMM, BACKEND.EXLLAMA_V1, BACKEND.EXLLAMA_V2],
         FORMAT.GEMV: [BACKEND.GEMV],
         FORMAT.GEMV_FAST: [BACKEND.GEMV_FAST],
@@ -155,7 +155,7 @@ def hf_select_quant_linear(
         backend=backend,
         device=device,
         format=FORMAT.GPTQ,
-        quant_method=QUANT_METHOD.GPTQ,
+        quant_method=METHOD.GPTQ,
         pack=pack,
         allow_marlin=True, # TODO: remove this after marlin padding is fixed
         dynamic=None,
@@ -173,7 +173,7 @@ def select_quant_linear(
         device: Optional[DEVICE] = None,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
-        quant_method: QUANT_METHOD = QUANT_METHOD.GPTQ,
+        quant_method: METHOD = METHOD.GPTQ,
         pack: bool = False,
         allow_marlin: bool = True,  # TODO: remove this after marlin padding is fixed
         dynamic=None,
@@ -246,19 +246,19 @@ def select_quant_linear(
     elif backend == BACKEND.BITBLAS:
         qlinear = BitBLASQuantLinear
     elif backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16]:
-        if quant_method == QUANT_METHOD.AWQ:
+        if quant_method == METHOD.AWQ:
             qlinear = AwqMarlinQuantLinear
         else:
             qlinear = MarlinQuantLinear
     elif backend == BACKEND.EXLLAMA_EORA:
         qlinear = ExllamaEoraQuantLinear
     elif backend == BACKEND.EXLLAMA_V2:
-        if quant_method == QUANT_METHOD.AWQ:
+        if quant_method == METHOD.AWQ:
             qlinear = AwqExllamaV2QuantLinear
         else:
             qlinear = ExllamaV2QuantLinear
     elif backend == BACKEND.EXLLAMA_V1:
-        if quant_method == QUANT_METHOD.AWQ:
+        if quant_method == METHOD.AWQ:
             qlinear = AwqExllamaQuantLinear
         else:
             qlinear = ExllamaQuantLinear

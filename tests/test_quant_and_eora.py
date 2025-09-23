@@ -25,7 +25,7 @@ from typing import Optional  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
-from gptqmodel.quantization import FORMAT, QUANT_METHOD  # noqa: E402
+from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 # from lm_eval.utils import make_table  # noqa: E402
@@ -49,11 +49,11 @@ class Test(ModelTest):
     @parameterized.expand(
         [
             # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, True), # gptq v2
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, False), # gptq v1
+            (METHOD.GPTQ, FORMAT.GPTQ, False), # gptq v1
             #(QUANT_METHOD.QQQ, FORMAT.QQQ),
         ]
     )
-    def test_quant_and_eora(self, quant_method: QUANT_METHOD, format: FORMAT, v2: bool):
+    def test_quant_and_eora(self, quant_method: METHOD, format: FORMAT, v2: bool):
         bits = 4
         group_size = 128
         desc_act = True

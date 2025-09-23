@@ -32,7 +32,7 @@ from transformers.utils.generic import ContextManagers
 from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, MIN_VERSION_WITH_V2, QUANT_METHOD
+from ..quantization.config import FORMAT, MIN_VERSION_WITH_V2, METHOD
 from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
@@ -306,7 +306,7 @@ def ModelLoader(cls):
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 
-        if qcfg.quant_method == QUANT_METHOD.AWQ and qcfg.format in [FORMAT.GEMV_FAST]:
+        if qcfg.quant_method == METHOD.AWQ and qcfg.format in [FORMAT.GEMV_FAST]:
             # GEMV_FAST only supports torch.float16
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16

@@ -7,7 +7,7 @@ import unittest
 
 from datasets import load_dataset
 from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
-from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QUANT_METHOD
+from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, METHOD
 from gptqmodel.utils.torch import torch_empty_cache
 from parameterized import parameterized
 from transformers import AutoTokenizer
@@ -53,7 +53,7 @@ class TestGroupSize(unittest.TestCase):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=group_size,
-            quant_method=QUANT_METHOD.AWQ,
+            quant_method=METHOD.AWQ,
             format=checkpoint_format,
         )
 

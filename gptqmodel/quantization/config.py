@@ -73,7 +73,7 @@ class FORMAT(str, Enum):
 
 
 # quant methods
-class QUANT_METHOD(str, Enum):
+class METHOD(str, Enum):
     GPTQ = "gptq"
     AUTO_ROUND = "auto_round"
     QQQ = "qqq"
@@ -81,22 +81,22 @@ class QUANT_METHOD(str, Enum):
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
-    QUANT_METHOD.GPTQ: {
+    METHOD.GPTQ: {
         FORMAT.GPTQ,
         FORMAT.GPTQ_V2,
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
     },
-    QUANT_METHOD.AUTO_ROUND: {
+    METHOD.AUTO_ROUND: {
         FORMAT.GPTQ,
         FORMAT.GPTQ_V2,
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
     },
-    QUANT_METHOD.QQQ: {
+    METHOD.QQQ: {
         FORMAT.QQQ,
     },
-    QUANT_METHOD.AWQ: {
+    METHOD.AWQ: {
         FORMAT.GEMM,
         FORMAT.GEMV,
         FORMAT.GEMV_FAST,
@@ -177,7 +177,7 @@ class QuantizeConfig():
 
     lm_head: bool = field(default=False)
 
-    quant_method: QUANT_METHOD = field(default=QUANT_METHOD.GPTQ)
+    quant_method: METHOD = field(default=METHOD.GPTQ)
 
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
     # if you inference with gptqmodel, save to gptq_v2 format for best result
@@ -260,12 +260,12 @@ class QuantizeConfig():
             raise ValueError(f"QuantizeConfig: Unsupported `quant_method`: {self.quant_method}")
 
         # TODO FIXME qqq compat which didn't have checkpoint_format before merging to gptqmodel
-        if self.quant_method == QUANT_METHOD.QQQ and self.format != FORMAT.QQQ:
+        if self.quant_method == METHOD.QQQ and self.format != FORMAT.QQQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
             self.format = FORMAT.QQQ
 
         # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
-        if self.quant_method == QUANT_METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM]:
+        if self.quant_method == METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM]:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
 
@@ -416,7 +416,7 @@ class QuantizeConfig():
 
         # FIXME convert awg quantize_config to gptq quantize_config
         normalized = {
-            QUANT_METHOD_FIELD: QUANT_METHOD.GPTQ,
+            QUANT_METHOD_FIELD: METHOD.GPTQ,
             # compat: default to gptq(v1) when loading models
             FORMAT_FIELD_CODE: format if format else FORMAT.GPTQ,
         }
@@ -441,7 +441,7 @@ class QuantizeConfig():
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif val == FORMAT.BITBLAS:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
-                elif val not in {QUANT_METHOD.GPTQ, QUANT_METHOD.AUTO_ROUND, QUANT_METHOD.QQQ, QUANT_METHOD.AWQ}:
+                elif val not in {METHOD.GPTQ, METHOD.AUTO_ROUND, METHOD.QQQ, METHOD.AWQ}:
                     raise ValueError(f"QuantizeConfig: Unknown quantization method: `{val}`.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
@@ -508,7 +508,7 @@ class QuantizeConfig():
         }
 
         # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm
-        if self.quant_method == QUANT_METHOD.AWQ:
+        if self.quant_method == METHOD.AWQ:
             out["zero_point"] = self.zero_point
             # awq compat with vllm/sglang/transformers loaders
             out["version"] = self.format

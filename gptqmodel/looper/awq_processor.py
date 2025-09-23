@@ -26,7 +26,7 @@ from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLi
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, set_op_by_name
 from ..quantization.awq.utils.utils import clear_memory, get_best_device
-from ..quantization.config import FORMAT, QUANT_METHOD, QuantizeConfig
+from ..quantization.config import FORMAT, METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import get_module_by_name_prefix, move_to
 from ..utils.offload import undo_offload_to_disk
@@ -795,7 +795,7 @@ class AWQProcessor(LoopProcessor):
         # set quantized state
         model.quantized = True
 
-        model.quantize_config.quant_method = QUANT_METHOD.AWQ
+        model.quantize_config.quant_method = METHOD.AWQ
 
         super().finalize(model=model, **kwargs)
 
