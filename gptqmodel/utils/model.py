@@ -171,7 +171,6 @@ def get_module(module, key):
 
 def make_quant(
     module,
-    quant_result: Dict[str, Dict[str, Any]],
     qcfg: QuantizeConfig,
     backend: BACKEND,
     lm_head_name: str,
@@ -223,7 +222,6 @@ def make_quant(
                 dynamic=dynamic,
                 group_size=group_size,
                 module=module,
-                quant_result=quant_result,
                 sym=sym,
                 device=device,
                 lm_head_name=lm_head_name,
@@ -258,8 +256,6 @@ def create_quant_module(
     backend: BACKEND = BACKEND.AUTO,
     adapter: Optional[Adapter] = None,
 ):
-
-
     # unwrap named module
     if isinstance(submodule, NamedModule):
         # print(f"offloading named module: {module.full_name}")
@@ -358,7 +354,6 @@ def create_quant_layer(
         dynamic,
         group_size: int,
         module,
-        quant_result: Dict[str, Dict[str, Any]],
         sym: bool,
         device: DEVICE,
         lm_head_name: str,
@@ -378,7 +373,6 @@ def create_quant_layer(
             group_size=group_size,
             module=module,
             submodule=submodule,
-            quant_result=quant_result,
             sym=sym,
             device=device,
             lm_head_name=lm_head_name,
@@ -660,7 +654,6 @@ def pack_model(
     modules = {n: modules[n] for n in quant_result}
     quant_linear_cls = make_quant(
         model,
-        quant_result=quant_result,
         qcfg=qcfg,
         backend=backend,
         lm_head_name=lm_head_name,

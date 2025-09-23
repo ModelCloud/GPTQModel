@@ -18,10 +18,9 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
 from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.importer import select_quant_linear
-from ..utils.model import move_to, pack_model, create_quant_module, pack_module, find_modules
+from ..utils.model import create_quant_module, pack_module, find_modules
 from ..utils.offload import undo_offload_to_disk
-from ..utils.torch import CPU, torch_streamCtx, torch_sync
+from ..utils.torch import torch_streamCtx, torch_sync
 
 log = setup_logger()
 lock = threading.Lock()
