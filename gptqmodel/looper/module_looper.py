@@ -545,15 +545,14 @@ class ModuleLooper():
                             module = processed_subset[name]
                             reverse_p.submodule_finalize(module, self.gptq_model)
 
-                            # TODO: offload packed module to disk
                             # checking for disk offloading
-                            # if self.gptq_model.quantize_config.offload_to_disk:
-                            #     ASYNC_WORKER.submit(partial(
-                            #         offload_to_disk,
-                            #         model=self.gptq_model.model,
-                            #         module=module,
-                            #         disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
-                            #     ))
+                            if self.gptq_model.quantize_config.offload_to_disk:
+                                ASYNC_WORKER.submit(partial(
+                                    offload_to_disk,
+                                    model=self.gptq_model.model,
+                                    module=self.gptq_model.model.get_submodule(module.full_name),
+                                    disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
+                                ))
 
                     #del module
 
