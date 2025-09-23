@@ -561,14 +561,12 @@ class ModuleLooper():
 
                     #del module
 
-
                 if auto_gc:
                     torch_empty_cache()
 
-                # LifeCycle: All sub-modules have finalized meaning quantization work is complete
-                # wait for all thread tasks
-                ASYNC_WORKER.join()
-
+        # LifeCycle: All sub-modules have finalized meaning quantization work is complete
+        # wait for all thread tasks
+        ASYNC_WORKER.join()
 
         # paranoid safety check
         torch_sync()
