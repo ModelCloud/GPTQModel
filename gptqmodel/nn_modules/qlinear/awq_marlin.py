@@ -17,6 +17,8 @@ from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.marlin import replace_parameter, gptq_marlin_gemm
+from ...utils.marlin_scalar_type import ScalarType, scalar_types
 from ...utils.rocm import IS_ROCM
 
 marlin_import_exception = None
@@ -252,7 +254,7 @@ def maybe_warn_marlin_atomic_add(device, dtype):
         return
     device_capability = torch.cuda.get_device_capability(device)
     if device_capability[0] < 9 and dtype == torch.bfloat16:
-        logger.info_once(
+        log.info_once(
             "You are running Marlin kernel with bf16 on GPUs before SM90. "
             "You can consider change to fp16 to achieve better performance "
             "if possible.")
@@ -293,7 +295,7 @@ def apply_awq_marlin_linear(
         output_size_per_partition: int,
         input_size_per_partition: int,
         bias: Optional[torch.Tensor] = None,
-        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
+        use_fp32_reduce: bool = True) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
@@ -303,7 +305,7 @@ def apply_awq_marlin_linear(
                                                   device=input.device,
                                                   dtype=input.dtype)
 
-    output = gptqmodel_marlin_kernels.gptq_marlin_gemm(reshaped_x,
+    output = gptq_marlin_gemm(reshaped_x,
                                   None,
                                   weight,
                                   bias,
@@ -324,7 +326,7 @@ def apply_awq_marlin_linear(
     return output.reshape(out_shape)
 
 class AwqMarlinQuantLinear(AWQuantLinear):
-    SUPPORTS_BITS = [4]
+    SUPPORTS_BITS = [4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True]
@@ -343,6 +345,12 @@ class AwqMarlinQuantLinear(AWQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "marlin"
+
+    # num_bits -> type
+    TYPE_MAP = {
+        4: scalar_types.uint4,
+        8: scalar_types.uint8,
+    }
 
     def __init__(
         self, bits: int,
@@ -376,30 +384,39 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             register_awq_buffers=False,
             **kwargs)
 
-        self.register_buffer(
+        self.register_parameter(
             "qweight",
-            torch.empty(
-                self.in_features,
-                self.out_features // self.pack_factor,
-                dtype=torch.int32,
+            torch.nn.Parameter(
+                torch.empty(
+                    self.in_features,
+                    self.out_features // self.pack_factor,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False
             ),
         )
-        self.register_buffer(
+        self.register_parameter(
             "qzeros",
-            torch.empty(
-                self.in_features // self.group_size,
-                self.out_features // self.pack_factor,
-                dtype=torch.int32,
-            ),
+            torch.nn.Parameter(
+                torch.empty(
+                    self.in_features // self.group_size,
+                    self.out_features // self.pack_factor,
+                    dtype=torch.int32,
+                ),
+                requires_grad=False
+            )
         )
 
-        self.register_buffer(
+        self.register_parameter(
             "scales",
-            torch.empty(
-                self.in_features // self.group_size,
-                self.out_features,
-                dtype=torch.float16,
-            ),
+            torch.nn.Parameter(
+                torch.empty(
+                    self.in_features // self.group_size,
+                    self.out_features,
+                    dtype=torch.float16,
+                ),
+                requires_grad=False
+            )
         )
 
         if bias:
@@ -416,6 +433,12 @@ class AwqMarlinQuantLinear(AWQuantLinear):
         self.is_lm_head = False
         if kwargs.get("name") is not None and kwargs.get("lm_head_name") is not None:
             self.is_lm_head = kwargs["name"] == kwargs["lm_head_name"]
+
+        if self.bits not in self.TYPE_MAP:
+            raise ValueError(f"Unsupported num_bits = {self.bits}. "
+                             f"Supported num_bits = {self.TYPE_MAP.keys()}")
+
+        self.weight_type = self.TYPE_MAP[self.bits]
 
     # def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
     #     if self.optimized:
@@ -459,7 +482,7 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             self.in_features,
             self.out_features,
             self.bits)
-        replace_tensor(self, "qweight", marlin_qweight)
+        replace_parameter(self, "qweight", marlin_qweight)
 
         # Permute scales from AWQ format to marlin format.
         marlin_scales = marlin_permute_scales(
@@ -467,7 +490,7 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             size_k=self.in_features,
             size_n=self.out_features,
             group_size=self.group_size)
-        replace_tensor(self, "scales", marlin_scales)
+        replace_parameter(self, "scales", marlin_scales)
 
         # Permute zero-points from AWQ format to marlin format.
         marlin_zp = awq_to_marlin_zero_points(
@@ -475,7 +498,7 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             size_k=self.in_features // self.group_size,
             size_n=self.out_features,
             num_bits=self.bits)
-        replace_tensor(self, "qzeros", marlin_zp)
+        replace_parameter(self, "qzeros", marlin_zp)
 
         # Not-used
         self.g_idx = marlin_make_empty_g_idx(device)
@@ -492,8 +515,8 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             buf.append(self.workspace)
         if hasattr(self, "g_idx_sort_indices") and self.g_idx_sort_indices is not None:
             buf.append(self.g_idx_sort_indices)
-        if hasattr(self, "zp") and self.zp is not None:
-            buf.append(self.zp)
+        if hasattr(self, "g_idx") and self.g_idx is not None:
+            buf.append(self.g_idx)
         return buf
 
     def forward(self, x: torch.Tensor):
@@ -508,20 +531,18 @@ class AwqMarlinQuantLinear(AWQuantLinear):
         if input_dtype != torch.float16:
             x = x.half()
 
-        out = apply_gptq_marlin_linear(
+        out = apply_awq_marlin_linear(
             input=x.contiguous() if self.is_lm_head else x,
             weight=self.qweight,
             weight_scale=self.scales,
-            weight_zp=self.zp,
+            weight_zp=self.qzeros,
             g_idx=self.g_idx,
             g_idx_sort_indices=self.g_idx_sort_indices,
             workspace=self.workspace,
-            num_bits=self.bits,
+            quant_type=self.weight_type,
             output_size_per_partition=self.out_features,
             input_size_per_partition=self.in_features,
-            is_k_full=self.is_k_full,
             bias=self.bias,
-            fp32=self.fp32,
         )
 
         if self.adapter:
