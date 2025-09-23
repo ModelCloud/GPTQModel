@@ -240,6 +240,8 @@ def make_quant(
 
     raise ValueError(f"No compatible quant linear was found for this module: {module.__class__.__name__}")
 
+quantizable_module_types = (nn.Linear, transformers.Conv1D, _ConvNd, BaseQuantLinear, NamedModule)
+
 def create_quant_module(
     name: str,
     linear_cls: Type[BaseQuantLinear],
@@ -256,7 +258,7 @@ def create_quant_module(
     backend: BACKEND = BACKEND.AUTO,
     adapter: Optional[Adapter] = None,
 ):
-    if not isinstance(submodule, BaseQuantLinear):
+    if not isinstance(submodule, quantizable_module_types):
         return
 
     # unwrap named module
