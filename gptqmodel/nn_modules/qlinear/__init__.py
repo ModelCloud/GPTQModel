@@ -105,12 +105,12 @@ class BaseQuantLinear(nn.Module):
         # store qzero format
         self._qzeros_format = 1 # only valid values are 1 and 2 for GPTQ v1 GPTQ v2
 
+        # some kernels auto-pads in/out features
+        in_features = self.in_features if not register_buffers_in_features else register_buffers_in_features
+        out_features = self.out_features if not register_buffers_out_features else register_buffers_out_features
+
         # most kernels share same buffers so they can share same register buffer code
         if register_buffers:
-            # some kernels auto-pads in/out features
-            in_features = self.in_features if not register_buffers_in_features else register_buffers_in_features
-            out_features = self.out_features if not register_buffers_out_features else register_buffers_out_features
-
             self.register_buffer(
                 "qweight",
                 t.zeros((in_features // self.pack_dtype_bits * self.bits, out_features), dtype=self.pack_dtype),
@@ -485,14 +485,19 @@ class PackableQuantLinear(BaseQuantLinear):
         if isinstance(linear, transformers.pytorch_utils.Conv1D):
             W = W.T
 
-        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
+        #self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
+        self.register_buffer("g_idx", g_idx.clone() if g_idx is not None else self.g_idx)
 
         scales = scales.T.contiguous()
         zeros = zeros.T.contiguous()
         scale_zeros = zeros * scales
-        self.scales = scales.clone().to(dtype=t.float16)
+
+        #self.scales = scales.clone().to(dtype=t.float16)
+        self.register_buffer("scales", scales.clone().to(dtype=t.float16))
+
         if linear.bias is not None:
-            self.bias = linear.bias.clone().to(dtype=t.float16)
+            # self.bias = linear.bias.clone().to(dtype=t.float16)
+            self.register_buffer("bias", linear.bias.clone().to(dtype=t.float16))
 
         int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
         int_weight = int_weight.T.contiguous()
@@ -527,7 +532,8 @@ class PackableQuantLinear(BaseQuantLinear):
                 i += 10
                 row += 1
 
-        self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
+        #self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
+        self.register_buffer("qweight", t.from_numpy(qweight.astype(self.pack_np_dtype)))
 
         zeros = zeros.numpy().astype(self.pack_np_math_dtype)
         qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_math_dtype)
@@ -558,7 +564,8 @@ class PackableQuantLinear(BaseQuantLinear):
                 i += 10
                 col += 1
 
-        self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
+        #self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
+        self.register_buffer("qzeros", t.from_numpy(qzeros.astype(self.pack_np_dtype)))
 
         # assert
         # assert isinstance(self, TorchQuantLinear), f"type: {self.__class_}"

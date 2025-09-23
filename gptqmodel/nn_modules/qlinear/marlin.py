@@ -72,6 +72,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             out_features: int,
             bias: bool = False,
             pack_dtype: torch.dtype = torch.int32,
+            register_buffers: bool = False,
             adapter: Adapter = None,
             **kwargs):
         if marlin_import_exception is not None:

@@ -178,6 +178,7 @@ def make_quant(
     pack: bool = False,
     device: DEVICE = None,
     from_quantized: bool = False,
+    register_buffers: bool = True,
 ) -> Type[BaseQuantLinear]:
 
     bits = qcfg.bits
@@ -229,6 +230,7 @@ def make_quant(
                 lm_head_name=lm_head_name,
                 pack_dtype=pack_dtype,
                 backend=backend,
+                register_buffers=register_buffers,
                 adapter=qcfg.adapter,
             )
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
@@ -257,7 +259,9 @@ def create_quant_module(
     lm_head_name: str,
     pack_dtype: torch.dtype,
     backend: BACKEND = BACKEND.AUTO,
+    register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
+
 ):
     # skip non-quantized modules
     if name not in quant_result:
@@ -350,6 +354,7 @@ def create_quant_module(
         lm_head_name=lm_head_name,
         backend=backend,
         adapter=adapter,
+        register_buffers=register_buffers,
     )
     new_layer.device = ori_layer_device
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
@@ -367,10 +372,13 @@ def create_quant_layer(
         lm_head_name: str,
         pack_dtype: torch.dtype,
         backend: BACKEND,
+        register_buffers: bool = True,
         adapter: Optional[Adapter] = None,
 ) -> Type[BaseQuantLinear]:
+    # TODO FIX ME: this is a strange protection check
     if isinstance(module, linear_cls):
         return linear_cls
+
     for name, submodule in module.named_modules():
         create_quant_module(
             name=name,

@@ -234,6 +234,7 @@ class GPTQProcessor(LoopProcessor):
             device=self.qcfg.device,
             lm_head_name=model.lm_head,
             pack_dtype=self.qcfg.pack_dtype,
+            register_buffers=False,
         )
 
         # pack module
