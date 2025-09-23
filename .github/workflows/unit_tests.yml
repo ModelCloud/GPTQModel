@@ -59,12 +59,13 @@ env:
   CUDA_VISIBLE_DEVICES: 0
   TORCH_CUDA_ARCH_LIST: '8.6 8.9 9.0 12.0'
   PYTORCH_CUDA_ALLOC_CONF: 'expandable_segments:True'
-  MAX_JOBS: 8
+  MAX_JOBS: 4
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.248
   CUDA_VERSION: 128
   TORCH_VERSION: 2.8.0
-  PYTHON_VERSION: 312
+  PYTHON_VERSION: 313
+  PYTHON_GIL: 0
   LEGACY_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py"
   GPTQMODEL_FORCE_BUILD: 1
@@ -521,9 +522,6 @@ jobs:
             uv pip install numpy==1.26.3
           fi
 
-          echo "===== install -r requirements.txt ====="
-          uv pip install -r requirements.txt
-
           echo "===== uninstall torchao ====="
           uv pip uninstall torchao
 
@@ -642,9 +640,6 @@ jobs:
 
           echo "=== installing test tools"
           uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm -U -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-
-          echo "=== installing requirements"
-          uv pip install -r requirements.txt -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
           echo "=== installing gptqmodel"
           uv pip install . --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple

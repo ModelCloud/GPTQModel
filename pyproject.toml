@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools >= 64"]
+requires = ["setuptools >= 64",
+"torch",
+"maturin>=1.9.3",
+]
 build-backend = "setuptools.build_meta:__legacy__"
 
 [project]
@@ -25,10 +28,28 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-dynamic = ["version", "dependencies"]
-
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+dynamic = ["version"]
+dependencies = [
+    "accelerate>=1.10.1",
+    # "datasets>=3.5.0",
+    "numpy>=2.2.6",
+    "torch>=2.8.0",
+    "safetensors>=0.6.2",
+    "transformers>=4.56.0",
+    "threadpoolctl>=3.6.0",
+    "packaging>=24.2",
+    "device-smi==0.4.1",
+    "protobuf>=6.32.0",
+    "pillow>=11.3.0",
+    "hf_transfer>=0.1.9",
+    "huggingface_hub>=0.34.4",
+    "random_word==1.0.13",
+    "tokenicer>=0.0.5",
+    "logbar==0.0.4",
+    # "soundfile==0.13.1",   # Qwen-Omni 可选依赖
+    "wheel>=0.45.1",
+    "maturin>=1.9.3",
+]
 
 [project.urls]
 Homepage = "https://github.com/ModelCloud/GPTQModel"
