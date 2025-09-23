@@ -251,7 +251,6 @@ def create_quant_module(
     group_size: int,
     module: nn.Module,
     submodule: nn.Module,
-    quant_result: Dict[str, Dict[str, Any]],
     sym: bool,
     device: DEVICE,
     lm_head_name: str,
@@ -259,10 +258,8 @@ def create_quant_module(
     backend: BACKEND = BACKEND.AUTO,
     adapter: Optional[Adapter] = None,
 ):
-    # skip non-quantized modules
-    if name not in quant_result:
-        return
-    
+
+
     # unwrap named module
     if isinstance(submodule, NamedModule):
         # print(f"offloading named module: {module.full_name}")

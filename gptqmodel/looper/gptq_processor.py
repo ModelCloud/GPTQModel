@@ -235,7 +235,6 @@ class GPTQProcessor(LoopProcessor):
             group_size=self.qcfg.group_size,
             module=model.model,
             submodule=module,
-            quant_result=self.results(),
             sym=self.qcfg.sym,
             device=self.qcfg.device,
             lm_head_name=model.lm_head,
