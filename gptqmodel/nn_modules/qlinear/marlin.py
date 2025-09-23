@@ -30,8 +30,8 @@ from ...utils.logger import setup_logger
 from ...utils.marlin import marlin_import_exception, marlin_repeat_scales_on_all_ranks, marlin_is_k_full, \
     marlin_make_workspace_new, gptq_marlin_repack, marlin_permute_scales, marlin_sort_g_idx, _transform_param, \
     marlin_make_empty_g_idx, apply_gptq_marlin_linear, marlin_permute_bias
-from ...utils.rocm import IS_ROCM
 from ...utils.marlin_scalar_type import scalar_types
+from ...utils.rocm import IS_ROCM
 
 log = setup_logger()
 
@@ -114,12 +114,10 @@ class MarlinQuantLinear(BaseQuantLinear):
                                              is_row_parallel=False):
             # By setting scale_dim == None, weight_loader will
             # repeat the scales on each GPU in TP>1 case.
-            scales_and_zp_input_dim = None
             scales_and_zp_size = self.in_features // self.group_size
         else:
             # By setting scale_dim == 0, weight_loader will
             # shard the scales in TP>1 case.
-            scales_and_zp_input_dim = 0
             scales_and_zp_size = self.in_features // self.group_size
 
         # Quantized weights
