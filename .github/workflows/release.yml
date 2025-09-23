@@ -287,7 +287,7 @@ jobs:
           echo "== python =="
           python --version
           echo "== nvcc =="
-          #nvcc --version
+          nvcc --version
           echo "== torch =="
           pip show torch
 
