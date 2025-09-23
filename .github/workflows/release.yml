@@ -359,7 +359,7 @@ jobs:
             pyenv virtualenv 3.13 "$env_name" || true
             pyenv local $env_name
             pyenv activate $env_name
-            pip install pip build setuptools wheel twine -U
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ 128 2.8.0 313
           fi
 
       - name: Fetch PR by number
@@ -370,6 +370,7 @@ jobs:
           git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
+
       - name: Install requirements
         run: pip install build setuptools -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
