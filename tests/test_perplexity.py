@@ -15,7 +15,7 @@ import unittest  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.quantization.config import FORMAT, QUANT_METHOD, QuantizeConfig  # noqa: E402
+from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig  # noqa: E402
 from gptqmodel.utils.perplexity import Perplexity  # noqa: E402
 from gptqmodel.utils.rocm import IS_ROCM  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -119,7 +119,7 @@ class TestPerplexity(unittest.TestCase):
     @parameterized.expand(
         [
             # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, True), # A100, 4889 max ram
-            (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, False), # A100, 6571 max ram
+            (METHOD.GPTQ, FORMAT.GPTQ, 8, 32, False), # A100, 6571 max ram
             # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8, 32, False),
             # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4, 32, False),
             # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4, 32, False),
@@ -127,8 +127,8 @@ class TestPerplexity(unittest.TestCase):
             # (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4, 32, False),
         ]
     )
-    def test_quantized_perplexity(self, method: QUANT_METHOD, format: FORMAT, bits: int, group_size: int, buffered_fwd: bool = False):
-        if method == QUANT_METHOD.GPTQ:
+    def test_quantized_perplexity(self, method: METHOD, format: FORMAT, bits: int, group_size: int, buffered_fwd: bool = False):
+        if method == METHOD.GPTQ:
             quantize_config = QuantizeConfig(
                 bits=bits,
                 group_size=group_size,

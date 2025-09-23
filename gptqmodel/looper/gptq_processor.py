@@ -16,7 +16,7 @@ from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ, GPTQv2
-from ..quantization.config import QUANT_METHOD, QuantizeConfig
+from ..quantization.config import METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
 from ..utils.offload import undo_offload_to_disk
@@ -243,7 +243,7 @@ class GPTQProcessor(LoopProcessor):
         # set quantized state
         model.quantized = True
 
-        model.quantize_config.quant_method = QUANT_METHOD.GPTQ
+        model.quantize_config.quant_method = METHOD.GPTQ
 
         super().finalize(model=model, **kwargs)
 

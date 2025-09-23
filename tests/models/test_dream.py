@@ -14,7 +14,7 @@ class TestDream(ModelTest):
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 1
-    QUANTIZE_CONFIG_BITS = 8
+    BITS = 8
 
     def test_dream(self):
         self.quant_lm_eval()

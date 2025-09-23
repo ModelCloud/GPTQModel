@@ -29,7 +29,7 @@ import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
-from gptqmodel.quantization import FORMAT  # noqa: E402
+from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
@@ -66,9 +66,16 @@ class ModelTest(unittest.TestCase):
     KERNEL_INFERENCE = {}  # kernel sets
 
     # quant config
-    QUANT_FORMAT = FORMAT.GPTQ
-    DESC_ACT = True
+    FORMAT = FORMAT.GPTQ
+    METHOD = METHOD.GPTQ
+    BITS = 4
+    GROUP_SIZE = 128
+    DESC_ACT = False
     SYM = True
+    V2 = False
+    ACT_GROUP_AWARE = True
+
+    SAVE_PATH = None  # default is temp folder
 
     USE_FLASH_ATTN = True
 
@@ -80,12 +87,7 @@ class ModelTest(unittest.TestCase):
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
     EXPECT_LM_HEAD_LOSS = None
 
-    QUANTIZE_CONFIG_BITS = 4
-    QUANTIZE_CONFIG_GROUP_SIZE = 128
 
-    V2 = False
-    ACT_GROUP_AWARE = False
-    QUANT_SAVE_PATH = None # default is temp folder
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
@@ -159,9 +161,9 @@ class ModelTest(unittest.TestCase):
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, **kwargs):
         quantize_config = QuantizeConfig(
-            bits=self.QUANTIZE_CONFIG_BITS,
-            group_size=self.QUANTIZE_CONFIG_GROUP_SIZE,
-            format=self.QUANT_FORMAT,
+            bits=self.BITS,
+            group_size=self.GROUP_SIZE,
+            format=self.FORMAT,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
             sym=self.SYM,
@@ -210,7 +212,7 @@ class ModelTest(unittest.TestCase):
             self.check_kernel(model, self.KERNEL_QUANT)
 
             # TODO: make into shared method
-            with (contextlib.nullcontext(self.QUANT_SAVE_PATH) if self.QUANT_SAVE_PATH else contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as path:
+            with (contextlib.nullcontext(self.SAVE_PATH) if self.SAVE_PATH else contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as path:
                 os.makedirs(path, exist_ok=True)
                 self.clear_directory(path)
 
@@ -357,7 +359,7 @@ class ModelTest(unittest.TestCase):
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
-        task_results = self.lm_eval(model=self.QUANT_SAVE_PATH if self.QUANT_SAVE_PATH else self.model ,
+        task_results = self.lm_eval(model=self.SAVE_PATH if self.SAVE_PATH else self.model,
                                     apply_chat_template=self.APPLY_CHAT_TEMPLATE,
                                     trust_remote_code=self.TRUST_REMOTE_CODE,
                                     delete_quantized_model=self.DELETE_QUANTIZED_MODEL)

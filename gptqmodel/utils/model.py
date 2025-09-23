@@ -44,7 +44,7 @@ from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import FORMAT_FIELD_CHECKPOINT, QUANT_METHOD, dynamic_get
+from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, dynamic_get
 from . import has_gil_disabled
 from .backend import BACKEND
 from .importer import select_quant_linear
@@ -596,7 +596,7 @@ def pack_model(
     group_size,
     backend: BACKEND,
     format: str | FORMAT,
-    quant_method: str | QUANT_METHOD,
+    quant_method: str | METHOD,
     lm_head_name: str,
     desc_act=False,
     sym: bool = True,

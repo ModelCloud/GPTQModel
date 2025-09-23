@@ -328,8 +328,8 @@ class GPTQ:
 
         # Temporarily disable torch.compile due to compatibility issues with torch 2.8
         # Will re-enable once the issue is fixed
-        if not TORCH_GTE_28 and not self.qcfg.mock_quantization:
-            self.hessian_inverse = torch_compile(self.hessian_inverse)
+        # if not TORCH_GTE_28 and not self.qcfg.mock_quantization:
+        #     self.hessian_inverse = torch_compile(self.hessian_inverse)
 
         if self.qcfg.mock_quantization:
             # Use simplified hessian inverse (identity matrix)

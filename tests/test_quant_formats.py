@@ -17,7 +17,7 @@ import tempfile  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, __version__, get_best_device  # noqa: E402
-from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, QUANT_METHOD  # noqa: E402
+from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, METHOD  # noqa: E402
 from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL, QuantizeConfig  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
@@ -40,7 +40,7 @@ class TestQuantization(ModelTest):
 
     @parameterized.expand(
         [
-            (QUANT_METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
+            (METHOD.GPTQ, BACKEND.AUTO, False, FORMAT.GPTQ, 8),
             # (QUANT_METHOD.GPTQ, BACKEND.TORCH, False, FORMAT.GPTQ, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.TORCH, False, FORMAT.GPTQ_V2, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ, 4),
@@ -51,8 +51,8 @@ class TestQuantization(ModelTest):
             # (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
         ]
     )
-    def test_quantize(self, method: QUANT_METHOD, backend: BACKEND, sym: bool, format: FORMAT, bits: int):
-        if method == QUANT_METHOD.GPTQ:
+    def test_quantize(self, method: METHOD, backend: BACKEND, sym: bool, format: FORMAT, bits: int):
+        if method == METHOD.GPTQ:
             quantize_config = QuantizeConfig(
                 bits=bits,
                 group_size=32,
@@ -61,7 +61,7 @@ class TestQuantization(ModelTest):
                 format=format,
                 damp_percent=0.05
             )
-        elif method == QUANT_METHOD.QQQ:
+        elif method == METHOD.QQQ:
             quantize_config = QuantizeConfig(
                 bits=bits,
                 group_size=128,
