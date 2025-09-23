@@ -21,7 +21,7 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, QUANT_METHOD, QUANTIZE_BLACK_LIST
+from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
@@ -475,7 +475,7 @@ class BaseQModel(nn.Module):
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
 
-        if self.quantize_config.quant_method == QUANT_METHOD.AWQ:
+        if self.quantize_config.quant_method == METHOD.AWQ:
             if self.quantize_config.format == FORMAT.GEMV_FAST:
                 # AWQ GEMV_FAST only supports pack_dtype is torch.int16
                 log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
@@ -570,10 +570,10 @@ class BaseQModel(nn.Module):
                 torch_empty_cache()
 
         # init processor with default GPTQ processor
-        if self.quantize_config.quant_method == QUANT_METHOD.QQQ:
+        if self.quantize_config.quant_method == METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
             quantize_processor = [QQQProcessor(**args)]
-        elif self.quantize_config.quant_method == QUANT_METHOD.AWQ:
+        elif self.quantize_config.quant_method == METHOD.AWQ:
             from ..looper.awq_processor import AWQProcessor
 
             os.environ["AWQ_BATCH_SIZE"] = str(batch_size)

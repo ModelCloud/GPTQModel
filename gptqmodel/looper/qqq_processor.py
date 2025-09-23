@@ -15,7 +15,7 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..quantization.config import QUANT_METHOD, QuantizeConfig
+from ..quantization.config import METHOD, QuantizeConfig
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
@@ -214,7 +214,7 @@ class QQQProcessor(LoopProcessor):
         # set quantized state
         model.quantized = True
 
-        model.quantize_config.quant_method = QUANT_METHOD.QQQ
+        model.quantize_config.quant_method = METHOD.QQQ
 
         super().finalize(model=model, **kwargs)
 
