@@ -19,16 +19,18 @@ from logbar import LogBar
 
 log = LogBar.shared()
 
+
 class TestGroupSize(unittest.TestCase):
 
     @classmethod
     def setUpClass(self):
         self.pretrained_model_id = "/monster/data/model/Llama-3.2-1B"
-        #"/monster/data/model/Qwen2.5-0.5B-Instruct/" "/monster/data/model/Qwen2.5-0.5B-Instruct/" #
+        # "/monster/data/model/Qwen2.5-0.5B-Instruct/" "/monster/data/model/Qwen2.5-0.5B-Instruct/" #
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
 
-        traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
+        traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
+                                 split="train")
         self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
     # def test_load_group_128(self):
@@ -41,14 +43,13 @@ class TestGroupSize(unittest.TestCase):
     #     result = model.generate("Uncovering deep insights begins with")[0] # tokens
     #     log.info(f"Output: {model.tokenizer.decode(result)}") # string output
 
-    # @parameterized.expand([-1, 128])
     @parameterized.expand([
-        # (FORMAT.GEMM, 128),
-        (FORMAT.GEMV, 128),
-        # (FORMAT.GEMV_FAST, 128),
-        # (FORMAT.MARLIN, 128),
+        # (FORMAT.GEMM, BACKEND.AUTO, 128),
+        (FORMAT.GEMM, BACKEND.MARLIN, 128),
+        # (FORMAT.GEMV, BACKEND.AUTO, 128),
+        # (FORMAT.GEMV_FAST, BACKEND.AUTO, 128),
     ])
-    def test_quant_and_inference(self, checkpoint_format, group_size: int):
+    def test_quant_and_inference(self, checkpoint_format, backend, group_size: int):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=group_size,
@@ -63,7 +64,6 @@ class TestGroupSize(unittest.TestCase):
         )
         model.quantize(self.calibration_dataset, batch_size=1, calibration_dataset_concat_size=2048)
         with tempfile.TemporaryDirectory() as tmp_dir_name:
-            tmp_dir_name = "AWQ-Qwen3-30B-A3B-" + checkpoint_format
             model.save(tmp_dir_name)
 
             with open(tmp_dir_name + "/" + QUANT_CONFIG_FILENAME, "r") as f:
@@ -78,6 +78,7 @@ class TestGroupSize(unittest.TestCase):
 
             model = GPTQModel.load(
                 tmp_dir_name,
+                backend=backend,
             )
 
             # self.assert_awq_linear(model)

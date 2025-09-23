@@ -414,6 +414,7 @@ class QuantizeConfig():
 
         field_names = [field.name for field in fields(cls)]
 
+        # FIXME convert awg quantize_config to gptq quantize_config
         normalized = {
             QUANT_METHOD_FIELD: QUANT_METHOD.GPTQ,
             # compat: default to gptq(v1) when loading models
