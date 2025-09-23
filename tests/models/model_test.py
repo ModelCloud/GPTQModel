@@ -73,7 +73,7 @@ class ModelTest(unittest.TestCase):
     DESC_ACT = False
     SYM = True
     V2 = False
-    ACT_GROUP_AWARE = False
+    ACT_GROUP_AWARE = True
 
     SAVE_PATH = None  # default is temp folder
 
