@@ -540,6 +540,18 @@ class BaseQModel(nn.Module):
             "calculate_w_wq_diff": needs_lora,  # lora needs original w - wq delta
         }
 
+        self.qlinear_kernel = select_quant_linear(
+                bits=self.quantize_config.bits,
+                group_size=self.quantize_config.group_size,
+                desc_act=self.quantize_config.desc_act,
+                sym=self.quantize_config.sym,
+                pack=True,
+                dynamic=self.quantize_config.dynamic,
+                device=self.quantize_config.device,
+                pack_dtype=self.quantize_config.pack_dtype,
+                multi_select=False,
+            )
+
         # rotate model
         if self.quantize_config.rotation:
             from gptqmodel.models.definitions.llama import LlamaQModel

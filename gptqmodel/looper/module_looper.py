@@ -539,19 +539,24 @@ class ModuleLooper():
                 # if last processor, we need to call finalize in reverse
                 if p_index == len(self.processors) - 1:
                     torch_sync()
-
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
-                            module = processed_subset[name]
-                            reverse_p.submodule_finalize(module)
+                            def finalize_module(module):
+                                reverse_p.submodule_finalize(module, self.gptq_model)
+                                
+                                # checking for disk offloading
+                                offload_to_disk(
+                                    model=self.gptq_model.model,
+                                    module=self.gptq_model.model.get_submodule(module.full_name),
+                                    disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
+                                )
 
-                            # checking for disk offloading
+                            module = processed_subset[name]
+
                             if self.gptq_model.quantize_config.offload_to_disk:
                                 ASYNC_WORKER.submit(partial(
-                                    offload_to_disk,
-                                    model=self.gptq_model.model,
+                                    finalize_module,
                                     module=module,
-                                    disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
                                 ))
 
                     #del module
@@ -560,10 +565,11 @@ class ModuleLooper():
                 if auto_gc:
                     torch_empty_cache()
 
-        # LifeCycle: All sub-modules have finalized meaning quantization work is complete
-        # Below starts packing: TODO FIXME. move packing to sub-module finalize
-        # wait for all thread tasks
-        ASYNC_WORKER.join()
+                # LifeCycle: All sub-modules have finalized meaning quantization work is complete
+                # wait for all thread tasks
+                ASYNC_WORKER.join()
+
+
         # paranoid safety check
         torch_sync()
         torch_sync(device=CPU)
