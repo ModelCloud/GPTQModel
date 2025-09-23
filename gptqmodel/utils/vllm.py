@@ -8,7 +8,7 @@ from typing import Any, Dict
 import torch
 
 try:
-    from vllm import LLM, SamplingParams
+    from vllm import LLM, SamplingParams, TokensPrompt
 
     VLLM_AVAILABLE = True
 except ImportError:
@@ -38,10 +38,15 @@ def convert_hf_params_to_vllm(hf_params: Dict[str, Any]):
         sampling_params.top_p = hf_params.get('top_p')
 
     if hf_params.get('max_length', None):
-        sampling_params.max_tokens = hf_params.get('max_length')
-
+        raise ValueError("vLLM does not support argument `max_length`. Please use `max_new_tokens` instead.")
     if hf_params.get('min_length', None):
-        sampling_params.min_tokens = hf_params.get('min_length')
+        raise ValueError("vLLM does not support argument `min_length`. Please use `min_new_tokens` instead.")
+
+    if hf_params.get('max_new_tokens', None):
+        sampling_params.max_tokens = hf_params.get('max_new_tokens')
+
+    if hf_params.get('min_new_tokens', None):
+        sampling_params.min_tokens = hf_params.get('min_new_tokens')
 
     if hf_params.get('eos_token_id', None):
         sampling_params.stop_token_ids = [hf_params.get('eos_token_id'), None]
@@ -79,17 +84,19 @@ def vllm_generate(model, **kwargs):
         hf_params = {
             key: kwargs.get(key) for key in [
                 'num_return_sequences', 'repetition_penalty', 'temperature',
-                'top_k', 'top_p', 'max_length', 'min_length', 'eos_token_id'
+                'top_k', 'top_p', 'max_length', 'min_length', 'max_new_tokens', 'min_new_tokens', 'eos_token_id'
             ]
         }
         sampling_params = convert_hf_params_to_vllm({k: v for k, v in hf_params.items() if v is not None})
 
     # Convert prompts to vLLM format
     if isinstance(prompts, torch.Tensor):
-        req_results = model.generate(prompt_token_ids=prompts.tolist(), sampling_params=sampling_params)
+        tokens_prompts = [TokensPrompt(prompt_token_ids=prompt) for prompt in prompts.tolist()]
+        req_results = model.generate(prompts=tokens_prompts, sampling_params=sampling_params)
     elif isinstance(prompts, list):
         if isinstance(prompts[0], list) or isinstance(prompts[0], int):
-            req_results = model.generate(prompt_token_ids=prompts, sampling_params=sampling_params)
+            tokens_prompts = [TokensPrompt(prompt_token_ids=prompt) for prompt in prompts]
+            req_results = model.generate(prompts=tokens_prompts, sampling_params=sampling_params)
         else:
             req_results = model.generate(prompts=prompts, sampling_params=sampling_params)
     elif isinstance(prompts, str):
