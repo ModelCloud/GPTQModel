@@ -543,7 +543,7 @@ class ModuleLooper():
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
                             module = processed_subset[name]
-                            reverse_p.submodule_finalize(module)
+                            reverse_p.submodule_finalize(module, self.gptq_model)
 
                             # TODO: offload packed module to disk
                             # checking for disk offloading
