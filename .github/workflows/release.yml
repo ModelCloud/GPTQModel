@@ -336,6 +336,8 @@ jobs:
       - check-vm
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_0919
+      volumes:
+        - /home/ci/models/pyenv:/opt/pyenv
     env:
       RELEASE_MODE: 0
     steps:
