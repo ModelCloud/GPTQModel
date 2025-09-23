@@ -1,7 +1,6 @@
 [build-system]
-requires = ["setuptools >= 64",
-"torch",
-"maturin>=1.9.3",
+requires = [
+    "setuptools >= 64",
 ]
 build-backend = "setuptools.build_meta:__legacy__"
 
