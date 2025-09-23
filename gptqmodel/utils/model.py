@@ -256,6 +256,9 @@ def create_quant_module(
     backend: BACKEND = BACKEND.AUTO,
     adapter: Optional[Adapter] = None,
 ):
+    if not isinstance(submodule, BaseQuantLinear):
+        return
+
     # unwrap named module
     if isinstance(submodule, NamedModule):
         # print(f"offloading named module: {module.full_name}")
