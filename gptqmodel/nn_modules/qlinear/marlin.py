@@ -17,7 +17,7 @@
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
 import os
-from typing import List, Optional, Tuple, Callable, Union
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -29,11 +29,12 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.marlin import marlin_import_exception, marlin_repeat_scales_on_all_ranks, marlin_is_k_full, \
     marlin_make_workspace_new, gptq_marlin_repack, marlin_permute_scales, marlin_sort_g_idx, _transform_param, \
-    marlin_make_empty_g_idx, apply_gptq_marlin_linear
+    marlin_make_empty_g_idx, apply_gptq_marlin_linear, marlin_permute_bias
 from ...utils.rocm import IS_ROCM
-from ...utils.marlin_scalar_type import scalar_types, ScalarType
+from ...utils.marlin_scalar_type import scalar_types
 
 log = setup_logger()
+
 
 class MarlinQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4, 8]
@@ -255,6 +256,9 @@ class MarlinQuantLinear(BaseQuantLinear):
         _transform_param(self, "qweight", transform_w_q)
         _transform_param(self, "scales", transform_w_s)
 
+        if hasattr(self, "bias") and self.bias is not None:
+            self.bias.data = marlin_permute_bias(self.bias)
+
         super().post_init()
 
     def list_buffers(self) -> List:
@@ -289,14 +293,9 @@ class MarlinQuantLinear(BaseQuantLinear):
             output_size_per_partition=self.out_features,
             input_size_per_partition=self.in_features,
             is_k_full=self.is_k_full,
-            # TODO FIX ME...marlin kernel fused bias is failing CI
-            bias=None, # self.bias,
+            bias=self.bias,
             use_fp32_reduce=self.fp32,
         )
-
-        # TODO FIX ME...marlin kernel fused bias is failing CI, bypass marlin fused bias
-        if self.bias is not None:
-            out = out.add_(self.bias)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)

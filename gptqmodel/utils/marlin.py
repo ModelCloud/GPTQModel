@@ -420,3 +420,10 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
 
     marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits)
     return marlin_zp
+
+
+def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
+    origin_shape = s.shape
+    _, scale_perm_single = get_scale_perms()
+    s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
+    return s.reshape(*origin_shape).contiguous()
