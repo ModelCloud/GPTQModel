@@ -345,6 +345,21 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
+      - name: Print Env
+        run: |
+          env_name="py313_release_source"
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            echo "env: ${env_name} exists, skip"
+            pyenv local $env_name
+            pyenv activate $env_name
+          else
+            echo "creating venv: ${env_name}..."
+            pyenv virtualenv "$python_version" "$env_name" || true
+            pyenv local $env_name
+            pyenv activate $env_name
+            pip install pip build setuptools wheel twine -U
+          fi
+
       - name: Fetch PR by number
         if: ${{ github.event.inputs.pr_number != 0 }}
         run: |
