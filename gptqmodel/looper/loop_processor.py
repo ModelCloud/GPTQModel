@@ -45,6 +45,7 @@ class LoopProcessor:
 
         # result is total collection of all module results mapped by module.full_name
         self._results: Dict[str, Any] = {}
+        self._results_lock = threading.Lock()
 
         # toggle to enable stream from gpu to cpu
         self.stream = False
@@ -221,14 +222,18 @@ class LoopProcessor:
         log.info(formatted_row)
         log.info(len(formatted_row) * "-")
 
-
-
     def result_save(self, key: str, value: Any):
-        assert self.result_get(key) is None, f"key: {key} already exists in `self.result`"
-        self._results[key] = value
+        with self._results_lock:
+            #assert self.result_get(key) is None, f"key: {key} already exists in `self.result`"
+            self._results[key] = value
 
     def result_get(self, key: str, default: Any = None) -> Any:
-        return self._results.get(key, default)
+        with self._results_lock:
+            return self._results.get(key, default)
+
+    def result_pop(self, key: str, default: Any = None):
+        with self._results_lock:
+            return self._results.pop(key, default)
 
     def results(self):
         return self._results

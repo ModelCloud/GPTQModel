@@ -596,33 +596,32 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers, quant_linear_cls, lock: threading.Lock):
+def pack_module(name, qModules, q_scales, q_zeros, q_g_idx, layers, quant_linear_cls, lock: threading.Lock):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         with lock:
-            r = quant_result[name]
-            scale, zero, g_idx = r["scale"], r["zero"], r["g_idx"] # TODO FIX ME: use const, not string for field names
-            module = qModules[name]
             layer = layers[name]
+            module = qModules[name]
 
         module = module.to(CPU)
 
         layer = layer.to(CPU)
-        scale = scale.to(CPU)
-        zero = zero.to(CPU)
-        g_idx = g_idx.to(CPU) if g_idx is not None else None
+        q_scales = q_scales.to(CPU)
+        q_zeros = q_zeros.to(CPU)
+        q_g_idx = q_g_idx.to(CPU) if q_g_idx is not None else None
 
         with lock:
-            qModules[name] = module
             layers[name] = layer
+            qModules[name] = module
 
+        # TODO FIX ME..remove hard coded qqq pack
         if quant_linear_cls.QUANT_TYPE == "qqq":
             with lock:
                 scale_extra = r["scale_extra"]
             scale_extra = scale_extra.to(CPU)
-            module.pack(linear=layer, scales=scale, s_extra=scale_extra)
+            module.pack(linear=layer, scales=q_scales, s_extra=scale_extra)
         else:
-            module.pack(linear=layer, scales=scale, zeros=zero, g_idx=g_idx)
+            module.pack(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 
         # TODO: why move it back to gpu?
         # start = time.time()
