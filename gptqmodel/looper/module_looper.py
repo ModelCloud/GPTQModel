@@ -539,19 +539,24 @@ class ModuleLooper():
                 # if last processor, we need to call finalize in reverse
                 if p_index == len(self.processors) - 1:
                     torch_sync()
-
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
-                            module = processed_subset[name]
-                            reverse_p.submodule_finalize(module, self.gptq_model)
-
-                            # checking for disk offloading
-                            if self.gptq_model.quantize_config.offload_to_disk:
-                                ASYNC_WORKER.submit(partial(
-                                    offload_to_disk,
+                            def finalize_module(module):
+                                reverse_p.submodule_finalize(module, self.gptq_model)
+                                
+                                # checking for disk offloading
+                                offload_to_disk(
                                     model=self.gptq_model.model,
                                     module=self.gptq_model.model.get_submodule(module.full_name),
                                     disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
+                                )
+
+                            module = processed_subset[name]
+
+                            if self.gptq_model.quantize_config.offload_to_disk:
+                                ASYNC_WORKER.submit(partial(
+                                    finalize_module,
+                                    module=module,
                                 ))
 
                     #del module
