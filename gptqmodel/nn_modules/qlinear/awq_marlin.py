@@ -6,19 +6,20 @@
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+from vllm.model_executor.layers.quantization.utils.marlin_utils import marlin_permute_bias
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
-from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.marlin import replace_parameter, gptq_marlin_gemm
-from ...utils.marlin_scalar_type import ScalarType, scalar_types
+from ...utils.marlin import replace_parameter, marlin_make_workspace_new, marlin_permute_scales, \
+    marlin_make_empty_g_idx, awq_to_marlin_zero_points, apply_awq_marlin_linear
+from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
 
 marlin_import_exception = None
@@ -29,301 +30,6 @@ except ImportError as e:
 
 log = setup_logger()
 
-marlin_cuda, msg = try_import("gptqmodel_marlin_kernels")
-
-GPTQ_MARLIN_TILE = 16
-GPTQ_MARLIN_MIN_THREAD_N = 64
-GPTQ_MARLIN_MIN_THREAD_K = 128
-GPTQ_MARLIN_MAX_PARALLEL = 16
-
-def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
-    origin_shape = s.shape
-    _, scale_perm_single = get_scale_perms()
-    s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
-    return s.reshape(*origin_shape).contiguous()
-
-def set_weight_attrs(
-    weight: torch.Tensor,
-    weight_attrs: Optional[Dict[str, Any]],
-):
-    """Set attributes on a weight tensor.
-
-    This method is used to set attributes on a weight tensor. This method
-    will not overwrite existing attributes.
-
-    Args:
-        weight: The weight tensor.
-        weight_attrs: A dictionary of attributes to set on the weight tensor.
-    """
-    if weight_attrs is None:
-        return
-    for key, value in weight_attrs.items():
-        assert not hasattr(
-            weight, key), (f"Overwriting existing tensor attribute: {key}")
-        setattr(weight, key, value)
-
-def marlin_is_k_full(act_order: bool, is_row_parallel: bool) -> bool:
-    return (not act_order) or (act_order and not is_row_parallel)
-
-def marlin_repeat_scales_on_all_ranks(act_order: bool, group_size: int,
-                                      is_row_parallel: bool) -> bool:
-    # Need to repeat scales on every rank if act_ordering or
-    # channelwise and RowParallelLinear
-    is_channelwise = group_size == -1
-    return act_order or (is_channelwise and is_row_parallel)
-
-def marlin_make_workspace(output_size_per_partition: int,
-                          device: torch.device) -> torch.Tensor:
-    max_workspace_size = (output_size_per_partition //
-                          GPTQ_MARLIN_MIN_THREAD_N) * GPTQ_MARLIN_MAX_PARALLEL
-
-    return torch.zeros(max_workspace_size,
-                       dtype=torch.int,
-                       device=device,
-                       requires_grad=False)
-
-def get_pack_factor(num_bits):
-    assert 32 % num_bits == 0, f"Unsupported num_bits = {num_bits}"
-    return 32 // num_bits
-
-def pack_cols(
-    q_w: torch.Tensor,
-    num_bits: int,
-    size_k: int,
-    size_n: int,
-):
-    assert q_w.shape == (size_k, size_n)
-
-    pack_factor = get_pack_factor(num_bits)
-    assert size_n % pack_factor == 0
-
-    orig_device = q_w.device
-
-    q_w = q_w.cpu().numpy().astype(np.uint32)
-
-    q_res = np.zeros((size_k, size_n // pack_factor), dtype=np.uint32)
-
-    for i in range(pack_factor):
-        q_res |= q_w[:, i::pack_factor] << num_bits * i
-
-    q_res = torch.from_numpy(q_res.astype(np.int32)).to(orig_device)
-    q_res = q_res.contiguous()
-
-    return q_res
-
-
-def unpack_cols(
-    packed_q_w: torch.Tensor,
-    num_bits: int,
-    size_k: int,
-    size_n: int,
-):
-    pack_factor = get_pack_factor(num_bits)
-    assert size_n % pack_factor == 0
-    assert packed_q_w.shape == (
-        size_k, size_n // pack_factor
-    ), "packed_q_w.shape = {} size_k = {}, size_n = {} pack_Factor = {}".format(
-        packed_q_w.shape, size_k, size_n, pack_factor)
-
-    orig_device = packed_q_w.device
-
-    packed_q_w_cpu = packed_q_w.cpu().numpy().astype(np.uint32)
-    q_res = np.zeros((size_k, size_n), dtype=np.uint32)
-
-    mask = (1 << num_bits) - 1
-    for i in range(pack_factor):
-        vals = packed_q_w_cpu & mask
-        packed_q_w_cpu >>= num_bits
-        q_res[:, i::pack_factor] = vals
-
-    q_res = torch.from_numpy(q_res.astype(np.int32)).to(orig_device)
-    q_res = q_res.contiguous()
-
-    return q_res
-
-def marlin_make_workspace_new(device: torch.device,
-                              max_blocks_per_sm: int = 1) -> torch.Tensor:
-    # In the new marlin kernel, we use the num of threadblocks as workspace
-    # size. The num of threadblocks is sms_count * max_blocks_per_sm.
-    sms = torch.cuda.get_device_properties(device).multi_processor_count
-    return torch.zeros(sms * max_blocks_per_sm,
-                       dtype=torch.int,
-                       device=device,
-                       requires_grad=False)
-
-def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
-                       num_bits: int) -> torch.Tensor:
-    # Permute zero-points in a similar way to scales, but do not use the
-    # "single" permutation, since zero-points are applied on every MMA
-    scale_perm, _ = get_scale_perms()
-    zp = zp.reshape((-1, len(scale_perm)))[:, scale_perm]
-
-    # Interleave column dim (for the dequantize code) and pack it to int32
-    if num_bits == 4:
-        interleave = np.array([0, 2, 4, 6, 1, 3, 5, 7])
-    elif num_bits == 8:
-        interleave = np.array([0, 2, 1, 3])
-    else:
-        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
-
-    zp = zp.reshape((-1, len(interleave)))[:, interleave].ravel()
-    zp = zp.reshape((-1, size_n)).contiguous()
-    zp = pack_cols(zp, num_bits, size_k, size_n)
-
-    return zp
-
-def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
-                              size_n: int, num_bits: int) -> torch.Tensor:
-    # AWQ zero-points are quantized and packed on the column dim.
-    # In addition, the values are permuted based on dequantizer.
-    # Here we undo both of these, and then apply marlin permutation
-    # and pack it back.
-    q_zp = unpack_cols(q_zp_packed, num_bits, size_k, size_n)
-
-    # Undo interleaving (use argsort(..) to get inverse perm)
-    if num_bits == 4:
-        undo_interleave = np.argsort(np.array([0, 2, 4, 6, 1, 3, 5, 7]))
-    elif num_bits == 8:
-        undo_interleave = np.argsort(np.array([0, 2, 1, 3]))
-    else:
-        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
-
-    q_zp = q_zp.reshape((-1, len(undo_interleave)))[:, undo_interleave].ravel()
-    q_zp = q_zp.reshape((-1, size_n)).contiguous()
-
-    marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits)
-    return marlin_zp
-
-def marlin_sort_g_idx(
-        g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
-    return g_idx[g_idx_sort_indices], g_idx_sort_indices
-
-def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
-    return torch.nn.Parameter(torch.empty(0, dtype=torch.int, device=device),
-                              requires_grad=False)
-
-# Newly generated tensors need to replace existing tensors that are
-# already registered as parameters by vLLM (and won't be freed)
-def replace_tensor(layer: torch.nn.Module, name: str,
-                   new_t: torch.Tensor) -> None:
-    # It is important to use resize_() here since it ensures
-    # the same buffer is reused
-    getattr(layer, name).resize_(new_t.shape)
-    getattr(layer, name).copy_(new_t)
-    del new_t
-
-def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
-                          group_size: int) -> torch.Tensor:
-
-    scale_perm, scale_perm_single = get_scale_perms()
-    if group_size < size_k and group_size != -1:
-        s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
-    else:
-        s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
-    s = s.reshape((-1, size_n)).contiguous()
-
-    return s
-
-def get_scale_perms():
-    scale_perm: List[int] = []
-    for i in range(8):
-        scale_perm.extend([i + 8 * j for j in range(8)])
-    scale_perm_single: List[int] = []
-    for i in range(4):
-        scale_perm_single.extend(
-            [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
-    return scale_perm, scale_perm_single
-
-
-def maybe_warn_marlin_atomic_add_env():
-    if torch.compiler.is_dynamo_compiling():
-        return
-
-    return
-    # if envs.VLLM_MARLIN_USE_ATOMIC_ADD:
-    #     return
-    # log.info_once(
-    #     "Marlin kernel can achieve better performance for small size_n "
-    #     "with experimental use_atomic_add feature. "
-    #     "You can consider set environment variable "
-    #     "VLLM_MARLIN_USE_ATOMIC_ADD to 1 if possible.")
-
-def maybe_warn_marlin_atomic_add(device, dtype):
-    if torch.compiler.is_dynamo_compiling():
-        return
-    device_capability = torch.cuda.get_device_capability(device)
-    if device_capability[0] < 9 and dtype == torch.bfloat16:
-        log.info_once(
-            "You are running Marlin kernel with bf16 on GPUs before SM90. "
-            "You can consider change to fp16 to achieve better performance "
-            "if possible.")
-
-def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
-                                 dtype: torch.dtype) -> bool:
-
-    # the performance of atomicAdd is better than global reduce
-    # only when m*n is small and k is large
-    if n >= 2048 or k < 2048 or device.type != "cuda":
-        return False
-
-    # TODO
-    # disable atomicAdd reduce by default,
-    # one can enable it with VLLM_MARLIN_USE_ATOMIC_ADD=1
-    # if not envs.VLLM_MARLIN_USE_ATOMIC_ADD:
-    #     maybe_warn_marlin_atomic_add_env()
-    #     return False
-
-    # sm8x doesn't support atomicAdd + bfloat16 natively
-    device_capability = torch.cuda.get_device_capability(device)
-    if device_capability[0] < 9 and dtype == torch.bfloat16:
-        maybe_warn_marlin_atomic_add(device, dtype)
-        return False
-
-    return True
-
-
-def apply_awq_marlin_linear(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        weight_zp: torch.Tensor,
-        g_idx: torch.Tensor,
-        g_idx_sort_indices: torch.Tensor,
-        workspace: torch.Tensor,
-        quant_type: ScalarType,
-        output_size_per_partition: int,
-        input_size_per_partition: int,
-        bias: Optional[torch.Tensor] = None,
-        use_fp32_reduce: bool = True) -> torch.Tensor:
-    reshaped_x = input.reshape(-1, input.shape[-1])
-    out_shape = input.shape[:-1] + (output_size_per_partition, )
-
-    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
-                                                  n=output_size_per_partition,
-                                                  k=reshaped_x.size(1),
-                                                  device=input.device,
-                                                  dtype=input.dtype)
-
-    output = gptq_marlin_gemm(reshaped_x,
-                                  None,
-                                  weight,
-                                  bias,
-                                  weight_scale,
-                                  None,
-                                  weight_zp,
-                                  g_idx,
-                                  g_idx_sort_indices,
-                                  workspace,
-                                  quant_type,
-                                  size_m=reshaped_x.shape[0],
-                                  size_n=output_size_per_partition,
-                                  size_k=input_size_per_partition,
-                                  use_atomic_add=use_atomic_add,
-                                  use_fp32_reduce=use_fp32_reduce,
-                                  is_zp_float=False)
-
-    return output.reshape(out_shape)
 
 class AwqMarlinQuantLinear(AWQuantLinear):
     SUPPORTS_BITS = [4, 8]
@@ -353,16 +59,16 @@ class AwqMarlinQuantLinear(AWQuantLinear):
     }
 
     def __init__(
-        self, bits: int,
-        group_size: int,
-        desc_act: bool,
-        sym: bool,
-        in_features: int,
-        out_features: int,
-        bias: bool = False,
-        pack_dtype: torch.dtype = torch.int32,
-        adapter: Adapter = None,
-        **kwargs):
+            self, bits: int,
+            group_size: int,
+            desc_act: bool,
+            sym: bool,
+            in_features: int,
+            out_features: int,
+            bias: bool = False,
+            pack_dtype: torch.dtype = torch.int32,
+            adapter: Adapter = None,
+            **kwargs):
         if marlin_import_exception is not None:
             raise ValueError(
                 f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
@@ -466,7 +172,8 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             if CUDA_VISIBLE_DEVICES is None:
                 has_cuda_v8 = all(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
             else:
-                has_cuda_v8 = all(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(len(CUDA_VISIBLE_DEVICES.split(","))))
+                has_cuda_v8 = all(
+                    torch.cuda.get_device_capability(i)[0] >= 8 for i in range(len(CUDA_VISIBLE_DEVICES.split(","))))
             if not has_cuda_v8:
                 raise NotImplementedError("Marlin kernel only supports compute capability >= 8.0.")
 
@@ -524,12 +231,6 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             "module.post_init() must be called before module.forward(). "
             "Use marlin_post_init() on the whole model."
         )
-        if marlin_cuda is None:
-            raise ModuleNotFoundError("External Marlin kernels are not properly installed." + msg)
-
-        input_dtype = x.dtype
-        if input_dtype != torch.float16:
-            x = x.half()
 
         out = apply_awq_marlin_linear(
             input=x.contiguous() if self.is_lm_head else x,
@@ -549,6 +250,7 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             out = self.adapter.apply(x=x, out=out)
 
         return out
+
 
 # Precompute permutations for Marlin weight and scale shuffling
 def _get_perms():
@@ -602,5 +304,6 @@ def dequantize_qzeros(layer):
     unpacked_qzeros = unpacked_qzeros.repeat_interleave(group_size, dim=0)
 
     return unpacked_qzeros
+
 
 __all__ = ["AwqMarlinQuantLinear"]

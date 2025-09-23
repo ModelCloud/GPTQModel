@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from typing import Optional, List, Tuple, Callable, Union
 
+import numpy
 import torch
 
 from .marlin_scalar_type import ScalarType
@@ -17,6 +18,7 @@ try:
     import gptqmodel_marlin_kernels
 except ImportError as e:
     marlin_import_exception = str(e)
+
 
 # Validate marlin support
 def _validate_marlin_device_support() -> bool:
@@ -237,6 +239,49 @@ def apply_gptq_marlin_linear(
     return output.reshape(out_shape)
 
 
+def apply_awq_marlin_linear(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_zp: torch.Tensor,
+        g_idx: torch.Tensor,
+        g_idx_sort_indices: torch.Tensor,
+        workspace: torch.Tensor,
+        quant_type: ScalarType,
+        output_size_per_partition: int,
+        input_size_per_partition: int,
+        bias: Optional[torch.Tensor] = None,
+        use_fp32_reduce: bool = True) -> torch.Tensor:
+    reshaped_x = input.reshape(-1, input.shape[-1])
+    out_shape = input.shape[:-1] + (output_size_per_partition,)
+
+    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+                                                  n=output_size_per_partition,
+                                                  k=reshaped_x.size(1),
+                                                  device=input.device,
+                                                  dtype=input.dtype)
+
+    output = gptq_marlin_gemm(reshaped_x,
+                              None,
+                              weight,
+                              bias,
+                              weight_scale,
+                              None,
+                              weight_zp,
+                              g_idx,
+                              g_idx_sort_indices,
+                              workspace,
+                              quant_type,
+                              size_m=reshaped_x.shape[0],
+                              size_n=output_size_per_partition,
+                              size_k=input_size_per_partition,
+                              use_atomic_add=use_atomic_add,
+                              use_fp32_reduce=use_fp32_reduce,
+                              is_zp_float=False)
+
+    return output.reshape(out_shape)
+
+
 def gptq_marlin_gemm(a: torch.Tensor,
                      c: Optional[torch.Tensor],
                      b_q_weight: torch.Tensor,
@@ -269,3 +314,109 @@ def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                        num_bits: int) -> torch.Tensor:
     return gptqmodel_marlin_kernels.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
                                                        num_bits)
+
+
+def get_pack_factor(num_bits):
+    assert 32 % num_bits == 0, f"Unsupported num_bits = {num_bits}"
+    return 32 // num_bits
+
+
+def pack_cols(
+        q_w: torch.Tensor,
+        num_bits: int,
+        size_k: int,
+        size_n: int,
+):
+    assert q_w.shape == (size_k, size_n)
+
+    pack_factor = get_pack_factor(num_bits)
+    assert size_n % pack_factor == 0
+
+    orig_device = q_w.device
+
+    q_w = q_w.cpu().numpy().astype(numpy.uint32)
+
+    q_res = numpy.zeros((size_k, size_n // pack_factor), dtype=numpy.uint32)
+
+    for i in range(pack_factor):
+        q_res |= q_w[:, i::pack_factor] << num_bits * i
+
+    q_res = torch.from_numpy(q_res.astype(numpy.int32)).to(orig_device)
+    q_res = q_res.contiguous()
+
+    return q_res
+
+
+def unpack_cols(
+        packed_q_w: torch.Tensor,
+        num_bits: int,
+        size_k: int,
+        size_n: int,
+):
+    pack_factor = get_pack_factor(num_bits)
+    assert size_n % pack_factor == 0
+    assert packed_q_w.shape == (
+        size_k, size_n // pack_factor
+    ), "packed_q_w.shape = {} size_k = {}, size_n = {} pack_Factor = {}".format(
+        packed_q_w.shape, size_k, size_n, pack_factor)
+
+    orig_device = packed_q_w.device
+
+    packed_q_w_cpu = packed_q_w.cpu().numpy().astype(numpy.uint32)
+    q_res = numpy.zeros((size_k, size_n), dtype=numpy.uint32)
+
+    mask = (1 << num_bits) - 1
+    for i in range(pack_factor):
+        vals = packed_q_w_cpu & mask
+        packed_q_w_cpu >>= num_bits
+        q_res[:, i::pack_factor] = vals
+
+    q_res = torch.from_numpy(q_res.astype(numpy.int32)).to(orig_device)
+    q_res = q_res.contiguous()
+
+    return q_res
+
+
+def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
+                       num_bits: int) -> torch.Tensor:
+    # Permute zero-points in a similar way to scales, but do not use the
+    # "single" permutation, since zero-points are applied on every MMA
+    scale_perm, _ = get_scale_perms()
+    zp = zp.reshape((-1, len(scale_perm)))[:, scale_perm]
+
+    # Interleave column dim (for the dequantize code) and pack it to int32
+    if num_bits == 4:
+        interleave = numpy.array([0, 2, 4, 6, 1, 3, 5, 7])
+    elif num_bits == 8:
+        interleave = numpy.array([0, 2, 1, 3])
+    else:
+        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+
+    zp = zp.reshape((-1, len(interleave)))[:, interleave].ravel()
+    zp = zp.reshape((-1, size_n)).contiguous()
+    zp = pack_cols(zp, num_bits, size_k, size_n)
+
+    return zp
+
+
+def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
+                              size_n: int, num_bits: int) -> torch.Tensor:
+    # AWQ zero-points are quantized and packed on the column dim.
+    # In addition, the values are permuted based on dequantizer.
+    # Here we undo both of these, and then apply marlin permutation
+    # and pack it back.
+    q_zp = unpack_cols(q_zp_packed, num_bits, size_k, size_n)
+
+    # Undo interleaving (use argsort(..) to get inverse perm)
+    if num_bits == 4:
+        undo_interleave = numpy.argsort(numpy.array([0, 2, 4, 6, 1, 3, 5, 7]))
+    elif num_bits == 8:
+        undo_interleave = numpy.argsort(numpy.array([0, 2, 1, 3]))
+    else:
+        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+
+    q_zp = q_zp.reshape((-1, len(undo_interleave)))[:, undo_interleave].ravel()
+    q_zp = q_zp.reshape((-1, size_n)).contiguous()
+
+    marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits)
+    return marlin_zp
