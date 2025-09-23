@@ -18,7 +18,8 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
 from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.model import move_to, pack_model
+from ..utils.importer import select_quant_linear
+from ..utils.model import move_to, pack_model, create_quant_module, pack_module, find_modules
 from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import CPU, torch_streamCtx, torch_sync
 
@@ -37,6 +38,7 @@ class GPTQProcessor(LoopProcessor):
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
+
 
     def log_plotly(self):
         task = self.logger_task
@@ -210,10 +212,41 @@ class GPTQProcessor(LoopProcessor):
         #     torch_empty_cache()
 
     # submodule_finalized is called in reverse after all next sequential processes are called
-    def submodule_finalize(self, module: NamedModule):
+    def submodule_finalize(self, module: NamedModule, model: BaseQModel):
         # generate complete, safe to move to cpu
         module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
+
+        layers = find_modules(model.model)
+
+        # replace module with quantized module
+        create_quant_module(
+            name=module.full_name,
+            linear_cls=model.qlinear_kernel,
+            bits=self.qcfg.bits,
+            desc_act=self.qcfg.desc_act,
+            dynamic=self.qcfg.dynamic,
+            group_size=self.qcfg.group_size,
+            module=model.model,
+            submodule=module,
+            quant_result=self.results(),
+            sym=self.qcfg.sym,
+            device=self.qcfg.device,
+            lm_head_name=model.lm_head,
+            pack_dtype=self.qcfg.pack_dtype,
+        )
+
+        # pack module
+        qModules = {name: submodule for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items() if name == module.full_name}
+        pack_module(
+            name=module.full_name,
+            qModules=qModules,
+            quant_result=self.results(),
+            layers=layers,
+            quant_linear_cls=model.qlinear_kernel,
+            lock=self.lock,
+        )
+        
 
     def finalize(self, model: BaseQModel, **kwargs):
         # block for streams
@@ -223,22 +256,6 @@ class GPTQProcessor(LoopProcessor):
         model.model = undo_offload_to_disk(module=model.model, include_buffers=True, delete_offload_folders=True)
         # print("finalize")
         # print_module_tree(model.model)
-
-        backend = kwargs.pop("backend")
-        model.qlinear_kernel = pack_model(
-            model=model.model,
-            quant_result=self.results(),
-            bits=self.qcfg.bits,
-            group_size=self.qcfg.group_size,
-            backend=backend,
-            desc_act=self.qcfg.desc_act,
-            format=self.qcfg.format,
-            quant_method=self.qcfg.quant_method,
-            lm_head_name=model.lm_head,
-            dynamic=self.qcfg.dynamic,
-            parallel_packing=self.qcfg.parallel_packing,
-            pack_dtype=self.qcfg.pack_dtype,
-        )
 
         # set quantized state
         model.quantized = True

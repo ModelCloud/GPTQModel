@@ -296,7 +296,7 @@ class LoopProcessor:
 
     # last step, after all loop processor is called
     # submodule_finalize is called in reverse after all next sequential processes are called
-    def submodule_finalize(self, module: NamedModule):
+    def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         pass
         #self.offload_to_disk(module=module)
 
