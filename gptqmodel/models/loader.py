@@ -318,8 +318,13 @@ def ModelLoader(cls):
         qcfg.calculate_bits_per_weight()
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
-            if qcfg.format != FORMAT.GPTQ and qcfg.format != FORMAT.GEMM:
-                raise ValueError(f"{backend} backend only supports FORMAT.GPTQ or FORMAT.GEMM: actual = {qcfg.format}")
+            if backend == BACKEND.VLLM:
+                if qcfg.format != FORMAT.GPTQ and qcfg.format != FORMAT.GEMM:
+                    raise ValueError(f"{backend} backend only supports FORMAT.GPTQ or FORMAT.GEMM: actual = {qcfg.format}")
+            elif backend == BACKEND.SGLANG:
+                if qcfg.format != FORMAT.GPTQ:
+                    raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {qcfg.format}")
+
             if backend == BACKEND.VLLM:
                 from ..utils.vllm import load_model_by_vllm, vllm_generate
 
