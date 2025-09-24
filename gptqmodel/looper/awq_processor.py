@@ -769,7 +769,7 @@ class AWQProcessor(LoopProcessor):
         pass
 
     # submodule_finalized is called in reverse after all next sequential processes are called
-    def submodule_finalize(self, module: NamedModule):
+    def submodule_finalize(self, module: NamedModule, **kwargs):
         # generate complete, safe to move to cpu
         module.weight.data = move_to(module.weight.data, device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
