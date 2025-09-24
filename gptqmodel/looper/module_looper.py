@@ -19,7 +19,7 @@ from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import SUPPORTS_MODULE_TYPES
+from ..models._const import SUPPORTS_MODULE_TYPES, CUDA
 from ..nn_modules.hooked_linear import HookedLinear, StopForward, replace_module_with_hooked_legacy
 from ..utils import ASYNC_WORKER
 from ..utils.logger import setup_logger
@@ -159,6 +159,7 @@ class ModuleLooper():
         return InputCache(layer_inputs=layer_inputs, layer_input_kwargs=layer_input_kwargs, position_ids=position_ids,
                           attention_masks=attention_masks)
 
+    @torch.inference_mode
     def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, fail_safe: bool = False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
@@ -377,7 +378,11 @@ class ModuleLooper():
                                                                                       **additional_layer_inputs)
                         except StopForward:
                             #print(f"Stop forwarding triggered")
+                            #torch_empty_cache(CUDA)
                             pass
+                        finally:
+                            del layer_input
+                            del additional_layer_inputs
 
                         # For Native processor, we can update processor input here
                         # if second forward is not required, this/first forward output is captured as input for next loop
@@ -389,8 +394,8 @@ class ModuleLooper():
                                 layer_outputs.append([layer_output])
 
 
-                        del layer_input
-                        del additional_layer_inputs
+                        # del layer_input
+                        # del additional_layer_inputs
 
                     # Native processor does not need to run a second forward pass, the output of the first pass is
                     # directly saved and used as input for the next loop.

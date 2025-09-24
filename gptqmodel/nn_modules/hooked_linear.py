@@ -42,7 +42,7 @@ class HookedConv1D(transformers.Conv1D):
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
-                raise STOP_FORWARD_EXCEPTION
+                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         return output
 
 class HookedConv1d(torch.nn.Conv1d):
@@ -98,7 +98,7 @@ class HookedConv1d(torch.nn.Conv1d):
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
-                raise STOP_FORWARD_EXCEPTION
+                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         return output
 
 # Models using conv2d: ovis
@@ -155,7 +155,7 @@ class HookedConv2d(torch.nn.Conv2d):
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
-                raise STOP_FORWARD_EXCEPTION
+                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         return output
 
 # Models using transformers.conv1d: gpt2
@@ -180,7 +180,7 @@ class HookedTransformerConv1D(transformers.Conv1D):
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
-                raise STOP_FORWARD_EXCEPTION
+                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         return output
 
 class HookedLinear(torch.nn.Linear):
@@ -206,7 +206,7 @@ class HookedLinear(torch.nn.Linear):
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
-                raise STOP_FORWARD_EXCEPTION
+                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         return output
 
 
