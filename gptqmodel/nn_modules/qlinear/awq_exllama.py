@@ -39,6 +39,8 @@ class AwqExllamaQuantLinear(AWQuantLinear):
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
+    REQUIRES_FORMAT_V2 = True
+
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_exllama"
 
