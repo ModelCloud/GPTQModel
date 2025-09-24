@@ -246,11 +246,7 @@ jobs:
           - cuda: 118
             torch: 2.0.1
             python: 311
-    if: ${{
-      (inputs['cuda-version'] == ''  || matrix.cuda   == inputs['cuda-version'])  &&
-      (inputs['torch-version'] == '' || matrix.torch  == inputs['torch-version']) &&
-      (inputs['python-version'] == ''|| matrix.python == inputs['python-version'])
-    } }
+    if: ${{ (inputs['cuda-version'] == ''  || matrix.cuda   == inputs['cuda-version'])  && (inputs['torch-version'] == '' || matrix.torch  == inputs['torch-version']) && (inputs['python-version'] == ''|| matrix.python == inputs['python-version']) }}
     runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
