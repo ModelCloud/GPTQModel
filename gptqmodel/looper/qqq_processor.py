@@ -207,7 +207,6 @@ class QQQProcessor(LoopProcessor):
             quant_method=self.qcfg.quant_method,
             lm_head_name=model.lm_head,
             dynamic=self.qcfg.dynamic,
-            parallel_packing=self.qcfg.parallel_packing,
             pack_dtype=self.qcfg.pack_dtype,
         )
 
