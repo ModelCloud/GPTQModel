@@ -64,7 +64,7 @@ env:
   XEON5: 10.0.14.248
   CUDA_VERSION: 128
   TORCH_VERSION: 2.8.0
-  PYTHON_VERSION: 312 // use 312, no need to recompile libs like flash_attn...
+  PYTHON_VERSION: 312 # use 312, no need to recompile libs like flash_attn...
   # PYTHON_GIL: 0 // test libs don't support yet
   BUILD_QQQ: 1
   BUILD_EORA: 1
