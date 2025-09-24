@@ -191,10 +191,6 @@ class QuantizeConfig():
     # mean square error calculation: may reduce error loss for some models
     mse: float = field(default=0.0)
 
-    # parallel packing will make ~40% speedup for many models, but may cause OOM in some large models
-    # if OOM, can set to False
-    parallel_packing: bool = field(default=True)
-
     # properties that do not directly contributes to quantization or quant inference should be placed in meta
     # i.e. quantizer tool (producer) + version, timestamp, entity who made the quant, etc
     meta: Optional[Dict] = field(default=None)

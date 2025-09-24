@@ -640,7 +640,6 @@ def pack_model(
     desc_act=False,
     sym: bool = True,
     dynamic=None,
-    parallel_packing: bool = True,
     pack_dtype: torch.dtype = None,
 ):
     qcfg = QuantizeConfig(
