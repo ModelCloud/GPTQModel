@@ -247,25 +247,28 @@ class GPTQModel:
         if isinstance(backend, str):
             backend = BACKEND(backend)
 
-        is_quantized = False
-        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
-                   "quantization_config"):
-            is_quantized = True
+        is_gptqmodel_quantized = False
+        model_cfg = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        if hasattr(model_cfg, "quantization_config") and "quant_format" in model_cfg.quantiztion_config:
+            # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
+            if model_cfg.quantiztion_config["quant_format"].lower() in ("gptq", "awq", "qqq"):
+                is_gptqmodel_quantized = True
         else:
+            # TODO FIX ME...not decoded to check if quant method is compatible or quantized by gptqmodel
             for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
                 if isdir(model_id_or_path):  # Local
                     if os.path.exists(join(model_id_or_path, name)):
-                        is_quantized = True
+                        is_gptqmodel_quantized = True
                         break
 
                 else:  # Remote
                     files = list_repo_files(repo_id=model_id_or_path)
                     for f in files:
                         if f == name:
-                            is_quantized = True
+                            is_gptqmodel_quantized = True
                             break
 
-        if is_quantized:
+        if is_gptqmodel_quantized:
             m = cls.from_quantized(
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,
