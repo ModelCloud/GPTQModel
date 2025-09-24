@@ -41,6 +41,7 @@ from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
+from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
@@ -526,8 +527,7 @@ def convert_gptq_v1_to_v2_format(
 
 
 def need_skip_gptq_v1_v2_convert(qlinear_kernel: Type[BaseQuantLinear]):
-    # TODO FORMAT.GEMM EXLLAMA V1 V2 needs to convert between v1 and v2
-    return qlinear_kernel in [MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear, AwqMarlinQuantLinear]
+    return qlinear_kernel in [MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear, AwqMarlinQuantLinear, AwqGEMMQuantLinear]
 
 
 # public/stable api exposed to transformer/optimum
