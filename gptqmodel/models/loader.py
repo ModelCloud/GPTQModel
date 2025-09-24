@@ -481,8 +481,8 @@ def ModelLoader(cls):
 
             preload_qlinear_kernel = make_quant(
                 model,
-                quant_result=modules,
                 qcfg=qcfg,
+                quant_result=modules,
                 backend=backend,
                 lm_head_name=cls.lm_head,
                 device=device,

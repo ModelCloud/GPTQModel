@@ -21,7 +21,7 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 from ..utils.offload import undo_offload_to_disk
-from ..utils.torch import CPU, torch_streamCtx, torch_sync
+from ..utils.torch import torch_streamCtx, torch_sync
 
 log = setup_logger()
 lock = threading.Lock()
@@ -133,15 +133,12 @@ class GPTQProcessor(LoopProcessor):
         with self.lock:
             g = self.tasks[module.name]
 
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 
         with self.lock:
-            # TODO: store module quant results in module, not global processor result
-            self.result_save(module.full_name, {
-                "scale": scale,
-                "zero": zero,
-                "g_idx": g_idx,
-            })
+            module.state.update({"q_scales": q_scales})
+            module.state.update({"q_zeros": q_zeros})
+            module.state.update({"q_g_idx": q_g_idx})
 
             self.durations.append(duration)
             self.avg_losses.append(avg_loss)
@@ -194,18 +191,18 @@ class GPTQProcessor(LoopProcessor):
             # diff in float32
             w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
 
-            module.state.update({
-                "w_wq_diff": w_wq_diff,
-            })
+            with self.lock:
+                module.state.update({
+                    "w_wq_diff": w_wq_diff,
+                })
 
         with self.lock:
             self.tasks[module.name].free()
 
-        # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-
-        module.state.update({
-            "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
-        })
+            # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
+            module.state.update({
+                "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
+            })
 
         module.weight.data = wq
 
@@ -215,8 +212,16 @@ class GPTQProcessor(LoopProcessor):
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel):
         # generate complete, safe to move to cpu
-        module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
-        module.state.pop("w", None) # no need for original weights now
+        # module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
+
+        # cleanup all memory or states vars persistently added by this processor
+        with self.lock:
+            module.state.pop("w", None) #
+            module.state.pop("w_wq_diff", None)
+
+            q_zeros = module.state.pop("q_zeros")
+            q_scales = module.state.pop("q_scales")
+            q_g_idx = module.state.pop("q_g_idx")
 
         layers = find_modules(model.model)
 
@@ -230,7 +235,6 @@ class GPTQProcessor(LoopProcessor):
             group_size=self.qcfg.group_size,
             module=model.model,
             submodule=module,
-            quant_result=self.results(),
             sym=self.qcfg.sym,
             device=self.qcfg.device,
             lm_head_name=model.lm_head,
@@ -243,7 +247,9 @@ class GPTQProcessor(LoopProcessor):
         pack_module(
             name=module.full_name,
             qModules=qModules,
-            quant_result=self.results(),
+            q_scales=q_scales,
+            q_zeros=q_zeros,
+            q_g_idx=q_g_idx,
             layers=layers,
             quant_linear_cls=model.qlinear_kernel,
             lock=self.lock,

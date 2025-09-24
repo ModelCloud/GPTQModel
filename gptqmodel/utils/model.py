@@ -171,8 +171,8 @@ def get_module(module, key):
 
 def make_quant(
     module,
-    quant_result: Dict[str, Dict[str, Any]],
     qcfg: QuantizeConfig,
+    quant_result: Dict[str, Dict[str, Any]],
     backend: BACKEND,
     lm_head_name: str,
     pack: bool = False,
@@ -223,9 +223,9 @@ def make_quant(
                 dynamic=dynamic,
                 group_size=group_size,
                 module=module,
-                quant_result=quant_result,
                 sym=sym,
                 device=device,
+                quant_result=quant_result,
                 lm_head_name=lm_head_name,
                 pack_dtype=pack_dtype,
                 backend=backend,
@@ -251,7 +251,6 @@ def create_quant_module(
     group_size: int,
     module: nn.Module,
     submodule: nn.Module,
-    quant_result: Dict[str, Dict[str, Any]],
     sym: bool,
     device: DEVICE,
     lm_head_name: str,
@@ -260,10 +259,6 @@ def create_quant_module(
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
 ):
-    # skip non-quantized modules
-    if name not in quant_result:
-        return
-
     # unwrap named module
     if isinstance(submodule, NamedModule):
         # print(f"offloading named module: {module.full_name}")
@@ -362,8 +357,8 @@ def create_quant_layer(
         desc_act: bool,
         dynamic,
         group_size: int,
-        module,
         quant_result: Dict[str, Dict[str, Any]],
+        module,
         sym: bool,
         device: DEVICE,
         lm_head_name: str,
@@ -374,6 +369,10 @@ def create_quant_layer(
     if isinstance(module, linear_cls):
         return linear_cls
     for name, submodule in module.named_modules():
+        # skip non-quantized modules
+        if name not in quant_result:
+            continue
+
         create_quant_module(
             name=name,
             linear_cls=linear_cls,
@@ -383,7 +382,6 @@ def create_quant_layer(
             group_size=group_size,
             module=module,
             submodule=submodule,
-            quant_result=quant_result,
             sym=sym,
             device=device,
             lm_head_name=lm_head_name,
@@ -598,33 +596,32 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_module(name, qModules, quant_result: Dict[str, Dict[str, Any]], layers, quant_linear_cls, lock: threading.Lock):
+def pack_module(name, qModules, q_scales, q_zeros, q_g_idx, layers, quant_linear_cls, lock: threading.Lock):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         with lock:
-            r = quant_result[name]
-            scale, zero, g_idx = r["scale"], r["zero"], r["g_idx"] # TODO FIX ME: use const, not string for field names
-            module = qModules[name]
             layer = layers[name]
+            module = qModules[name]
 
         module = module.to(CPU)
 
         layer = layer.to(CPU)
-        scale = scale.to(CPU)
-        zero = zero.to(CPU)
-        g_idx = g_idx.to(CPU) if g_idx is not None else None
+        q_scales = q_scales.to(CPU)
+        q_zeros = q_zeros.to(CPU)
+        q_g_idx = q_g_idx.to(CPU) if q_g_idx is not None else None
 
         with lock:
-            qModules[name] = module
             layers[name] = layer
+            qModules[name] = module
 
+        # TODO FIX ME..remove hard coded qqq pack
         if quant_linear_cls.QUANT_TYPE == "qqq":
             with lock:
                 scale_extra = r["scale_extra"]
             scale_extra = scale_extra.to(CPU)
-            module.pack(linear=layer, scales=scale, s_extra=scale_extra)
+            module.pack(linear=layer, scales=q_scales, s_extra=scale_extra)
         else:
-            module.pack(linear=layer, scales=scale, zeros=zero, g_idx=g_idx)
+            module.pack(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 
         # TODO: why move it back to gpu?
         # start = time.time()
@@ -666,7 +663,6 @@ def pack_model(
     modules = {n: modules[n] for n in quant_result}
     quant_linear_cls = make_quant(
         model,
-        quant_result=quant_result,
         qcfg=qcfg,
         backend=backend,
         lm_head_name=lm_head_name,

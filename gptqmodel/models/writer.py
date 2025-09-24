@@ -447,10 +447,11 @@ def ModelWriter(cls):
                         log.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
+
             make_quant(
                 model,
-                quant_result=modules,
                 qcfg=qcfg,
+                quant_result=modules,
                 backend=BACKEND.AUTO,
                 lm_head_name=cls.lm_head,
                 pack=True,
