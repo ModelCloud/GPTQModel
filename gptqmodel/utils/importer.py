@@ -12,12 +12,12 @@ from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
-from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from ..nn_modules.qlinear.awq_exllama import AwqExllamaQuantLinear
 from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
+from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear

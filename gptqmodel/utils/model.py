@@ -263,7 +263,7 @@ def create_quant_module(
     # skip non-quantized modules
     if name not in quant_result:
         return
-    
+
     # unwrap named module
     if isinstance(submodule, NamedModule):
         # print(f"offloading named module: {module.full_name}")
@@ -391,7 +391,7 @@ def create_quant_layer(
             backend=backend,
             adapter=adapter,
         )
-        
+
     return linear_cls
 
 # public/stable api exposed to transformer/optimum

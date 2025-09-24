@@ -10,8 +10,8 @@ import transformers
 from torch import Tensor, nn
 from torch.nn import Parameter
 from torch.nn.modules.conv import _ConvNd
-from ..utils.logger import setup_logger
 
+from ..utils.logger import setup_logger
 
 log = setup_logger()
 

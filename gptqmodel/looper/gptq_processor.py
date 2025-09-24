@@ -17,9 +17,9 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import METHOD, QuantizeConfig
-from ..utils.logger import setup_logger
 from ..utils.importer import select_quant_linear
-from ..utils.model import move_to, pack_model, create_quant_module, pack_module, find_modules
+from ..utils.logger import setup_logger
+from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import CPU, torch_streamCtx, torch_sync
 
