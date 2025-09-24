@@ -53,7 +53,7 @@ on:
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
-  RUNNER: 10.0.14.248
+  RUNNER: 10.0.13.31
   TORCH_CUDA_ARCH_LIST: '8.0 8.6 8.9 9.0 12.0'
   CUDA_ARCH_LIST: '8.0 8.6 8.9 9.0 12.0'
   RELEASE_MODE: 1
@@ -63,7 +63,7 @@ env:
   ref: ${{ github.event.inputs.ref || github.ref }}
   MAX_JOBS: 4
   GPTQMODEL_BUILD_QQQ: 0
-  GTTQMODEL_BUILD_EORA: 0
+  GPTQMODEL_BUILD_EORA: 0
   GPTQMODEL_BUILD_EXLLAMA_V1: 0
 
 concurrency:
@@ -287,7 +287,7 @@ jobs:
           echo "== python =="
           python --version
           echo "== nvcc =="
-          #nvcc --version
+          nvcc --version
           echo "== torch =="
           pip show torch
 
@@ -336,6 +336,8 @@ jobs:
       - check-vm
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_0919
+      volumes:
+        - /home/ci/models/pyenv:/opt/pyenv
     env:
       RELEASE_MODE: 0
     steps:
@@ -345,6 +347,21 @@ jobs:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
+      - name: Print Env
+        run: |
+          env_name="py313_release_source"
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            echo "env: ${env_name} exists, skip"
+            pyenv local $env_name
+            pyenv activate $env_name
+          else
+            echo "creating venv: ${env_name}..."
+            pyenv virtualenv 3.13 "$env_name" || true
+            pyenv local $env_name
+            pyenv activate $env_name
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ 128 2.8.0 313
+          fi
+
       - name: Fetch PR by number
         if: ${{ github.event.inputs.pr_number != 0 }}
         run: |
@@ -353,6 +370,7 @@ jobs:
           git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
+
       - name: Install requirements
         run: pip install build setuptools -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
 
