@@ -79,6 +79,7 @@ class QQQQuantLinear(BaseQuantLinear):
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
+        register_buffers: bool = False,
         **kwargs):
         if qqq_import_exception is not None:
             raise ValueError(

@@ -585,7 +585,12 @@ class PackableQuantLinear(BaseQuantLinear):
         # print("self qw", self.qweight, self.scales, self.qzeros)
 
 class AWQuantLinear(BaseQuantLinear):
-    def __init__(self, bias: bool = False, use_bf16: bool = False, register_awq_buffers: bool = True, **kwargs):
+    def __init__(self,
+                 bias: bool = False,
+                 use_bf16: bool = False,
+                 register_awq_buffers: bool = True,
+                 register_buffers: bool = False,
+                 **kwargs):
         super().__init__(bias=bias, register_buffers=False, **kwargs)
 
         self.use_bf16 = use_bf16
