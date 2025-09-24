@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Union
 
+import torch
+
 _SCALAR_TYPES_ID_MAP = {}
 
 
@@ -327,6 +329,10 @@ class scalar_types:
     uint8 = ScalarType.uint(8, None)
     float8_e4m3fn = ScalarType.float_(4, 3, True, NanRepr.EXTD_RANGE_MAX_MIN)
     float8_e5m2 = ScalarType.float_IEEE754(5, 2)
+    HAS_E8M0FNU = False
+    if hasattr(torch, "float8_e8m0fnu"):
+        float8_e8m0fnu = ScalarType(8, 0, False, 0, True, NanRepr.EXTD_RANGE_MAX_MIN)
+        HAS_E8M0FNU = True
     float8_e8m0fnu = ScalarType(8, 0, False, 0, True,
                                 NanRepr.EXTD_RANGE_MAX_MIN)
     float16_e8m7 = ScalarType.float_IEEE754(8, 7)
