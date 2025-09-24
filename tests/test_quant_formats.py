@@ -17,7 +17,7 @@ import tempfile  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel, __version__, get_best_device  # noqa: E402
-from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, METHOD  # noqa: E402
+from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME  # noqa: E402
 from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL, QuantizeConfig  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402

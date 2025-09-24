@@ -184,8 +184,10 @@ def _detect_torch_version() -> str | None:
 
 
 def _major_minor(v: str) -> str:
-    parts = v.split(".")
-    return ".".join(parts[:2]) if parts else v
+    if v:
+        parts = v.split(".")
+        return ".".join(parts[:2]) if parts else v
+    return v
 
 
 def _detect_cuda_version() -> str | None:
@@ -332,11 +334,6 @@ def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
 
     # Fallback: default GitHub template
     return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
-
-requirements = []
-if not os.getenv("CI"):
-    with open("requirements.txt", encoding="utf-8") as f:
-        requirements = [line.strip() for line in f if line.strip()]
 
 # Decide HAS_CUDA_V8 without torch
 HAS_CUDA_V8 = False

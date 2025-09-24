@@ -27,9 +27,9 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.marlin import marlin_import_exception, marlin_repeat_scales_on_all_ranks, marlin_is_k_full, \
-    marlin_make_workspace_new, gptq_marlin_repack, marlin_permute_scales, marlin_sort_g_idx, _transform_param, \
-    marlin_make_empty_g_idx, apply_gptq_marlin_linear, marlin_permute_bias
+from ...utils.marlin import (_transform_param, apply_gptq_marlin_linear, gptq_marlin_repack, marlin_import_exception,
+                             marlin_is_k_full, marlin_make_empty_g_idx, marlin_make_workspace_new, marlin_permute_bias,
+                             marlin_permute_scales, marlin_repeat_scales_on_all_ranks, marlin_sort_g_idx)
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
 
@@ -72,6 +72,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             out_features: int,
             bias: bool = False,
             pack_dtype: torch.dtype = torch.int32,
+            register_buffers: bool = False,
             adapter: Adapter = None,
             **kwargs):
         if marlin_import_exception is not None:
@@ -98,7 +99,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.MARLIN),
             adapter=adapter,
-            register_buffers=False,
+            register_buffers=False, # do not register buffers in super()
             **kwargs)
 
         # toggle fp32 mode depending on MARLIN or MARLIN_FP16 backend

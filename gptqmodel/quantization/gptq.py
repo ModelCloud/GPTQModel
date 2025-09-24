@@ -21,7 +21,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_CUDA, HAS_XPU, TORCH_GTE_28, device_next, torch_compile, torch_sync
+from ..utils.torch import HAS_CUDA, HAS_XPU, device_next, torch_sync
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 

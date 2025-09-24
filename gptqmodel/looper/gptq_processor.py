@@ -17,8 +17,9 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import METHOD, QuantizeConfig
+from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.model import create_quant_module, pack_module, find_modules
+from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import torch_streamCtx, torch_sync
 
@@ -238,6 +239,7 @@ class GPTQProcessor(LoopProcessor):
             device=self.qcfg.device,
             lm_head_name=model.lm_head,
             pack_dtype=self.qcfg.pack_dtype,
+            register_buffers=False,
         )
 
         # pack module
@@ -253,8 +255,7 @@ class GPTQProcessor(LoopProcessor):
             lock=self.lock,
         )
 
-        # we do not need the original weights now
-        module.weight.data = torch.empty(0)
+        module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
         # block for streams

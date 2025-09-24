@@ -83,11 +83,14 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
         out_features,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        register_buffers: bool = True,
         adapter: Adapter = None,
         **kwargs,
     ):
         if not TRITON_AVAILABLE:
             raise ValueError(TRITON_INSTALL_HINT)
+
+        # log.debug(f"triton register_buffers: {register_buffers}")
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -99,7 +102,7 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.TRITON),
             adapter=adapter,
-            register_buffers=True,
+            register_buffers=register_buffers,
             **kwargs)
 
         # if self.group_size != self.in_features:
