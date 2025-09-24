@@ -463,9 +463,26 @@ def ModelLoader(cls):
             layer0 = layers[0]
             layer_type = layer0.__class__.__name__
 
+            modules = find_modules(model)
+            ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
+
+            for name in list(modules.keys()):
+                # allow loading of quantized lm_head
+                if qcfg.lm_head and name == cls.lm_head:
+                    continue
+
+                if not any(name.startswith(prefix) for prefix in cls.extract_layers_node()) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
+                        not name.endswith(ignore_module) for sublist in cls.simple_layer_modules(config) for ignore_module in sublist
+                ):
+                    # log non-lm-head quantized modules only
+                    if name is not cls.lm_head:
+                        log.info(f"The layer {name} is not quantized.")
+                    del modules[name]
+
             preload_qlinear_kernel = make_quant(
                 model,
                 qcfg=qcfg,
+                quant_result=modules,
                 backend=backend,
                 lm_head_name=cls.lm_head,
                 device=device,

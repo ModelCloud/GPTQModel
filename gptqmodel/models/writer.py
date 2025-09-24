@@ -431,9 +431,27 @@ def ModelWriter(cls):
                 config, dtype=torch.float16
             )
 
+            modules = find_modules(model)
+            ignore_modules = [self.lm_head] + self.get_base_modules(model)
+
+            for name in list(modules.keys()):
+                # allow loading of quantized lm_head
+                if qcfg.lm_head and name == self.lm_head:
+                    continue
+
+                if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
+                        not name.endswith(ignore_module) for sublist in self.simple_layer_modules(config) for ignore_module in sublist
+                ):
+                    # log non-lm-head quantizerd modules only
+                    if name is not self.lm_head:
+                        log.info(f"The layer {name} is not quantized.")
+                    del modules[name]
+
+
             make_quant(
                 model,
                 qcfg=qcfg,
+                quant_result=modules,
                 backend=BACKEND.AUTO,
                 lm_head_name=cls.lm_head,
                 pack=True,

@@ -172,6 +172,7 @@ def get_module(module, key):
 def make_quant(
     module,
     qcfg: QuantizeConfig,
+    quant_result: Dict[str, Dict[str, Any]],
     backend: BACKEND,
     lm_head_name: str,
     pack: bool = False,
@@ -224,6 +225,7 @@ def make_quant(
                 module=module,
                 sym=sym,
                 device=device,
+                quant_result=quant_result,
                 lm_head_name=lm_head_name,
                 pack_dtype=pack_dtype,
                 backend=backend,
@@ -239,8 +241,6 @@ def make_quant(
                 raise e
 
     raise ValueError(f"No compatible quant linear was found for this module: {module.__class__.__name__}")
-
-quantizable_module_types = (nn.Linear, transformers.Conv1D, _ConvNd, BaseQuantLinear, NamedModule)
 
 def create_quant_module(
     name: str,
@@ -259,9 +259,6 @@ def create_quant_module(
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
 ):
-    if not isinstance(submodule, quantizable_module_types):
-        return
-
     # unwrap named module
     if isinstance(submodule, NamedModule):
         # print(f"offloading named module: {module.full_name}")
@@ -360,6 +357,7 @@ def create_quant_layer(
         desc_act: bool,
         dynamic,
         group_size: int,
+        quant_result: Dict[str, Dict[str, Any]],
         module,
         sym: bool,
         device: DEVICE,
@@ -371,6 +369,10 @@ def create_quant_layer(
     if isinstance(module, linear_cls):
         return linear_cls
     for name, submodule in module.named_modules():
+        # skip non-quantized modules
+        if name not in quant_result:
+            continue
+
         create_quant_module(
             name=name,
             linear_cls=linear_cls,
