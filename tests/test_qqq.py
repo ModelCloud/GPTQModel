@@ -31,15 +31,15 @@ class TestGroupSize(unittest.TestCase):
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
         self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
-    # def test_load_group_128(self):
-    #     model = GPTQModel.load(
-    #         "/monster/data/model/QQQ-Llama-3-8b-g128",
-    #     )
-    #
-    #     self.assert_qqq_linear(model)
-    #
-    #     result = model.generate("Uncovering deep insights begins with")[0] # tokens
-    #     log.info(f"Output: {model.tokenizer.decode(result)}") # string output
+    def test_load_group_128(self):
+        model = GPTQModel.load(
+            "/monster/data/model/QQQ-Llama-3-8b-g128",
+        )
+    
+        self.assert_qqq_linear(model)
+    
+        result = model.generate("Uncovering deep insights begins with")[0] # tokens
+        log.info(f"Output: {model.tokenizer.decode(result)}") # string output
 
     # TODO FIXME: group_size 128 is failing this CI TEST!
     @parameterized.expand([-1]) #[-1, 128])
