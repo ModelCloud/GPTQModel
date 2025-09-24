@@ -23,6 +23,21 @@
   #define MARLIN_NAMESPACE_NAME marlin
 #endif
 
+#include <ATen/ATen.h>
+
+template <typename T, T v>
+struct is_valid_value { static constexpr bool value = true; };
+
+#if defined(__has_include)
+#  if __has_include(<ATen/native/quantized/Float8_e8m0fnu.h>)
+#    define HAS_FLOAT8_E8M0FNU 1
+#  else
+#    define HAS_FLOAT8_E8M0FNU 0
+#  endif
+#else
+#  define HAS_FLOAT8_E8M0FNU 0
+#endif
+
 #include "kernel.h"
 
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
@@ -906,9 +921,14 @@ torch::Tensor gptq_marlin_gemm(
     if (b_q_type == vllm::kFE2M1f) {
       if (group_size == 16)
         scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
-      else if (group_size == 32)
-        scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
-      else
+      else if (group_size == 32) {
+        #if HAS_FLOAT8_E8M0FNU
+          scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
+        #else
+          TORCH_CHECK(false,
+            "float8_e8m0fnu is not available in this build of PyTorch.");
+        #endif
+      } else
         TORCH_CHECK(false,
                     "float4_e2m1f only supports group_size == 16 (NVFP4) ",
                     "and group_size == 32 (MXFP4)");
@@ -930,9 +950,14 @@ torch::Tensor gptq_marlin_gemm(
     if (b_q_type == vllm::kFE2M1f) {
       if (group_size == 16)
         scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
-      else if (group_size == 32)
-        scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
-      else
+      else if (group_size == 32) {
+        #if HAS_FLOAT8_E8M0FNU
+          scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
+        #else
+          TORCH_CHECK(false,
+            "float8_e8m0fnu is not available in this build of PyTorch.");
+        #endif
+     } else
         TORCH_CHECK(false,
                     "float4_e2m1f only supports group_size == 16 (NVFP4) ",
                     "and group_size == 32 (MXFP4)");
