@@ -75,19 +75,12 @@ class FORMAT(str, Enum):
 # quant methods
 class METHOD(str, Enum):
     GPTQ = "gptq"
-    AUTO_ROUND = "auto_round"
     QQQ = "qqq"
     AWQ = "awq"
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.GPTQ: {
-        FORMAT.GPTQ,
-        FORMAT.GPTQ_V2,
-        FORMAT.MARLIN,
-        FORMAT.BITBLAS,
-    },
-    METHOD.AUTO_ROUND: {
         FORMAT.GPTQ,
         FORMAT.GPTQ_V2,
         FORMAT.MARLIN,
