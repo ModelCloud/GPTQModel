@@ -49,11 +49,11 @@ def gen_quant4(k, n, groupsize=-1):
     ref = (w - (maxq + 1) // 2).half() * s
 
     if groupsize != -1:
-        def reshape(w):
-            w = w.reshape((groupsize, -1, n))
-            w = w.permute(1, 0, 2)
-            w = w.reshape((k, n)).contiguous()
-            return w
+        def reshape(wt):
+            wt = wt.reshape((groupsize, -1, n))
+            wt = wt.permute(1, 0, 2)
+            wt = wt.reshape((k, n)).contiguous()
+            return wt
 
         ref = reshape(ref)
         w = reshape(w)
@@ -74,16 +74,22 @@ class TestRepacking(unittest.TestCase):
         # BACKEND.BITBLAS: BitBLASQuantLinear,
     }
 
-
+    # test dimensions
     k = 2048
     n = 1024 * 100
     group_size = 128
     pack_dtype = torch.int32
 
+    # zeros/scales per original test layout
     zeros = torch.full((k // group_size, n), 8, dtype=torch.int32)
-    print(f"k={k}, n={n}, shape={zeros.shape}, size={zeros.shape[0] * zeros.shape[1] * 4 / 1024 / 1024}M")
+    print(f"k={k}, n={n}, shape=zeros[{zeros.shape}], size={zeros.shape[0] * zeros.shape[1] * 4 / 1024 / 1024:.2f}M")
 
+    # generate reference linear/scales
     _, linear, s = gen_quant4(k, n, group_size)
+
+    # NEW: explicit group index vector (length = in_features = k)
+    # maps each input channel to its group id (0..G-1), repeating every group_size
+    g_idx = (torch.arange(k, dtype=torch.long) // group_size).contiguous()  # [k], long for index_select/gather
 
     def pack(self, qlinearCls, backend):
         qlinear = qlinearCls(
@@ -95,15 +101,15 @@ class TestRepacking(unittest.TestCase):
             out_features=self.n,
             pack_dtype=self.pack_dtype,
             backend=backend,
-            bias=False)
+            bias=False,
+        )
 
-        qlinear.pack(self.linear, self.s.T, self.zeros.T, g_idx=None)
+        # pass g_idx explicitly (non-None)
+        qlinear.pack(self.linear, self.s.T, self.zeros.T, g_idx=self.g_idx)
 
         return qlinear
 
-    @parameterized.expand(
-        list(QLINEAR_DICT.keys())
-    )
+    @parameterized.expand(list(QLINEAR_DICT.keys()))
     def test_compare_exllama_triton_torch(self, backend):
         triton_linear = self.pack(self.QLINEAR_DICT[backend], backend=backend)
 
