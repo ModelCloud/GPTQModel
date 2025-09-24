@@ -484,7 +484,7 @@ class PackableQuantLinear(BaseQuantLinear):
              linear: nn.Module,
              scales: t.Tensor,
              zeros: t.Tensor,
-             g_idx: t.Tensor = None,
+             g_idx: t.Tensor,
              *,
              block_in: int = 8192,
              workers: int  = 8):
@@ -513,13 +513,11 @@ class PackableQuantLinear(BaseQuantLinear):
         out_features, in_features = W.shape
 
         # ---------- g_idx buffer ----------
-        if g_idx is not None:
-            self.register_buffer("g_idx", g_idx.to("cpu", non_blocking=True), persistent=True)
-        elif not hasattr(self, "g_idx") or self.g_idx is None:
-            raise ValueError("g_idx must be provided at first pack")
-        g_idx = self.g_idx.to("cpu", non_blocking=True).long()
         if g_idx.numel() != in_features:
             raise ValueError(f"g_idx length {g_idx.numel()} != in_features {in_features}")
+
+        g_idx = g_idx.to("cpu")
+        self.register_buffer("g_idx", g_idx)
 
         # ---------- ORIGINAL scales/zeros logic (unchanged) ----------
         scales = scales.T.contiguous()  # [G, out]
@@ -527,9 +525,9 @@ class PackableQuantLinear(BaseQuantLinear):
         scale_zeros = zeros * scales  # [G, out]
 
         # small buffers
-        self.register_buffer("scales", scales.to(dtype=t.float16), persistent=True)
+        self.register_buffer("scales", scales.to(dtype=t.float16))
         if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.detach().to("cpu", dtype=t.float16), persistent=True)
+            self.register_buffer("bias", linear.bias.detach().to("cpu", dtype=t.float16))
 
         # ---------- constants ----------
         bits = int(self.bits)  # 2,3,4,8
@@ -667,8 +665,8 @@ class PackableQuantLinear(BaseQuantLinear):
             raise NotImplementedError(f"Unsupported bits={self.bits}")
 
         # ---------- register buffers ----------
-        self.register_buffer("qweight", qweight.to(dtype=self.pack_dtype), persistent=True)
-        self.register_buffer("qzeros", t.from_numpy(qzeros_np.astype(self.pack_np_dtype, copy=False)), persistent=True)
+        self.register_buffer("qweight", qweight.to(dtype=self.pack_dtype))
+        self.register_buffer("qzeros", t.from_numpy(qzeros_np.astype(self.pack_np_dtype, copy=False)))
 
     def pack_original(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
         # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
