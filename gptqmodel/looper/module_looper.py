@@ -19,8 +19,8 @@ from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import SUPPORTS_MODULE_TYPES
-from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
+from ..models._const import CUDA, SUPPORTS_MODULE_TYPES
+from ..nn_modules.hooked_linear import HookedLinear, StopForward, replace_module_with_hooked_legacy
 from ..utils import ASYNC_WORKER
 from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_device, get_module, get_module_by_name_prefix, move_to, nested_move_to
@@ -159,6 +159,7 @@ class ModuleLooper():
         return InputCache(layer_inputs=layer_inputs, layer_input_kwargs=layer_input_kwargs, position_ids=position_ids,
                           attention_masks=attention_masks)
 
+    @torch.inference_mode
     def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, fail_safe: bool = False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
@@ -314,14 +315,18 @@ class ModuleLooper():
                     # log.info(f"Subset = {subset}")
                     device_next_reset()
 
-                    for name in subset:
-                        m = subset[name]
+                    subset_size = len(subset)
+                    for idx, (name, m) in enumerate(subset.items()):
+                        is_last = (idx == subset_size - 1)
+
                         m.module.target_device, m.module.target_device_stream = device_next()
                         # print(f"XX m.module.target_device, = {m.module.target_device}")
                         # log.info(f"Loop name = {name}")
                         if hasattr(subset[name], 'forward_hook'):
                             # print(f"XX pre_process_fwd_hook, = {name}")
                             subset[name].forward_hook = processor.pre_process_fwd_hook(name)
+                            if is_last:
+                                subset[name].forward_hook_last = True
                         else:
                             # print(f"XX register forward hook, = {name}")
                             # TODO FIXME: do we even need to hook into modules that are not quantizable?
@@ -356,20 +361,29 @@ class ModuleLooper():
                         # sync above stream copies
                         #torch_sync(device=cur_layer_device)
 
-                        # TODO FIX ME remove hamba hack
-                        # reuse_kv is a flag to reuse the kv cache, only for the hamba model
-                        if hasattr(module, "reuse_kv"):
-                            if module.reuse_kv:
-                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(
-                                    layer_index - 1)
+                        try:
+                            # TODO FIX ME remove hamba hack
+                            # reuse_kv is a flag to reuse the kv cache, only for the hamba model
+                            if hasattr(module, "reuse_kv"):
+                                if module.reuse_kv:
+                                    additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(
+                                        layer_index - 1)
 
-                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
-                                                                                                 **additional_layer_inputs)
-                            if shared_kv_cache_dict.get(layer_index) is None:
-                                shared_kv_cache_dict[layer_index] = layer_output[-1]
-                        else:
-                            layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
-                                                                                  **additional_layer_inputs)
+                                layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
+                                                                                                     **additional_layer_inputs)
+                                if shared_kv_cache_dict.get(layer_index) is None:
+                                    shared_kv_cache_dict[layer_index] = layer_output[-1]
+                            else:
+                                layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input,
+                                                                                      **additional_layer_inputs)
+                        except StopForward:
+                            #print(f"Stop forwarding triggered")
+                            #torch_empty_cache(CUDA)
+                            pass
+                        finally:
+                            del layer_input
+                            del additional_layer_inputs
+
                         # For Native processor, we can update processor input here
                         # if second forward is not required, this/first forward output is captured as input for next loop
                         if not processor.fwd_after_process:
@@ -380,8 +394,8 @@ class ModuleLooper():
                                 layer_outputs.append([layer_output])
 
 
-                        del layer_input
-                        del additional_layer_inputs
+                        # del layer_input
+                        # del additional_layer_inputs
 
                     # Native processor does not need to run a second forward pass, the output of the first pass is
                     # directly saved and used as input for the next loop.
@@ -400,6 +414,7 @@ class ModuleLooper():
                     for name in subset:
                         if hasattr(subset[name], 'forward_hook'):
                             subset[name].forward_hook = None
+                            subset[name].forward_hook_last = False
 
 
                     # TODO FIXME: MoE modules forward() may not trigger if dataset is too small

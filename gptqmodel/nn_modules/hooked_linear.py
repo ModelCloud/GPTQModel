@@ -13,6 +13,12 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
+class StopForward(Exception):
+    """Signal an intentional early stop of the forward pass."""
+    pass
+
+STOP_FORWARD_EXCEPTION = StopForward("Forwarding stopped")
+
 # Models using conv1d: gpt2
 class HookedConv1D(transformers.Conv1D):
     def __init__(self, nf: int, nx: int) -> None:
@@ -20,6 +26,7 @@ class HookedConv1D(transformers.Conv1D):
         self.nf = nf
         self.nx = nx
         self.forward_hook = None
+        self.forward_hook_last = False
 
     @staticmethod
     def from_conv1d(m: transformers.Conv1D):
@@ -34,6 +41,8 @@ class HookedConv1D(transformers.Conv1D):
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
+            if self.forward_hook_last:
+                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         return output
 
 class HookedConv1d(torch.nn.Conv1d):
@@ -61,6 +70,7 @@ class HookedConv1d(torch.nn.Conv1d):
         #     padding_mode,
         # )
         self.forward_hook = None
+        self.forward_hook_last = False
 
     @staticmethod
     def from_conv1d(m: torch.nn.Conv1d):
@@ -87,6 +97,8 @@ class HookedConv1d(torch.nn.Conv1d):
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
+            if self.forward_hook_last:
+                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         return output
 
 # Models using conv2d: ovis
@@ -115,6 +127,7 @@ class HookedConv2d(torch.nn.Conv2d):
         #     padding_mode,
         # )
         self.forward_hook = None
+        self.forward_hook_last = False
 
     @staticmethod
     def from_conv2d(m: torch.nn.Conv2d):
@@ -141,6 +154,8 @@ class HookedConv2d(torch.nn.Conv2d):
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
+            if self.forward_hook_last:
+                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         return output
 
 # Models using transformers.conv1d: gpt2
@@ -150,6 +165,7 @@ class HookedTransformerConv1D(transformers.Conv1D):
         self.nf = nf
         self.nx = nx
         self.forward_hook = None
+        self.forward_hook_last = False
 
     @staticmethod
     def from_conv1d(conv1d: transformers.Conv1D):
@@ -163,6 +179,8 @@ class HookedTransformerConv1D(transformers.Conv1D):
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
+            if self.forward_hook_last:
+                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         return output
 
 class HookedLinear(torch.nn.Linear):
@@ -173,6 +191,7 @@ class HookedLinear(torch.nn.Linear):
         self.out_features = out_features
 
         self.forward_hook = None
+        self.forward_hook_last = False
 
     @staticmethod
     def from_linear(linear: torch.nn.Linear):
@@ -186,6 +205,8 @@ class HookedLinear(torch.nn.Linear):
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
+            if self.forward_hook_last:
+                raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         return output
 
 
