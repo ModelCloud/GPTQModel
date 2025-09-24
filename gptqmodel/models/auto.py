@@ -251,7 +251,7 @@ class GPTQModel:
         model_cfg = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
         if hasattr(model_cfg, "quantization_config") and "quant_format" in model_cfg.quantiztion_config:
             # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
-            if model_cfg.quantiztion_config["quant_format"].lower() in ("gptq", "awq", "qqq"):
+            if model_cfg.quantization_config["quant_format"].lower() in ("gptq", "awq", "qqq"):
                 is_gptqmodel_quantized = True
         else:
             # TODO FIX ME...not decoded to check if quant method is compatible or quantized by gptqmodel
