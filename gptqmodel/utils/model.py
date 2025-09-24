@@ -26,7 +26,6 @@ import torch.nn as nn
 import transformers
 from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
-from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from torch.nn.modules.conv import _ConvNd
@@ -40,7 +39,6 @@ from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
                              EXPERT_INDEX_PLACEHOLDER, SUPPORTS_MODULE_TYPES)
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
-from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
@@ -501,7 +499,7 @@ def convert_gptq_v1_to_v2_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if need_skip_gptq_v1_v2_convert(qlinear_kernel):
+    if not qlinear_kernel.REQUIRES_FORMAT_V2:
         log.info(
             f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
         return model
@@ -523,12 +521,6 @@ def convert_gptq_v1_to_v2_format(
         log.info(f"Format: Conversion complete: {time.time() - t}s")
 
     return model
-
-
-def need_skip_gptq_v1_v2_convert(qlinear_kernel: Type[BaseQuantLinear]):
-    # TODO FORMAT.GEMM EXLLAMA V1 V2 needs to convert between v1 and v2
-    return qlinear_kernel in [MarlinQuantLinear, ExllamaEoraQuantLinear, QQQQuantLinear, AwqMarlinQuantLinear]
-
 
 # public/stable api exposed to transformer/optimum
 def hf_convert_gptq_v2_to_v1_format(
@@ -583,7 +575,7 @@ def convert_gptq_v2_to_v1_format(
 ):
 
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if need_skip_gptq_v1_v2_convert(qlinear_kernel):
+    if not qlinear_kernel.REQUIRES_FORMAT_V2:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression

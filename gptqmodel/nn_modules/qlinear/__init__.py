@@ -43,6 +43,8 @@ class BaseQuantLinear(nn.Module):
 
     SUPPORTS_DTYPES: List[t.dtype] = None
 
+    REQUIRES_FORMAT_V2: bool = False
+
     def __init__(self,
                  bits: int,
                  group_size: int,

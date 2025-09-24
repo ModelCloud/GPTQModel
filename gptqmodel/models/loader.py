@@ -551,7 +551,9 @@ def ModelLoader(cls):
             )
 
             load_checkpoint_in_model = False
-            qcfg.runtime_format = FORMAT.GPTQ_V2
+
+            if preload_qlinear_kernel.REQUIRES_FORMAT_V2:
+                qcfg.runtime_format = FORMAT.GPTQ_V2
 
         if backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and (
                 preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
