@@ -480,19 +480,18 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                # TODO FIX ME. awq gemm kernel not passing ci inference tests
-                # if BUILD_QQQ:
-                #     extensions += [
-                #         cpp_ext.CUDAExtension(
-                #             "gptqmodel_qqq_kernels",
-                #             [
-                #                 "gptqmodel_ext/qqq/qqq.cpp",
-                #                 "gptqmodel_ext/qqq/qqq_gemm.cu",
-                #             ],
-                #             extra_link_args=extra_link_args,
-                #             extra_compile_args=extra_compile_args,
-                #         )
-                #     ]
+                if BUILD_QQQ:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_qqq_kernels",
+                            [
+                                "gptqmodel_ext/qqq/qqq.cpp",
+                                "gptqmodel_ext/qqq/qqq_gemm.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
+                    ]
 
                 if BUILD_EORA:
                     extensions += [
