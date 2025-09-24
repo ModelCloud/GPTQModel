@@ -57,7 +57,7 @@ class QQQQuantLinear(BaseQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -336,9 +336,9 @@ class QQQQuantLinear(BaseQuantLinear):
             # self.s_group = torch.tensor(
             #     [], dtype=torch.float16, device=self.s_channel.device
             # )
-            self.register_buffer("s_group", torch.tensor(
-                [], dtype=torch.float16, device=CPU
-            ))
+            # self.register_buffer("s_group", torch.tensor(
+            #     [], dtype=torch.float16, device=CPU
+            # ))
 
             #self.s_channel[:, :] = s.to(self.s_channel.device)
             self.register_buffer("s_channel", s.to(CPU))
@@ -346,9 +346,9 @@ class QQQQuantLinear(BaseQuantLinear):
             if self.bias is not None:
                 # self.bias[:] = linear.bias.data.to(self.bias.device).to(torch.float16)
                 self.register_buffer("bias", linear.bias.data.to(self.bias.device).to(torch.float16))
-            else:
-                # self.bias = linear.bias.clone().to(torch.float16)
-                self.register_buffer("bias", linear.bias.clone().to(torch.float16))
+            # else:
+            #    # self.bias = linear.bias.clone().to(torch.float16)
+            #    self.register_buffer("bias", linear.bias.clone().to(torch.float16))
 
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):

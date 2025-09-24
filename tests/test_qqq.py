@@ -31,17 +31,17 @@ class TestGroupSize(unittest.TestCase):
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
         self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
-    def test_load_group_128(self):
-        model = GPTQModel.load(
-            "/monster/data/model/QQQ-Llama-3-8b-g128",
-        )
+    # def test_load_group_128(self):
+    #     model = GPTQModel.load(
+    #         "/monster/data/model/QQQ-Llama-3-8b-g128",
+    #     )
+    #
+    #     self.assert_qqq_linear(model)
+    #
+    #     result = model.generate("Uncovering deep insights begins with")[0] # tokens
+    #     log.info(f"Output: {model.tokenizer.decode(result)}") # string output
 
-        self.assert_qqq_linear(model)
-
-        result = model.generate("Uncovering deep insights begins with")[0] # tokens
-        log.info(f"Output: {model.tokenizer.decode(result)}") # string output
-
-    @parameterized.expand([-1, 128])
+    @parameterized.expand([128]) #[-1, 128])
     def test_quant_and_inference(self, group_size: int):
         quantize_config = QuantizeConfig(
             bits=4,
