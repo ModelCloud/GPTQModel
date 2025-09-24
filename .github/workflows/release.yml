@@ -57,11 +57,11 @@ on:
       torch-version:
         description: 'torch version(2.8.0)'
         required: false
-        default: '10'
+        default: '1'
       python-version:
         description: 'python version(313)'
         required: false
-        default: '10'
+        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
