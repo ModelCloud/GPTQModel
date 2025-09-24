@@ -63,7 +63,7 @@ quality = [
     "isort==6.0.1",
 ]
 vllm = [
-    "vllm>=0.8.5",
+    "vllm>=0.10.2",
     "flashinfer-python>=0.2.1",
 ]
 sglang = [
