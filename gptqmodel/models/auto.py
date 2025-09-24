@@ -48,7 +48,7 @@ from transformers import AutoConfig, GenerationConfig, PreTrainedModel, PreTrain
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
+from ..quantization import METHOD, QUANT_CONFIG_FILENAME  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
@@ -249,9 +249,9 @@ class GPTQModel:
 
         is_gptqmodel_quantized = False
         model_cfg = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-        if hasattr(model_cfg, "quantization_config") and "quant_format" in model_cfg.quantiztion_config:
+        if hasattr(model_cfg, "quantization_config") and "quant_format" in model_cfg.quantization_config:
             # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
-            if model_cfg.quantiztion_config["quant_format"].lower() in ("gptq", "awq", "qqq"):
+            if model_cfg.quantization_config["quant_format"].lower() in (METHOD.GPTQ, METHOD.AWQ, METHOD.QQQ):
                 is_gptqmodel_quantized = True
         else:
             # TODO FIX ME...not decoded to check if quant method is compatible or quantized by gptqmodel

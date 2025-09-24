@@ -54,10 +54,6 @@ META_FIELD_V2_MEMORY_DEVICE = "v2_memory_device"
 
 ADAPTER_FIELD = "adapter"
 
-
-# pkg names
-PKG_AUTO_ROUND = "auto-round"
-
 # saved formats
 class FORMAT(str, Enum):
     GPTQ = "gptq"
@@ -75,19 +71,12 @@ class FORMAT(str, Enum):
 # quant methods
 class METHOD(str, Enum):
     GPTQ = "gptq"
-    AUTO_ROUND = "auto_round"
     QQQ = "qqq"
     AWQ = "awq"
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.GPTQ: {
-        FORMAT.GPTQ,
-        FORMAT.GPTQ_V2,
-        FORMAT.MARLIN,
-        FORMAT.BITBLAS,
-    },
-    METHOD.AUTO_ROUND: {
         FORMAT.GPTQ,
         FORMAT.GPTQ_V2,
         FORMAT.MARLIN,
@@ -437,7 +426,7 @@ class QuantizeConfig():
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif val == FORMAT.BITBLAS:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
-                elif val not in {METHOD.GPTQ, METHOD.AUTO_ROUND, METHOD.QQQ, METHOD.AWQ}:
+                elif val not in {METHOD.GPTQ, METHOD.QQQ, METHOD.AWQ}:
                     raise ValueError(f"QuantizeConfig: Unknown quantization method: `{val}`.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
