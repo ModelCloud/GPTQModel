@@ -18,9 +18,9 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
 from ..quantization.config import METHOD, QuantizeConfig
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger
-from ..utils.model import move_to, pack_model
-from ..utils.torch import CPU, DEVICE_0, torch_streamCtx, torch_sync
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
+from ..utils.offload import undo_offload_to_disk
+from ..utils.torch import CPU, DEVICE_0, torch_streamCtx, torch_sync
 
 log = setup_logger()
 
