@@ -14,56 +14,21 @@ Usage:
   `experts-regex` "(^|\\.)experts($|\\.)" --experts-show 1
   `no-collapse-experts`  # disable collapsing
 
+Flags semantics:
+- show_params/show_buffers: print detailed lines for parameters and (optionally) buffers.
+- show_all: print detailed lines for BOTH parameters AND buffers (names included), overriding the other two.
+- filter_regex: planned hook (compiled but not applied; keep for future filtering of node names).
+
 Notes:
 - Detects shared submodules and avoids re-printing them.
 - Collapsing is generic: any numeric-indexed ModuleList whose qualified name matches `experts-regex`.
 """
 
 import re
-from typing import Optional, Set, Tuple
-
-from torch import nn
-
-
-def _param_summary(mod: nn.Module, recurse: bool = False) -> Tuple[int, int]:
-    p = sum(p.numel() for p in mod.parameters(recurse=recurse))
-    b = sum(bf.numel() for bf in mod.buffers(recurse=recurse))
-    return p, b
-
-
-def _format_line(prefix: str, trunk: str, name: str, mod: nn.Module, show_counts: bool, color: bool) -> str:
-    cls = mod.__class__.__name__
-    p, b = _param_summary(mod, recurse=False)
-    counts = f"  (P={human_count(p)} B={human_count(b)})" if show_counts else ""
-    if color:
-        BLUE, CYAN, DIM, RESET = "\033[34m", "\033[36m", "\033[2m", "\033[0m"
-        return f"{prefix}{trunk}{BLUE}{name}{RESET}: {CYAN}{cls}{RESET}{DIM}{counts}{RESET}"
-    return f"{prefix}{trunk}{name}: {cls}{counts}"
-
-
-def _print_params(prefix: str, mod: nn.Module, include_buffers: bool, color: bool, max_items: int = 100):
-    items = []
-    for n, p in mod.named_parameters(recurse=False):
-        items.append(("param", n, tuple(p.shape), p.dtype))
-    if include_buffers:
-        for n, b in mod.named_buffers(recurse=False):
-            items.append(("buffer", n, tuple(b.shape), b.dtype))
-    if not items:
-        return
-    if color:
-        DIM, RESET = "\033[2m", "\033[0m"
-    else:
-        DIM = RESET = ""
-    for kind, n, shape, dt in items[:max_items]:
-        print(f"{prefix}{DIM}• {kind}: {n:32s} shape={shape!s:>20s} dtype={str(dt)}{RESET}")
-    if len(items) > max_items:
-        print(f"{prefix}{DIM}• … {len(items)-max_items} more{RESET}")
-
-
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Optional, Set, Tuple
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 # =========================
 #   ANSI color helpers
@@ -97,10 +62,8 @@ if hasattr(torch, "float8_e5m2"):
 class _FakeDType:
     """Sentinel dtype for experimental 4-bit formats."""
     def __init__(self, name: str): self.name = name
-    def __repr__(self):
-        return self.name
-    def __str__(self):
-        return self.name
+    def __repr__(self): return self.name
+    def __str__(self): return self.name
 
 MXFP4 = _FakeDType("MXFP4")
 NVFP4 = _FakeDType("NVFP4")
@@ -114,28 +77,22 @@ def _elem_size(d) -> float:
 #   Formatting helpers
 # =========================
 def human_count(n: int) -> str:
-    if n < 0:
-        return str(n)
-    if n < 1_000:
-        return str(n)
+    if n < 0: return str(n)
+    if n < 1_000: return str(n)
     for label, scale in (("T", 1_000_000_000_000),
                          ("B", 1_000_000_000),
                          ("M", 1_000_000),
                          ("K", 1_000)):
         if n >= scale:
             return f"{n/scale:.2f}{label}"
-
     return str(n)
 
 def _human_bytes(n: float) -> str:
-    if n <= 0:
-        return "0B"
-
+    if n <= 0: return "0B"
     for unit in ["B","KB","MB","GB","TB","PB"]:
         if n < 1024:
             return f"{n:.0f}{unit}" if unit == "B" else f"{n:.2f}{unit}"
         n /= 1024.0
-
     return f"{n:.2f}PB"
 
 # =========================
@@ -161,15 +118,11 @@ def _summarize_module_tensors(mod: nn.Module, *, recurse: bool = False):
     est_bytes = 0.0
 
     def _iter_tensors() -> Iterable[torch.Tensor]:
-        for _, t in mod.named_parameters(recurse=recurse):
-            yield t
-        for _, t in mod.named_buffers(recurse=recurse):
-            yield t
+        for _, t in mod.named_parameters(recurse=recurse): yield t
+        for _, t in mod.named_buffers(recurse=recurse): yield t
 
     for t in _iter_tensors():
-        if t is None:
-            continue
-
+        if t is None: continue
         is_meta = bool(getattr(t, "is_meta", False) or (hasattr(t, "device") and t.device.type == "meta"))
         dev_key = "meta" if is_meta else (str(t.device) if hasattr(t, "device") else "-")
         n = t.numel()
@@ -178,13 +131,10 @@ def _summarize_module_tensors(mod: nn.Module, *, recurse: bool = False):
         dt = getattr(t, "dtype", None)
         dtype_set.add(dt)
         esize = (t.element_size() if (not is_meta and hasattr(t, "element_size")) else _elem_size(dt)) or 0.0
-
         if not is_meta:
             alloc_bytes += n * esize
-
         est_bytes += n * esize
 
-    # summarize
     if not dev_counts:
         device_str = "-"
     elif len(dev_counts) == 1:
@@ -192,6 +142,7 @@ def _summarize_module_tensors(mod: nn.Module, *, recurse: bool = False):
     else:
         top = sorted(dev_counts.items(), key=lambda kv: kv[1], reverse=True)[:2]
         device_str = "mixed[" + ", ".join(k for k, _ in top) + ("" if len(dev_counts) <= 2 else ", …") + "]"
+
     if not dtype_set:
         dtype_str = "-"
     elif len(dtype_set) == 1:
@@ -200,6 +151,7 @@ def _summarize_module_tensors(mod: nn.Module, *, recurse: bool = False):
     else:
         dnames = [(str(d).replace("torch.", "")) if d is not None else "-" for d in list(dtype_set)[:3]]
         dtype_str = "mixed[" + ", ".join(dnames) + ("" if len(dtype_set) <= 3 else ", …") + "]"
+
     return device_str, dtype_str, total_elems, alloc_bytes, est_bytes
 
 def _annotate(mod: nn.Module, *, color: bool = True) -> str:
@@ -214,9 +166,9 @@ def _annotate(mod: nn.Module, *, color: bool = True) -> str:
 # =========================
 def _format_line(prefix: str, trunk: str, qual_name: str, mod: nn.Module, show_counts: bool, color: bool) -> str:
     cls = mod.__class__.__name__
-    left = _maybe(prefix + trunk, FG_GRAY, color=color)   # tree lines
-    name = _maybe(qual_name, FG_CYAN, color=color)        # softened path name
-    klass = _maybe(cls, DIM, color=color)                 # class name dimmed
+    left = _maybe(prefix + trunk, FG_GRAY, color=color)
+    name = _maybe(qual_name, FG_CYAN, color=color)
+    klass = _maybe(cls, DIM, color=color)
     if show_counts:
         p, b = _counts_for_module(mod)
         counts = _maybe(f"(P={human_count(p)} B={human_count(b)})", FG_YELLOW, color=color)
@@ -235,11 +187,9 @@ def _print_params(indent: str, mod: nn.Module, *, include_buffers: bool, color: 
         size_y = _maybe(_human_bytes(sizeb), FG_YELLOW, color=color)
         return f"{indent}{kind_c}: {name_c}  shape={tuple(t.shape)} dtype={dt} device={dev} ~{size_y}"
 
-    for n, p in mod.named_parameters(recurse=False):
-        print(_line("param", n, p))
+    for n, p in mod.named_parameters(recurse=False): print(_line("param", n, p))
     if include_buffers:
-        for n, b in mod.named_buffers(recurse=False):
-            print(_line("buffer", n, b))
+        for n, b in mod.named_buffers(recurse=False): print(_line("buffer", n, b))
 
 # =========================
 #   Main tree printer
@@ -252,12 +202,13 @@ def print_module_tree(
     filter_regex: Optional[str] = None,
     show_params: bool = False,
     show_buffers: bool = False,
+    show_all: bool = True,   # If True: show detailed lines for BOTH params and buffers (names included)
     color: bool = True,
     collapse_experts: bool = True,
     experts_regex: str = r"(^|\.)experts($|\.)",
     experts_show: int = 1,
 ):
-    _ = re.compile(filter_regex) if filter_regex else None
+    _ = re.compile(filter_regex) if filter_regex else None  # reserved for future use
     experts_name_re = re.compile(experts_regex) if collapse_experts else None
     seen: Set[int] = set()
 
@@ -265,30 +216,29 @@ def print_module_tree(
     total_b = sum(b.numel() for b in model.buffers())
 
     def should_collapse(qual_name: str, container: nn.Module) -> bool:
-        if not experts_name_re:
-            return False
-        if not experts_name_re.search(qual_name):
-            return False
-        if not isinstance(container, (nn.ModuleList, nn.Sequential)):
-            return False
+        if not experts_name_re: return False
+        if not experts_name_re.search(qual_name): return False
+        if not isinstance(container, (nn.ModuleList, nn.Sequential)): return False
         names = [n for n, _ in container.named_children()]
-        if not names:
-            return False
+        if not names: return False
         return all(n.isdigit() for n in names) and len(names) > max(0, experts_show)
 
     def rec(mod: nn.Module, name: str, depth: int, prefix: str, is_last: bool):
-        if max_depth is not None and depth > max_depth:
-            return
+        if max_depth is not None and depth > max_depth: return
         mod_id = id(mod)
         shared = "" if mod_id not in seen else "  ↩ shared ref"
         seen.add(mod_id)
         trunk = "└─ " if is_last else "├─ "
         line = _format_line(prefix, trunk, name, mod, show_counts=True, color=color)
         print(line + " " + _annotate(mod, color=color) + shared)
-        if shared:
-            return
-        if show_params or show_buffers:
-            _print_params(prefix + ("   " if is_last else "│  "), mod, include_buffers=show_buffers, color=color)
+        if shared: return
+
+        indent = prefix + ("   " if is_last else "│  ")
+        if show_all:
+            _print_params(indent, mod, include_buffers=True, color=color)
+        elif show_params or show_buffers:
+            _print_params(indent, mod, include_buffers=show_buffers, color=color)
+
         children = list(mod.named_children())
         n = len(children)
         for i, (child_name, child) in enumerate(children):
@@ -316,21 +266,21 @@ def print_module_tree(
             rec(child, display_name, depth + 1, child_prefix, last)
 
     print(_format_line("", "", root_name, model, show_counts=True, color=color) + " " + _annotate(model, color=color))
-    if show_params or show_buffers:
-        _print_params("   ", model, include_buffers=show_buffers, color=color)
+    root_indent = "   "
+    if show_all:
+        _print_params(root_indent, model, include_buffers=True, color=color)
+    elif show_params or show_buffers:
+        _print_params(root_indent, model, include_buffers=show_buffers, color=color)
+
     children_root = list(model.named_children())
     for i, (child_name, child) in enumerate(children_root):
         last = (i == len(children_root) - 1)
         rec(child, f"{root_name}.{child_name}", 1, "", last)
+
     print("\nTotal parameters:", human_count(total_p), " | Total buffers:", human_count(total_b))
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     frozen = total_p - trainable
     print("Trainable:", human_count(trainable), " | Frozen:", human_count(frozen))
-
-from typing import Optional
-
-import torch
-
 
 def _get_qualified_name(root: torch.nn.Module, obj: torch.nn.Module) -> str:
     for name, mod in root.named_modules():
