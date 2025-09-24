@@ -67,6 +67,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
+        register_buffers: bool = True,
         **kwargs,
     ):
         if exllama_import_exception is not None:
@@ -95,7 +96,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.EXLLAMA_V1),
             adapter=adapter,
-            register_buffers=True,
+            register_buffers=register_buffers,
             register_buffers_in_features=in_features,
             register_buffers_out_feature=out_features,
             **kwargs)
