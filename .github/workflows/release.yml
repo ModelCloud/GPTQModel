@@ -246,7 +246,6 @@ jobs:
           - cuda: 118
             torch: 2.0.1
             python: 311
-    if: ${{ (inputs['cuda-version'] == ''  || matrix.cuda   == inputs['cuda-version'])  && (inputs['torch-version'] == '' || matrix.torch  == inputs['torch-version']) && (inputs['python-version'] == ''|| matrix.python == inputs['python-version']) }}
     runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
@@ -255,14 +254,24 @@ jobs:
       volumes:
         - /home/ci/models/pyenv:/opt/pyenv
     steps:
+      - name: Check matrix
+        run: |
+          shouldRun=${{ (inputs['cuda-version'] == '' || matrix.cuda == inputs['cuda-version']) && (inputs['torch-version'] == '' || matrix.torch == inputs['torch-version']) && (inputs['python-version'] == ''|| matrix.python == inputs['python-version']) }}
+          if [ "$shouldRun" == "true" ]; then
+            echo "SHOULD_RUN=1" >> $GITHUB_ENV
+          else
+            echo "SHOULD_RUN=0" >> $GITHUB_ENV
+          fi
+
       - name: Checkout Codes
+        if: env.SHOULD_RUN == 1
         uses: actions/checkout@v5
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
 
       - name: Fetch PR by number
-        if: ${{ github.event.inputs.pr_number != 0 }}
+        if: ${{ github.event.inputs.pr_number != 0 && env.SHOULD_RUN == 1 }}
         run: |
           PR_NUMBER=${{ github.event.inputs.pr_number }}
           echo "pr number $PR_NUMBER"
@@ -271,6 +280,7 @@ jobs:
           git checkout pr-${PR_NUMBER}
 
       - name: Print Env
+        if: env.SHOULD_RUN == 1
         run: |
           if [[ "${{ matrix.cuda }}" -lt 128 ]]; then # CUDA >= 12.8 supports 12.0 (5090)
             echo "CUDA_ARCH_LIST=8.0 8.6 8.9 9.0" >> $GITHUB_ENV
@@ -305,9 +315,11 @@ jobs:
           pip show torch
 
       - name: Compile
+        if: env.SHOULD_RUN == 1
         run: python setup.py bdist_wheel
 
       - name: Test install
+        if: env.SHOULD_RUN == 1
         run: |
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
@@ -317,6 +329,7 @@ jobs:
           fi
 
       - name: Upload wheel
+        if: env.SHOULD_RUN == 1
         continue-on-error: true
         run: |
           sha256=$(sha256sum dist/${{ env.WHL_NAME }})
@@ -326,6 +339,7 @@ jobs:
           fi
 
       - name: Upload artifact
+        if: env.SHOULD_RUN == 1
         uses: actions/upload-artifact@v4
         continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
@@ -335,7 +349,7 @@ jobs:
 
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
-        if: (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled()
+        if: env.SHOULD_RUN == 1 && (github.event_name == 'release' || github.event.inputs.upload_release == 'true') && !cancelled()
         with:
           repo_name: ${{ env.repo }}
           tag: ${{ env.ref }}
