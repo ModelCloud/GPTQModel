@@ -1,6 +1,6 @@
 name: Release
 
-#run-name: "${{ github.event.inputs.title }}" // no need for now
+run-name: "${{ github.event.inputs.title }}"
 
 defaults:
   run:
@@ -11,10 +11,10 @@ on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
-#      title:
-#        description: 'set a title for this run'
-#        required: false
-#        default: ''
+      title:
+        description: 'set a title for this run'
+        required: false
+        default: ''
       repo:
         description: 'GitHub repo {owner}/{repo}'
         required: false
@@ -46,18 +46,19 @@ on:
         type: boolean
         required: false
         default: false
-      cuda-version:
-        description: 'cuda version(128)'
-        required: false
-        default: ''
-      torch-version:
-        description: 'torch version(2.8.0)'
-        required: false
-        default: ''
-      python-version:
-        description: 'python version(313)'
-        required: false
-        default: ''
+# for github limits, test only
+#      cuda-version:
+#        description: 'cuda version(128)'
+#        required: false
+#        default: ''
+#      torch-version:
+#        description: 'torch version(2.8.0)'
+#        required: false
+#        default: ''
+#      python-version:
+#        description: 'python version(313)'
+#        required: false
+#        default: ''
 
 env:
   CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -252,7 +253,9 @@ jobs:
     steps:
       - name: Check matrix
         run: |
-          shouldRun=${{ (inputs['cuda-version'] == '' || matrix.cuda == inputs['cuda-version']) && (inputs['torch-version'] == '' || matrix.torch == inputs['torch-version']) && (inputs['python-version'] == ''|| matrix.python == inputs['python-version']) }}
+          // for github limits, test only
+          // shouldRun=${{ (inputs['cuda-version'] == '' || matrix.cuda == inputs['cuda-version']) && (inputs['torch-version'] == '' || matrix.torch == inputs['torch-version']) && (inputs['python-version'] == ''|| matrix.python == inputs['python-version']) }}
+          shouldRun=true
           if [ "$shouldRun" == "true" ]; then
             echo "SHOULD_RUN=1" >> $GITHUB_ENV
           else
