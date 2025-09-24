@@ -371,9 +371,6 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Install requirements
-        run: pip install build setuptools -U -i http://${{ needs.check-vm.outputs.ip }}/simple/ --trusted-host ${{ needs.check-vm.outputs.ip }}
-
       - name: Compile
         run: python -m build --no-isolation --sdist
 
