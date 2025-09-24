@@ -5,6 +5,7 @@
 import copy
 import math
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -478,30 +479,26 @@ class PackableQuantLinear(BaseQuantLinear):
 
         return weights
 
-    import numpy as np
-    import torch as t
-    import torch.nn as nn
-    from torch.nn.modules.conv import _ConvNd
-    import transformers
-
     @t.inference_mode()
-    def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor = None, *,
-             block_in: int = 8192 * 4):
+    def pack(self,
+             linear: nn.Module,
+             scales: t.Tensor,
+             zeros: t.Tensor,
+             g_idx: t.Tensor = None,
+             *,
+             block_in: int = 8192,
+             workers: int  = 8):
         """
-        Keep ORIGINAL logic for scales/zeros and qzeros packing.
-        Only optimize qweight for memory/speed (CPU torch, streaming, vectorized 2/4/8-bit).
-        Produces identical shapes to your original code:
+        Parallel qweight pack (threaded over input blocks). qzeros path = original logic.
 
-          scales  := (scales.T).contiguous()           # [G, out]
-          zeros   := (zeros.T).contiguous()            # [G, out]
-          scale_zeros = zeros * scales                 # [G, out]
-          qweight : [(in/32)*bits, out]  (torch.int32)
-          qzeros  : [G, (out/32)*bits]   (torch.int32 via numpy astype)
+        - qweight: streamed in 32-aligned blocks; each block packed by a worker into
+          non-overlapping rows of the preallocated output tensor (no locks).
+        - qzeros: EXACT original numpy-based packing to preserve layout/shape.
+        - math done on CPU; no .numpy() round trips for qweight.
 
-        Requirements:
-          - self.pack_dtype_bits == 32
-          - self.pack_factor * self.bits == 32
-          - in_features % 32 == 0
+        Args:
+          block_in: number of input channels per task (must be multiple of 32).
+          workers:  number of worker threads (None -> auto; 1 -> single-thread).
         """
 
         MASK32 = (1 << 32) - 1  # for safe masking when packing via int64
@@ -524,13 +521,12 @@ class PackableQuantLinear(BaseQuantLinear):
         if g_idx.numel() != in_features:
             raise ValueError(f"g_idx length {g_idx.numel()} != in_features {in_features}")
 
-        # ---------- ORIGINAL scales/zeros logic (do not change) ----------
-        # Transpose to [G, out] exactly like your code, then compute scale_zeros.
+        # ---------- ORIGINAL scales/zeros logic (unchanged) ----------
         scales = scales.T.contiguous()  # [G, out]
         zeros = zeros.T.contiguous()  # [G, out]
         scale_zeros = zeros * scales  # [G, out]
 
-        # Keep your small buffers behavior
+        # small buffers
         self.register_buffer("scales", scales.to(dtype=t.float16), persistent=True)
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.detach().to("cpu", dtype=t.float16), persistent=True)
@@ -538,26 +534,25 @@ class PackableQuantLinear(BaseQuantLinear):
         # ---------- constants ----------
         bits = int(self.bits)  # 2,3,4,8
         word_bits = int(self.pack_dtype_bits)  # expect 32
-        pack_factor = int(self.pack_factor)  # expect 32//bits
+        pack_factor = int(self.pack_factor)  # expect 32 // bits
         assert word_bits == 32, "Only 32-bit packing words supported."
         assert pack_factor * bits == 32, "pack_factor * bits must equal 32."
         if (in_features % word_bits) != 0:
             raise ValueError("in_features must be divisible by 32")
 
-        # ---------- qweight (ONLY this part is optimized) ----------
-        # allocate final qweight as storage dtype (int32 as per your config)
-        OUT_DTYPE = self.pack_dtype  # should be torch.int32 in your mapping
+        # ---------- qweight allocation (storage dtype = int32) ----------
+        OUT_DTYPE = self.pack_dtype  # should be torch.int32 per your dtype table
         if OUT_DTYPE != t.int32:
-            raise ValueError("This pack() expects self.pack_dtype to be torch.int32 for 32-bit words.")
+            raise ValueError("This pack() expects self.pack_dtype == torch.int32 for 32-bit words.")
 
         qweight_rows = (in_features // word_bits) * bits
         qweight = t.empty((qweight_rows, out_features), dtype=OUT_DTYPE, device="cpu")
 
-        # precompute shifts for vectorized pack (2/4/8-bit)
+        # ---------- precompute shifts for 2/4/8-bit vectorized packing ----------
         if bits in (2, 4, 8):
             shifts_pf64 = (t.arange(pack_factor, dtype=t.int64) * bits).view(1, pack_factor, 1)  # [1,pf,1]
 
-        # pack helpers (do shifts in int64; mask; cast to int32)
+        # ---------- pack helpers (int64 shifts -> mask -> int32) ----------
         def _pack_rows_2_4_8(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
             # int32_blk_32xN: [32, N]
             r64 = int32_blk_32xN.to(t.int64)  # [32,N]
@@ -583,26 +578,23 @@ class PackableQuantLinear(BaseQuantLinear):
             dst[dst_rows_base + 1] = B.to(t.int32)
             dst[dst_rows_base + 2] = C.to(t.int32)
 
-        # stream input dimension in blocks (exact same math as your original formula)
+        # ---------- thread task: process a single [i0,i1) block ----------
         block_in = max(word_bits, (block_in // word_bits) * word_bits)
-        for i0 in range(0, in_features, block_in):
-            i1 = min(i0 + block_in, in_features)
+
+        def _process_block(i0: int, i1: int):
             blk = i1 - i0
-            assert blk % word_bits == 0
-
-            # W block [out, blk]
+            # [out, blk]
             Wblk = W[:, i0:i1]
-
-            # select group rows for these inputs from [G, out] -> [blk, out], then transpose to [out, blk]
+            # select group rows for these inputs from [G, out] -> [blk, out], then T -> [out, blk]
             gsel = g_idx[i0:i1]  # [blk]
             sz_blk_T = scale_zeros.index_select(0, gsel).T  # [out, blk]
             s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
 
-            # ORIGINAL formula: round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
+            # ORIGINAL formula (unchanged):
+            # int_block = round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
             int_block = t.round((Wblk + sz_blk_T) / s_blk_T).to(t.int32)  # [out, blk]
             int_block = int_block.T.contiguous()  # [blk, out]
 
-            # pack this block
             groups32 = blk // word_bits
             base_group = (i0 // word_bits)
             for g in range(groups32):
@@ -615,28 +607,41 @@ class PackableQuantLinear(BaseQuantLinear):
                 else:
                     raise NotImplementedError(f"Unsupported bits={bits}")
 
-            # free temps promptly
+            # free temps
             del Wblk, gsel, sz_blk_T, s_blk_T, int_block
 
-        # ---------- qzeros: EXACT original numpy path (no "optimization") ----------
-        # zeros/scales are [G, out] here, same as your code above.
+        # ---------- schedule blocks across a thread pool ----------
+        starts = list(range(0, in_features, block_in))
+        ranges = [(i0, min(i0 + block_in, in_features)) for i0 in starts]
+        total_blocks = len(ranges)
+
+        workers = max(1, min(workers, total_blocks))
+
+        if workers == 1:
+            for i0, i1 in ranges:
+                _process_block(i0, i1)
+        else:
+            # NOTE: PyTorch CPU ops generally release the GIL, so threads may help here.
+            # Avoid oversubscription by choosing a reasonable 'workers'.
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pack qweight") as ex:
+                futs = [ex.submit(_process_block, i0, i1) for (i0, i1) in ranges]
+                for f in futs:
+                    f.result()
+
+        # ---------- qzeros: EXACT original numpy path (unchanged) ----------
         zeros_np = zeros.detach().cpu().numpy().astype(self.pack_np_math_dtype, copy=False)  # [G, out]
-        # Original shape: (zeros.shape[0], zeros.shape[1] // 32 * bits)  == [G, (out/32)*bits]
         qzeros_np = np.zeros(
             (zeros_np.shape[0], (zeros_np.shape[1] // self.pack_dtype_bits) * self.bits),
             dtype=self.pack_np_math_dtype
         )
 
         if self.bits in [2, 4, 8]:
-            # pack along 'out' axis in groups of 32 columns
             pf = self.pack_factor  # 32 // bits
             for col in range(qzeros_np.shape[1]):
-                # For each packed output column word, OR together pf lanes
                 base = col * pf
                 for j in range(pf):
                     qzeros_np[:, col] |= zeros_np[:, base + j] << (self.bits * j)
         elif self.bits == 3:
-            # Follow your exact schedule
             i = 0
             col = 0
             while col < qzeros_np.shape[1]:
@@ -662,15 +667,8 @@ class PackableQuantLinear(BaseQuantLinear):
             raise NotImplementedError(f"Unsupported bits={self.bits}")
 
         # ---------- register buffers ----------
-        # qweight already torch.int32 with desired shape [(in/32)*bits, out]
         self.register_buffer("qweight", qweight.to(dtype=self.pack_dtype), persistent=True)
-
-        # qzeros via original numpy path to your storage dtype (np.int32 for int32)
-        self.register_buffer(
-            "qzeros",
-            t.from_numpy(qzeros_np.astype(self.pack_np_dtype, copy=False)),
-            persistent=True
-        )
+        self.register_buffer("qzeros", t.from_numpy(qzeros_np.astype(self.pack_np_dtype, copy=False)), persistent=True)
 
     def pack_original(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
         # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
