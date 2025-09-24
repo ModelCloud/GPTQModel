@@ -378,13 +378,12 @@ def _env_enabled_any(names, default="1") -> bool:
 
 BUILD_MARLIN = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
 BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
+BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
+BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
 
 # Optional kernels and not build by default. Enable compile with env flags
-BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "0"))
 BUILD_EORA = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EORA", "0"))
 BUILD_EXLLAMA_V1 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V1", "0"))
-
-BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
 
 if BUILD_CUDA_EXT == "1":
     # Import torch's cpp_extension only if we're truly building GPU extensions
@@ -481,18 +480,19 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if BUILD_QQQ:
-                    extensions += [
-                        cpp_ext.CUDAExtension(
-                            "gptqmodel_qqq_kernels",
-                            [
-                                "gptqmodel_ext/qqq/qqq.cpp",
-                                "gptqmodel_ext/qqq/qqq_gemm.cu",
-                            ],
-                            extra_link_args=extra_link_args,
-                            extra_compile_args=extra_compile_args,
-                        )
-                    ]
+                # TODO FIX ME. awq gemm kernel not passing ci inference tests
+                # if BUILD_QQQ:
+                #     extensions += [
+                #         cpp_ext.CUDAExtension(
+                #             "gptqmodel_qqq_kernels",
+                #             [
+                #                 "gptqmodel_ext/qqq/qqq.cpp",
+                #                 "gptqmodel_ext/qqq/qqq_gemm.cu",
+                #             ],
+                #             extra_link_args=extra_link_args,
+                #             extra_compile_args=extra_compile_args,
+                #         )
+                #     ]
 
                 if BUILD_EORA:
                     extensions += [

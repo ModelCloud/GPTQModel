@@ -5,7 +5,6 @@
 
 # -- do not touch
 import os
-from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -18,7 +17,6 @@ import torch.nn as nn  # noqa: E402
 # isort: on
 from gptqmodel import BACKEND  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 
