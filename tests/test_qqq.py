@@ -35,9 +35,9 @@ class TestGroupSize(unittest.TestCase):
         model = GPTQModel.load(
             "/monster/data/model/QQQ-Llama-3-8b-g128",
         )
-    
+
         self.assert_qqq_linear(model)
-    
+
         result = model.generate("Uncovering deep insights begins with")[0] # tokens
         log.info(f"Output: {model.tokenizer.decode(result)}") # string output
 
