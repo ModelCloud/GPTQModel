@@ -451,7 +451,7 @@ class BaseQModel(nn.Module):
         # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
         buffered_fwd: bool = False,
         # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
-        auto_gc: bool = True,
+        auto_gc: bool = False,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter = None,
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
