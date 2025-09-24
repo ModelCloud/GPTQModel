@@ -257,6 +257,7 @@ def create_quant_module(
     lm_head_name: str,
     pack_dtype: torch.dtype,
     backend: BACKEND = BACKEND.AUTO,
+    register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
 ):
     # skip non-quantized modules
@@ -349,6 +350,7 @@ def create_quant_module(
         name=name,
         lm_head_name=lm_head_name,
         backend=backend,
+        register_buffers=register_buffers,
         adapter=adapter,
     )
     new_layer.device = ori_layer_device

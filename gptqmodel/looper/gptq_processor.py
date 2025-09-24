@@ -234,6 +234,7 @@ class GPTQProcessor(LoopProcessor):
             device=self.qcfg.device,
             lm_head_name=model.lm_head,
             pack_dtype=self.qcfg.pack_dtype,
+            register_buffers=False,
         )
 
         # pack module
@@ -246,7 +247,8 @@ class GPTQProcessor(LoopProcessor):
             quant_linear_cls=model.qlinear_kernel,
             lock=self.lock,
         )
-        
+
+        module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
         # block for streams

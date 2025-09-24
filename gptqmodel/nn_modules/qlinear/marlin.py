@@ -72,6 +72,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             out_features: int,
             bias: bool = False,
             pack_dtype: torch.dtype = torch.int32,
+            register_buffers: bool = False,
             adapter: Adapter = None,
             **kwargs):
         if marlin_import_exception is not None:
@@ -98,7 +99,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.MARLIN),
             adapter=adapter,
-            register_buffers=False,
+            register_buffers=False, # do not register buffers in super()
             **kwargs)
 
         # toggle fp32 mode depending on MARLIN or MARLIN_FP16 backend
