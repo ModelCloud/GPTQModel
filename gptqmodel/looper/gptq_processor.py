@@ -136,6 +136,7 @@ class GPTQProcessor(LoopProcessor):
         wq, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 
         with self.lock:
+            # TODO: store module quant results in module, not global processor result
             self.result_save(module.full_name, {
                 "scale": scale,
                 "zero": zero,
@@ -247,6 +248,10 @@ class GPTQProcessor(LoopProcessor):
             quant_linear_cls=model.qlinear_kernel,
             lock=self.lock,
         )
+
+        # TODO: store module quant results in module, not global processor result
+        with self.lock:
+            self.result_pop(module.full_name)
 
         module.unregister_parameter("weight")
 

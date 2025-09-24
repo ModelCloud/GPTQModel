@@ -409,7 +409,7 @@ if BUILD_CUDA_EXT == "1":
 
         extra_link_args = []
         extra_compile_args = {
-            "cxx": ["-O3", "-std=c++17", "-fopenmp", "-lgomp", "-DENABLE_BF16"],
+            "cxx": ["-O3", "-std=c++17", "-DENABLE_BF16"],
             "nvcc": [
                 "-O3",
                 "-std=c++17",
