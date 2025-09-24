@@ -479,20 +479,30 @@ class PackableQuantLinear(BaseQuantLinear):
         return weights
 
     def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
-        W = linear.weight.data.clone()
+        # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
+        # W = linear.weight.data.clone()
+        W = linear.weight.data
         if isinstance(linear, _ConvNd):
             W = W.flatten(1)
         if isinstance(linear, transformers.pytorch_utils.Conv1D):
             W = W.T
 
-        self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
+        # TODO why clone?
+        # self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
+        self.register_buffer("g_idx", g_idx if g_idx is not None else self.g_idx )
 
         scales = scales.T.contiguous()
         zeros = zeros.T.contiguous()
         scale_zeros = zeros * scales
-        self.scales = scales.clone().to(dtype=t.float16)
+
+        # TODO why clone?
+        # self.scales = scales.clone().to(dtype=t.float16)
+        self.register_buffer("scales", scales.to(dtype=t.float16))
+
         if linear.bias is not None:
-            self.bias = linear.bias.clone().to(dtype=t.float16)
+            # TODO why clone?
+            # self.bias = linear.bias.clone().to(dtype=t.float16)
+            self.register_buffer("bias", linear.bias.to(dtype=t.float16))
 
         int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
         int_weight = int_weight.T.contiguous()
@@ -527,7 +537,8 @@ class PackableQuantLinear(BaseQuantLinear):
                 i += 10
                 row += 1
 
-        self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
+        # self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
+        self.register_buffer("qweight", t.from_numpy(qweight.astype(self.pack_np_dtype)))
 
         zeros = zeros.numpy().astype(self.pack_np_math_dtype)
         qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_math_dtype)
@@ -558,7 +569,8 @@ class PackableQuantLinear(BaseQuantLinear):
                 i += 10
                 col += 1
 
-        self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
+        # self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
+        self.register_buffer("qzeros", t.from_numpy(qzeros.astype(self.pack_np_dtype)))
 
         # assert
         # assert isinstance(self, TorchQuantLinear), f"type: {self.__class_}"
@@ -606,6 +618,7 @@ class AWQuantLinear(BaseQuantLinear):
             else:
                 self.bias = None
 
+    # TODO FIX ME. this hack was needed because other part of code forgot to call nn.module register_buffer()!
     def list_buffers(self) -> List:
         buf = []
         if hasattr(self, "qweight") and self.qweight is not None:

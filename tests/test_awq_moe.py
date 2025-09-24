@@ -7,7 +7,7 @@ import unittest
 
 from datasets import load_dataset
 from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
-from gptqmodel.quantization import FORMAT, QUANT_CONFIG_FILENAME, METHOD
+from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.torch import torch_empty_cache
 from parameterized import parameterized
 from transformers import AutoTokenizer

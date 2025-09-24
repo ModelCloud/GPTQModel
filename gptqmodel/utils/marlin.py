@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-from typing import Optional, List, Tuple, Callable, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import numpy
 import torch
 
-from .marlin_scalar_type import ScalarType
 from ..utils.logger import setup_logger
+from .marlin_scalar_type import ScalarType
 from .rocm import IS_ROCM
 
 log = setup_logger()

@@ -15,8 +15,8 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.marlin import replace_parameter, marlin_make_workspace_new, marlin_permute_scales, \
-    marlin_make_empty_g_idx, awq_to_marlin_zero_points, apply_awq_marlin_linear, marlin_permute_bias
+from ...utils.marlin import (apply_awq_marlin_linear, awq_to_marlin_zero_points, marlin_make_empty_g_idx,
+                             marlin_make_workspace_new, marlin_permute_bias, marlin_permute_scales, replace_parameter)
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
 

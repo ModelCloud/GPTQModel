@@ -257,12 +257,13 @@ def create_quant_module(
     lm_head_name: str,
     pack_dtype: torch.dtype,
     backend: BACKEND = BACKEND.AUTO,
+    register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
 ):
     # skip non-quantized modules
     if name not in quant_result:
         return
-    
+
     # unwrap named module
     if isinstance(submodule, NamedModule):
         # print(f"offloading named module: {module.full_name}")
@@ -349,6 +350,7 @@ def create_quant_module(
         name=name,
         lm_head_name=lm_head_name,
         backend=backend,
+        register_buffers=register_buffers,
         adapter=adapter,
     )
     new_layer.device = ori_layer_device
@@ -389,7 +391,7 @@ def create_quant_layer(
             backend=backend,
             adapter=adapter,
         )
-        
+
     return linear_cls
 
 # public/stable api exposed to transformer/optimum

@@ -5,6 +5,7 @@
 
 import torch
 
+
 # optimized
 def compute_local_perms(diag_H: torch.Tensor, groupsize: int) -> torch.Tensor:
     """
