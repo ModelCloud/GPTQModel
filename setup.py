@@ -232,16 +232,6 @@ def get_version_tag() -> str:
     return f"{base}{torch_suffix}"
 
 
-def _has_float8_e8m0fnu() -> bool:
-    import torch
-    if not hasattr(torch, "float8_e8m0fnu"):
-        return False
-    try:
-        _ = torch.empty(0, dtype=torch.float8_e8m0fnu)
-        return True
-    except Exception:
-        return False
-
 # ---------------------------
 # Env and versioning
 # ---------------------------
@@ -476,14 +466,6 @@ if BUILD_CUDA_EXT == "1":
             if not ROCM_VERSION and HAS_CUDA_V8:
                 if BUILD_MARLIN:
                     marlin_template_kernel_srcs = glob.glob("gptqmodel_ext/marlin/kernel_*.cu")
-
-                    import copy
-                    float8_e8m0fnu_compile_args = copy.deepcopy(extra_compile_args)
-
-                    if not _has_float8_e8m0fnu():
-                        float8_e8m0fnu_compile_args["cxx"].append("-DHAVE_AT_FLOAT8_E8M0FNU=0")
-                        float8_e8m0fnu_compile_args["nvcc"].append("-DHAVE_AT_FLOAT8_E8M0FNU=0")
-
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_marlin_kernels",
@@ -494,7 +476,7 @@ if BUILD_CUDA_EXT == "1":
                                 "gptqmodel_ext/marlin/awq_marlin_repack.cu",
                             ] + marlin_template_kernel_srcs,
                             extra_link_args=extra_link_args,
-                            extra_compile_args=float8_e8m0fnu_compile_args,
+                            extra_compile_args=extra_compile_args,
                         )
                     ]
 

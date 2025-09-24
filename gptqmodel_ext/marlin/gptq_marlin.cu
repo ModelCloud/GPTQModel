@@ -23,8 +23,19 @@
   #define MARLIN_NAMESPACE_NAME marlin
 #endif
 
-#ifndef HAVE_AT_FLOAT8_E8M0FNU
-  #define HAVE_AT_FLOAT8_E8M0FNU 1
+#include <ATen/ATen.h>
+
+template <typename T, T v>
+struct is_valid_value { static constexpr bool value = true; };
+
+#if defined(__has_include)
+#  if __has_include(<ATen/native/quantized/Float8_e8m0fnu.h>)
+#    define HAS_FLOAT8_E8M0FNU 1
+#  else
+#    define HAS_FLOAT8_E8M0FNU 0
+#  endif
+#else
+#  define HAS_FLOAT8_E8M0FNU 0
 #endif
 
 #include "kernel.h"
@@ -911,7 +922,7 @@ torch::Tensor gptq_marlin_gemm(
       if (group_size == 16)
         scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
       else if (group_size == 32) {
-        #if HAVE_AT_FLOAT8_E8M0FNU
+        #if HAS_FLOAT8_E8M0FNU
           scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
         #else
           TORCH_CHECK(false,
@@ -940,7 +951,7 @@ torch::Tensor gptq_marlin_gemm(
       if (group_size == 16)
         scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
       else if (group_size == 32) {
-        #if HAVE_AT_FLOAT8_E8M0FNU
+        #if HAS_FLOAT8_E8M0FNU
           scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
         #else
           TORCH_CHECK(false,
