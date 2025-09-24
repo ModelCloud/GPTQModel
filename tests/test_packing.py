@@ -79,7 +79,7 @@ class TestRepacking(unittest.TestCase):
 
     # Grid over bits and group sizes
     TEST_GRID = []
-    for bits in (2, 4, 8):
+    for bits in (2, 3, 4, 8):
         for gs in (32, 64, 128):
             for backend in QLINEAR_DICT:
                 TEST_GRID.append((bits, gs, backend))

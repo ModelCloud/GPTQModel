@@ -480,14 +480,15 @@ class PackableQuantLinear(BaseQuantLinear):
         return weights
 
     @t.inference_mode()
-    def pack(self,
-             linear: nn.Module,
-             scales: t.Tensor,
-             zeros: t.Tensor,
-             g_idx: t.Tensor,
-             *,
-             block_in: int = 8192,
-             workers: int  = 8):
+    def pack(
+            self,
+            linear: nn.Module,
+            scales: t.Tensor,
+            zeros: t.Tensor,
+            g_idx: t.Tensor,
+            block_in: int = 8192,
+            workers: int = 8,
+    ):
         """
         Parallel qweight pack (threaded over input blocks). qzeros path = original logic.
 
@@ -515,7 +516,6 @@ class PackableQuantLinear(BaseQuantLinear):
         # ---------- g_idx buffer ----------
         if g_idx.numel() != in_features:
             raise ValueError(f"g_idx length {g_idx.numel()} != in_features {in_features}")
-
         g_idx = g_idx.to("cpu")
         self.register_buffer("g_idx", g_idx)
 
@@ -532,18 +532,27 @@ class PackableQuantLinear(BaseQuantLinear):
         # ---------- constants ----------
         bits = int(self.bits)  # 2,3,4,8
         word_bits = int(self.pack_dtype_bits)  # expect 32
-        pack_factor = int(self.pack_factor)  # expect 32 // bits
         assert word_bits == 32, "Only 32-bit packing words supported."
-        assert pack_factor * bits == 32, "pack_factor * bits must equal 32."
         if (in_features % word_bits) != 0:
             raise ValueError("in_features must be divisible by 32")
+
+        # NOTE: pack_factor is only meaningful for {2,4,8}. There is NO integer pack_factor for 3-bit.
+        if bits in (2, 4, 8):
+            pack_factor = word_bits // bits  # 16, 8, 4 respectively
+            # If the instance carries a different pack_factor, ignore it for safety.
+        elif bits == 3:
+            pack_factor = None  # sentinel: use the 10-1-10-1-10 scheme
+        else:
+            raise NotImplementedError(f"Unsupported bits={bits}")
 
         # ---------- qweight allocation (storage dtype = int32) ----------
         OUT_DTYPE = self.pack_dtype  # should be torch.int32 per your dtype table
         if OUT_DTYPE != t.int32:
             raise ValueError("This pack() expects self.pack_dtype == torch.int32 for 32-bit words.")
 
-        qweight_rows = (in_features // word_bits) * bits
+        # rows = (in // 32) * ({2,4,8} -> bits rows ; 3 -> 3 rows)
+        rows_per_group = (bits if bits != 3 else 3)
+        qweight_rows = (in_features // word_bits) * rows_per_group
         qweight = t.empty((qweight_rows, out_features), dtype=OUT_DTYPE, device="cpu")
 
         # ---------- precompute shifts for 2/4/8-bit vectorized packing ----------
@@ -554,21 +563,23 @@ class PackableQuantLinear(BaseQuantLinear):
         def _pack_rows_2_4_8(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
             # int32_blk_32xN: [32, N]
             r64 = int32_blk_32xN.to(t.int64)  # [32,N]
+            # interpret the 32 input rows as [bits, pack_factor, N] in row-major order
             R = r64.view(bits, pack_factor, -1)  # [bits,pf,N]
             packed64 = (R << shifts_pf64).sum(dim=1, dtype=t.int64)  # [bits,N]
             dst[dst_rows_base:dst_rows_base + bits] = ((packed64 & MASK32).to(t.int32))
 
         def _pack_rows_3(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
+            # Layout: 32 inputs -> 3 output rows with pattern 10 | 1 | 10 | 1 | 10 (=> 32 scalars * 3 bits = 96 bits)
             x = int32_blk_32xN.to(t.int64)  # [32,N]
-            # A
+            # A: first 10 values at bit offsets {0,3,6,...,27} plus low 2 bits of the 11th value at bit 30
             A = ((x[0:10] << (t.arange(10, dtype=t.int64).view(-1, 1) * 3)).sum(dim=0, dtype=t.int64)) & MASK32
             A = (A | ((x[10] << 30) & MASK32)) & MASK32
-            # B
+            # B: carry bit 2 of the 11th into bit 0, then 10 values at offsets {1,4,7,...,28}, then bit 31 from 22nd
             B = (((x[10] >> 2) & 1) & MASK32)
             B = (B | (
                 (x[11:21] << (t.arange(10, dtype=t.int64).view(-1, 1) * 3 + 1)).sum(dim=0, dtype=t.int64))) & MASK32
             B = (B | ((x[21] << 31) & MASK32)) & MASK32
-            # C
+            # C: carry bits 1..0 of the 22nd into bits 0..1, then 10 values at offsets {2,5,8,...,29}
             C = (((x[21] >> 1) & 0x3) & MASK32)
             C = (C | (
                 (x[22:32] << (t.arange(10, dtype=t.int64).view(-1, 1) * 3 + 2)).sum(dim=0, dtype=t.int64))) & MASK32
@@ -588,7 +599,6 @@ class PackableQuantLinear(BaseQuantLinear):
             sz_blk_T = scale_zeros.index_select(0, gsel).T  # [out, blk]
             s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
 
-            # ORIGINAL formula (unchanged):
             # int_block = round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
             int_block = t.round((Wblk + sz_blk_T) / s_blk_T).to(t.int32)  # [out, blk]
             int_block = int_block.T.contiguous()  # [blk, out]
@@ -597,7 +607,7 @@ class PackableQuantLinear(BaseQuantLinear):
             base_group = (i0 // word_bits)
             for g in range(groups32):
                 sub = int_block[g * word_bits:(g + 1) * word_bits]  # [32, out] int32
-                dst_rows = (base_group + g) * bits
+                dst_rows = (base_group + g) * (bits if bits != 3 else 3)
                 if bits in (2, 4, 8):
                     _pack_rows_2_4_8(sub, qweight, dst_rows)
                 elif bits == 3:
@@ -613,15 +623,12 @@ class PackableQuantLinear(BaseQuantLinear):
         ranges = [(i0, min(i0 + block_in, in_features)) for i0 in starts]
         total_blocks = len(ranges)
 
-        workers = max(1, min(workers, total_blocks))
-
-        if workers == 1:
+        workers_eff = max(1, min(workers, total_blocks))
+        if workers_eff == 1:
             for i0, i1 in ranges:
                 _process_block(i0, i1)
         else:
-            # NOTE: PyTorch CPU ops generally release the GIL, so threads may help here.
-            # Avoid oversubscription by choosing a reasonable 'workers'.
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pack qweight") as ex:
+            with ThreadPoolExecutor(max_workers=workers_eff, thread_name_prefix="pack qweight") as ex:
                 futs = [ex.submit(_process_block, i0, i1) for (i0, i1) in ranges]
                 for f in futs:
                     f.result()
@@ -629,17 +636,17 @@ class PackableQuantLinear(BaseQuantLinear):
         # ---------- qzeros: EXACT original numpy path (unchanged) ----------
         zeros_np = zeros.detach().cpu().numpy().astype(self.pack_np_math_dtype, copy=False)  # [G, out]
         qzeros_np = np.zeros(
-            (zeros_np.shape[0], (zeros_np.shape[1] // self.pack_dtype_bits) * self.bits),
+            (zeros_np.shape[0], (zeros_np.shape[1] // self.pack_dtype_bits) * bits),
             dtype=self.pack_np_math_dtype
         )
 
-        if self.bits in [2, 4, 8]:
-            pf = self.pack_factor  # 32 // bits
+        if bits in [2, 4, 8]:
+            pf = (32 // bits)  # compute locally to avoid relying on attribute
             for col in range(qzeros_np.shape[1]):
                 base = col * pf
                 for j in range(pf):
-                    qzeros_np[:, col] |= zeros_np[:, base + j] << (self.bits * j)
-        elif self.bits == 3:
+                    qzeros_np[:, col] |= zeros_np[:, base + j] << (bits * j)
+        elif bits == 3:
             i = 0
             col = 0
             while col < qzeros_np.shape[1]:
@@ -662,7 +669,7 @@ class PackableQuantLinear(BaseQuantLinear):
                 i += 10
                 col += 1
         else:
-            raise NotImplementedError(f"Unsupported bits={self.bits}")
+            raise NotImplementedError(f"Unsupported bits={bits}")
 
         # ---------- register buffers ----------
         self.register_buffer("qweight", qweight.to(dtype=self.pack_dtype))
