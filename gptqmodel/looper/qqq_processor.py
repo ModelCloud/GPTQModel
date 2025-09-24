@@ -20,6 +20,7 @@ from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, pack_model
 from ..utils.torch import CPU, DEVICE_0, torch_streamCtx, torch_sync
+from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 
 log = setup_logger()
 
@@ -117,7 +118,7 @@ class QQQProcessor(LoopProcessor):
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
         q = qqq[module.name]
-        wq, scale, zero, g_idx, duration, avg_loss, damp_percent, scale_extra, nsamples = q.quantize()
+        wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, q_scales_extra, nsamples = q.quantize()
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
 
@@ -159,12 +160,10 @@ class QQQProcessor(LoopProcessor):
         self.log.append(stat)
         self.log_new_row(stat)
 
-        self.result_save(module.full_name, {
-            "scale": move_to(scale, device=CPU, stream=self.stream),
-            "zero": move_to(zero, device=CPU, stream=self.stream),
-            "g_idx": move_to(g_idx, device=CPU, stream=self.stream),
-            "scale_extra": move_to(scale_extra, device=CPU, stream=self.stream),
-        })
+        module.state.update({"q_scales": q_scales})
+        module.state.update({"q_zeros": q_zeros})
+        module.state.update({"q_g_idx": q_g_idx})
+        module.state.update({"q_scales_extra": q_scales_extra})
 
         if self.calculate_w_wq_diff:
             if module.weight.data.dtype == torch.float16:
@@ -180,35 +179,75 @@ class QQQProcessor(LoopProcessor):
 
         # with torch_streamCtx(DEVICE_0_STREAM):
         #     wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference
-        wq = wq.to(device=DEVICE_0, non_blocking=False)
+        # wq = wq.to(device=DEVICE_0, non_blocking=False)
 
         # prepare for module.forward post generate
         module.weight.data = wq
 
     # submodule_finalized is called in reverse after all next sequential processes are called
-    def submodule_finalize(self, module: NamedModule):
+    def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         # generate complete, safe to move to cpu
         module.weight.data = move_to(module.weight.data, device=CPU, stream=self.stream) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
+
+        # cleanup all memory or states vars persistently added by this processor
+        with self.lock:
+            module.state.pop("w", None)  #
+            module.state.pop("w_wq_diff", None)
+
+            q_zeros = module.state.pop("q_zeros")
+            q_scales = module.state.pop("q_scales")
+            q_g_idx = module.state.pop("q_g_idx")
+            q_scales_extra = module.state.pop("q_scales_extra")
+
+        layers = find_modules(model.model)
+
+        # replace module with quantized module
+        create_quant_module(
+            name=module.full_name,
+            linear_cls=model.qlinear_kernel,
+            bits=self.qcfg.bits,
+            desc_act=self.qcfg.desc_act,
+            dynamic=self.qcfg.dynamic,
+            group_size=self.qcfg.group_size,
+            module=model.model,
+            submodule=module,
+            sym=self.qcfg.sym,
+            device=self.qcfg.device,
+            lm_head_name=model.lm_head,
+            pack_dtype=self.qcfg.pack_dtype,
+            register_buffers=False,
+        )
+
+        # pack module
+        qModules = {name: submodule for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items() if
+                    name == module.full_name}
+        pack_module(
+            name=module.full_name,
+            qModules=qModules,
+            q_scales=q_scales,
+            q_zeros=q_zeros,
+            q_g_idx=q_g_idx,
+            layers=layers,
+            quant_linear_cls=model.qlinear_kernel,
+            lock=self.lock,
+            q_scales_extra=q_scales_extra,
+        )
+
+        # TODO: store module quant results in module, not global processor result
+        with self.lock:
+            self.result_pop(module.full_name)
+
+        module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
         # block for streams
         if self.stream:
             torch_sync()
 
-        model.qlinear_kernel = pack_model(
-            model=model.model,
-            quant_result=self.results(),
-            bits=self.qcfg.bits,
-            group_size=self.qcfg.group_size,
-            backend=BACKEND.QQQ,
-            desc_act=self.qcfg.desc_act,
-            format=self.qcfg.format,
-            quant_method=self.qcfg.quant_method,
-            lm_head_name=model.lm_head,
-            dynamic=self.qcfg.dynamic,
-            pack_dtype=self.qcfg.pack_dtype,
-        )
+        model.model = undo_offload_to_disk(module=model.model, include_buffers=True, delete_offload_folders=True)
+        # print("finalize")
+        # print_module_tree(model.model)
 
         # set quantized state
         model.quantized = True
