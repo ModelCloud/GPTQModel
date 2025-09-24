@@ -235,6 +235,9 @@ class LoopProcessor:
         with self._results_lock:
             return self._results.pop(key, default)
 
+    def result_pop(self, key: str, default: Any = None) -> Any:
+        return self._results.pop(key, default)
+
     def results(self):
         return self._results
 

@@ -255,6 +255,10 @@ class GPTQProcessor(LoopProcessor):
             lock=self.lock,
         )
 
+        # TODO: store module quant results in module, not global processor result
+        with self.lock:
+            self.result_pop(module.full_name)
+
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):

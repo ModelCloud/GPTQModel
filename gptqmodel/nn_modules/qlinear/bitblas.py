@@ -121,6 +121,7 @@ class BitBLASQuantLinear(BaseQuantLinear):
         propagate_b: bool = BITBLAS_PROPAGATE_WEIGHTS,
         opt_features: Union[int, List[int]] = OPT_FEATURES,
         layout: str = "nt",
+        register_buffers: bool = False,
         **kwargs,
     ):
         super().__init__(
