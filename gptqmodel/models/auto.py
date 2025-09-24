@@ -48,7 +48,7 @@ from transformers import AutoConfig, GenerationConfig, PreTrainedModel, PreTrain
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from ..quantization import QUANT_CONFIG_FILENAME  # noqa: E402
+from ..quantization import METHOD, QUANT_CONFIG_FILENAME  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
