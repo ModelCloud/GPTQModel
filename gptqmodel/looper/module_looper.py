@@ -19,7 +19,7 @@ from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import SUPPORTS_MODULE_TYPES, CUDA
+from ..models._const import CUDA, SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import HookedLinear, StopForward, replace_module_with_hooked_legacy
 from ..utils import ASYNC_WORKER
 from ..utils.logger import setup_logger
