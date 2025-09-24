@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from ...adapter.adapter import Adapter, Lora
-from ...models._const import DEVICE, PLATFORM
+from ...models._const import DEVICE, PLATFORM, CPU
 from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -79,7 +79,7 @@ class QQQQuantLinear(BaseQuantLinear):
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
-        register_buffers: bool = False,
+        register_buffers: bool = True,
         **kwargs):
         if qqq_import_exception is not None:
             raise ValueError(
@@ -108,51 +108,56 @@ class QQQQuantLinear(BaseQuantLinear):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.QQQ),
             adapter=adapter,
+            # QQQ does it's own buffer setup
             register_buffers=False,
             **kwargs)
 
-        self.register_buffer(
-            "B",
-            torch.empty(
-                (self.in_features // 16, self.out_features * 16 // 8), dtype=torch.int32
-            ),
-        )
-        self.register_buffer(
-            "s_channel",
-            torch.empty(
-                (1, self.out_features),
-                dtype=torch.float32,
-            ),
-        )
-        if self.group_size != self.in_features:
+        # during quantization, we do are not loading tensors from disk so no need to preallocate buffers
+        if register_buffers:
             self.register_buffer(
-                "s_group",
+                "B",
                 torch.empty(
-                    (self.in_features // self.group_size, self.out_features),
-                    dtype=torch.float16,
+                    (self.in_features // 16, self.out_features * 16 // 8), dtype=torch.int32
                 ),
             )
-        else:
             self.register_buffer(
-                "s_group",
-                torch.tensor([], dtype=torch.float16),
+                "s_channel",
+                torch.empty(
+                    (1, self.out_features),
+                    dtype=torch.float32,
+                ),
             )
-        # 128 is currently the minimum `tile_n`, hence it gives the maximum workspace size; 16 is the default `max_par`
-        self.register_buffer(
-            "workspace",
-            torch.zeros(self.out_features // 128 * 16, dtype=torch.int32),
-            persistent=False,
-        )
-        self.register_buffer(
-            "reduce_buffer",
-            torch.zeros((self.max_par * 16 * 4, self.out_features), dtype=torch.int),
-            persistent=False,
-        )
-        self.wf = torch.tensor(list(range(0, 32, 4)), dtype=torch.int32).unsqueeze(0)
-        if bias:
-            self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
-        else:
-            self.bias = None
+            if self.group_size != self.in_features:
+                self.register_buffer(
+                    "s_group",
+                    torch.empty(
+                        (self.in_features // self.group_size, self.out_features),
+                        dtype=torch.float16,
+                    ),
+                )
+            else:
+                self.register_buffer(
+                    "s_group",
+                    torch.tensor([], dtype=torch.float16),
+                )
+            # 128 is currently the minimum `tile_n`, hence it gives the maximum workspace size; 16 is the default `max_par`
+            self.register_buffer(
+                "workspace",
+                torch.zeros(self.out_features // 128 * 16, dtype=torch.int32),
+                persistent=False,
+            )
+            self.register_buffer(
+                "reduce_buffer",
+                torch.zeros((self.max_par * 16 * 4, self.out_features), dtype=torch.int),
+                persistent=False,
+            )
+            self.wf = torch.tensor(list(range(0, 32, 4)), dtype=torch.int32).unsqueeze(0)
+            if bias:
+                self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
+            else:
+                self.bias = None
+
+
         self._perm, self._scale_perm, self._scale_perm_single = self._get_perms()
 
         # auto-optimize on post init
@@ -316,21 +321,34 @@ class QQQQuantLinear(BaseQuantLinear):
         else:
             for i in range(8):
                 q |= (res[:, i::8] & 0xF) << 4 * i
-        q = torch.from_numpy(q.astype(np.int32)).to(w.device)
-        self.B[:, :] = q.to(self.B.device)
+        q = torch.from_numpy(q.astype(np.int32)).to(CPU)
+
+        #self.B[:, :] = q.to(self.B.device)
+        self.register_buffer("B", q)
+
         if self.group_size != self.in_features:
-            self.s_group[:, :] = s.to(self.s_group.device)
-            self.s_channel[:, :] = s_extra.to(self.s_channel.device)
+            #self.s_group[:, :] = s.to(self.s_group.device)
+            self.register_buffer("s_group", s.to(CPU))
+
+            #self.s_channel[:, :] = s_extra.to(self.s_channel.device)
+            self.register_buffer("s_channel", s_extra.to(CPU))
         else:
-            self.s_group = torch.tensor(
-                [], dtype=torch.float16, device=self.s_channel.device
-            )
-            self.s_channel[:, :] = s.to(self.s_channel.device)
+            # self.s_group = torch.tensor(
+            #     [], dtype=torch.float16, device=self.s_channel.device
+            # )
+            self.register_buffer("s_group", torch.tensor(
+                [], dtype=torch.float16, device=CPU
+            ))
+
+            #self.s_channel[:, :] = s.to(self.s_channel.device)
+            self.register_buffer("s_channel", s.to(CPU))
         if linear.bias is not None:
             if self.bias is not None:
-                self.bias[:] = linear.bias.data.to(self.bias.device).to(torch.float16)
+                # self.bias[:] = linear.bias.data.to(self.bias.device).to(torch.float16)
+                self.register_buffer("bias", linear.bias.data.to(self.bias.device).to(torch.float16))
             else:
-                self.bias = linear.bias.clone().to(torch.float16)
+                # self.bias = linear.bias.clone().to(torch.float16)
+                self.register_buffer("bias", linear.bias.clone().to(torch.float16))
 
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
