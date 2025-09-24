@@ -478,7 +478,201 @@ class PackableQuantLinear(BaseQuantLinear):
 
         return weights
 
-    def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
+    import numpy as np
+    import torch as t
+    import torch.nn as nn
+    from torch.nn.modules.conv import _ConvNd
+    import transformers
+
+    @t.inference_mode()
+    def pack(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor = None, *,
+             block_in: int = 8192 * 4):
+        """
+        Keep ORIGINAL logic for scales/zeros and qzeros packing.
+        Only optimize qweight for memory/speed (CPU torch, streaming, vectorized 2/4/8-bit).
+        Produces identical shapes to your original code:
+
+          scales  := (scales.T).contiguous()           # [G, out]
+          zeros   := (zeros.T).contiguous()            # [G, out]
+          scale_zeros = zeros * scales                 # [G, out]
+          qweight : [(in/32)*bits, out]  (torch.int32)
+          qzeros  : [G, (out/32)*bits]   (torch.int32 via numpy astype)
+
+        Requirements:
+          - self.pack_dtype_bits == 32
+          - self.pack_factor * self.bits == 32
+          - in_features % 32 == 0
+        """
+
+        MASK32 = (1 << 32) - 1  # for safe masking when packing via int64
+
+        # ---------- normalize weight to [out, in] (same as your code) ----------
+        W = linear.weight.detach()
+        if isinstance(linear, _ConvNd):
+            W = W.flatten(1)
+        if isinstance(linear, transformers.pytorch_utils.Conv1D):
+            W = W.T
+        W = W.to("cpu", copy=False)
+        out_features, in_features = W.shape
+
+        # ---------- g_idx buffer ----------
+        if g_idx is not None:
+            self.register_buffer("g_idx", g_idx.to("cpu", non_blocking=True), persistent=True)
+        elif not hasattr(self, "g_idx") or self.g_idx is None:
+            raise ValueError("g_idx must be provided at first pack")
+        g_idx = self.g_idx.to("cpu", non_blocking=True).long()
+        if g_idx.numel() != in_features:
+            raise ValueError(f"g_idx length {g_idx.numel()} != in_features {in_features}")
+
+        # ---------- ORIGINAL scales/zeros logic (do not change) ----------
+        # Transpose to [G, out] exactly like your code, then compute scale_zeros.
+        scales = scales.T.contiguous()  # [G, out]
+        zeros = zeros.T.contiguous()  # [G, out]
+        scale_zeros = zeros * scales  # [G, out]
+
+        # Keep your small buffers behavior
+        self.register_buffer("scales", scales.to(dtype=t.float16), persistent=True)
+        if linear.bias is not None:
+            self.register_buffer("bias", linear.bias.detach().to("cpu", dtype=t.float16), persistent=True)
+
+        # ---------- constants ----------
+        bits = int(self.bits)  # 2,3,4,8
+        word_bits = int(self.pack_dtype_bits)  # expect 32
+        pack_factor = int(self.pack_factor)  # expect 32//bits
+        assert word_bits == 32, "Only 32-bit packing words supported."
+        assert pack_factor * bits == 32, "pack_factor * bits must equal 32."
+        if (in_features % word_bits) != 0:
+            raise ValueError("in_features must be divisible by 32")
+
+        # ---------- qweight (ONLY this part is optimized) ----------
+        # allocate final qweight as storage dtype (int32 as per your config)
+        OUT_DTYPE = self.pack_dtype  # should be torch.int32 in your mapping
+        if OUT_DTYPE != t.int32:
+            raise ValueError("This pack() expects self.pack_dtype to be torch.int32 for 32-bit words.")
+
+        qweight_rows = (in_features // word_bits) * bits
+        qweight = t.empty((qweight_rows, out_features), dtype=OUT_DTYPE, device="cpu")
+
+        # precompute shifts for vectorized pack (2/4/8-bit)
+        if bits in (2, 4, 8):
+            shifts_pf64 = (t.arange(pack_factor, dtype=t.int64) * bits).view(1, pack_factor, 1)  # [1,pf,1]
+
+        # pack helpers (do shifts in int64; mask; cast to int32)
+        def _pack_rows_2_4_8(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
+            # int32_blk_32xN: [32, N]
+            r64 = int32_blk_32xN.to(t.int64)  # [32,N]
+            R = r64.view(bits, pack_factor, -1)  # [bits,pf,N]
+            packed64 = (R << shifts_pf64).sum(dim=1, dtype=t.int64)  # [bits,N]
+            dst[dst_rows_base:dst_rows_base + bits] = ((packed64 & MASK32).to(t.int32))
+
+        def _pack_rows_3(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
+            x = int32_blk_32xN.to(t.int64)  # [32,N]
+            # A
+            A = ((x[0:10] << (t.arange(10, dtype=t.int64).view(-1, 1) * 3)).sum(dim=0, dtype=t.int64)) & MASK32
+            A = (A | ((x[10] << 30) & MASK32)) & MASK32
+            # B
+            B = (((x[10] >> 2) & 1) & MASK32)
+            B = (B | (
+                (x[11:21] << (t.arange(10, dtype=t.int64).view(-1, 1) * 3 + 1)).sum(dim=0, dtype=t.int64))) & MASK32
+            B = (B | ((x[21] << 31) & MASK32)) & MASK32
+            # C
+            C = (((x[21] >> 1) & 0x3) & MASK32)
+            C = (C | (
+                (x[22:32] << (t.arange(10, dtype=t.int64).view(-1, 1) * 3 + 2)).sum(dim=0, dtype=t.int64))) & MASK32
+            dst[dst_rows_base + 0] = A.to(t.int32)
+            dst[dst_rows_base + 1] = B.to(t.int32)
+            dst[dst_rows_base + 2] = C.to(t.int32)
+
+        # stream input dimension in blocks (exact same math as your original formula)
+        block_in = max(word_bits, (block_in // word_bits) * word_bits)
+        for i0 in range(0, in_features, block_in):
+            i1 = min(i0 + block_in, in_features)
+            blk = i1 - i0
+            assert blk % word_bits == 0
+
+            # W block [out, blk]
+            Wblk = W[:, i0:i1]
+
+            # select group rows for these inputs from [G, out] -> [blk, out], then transpose to [out, blk]
+            gsel = g_idx[i0:i1]  # [blk]
+            sz_blk_T = scale_zeros.index_select(0, gsel).T  # [out, blk]
+            s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
+
+            # ORIGINAL formula: round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
+            int_block = t.round((Wblk + sz_blk_T) / s_blk_T).to(t.int32)  # [out, blk]
+            int_block = int_block.T.contiguous()  # [blk, out]
+
+            # pack this block
+            groups32 = blk // word_bits
+            base_group = (i0 // word_bits)
+            for g in range(groups32):
+                sub = int_block[g * word_bits:(g + 1) * word_bits]  # [32, out] int32
+                dst_rows = (base_group + g) * bits
+                if bits in (2, 4, 8):
+                    _pack_rows_2_4_8(sub, qweight, dst_rows)
+                elif bits == 3:
+                    _pack_rows_3(sub, qweight, dst_rows)
+                else:
+                    raise NotImplementedError(f"Unsupported bits={bits}")
+
+            # free temps promptly
+            del Wblk, gsel, sz_blk_T, s_blk_T, int_block
+
+        # ---------- qzeros: EXACT original numpy path (no "optimization") ----------
+        # zeros/scales are [G, out] here, same as your code above.
+        zeros_np = zeros.detach().cpu().numpy().astype(self.pack_np_math_dtype, copy=False)  # [G, out]
+        # Original shape: (zeros.shape[0], zeros.shape[1] // 32 * bits)  == [G, (out/32)*bits]
+        qzeros_np = np.zeros(
+            (zeros_np.shape[0], (zeros_np.shape[1] // self.pack_dtype_bits) * self.bits),
+            dtype=self.pack_np_math_dtype
+        )
+
+        if self.bits in [2, 4, 8]:
+            # pack along 'out' axis in groups of 32 columns
+            pf = self.pack_factor  # 32 // bits
+            for col in range(qzeros_np.shape[1]):
+                # For each packed output column word, OR together pf lanes
+                base = col * pf
+                for j in range(pf):
+                    qzeros_np[:, col] |= zeros_np[:, base + j] << (self.bits * j)
+        elif self.bits == 3:
+            # Follow your exact schedule
+            i = 0
+            col = 0
+            while col < qzeros_np.shape[1]:
+                for j in range(i, i + 10):
+                    qzeros_np[:, col] |= zeros_np[:, j] << (3 * (j - i))
+                i += 10
+                qzeros_np[:, col] |= zeros_np[:, i] << 30
+                col += 1
+                qzeros_np[:, col] |= (zeros_np[:, i] >> 2) & 1
+                i += 1
+                for j in range(i, i + 10):
+                    qzeros_np[:, col] |= zeros_np[:, j] << (3 * (j - i) + 1)
+                i += 10
+                qzeros_np[:, col] |= zeros_np[:, i] << 31
+                col += 1
+                qzeros_np[:, col] |= (zeros_np[:, i] >> 1) & 0x3
+                i += 1
+                for j in range(i, i + 10):
+                    qzeros_np[:, col] |= zeros_np[:, j] << (3 * (j - i) + 2)
+                i += 10
+                col += 1
+        else:
+            raise NotImplementedError(f"Unsupported bits={self.bits}")
+
+        # ---------- register buffers ----------
+        # qweight already torch.int32 with desired shape [(in/32)*bits, out]
+        self.register_buffer("qweight", qweight.to(dtype=self.pack_dtype), persistent=True)
+
+        # qzeros via original numpy path to your storage dtype (np.int32 for int32)
+        self.register_buffer(
+            "qzeros",
+            t.from_numpy(qzeros_np.astype(self.pack_np_dtype, copy=False)),
+            persistent=True
+        )
+
+    def pack_original(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
         # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
         # W = linear.weight.data.clone()
         W = linear.weight.data
