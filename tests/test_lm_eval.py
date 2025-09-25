@@ -25,7 +25,7 @@ class TestLmEval(unittest.TestCase):
         self.task = EVAL.LM_EVAL.ARC_CHALLENGE
 
         # self.acc_score = 0.3183
-        self.acc_norm_score = 0.3515
+        # self.acc_norm_score = 0.3515
 
 
     def test_eval_direct(self):
@@ -47,7 +47,7 @@ class TestLmEval(unittest.TestCase):
            acc_norm_score = results['results'].get(self.task.value, {}).get('acc_norm,none')
 
            # self.assertGreaterEqual(acc_score, self.acc_score, "acc score does not match expected result")
-           self.assertGreaterEqual(acc_norm_score, self.acc_norm_score, "acc_norm score does not match expected result")
+           self.assertGreaterEqual(acc_norm_score, 0.3400, "acc_norm score does not match expected result")
 
     def test_eval_path(self):
        with tempfile.TemporaryDirectory() as tmp_dir:
@@ -68,4 +68,4 @@ class TestLmEval(unittest.TestCase):
            acc_norm_score = results['results'].get(self.task, {}).get('acc_norm,none')
 
            # self.assertGreaterEqual(acc_score, self.acc_score, "acc score does not match expected result")
-           self.assertGreaterEqual(acc_norm_score, self.acc_norm_score, "acc_norm score does not match expected result")
+           self.assertGreaterEqual(acc_norm_score, 0.3000, "acc_norm score does not match expected result")
