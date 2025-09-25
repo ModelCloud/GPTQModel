@@ -93,7 +93,7 @@ class ModuleLooper():
             layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
 
         # GC!
-        gc.collect()
+        # gc.collect()
 
         ori_outside_layer_module_devices = {}
         for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
@@ -256,7 +256,7 @@ class ModuleLooper():
 
             module = self.gptq_model.pre_quantize(module)
             # GC!
-            gc.collect()
+            # gc.collect()
 
             cur_layer_device = get_device(module)
             # print(f"XX0 cur_layer_device = {cur_layer_device}")
