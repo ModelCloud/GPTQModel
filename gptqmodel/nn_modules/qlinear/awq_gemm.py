@@ -7,14 +7,14 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, PackableQuantLinear
 from ...quantization.awq.modules.linear.gemm import WQLinearMMFunction
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-class AwqGEMMQuantLinear(AWQuantLinear):
+class AwqGEMMQuantLinear(AWQuantLinear, PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
