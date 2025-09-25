@@ -26,7 +26,6 @@ from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
-from ..nn_modules.hooked_linear import HookedLinear
 from ..quantization.config import (FORMAT, META_FIELD_ACT_GROUP_AWARE, META_FIELD_DAMP_AUTO_INCREMENT,
                                    META_FIELD_DAMP_PERCENT, META_FIELD_MSE, META_FIELD_QUANTIZER,
                                    META_FIELD_STATIC_GROUPS, META_FIELD_TRUE_SEQUENTIAL, META_FIELD_URI,
@@ -36,6 +35,7 @@ from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
 from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_modules, get_model_files_size,
                            get_state_dict_for_save, load_checkpoint_in_model_then_tie_weights, make_quant)
+from ..utils.structure import alias_all_from_turtle_if_meta
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
 from ._const import DEFAULT_MAX_SHARD_SIZE
@@ -257,12 +257,9 @@ def ModelWriter(cls):
             self.processor.save_pretrained(save_dir)
         # --- end config save block ---
 
-        # TODO FIX ME..remove this ugly patch and find core issue why output_embedding is not retied after offload/undo_offload
-        output_embed = model.get_output_embeddings()
-        if isinstance(output_embed, HookedLinear):
-            model.set_output_embeddings(model.get_input_embeddings())
+        # Due to shell/turtle state, we need to sync the modules from turtle to shell
+        alias_all_from_turtle_if_meta(shell_model=model, turtle_model=self.turtle_model)
 
-        # model.to(CPU) <-- do we need to do this?
         state_dict = get_state_dict_for_save(model)
 
         model_base_name = "model"

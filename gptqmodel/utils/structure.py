@@ -30,6 +30,8 @@ from typing import Dict, Iterable, Optional, Set, Tuple
 import torch
 from torch import nn
 
+from ..utils.logger import setup_logger
+
 # =========================
 #   ANSI color helpers
 # =========================
@@ -38,6 +40,8 @@ DIM = "\033[2m"
 FG_GRAY = "\033[90m"
 FG_CYAN = "\033[36m"
 FG_YELLOW = "\033[33m"
+
+log = setup_logger()
 
 def _maybe(s: str, code: str, *, color: bool) -> str:
     return f"{code}{s}{RESET}" if color else s
@@ -368,3 +372,102 @@ def alias_from_turtle_for_submodule(
 
     # return the *target* submodule, which is the injected result
     return target_submodule
+
+def _is_meta_tensor(t: torch.Tensor) -> bool:
+    return bool(getattr(t, "is_meta", False)) or (hasattr(t, "device") and t.device.type == "meta")
+
+def _module_all_meta(mod: nn.Module) -> bool:
+    """True if the module has at least one tensor and *all* its params/buffers are meta."""
+    saw_any = False
+    for _, p in mod.named_parameters(recurse=False):
+        saw_any = True
+        if not _is_meta_tensor(p):
+            return False
+    for _, b in mod.named_buffers(recurse=False):
+        saw_any = True
+        if not _is_meta_tensor(b):
+            return False
+    return saw_any  # modules with no tensors aren't considered 'meta' targets
+
+def _is_leaf(mod: nn.Module) -> bool:
+    return next(mod.named_children(), None) is None
+
+def alias_all_from_turtle_if_meta(
+    shell_model: nn.Module,
+    turtle_model: nn.Module,
+    *,
+    require_class_match: bool = True,
+    verify_shapes: bool = True,
+    tie_after: bool = True,
+) -> int:
+    """
+    Replace (alias) leaf submodules in `shell_model` with the corresponding submodules
+    from `turtle_model` when the shell submodule's tensors are on meta.
+
+    Logs each swap via log.info().
+    """
+    turtle_map = dict(turtle_model.named_modules())
+    swapped = 0
+
+    for qname, shell_sub in list(shell_model.named_modules()):
+        if not qname:  # skip root
+            continue
+        if not _is_leaf(shell_sub):
+            continue
+        if not _module_all_meta(shell_sub):
+            continue
+
+        turtle_sub = turtle_map.get(qname, None)
+        if turtle_sub is None:
+            # log.info(f"Module: Skipped {qname}: not found in turtle model")
+            continue
+
+        if require_class_match and (shell_sub.__class__ is not turtle_sub.__class__):
+            # log.info(
+            #     f"Module: Skipped {qname}: class mismatch "
+            #     f"(shell={shell_sub.__class__.__name__}, turtle={turtle_sub.__class__.__name__})"
+            # )
+            continue
+
+        if verify_shapes:
+            shell_ps = dict(shell_sub.named_parameters(recurse=False))
+            turtle_ps = dict(turtle_sub.named_parameters(recurse=False))
+            for n in set(shell_ps.keys()) & set(turtle_ps.keys()):
+                if shell_ps[n].shape != turtle_ps[n].shape:
+                    # log.info(
+                    #     f"Module: Skipped {qname}: parameter shape mismatch at '{n}' "
+                    #     f"(shell={tuple(shell_ps[n].shape)}, turtle={tuple(turtle_ps[n].shape)})"
+                    # )
+                    break
+            else:
+                shell_bs = dict(shell_sub.named_buffers(recurse=False))
+                turtle_bs = dict(turtle_sub.named_buffers(recurse=False))
+                for n in set(shell_bs.keys()) & set(turtle_bs.keys()):
+                    if shell_bs[n].shape != turtle_bs[n].shape:
+                        # log.info(
+                        #     f"Module: Skipped {qname}: buffer shape mismatch at '{n}' "
+                        #     f"(shell={tuple(shell_bs[n].shape)}, turtle={tuple(turtle_bs[n].shape)})"
+                        # )
+                        break
+                else:
+                    parent, leaf = _get_parent_and_leaf_by_path(shell_model, qname)
+                    setattr(parent, leaf, turtle_sub)
+                    swapped += 1
+                    log.info(f"Module: Sync {qname} <- from turtle ({turtle_sub.__class__.__name__})")
+                    continue
+            continue
+
+        parent, leaf = _get_parent_and_leaf_by_path(shell_model, qname)
+        setattr(parent, leaf, turtle_sub)
+        swapped += 1
+        log.info(f"Module:: Sync {qname} <- from turtle ({turtle_sub.__class__.__name__})")
+
+    if tie_after and hasattr(shell_model, "tie_weights") and getattr(shell_model.config, "tie_word_embeddings", False):
+        try:
+            shell_model.tie_weights()
+            log.info("Module: Re-tied embedding weights on shell model after full sync")
+        except Exception as e:
+            log.info(f"Module: tie_weights failed: {e}")
+
+    log.info(f"Module: Total synced modules: {swapped}")
+    return swapped
