@@ -91,6 +91,10 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
 
     # print(f"device_map base_modules: {device_map}")
 
+    # skip modules without weights since they can't be offloaded
+    if not hasattr(module, "weight"):
+        return
+
     _ = disk_offload(
         module,
         # device_map={ "" : "disk" },  # only touch this subtree
