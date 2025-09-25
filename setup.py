@@ -432,14 +432,20 @@ if BUILD_CUDA_EXT == "1":
 
         if not ROCM_VERSION:
             extra_compile_args["nvcc"] += [
-                "--threads", "8",
-                "--optimize=3",
-                "-lineinfo",
-                "--resource-usage",
-                "-Xfatbin", "-compress-all",
-                "--expt-relaxed-constexpr",
-                "--expt-extended-lambda",
-                "-diag-suppress=179,39,177",
+                "--threads", "8",  # NVCC parallelism
+                "--optimize=3",  # alias for -O3
+                "-rdc=true",  # enable relocatable device code, required for future cuda > 13.x for marlin
+                # "-dlto",      # compile and link <-- TODO FIX ME
+                # Print register/shared-memory usage per kernel (debug aid, no perf effect)
+                # Ensure PTXAS uses maximum optimization
+                # Cache global loads in both L1 and L2 (better for memory-bound kernels)
+                "-Xptxas", "-v,-O3,-dlcm=ca",
+                "-lineinfo",  # keep source line info for profiling
+                # "--resource-usage",  # show per-kernel register/SMEM usage
+                "-Xfatbin", "-compress-all",  # compress fatbin
+                # "--expt-relaxed-constexpr",  # relaxed constexpr rules <-- not used
+                # "--expt-extended-lambda",  # allow device lambdas <-- not used
+                "-diag-suppress=179,39,177",  # silence some template warnings
             ]
         else:
             # hipify CUDA-like flags
