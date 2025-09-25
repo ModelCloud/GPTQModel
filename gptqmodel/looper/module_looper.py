@@ -20,7 +20,8 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CUDA, SUPPORTS_MODULE_TYPES
-from ..nn_modules.hooked_linear import HookedLinear, StopForward, replace_module_with_hooked_legacy
+from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
+                                        StopForward, replace_module_with_hooked_legacy)
 from ..utils import ASYNC_WORKER
 from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_device, get_module, get_module_by_name_prefix, move_to, nested_move_to
@@ -78,7 +79,7 @@ class ModuleLooper():
                     one_kwargs[k] = nested_move_to(v, device=data_device)
             layer_input_kwargs.append(one_kwargs)
 
-            raise ValueError
+            raise STOP_FORWARD_EXCEPTION
 
         # move layer to target device
         # layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
@@ -154,7 +155,7 @@ class ModuleLooper():
                     self.gptq_model.model.generate(**example, return_audio=False)
                 else:
                     self.gptq_model.model(**example, use_cache=use_cache)
-            except ValueError:
+            except StopForward:
                 pass
 
         # LifeCycle: pre-first layer embedding hook
