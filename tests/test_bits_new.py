@@ -149,10 +149,10 @@ class Test(ModelTest):
 
             if not model.quantized:
                 model.quantize(
-                    calibration_dataset=calibration_dataset,
+                    calibration=calibration_dataset,
                     batch_size=batch_size,
                     auto_gc=auto_gc,
-                    calibration_dataset_concat_size=calibration_dataset_concat_size,
+                    calibration_concat_size=calibration_dataset_concat_size,
                     backend=BACKEND.TORCH,
                 ) #
 

@@ -102,10 +102,10 @@ class Test(ModelTest):
             )
 
             model.quantize(
-                calibration_dataset=calibration_dataset,
+                calibration=calibration_dataset,
                 batch_size=batch_size,
                 auto_gc=auto_gc,
-                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                calibration_concat_size=calibration_dataset_concat_size,
             ) #
 
             # EoRA adapter is saved according to Lora.path property

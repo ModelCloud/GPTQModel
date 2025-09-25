@@ -16,7 +16,7 @@ log = setup_logger()
 
 class DequantizeProcessor(LoopProcessor):
     def __init__(self, quantized_modules: Dict[str, TorchQuantLinear]):
-        super().__init__(tokenizer=None, qcfg=None, calibration_dataset=None, calibration_dataset_concat_size=None,
+        super().__init__(tokenizer=None, qcfg=None, calibration=None, calibration_concat_size=None,
                          prepare_dataset_func=None, batch_size=1,
                          logger_board="", require_fwd=False)
 

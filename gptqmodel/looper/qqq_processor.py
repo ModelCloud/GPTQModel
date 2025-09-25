@@ -26,12 +26,12 @@ from ..utils.torch import CPU, DEVICE_0, torch_streamCtx, torch_sync
 log = setup_logger()
 
 class QQQProcessor(LoopProcessor):
-    def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
-                 calibration_dataset_concat_size: Optional[int], batch_size: int,
+    def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration, prepare_dataset_func,
+                 calibration_concat_size: Optional[int], batch_size: int,
                  logger_board: str = "", require_fwd: bool = True, calculate_w_wq_diff: bool = False):
 
-        super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration_dataset=calibration_dataset,
-                         calibration_dataset_concat_size=calibration_dataset_concat_size,
+        super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration=calibration,
+                         calibration_concat_size=calibration_concat_size,
                          prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
                          logger_board=logger_board, require_fwd=require_fwd)
 

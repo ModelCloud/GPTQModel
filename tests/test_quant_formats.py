@@ -80,8 +80,8 @@ class TestQuantization(ModelTest):
             quantize_config=quantize_config,
         )
         model.quantize(
-            calibration_dataset=self.calibration_dataset,
-            calibration_dataset_concat_size=0,
+            calibration=self.calibration_dataset,
+            calibration_concat_size=0,
             auto_gc=False,
         )
 

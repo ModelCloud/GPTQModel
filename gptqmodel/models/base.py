@@ -482,10 +482,10 @@ class BaseQModel(nn.Module):
 
     def quantize(
         self,
-        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
-        calibration_dataset_concat_size: Optional[int] = None,
-        calibration_dataset_sort: Optional[str] = None,  # valid values are asc, desc, shuffle
+        calibration_concat_size: Optional[int] = None,
+        calibration_sort: Optional[str] = None,  # valid values are asc, desc, shuffle
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
@@ -575,10 +575,10 @@ class BaseQModel(nn.Module):
         args = {
             "tokenizer": self.tokenizer,
             "qcfg": self.quantize_config,
-            "calibration_dataset": calibration_dataset,
+            "calibration": calibration,
             "prepare_dataset_func": self.prepare_dataset,
-            "calibration_dataset_concat_size": calibration_dataset_concat_size,
-            "calibration_dataset_sort": calibration_dataset_sort,
+            "calibration_concat_size": calibration_concat_size,
+            "calibration_sort": calibration_sort,
             "batch_size": batch_size,
             "logger_board": logger_board,
             "calculate_w_wq_diff": needs_lora,  # lora needs original w - wq delta
@@ -662,10 +662,10 @@ class BaseQModel(nn.Module):
                 EoraProcessor(
                     tokenizer=self.tokenizer,
                     qcfg=self.quantize_config,
-                    calibration_dataset=adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration_dataset,
+                    calibration=adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration,
                     prepare_dataset_func=self.prepare_dataset,
-                    calibration_dataset_concat_size=calibration_dataset_concat_size,
-                    calibration_dataset_sort=calibration_dataset_sort,
+                    calibration_concat_size=calibration_concat_size,
+                    calibration_sort=calibration_sort,
                     batch_size=batch_size,
                     logger_board=logger_board,
                 )
@@ -728,10 +728,10 @@ class BaseQModel(nn.Module):
             EoraProcessor(
                 tokenizer=self.tokenizer,
                 qcfg=self.quantize_config,
-                calibration_dataset=calibration_dataset,
+                calibration=calibration_dataset,
                 prepare_dataset_func=self.prepare_dataset,
-                calibration_dataset_concat_size=calibration_dataset_concat_size,
-                calibration_dataset_sort=calibration_dataset_sort,
+                calibration_concat_size=calibration_dataset_concat_size,
+                calibration_sort=calibration_dataset_sort,
                 batch_size=batch_size,
                 logger_board=logger_board,
             ),
