@@ -81,12 +81,14 @@ def get_device(obj: torch.Tensor | nn.Module):
     if isinstance(obj, torch.Tensor):
         return obj.device
 
-    params = list(obj.parameters())  # Convert generator to list
+    params = list(obj.parameters())
+    buffers = list(obj.buffers())
     if len(params) > 0:
         return params[0].device
+    elif len(buffers) > 0:
+        return buffers[0].device
     else:
-        log.warn(f"Quantize: Unable to determine device of `{obj}`. default to `cpu`")
-        return torch.device('cpu')  # or raise an exception
+        return None
 
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
     if get_device(obj) != device:
