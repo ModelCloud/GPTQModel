@@ -500,7 +500,7 @@ def convert_gptq_v1_to_v2_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if not qlinear_kernel.REQUIRES_FORMAT_V2:
+    if quantize_config.quant_method in [METHOD.GPTQ] and not qlinear_kernel.REQUIRES_FORMAT_V2:
         log.info(
             f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
         return model
@@ -576,7 +576,7 @@ def convert_gptq_v2_to_v1_format(
 ):
 
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if not qlinear_kernel.REQUIRES_FORMAT_V2:
+    if quantize_config.quant_method in [METHOD.GPTQ] and not qlinear_kernel.REQUIRES_FORMAT_V2:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
