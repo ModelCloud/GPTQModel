@@ -426,6 +426,8 @@ class BaseQModel(nn.Module):
             new_calibration_dataset = concatenated_data
 
         if self.support_batch_quantize:
+            log.info(f"Calibration: Pre-batch sorting in ascending order by length")
+
             # Sort input_ids in asc order
             sorted_dataset = sorted(
                 new_calibration_dataset,
@@ -441,6 +443,24 @@ class BaseQModel(nn.Module):
                 {"input_ids": torch.tensor(block["input_ids"], dtype=torch.long)}
                 for block in new_calibration_dataset
             ]
+
+        # total tokens counters
+        total_padded = 0
+        total_non_padded = 0
+
+        for batch in new_calibration_dataset_batched:
+            # attention_mask is shape [batch_size, seq_len]
+            mask = batch["attention_mask"]
+
+            # count where mask == 0 (padded tokens)
+            total_padded += (mask == 0).sum().item()
+
+            # count where mask == 1 (non-padded tokens)
+            total_non_padded += (mask == 1).sum().item()
+
+        log.info(f"Calibration: Total padded tokens: {total_padded}")
+        log.info(f"Calibration: Total non-padded tokens: {total_non_padded}")
+        log.info(f"Calibration: Total tokens: {total_non_padded + total_padded}")
 
         return new_calibration_dataset_batched
 
