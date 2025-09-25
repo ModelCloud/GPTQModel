@@ -233,7 +233,6 @@ class GPTQModel:
             device: Optional[Union[str, torch.device]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             trust_remote_code: bool = False,
-            verify_hash: Optional[Union[str, List[str]]] = None,
             debug: Optional[bool] = False,
             **kwargs,
     ):
@@ -275,7 +274,6 @@ class GPTQModel:
                 device=device,
                 backend=backend,
                 trust_remote_code=trust_remote_code,
-                verify_hash=verify_hash,
                 **kwargs,
             )
         else:
@@ -331,10 +329,6 @@ class GPTQModel:
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             trust_remote_code: bool = False,
-            # verify weight files matches predefined hash during loading
-            # usage: hash_format:hash_value, example: md5:ugkdh232
-            # supports all hashlib hash methods
-            verify_hash: Optional[Union[str, List[str]]] = None,
             **kwargs,
     ) -> BaseQModel:
         # normalize adapter to instance
@@ -352,7 +346,6 @@ class GPTQModel:
             device=device,
             backend=backend,
             trust_remote_code=trust_remote_code,
-            verify_hash=verify_hash,
             adapter=adapter,
             **kwargs,
         )

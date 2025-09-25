@@ -39,8 +39,7 @@ from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_device_support
 from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_config_seq_len, find_modules,
                            get_checkpoints, get_module_by_name_prefix, gptqmodel_post_init,
-                           load_checkpoint_in_model_then_tie_weights, make_quant, simple_dispatch_model,
-                           verify_model_hash, verify_sharded_model_hashes)
+                           load_checkpoint_in_model_then_tie_weights, make_quant, simple_dispatch_model)
 from ._const import DEVICE, normalize_device
 
 log = setup_logger()
@@ -231,7 +230,6 @@ def ModelLoader(cls):
             adapter: Optional[Adapter] = None,
             dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
-            verify_hash: Optional[Union[str, List[str]]] = None,
             max_memory: Optional[dict] = None,
             **kwargs,
     ):
@@ -410,14 +408,6 @@ def ModelLoader(cls):
         qcfg.runtime_format = qcfg.format
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
-        if verify_hash:
-            if is_sharded:
-                verfieid = verify_sharded_model_hashes(model_save_name, verify_hash)
-            else:
-                verfieid = verify_model_hash(model_save_name, verify_hash)
-            if not verfieid:
-                raise ValueError(f"Hash verification failed for {model_save_name}")
-            log.info(f"Hash verification succeeded for {model_save_name}")
 
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
         def skip(*args, **kwargs):
