@@ -434,7 +434,7 @@ if BUILD_CUDA_EXT == "1":
             extra_compile_args["nvcc"] += [
                 "--threads", "8",  # NVCC parallelism
                 "--optimize=3",  # alias for -O3
-                "-rdc=true",  # enable relocatable device code, required for future cuda > 13.x for marlin
+                # "-rdc=true",  # enable relocatable device code, required for future cuda > 13.x <-- TODO FIX ME broken loading
                 # "-dlto",      # compile and link <-- TODO FIX ME
                 # Print register/shared-memory usage per kernel (debug aid, no perf effect)
                 # Ensure PTXAS uses maximum optimization
