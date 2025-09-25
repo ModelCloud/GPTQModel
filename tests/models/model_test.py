@@ -75,6 +75,7 @@ class ModelTest(unittest.TestCase):
     SYM = True
     V2 = False
     ACT_GROUP_AWARE = True
+    FAIL_SAFE = True
 
     SAVE_PATH = None  # default is temp folder
 
@@ -169,6 +170,7 @@ class ModelTest(unittest.TestCase):
             format=self.FORMAT,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
+            fail_safe=self.FAIL_SAFE,
             sym=self.SYM,
             v2=self.V2
         )
