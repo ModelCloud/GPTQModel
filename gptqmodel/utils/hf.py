@@ -2,7 +2,7 @@ from typing import Any, Optional
 
 import torch
 from accelerate import init_empty_weights
-from transformers import AutoModelForCausalLM, GenerationConfig, PreTrainedModel
+from transformers import GenerationConfig, PreTrainedModel
 
 from ..utils.logger import setup_logger
 
