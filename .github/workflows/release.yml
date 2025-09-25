@@ -237,12 +237,6 @@ jobs:
           - cuda: 118
             torch: 2.2.2
             python: 311
-          - cuda: 118
-            torch: 2.1.2
-            python: 311
-          - cuda: 118
-            torch: 2.0.1
-            python: 311
     runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
