@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import random
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Type, Union
 
@@ -302,6 +303,7 @@ class BaseQModel(nn.Module):
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
         calibration_dataset_concat_size: Optional[int] = None,
+        calibration_dataset_sort: Optional[str] = None,
         batch_size: int = 1,
         calibration_data_min_length: int = 10,
     ):
@@ -425,24 +427,65 @@ class BaseQModel(nn.Module):
 
             new_calibration_dataset = concatenated_data
 
+        # Sort or shuffle calibration dataset
+        if calibration_dataset_sort == "asc":
+            log.info("Calibration: Sort in ascending order by length")
+            sorted_dataset = sorted(
+                new_calibration_dataset,
+                key=lambda item: len(item["input_ids"][0])
+            )
+        elif calibration_dataset_sort == "desc":
+            log.info("Calibration: Sort in descending order by length")
+            sorted_dataset = sorted(
+                new_calibration_dataset,
+                key=lambda item: len(item["input_ids"][0]),
+                reverse=True
+            )
+        elif calibration_dataset_sort == "shuffle":
+            log.info("Calibration: Sort by random shuffle")
+            sorted_dataset = new_calibration_dataset[:]  # shallow copy
+            random.shuffle(sorted_dataset)
+        else:
+            log.info("Calibration: Native order")
+            sorted_dataset = new_calibration_dataset  # fallback: no sort
+
         if self.support_batch_quantize:
             new_calibration_dataset_batched = [
-                collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
-                for start in range(0, len(new_calibration_dataset), batch_size)
+                collate_data(sorted_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
+                for start in range(0, len(sorted_dataset), batch_size)
             ]
         else:
             new_calibration_dataset_batched = [
                 {"input_ids": torch.tensor(block["input_ids"], dtype=torch.long)}
-                for block in new_calibration_dataset
+                for block in sorted_dataset
             ]
+
+        # total tokens counters
+        total_padded = 0
+        total_non_padded = 0
+
+        for batch in new_calibration_dataset_batched:
+            # attention_mask is shape [batch_size, seq_len]
+            mask = batch["attention_mask"]
+
+            # count where mask == 0 (padded tokens)
+            total_padded += (mask == 0).sum().item()
+
+            # count where mask == 1 (non-padded tokens)
+            total_non_padded += (mask == 1).sum().item()
+
+        log.info(f"Calibration: Total padded tokens: {total_padded}")
+        log.info(f"Calibration: Total non-padded tokens: {total_non_padded}")
+        log.info(f"Calibration: Total tokens: {total_non_padded + total_padded}")
 
         return new_calibration_dataset_batched
 
     def quantize(
         self,
-        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
-        calibration_dataset_concat_size: Optional[int] = None,
+        calibration_concat_size: Optional[int] = None,
+        calibration_sort: Optional[str] = None,  # valid values are asc, desc, shuffle
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
@@ -532,9 +575,10 @@ class BaseQModel(nn.Module):
         args = {
             "tokenizer": self.tokenizer,
             "qcfg": self.quantize_config,
-            "calibration_dataset": calibration_dataset,
+            "calibration": calibration,
             "prepare_dataset_func": self.prepare_dataset,
-            "calibration_dataset_concat_size": calibration_dataset_concat_size,
+            "calibration_concat_size": calibration_concat_size,
+            "calibration_sort": calibration_sort,
             "batch_size": batch_size,
             "logger_board": logger_board,
             "calculate_w_wq_diff": needs_lora,  # lora needs original w - wq delta
@@ -618,9 +662,10 @@ class BaseQModel(nn.Module):
                 EoraProcessor(
                     tokenizer=self.tokenizer,
                     qcfg=self.quantize_config,
-                    calibration_dataset=adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration_dataset,
+                    calibration=adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration,
                     prepare_dataset_func=self.prepare_dataset,
-                    calibration_dataset_concat_size=calibration_dataset_concat_size,
+                    calibration_concat_size=calibration_concat_size,
+                    calibration_sort=calibration_sort,
                     batch_size=batch_size,
                     logger_board=logger_board,
                 )
@@ -644,6 +689,7 @@ class BaseQModel(nn.Module):
         quantized_modules: Dict[str, TorchQuantLinear],
         calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         calibration_dataset_concat_size: Optional[int] = None,
+        calibration_dataset_sort: Optional[str] = None,
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
@@ -682,9 +728,10 @@ class BaseQModel(nn.Module):
             EoraProcessor(
                 tokenizer=self.tokenizer,
                 qcfg=self.quantize_config,
-                calibration_dataset=calibration_dataset,
+                calibration=calibration_dataset,
                 prepare_dataset_func=self.prepare_dataset,
-                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                calibration_concat_size=calibration_dataset_concat_size,
+                calibration_sort=calibration_dataset_sort,
                 batch_size=batch_size,
                 logger_board=logger_board,
             ),

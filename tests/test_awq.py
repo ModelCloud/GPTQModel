@@ -62,7 +62,7 @@ class TestGroupSize(unittest.TestCase):
             quantize_config=quantize_config,
             debug=True,
         )
-        model.quantize(self.calibration_dataset, batch_size=1, calibration_dataset_concat_size=2048)
+        model.quantize(self.calibration_dataset, batch_size=1, calibration_concat_size=2048)
         with tempfile.TemporaryDirectory() as tmp_dir_name:
             model.save(tmp_dir_name)
 

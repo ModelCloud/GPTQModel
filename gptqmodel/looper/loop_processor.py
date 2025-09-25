@@ -31,9 +31,10 @@ class LoopProcessor:
     def __init__(
             self,
             tokenizer, qcfg: QuantizeConfig,
-            calibration_dataset,
+            calibration,
             prepare_dataset_func,
-            calibration_dataset_concat_size: Optional[int],
+            calibration_concat_size: Optional[int],
+            calibration_sort: Optional[str],
             batch_size: int = 1,
             logger_board: str = "",
             require_fwd: bool = True,
@@ -111,24 +112,25 @@ class LoopProcessor:
 
 
         # prepare dataset
-        if calibration_dataset is not None:
-            if len(calibration_dataset) == 0:
+        if calibration is not None:
+            if len(calibration) == 0:
                 raise ValueError("Calibration dataset must not be empty.")
 
             min_calibration_dataset_size = 256
             min_calibration_dataset_input_ids_avg_length = 256
-            if len(calibration_dataset) < min_calibration_dataset_size:
+            if len(calibration) < min_calibration_dataset_size:
                 log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
-                               f"Current: {len(calibration_dataset)}.")
+                               f"Current: {len(calibration)}.")
 
-            calibration_dataset = prepare_dataset_func(calibration_dataset=calibration_dataset,
-                                                            calibration_dataset_concat_size=calibration_dataset_concat_size,
-                                                            batch_size=batch_size)
+            calibration = prepare_dataset_func(calibration_dataset=calibration,
+                                               calibration_dataset_concat_size=calibration_concat_size,
+                                               calibration_dataset_sort=calibration_sort,
+                                               batch_size=batch_size)
 
             # Calculate the average length of the average input_ids
             total_input_ids_length = 0
             max_input_id_length = 0
-            for row in calibration_dataset:
+            for row in calibration:
                 input_ids = row["input_ids"]
                 if isinstance(input_ids, torch.Tensor):
                     if input_ids.dim() <= 2:
@@ -143,15 +145,15 @@ class LoopProcessor:
                 if input_ids_length > max_input_id_length:
                     max_input_id_length = input_ids_length
                 total_input_ids_length += input_ids_length
-            avg = total_input_ids_length / len(calibration_dataset)
+            avg = total_input_ids_length / len(calibration)
 
             if avg < min_calibration_dataset_input_ids_avg_length:
                 log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
                                f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
-            self.num_batches = len(calibration_dataset)
+            self.num_batches = len(calibration)
 
-        self.calibration_dataset = calibration_dataset
+        self.calibration_dataset = calibration
 
     def log_save_async(self, stat):
         # start log worker async writer
