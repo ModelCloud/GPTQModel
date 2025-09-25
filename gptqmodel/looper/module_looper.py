@@ -366,6 +366,7 @@ class ModuleLooper():
                         # sync above stream copies
                         #torch_sync(device=cur_layer_device)
 
+                        layer_output = None # scope fix due to try/catch
                         try:
                             # TODO FIX ME remove hamba hack
                             # reuse_kv is a flag to reuse the kv cache, only for the hamba model
@@ -386,8 +387,9 @@ class ModuleLooper():
                             #torch_empty_cache(CUDA)
                             pass
                         finally:
-                            del layer_input
-                            del additional_layer_inputs
+                            pass
+                            #del layer_input
+                            #del additional_layer_inputs
 
                         # For Native processor, we can update processor input here
                         # if second forward is not required, this/first forward output is captured as input for next loop
@@ -563,7 +565,7 @@ class ModuleLooper():
                         for name in processed_subset:
                             def finalize_module(module):
                                 reverse_p.submodule_finalize(module, self.gptq_model)
-                                
+
                                 # checking for disk offloading
                                 offload_to_disk(
                                     model=self.gptq_model.model,
@@ -609,6 +611,7 @@ class ModuleLooper():
 
             processor_name = reverse_p.name()
             total_log[processor_name] = reverse_p.log
+            # TODO FIX ME..what about awq?
             if processor_name in ["gptq", "gptq v2"]:
                 self.gptq_model.quant_log = reverse_p.log
 

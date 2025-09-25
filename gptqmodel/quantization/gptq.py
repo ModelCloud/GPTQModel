@@ -121,7 +121,6 @@ class GPTQ:
 
         self.module_copy = None
 
-        self.H = None
         self.nsamples = 0
 
         self.quantizer = self.create_quantizer(name=self.name)
