@@ -268,7 +268,7 @@ def ModelWriter(cls):
         if getattr(model.config, "tie_word_embeddings", False):
             input_embed = model.get_input_embeddings()
             output_embed = model.get_output_embeddings()
-            if input_embed != output_embed.device and output_embed.weight.device.type == "meta":
+            if input_embed != output_embed and output_embed.weight.device.type == "meta":
                 model.set_output_embeddings(input_embed)
 
         # print("dbug 2")
