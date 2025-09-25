@@ -20,6 +20,8 @@ class TestLlama3_2(ModelTest):
     DEBUG = True
     ACT_GROUP_AWARE = True
     DESC_ACT = False
+    DATASET_SIZE = 1024
+    QUANT_BATCH_SIZE = 2 # <-- change to 2
 
     def test_llama3_2(self):
         self.quant_lm_eval()

@@ -143,6 +143,8 @@ class ModelTest(unittest.TestCase):
             return traindata.select(range(rows))
         #     return traindata[:rows]
 
+        return traindata.select(range(rows))["text"]
+
         datas = []
         for index, sample in enumerate(traindata):
             tokenized = tokenizer(sample['text'])
