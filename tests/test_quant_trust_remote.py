@@ -26,7 +26,7 @@ class TestQuantWithTrustRemoteTrue(ModelTest):
         if not self.tokenizer.pad_token_id:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        self.calibration_dataset = self.load_dataset(self.tokenizer)
+        self.calibration = self.load_dataset(self.tokenizer)
 
     def test_diff_batch(self):
         quantize_config = QuantizeConfig(
@@ -43,7 +43,7 @@ class TestQuantWithTrustRemoteTrue(ModelTest):
             **args,
         )
 
-        model.quantize(self.calibration_dataset, batch_size=64)
+        model.quantize(self.calibration, batch_size=64)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(tmp_dir)

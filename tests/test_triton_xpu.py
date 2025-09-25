@@ -27,8 +27,8 @@ class TestTritonXPU(ModelTest):
             device=DEVICE.XPU,
         )
         tokenizer = self.load_tokenizer(self.NATIVE_MODEL_ID)
-        calibration_dataset = self.load_dataset(tokenizer)
-        origin_model.quantize(calibration_dataset, backend=BACKEND.TRITON)
+        calibration = self.load_dataset(tokenizer)
+        origin_model.quantize(calibration, backend=BACKEND.TRITON)
         with tempfile.TemporaryDirectory() as tmpdir:
           origin_model.save(tmpdir)
 

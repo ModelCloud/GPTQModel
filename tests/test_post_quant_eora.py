@@ -70,18 +70,18 @@ class TestEoraPostQuant(ModelTest):
 
     def test_post_quant_eora(self):
         rank = 256
-        calibration_dataset_rows = 512
-        calibration_dataset_concat_size = 0  # disable
+        calibration_rows = 512
+        calibration_concat_size = 0  # disable
         auto_gc = False
 
         dataset_id = "allenai/c4"
         dataset_files = "en/c4-train.00001-of-01024.json.gz"
 
-        calibration_dataset = load_dataset(
+        calibration = load_dataset(
             dataset_id,
             data_files=dataset_files,
             split="train"
-        ).select(range(calibration_dataset_rows))["text"]
+        ).select(range(calibration_rows))["text"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             eora = Lora(
@@ -95,8 +95,8 @@ class TestEoraPostQuant(ModelTest):
                 adapter=eora,
                 model_id_or_path=self.NATIVE_MODEL_ID,
                 quantized_model_id_or_path=self.QUANTIZED_MODEL_PATH,
-                calibration_dataset=calibration_dataset,
-                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                calibration=calibration,
+                calibration_concat_size=calibration_concat_size,
                 auto_gc=auto_gc)
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,

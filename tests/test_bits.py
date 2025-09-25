@@ -80,7 +80,7 @@ class TestBits(unittest.TestCase):
         model_id = "/monster/data/model/Qwen2.5-0.5B-Instruct"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         dataset = ["gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
-        calibration_dataset = [tokenizer(example) for example in dataset]
+        calibration = [tokenizer(example) for example in dataset]
 
         for quant_backend in self.pack_backends:
             supports_bits = self.QLINEAR_DICT[quant_backend].SUPPORTS_BITS
@@ -89,7 +89,7 @@ class TestBits(unittest.TestCase):
                 quantize_config = QuantizeConfig(bits=bits, group_size=128, sym=True, desc_act=True)
                 print(f"bits: {bits}, quant_backend: {quant_backend} start quant")
                 #try:
-                self.quant_and_eval(calibration_dataset, model_id, quant_backend, quantize_config, tokenizer)
+                self.quant_and_eval(calibration, model_id, quant_backend, quantize_config, tokenizer)
                 # except Exception as e:
                 #     raise e
                 #     # error_log=f"bits:  {bits}, quant_backend: {quant_backend} An error occurred"
@@ -102,12 +102,12 @@ class TestBits(unittest.TestCase):
 
         # self.assertTrue(len(errors) == 0, '\n'.join(errors))
 
-    def quant_and_eval(self, calibration_dataset, model_id, quant_backend, quantize_config, tokenizer):
+    def quant_and_eval(self, calibration, model_id, quant_backend, quantize_config, tokenizer):
         model = GPTQModel.load(
             model_id,
             quantize_config=quantize_config,
         )
-        model.quantize(calibration_dataset, backend=quant_backend)
+        model.quantize(calibration, backend=quant_backend)
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(
                 tmp_dir,

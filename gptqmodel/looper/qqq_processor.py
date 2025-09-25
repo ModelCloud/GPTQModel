@@ -52,8 +52,8 @@ class QQQProcessor(LoopProcessor):
             task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
             task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
 
-    def set_calibration_dataset(self, calibration_dataset):
-        raise NotImplementedError("QQQProcessor's calibration_dataset cannot be modified")
+    def set_calibration(self, calibration):
+        raise NotImplementedError("QQQProcessor's calibration dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, buffered_fwd: bool):
         # entire module is skipped
@@ -257,9 +257,9 @@ class QQQProcessor(LoopProcessor):
 
         super().finalize(model=model, **kwargs)
 
-    def verify_calibration_dataset(self, processor_index: int) -> bool:
-        if self.calibration_dataset is None:
-            raise ValueError("GPTQProcessor's calibration_dataset must be provided.")
+    def verify_calibration(self, processor_index: int) -> bool:
+        if self.calibration is None:
+            raise ValueError("GPTQProcessor's calibration dataset must be provided.")
         else:
             return True
 

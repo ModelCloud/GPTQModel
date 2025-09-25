@@ -76,7 +76,7 @@ class TestLoadVLLM(ModelTest):
         if not tokenizer.pad_token_id:
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
-        calibration_dataset = self.load_dataset(tokenizer)
+        calibration = self.load_dataset(tokenizer)
 
         # support dynamic override of bits, group_size, desc_act, sym for each layer/module match
         #
@@ -98,7 +98,7 @@ class TestLoadVLLM(ModelTest):
             NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
-        model.quantize(calibration_dataset, batch_size=4)
+        model.quantize(calibration, batch_size=4)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tokenizer.save_pretrained(tmp_dir)

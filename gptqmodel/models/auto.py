@@ -606,9 +606,9 @@ class GPTQModel:
             adapter: Adapter,
             model_id_or_path: str, # native model
             quantized_model_id_or_path: str, # gptqmodel quantized model
-            calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-            calibration_dataset_concat_size: Optional[int] = None,
-            calibration_dataset_sort: Optional[str] = None,
+            calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+            calibration_concat_size: Optional[int] = None,
+            calibration_sort: Optional[str] = None,
             batch_size: Optional[int] = 1,
             calibration_enable_gpu_cache: Optional[bool] = True,
             tokenizer: Optional[PreTrainedTokenizerBase] = None,
@@ -657,9 +657,9 @@ class GPTQModel:
                 model._eora_generate(
                     adapter=adapter,
                     quantized_modules=qModules,
-                    calibration_dataset=calibration_dataset,
-                    calibration_dataset_concat_size=calibration_dataset_concat_size,
-                    calibration_dataset_sort=calibration_dataset_sort,
+                    calibration=calibration,
+                    calibration_concat_size=calibration_concat_size,
+                    calibration_sort=calibration_sort,
                     batch_size=batch_size,
                     calibration_enable_gpu_cache=calibration_enable_gpu_cache,
                     tokenizer=tokenizer,

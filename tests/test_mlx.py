@@ -20,7 +20,7 @@ class TestExport(ModelTest):
     @classmethod
     def setUpClass(self):
         self.tokenizer = AutoTokenizer.from_pretrained(self.NATIVE_MODEL_ID, use_fast=True)
-        self.calibration_dataset = self.load_dataset(self.tokenizer)
+        self.calibration = self.load_dataset(self.tokenizer)
 
     def test_export_mlx(self):
         with tempfile.TemporaryDirectory() as export_dir:

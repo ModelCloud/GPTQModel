@@ -40,7 +40,7 @@ class ModuleLooper():
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
 
-    def cache_inputs(self, layers, auto_gc, calibration_data, calibration_enable_gpu_cache, use_cache):
+    def cache_inputs(self, layers, auto_gc, calibration, calibration_enable_gpu_cache, use_cache):
         layer_inputs = []
         attention_masks = []
         position_ids = []
@@ -134,7 +134,7 @@ class ModuleLooper():
         # print(f"pre generation input hoook (embedding)")
         # print_module_tree(self.gptq_model.model)
 
-        for example in calibration_data:
+        for example in calibration:
             for k, v in example.items():
                 if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
                     data_device = self.gptq_model.quantize_config.device
@@ -193,29 +193,29 @@ class ModuleLooper():
         layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.extract_layers_node())
 
         for p_index, processor in enumerate(self.processors):
-            if not processor.verify_calibration_dataset(p_index):
+            if not processor.verify_calibration(p_index):
                 if isinstance(processor, EoraProcessor) or\
                         (isinstance(processor, GPTQProcessor) and self.gptq_model.quantize_config.v2):
                     prev_processor = self.processors[p_index - 1]
-                    processor.set_calibration_dataset(prev_processor.calibration_dataset)
+                    processor.set_calibration(prev_processor.calibration)
                     # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
                     processor.receive_input_cache(copy.copy(prev_processor.inputs_cache))
                 elif isinstance(processor, DequantizeProcessor):
                     # DequantizeProcessor does not perform any operations on dataset.
-                    processor.set_calibration_dataset([])
+                    processor.set_calibration([])
                     processor.receive_input_cache(InputCache([], [], [], []))
 
                 continue
 
             input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
-                                            calibration_data=processor.calibration_dataset,
+                                            calibration=processor.calibration,
                                             calibration_enable_gpu_cache=calibration_enable_gpu_cache,
                                             use_cache=False)
             processor.receive_input_cache(input_cache)
 
         # release calibration_dataset
         for processor in self.processors:
-            processor.release_calibration_dataset()
+            processor.release_calibration()
 
         layer_modules = self.gptq_model.simple_layer_modules(model_config=self.gptq_model.model.config)
 

@@ -60,23 +60,23 @@ class Test(ModelTest):
         act_group_aware = True
         rank = 128
         batch_size = 1
-        calibration_dataset_rows = 512
-        calibration_dataset_concat_size = 0 # disable
+        calibration_rows = 512
+        calibration_concat_size = 0 # disable
         auto_gc = False
         adapter_path = "eora"
         dataset_id = "allenai/c4"
         dataset_files = "en/c4-train.00001-of-01024.json.gz"
 
 
-        calibration_dataset = load_dataset(
+        calibration = load_dataset(
             dataset_id,
             data_files=dataset_files,
             split="train"
-        ).select(range(calibration_dataset_rows))["text"]
+        ).select(range(calibration_rows))["text"]
 
         # with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
         #     data = [json.loads(line)["text"] for line in f]
-        #     calibration_dataset = data[:calibration_dataset_rows]
+        #     calibration_dataset = data[:calibration_rows]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             eora = Lora(
@@ -102,10 +102,10 @@ class Test(ModelTest):
             )
 
             model.quantize(
-                calibration=calibration_dataset,
+                calibration=calibration,
                 batch_size=batch_size,
                 auto_gc=auto_gc,
-                calibration_concat_size=calibration_dataset_concat_size,
+                calibration_concat_size=calibration_concat_size,
             ) #
 
             # EoRA adapter is saved according to Lora.path property
