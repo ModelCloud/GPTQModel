@@ -135,8 +135,11 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     @classmethod
-    def load_dataset(self, tokenizer=None, rows: int = DATASET_SIZE):
-        traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
+    def load_dataset(self, tokenizer=None, rows: int = 0):
+
+        #traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
+        traindata = load_dataset("neuralmagic/calibration", "LLM", split="train")
+        #neuralmagic / calibration
         # Load data directly from gzipped JSON file
         # with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
         #     traindata = [json.loads(line) for line in f]
@@ -145,7 +148,13 @@ class ModelTest(unittest.TestCase):
             return traindata.select(range(rows))
         #     return traindata[:rows]
 
-        return traindata.select(range(rows))["text"]
+        # Count total rows
+        # print("Total rows:", len(traindata), "wanted rows=", rows)
+
+        # Select the first N rows (e.g., N=10)
+        subset = traindata.select(range(min(rows, len(traindata))))
+
+        return subset["text"]
 
         datas = []
         for index, sample in enumerate(traindata):
@@ -198,7 +207,7 @@ class ModelTest(unittest.TestCase):
         tokenizer = model.tokenizer
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
-        calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer)
+        calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
 
         # mpt model need
         if not model.config.pad_token_id:
