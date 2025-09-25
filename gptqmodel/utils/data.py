@@ -142,26 +142,66 @@ def make_data_block(
     return new_samples
 
 
+from typing import Dict, List
+import torch
+from torch import Tensor
+
 def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> Dict[str, Tensor]:
-    def pad_batch(block: LongTensor, pads: Tensor):
-        return torch.cat((block, pads.to(block.device)), dim=-1)
+    """
+    Collate an outer batch (size B) of items, where each item holds multiple rows.
+    We flatten the rows across items, pad to a global max length, and stack into
+    [total_rows, max_len] tensors for HF Transformers.
 
-    input_ids = [LongTensor(block["input_ids"]) for block in batch]
-    attention_masks = [LongTensor(block["attention_mask"]) for block in batch]
+    Each element of `batch` looks like:
+      {
+        "input_ids": List[List[int]],       # rows
+        "attention_mask": List[List[int]],  # rows
+      }
+    """
+    # Flatten rows across all items in the outer batch
+    rows_ids = []
+    rows_mask = []
 
-    inp_max_len = max([block.size(-1) for block in input_ids])
+    for item in batch:
+        ids_list = item["input_ids"]
+        msk_list = item["attention_mask"]
 
-    for i in range(len(batch)):
-        block_bsz, block_inp_len = input_ids[i].shape
-        pad_num = inp_max_len - block_inp_len
-        if pad_num > 0:
-            input_ids[i] = pad_batch(input_ids[i], torch.ones((block_bsz, pad_num)) * pad_token_id)
-            attention_masks[i] = pad_batch(attention_masks[i], torch.zeros((block_bsz, pad_num)))
+        # sanity check shapes per row
+        assert len(ids_list) == len(msk_list), "input_ids and attention_mask row counts must match"
 
-    return {
-        "input_ids": torch.cat(input_ids, dim=0).long(),
-        "attention_mask": torch.cat(attention_masks, dim=0).long(),
+        for r in range(len(ids_list)):
+            ids = torch.as_tensor(ids_list[r], dtype=torch.long)
+            msk = torch.as_tensor(msk_list[r], dtype=torch.long)
+
+            # ensure pre-pad lengths match within the row
+            if ids.numel() != msk.numel():
+                raise ValueError("Row has mismatched lengths between input_ids and attention_mask")
+
+            rows_ids.append(ids)
+            rows_mask.append(msk)
+
+    # Compute global max length
+    max_len = max(t.numel() for t in rows_ids) if rows_ids else 0
+
+    # Right-pad each row to global max_len
+    def right_pad(row: torch.Tensor, pad_value: int) -> torch.Tensor:
+        pad_len = max_len - row.numel()
+        if pad_len <= 0:
+            return row
+        return torch.cat([row, torch.full((pad_len,), pad_value, dtype=row.dtype, device=row.device)], dim=0)
+
+    padded_ids = [right_pad(t, pad_token_id) for t in rows_ids]
+    padded_msk = [right_pad(t, 0) for t in rows_mask]
+
+    # Stack into [total_rows_in_batch, max_len]
+    input_ids = torch.stack(padded_ids, dim=0) if padded_ids else torch.empty((0, 0), dtype=torch.long)
+    attention_mask = torch.stack(padded_msk, dim=0) if padded_msk else torch.empty((0, 0), dtype=torch.long)
+
+    out = {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
     }
+    return out
 
 
 def get_dataloader(
