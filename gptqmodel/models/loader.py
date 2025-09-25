@@ -183,7 +183,7 @@ def ModelLoader(cls):
 
         #model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
         print("shell model-----------")
-        model = build_shell_model(config=config, **model_init_kwargs)
+        model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
         model._model_init_kwargs = model_init_kwargs
 
         print_module_tree(model=model)

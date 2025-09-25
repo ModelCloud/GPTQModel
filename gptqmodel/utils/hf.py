@@ -63,6 +63,7 @@ def autofix_hf_generation_config(cfg: GenerationConfig):
 
 # load hf model with empty tensors on meta device (zero tensor memory usage)
 def build_shell_model(
+    loader,
     config: Any,
     dtype: Optional[torch.dtype] = None,
     trust_remote_code: bool = True,
@@ -85,7 +86,7 @@ def build_shell_model(
 
     # All nn.Parameters and buffers are created on 'meta' and initializers are skipped.
     with init_empty_weights(include_buffers=True):
-        shell = AutoModelForCausalLM.from_config(
+        shell = loader.from_config(
             config,
             dtype=dtype,
             trust_remote_code=trust_remote_code,
