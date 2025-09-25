@@ -19,7 +19,7 @@ class TestKernelOutput(unittest.TestCase):
         BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
     }
     target = 'model.layers.6.self_attn.v_proj'
-    device_map = "cpu"
+    device = "cpu"
     m = [1, 16, 64, 256, 1024]
     k = 2048
     dtype = torch.float16
@@ -29,7 +29,7 @@ class TestKernelOutput(unittest.TestCase):
 
     @classmethod
     def setUp(self):
-        self.torch_model = GPTQModel.load(self.model_path, backend=BACKEND.TORCH, device_map=self.device_map, dtype=self.dtype)
+        self.torch_model = GPTQModel.load(self.model_path, backend=BACKEND.TORCH, device=self.device, dtype=self.dtype)
         self.x = []
         self.torch_kernel_outs = []
         for dim_0 in self.m:
@@ -61,8 +61,8 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TORCH_FUSED,  r_tolerance, a_tolerance),
     ])
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
-        model = GPTQModel.load(self.model_path, backend=backend, device_map=self.device_map, dtype=self.dtype)
-        log.info(f"device_map: {self.device_map} ")
+        model = GPTQModel.load(self.model_path, backend=backend, device=self.device, dtype=self.dtype)
+        log.info(f"device: {self.device} ")
         log.info(f"backend: {backend} ")
         for i in range(len(self.x)):
             out = self.forward(model, self.x[i], backend=backend)
@@ -75,7 +75,7 @@ class TestKernelOutputBFloat16(TestKernelOutput):
 
 @unittest.skipUnless(hasattr(torch, "xpu") and torch.xpu.is_available(), reason="Test requires XPU")
 class TestKernelOutputXPU(TestKernelOutput):
-    device_map = "xpu:0"
+    device = "xpu:0"
     a_tolerance = 0.0005
 
 
