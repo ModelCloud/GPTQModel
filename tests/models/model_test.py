@@ -196,7 +196,7 @@ class ModelTest(unittest.TestCase):
         tokenizer = model.tokenizer
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
-        calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer)
+        calibration = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer)
 
         # mpt model need
         if not model.config.pad_token_id:
@@ -210,7 +210,7 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, calibration_sort=self.DATASET_SORT, backend=self.QUANT_BACKEND, batch_size=batch_size, buffered_fwd=self.BUFFERED_FWD)
+            model.quantize(calibration, calibration_sort=self.DATASET_SORT, backend=self.QUANT_BACKEND, batch_size=batch_size, buffered_fwd=self.BUFFERED_FWD)
 
             self.check_kernel(model, self.KERNEL_QUANT)
 

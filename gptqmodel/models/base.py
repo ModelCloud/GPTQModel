@@ -33,8 +33,7 @@ from ..utils.model import MODALITY, find_modules, get_device, get_module_by_name
 from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
-from ._const import (CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE,
-                     DEVICE, EXPERT_INDEX_PLACEHOLDER, META)
+from ._const import CALIBRATION_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE, DEVICE, EXPERT_INDEX_PLACEHOLDER, META
 from .loader import ModelLoader
 from .writer import ModelWriter
 
@@ -300,36 +299,36 @@ class BaseQModel(nn.Module):
 
     def prepare_dataset(
         self,
-        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
+        calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
-        calibration_dataset_concat_size: Optional[int] = None,
-        calibration_dataset_sort: Optional[str] = None,
+        calibration_concat_size: Optional[int] = None,
+        calibration_sort: Optional[str] = None,
         batch_size: int = 1,
         calibration_data_min_length: int = 10,
     ):
-        if isinstance(calibration_dataset[0], (str, list)) or (isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
+        if isinstance(calibration[0], (str, list)) or (isinstance(calibration[0], list) and all(isinstance(x, int) for x in calibration[0])):
             if self.tokenizer is None:
-                raise ValueError(f"tokenizer must be provided when calibration_dataset is List[str] or List[int], type: {type(calibration_dataset[0])}")
+                raise ValueError(f"tokenizer must be provided when calibration dataset is List[str] or List[int], type: {type(calibration[0])}")
 
             # Convert strings/ints to tokenized format
-            new_calibration_dataset = []
-            for data in calibration_dataset:
+            new_calibration = []
+            for data in calibration:
                 # convert to tensor directly if already in token ids format (ints)
                 if isinstance(data, list) and all(isinstance(x, int) for x in data):
                     input_ids = torch.tensor([data], dtype=torch.long)
                     attention_mask = torch.ones_like(input_ids)
-                    new_calibration_dataset.append({
+                    new_calibration.append({
                         "input_ids": input_ids,
                         "attention_mask": attention_mask
                     })
                 # call tokenizer if dataset still string format (str)
                 else:
                     tokenized = self.tokenizer(data, return_tensors="pt")
-                    new_calibration_dataset.append({
+                    new_calibration.append({
                         "input_ids": tokenized["input_ids"],
                         "attention_mask": tokenized["attention_mask"]
                     })
-            calibration_dataset = new_calibration_dataset
+            calibration = new_calibration
 
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -339,9 +338,9 @@ class BaseQModel(nn.Module):
                 return tensor.cpu().numpy().tolist()
             return [tensor]
 
-        new_calibration_dataset = []
+        new_calibration = []
         too_short_calibration_data_count = 0
-        for example in calibration_dataset:
+        for example in calibration:
             input_ids = _convert_tensor_to_list(example["input_ids"])
             attention_mask = _convert_tensor_to_list(example["attention_mask"])
 
@@ -350,7 +349,7 @@ class BaseQModel(nn.Module):
                 too_short_calibration_data_count += 1
                 continue
 
-            new_calibration_dataset.append(
+            new_calibration.append(
                 {
                     "input_ids": input_ids,
                     "attention_mask": attention_mask,
@@ -361,24 +360,24 @@ class BaseQModel(nn.Module):
             log.warn(f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
                      f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length.")
 
-        if calibration_dataset_concat_size:
+        if calibration_concat_size:
             concatenated_data = []
             input_ids_buff = []
             attention_mask_buff = []
             current_length = 0
 
-            new_line = self.tokenizer(CALIBRATION_DATASET_CONCAT_CHAR, return_tensors="pt")
+            new_line = self.tokenizer(CALIBRATION_CONCAT_CHAR, return_tensors="pt")
             new_line_input_ids = _convert_tensor_to_list(new_line["input_ids"])[0]
             new_line_attention_mask = _convert_tensor_to_list(new_line["attention_mask"])[0]
             new_line_input_ids_len = len(new_line_input_ids)
 
-            for example in new_calibration_dataset:
+            for example in new_calibration:
                 input_ids = example["input_ids"][0]
                 attention_mask = example["attention_mask"][0]
 
-                if current_length + len(input_ids) + new_line_input_ids_len >= calibration_dataset_concat_size:
+                if current_length + len(input_ids) + new_line_input_ids_len >= calibration_concat_size:
                     if len(input_ids_buff) > 0:
-                        remaining_space = calibration_dataset_concat_size - current_length
+                        remaining_space = calibration_concat_size - current_length
                         # if there is remaining space, add the remaining input to the current block
                         if remaining_space > 0:
                             input_ids_buff.extend(new_line_input_ids)
@@ -397,12 +396,12 @@ class BaseQModel(nn.Module):
                                 "attention_mask": [attention_mask_buff]
                             })
 
-                        input_ids_buff = input_ids[:calibration_dataset_concat_size]
-                        attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
+                        input_ids_buff = input_ids[:calibration_concat_size]
+                        attention_mask_buff = attention_mask[:calibration_concat_size]
                         current_length = len(input_ids_buff)
                     else:
-                        input_ids_buff = input_ids[:calibration_dataset_concat_size]
-                        attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
+                        input_ids_buff = input_ids[:calibration_concat_size]
+                        attention_mask_buff = attention_mask[:calibration_concat_size]
                         current_length = len(input_ids_buff)
                 else:
                     if len(input_ids_buff) > 0:
@@ -416,7 +415,7 @@ class BaseQModel(nn.Module):
 
 
             if input_ids_buff:
-                padding_length = calibration_dataset_concat_size - len(input_ids_buff)
+                padding_length = calibration_concat_size - len(input_ids_buff)
                 if padding_length > 0:
                     input_ids_buff.extend([self.tokenizer.pad_token_id] * padding_length)
                     attention_mask_buff.extend([0] * padding_length)
@@ -425,37 +424,37 @@ class BaseQModel(nn.Module):
                     "attention_mask": [attention_mask_buff]
                 })
 
-            new_calibration_dataset = concatenated_data
+            new_calibration = concatenated_data
 
         # Sort or shuffle calibration dataset
-        if calibration_dataset_sort == "asc":
+        if calibration_sort == "asc":
             log.info("Calibration: Sort in ascending order by length")
             sorted_dataset = sorted(
-                new_calibration_dataset,
+                new_calibration,
                 key=lambda item: len(item["input_ids"][0])
             )
-        elif calibration_dataset_sort == "desc":
+        elif calibration_sort == "desc":
             log.info("Calibration: Sort in descending order by length")
             sorted_dataset = sorted(
-                new_calibration_dataset,
+                new_calibration,
                 key=lambda item: len(item["input_ids"][0]),
                 reverse=True
             )
-        elif calibration_dataset_sort == "shuffle":
+        elif calibration_sort == "shuffle":
             log.info("Calibration: Sort by random shuffle")
-            sorted_dataset = new_calibration_dataset[:]  # shallow copy
+            sorted_dataset = new_calibration[:]  # shallow copy
             random.shuffle(sorted_dataset)
         else:
             log.info("Calibration: Native order")
-            sorted_dataset = new_calibration_dataset  # fallback: no sort
+            sorted_dataset = new_calibration  # fallback: no sort
 
         if self.support_batch_quantize:
-            new_calibration_dataset_batched = [
+            new_calibration_batched = [
                 collate_data(sorted_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
                 for start in range(0, len(sorted_dataset), batch_size)
             ]
         else:
-            new_calibration_dataset_batched = [
+            new_calibration_batched = [
                 {"input_ids": torch.tensor(block["input_ids"], dtype=torch.long)}
                 for block in sorted_dataset
             ]
@@ -464,7 +463,7 @@ class BaseQModel(nn.Module):
         total_padded = 0
         total_non_padded = 0
 
-        for batch in new_calibration_dataset_batched:
+        for batch in new_calibration_batched:
             # attention_mask is shape [batch_size, seq_len]
             mask = batch["attention_mask"]
 
@@ -478,7 +477,7 @@ class BaseQModel(nn.Module):
         log.info(f"Calibration: Total non-padded tokens: {total_non_padded}")
         log.info(f"Calibration: Total tokens: {total_non_padded + total_padded}")
 
-        return new_calibration_dataset_batched
+        return new_calibration_batched
 
     def quantize(
         self,
@@ -497,7 +496,7 @@ class BaseQModel(nn.Module):
         auto_gc: bool = False,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter = None,
-        adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
+        adapter_calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
         # minimum length of calibration data, default is 10
         calibration_data_min_length: int = 10,
     ) -> Dict[str, List[Dict[str, str]]]:
@@ -662,7 +661,7 @@ class BaseQModel(nn.Module):
                 EoraProcessor(
                     tokenizer=self.tokenizer,
                     qcfg=self.quantize_config,
-                    calibration=adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration,
+                    calibration=adapter_calibration if adapter_calibration is not None else calibration,
                     prepare_dataset_func=self.prepare_dataset,
                     calibration_concat_size=calibration_concat_size,
                     calibration_sort=calibration_sort,
@@ -687,9 +686,9 @@ class BaseQModel(nn.Module):
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter,
         quantized_modules: Dict[str, TorchQuantLinear],
-        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-        calibration_dataset_concat_size: Optional[int] = None,
-        calibration_dataset_sort: Optional[str] = None,
+        calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        calibration_concat_size: Optional[int] = None,
+        calibration_sort: Optional[str] = None,
         batch_size: int = 1,
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
@@ -728,10 +727,10 @@ class BaseQModel(nn.Module):
             EoraProcessor(
                 tokenizer=self.tokenizer,
                 qcfg=self.quantize_config,
-                calibration=calibration_dataset,
+                calibration=calibration,
                 prepare_dataset_func=self.prepare_dataset,
-                calibration_concat_size=calibration_dataset_concat_size,
-                calibration_sort=calibration_dataset_sort,
+                calibration_concat_size=calibration_concat_size,
+                calibration_sort=calibration_sort,
                 batch_size=batch_size,
                 logger_board=logger_board,
             ),

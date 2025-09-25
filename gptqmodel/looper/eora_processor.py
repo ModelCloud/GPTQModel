@@ -64,9 +64,9 @@ class EoraProcessor(LoopProcessor):
             task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
             task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
 
-    def set_calibration_dataset(self, calibration_dataset):
-        self.calibration_dataset = calibration_dataset
-        self.num_batches = len(calibration_dataset)
+    def set_calibration(self, calibration):
+        self.calibration = calibration
+        self.num_batches = len(calibration)
 
     def preprocess(self, module: NamedModule, **kwargs):
         # entire module is skipped
@@ -232,10 +232,10 @@ class EoraProcessor(LoopProcessor):
 
         super().finalize(model=model, **kwargs)
 
-    def verify_calibration_dataset(self, processor_index: int) -> bool:
-        if self.calibration_dataset is None:
+    def verify_calibration(self, processor_index: int) -> bool:
+        if self.calibration is None:
             if processor_index == 0:
-                raise ValueError("EoraProcessor's calibration_dataset must be provided.")
+                raise ValueError("EoraProcessor's calibration dataset must be provided.")
             else:
                 return False
         return True

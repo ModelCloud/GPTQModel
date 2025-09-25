@@ -264,18 +264,18 @@ from gptqmodel import GPTQModel, QuantizeConfig
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-gptqmodel-4bit"
 
-calibration_dataset = load_dataset(
-    "allenai/c4",
-    data_files="en/c4-train.00001-of-01024.json.gz",
-    split="train"
-  ).select(range(1024))["text"]
+calibration = load_dataset(
+  "allenai/c4",
+  data_files="en/c4-train.00001-of-01024.json.gz",
+  split="train"
+).select(range(1024))["text"]
 
 quant_config = QuantizeConfig(bits=4, group_size=128)
 
 model = GPTQModel.load(model_id, quant_config)
 
 # increase `batch_size` to match gpu/vram specs to speed up quantization
-model.quantize(calibration_dataset, batch_size=1)
+model.quantize(calibration, batch_size=1)
 
 model.save(quant_path)
 ```
@@ -308,12 +308,13 @@ print(model.tokenizer.decode(result)) # string output
 ### Quantization + EoRA Accuracy Recovery 
 
 GPT-QModel now support EoRA, a LoRA method that can further imporve the accuracy of the quantized model
+
 ```py
 # higher rank improves accuracy at the cost of vram usage
 # suggestion: test rank 64 and 32 before 128 or 256 as latter may overfit while increasing memory usage
 eora = Lora(
   # for eora generation, path is adapter save path; for load, it is loading path
-  path=f"{quant_path}/eora_rank32", 
+  path=f"{quant_path}/eora_rank32",
   rank=32,
 )
 
@@ -322,8 +323,8 @@ GPTQModel.adapter.generate(
   adapter=eora,
   model_id_or_path=model_id,
   quantized_model_id_or_path=quant_path,
-  calibration_dataset=calibration_dataset,
-  calibration_dataset_concat_size=0,
+  calibration=calibration,
+  calibration_concat_size=0,
   auto_gc=False)
 
 # post-eora inference

@@ -90,12 +90,12 @@ class OvisQModel(BaseQModel):
 
     def prepare_dataset(
             self,
-            calibration_dataset,
-            calibration_dataset_concat_size,
+            calibration,
+            calibration_concat_size,
             batch_size: int = 1,
             tokenizer=None, ):
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, self.preprocess_dataset):
+        for batch in batched(calibration, batch_size, self.preprocess_dataset):
             pixel_values, input_ids, labels = tuple([instance[key] for instance in batch]
                                                     for key in ("pixel_values", "input_ids", "labels"))
             input_ids = torch.nn.utils.rnn.pad_sequence(

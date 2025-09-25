@@ -79,8 +79,8 @@ class TestPerplexity(unittest.TestCase):
         if not self.opt_tokenizer.pad_token_id:
             self.opt_tokenizer.pad_token_id = self.opt_tokenizer.eos_token_id
 
-        self.tinyllama_calibration_dataset, self.tinyllama_native_ppl = self.calculate_native_ppl(FORMAT.GPTQ)
-        self.opt_calibration_dataset, self.opt_native_ppl = self.calculate_native_ppl( FORMAT.MARLIN)
+        self.tinyllama_calibration, self.tinyllama_native_ppl = self.calculate_native_ppl(FORMAT.GPTQ)
+        self.opt_calibration, self.opt_native_ppl = self.calculate_native_ppl(FORMAT.MARLIN)
 
 
     @classmethod
@@ -113,8 +113,8 @@ class TestPerplexity(unittest.TestCase):
 
         length = 512 if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else 2048
         traindata = load_dataset(dataset_path, dataset_name, split=dataset_split).filter(lambda x: len(x[dataset_column]) >= length)
-        calibration_dataset = [tokenizer(example[dataset_column]) for example in traindata.select(range(1024))]
-        return calibration_dataset, native_ppl
+        calibration = [tokenizer(example[dataset_column]) for example in traindata.select(range(1024))]
+        return calibration, native_ppl
 
     @parameterized.expand(
         [
@@ -151,7 +151,7 @@ class TestPerplexity(unittest.TestCase):
             quantize_config=quantize_config,
         )
 
-        dataset = self.opt_calibration_dataset if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.tinyllama_calibration_dataset
+        dataset = self.opt_calibration if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else self.tinyllama_calibration
         start = time.time()
         model.quantize(
             dataset,

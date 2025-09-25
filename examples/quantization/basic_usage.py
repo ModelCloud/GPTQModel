@@ -17,7 +17,7 @@ quantized_model_id = "TinyLlama-1.1B-Chat-v1.0-4bit-128g"
 
 def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
-    calibration_dataset = [
+    calibration = [
         tokenizer(
             "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."
         )
@@ -31,8 +31,8 @@ def main():
     # load un-quantized model, by default, the model will always be loaded into CPU memory
     model = GPTQModel.load(pretrained_model_id, quantize_config)
 
-    # quantize model, the calibration_dataset should be list of dict whose keys can only be "input_ids" and "attention_mask"
-    model.quantize(calibration_dataset)
+    # quantize model, the calibration should be list of dict whose keys can only be "input_ids" and "attention_mask"
+    model.quantize(calibration)
 
     # save quantized model
     model.save(quantized_model_id)

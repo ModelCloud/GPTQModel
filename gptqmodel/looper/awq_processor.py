@@ -91,13 +91,13 @@ class AWQProcessor(LoopProcessor):
             task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
             task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
 
-    def set_calibration_dataset(self, calibration_dataset):
-        raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
+    def set_calibration(self, calibration):
+        raise NotImplementedError("AWQProcessor's calibration dataset cannot be modified")
 
     def init_quant(self):
         modules, _ = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.extract_layers_node())
         # make sure samples tensor's shape is [1, max_calib_seq_len]
-        samples = [data['input_ids'][:, :self.max_calib_seq_len] for data in self.calibration_dataset if data['input_ids'].shape[1] >= self.max_calib_seq_len]
+        samples = [data['input_ids'][:, :self.max_calib_seq_len] for data in self.calibration if data['input_ids'].shape[1] >= self.max_calib_seq_len]
 
         samples = torch.cat(samples, dim=0)
 
@@ -799,9 +799,9 @@ class AWQProcessor(LoopProcessor):
 
         super().finalize(model=model, **kwargs)
 
-    def verify_calibration_dataset(self, processor_index: int) -> bool:
-        if self.calibration_dataset is None:
-            raise ValueError("GPTQProcessor's calibration_dataset must be provided.")
+    def verify_calibration(self, processor_index: int) -> bool:
+        if self.calibration is None:
+            raise ValueError("GPTQProcessor's calibration dataset must be provided.")
         else:
             return True
 

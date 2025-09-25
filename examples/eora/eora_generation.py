@@ -71,7 +71,7 @@ if __name__ == '__main__':
     desc_act = True
     rank = args.eora_rank
     batch_size = 1
-    calibration_dataset_concat_size = 0  # disable
+    calibration_concat_size = 0  # disable
     auto_gc = False
 
     if args.quant_save_path is not None:
@@ -87,7 +87,7 @@ if __name__ == '__main__':
 
 
     ## C4 for quant
-    calibration_dataset = construct_c4()
+    calibration = construct_c4()
 
     eora = Lora(
         # for quant, path is save path. for load, it is loading path
@@ -109,21 +109,21 @@ if __name__ == '__main__':
 
     if args.eora_dataset == "c4":
         model.quantize(
-            calibration=calibration_dataset,
+            calibration=calibration,
             batch_size=batch_size,
             auto_gc=auto_gc,
-            calibration_concat_size=calibration_dataset_concat_size,
+            calibration_concat_size=calibration_concat_size,
         )  #
     else:
 
-        eora_calibration_dataset = construct_mmlu()
+        eora_calibration = construct_mmlu()
 
         model.quantize(
-            calibration=calibration_dataset,
+            calibration=calibration,
             batch_size=batch_size,
             auto_gc=auto_gc,
-            calibration_concat_size=calibration_dataset_concat_size,
-            adapter_calibration_dataset=eora_calibration_dataset
+            calibration_concat_size=calibration_concat_size,
+            adapter_calibration=eora_calibration
         )  #
 
 

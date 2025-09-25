@@ -11,25 +11,25 @@ def multiple_choices_question_answering_format(question, choices, answer):
 ## An example of using ARC for construting the EoRA calibration set
 
 def construct_c4():
-    calibration_dataset = load_dataset(
+    calibration = load_dataset(
       "allenai/c4",
       data_files="en/c4-train.00001-of-01024.json.gz",
       split="train", download_mode="force_redownload"
     ).select(range(1024))["text"]
-    return calibration_dataset
+    return calibration
 
 def construct_ARC():
     nsamples = 1024
-    arc_easy_calibration_dataset = load_dataset('ai2_arc', 'ARC-Easy', split='train').select(range(nsamples))
-    arc_challenge_calibration_dataset = load_dataset('ai2_arc', 'ARC-Challenge', split='train').select(range(nsamples))
+    arc_easy_calibration = load_dataset('ai2_arc', 'ARC-Easy', split='train').select(range(nsamples))
+    arc_challenge_calibration = load_dataset('ai2_arc', 'ARC-Challenge', split='train').select(range(nsamples))
     dataset = []
 
-    for example in arc_easy_calibration_dataset:
+    for example in arc_easy_calibration:
         answer = example['choices']['text'][example['choices']['label'].index(example['answerKey'])]
         question = example['question']
         dataset.append(question_answering_format(question=question,answer=answer))
 
-    for example in arc_challenge_calibration_dataset:
+    for example in arc_challenge_calibration:
         answer = example['choices']['text'][example['choices']['label'].index(example['answerKey'])]
         question = example['question']
         dataset.append(question_answering_format(question=question,answer=answer))
@@ -45,9 +45,9 @@ def construct_ARC():
 
 def construct_mmlu():
 
-    mmlu_calibration_dataset = load_dataset('cais/mmlu', 'all', split='validation')
+    mmlu_calibration = load_dataset('cais/mmlu', 'all', split='validation')
     dataset = []
-    for example in mmlu_calibration_dataset:
+    for example in mmlu_calibration:
         question = example['question']
         choices = example['choices']
         answer = ['A','B','C','D'][example['answer']]

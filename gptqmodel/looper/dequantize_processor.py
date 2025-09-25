@@ -22,8 +22,8 @@ class DequantizeProcessor(LoopProcessor):
 
         self.quantized_modules = quantized_modules
 
-    def set_calibration_dataset(self, calibration_dataset):
-        self.calibration_dataset = None
+    def set_calibration(self, calibration):
+        self.calibration = None
         self.num_batches = 0
 
     # de-quantize weights
@@ -51,7 +51,7 @@ class DequantizeProcessor(LoopProcessor):
         module.state.pop("w", None)  # no need for these weights now
         module.state.pop("wq", None) # no need for these weights now
 
-    def verify_calibration_dataset(self, processor_index: int) -> bool:
+    def verify_calibration(self, processor_index: int) -> bool:
         return False
 
     def name(self) -> str:

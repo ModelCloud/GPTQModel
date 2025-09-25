@@ -43,10 +43,10 @@ class TestLmHeadQuant(ModelTest):
 
     @classmethod
     def setUpClass(cls):
-        calibration_dataset = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train").filter(lambda x: len(x["text"]) >= cls.sample_length).select(range(cls.samples))["text"]
+        calibration = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train").filter(lambda x: len(x["text"]) >= cls.sample_length).select(range(cls.samples))["text"]
 
         # Truncating sample text to reduce memory usage
-        cls.calibration_dataset = [c[:cls.sample_length] for c in calibration_dataset]
+        cls.calibration = [c[:cls.sample_length] for c in calibration]
 
     def test_quant_lm_head(self):
         self.NATIVE_ARC_CHALLENGE_ACC = 0.3148464163822526
@@ -56,7 +56,7 @@ class TestLmHeadQuant(ModelTest):
 
         model = GPTQModel.load(self.model_id, quant_config)
 
-        model.quantize(self.calibration_dataset, batch_size=8)
+        model.quantize(self.calibration, batch_size=8)
 
         self.check_lm_head_loss(model.quant_log)
 

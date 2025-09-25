@@ -58,11 +58,11 @@ if __name__ == '__main__':
     )
 
     if args.dataset == "c4":
-        calibration_dataset = construct_c4()
+        calibration = construct_c4()
     elif args.dataset == "arc":
-        calibration_dataset = construct_ARC()
+        calibration = construct_ARC()
     elif args.dataset == "mmlu":
-        calibration_dataset = construct_mmlu()
+        calibration = construct_mmlu()
     else:
         raise NotImplementedError
 
@@ -72,7 +72,7 @@ if __name__ == '__main__':
         adapter=eora,
         model_id_or_path=args.model,
         quantized_model_id_or_path=args.quantized_model,
-        calibration_dataset=calibration_dataset,
-        calibration_dataset_concat_size=0,
+        calibration=calibration,
+        calibration_concat_size=0,
         auto_gc=False)
 

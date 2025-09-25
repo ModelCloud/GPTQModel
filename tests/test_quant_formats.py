@@ -35,7 +35,7 @@ class TestQuantization(ModelTest):
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
 
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        self.calibration = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
 
 
     @parameterized.expand(
@@ -80,7 +80,7 @@ class TestQuantization(ModelTest):
             quantize_config=quantize_config,
         )
         model.quantize(
-            calibration=self.calibration_dataset,
+            calibration=self.calibration,
             calibration_concat_size=0,
             auto_gc=False,
         )

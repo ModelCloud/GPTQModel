@@ -21,19 +21,19 @@ EVAL_ONLY = True
 EVAL_APPLY_CHAT_TEMPLATE = True
 
 def get_calib_data(tokenizer, rows: int):
-    # calibration_dataset = load_dataset(
+    # calibration = load_dataset(
     #     "allenai/c4",
     #     data_files="en/c4-train.00000-of-01024.json.gz",
     #     split="train"
     # )
 
-    calibration_dataset = load_dataset(
+    calibration = load_dataset(
         "json",
         data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
         split="train")
 
     datas = []
-    for index, sample in enumerate(calibration_dataset):
+    for index, sample in enumerate(calibration):
         tokenized = tokenizer(sample["text"])
         if len(tokenized.data['input_ids']) <= INPUTS_MAX_LENGTH:
             datas.append(tokenized)
@@ -60,9 +60,9 @@ if not EVAL_ONLY:
     model = GPTQModel.load(MODEL_ID, quant_config)
 
     # load calibration data
-    calibration_dataset = get_calib_data(tokenizer=model.tokenizer, rows=256)
+    calibration = get_calib_data(tokenizer=model.tokenizer, rows=256)
 
-    model.quantize(calibration_dataset, batch_size=1)
+    model.quantize(calibration, batch_size=1)
 
     model.save(QUANT_SAVE_PATH)
     log.info(f"Quant Model Saved to: {QUANT_SAVE_PATH}")

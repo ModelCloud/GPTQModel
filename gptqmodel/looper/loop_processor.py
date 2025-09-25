@@ -116,15 +116,15 @@ class LoopProcessor:
             if len(calibration) == 0:
                 raise ValueError("Calibration dataset must not be empty.")
 
-            min_calibration_dataset_size = 256
-            min_calibration_dataset_input_ids_avg_length = 256
-            if len(calibration) < min_calibration_dataset_size:
-                log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
+            min_calibration_size = 256
+            min_calibration_input_ids_avg_length = 256
+            if len(calibration) < min_calibration_size:
+                log.warn(f"Calibration dataset size should be more than {min_calibration_size}. "
                                f"Current: {len(calibration)}.")
 
-            calibration = prepare_dataset_func(calibration_dataset=calibration,
-                                               calibration_dataset_concat_size=calibration_concat_size,
-                                               calibration_dataset_sort=calibration_sort,
+            calibration = prepare_dataset_func(calibration=calibration,
+                                               calibration_concat_size=calibration_concat_size,
+                                               calibration_sort=calibration_sort,
                                                batch_size=batch_size)
 
             # Calculate the average length of the average input_ids
@@ -147,13 +147,13 @@ class LoopProcessor:
                 total_input_ids_length += input_ids_length
             avg = total_input_ids_length / len(calibration)
 
-            if avg < min_calibration_dataset_input_ids_avg_length:
-                log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
-                               f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
+            if avg < min_calibration_input_ids_avg_length:
+                log.warn(f"The average length of input_ids of calibration dataset should be greater than "
+                               f"{min_calibration_input_ids_avg_length}: actual avg: {avg}.")
 
             self.num_batches = len(calibration)
 
-        self.calibration_dataset = calibration
+        self.calibration = calibration
 
     def log_save_async(self, stat):
         # start log worker async writer
@@ -266,7 +266,7 @@ class LoopProcessor:
     def log_plotly(self):
         pass
 
-    def set_calibration_dataset(self, calibration_dataset):
+    def set_calibration(self, calibration):
         pass
 
     def set_fwd_time(self, fwd_time: float):
@@ -323,13 +323,13 @@ class LoopProcessor:
             # if os.path.exists(self.log_tmp_log_file_name):
             #     os.remove(file_path)
 
-    def release_calibration_dataset(self):
-        del self.calibration_dataset
+    def release_calibration(self):
+        del self.calibration
 
     def number_batches(self) -> int:
         return self.num_batches
 
-    def verify_calibration_dataset(self, processor_index: int) -> bool:
+    def verify_calibration(self, processor_index: int) -> bool:
         pass
 
     def name(self) -> str:
