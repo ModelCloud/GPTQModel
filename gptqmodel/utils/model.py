@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import collections
 import functools
-import hashlib
 import json
 import operator
 import os
@@ -501,7 +500,7 @@ def convert_gptq_v1_to_v2_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if not qlinear_kernel.REQUIRES_FORMAT_V2:
+    if cfg.quant_method in [METHOD.GPTQ] and not qlinear_kernel.REQUIRES_FORMAT_V2:
         log.info(
             f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
         return model
@@ -577,7 +576,7 @@ def convert_gptq_v2_to_v1_format(
 ):
 
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if not qlinear_kernel.REQUIRES_FORMAT_V2:
+    if quantize_config.quant_method in [METHOD.GPTQ] and not qlinear_kernel.REQUIRES_FORMAT_V2:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
@@ -688,38 +687,6 @@ def pack_model(
 
     log.info("Model packed.")
     return quant_linear_cls
-
-
-def verify_model_hash(file_path: str, verify_hash: str):
-    if not isinstance(verify_hash, str):
-        raise ValueError("model verify_hash must be a string")
-    if ':' not in verify_hash:
-        raise ValueError("verify_hash must be in the format 'hash_type:hash_value'")
-    hash_type, hash_value = verify_hash.split(':', 1)
-    hash_func = getattr(hashlib, hash_type, None)
-    if not hash_func:
-        raise ValueError(f"No hash function found for type: {hash_type}")
-    with open(file_path, "rb") as f:
-        file_hash = hash_func(f.read()).hexdigest()
-    return file_hash == hash_value
-
-
-def verify_sharded_model_hashes(jsonPath: str, verify_hash: List[str]):
-    if not isinstance(verify_hash, list):
-        raise ValueError("sharded model verify_hash must be a list")
-
-    with open(jsonPath, 'r') as f:
-        index_data = json.load(f)
-    weight_map = index_data['weight_map']
-    shard_files = set(weight_map.values())
-    if len(shard_files) != len(verify_hash):
-        raise ValueError("Number of shards and number of hash values do not match.")
-
-    for shard_file, expected_hash in zip(shard_files, verify_hash):
-        if not verify_model_hash(shard_file, expected_hash):
-            log.info(f"Hash verification failed for {shard_file}")
-            return False
-    return True
 
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
