@@ -77,8 +77,8 @@ def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: 
 
             _offload_disk(module=module, name=full_name, disk_path=disk_path)
 
-        if hasattr(module, "config") and hasattr(module.config,
-                                                 "tie_word_embeddings") and module.config.tie_word_embeddings:
+        if hasattr(module, "config") and getattr(module.config,
+                                                 "tie_word_embeddings", False):
             module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after offload
 
     # print("offload_disk: list item tree")
