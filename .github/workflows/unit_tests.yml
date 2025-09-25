@@ -255,8 +255,7 @@ jobs:
             bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
           fi
 
-          pyenv local $env_name
-          pyenv activate $env_name
+          pip uninstall -y uv
 
           echo "== pyenv =="
           pyenv versions
@@ -382,8 +381,8 @@ jobs:
             bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
           fi
 
-          pyenv local $env_name
-          pyenv activate $env_name
+          pip uninstall -y uv
+
 
           echo "== pyenv =="
           pyenv versions
@@ -395,198 +394,6 @@ jobs:
           pip show torch
           echo "== pip list =="
           pip list
-
-#      - name: Install requirements
-#        run: |
-#          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
-
-      - name: Download source from local
-        continue-on-error: true
-        run: |
-          curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
-          ls -ahl .
-          sha256=$(sha256sum $file_name)
-          echo "sha256=$sha256"
-          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
-
-      # - name: Download source from github
-      #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
-      #   uses: actions/download-artifact@v5
-      #   with:
-      #     name: source
-      #     path: dist
-      #     run-id: ${{ github.run_id }}
-
-      #     - name: Uncompress source
-      #      continue-on-error: true
-      #     run: |
-      #      find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
-      #     ls -ahl .
-      #    tar -zxf gptqmodel_source.tar.gz
-
-      - name: Download wheel from local
-        continue-on-error: true
-        run: |
-          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://$RUNNER/gpu/whl/download")
-
-          echo "file_name=$file_name"
-
-          if echo "$file_name" | grep -q "gptqmodel"; then
-              mkdir dist || true
-              cd dist
-              curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/$file_name
-              ls -ahl .
-              sha256=$(sha256sum $file_name)
-              echo "sha256=$sha256"
-              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
-          fi
-
-      - name: Download artifact from github
-        if: env.WHL_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v5
-        with:
-          name: whl
-          path: dist
-          run-id: ${{ needs.check-vm.outputs.run_id }}
-
-      - name: Install wheel
-        run: |
-          uv pip install -U transformers 
-          if [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
-             [ "${{ matrix.test_script }}" == "test_inference_speed" ] || \
-             [ "${{ matrix.test_script }}" == "test_q4_bitblas" ] || \
-             [ "${{ matrix.test_script }}" == "test_save_loaded_quantized_model" ]; then
-            echo "===== install bitblas==0.0.1.dev13 ====="
-            uv pip install bitblas==0.0.1.dev13 -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          if [[ "${{ matrix.test_script }}" == *auto_round* ]]; then
-            uv pip install auto_round
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
-            uv pip install intel_extension_for_pytorch -U
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "models/test_pangu_alpha" ]]; then
-            uv pip install jieba
-          fi
-
-          if [ "${{ matrix.test_script }}" == "models/test_cohere2" ] || [ "${{ matrix.test_script }}" == "models/test_gemma" ]; then
-            echo "===== install transformers from git ====="
-            uv pip install -U transformers -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
-            echo "===== switching to xpu env ====="
-            source /etc/profile.d/pyenv.sh && pyenv activate xpu
-            uv pip install -U logbar==0.0.4
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
-            uv pip install git+https://github.com/huggingface/peft trl wandb
-          fi
-
-          if [[ "${{ matrix.test_script }}" == *ipex* ]] && [[ "${{ matrix.test_script }}" != *xpu* ]]; then
-            uv pip uninstall torchvision torch flash_attn # fix ipex can't be used with torch+cu126
-            uv pip install torchvision torch
-            uv pip install -U intel_extension_for_pytorch -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          if [[ "${{ matrix.test_script }}" == *"mlx"* ]]; then
-            uv pip install mlx_lm --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "test_modelscope" ]]; then
-            echo "===== installing modelscope ====="
-            uv pip install modelscope --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          uv pip install git+https://github.com/ModelCloud/Tokenicer -U
-
-          # ipex doesn't need to compile kernels. xpu can't install cuda package
-          if [[ "${{ matrix.test_script }}" != *ipex* && "${{ matrix.test_script }}" != *xpu* ]]; then
-            echo "===== install dist/whl ====="
-            uv pip install dist/*.whl -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          else
-            echo "===== install with local files for xpu env ====="
-            export CUDA_VISIBLE_DEVICES=""
-            unset TORCH_CUDA_ARCH_LIST
-            uv pip install . --no-build-isolation
-          fi
-
-          if [ "${{ matrix.test_script }}" == "test_transformers" ]; then
-            echo "===== install optimum from git ====="
-            uv pip install -U git+https://github.com/huggingface/optimum.git -i http://$RUNNER/simple/ --trusted-host $RUNNER
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "test_sglang" ]]; then
-            uv pip install transformers==4.48.3
-            uv pip install numpy==1.26.3
-          fi
-
-          echo "===== uninstall torchao ====="
-          uv pip uninstall torchao
-
-          echo "== pip list =="
-          pip list
-
-      - name: Find suitable GPU
-        if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
-        run: |
-          timestamp=$(date +%s%3N)
-          gpu_id=-1
-
-          url="http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }}"
-          echo "$url"
-          while [ "$gpu_id" -lt 0 ]; do
-            gpu_id=$(curl -s "$url")
-            if [ "$gpu_id" -lt 0 ]; then
-              echo "http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
-              echo "No available GPU, waiting 5 seconds..."
-              curl http://$XEON5/gpu/status2
-              sleep 5
-            else
-              echo "Allocated GPU ID: $gpu_id"
-            fi
-          done
-          if [[ ! "$gpu_id" =~ ^[0-9]+$ ]]; then
-            echo "gpu_id: $gpu_id is not a number"
-          fi
-          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> $GITHUB_ENV
-          echo "STEP_TIMESTAMP=$timestamp" >> $GITHUB_ENV
-          echo "CUDA_VISIBLE_DEVICES set to $gpu_id, timestamp=$timestamp"
-          curl http://$XEON5/gpu/status2
-
-      - name: Run tests
-        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
-        run: |
-          if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
-            export CUDA_VISIBLE_DEVICES=""
-          fi
-          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
-            export CUDA_VISIBLE_DEVICES=""
-            source /etc/profile.d/pyenv.sh && pyenv activate xpu
-            pip uninstall vllm -y
-            pip list
-          fi
-
-          start_time=$(date +%s)
-          pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
-          execution_time=$(( $(date +%s) - start_time ))
-          echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://$XEON5/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
-
-      - name: Release GPU
-        if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
-        run: curl -X GET "http://$RUNNER/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
-
-      - name: Clean cache
-        if: always()
-        run: |
-          # rm ~/.cache/evalplus/*pkl || true
-          # pip cache purge && uv cache clean
-          rm -rf rm -rf ./* .[^.] .??*
 
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
