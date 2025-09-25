@@ -150,7 +150,7 @@ def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> 
     Each element of `batch` looks like:
       {
         "input_ids": List[List[int]],       # rows
-        "attention_mask": List[List[int]],  # rows
+        "attention_mask": List[List[int]],  # rows (0/1 ints, cast to bool here)
       }
     """
     # Flatten rows across all items in the outer batch
@@ -166,9 +166,9 @@ def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> 
 
         for r in range(len(ids_list)):
             ids = torch.as_tensor(ids_list[r], dtype=torch.long)
-            msk = torch.as_tensor(msk_list[r], dtype=torch.long)
+            # make mask boolean immediately
+            msk = torch.as_tensor(msk_list[r], dtype=torch.bool)
 
-            # ensure pre-pad lengths match within the row
             if ids.numel() != msk.numel():
                 raise ValueError("Row has mismatched lengths between input_ids and attention_mask")
 
@@ -179,24 +179,30 @@ def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> 
     max_len = max(t.numel() for t in rows_ids) if rows_ids else 0
 
     # Right-pad each row to global max_len
-    def right_pad(row: torch.Tensor, pad_value: int) -> torch.Tensor:
+    def right_pad(row: torch.Tensor, pad_value, dtype=None) -> torch.Tensor:
         pad_len = max_len - row.numel()
         if pad_len <= 0:
             return row
-        return torch.cat([row, torch.full((pad_len,), pad_value, dtype=row.dtype, device=row.device)], dim=0)
+        return torch.cat(
+            [
+                row,
+                torch.full((pad_len,), pad_value, dtype=dtype or row.dtype, device=row.device),
+            ],
+            dim=0,
+        )
 
-    padded_ids = [right_pad(t, pad_token_id) for t in rows_ids]
-    padded_msk = [right_pad(t, 0) for t in rows_mask]
+    padded_ids = [right_pad(t, pad_token_id, dtype=torch.long) for t in rows_ids]
+    # pad masks with False, not 0
+    padded_msk = [right_pad(t, False, dtype=torch.bool) for t in rows_mask]
 
     # Stack into [total_rows_in_batch, max_len]
     input_ids = torch.stack(padded_ids, dim=0) if padded_ids else torch.empty((0, 0), dtype=torch.long)
-    attention_mask = torch.stack(padded_msk, dim=0) if padded_msk else torch.empty((0, 0), dtype=torch.long)
+    attention_mask = torch.stack(padded_msk, dim=0) if padded_msk else torch.empty((0, 0), dtype=torch.bool)
 
-    out = {
+    return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
     }
-    return out
 
 
 def get_dataloader(
