@@ -10,7 +10,7 @@ dynamic = ["version"]
 description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license-files = ["licenses/*"]
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
 ]
