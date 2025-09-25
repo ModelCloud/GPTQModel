@@ -92,8 +92,9 @@ class OvisQModel(BaseQModel):
             self,
             calibration,
             calibration_concat_size,
-            batch_size: int = 1,
-            tokenizer=None, ):
+            calibration_sort,
+            batch_size,
+            calibration_min_length,):
         calib_data = []
         for batch in batched(calibration, batch_size, self.preprocess_dataset):
             pixel_values, input_ids, labels = tuple([instance[key] for instance in batch]

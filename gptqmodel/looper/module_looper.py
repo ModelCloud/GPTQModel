@@ -40,7 +40,7 @@ class ModuleLooper():
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
 
-    def cache_inputs(self, layers, auto_gc, calibration_data, calibration_enable_gpu_cache, use_cache):
+    def cache_inputs(self, layers, auto_gc, calibration, calibration_enable_gpu_cache, use_cache):
         layer_inputs = []
         attention_masks = []
         position_ids = []
@@ -134,7 +134,7 @@ class ModuleLooper():
         # print(f"pre generation input hoook (embedding)")
         # print_module_tree(self.gptq_model.model)
 
-        for example in calibration_data:
+        for example in calibration:
             for k, v in example.items():
                 if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
                     data_device = self.gptq_model.quantize_config.device
@@ -208,7 +208,7 @@ class ModuleLooper():
                 continue
 
             input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
-                                            calibration_data=processor.calibration,
+                                            calibration=processor.calibration,
                                             calibration_enable_gpu_cache=calibration_enable_gpu_cache,
                                             use_cache=False)
             processor.receive_input_cache(input_cache)
