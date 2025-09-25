@@ -1223,6 +1223,9 @@ class BaseQModel(nn.Module):
         # For other types, return as-is
         return node
 
+    def tied_word_embedding(self) -> bool:
+        return getattr(self.model.config, "tie_word_embeddings", False)
+
     def __getattr__(self, item):
         try:
             return super().__getattr__(item)
