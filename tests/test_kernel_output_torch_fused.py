@@ -19,7 +19,7 @@ class TestKernelOutput(unittest.TestCase):
         BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
     }
     target = 'model.layers.6.self_attn.v_proj'
-    device = "xpu"
+    device = "cpu"
     m = [1, 16, 64, 256, 1024]
     k = 2048
     dtype = torch.float16
@@ -75,7 +75,7 @@ class TestKernelOutputBFloat16(TestKernelOutput):
 
 @unittest.skipUnless(hasattr(torch, "xpu") and torch.xpu.is_available(), reason="Test requires XPU")
 class TestKernelOutputXPU(TestKernelOutput):
-    device_map = "xpu:0"
+    device = "xpu:0"
     a_tolerance = 0.0005
 
 

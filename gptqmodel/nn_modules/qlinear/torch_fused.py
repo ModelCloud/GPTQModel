@@ -46,7 +46,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
     # optimized for XPU but should run on all
-    SUPPORTS_DEVICES = [DEVICE.XPU] # change this to XPU to limit to Intel XPU
+    SUPPORTS_DEVICES = [DEVICE.CPU, DEVICE.XPU] # change this to XPU to limit to Intel XPU
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -174,7 +174,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     def _forward(self, x, out_shape):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
 
-        if not self.training and not self.transformed and TORCH_HAS_XPU_FUSED_OPS:
+        if not self.training and not self.transformed and TORCH_HAS_XPU_FUSED_OPS and "xpu" == x.device.type:
             # one-time transform per module for xpu aten fused ops
             self.transform(x.dtype)
             self.transformed = True
