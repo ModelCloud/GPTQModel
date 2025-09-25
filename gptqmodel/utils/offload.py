@@ -91,8 +91,10 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
 
     # print(f"device_map base_modules: {device_map}")
 
-    # skip modules without weights since they can't be offloaded
-    if not any(module.parameters(recurse=False)) and not any(module.buffers(recurse=False)):
+    # skip modules that have no parameters and no buffers since they can't be offloaded
+    has_params  = any(p.numel() > 0 for p in module.parameters(recurse=False))
+    has_buffers = any(b.numel() > 0 for b in module.buffers(recurse=False))
+    if not has_params and not has_buffers:
         return
 
     _ = disk_offload(
