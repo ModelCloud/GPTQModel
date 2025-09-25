@@ -19,7 +19,7 @@ from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestQuantBatch(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
+    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0"
 
     def calculate_avg_ppl(self, model, tokenizer):
         ppl = Perplexity(
@@ -71,14 +71,14 @@ class TestQuantBatch(ModelTest):
                 tmp_dir,
             )
 
-            batch_size_1_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+            batch_1_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
         model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             quantize_config=quantize_config,
         )
 
-        model.quantize(self.calibration_dataset, batch_size=4)
+        model.quantize(self.calibration_dataset, batch_size=256)
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.save(
                 tmp_dir,
@@ -90,8 +90,8 @@ class TestQuantBatch(ModelTest):
                 tmp_dir,
             )
 
-            batch_size_256_ppl = self.calculate_avg_ppl(model, self.tokenizer)
+            batch_n_ppl = self.calculate_avg_ppl(model, self.tokenizer)
 
             del model
 
-        self.assertTrue(abs(batch_size_1_ppl - batch_size_256_ppl) / batch_size_1_ppl <= 0.05)
+        self.assertTrue(abs(batch_1_ppl - batch_n_ppl) / batch_1_ppl <= 0.05)
