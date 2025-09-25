@@ -89,6 +89,7 @@ def get_device(obj: torch.Tensor | nn.Module):
         return torch.device('cpu')  # or raise an exception
 
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
+    assert obj is not None
     if get_device(obj) != device:
         if stream:
             # we cannot support changing dtype and stream at the same time

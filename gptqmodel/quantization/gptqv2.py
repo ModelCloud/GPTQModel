@@ -29,7 +29,6 @@ class GPTQv2(GPTQ):
         super().__init__(module, qcfg)
 
         self.dXXT = None
-
         self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
 
     # TODO FIXME: using v1 new process_batch kills v2 quantization quality, use original process_batch
@@ -90,10 +89,8 @@ class GPTQv2(GPTQ):
             native_inp = unfold(native_inp)
             native_inp = native_inp.permute([1, 0, 2]).flatten(1)
 
-        if self.H is None:
-            self.H = torch.zeros((self.columns, self.columns),
-                                 dtype=torch.float32,
-                                 device=inp.device)
+        if self.dXXT is None:
+            self.H = self.H.to(device=inp.device)
             self.dXXT = self.H.clone()
         else:
             self.H *= self.nsamples / (self.nsamples + batch_size)
