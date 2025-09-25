@@ -426,9 +426,15 @@ class BaseQModel(nn.Module):
             new_calibration_dataset = concatenated_data
 
         if self.support_batch_quantize:
+            # Sort input_ids in asc order
+            sorted_dataset = sorted(
+                new_calibration_dataset,
+                key=lambda item: len(item["input_ids"][0])
+            )
+
             new_calibration_dataset_batched = [
-                collate_data(new_calibration_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
-                for start in range(0, len(new_calibration_dataset), batch_size)
+                collate_data(sorted_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
+                for start in range(0, len(sorted_dataset), batch_size)
             ]
         else:
             new_calibration_dataset_batched = [
