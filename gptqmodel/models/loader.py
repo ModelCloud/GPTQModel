@@ -192,8 +192,8 @@ def ModelLoader(cls):
 
         # TODO FIX ME...temp store model_init args
         turtle_model._model_init_kwargs = model_init_kwargs
-        print("actual turtle model-----------")
-        print_module_tree(model=turtle_model)
+        # print("actual turtle model-----------")
+        # print_module_tree(model=turtle_model)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]

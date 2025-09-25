@@ -25,6 +25,7 @@ from ..utils import ASYNC_WORKER
 from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_device, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
+from ..utils.structure import print_module_tree
 from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, META, BalanceStrategy,
                            device_next, device_next_reset, torch_empty_cache, torch_sync)
 from .awq_processor import AWQProcessor
@@ -62,6 +63,7 @@ class ModuleLooper():
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
+            # TODO FIX ME..why is Qwen2_5OmniDecoderLayer harded here?
             if kwargs.get("attention_mask") is not None and str(type(module)) != "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
                 attention_masks.append(kwargs["attention_mask"].to(device=data_device))
             else:
@@ -93,7 +95,7 @@ class ModuleLooper():
             layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
 
         # GC!
-        gc.collect()
+        # gc.collect()
 
         ori_outside_layer_module_devices = {}
         for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
@@ -127,6 +129,9 @@ class ModuleLooper():
 
         # LifeCycle: start pre-first layer embedding hook
         self.gptq_model.pre_quantize_generate_hook_start()
+
+        # print(f"pre generation input hoook (embedding)")
+        # print_module_tree(self.gptq_model.model)
 
         for example in calibration_data:
             for k, v in example.items():
@@ -256,7 +261,7 @@ class ModuleLooper():
 
             module = self.gptq_model.pre_quantize(module)
             # GC!
-            gc.collect()
+            # gc.collect()
 
             cur_layer_device = get_device(module)
             # print(f"XX0 cur_layer_device = {cur_layer_device}")
