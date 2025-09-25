@@ -550,6 +550,9 @@ class BaseQModel(nn.Module):
                 device=self.quantize_config.device,
                 pack_dtype=self.quantize_config.pack_dtype,
                 multi_select=False,
+                backend=backend,
+                format=self.quantize_config.format,
+                quant_method=self.quantize_config.quant_method,
             )
 
         # rotate model

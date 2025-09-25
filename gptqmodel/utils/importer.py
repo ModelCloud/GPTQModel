@@ -181,7 +181,6 @@ def select_quant_linear(
         multi_select: bool = False, # return all valid kernels
         adapter: Optional[Adapter] = None,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
-    print("qua",quant_method, format, backend)
     # TODO: this looks wrong
     if device is None:
         device = DEVICE.CUDA

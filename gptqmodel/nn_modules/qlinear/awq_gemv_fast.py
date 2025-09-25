@@ -7,7 +7,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, PackableQuantLinear
 from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
@@ -17,7 +17,7 @@ log = setup_logger()
 
 awq_v2_ext, msg = try_import("gptqmodel_awq_v2_kernels")
 
-class AwqGEMVFastQuantLinear(AWQuantLinear):
+class AwqGEMVFastQuantLinear(AWQuantLinear, PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
