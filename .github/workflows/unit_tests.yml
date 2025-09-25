@@ -255,7 +255,7 @@ jobs:
             bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
           fi
 
-          pip uninstall -y uv
+          pip install uv
 
           echo "== pyenv =="
           pyenv versions
@@ -326,7 +326,7 @@ jobs:
             bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
           fi
 
-          pip uninstall -y uv
+          pip install uv
 
 
           echo "== pyenv =="
