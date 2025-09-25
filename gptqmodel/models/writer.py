@@ -35,11 +35,10 @@ from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger
 from ..utils.model import (convert_gptq_v2_to_v1_format, copy_py_files, find_modules, get_model_files_size,
                            get_state_dict_for_save, load_checkpoint_in_model_then_tie_weights, make_quant)
-from ..utils.structure import print_module_tree
+from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import torch_empty_cache
-from ..utils.offload import  undo_offload_to_disk
 from ..version import __version__
-from ._const import CPU, DEFAULT_MAX_SHARD_SIZE
+from ._const import DEFAULT_MAX_SHARD_SIZE
 
 log = setup_logger()
 
@@ -265,11 +264,10 @@ def ModelWriter(cls):
         # print_module_tree(model)
 
         # TODO FIX ME..remove this ugly patch and find core issue why output_embedding is not retied after offload/undo_offload
-        if getattr(model.config, "tie_word_embeddings", False):
-            input_embed = model.get_input_embeddings()
-            output_embed = model.get_output_embeddings()
-            if input_embed != output_embed and output_embed.weight.device.type == "meta":
-                model.set_output_embeddings(input_embed)
+        input_embed = model.get_input_embeddings()
+        output_embed = model.get_output_embeddings()
+        undo_offload_to_disk(output_embed, delete_offload_folders=True)
+        undo_offload_to_disk(input_embed, delete_offload_folders=True)
 
         # print("dbug 2")
         # print_module_tree(model)
