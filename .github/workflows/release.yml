@@ -351,6 +351,8 @@ jobs:
           overwrite: true
 
   release-source:
+    permissions:
+      contents: write
     runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
