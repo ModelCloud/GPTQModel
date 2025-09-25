@@ -92,7 +92,7 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
     # print(f"device_map base_modules: {device_map}")
 
     # skip modules without weights since they can't be offloaded
-    if not hasattr(module, "weight"):
+    if not any(module.parameters(recurse=False)) and not any(module.buffers(recurse=False)):
         return
 
     _ = disk_offload(
