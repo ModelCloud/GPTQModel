@@ -949,7 +949,7 @@ class BaseQModel(nn.Module):
                                 and name in self.awq_scale_optimize_shape_dependent_modules
                                 and isinstance(last_module, nn.Linear)
                                 and last_module.weight.shape != m.weight.shape):
-                            log.debug(f'"{name}" attention out skipped.')
+                            # log.debug(f'"{name}" attention out skipped.')
                             skip = True
 
                         subset.append(m)
@@ -1004,7 +1004,7 @@ class BaseQModel(nn.Module):
                 out.append(entry)
             return out
 
-        print("DEBUG AWQ NODES:", format_nodes(nodes))
+        # print("DEBUG AWQ NODES:", format_nodes(nodes))
         return nodes
 
     # transfer actually materizlied module from turtle (real) to shell
