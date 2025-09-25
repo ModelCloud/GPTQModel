@@ -544,12 +544,7 @@ if BUILD_CUDA_EXT == "1":
                         [
                             "gptqmodel_ext/awq/pybind_awq.cpp",
                             "gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu",
-                            "gptqmodel_ext/awq/layernorm/layernorm.cu",
-                            "gptqmodel_ext/awq/position_embedding/pos_encoding_kernels.cu",
                             "gptqmodel_ext/awq/quantization/gemv_cuda.cu",
-                            "gptqmodel_ext/awq/vllm/moe_alig_block.cu",
-                            "gptqmodel_ext/awq/vllm/activation.cu",
-                            "gptqmodel_ext/awq/vllm/topk_softmax_kernels.cu",
                         ],
                         extra_link_args=extra_link_args,
                         extra_compile_args=extra_compile_args,

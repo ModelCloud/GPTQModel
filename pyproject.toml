@@ -6,14 +6,15 @@ build-backend = "setuptools.build_meta:__legacy__"
 
 [project]
 name = "gptqmodel"
+dynamic = ["version"]
 description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = { file = "LICENSE" }
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
 ]
-keywords = ["gptq", "quantization", "large-language-models", "transformers", "4bit", "llm"]
+keywords = ["gptq", "awq", "qqq", "autogptq", "autoawq", "eora", "gar", "quantization", "large-language-models", "transformers", "llm", "moe", "compression"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -27,7 +28,6 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-dynamic = ["version"]
 dependencies = [
     "accelerate>=1.10.1",
     # "datasets>=3.5.0",
@@ -55,7 +55,7 @@ Homepage = "https://github.com/ModelCloud/GPTQModel"
 
 [project.optional-dependencies]
 test = [
-    "pytest>=8.2.2",
+    "pytest>=8.3.5",
     "parameterized",
 ]
 quality = [
@@ -64,11 +64,11 @@ quality = [
 ]
 vllm = [
     "vllm>=0.10.2",
-    "flashinfer-python>=0.2.1",
+    "flashinfer-python>=0.3.1",
 ]
 sglang = [
     "sglang[srt]>=0.4.6",
-    "flashinfer-python>=0.2.1",
+    "flashinfer-python>=0.3.1",
 ]
 bitblas = [
     "bitblas==0.0.1-dev13",
