@@ -34,6 +34,7 @@ class LoopProcessor:
             calibration_dataset,
             prepare_dataset_func,
             calibration_dataset_concat_size: Optional[int],
+            calibration_dataset_sort: Optional[str],
             batch_size: int = 1,
             logger_board: str = "",
             require_fwd: bool = True,
@@ -123,6 +124,7 @@ class LoopProcessor:
 
             calibration_dataset = prepare_dataset_func(calibration_dataset=calibration_dataset,
                                                             calibration_dataset_concat_size=calibration_dataset_concat_size,
+                                                            calibration_dataset_sort=calibration_dataset_sort,
                                                             batch_size=batch_size)
 
             # Calculate the average length of the average input_ids

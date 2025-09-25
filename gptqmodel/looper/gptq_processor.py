@@ -28,11 +28,12 @@ lock = threading.Lock()
 
 class GPTQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration_dataset, prepare_dataset_func,
-                 calibration_dataset_concat_size: Optional[int], batch_size: int,
+                 calibration_dataset_concat_size: Optional[int], calibration_dataset_sort: Optional[str], batch_size: int,
                  logger_board: str = "", require_fwd: bool = True, calculate_w_wq_diff: bool = False):
 
         super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration_dataset=calibration_dataset,
                          calibration_dataset_concat_size=calibration_dataset_concat_size,
+                         calibration_dataset_sort=calibration_dataset_sort,
                          prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
                          logger_board=logger_board, require_fwd=require_fwd)
 
