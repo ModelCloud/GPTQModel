@@ -571,7 +571,7 @@ if BUILD_CUDA_EXT == "1":
                 ]
 
         additional_setup_kwargs = {
-            "ext_modules": extensions,
+            "ext_modules": [],
             "cmdclass": {"build_ext": cpp_ext.BuildExtension},
         }
 
