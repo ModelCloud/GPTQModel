@@ -453,14 +453,14 @@ def alias_all_from_turtle_if_meta(
                     parent, leaf = _get_parent_and_leaf_by_path(shell_model, qname)
                     setattr(parent, leaf, turtle_sub)
                     swapped += 1
-                    log.info(f"Module:: Sync {qname} with ({turtle_sub.__class__.__name__})")
+                    log.info(f"Module: Sync {qname} <- from turtle ({turtle_sub.__class__.__name__})")
                     continue
             continue
 
         parent, leaf = _get_parent_and_leaf_by_path(shell_model, qname)
         setattr(parent, leaf, turtle_sub)
         swapped += 1
-        log.info(f"Module:: Sync {qname} with ({turtle_sub.__class__.__name__})")
+        log.info(f"Module:: Sync {qname} <- from turtle ({turtle_sub.__class__.__name__})")
 
     if tie_after and hasattr(shell_model, "tie_weights") and getattr(shell_model.config, "tie_word_embeddings", False):
         try:
