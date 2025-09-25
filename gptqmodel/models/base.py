@@ -426,7 +426,7 @@ class BaseQModel(nn.Module):
             new_calibration_dataset = concatenated_data
 
         if self.support_batch_quantize:
-            log.info(f"Calibration: Pre-batch sorting in ascending order by length")
+            log.info("Calibration: Pre-batch sorting in ascending order by length")
 
             # Sort input_ids in asc order
             sorted_dataset = sorted(

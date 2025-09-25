@@ -141,11 +141,6 @@ def make_data_block(
 
     return new_samples
 
-
-from typing import Dict, List
-import torch
-from torch import Tensor
-
 def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> Dict[str, Tensor]:
     """
     Collate an outer batch (size B) of items, where each item holds multiple rows.
