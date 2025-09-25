@@ -59,6 +59,7 @@ class ModelTest(unittest.TestCase):
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
     DATASET_SIZE = 256
+    DATASET_SORT = "asc"
     DELETE_QUANTIZED_MODEL = True
     BUFFERED_FWD = False
 
@@ -209,7 +210,7 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, backend=self.QUANT_BACKEND, batch_size=batch_size, buffered_fwd=self.BUFFERED_FWD)
+            model.quantize(calibration_dataset, calibration_dataset_sort=self.DATASET_SORT, backend=self.QUANT_BACKEND, batch_size=batch_size, buffered_fwd=self.BUFFERED_FWD)
 
             self.check_kernel(model, self.KERNEL_QUANT)
 

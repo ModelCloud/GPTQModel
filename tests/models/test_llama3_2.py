@@ -21,6 +21,7 @@ class TestLlama3_2(ModelTest):
     ACT_GROUP_AWARE = True
     DESC_ACT = False
     DATASET_SIZE = 512
+    DATASET_SORT = "asc"
     QUANT_BATCH_SIZE = 16
     # b1 = 0.315, b4 = 0.3106, b8 = 0.3148, b32 = 0.3148, b16 = 0.3234
 
