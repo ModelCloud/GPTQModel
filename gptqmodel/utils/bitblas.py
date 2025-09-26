@@ -59,7 +59,7 @@ def prepare_model_for_bitblas_load(
     return model
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool, desc_act: bool, repack: bool):
     """
     Converts GPTQ-packed weights to the Bitblas format.

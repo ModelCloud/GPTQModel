@@ -236,7 +236,7 @@ class AWQProcessor(LoopProcessor):
         input_feat = {k: cat_and_assert(k, v) for k, v in input_feat.items()}
         return input_feat
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _search_best_scale(
             self,
             module,
@@ -387,7 +387,7 @@ class AWQProcessor(LoopProcessor):
 
         clear_memory()
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _search_best_clip(self, layer, named_linears, input_feat):
         clip_list = []
         avoid_clipping = ["q_", "k_", "query", "key", "Wqkv"]
@@ -406,7 +406,7 @@ class AWQProcessor(LoopProcessor):
 
         return clip_list
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _compute_best_clip(
             self,
             w: torch.Tensor,
@@ -580,7 +580,7 @@ class AWQProcessor(LoopProcessor):
 
         return best_scales.detach().cpu(), best_error
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _compute_loss(
             self,
             fp16_output: torch.Tensor,
@@ -612,7 +612,7 @@ class AWQProcessor(LoopProcessor):
 
         return loss
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def _module_forward(
             self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
     ) -> torch.Tensor:

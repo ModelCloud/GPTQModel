@@ -20,7 +20,7 @@ def get_wikitext2(tokenizer, nsamples, seqlen):
     return [tokenizer(example["text"]) for example in traindata.select(range(nsamples))]
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def calculate_avg_ppl(model, tokenizer):
     from gptqmodel.utils.perplexity import Perplexity
 

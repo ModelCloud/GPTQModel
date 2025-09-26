@@ -166,7 +166,7 @@ def save_res(res, output_path):
     return accu, corr, wrong
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, batch_size):
     global choices
     log.info("evaluating " + subject)

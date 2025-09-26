@@ -1122,7 +1122,7 @@ class TestsQ4ExllamaV1(ModelTest):
 
         inp = torch.rand(1, m, k, dtype=torch.float16).to(device)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             res = linear(inp)[0][0]
 
         reference = REFERENCE.to(device)

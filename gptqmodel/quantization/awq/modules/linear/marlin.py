@@ -168,7 +168,7 @@ class WQLinear_Marlin(nn.Module):
             persistent=False,
         )
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def forward(self, x):
         assert hasattr(self, "workspace"), (
             "module.post_init() must be called before module.forward(). "
