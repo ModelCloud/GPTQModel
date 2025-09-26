@@ -118,13 +118,13 @@ class TestPerplexity(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32, True), # A100, 4889 max ram
-            (METHOD.GPTQ, FORMAT.GPTQ, 8, 32, False), # A100, 6571 max ram
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8, 32, False),
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4, 32, False),
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4, 32, False),
-            # (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4, 32, False),
-            # (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4, 32, False),
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 8, 32), # A100, 4889 max ram
+            (METHOD.GPTQ, FORMAT.GPTQ, 8, 32), # A100, 6571 max ram
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 8, 32),
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ_V2, 4, 32),
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, 4, 32),
+            # (QUANT_METHOD.GPTQ, FORMAT.BITBLAS, 4, 32),
+            # (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4, 32),
         ]
     )
     def test_quantized_perplexity(self, method: METHOD, format: FORMAT, bits: int, group_size: int):
