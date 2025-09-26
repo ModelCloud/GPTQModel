@@ -140,6 +140,8 @@ class EoraProcessor(LoopProcessor):
             device=module.target_device,
         )
 
+        del eigen_scaling_diag_matrix
+
         # wq with A/B applied
         computed_wq = wq + (B @ A)
 
@@ -194,33 +196,19 @@ class EoraProcessor(LoopProcessor):
         # log.info(stat)
         self.log_new_row(stat)
 
-        # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        with self.lock:
-            self.result_save(module.full_name, {
-                "rank": module.adapter_cfg.rank,
-                "lora_A.weight": move_to(A.to(dtype=module.module_dtype), device=CPU, stream=self.stream),
-                "lora_B.weight": move_to(B.to(dtype=module.module_dtype), device=CPU, stream=self.stream),
-            })
+        eora = Lora(
+                rank=module.adapter_cfg.rank,
+                lora_A=move_to(A.to(dtype=module.module_dtype), device=CPU, stream=self.stream),
+                lora_B=move_to(B.to(dtype=module.module_dtype), device=CPU, stream=self.stream),
+            )
 
-
-
-        # eora = Lora(rank=module.adapter_cfg.rank, lora_A=A, lora_B=B)
-        #
-        # module.state.update({
-        #     "adapter": eora,
-        # })
+        module.state.update({
+            "adapter": eora
+        })
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
-        pass
-        # adapter: Lora = module.state.pop("adapter")
-        #
-        # # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-        # self.result_save(module.full_name, {
-        #     "lora_A.weight": move_to(adapter.lora_A.to(dtype=torch.float16), device=CPU, stream=self.stream),
-        #     # A.to(dtype=torch.float16, device=CPU),
-        #     "lora_B.weight": move_to(adapter.lora_B.to(dtype=torch.float16), device=CPU, stream=self.stream),
-        #     # B.to(dtype=torch.float16, device=CPU),
-        # })
+        # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
+        self.result_save(module.full_name, module.state.pop("adapter"))
 
     def finalize(self, model: BaseQModel, **kwargs):
         # block for streams

@@ -224,22 +224,27 @@ class LoopProcessor:
         log.info(formatted_row)
         log.info(len(formatted_row) * "-")
 
+    # Loop Procssor level scoped state data
     def result_save(self, key: str, value: Any):
         with self._results_lock:
             #assert self.result_get(key) is None, f"key: {key} already exists in `self.result`"
             self._results[key] = value
 
+    # Loop Procssor level scoped state data
     def result_get(self, key: str, default: Any = None) -> Any:
         with self._results_lock:
             return self._results.get(key, default)
 
+    # Loop Procssor level scoped state data
     def result_pop(self, key: str, default: Any = None):
         with self._results_lock:
             return self._results.pop(key, default)
 
+    # Loop Procssor level scoped state data
     def result_pop(self, key: str, default: Any = None) -> Any:
         return self._results.pop(key, default)
 
+    # Loop Procssor level scoped state data
     def results(self):
         return self._results
 

@@ -31,7 +31,8 @@ class NamedModule(torch.nn.Module):
         # self.target_device, self.target_device_stream = device_next()
         self.target_device, self.target_device_stream = None, None
 
-        # persistent work state forLoopProcessors
+
+        # persistent work state for named module (used by some LoopProcessors)
         # store all `processed()` work state/data/result here
         self.state = {}
 
