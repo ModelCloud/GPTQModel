@@ -44,6 +44,7 @@ from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, dynamic_get
 from . import has_gil_disabled
 from .backend import BACKEND
+from .device import get_device
 from .importer import select_quant_linear
 from .logger import setup_logger
 from .torch import torch_empty_cache, torch_new_stream_ctx
@@ -75,19 +76,6 @@ def recurse_setattr(module, name, value):
         name, rest = name.split(".", 1)
         recurse_setattr(getattr(module, name), rest, value)
 
-
-def get_device(obj: torch.Tensor | nn.Module) -> torch.device:
-    if isinstance(obj, torch.Tensor):
-        return obj.device
-
-    params = list(obj.parameters())
-    buffers = list(obj.buffers())
-    if len(params) > 0:
-        return params[0].device
-    elif len(buffers) > 0:
-        return buffers[0].device
-    else:
-        return None
 
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
     if get_device(obj) != device:

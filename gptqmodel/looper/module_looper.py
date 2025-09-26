@@ -24,8 +24,9 @@ from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
 from ..utils import ASYNC_WORKER
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
+from ..utils.device import get_device
 from ..utils.logger import setup_logger
-from ..utils.model import find_modules, get_device, get_module, get_module_by_name_prefix, move_to, nested_move_to
+from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
 from ..utils.structure import print_module_tree
 from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA, META, BalanceStrategy,

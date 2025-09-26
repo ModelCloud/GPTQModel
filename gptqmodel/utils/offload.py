@@ -17,7 +17,8 @@ from accelerate.utils import align_module_device, has_offloaded_params
 from torch import nn
 
 from ..looper.named_module import NamedModule
-from .torch import CPU, META
+from .device import get_device
+from .torch import CPU, HAS_CUDA, META
 
 _lock = threading.Lock()
 
@@ -89,6 +90,10 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
         # print(f"[skip] '{name}' is on meta; leaving as-is")
         return
 
+    m_device = get_device(module)
+    if m_device.type == "cuda":
+        torch.cuda.set_device(m_device)
+
     # print(f"device_map base_modules: {device_map}")
 
     # skip modules that have no parameters and no buffers since they can't be offloaded
@@ -97,13 +102,24 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
     if not has_params and not has_buffers:
         return
 
+    # print(f"Offload source device: {m_device}")
+    # print_module_tree(module)
+    # TODO FIXME pending PR upstream: https://github.com/huggingface/accelerate/pull/3796
+    real_cache_flush = None
+    if HAS_CUDA:
+        real_cache_flush = torch.cuda.empty_cache
+        torch.cuda.empty_cache = lambda: None
+
     _ = disk_offload(
         module,
         # device_map={ "" : "disk" },  # only touch this subtree
         offload_dir=f"{disk_path}/{name}",
         offload_buffers=True,  # needed for buffers
-        execution_device=CPU,
+        execution_device=m_device,
     )
+
+    if real_cache_flush:
+        torch.cuda.empty_cache = real_cache_flush
 
     # print("offload_disk: list item tree")
     # print_module_tree(module)

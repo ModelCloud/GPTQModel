@@ -20,6 +20,7 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
+from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.torch import HAS_CUDA, HAS_XPU, device_next
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
@@ -143,6 +144,10 @@ class GPTQ:
     def process_batch(self, inp: torch.Tensor):
         # print(f"inp = {inp}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
+        inp_device = get_device(inp)
+        if inp_device.type == "cuda":
+            torch.cuda.set_device(inp_device)
+
         inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
         # input reshaping
