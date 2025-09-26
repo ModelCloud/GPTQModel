@@ -18,8 +18,11 @@ from torch import nn
 
 from ..looper.named_module import NamedModule
 from .torch import CPU, META
+from .threads import device_ctx, activate_device
+from ..utils.model import get_device
+import contextlib
 
-_lock = threading.Lock()
+lock = threading.Lock()
 
 def get_module_fullname(model: torch.nn.Module, module: torch.nn.Module) -> str:
     for name, mod in model.named_modules():
@@ -56,30 +59,29 @@ def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: 
     assert module is not None
     assert model is not None
 
-    with _lock:
-        if isinstance(module, List):
-            for name in module:
-                m = get_submodule(model, name)
-                # unwrap named module
-                if isinstance(m, NamedModule):
-                    # print(f"offloading named module: {module.full_name}")
-                    m = m.module
-
-                full_name = get_module_fullname(model=model, module=m)
-                _offload_disk(module=m, name=full_name, disk_path=disk_path)
-        else:
+    if isinstance(module, List):
+        for name in module:
+            m = get_submodule(model, name)
             # unwrap named module
-            if isinstance(module, NamedModule):
+            if isinstance(m, NamedModule):
                 # print(f"offloading named module: {module.full_name}")
-                module = module.module
+                m = m.module
 
-            full_name = get_module_fullname(model=model, module=module)
+            full_name = get_module_fullname(model=model, module=m)
+            _offload_disk(module=m, name=full_name, disk_path=disk_path)
+    else:
+        # unwrap named module
+        if isinstance(module, NamedModule):
+            # print(f"offloading named module: {module.full_name}")
+            module = module.module
 
-            _offload_disk(module=module, name=full_name, disk_path=disk_path)
+        full_name = get_module_fullname(model=model, module=module)
 
-        if hasattr(module, "config") and getattr(module.config,
-                                                 "tie_word_embeddings", False):
-            module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after offload
+        _offload_disk(module=module, name=full_name, disk_path=disk_path)
+
+    if hasattr(module, "config") and getattr(module.config,
+                                             "tie_word_embeddings", False):
+        module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after offload
 
     # print("offload_disk: list item tree")
             # print_module_tree(module)
@@ -89,23 +91,33 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
         # print(f"[skip] '{name}' is on meta; leaving as-is")
         return
 
-    # print(f"device_map base_modules: {device_map}")
+    m_device = get_device(module)
+    activate_device(m_device)
 
-    # skip modules that have no parameters and no buffers since they can't be offloaded
-    has_params  = any(p.numel() > 0 for p in module.parameters(recurse=False))
-    has_buffers = any(b.numel() > 0 for b in module.buffers(recurse=False))
-    if not has_params and not has_buffers:
-        return
+    with device_ctx(m_device):
+        # print(f"device_map base_modules: {device_map}")
 
-    _ = disk_offload(
-        module,
-        # device_map={ "" : "disk" },  # only touch this subtree
-        offload_dir=f"{disk_path}/{name}",
-        offload_buffers=True,  # needed for buffers
-        execution_device=CPU,
-    )
+        # skip modules that have no parameters and no buffers since they can't be offloaded
+        has_params  = any(p.numel() > 0 for p in module.parameters(recurse=False))
+        has_buffers = any(b.numel() > 0 for b in module.buffers(recurse=False))
+        if not has_params and not has_buffers:
+            return
 
-    # print("offload_disk: list item tree")
+        # TODO FIX ME: ugly hack to bypass threading issue with accelerate calling cuda clear cache
+        empty_cache = torch.cuda.empty_cache
+        torch.cuda.empty_cache = lambda: None
+        try:
+            _ = disk_offload(
+                module,
+                # device_map={ "" : "disk" },  # only touch this subtree
+                offload_dir=f"{disk_path}/{name}",
+                offload_buffers=True,  # needed for buffers
+                execution_device=CPU,
+            )
+        finally:
+            torch.cuda.empty_cache = empty_cache
+
+            # print("offload_disk: list item tree")
     # print_module_tree(module)
 
 # undo offload
@@ -244,7 +256,8 @@ def undo_offload_to_disk(
     Returns:
         The same `module`, now “de-offloaded”.
     """
-    with _lock:
+    with lock\
+:
         # Track candidate offload dirs if user asks to delete them later.
         offload_dirs: Set[str] = set()
 

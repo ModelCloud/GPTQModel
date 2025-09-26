@@ -22,6 +22,7 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.torch import HAS_CUDA, HAS_XPU, device_next
+from ..utils.threads import activate_device
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -53,6 +54,8 @@ def get_number_of_rows_and_cols(layer: nn.Module):
 
 
 class GPTQ:
+    lock = threading.Lock()
+
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig] = None):
         # self.lock = threading.Lock()
 
@@ -141,66 +144,67 @@ class GPTQ:
         self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
-        # print(f"inp = {inp}")
-        # print(f"self.module = {self.module} device = {self.module.target_device}")
-        inp = inp.to(device=self.module.target_device, dtype=torch.float32)
+        with self.lock:
+            # print(f"inp = {inp}")
+            # print(f"self.module = {self.module} device = {self.module.target_device}")
+            inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
-        # input reshaping
-        if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-            reshaped_inp = inp.reshape(-1, inp.shape[-1])
-        else:
-            if isinstance(self.module, nn.Conv1d):
-                reshaped_inp = inp.reshape(
-                    inp.size(0) * self.module.groups,
-                    inp.size(1) // self.module.groups,
-                    inp.shape[2],
-                    1,
-                )
-                unfold = nn.Unfold(
-                    self.module.kernel_size + (1,),
-                    dilation=self.module.dilation + (1,),
-                    padding=self.module.padding + (0,),
-                    stride=self.module.stride + (1,),
-                )
-                # output size (batch_size, channels * \prod kernel_size, num_patches)
-                reshaped_inp = unfold(reshaped_inp)
+            # input reshaping
+            if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
+                reshaped_inp = inp.reshape(-1, inp.shape[-1])
             else:
-                reshaped_inp = inp.reshape(
-                    inp.size(0) * self.module.groups,
-                    inp.size(1) // self.module.groups,
-                    inp.shape[2],
-                    inp.shape[3],
-                )
-                unfold = nn.Unfold(
-                    self.module.kernel_size,
-                    dilation=self.module.dilation,
-                    padding=self.module.padding,
-                    stride=self.module.stride,
-                )
-                # output size (batch_size, channels * \prod kernel_size, num_patches)
-                reshaped_inp = unfold(reshaped_inp)
-            reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
+                if isinstance(self.module, nn.Conv1d):
+                    reshaped_inp = inp.reshape(
+                        inp.size(0) * self.module.groups,
+                        inp.size(1) // self.module.groups,
+                        inp.shape[2],
+                        1,
+                    )
+                    unfold = nn.Unfold(
+                        self.module.kernel_size + (1,),
+                        dilation=self.module.dilation + (1,),
+                        padding=self.module.padding + (0,),
+                        stride=self.module.stride + (1,),
+                    )
+                    # output size (batch_size, channels * \prod kernel_size, num_patches)
+                    reshaped_inp = unfold(reshaped_inp)
+                else:
+                    reshaped_inp = inp.reshape(
+                        inp.size(0) * self.module.groups,
+                        inp.size(1) // self.module.groups,
+                        inp.shape[2],
+                        inp.shape[3],
+                    )
+                    unfold = nn.Unfold(
+                        self.module.kernel_size,
+                        dilation=self.module.dilation,
+                        padding=self.module.padding,
+                        stride=self.module.stride,
+                    )
+                    # output size (batch_size, channels * \prod kernel_size, num_patches)
+                    reshaped_inp = unfold(reshaped_inp)
+                reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
 
-        batch_token_size = reshaped_inp.shape[0]
+            batch_token_size = reshaped_inp.shape[0]
 
-        if self.H.device != reshaped_inp.device:
-            self.H = self.H.to(device=reshaped_inp.device)
+            if self.H.device != reshaped_inp.device:
+                self.H = self.H.to(device=reshaped_inp.device)
 
-        # moe model may receive an empty batch, return early
-        if batch_token_size == 0:
-            return batch_token_size, reshaped_inp, 0, 0
+            # moe model may receive an empty batch, return early
+            if batch_token_size == 0:
+                return batch_token_size, reshaped_inp, 0, 0
 
-        beta = self.nsamples / (self.nsamples + batch_token_size)
-        alpha = 2.0 / (self.nsamples + batch_token_size)
+            beta = self.nsamples / (self.nsamples + batch_token_size)
+            alpha = 2.0 / (self.nsamples + batch_token_size)
 
-        self.H.addmm_(reshaped_inp.T, reshaped_inp, beta=beta, alpha=alpha)
+            self.H.addmm_(reshaped_inp.T, reshaped_inp, beta=beta, alpha=alpha)
 
-        # update number of collected samples
-        self.nsamples += batch_token_size
+            # update number of collected samples
+            self.nsamples += batch_token_size
 
-        # inp returned here is flattened/reshaped original inp
-        # return batch_token_size, reshaped_inp, alpha, beta
-        del batch_token_size, reshaped_inp, alpha, beta
+            # inp returned here is flattened/reshaped original inp
+            # return batch_token_size, reshaped_inp, alpha, beta
+            del batch_token_size, reshaped_inp, alpha, beta
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
