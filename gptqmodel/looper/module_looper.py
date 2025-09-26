@@ -450,6 +450,7 @@ class ModuleLooper():
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = []
 
+                            @torch.inference_mode()
                             def process_module(name, m):
                                 # prevent cuda sync memory ctx bugs
                                 m_device = get_device(m)
@@ -541,6 +542,7 @@ class ModuleLooper():
                     torch_sync()
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
+                            @torch.inference_mode()
                             def finalize_module(module):
                                 # prevent cuda sync memory ctx bugs
                                 m_device = get_device(module)
