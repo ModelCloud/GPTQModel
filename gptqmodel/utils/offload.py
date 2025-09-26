@@ -18,6 +18,9 @@ from torch import nn
 
 from ..looper.named_module import NamedModule
 from .torch import CPU, META
+from .threads import device_ctx, activate_device
+from ..utils.model import get_device
+import contextlib
 
 _lock = threading.Lock()
 
@@ -89,21 +92,25 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
         # print(f"[skip] '{name}' is on meta; leaving as-is")
         return
 
-    # print(f"device_map base_modules: {device_map}")
+    m_device = get_device(module)
+    activate_device(m_device)
 
-    # skip modules that have no parameters and no buffers since they can't be offloaded
-    has_params  = any(p.numel() > 0 for p in module.parameters(recurse=False))
-    has_buffers = any(b.numel() > 0 for b in module.buffers(recurse=False))
-    if not has_params and not has_buffers:
-        return
+    with device_ctx(m_device):
+        # print(f"device_map base_modules: {device_map}")
 
-    _ = disk_offload(
-        module,
-        # device_map={ "" : "disk" },  # only touch this subtree
-        offload_dir=f"{disk_path}/{name}",
-        offload_buffers=True,  # needed for buffers
-        execution_device=CPU,
-    )
+        # skip modules that have no parameters and no buffers since they can't be offloaded
+        has_params  = any(p.numel() > 0 for p in module.parameters(recurse=False))
+        has_buffers = any(b.numel() > 0 for b in module.buffers(recurse=False))
+        if not has_params and not has_buffers:
+            return
+
+        _ = disk_offload(
+            module,
+            # device_map={ "" : "disk" },  # only touch this subtree
+            offload_dir=f"{disk_path}/{name}",
+            offload_buffers=True,  # needed for buffers
+            execution_device=CPU,
+        )
 
     # print("offload_disk: list item tree")
     # print_module_tree(module)

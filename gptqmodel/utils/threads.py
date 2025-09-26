@@ -8,7 +8,44 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+import torch
+import contextlib
 
+def activate_device(dev: torch.device | None):
+    if dev is None:
+        return
+
+    if dev.type == "cuda" and hasattr(torch, "cuda"):
+        idx = dev.index if dev.index is not None else 0
+        torch.cuda.set_device(idx)
+    elif dev.type == "xpu" and hasattr(torch, "xpu"):
+        idx = dev.index if dev.index is not None else 0
+        torch.xpu.set_device(idx)
+    elif dev.type == "tpu" and hasattr(torch, "tpu"):
+        idx = dev.index if dev.index is not None else 0
+        torch.tpu.set_device(idx)
+    elif dev.type == "npu" and hasattr(torch, "npu"):
+        idx = dev.index if dev.index is not None else 0
+        torch.tpu.set_device(idx)
+
+
+def device_ctx(dev: torch.device | None):
+    # Returns a no-op context on CPU; proper context for CUDA/XPU
+    if dev is None:
+        return contextlib.ExitStack()
+    if dev.type == "cuda" and hasattr(torch, "cuda"):
+        idx = dev.index if dev.index is not None else 0
+        return torch.cuda.device(idx)
+    if dev.type == "xpu" and hasattr(torch, "xpu"):
+        idx = dev.index if dev.index is not None else 0
+        return torch.xpu.device(idx)
+    if dev.type == "tpu" and hasattr(torch, "tpu"):
+        idx = dev.index if dev.index is not None else 0
+        return torch.tpu.device(idx)
+    if dev.type == "npu" and hasattr(torch, "npu"):
+        idx = dev.index if dev.index is not None else 0
+        return torch.npu.device(idx)
+    return contextlib.ExitStack()
 
 class AsyncManager:
     """Single-queue async offloader. Submit only callables (fn or lambda)."""
