@@ -28,7 +28,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_device, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
 from ..utils.structure import print_module_tree
-from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, META, BalanceStrategy,
+from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA, META, BalanceStrategy,
                            device_next, device_next_reset, torch_empty_cache, torch_sync)
 from .awq_processor import AWQProcessor
 
@@ -451,6 +451,11 @@ class ModuleLooper():
                             futures = []
 
                             def process_module(name, m):
+                                # prevent cuda sync memory ctx bugs
+                                m_device = get_device(m)
+                                if HAS_CUDA and m_device is not None and m_device.type == "cuda":
+                                    torch.cuda.set_device(module.weight.device)
+
                                 processor.process(module=m, auto_gc=auto_gc)
                                 return name, m
 
@@ -544,6 +549,11 @@ class ModuleLooper():
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
                             def finalize_module(module):
+                                # prevent cuda sync memory ctx bugs
+                                m_device = get_device(module)
+                                if HAS_CUDA and m_device is not None and m_device.type == "cuda":
+                                    torch.cuda.set_device(module.weight.device)
+
                                 reverse_p.submodule_finalize(module, self.gptq_model)
 
                                 # checking for disk offloading
