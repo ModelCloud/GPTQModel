@@ -58,7 +58,7 @@ class GPTQProcessor(LoopProcessor):
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
-    def preprocess(self, module: NamedModule, buffered_fwd: bool, fail_safe: bool):
+    def preprocess(self, module: NamedModule, fail_safe: bool):
         # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
             return
@@ -86,15 +86,6 @@ class GPTQProcessor(LoopProcessor):
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
             tmp.fail_safe = fail_safe
-
-        # models like DeepSeek v3/r1 has > 256 $ of sub-modules per layer
-        # use buffered mode go vram don't explode: gptq needs to store fwd inputs per each layer fwd
-        # all sub-modules within a single layer needs to store all the inputs.
-        # deepseek has massive # of sub-modules per layer, causing vram pressure
-        # buffered mode is slower due to gpu<->cpu movement
-        if buffered_fwd:
-            log.info.once(f"Quantize: Enabling fwd buffered mode for: `{module.name}`")
-            tmp.fwd_inputs_buffered = True
 
         tmp.quantizer.configure(
             perchannel=True,

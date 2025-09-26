@@ -746,7 +746,7 @@ class AWQProcessor(LoopProcessor):
                 sanitized_kwargs[k] = v
         return sanitized_kwargs
 
-    def preprocess(self, module: NamedModule, buffered_fwd: bool):
+    def preprocess(self, module: NamedModule, fail_safe: bool):
         # TODO Dynamic is not yet supported
         pass
 

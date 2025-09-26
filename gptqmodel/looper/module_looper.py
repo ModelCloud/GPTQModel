@@ -188,7 +188,7 @@ class ModuleLooper():
                           attention_masks=attention_masks)
 
     @torch.inference_mode
-    def loop(self, calibration_enable_gpu_cache=True, buffered_fwd=False, fail_safe: bool = False, **kwargs):
+    def loop(self, calibration_enable_gpu_cache=True, fail_safe: bool = False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
                 tied_keys = self.gptq_model.model._tied_weights_keys
@@ -303,7 +303,7 @@ class ModuleLooper():
                 if isinstance(processor, AWQProcessor):
                     named_childs = dict()
                     for index, names in enumerate(modules):
-                        named_modules = self.crate_named_modules(buffered_fwd=buffered_fwd, full=full,
+                        named_modules = self.crate_named_modules(full=full,
                                                                  is_lm_head_module=is_lm_head_module,
                                                                  layer_index=layer_index, layers_prefix=layers_prefix,
                                                                  names=names,
@@ -326,7 +326,7 @@ class ModuleLooper():
                 processed_subset = {}
 
                 for index, names in enumerate(modules):
-                    subset = self.crate_named_modules(buffered_fwd=buffered_fwd, full=full, is_lm_head_module=is_lm_head_module,
+                    subset = self.crate_named_modules(full=full, is_lm_head_module=is_lm_head_module,
                                                       layer_index=layer_index, layers_prefix=layers_prefix,
                                                       names=names,
                                                       processor=processor,
@@ -598,7 +598,7 @@ class ModuleLooper():
 
         return total_log
 
-    def crate_named_modules(self, buffered_fwd, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe) -> Dict[str, NamedModule]:
+    def crate_named_modules(self, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe) -> Dict[str, NamedModule]:
         is_awq_quant = isinstance(processor, AWQProcessor)
         subset = {}
         for n in names:
@@ -626,9 +626,9 @@ class ModuleLooper():
 
             if not is_awq_quant:
                 if isinstance(processor, GPTQProcessor):
-                    processor.preprocess(subset[name], buffered_fwd=buffered_fwd, fail_safe=fail_safe)
+                    processor.preprocess(subset[name], fail_safe=fail_safe)
                 else:
-                    processor.preprocess(subset[name], buffered_fwd=buffered_fwd)
+                    processor.preprocess(subset[name])
                 # some modules are skipped
                 if processor.is_skipped(subset[name]):
                     skipped_modules.append(name)

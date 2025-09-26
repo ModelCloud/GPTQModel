@@ -32,7 +32,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import MODALITY, find_modules, get_device, get_module_by_name_prefix, move_to
 from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule
-from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
+from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from ._const import (CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE,
                      DEVICE, EXPERT_INDEX_PLACEHOLDER, META)
 from .loader import ModelLoader
@@ -491,8 +491,6 @@ class BaseQModel(nn.Module):
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,
         backend: Optional[BACKEND] = BACKEND.AUTO,
-        # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
-        buffered_fwd: bool = False,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter = None,
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
@@ -672,7 +670,6 @@ class BaseQModel(nn.Module):
 
         return module_looper.loop(
             calibration_enable_gpu_cache=calibration_enable_gpu_cache,
-            buffered_fwd=buffered_fwd,
             backend=backend,
             fail_safe=self.quantize_config.fail_safe,
         )
@@ -689,8 +686,6 @@ class BaseQModel(nn.Module):
         calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,
-        # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
-        buffered_fwd: bool = False,
     ):
         if self.quantized:
             raise EnvironmentError("eora_generate() is called a model that is already quantized")
@@ -735,7 +730,6 @@ class BaseQModel(nn.Module):
 
         module_looper.loop(
             calibration_enable_gpu_cache=calibration_enable_gpu_cache,
-            buffered_fwd=buffered_fwd,
         )
 
         self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)

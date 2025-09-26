@@ -61,7 +61,6 @@ class ModelTest(unittest.TestCase):
     DATASET_SIZE = 256
     DATASET_SORT = "asc"
     DELETE_QUANTIZED_MODEL = True
-    BUFFERED_FWD = False
 
     KERNEL_QUANT = {}  # kernel sets
     KERNEL_INFERENCE = {}  # kernel sets
@@ -221,7 +220,7 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, calibration_sort=self.DATASET_SORT, backend=self.QUANT_BACKEND, batch_size=batch_size, buffered_fwd=self.BUFFERED_FWD)
+            model.quantize(calibration_dataset, calibration_sort=self.DATASET_SORT, backend=self.QUANT_BACKEND, batch_size=batch_size)
 
             self.check_kernel(model, self.KERNEL_QUANT)
 

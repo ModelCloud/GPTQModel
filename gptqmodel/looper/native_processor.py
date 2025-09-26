@@ -51,7 +51,7 @@ class NativeProcessor(LoopProcessor):
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("NativeProcessor's calibration_dataset cannot be modified")
 
-    def preprocess(self, module: NamedModule, buffered_fwd: bool):
+    def preprocess(self, module: NamedModule):
         self.native_inp_caches[module.name] = []
 
     def is_skipped(self, module: NamedModule) -> bool:
