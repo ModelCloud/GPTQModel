@@ -60,7 +60,7 @@ Fix ROCm version auto detection in `setup` install.
 * 02/08/2025 [1.8.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.8.1): ⚡ `DeepSeek v3/R1` model support. New flexible weight `packing`: allow quantized weights to be packed to `[int32, int16, int8]` dtypes. 
 `Triton` and `Torch` kernels supports full range of new `QuantizeConfig.pack_dtype`. 
 New `auto_gc: bool` control in `quantize()` which can reduce quantization time for small model with no chance of oom. 
-New `GPT-QModel.push_to_hub()` api for easy quant model upload to HF repo. New `buffered_fwd: bool` control in `model.quantize()`. Over 50% quantization speed-up for visual (vl) models.  
+New `GPTQModel.push_to_hub()` api for easy quant model upload to HF repo. New `buffered_fwd: bool` control in `model.quantize()`. Over 50% quantization speed-up for visual (vl) models.  
 Fixed `bits=3` packing and `group_size=-1` regression in v1.7.4.
 * 01/26/2025 [1.7.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.4): New `compile()` api for ~4-8% inference tps improvement. Faster `pack()` for post-quantiztion model save. `Triton` kernel validated for Intel/`XPU` when Intel Triton packages are installed. Fixed Transformers (bug) downcasting tokenizer class on save. 
 * 01/20/2025 [1.7.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.7.3): New Telechat2 (China Telecom) and PhiMoE model support. Fixed `lm_head` weights duplicated in post-quantize save() for models with tied-embedding. 
@@ -361,10 +361,10 @@ pip install lm-eval>=0.4.7
 pip install -U "evalplus @ git+https://github.com/evalplus/evalplus"
 ```
 
-Below is a basic sample using `GPT-QModel.eval` API
+Below is a basic sample using `GPTQModel.eval` API
 
 ```py
-from gptqmodel import GPT-QModel
+from gptqmodel import GPTQModel
 from gptqmodel.utils.eval import EVAL
 
 model_id = "ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
