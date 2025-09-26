@@ -121,7 +121,7 @@ def batch_inference(model, tokenizer, inference_batchs, batch_size):
 
     for batch in pb:
         input_tensor = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=max_model_length, padding_side='left').to(model.device)
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = model.generate(
                 input_ids=input_tensor["input_ids"],
                 tokenizer=tokenizer,
@@ -166,7 +166,7 @@ def save_res(res, output_path):
     return accu, corr, wrong
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def eval_cot(subject, model, tokenizer, val_df, test_df, output_path, ntrain, batch_size):
     global choices
     log.info("evaluating " + subject)

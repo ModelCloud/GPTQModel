@@ -153,7 +153,7 @@ class WQLinear_GEMV(nn.Module):
         awq_linear.qzeros = qzeros
         return awq_linear
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def forward(self, x):
         if awq_ext is None:
             raise ModuleNotFoundError("External AWQ kernels are not properly installed." + msg)

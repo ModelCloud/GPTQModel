@@ -43,7 +43,7 @@ class GptOssExpertsNew(nn.Module):
                 d_w_src  = ori_experts.down_proj[i].detach().t().contiguous()
                 d_b_src  = ori_experts.down_proj_bias[i].detach()
 
-                with torch.no_grad():
+                with torch.inference_mode():
                     tgt_gu_w.copy_(gu_w_src)
                     tgt_gu_b.copy_(gu_b_src)
                     tgt_d_w.copy_(d_w_src)
@@ -113,7 +113,7 @@ class GptOssTopKRouterNew(nn.Module):
         self.bias = nn.Parameter(torch.empty(self.num_experts))
 
         if ori_router is not None:
-            with torch.no_grad():
+            with torch.inference_mode():
                 self.weight.copy_(ori_router.weight.detach())
                 self.bias.copy_(ori_router.bias.detach())
 

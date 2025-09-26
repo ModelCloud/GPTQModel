@@ -182,7 +182,7 @@ class WQLinear_GEMVFast(torch.nn.Module):
 
         return awq_linear
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def forward(self, x):
         if awq_v2_ext is None:
             raise ModuleNotFoundError("External AWQ V2 kernels are not properly installed." + msg)

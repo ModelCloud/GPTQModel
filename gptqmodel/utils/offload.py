@@ -214,7 +214,7 @@ def _restore_leaves_from_weights_map(mod: nn.Module, device: torch.device, dtype
     except Exception:
         return False
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for name, tensor, is_param in list(_iter_leaf_tensors(mod, include_buffers=True)):
             is_meta = getattr(tensor, "is_meta", False) or tensor.device is META
             if not is_meta:
@@ -265,7 +265,7 @@ def undo_offload_to_disk(
         offload_dirs: Set[str] = set()
 
         # 1) Materialize all offloaded leaves as real tensors on the target device/dtype.
-        with torch.no_grad():
+        with torch.inference_mode():
             for sub in module.modules():
                 if not has_offloaded_params(sub):
                     continue

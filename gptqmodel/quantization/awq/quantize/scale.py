@@ -22,7 +22,7 @@ allowed_act_fns = [
 ]
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def apply_clip(module, clip_list: Tuple[str, torch.Tensor]):
     for name, max_val in clip_list:
         layer: nn.Linear = get_op_by_name(module, name)
@@ -85,7 +85,7 @@ def apply_scale(module, scales_list, input_feat_dict=None):
         scales.cpu()
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def scale_ln_fcs(ln: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
     if not isinstance(fcs, list):
         fcs = [fcs]
@@ -114,7 +114,7 @@ def scale_ln_fcs(ln: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
             assert torch.isnan(p).sum() == 0
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def scale_fc_fc(fc1: nn.Linear, fc2: nn.Linear, scales: torch.Tensor):
     assert isinstance(fc1, nn.Linear)
     assert isinstance(fc2, nn.Linear)
@@ -133,7 +133,7 @@ def scale_fc_fc(fc1: nn.Linear, fc2: nn.Linear, scales: torch.Tensor):
         assert torch.isnan(p).sum() == 0
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def scale_fc_fcs(fc1: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
     if not isinstance(fcs, list):
         fcs = [fcs]
@@ -154,7 +154,7 @@ def scale_fc_fcs(fc1: nn.Linear, fcs: List[nn.Linear], scales: torch.Tensor):
             assert torch.isnan(p).sum() == 0
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def scale_gelu_fc(gelu: allowed_act_fns, fc: nn.Linear, scales: torch.Tensor):
     assert any(isinstance(gelu, t) for t in allowed_act_fns)
     assert isinstance(fc, nn.Linear)

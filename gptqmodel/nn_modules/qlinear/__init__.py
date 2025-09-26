@@ -592,6 +592,7 @@ class PackableQuantLinear(BaseQuantLinear):
         # ---------- thread task: process a single [i0,i1) block ----------
         block_in = max(word_bits, (block_in // word_bits) * word_bits)
 
+        @t.inference_mode()
         def _process_block(i0: int, i1: int):
             blk = i1 - i0
             # [out, blk]

@@ -242,6 +242,6 @@ class Perplexity:
             The logits for the batch of tokens.
         """
         # Compute the logits without keeping track of gradients
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = self._model(tokens[:, batch_start: batch_start + batch_size])
         return outputs.logits.detach()
