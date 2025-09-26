@@ -83,14 +83,14 @@ class ModuleLooper():
             return inner_hook(module, new_inputs, new_output)
         return hook
 
-    def cache_inputs(self, layers, calibration_data, calibration_enable_gpu_cache, use_cache):
+    def cache_inputs(self, layers, calibration_data, use_cache):
         layer_inputs = []
         attention_masks = []
         position_ids = []
         layer_input_kwargs = []
 
         cur_layer_device = get_device(layers[0])
-        data_device = cur_layer_device if calibration_enable_gpu_cache else CPU
+        data_device = cur_layer_device
 
         # TODO HookLinear add register_forward_pre_hook()
         def store_input_hook(module, args, kwargs):
@@ -188,7 +188,7 @@ class ModuleLooper():
                           attention_masks=attention_masks)
 
     @torch.inference_mode
-    def loop(self, calibration_enable_gpu_cache=True, fail_safe: bool = False, **kwargs):
+    def loop(self, fail_safe: bool = False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
                 tied_keys = self.gptq_model.model._tied_weights_keys
@@ -231,7 +231,6 @@ class ModuleLooper():
 
             input_cache = self.cache_inputs(layers=layers,
                                             calibration_data=processor.calibration_dataset,
-                                            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
                                             use_cache=False)
             processor.receive_input_cache(input_cache)
 
@@ -513,7 +512,7 @@ class ModuleLooper():
 
                         layer_output = move_to(
                             layer_output,
-                            device=cur_layer_device if calibration_enable_gpu_cache else CPU,
+                            device=cur_layer_device,
                         )
 
                         layer_outputs.append([layer_output])

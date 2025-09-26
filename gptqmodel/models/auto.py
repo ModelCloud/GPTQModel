@@ -610,7 +610,6 @@ class GPTQModel:
             calibration_dataset_concat_size: Optional[int] = None,
             calibration_dataset_sort: Optional[str] = None,
             batch_size: Optional[int] = 1,
-            calibration_enable_gpu_cache: Optional[bool] = True,
             tokenizer: Optional[PreTrainedTokenizerBase] = None,
             logger_board: Optional[str] = None,
             # pass-through vars for load()
@@ -657,7 +656,6 @@ class GPTQModel:
                     calibration_dataset_concat_size=calibration_dataset_concat_size,
                     calibration_dataset_sort=calibration_dataset_sort,
                     batch_size=batch_size,
-                    calibration_enable_gpu_cache=calibration_enable_gpu_cache,
                     tokenizer=tokenizer,
                     logger_board=logger_board,
                 )

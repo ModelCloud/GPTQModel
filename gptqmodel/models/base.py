@@ -487,7 +487,6 @@ class BaseQModel(nn.Module):
         calibration_concat_size: Optional[int] = None,
         calibration_sort: Optional[str] = None,  # valid values are asc, desc, shuffle
         batch_size: int = 1,
-        calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,
         backend: Optional[BACKEND] = BACKEND.AUTO,
@@ -669,7 +668,6 @@ class BaseQModel(nn.Module):
         module_looper = ModuleLooper(self, processors=processors)
 
         return module_looper.loop(
-            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
             backend=backend,
             fail_safe=self.quantize_config.fail_safe,
         )
@@ -683,7 +681,6 @@ class BaseQModel(nn.Module):
         calibration_dataset_concat_size: Optional[int] = None,
         calibration_dataset_sort: Optional[str] = None,
         batch_size: int = 1,
-        calibration_enable_gpu_cache: bool = True,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,
     ):
@@ -728,9 +725,7 @@ class BaseQModel(nn.Module):
         # prepare processor worker (looper)
         module_looper = ModuleLooper(model=self, processors=processors)
 
-        module_looper.loop(
-            calibration_enable_gpu_cache=calibration_enable_gpu_cache,
-        )
+        module_looper.loop()
 
         self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)
         return
