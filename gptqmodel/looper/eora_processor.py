@@ -208,7 +208,7 @@ class EoraProcessor(LoopProcessor):
         #     "adapter": eora,
         # })
 
-    def submodule_finalize(self, module: NamedModule):
+    def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         pass
         # adapter: Lora = module.state.pop("adapter")
         #
