@@ -233,6 +233,9 @@ def select_quant_linear(
         if err:
             raise err
 
+        if not multi_select and len(validated_qlinears):
+            raise ValueError("No valid quant linear")
+
         return validated_qlinears
 
     # TODO check AWQ format supports BACKEND
