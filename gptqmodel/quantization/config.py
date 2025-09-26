@@ -155,8 +155,8 @@ class QuantizeConfig():
     group_size: int = field(default=128)
 
     # increase damp if NaN is encountered during `.quantize()` and/or increase calib dataset size
-    damp_percent: float = field(default=0.05)
-    damp_auto_increment: float = field(default=0.01)
+    damp_percent: float = field(default=None)
+    damp_auto_increment: float = field(default=None)
 
     desc_act: bool = field(default=True)
     act_group_aware: bool = field(default=False)
@@ -248,6 +248,15 @@ class QuantizeConfig():
         if self.quant_method == METHOD.QQQ and self.format != FORMAT.QQQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
             self.format = FORMAT.QQQ
+
+        # If the user does not pass it, the default value will be set according to quant_method
+        if self.damp_percent is None:
+            if self.quant_method == METHOD.QQQ:
+                self.damp_percent = 0.01
+                self.damp_auto_increment = 0.0025
+            else:
+                self.damp_percent = 0.05
+                self.damp_auto_increment = 0.01
 
         # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
         if self.quant_method == METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM]:
