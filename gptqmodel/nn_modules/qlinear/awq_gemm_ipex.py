@@ -115,7 +115,7 @@ class Awq_IPEXQuantLinear(AwqGEMMQuantLinear):
         out_shape = x.shape[:-1] + (self.out_features,)
 
         if hasattr(self, "ipex_linear"):
-            with torch.no_grad():
+            with torch.inference_mode():
                 out = self.ipex_linear(x)
         else:
             out = dequantize_gemm(self.qweight, self.qzeros, self.scales, self.bits, self.group_size).to(x.dtype)

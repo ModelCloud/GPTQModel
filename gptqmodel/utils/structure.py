@@ -536,7 +536,7 @@ def alias_from_turtle_for_submodule(
     # ---- copy params/buffers CPU->GPU into target_submodule (your existing code) ----
     t_params = dict(target_submodule.named_parameters(recurse=True))
     s_params = dict(src_sub.named_parameters(recurse=True))
-    with torch.no_grad():
+    with torch.inference_mode():
         for name, s_p in s_params.items():
             t_p = t_params.get(name)
             if t_p is None or t_p.shape != s_p.shape:

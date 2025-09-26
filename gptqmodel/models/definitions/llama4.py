@@ -103,7 +103,7 @@ class Llama4QModel(BaseQModel):
                     super().__init__([Llama4TextMLP(config) for _ in range(self.num_experts)])
                 intermediate_size = original.down_proj.shape[1]
 
-                with torch.no_grad():
+                with torch.inference_mode():
                     # Batch process all expert parameters to avoid loops
                     gate_up_batch = torch.stack([original.gate_up_proj[i] for i in range(self.num_experts)])
                     down_batch = torch.stack([original.down_proj[i] for i in range(self.num_experts)])

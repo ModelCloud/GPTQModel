@@ -296,7 +296,7 @@ class AWQProcessor(LoopProcessor):
         clear_memory(x_sum)
 
         # [STEP 3]: Compute output of module
-        with torch.no_grad():
+        with torch.inference_mode():
             module_kwargs = self._sanitize_kwargs(kwargs, module2inspect)
             fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
             fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)

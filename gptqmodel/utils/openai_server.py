@@ -58,7 +58,7 @@ class OpenAiServer:
                     return_tensors='pt').to(self.model.device)
 
                 do_sample = True if request.temperature != 0.0 else False
-                with torch.no_grad():
+                with torch.inference_mode():
                     outputs = self.model.generate(
                         inputs_tensor,
                         max_length=inputs_tensor.shape[0] + request.max_tokens,

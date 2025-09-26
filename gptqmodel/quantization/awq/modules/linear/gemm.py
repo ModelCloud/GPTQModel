@@ -270,7 +270,7 @@ class WQLinear_GEMM(nn.Module):
                 self.out_features,
             )
         else:
-            with torch.no_grad():
+            with torch.inference_mode():
                 out = WQLinearMMFunction.apply(
                     x,
                     self.qweight,

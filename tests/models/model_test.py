@@ -173,9 +173,10 @@ class ModelTest(unittest.TestCase):
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, **kwargs):
         quantize_config = QuantizeConfig(
+            quant_method=self.METHOD,
+            format=self.FORMAT,
             bits=self.BITS,
             group_size=self.GROUP_SIZE,
-            format=self.FORMAT,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
             fail_safe=self.FAIL_SAFE,
@@ -296,7 +297,7 @@ class ModelTest(unittest.TestCase):
                 for framework, tasks in task_groups.items():
                     log.info(f"TEST: EVAL starting: backend = {self.LOAD_BACKEND}")
                     results = GPTQModel.eval(
-                        model_or_id_or_path=model,
+                        model_or_id_or_path=model.model_local_path,
                         llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
                         model_args=model_args,
                         output_path=tmp_dir,
