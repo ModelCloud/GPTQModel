@@ -27,45 +27,6 @@ from .quantizer import HF_OPTIMUM, Quantizer
 
 log = setup_logger()
 
-# TODO: move this to a locking class
-# --------------------------------------------------------------------------------------
-# Per-device lock registry to guard device-specific critical sections (like tensor moves)
-# --------------------------------------------------------------------------------------
-_device_locks = {}                 # {(device_type, index): threading.Lock()}
-_device_locks_guard = threading.Lock()  # guards the registry itself
-
-
-def _device_key(dev) -> tuple:
-    """
-    Normalize a device into a hashable (type, index) key.
-    Examples:
-      torch.device('cuda', 0) -> ('cuda', 0)
-      torch.device('xpu')     -> ('xpu', -1)
-      'cuda:1'                -> ('cuda', 1)
-      'cpu'                   -> ('cpu', -1)
-    """
-    if isinstance(dev, torch.device):
-        return (dev.type, dev.index if dev.index is not None else -1)
-    if isinstance(dev, str):
-        try:
-            d = torch.device(dev)
-            return _device_key(d)
-        except Exception:
-            return ("str", dev)  # last-resort string key
-    # Unknown type — stringify
-    return ("unknown", str(dev))
-
-
-def _get_device_lock(dev) -> threading.Lock:
-    key = _device_key(dev)
-    with _device_locks_guard:
-        lk = _device_locks.get(key)
-        if lk is None:
-            lk = threading.Lock()
-            _device_locks[key] = lk
-        return lk
-# --------------------------------------------------------------------------------------
-
 lock = threading.Lock()
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -616,13 +577,7 @@ class GPTQ:
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
 
-        target_device = self.module.weight.data.device
-
-        # limit one sync tensor move action per device due to cuda limits
-        if Q.device != target_device:
-            dev_lock = _get_device_lock(target_device)
-            with dev_lock:
-                Q = Q.to(device=target_device, non_blocking=False)
+        Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
 
         duration = time.time() - start
 
