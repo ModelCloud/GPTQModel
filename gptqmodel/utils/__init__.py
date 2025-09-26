@@ -6,12 +6,13 @@
 from .backend import BACKEND
 from .logger import setup_logger
 from .python import gte_python_3_13_3, has_gil_control, has_gil_disabled, log_gil_requirements_for
-from .threads import AsyncManager
+from .threads import AsyncManager, SerialWorker
 from .vram import get_vram
 
 log = setup_logger()
 
-ASYNC_WORKER = AsyncManager(threads=4)
+ASYNC_BG_QUEUE = AsyncManager(threads=4)
+SERIAL_BG_QUEUE = SerialWorker()
 
 # TODO: datasets is not compatible with free threading
 if has_gil_disabled():

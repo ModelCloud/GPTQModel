@@ -22,7 +22,7 @@ from ..models import BaseQModel
 from ..models._const import CUDA, SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
-from ..utils import ASYNC_WORKER
+from ..utils import ASYNC_BG_QUEUE, SERIAL_BG_QUEUE
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
@@ -32,6 +32,7 @@ from ..utils.structure import print_module_tree
 from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA, META, BalanceStrategy,
                            device_next, device_next_reset, torch_empty_cache, torch_sync)
 from .awq_processor import AWQProcessor
+from .qqq_processor import QQQProcessor
 
 log = setup_logger()
 
@@ -222,7 +223,7 @@ class ModuleLooper():
                     prev_processor = self.processors[p_index - 1]
                     processor.set_calibration_dataset(prev_processor.calibration_dataset)
                     # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
-                    processor.receive_input_cache(copy.copy(prev_processor.inputs_cache))
+                    processor.receive_input_cache(prev_processor.inputs_cache)
                 elif isinstance(processor, DequantizeProcessor):
                     # DequantizeProcessor does not perform any operations on dataset.
                     processor.set_calibration_dataset([])
@@ -543,31 +544,36 @@ class ModuleLooper():
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
                             @torch.inference_mode()
-                            def finalize_module(module):
+                            def finalize_module(process, module):
                                 # prevent cuda sync memory ctx bugs
                                 m_device = get_device(module)
                                 if HAS_CUDA and m_device is not None and m_device.type == "cuda":
                                     torch.cuda.set_device(m_device)
 
-                                reverse_p.submodule_finalize(module, self.gptq_model)
+                                process.submodule_finalize(module, self.gptq_model)
 
-                                # checking for disk offloading
-                                offload_to_disk(
-                                    model=self.gptq_model.model,
-                                    module=self.gptq_model.model.get_submodule(module.full_name),
-                                    disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
-                                )
+                                # TODO FIX ME offloading to LoopProcessor lifecycle
+                                if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
+                                    # checking for disk offloading
+                                    offload_to_disk(
+                                        model=self.gptq_model.model,
+                                        module=self.gptq_model.model.get_submodule(module.full_name),
+                                        disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
+                                    )
 
                             module = processed_subset[name]
 
                             if self.gptq_model.quantize_config.offload_to_disk:
-                                ASYNC_WORKER.submit(partial(
+                                SERIAL_BG_QUEUE.submit(partial(
                                     finalize_module,
+                                    process=reverse_p,
                                     module=module,
                                 ))
+                            else:
+                                reverse_p.submodule_finalize(module, self.gptq_model)
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
-        ASYNC_WORKER.join()
+        SERIAL_BG_QUEUE.join()
 
         # paranoid safety check
         torch_sync()

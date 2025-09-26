@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import concurrent.futures as cf
+import queue
 import threading
 import time
 import traceback
@@ -84,3 +85,34 @@ class AsyncManager:
         if wait:
             self.join()  # wait for remaining tasks
         self._exec.shutdown(wait=wait)
+
+
+class SerialWorker:
+    def __init__(self, name="serial-worker"):
+        self._q = queue.Queue()
+        self._t = threading.Thread(target=self._loop, name=name, daemon=True)
+        self._t.start()
+
+    def _loop(self):
+        while True:
+            fn = self._q.get()
+            if fn is None:
+                break
+            try:
+                fn()
+            except Exception:
+                traceback.print_exc()
+            finally:
+                self._q.task_done()
+
+    def submit(self, fn):
+        if not callable(fn):
+            raise TypeError("submit expects a callable")
+        self._q.put(fn)
+
+    def join(self, timeout=None):
+        self._q.join()
+
+    def shutdown(self):
+        self._q.put(None)
+        self._t.join()

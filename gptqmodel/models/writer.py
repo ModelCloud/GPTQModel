@@ -75,7 +75,8 @@ def ModelWriter(cls):
             weights = {}
             target_modules = set()
             # convert the dict into safetensors compatible dict
-            for key, d in self.lora_results.items():
+            for key, adapter in self.lora_results.items():
+                assert isinstance(adapter, Lora)
                 key = key.lower()
                 simple_module_name = key.split(".")[-1] # mlp.gate_proj => gate_proj
                 target_modules.add(simple_module_name)
@@ -84,12 +85,11 @@ def ModelWriter(cls):
                 #     key = key.removeprefix('model.') # some HF models use model. or model.model.
 
                 # must normalize key since HF can load weights as `model.` or not based on what AutoModel is used
-                key = f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}{key}"
-                lora_rank = d.pop("rank")
-                for lora_key, lora_weight in d.items():
-                    assert isinstance(lora_weight, torch.Tensor)
-                    weights[f"{key}.{lora_key}"] = lora_weight
-                    log.info(f"Adapter: EoRA weights found -> `{key}.{lora_key}`, rank = `{lora_rank}`")
+                weight_key = f"{HF_ADAPTER_WEIGHT_KEY_PREFIX}{key}"
+
+                weights[f"{weight_key}.lora_A.weight"] = adapter.lora_A
+                weights[f"{weight_key}.lora_B.weight"] = adapter.lora_B
+                log.info(f"Adapter: EoRA weights found -> `{weight_key}.lora_A/Lora_B.weight`, rank = `{adapter.rank}`")
 
             weight_file_path = f"{save_dir.removesuffix('/')}/{HF_ADAPTER_FILE_NAME}"
 

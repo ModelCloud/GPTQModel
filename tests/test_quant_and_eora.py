@@ -48,12 +48,12 @@ class Test(ModelTest):
 
     @parameterized.expand(
         [
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ, True), # gptq v2
-            (METHOD.GPTQ, FORMAT.GPTQ, False), # gptq v1
+            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ), # gptq v2
+            (METHOD.GPTQ, FORMAT.GPTQ), # gptq v1
             #(QUANT_METHOD.QQQ, FORMAT.QQQ),
         ]
     )
-    def test_quant_and_eora(self, quant_method: METHOD, format: FORMAT, v2: bool):
+    def test_quant_and_eora(self, quant_method: METHOD, format: FORMAT):
         bits = 4
         group_size = 128
         desc_act = False
@@ -92,7 +92,6 @@ class Test(ModelTest):
                 adapter=eora,
                 format=format,
                 quant_method=quant_method,
-                v2=v2,
             )
 
             model = GPTQModel.load(
