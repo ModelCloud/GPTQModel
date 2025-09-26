@@ -11,7 +11,8 @@ from .vram import get_vram
 
 log = setup_logger()
 
-ASYNC_WORKER = AsyncManager(threads=4)
+ASYNC_BG_QUEUE = AsyncManager(threads=4)
+SERIAL_BG_QUEUE = AsyncManager(threads=1)
 
 # TODO: datasets is not compatible with free threading
 if has_gil_disabled():
