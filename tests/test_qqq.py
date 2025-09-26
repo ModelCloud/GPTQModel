@@ -42,7 +42,7 @@ class TestGroupSize(unittest.TestCase):
         log.info(f"Output: {model.tokenizer.decode(result)}") # string output
 
     # TODO FIXME: group_size 128 is failing this CI TEST!
-    @parameterized.expand([-1]) #[-1, 128])
+    @parameterized.expand([-1, 128])
     def test_quant_and_inference(self, group_size: int):
         quantize_config = QuantizeConfig(
             bits=4,
