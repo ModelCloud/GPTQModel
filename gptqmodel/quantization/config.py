@@ -20,6 +20,8 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
+BITS_FIELD_CODE = "bits"
+GROUP_SIZE_FIELD_CODE = "group_size"
 FORMAT_FIELD_CODE = "format"
 FORMAT_FIELD_CHECKPOINT = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
@@ -98,9 +100,11 @@ QUANTIZE_BLACK_LIST = {}
 
 # compat
 QUANT_CONFIG_ARG_SYNONYMS = {
-    "w_bit": "bits",
-    "q_group_size": "group_size",
-    # awq compat
+    "w_bit": BITS_FIELD_CODE,
+    # QQQ compat
+    "wbits": BITS_FIELD_CODE,
+    "q_group_size": GROUP_SIZE_FIELD_CODE,
+    # AWQ compat
     "version" : FORMAT_FIELD_CODE,
     # map format field (checkpoint_format) to class/code (format)
     FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
@@ -252,8 +256,8 @@ class QuantizeConfig():
         # If the user does not pass it, the default value will be set according to quant_method
         if self.damp_percent is None:
             if self.quant_method == METHOD.QQQ:
-                self.damp_percent = 0.01
-                self.damp_auto_increment = 0.0025
+                self.damp_percent = 0.005
+                self.damp_auto_increment = 0.001
             else:
                 self.damp_percent = 0.05
                 self.damp_auto_increment = 0.01
