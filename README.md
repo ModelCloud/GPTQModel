@@ -115,25 +115,25 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 </details>
 
 ## What is GPT-QModel?
-GPTQ-Model is a production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF Transformers, vLLM, and SGLang.
+GPT-QModel is a production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF Transformers, vLLM, and SGLang.
 
 Public and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
 
-GPTQ-Model not only supports GPTQ but also QQQ, GPTQv2, Eora with more quantization methods and enhancements planned. 
+GPT-QModel not only supports GPTQ but also QQQ, GPTQv2, Eora with more quantization methods and enhancements planned. 
 
 ## Quantization Support
 
-GPTQ-Model is a modular design supporting multiple quantization methods and feature extensions.
+GPT-QModel is a modular design supporting multiple quantization methods and feature extensions.
 
-| Quantization Feature |  GPTQ-Model | Transformers | vLLM  | SGLang | Lora Training |
-|----------------------|---|---|---|---|---------------|
-| GPTQ                 | ✅ | ✅ | ✅ | ✅ | ✅             | 
-| EoRA                 | ✅ | ✅ | ✅ | ✅ | x             | 
-| AWQ                 | ✅ | ✅* | ✅* | ✅* | ✅*             | 
-| GPTQ v2              | ✅ | ✅ | ✅ | ✅ | ✅             | 
-| QQQ                  | ✅ | x | x | x | x             | 
-| Rotation             | ✅ | x | x | x | x             |  
-| Group Aware Activitation Reordering (GPTQ) | ✅ | ✅ | ✅ | ✅ | ✅             |  
+| Quantization Feature | GPT-QModel | Transformers | vLLM  | SGLang | Lora Training |
+|----------------------|------------|---|---|---|---------------|
+| GPTQ                 | ✅          | ✅ | ✅ | ✅ | ✅             | 
+| EoRA                 | ✅          | ✅ | ✅ | ✅ | x             | 
+| AWQ                 | ✅          | ✅* | ✅* | ✅* | ✅*             | 
+| GPTQ v2              | ✅          | ✅ | ✅ | ✅ | ✅             | 
+| QQQ                  | ✅          | x | x | x | x             | 
+| Rotation             | ✅          | x | x | x | x             |  
+| Group Aware Activitation Reordering (GPTQ) | ✅          | ✅ | ✅ | ✅ | ✅             |  
 
 ## Multi-Modal
 
@@ -190,7 +190,7 @@ Native support support some of the most popular multi-modal models:
 
 ## Platform and HW Support 
 
-GPTQ-Model is validated for Linux, MacOS, and Windows 11:
+GPT-QModel is validated for Linux, MacOS, and Windows 11:
 
 | Platform        | Device        |     |  Optimized Arch              | Kernels                                       |
 |-----------------|---------------| --- | -------------- |-----------------------------------------------| 
@@ -370,10 +370,16 @@ from gptqmodel.utils.eval import EVAL
 model_id = "ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
 
 # Use `lm-eval` as framework to evaluate the model
-lm_eval_results = GPTQ-Model.eval(model_id, framework=EVAL.LM_EVAL, tasks=[EVAL.LM_EVAL.ARC_CHALLENGE], output_file='lm-eval_result.json')
+lm_eval_data = GPTQModel.eval(model_id, 
+                    framework=EVAL.LM_EVAL, 
+                    tasks=[EVAL.LM_EVAL.ARC_CHALLENGE])
+
 
 # Use `evalplus` as framework to evaluate the model
-evalplus_results = GPTQ-Model.eval(model_id, framework=EVAL.EVALPLUS, tasks=[EVAL.EVALPLUS.HUMAN], output_file='evalplus_result.json')
+evalplus_data = GPTQModel.eval(model_id, 
+                    framework=EVAL.EVALPLUS, 
+                    tasks=[EVAL.EVALPLUS.HUMAN])
+
 ```
 ### Dynamic Quantization (Per Module QuantizeConfig Override)
 
