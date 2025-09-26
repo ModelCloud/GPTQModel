@@ -76,7 +76,7 @@ def recurse_setattr(module, name, value):
         recurse_setattr(getattr(module, name), rest, value)
 
 
-def get_device(obj: torch.Tensor | nn.Module):
+def get_device(obj: torch.Tensor | nn.Module) -> torch.device:
     if isinstance(obj, torch.Tensor):
         return obj.device
 

@@ -451,6 +451,11 @@ class ModuleLooper():
                             futures = []
 
                             def process_module(name, m):
+                                # prevent cuda sync memory ctx bugs
+                                m_device = get_device(m)
+                                if HAS_CUDA and m_device is not None and m_device.type == "cuda":
+                                    torch.cuda.set_device(module.weight.device)
+
                                 processor.process(module=m, auto_gc=auto_gc)
                                 return name, m
 
@@ -544,6 +549,11 @@ class ModuleLooper():
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
                             def finalize_module(module):
+                                # prevent cuda sync memory ctx bugs
+                                m_device = get_device(module)
+                                if HAS_CUDA and m_device is not None and m_device.type == "cuda":
+                                    torch.cuda.set_device(module.weight.device)
+
                                 reverse_p.submodule_finalize(module, self.gptq_model)
 
                                 # checking for disk offloading
