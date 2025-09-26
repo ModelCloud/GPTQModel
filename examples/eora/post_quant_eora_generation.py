@@ -74,5 +74,5 @@ if __name__ == '__main__':
         quantized_model_id_or_path=args.quantized_model,
         calibration_dataset=calibration_dataset,
         calibration_dataset_concat_size=0,
-        auto_gc=False)
+    )
 

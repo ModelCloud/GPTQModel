@@ -615,8 +615,6 @@ class GPTQModel:
             logger_board: Optional[str] = None,
             # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
             buffered_fwd: bool = False,
-            # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
-            auto_gc: bool = True,
             # pass-through vars for load()
             trust_remote_code: bool = False,
             dtype: Optional[Union[str, torch.dtype]] = None,
@@ -665,5 +663,5 @@ class GPTQModel:
                     tokenizer=tokenizer,
                     logger_board=logger_board,
                     buffered_fwd=buffered_fwd,
-                    auto_gc=auto_gc)
+                )
             return
