@@ -54,7 +54,7 @@ from ..utils.torch import (
     torch_sync,
 )
 from .awq_processor import AWQProcessor
-from ..utils.threads import  device_ctx, activate_device
+from ..utils.threads import device_ctx, activate_device
 
 log = setup_logger()
 
@@ -152,7 +152,7 @@ class ModuleLooper:
 
         return hook
 
-    # ---------- Input caching (unchanged except for minor style) ----------
+    # ---------- Input caching ----------
 
     def cache_inputs(self, layers, calibration_data, use_cache):
         layer_inputs = []
@@ -463,7 +463,8 @@ class ModuleLooper:
                     def _build_clone_and_subset(target_device):
                         if target_device == META:
                             return None, None
-                        activate_device(target_device)
+                        # Ensure this OS thread is pinned to the right device
+                        activate_device(target_device)  # <<< NEW
                         with device_ctx(target_device):
                             removed = self._strip_unpickleable_attrs(module)
                             try:
@@ -518,7 +519,7 @@ class ModuleLooper:
 
                     # Worker: run a partition on a specific device/clone
                     def _run_partition(dev: torch.device, batch_range: Tuple[int, int], clone, subset_clone):
-                        activate_device(dev)
+                        activate_device(dev)  # <<< NEW — pin this worker thread
                         with device_ctx(dev):
                             start_idx, end_idx = batch_range
                             for j in range(start_idx, end_idx):
@@ -558,6 +559,7 @@ class ModuleLooper:
 
                                 # Forward on clone
                                 try:
+                                    activate_device(dev)  # <<< NEW — right before forward
                                     if hasattr(clone, "reuse_kv") and clone.reuse_kv:
                                         additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(
                                             layer_index - 1
@@ -590,6 +592,7 @@ class ModuleLooper:
 
                     if num_devices == 1:
                         # Keep the single-thread path for zero-overhead when only one device
+                        activate_device(cur_layer_device)  # <<< NEW
                         layer_outputs = []
                         for j in range(num_batches):
                             layer_input = []
@@ -625,6 +628,7 @@ class ModuleLooper:
                                 additional_layer_inputs[kk] = nested_move_to(vv, device=cur_layer_device, stream=False)
 
                             try:
+                                activate_device(cur_layer_device)  # <<< NEW — before forward
                                 if hasattr(module, "reuse_kv") and module.reuse_kv:
                                     additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
                                     layer_output = module(*layer_input) if is_lm_head_module else module(
@@ -660,6 +664,7 @@ class ModuleLooper:
 
                         if len(clones) == 0:
                             # fallback to single device path on cur_layer_device
+                            activate_device(cur_layer_device)  # <<< NEW
                             layer_outputs = []
                             for j in range(num_batches):
                                 layer_input = []
@@ -696,6 +701,7 @@ class ModuleLooper:
                                         vv, device=cur_layer_device, stream=False
                                     )
                                 try:
+                                    activate_device(cur_layer_device)  # <<< NEW — before forward
                                     if hasattr(module, "reuse_kv") and module.reuse_kv:
                                         additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(
                                             layer_index - 1
@@ -790,8 +796,7 @@ class ModuleLooper:
                             def process_module(name, m):
                                 # prevent cuda sync memory ctx bugs
                                 m_device = get_device(m)
-                                if HAS_CUDA and m_device is not None and getattr(m_device, "type", "") == "cuda":
-                                    torch.cuda.set_device(m_device)
+                                activate_device(m_device)  # <<< NEW
                                 processor.process(module=m)
                                 return name, m
 
@@ -809,6 +814,7 @@ class ModuleLooper:
                 is_last_module = layer_index == len(quant_modules_pb) - 1
                 # second forward after process()
                 if not is_last_module and processor.fwd_after_process:
+                    activate_device(cur_layer_device)  # <<< NEW
                     layer_outputs = []
                     for j in range(processor.num_batches):
                         layer_input = []
@@ -879,8 +885,7 @@ class ModuleLooper:
                             def finalize_module(module):
                                 # prevent cuda sync memory ctx bugs
                                 m_device = get_device(module)
-                                if HAS_CUDA and m_device is not None and getattr(m_device, "type", "") == "cuda":
-                                    torch.cuda.set_device(m_device)
+                                activate_device(m_device)
 
                                 reverse_p.submodule_finalize(module, self.gptq_model)
 
