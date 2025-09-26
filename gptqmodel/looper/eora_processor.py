@@ -202,6 +202,8 @@ class EoraProcessor(LoopProcessor):
                 "lora_B.weight": move_to(B.to(dtype=module.module_dtype), device=CPU, stream=self.stream),
             })
 
+
+
         # eora = Lora(rank=module.adapter_cfg.rank, lora_A=A, lora_B=B)
         #
         # module.state.update({

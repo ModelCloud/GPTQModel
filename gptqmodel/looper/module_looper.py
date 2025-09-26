@@ -12,7 +12,6 @@ from typing import Dict, List
 
 import torch
 
-from .qqq_processor import QQQProcessor
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
@@ -33,6 +32,7 @@ from ..utils.structure import print_module_tree
 from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA, META, BalanceStrategy,
                            device_next, device_next_reset, torch_empty_cache, torch_sync)
 from .awq_processor import AWQProcessor
+from .qqq_processor import QQQProcessor
 
 log = setup_logger()
 
