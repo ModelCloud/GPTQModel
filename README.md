@@ -418,7 +418,6 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 ### Experimental Features
 
 * GPTQ v2: set `v2=True` in quantization config.
-* Pass `buffered_fwd = True` to `quantize()` api to potentially speed up quantization if gpu has plenty of vram and can hold all fwd inputs in vram.
 
 
 ### Attribution of Quantization Methods:

@@ -21,7 +21,7 @@ from torch.nn.modules.conv import _ConvNd
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_CUDA, HAS_XPU, device_next, torch_sync
+from ..utils.torch import HAS_CUDA, HAS_XPU, device_next
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -87,10 +87,6 @@ class GPTQ:
 
         self.quantizer = self.create_quantizer(name=self.name)
 
-        # fwd input buffer
-        self.fwd_inputs_buffered = False
-        self.fwd_inputs_buffered_data = []
-
         # fwd counter
         self.fwd_counter = 0
 
@@ -142,13 +138,7 @@ class GPTQ:
 
         # print(f"self.module.target_device = {self.module.target_device}")
 
-        if self.fwd_inputs_buffered:
-            # with torch_streamCtx(self.module.target_device_stream):
-            #     self.fwd_inputs_buffered_data.append(inp.to(device=self.module.target_device, non_blocking=True))
-
-            self.fwd_inputs_buffered_data.append(inp.to(device=self.module.target_device, non_blocking=False))
-        else:
-            self.process_batch(inp)
+        self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
         # print(f"inp = {inp}")
@@ -295,16 +285,6 @@ class GPTQ:
         if self.qcfg.mock_quantization:
             # Use simplified hessian inverse (identity matrix)
             self.hessian_inverse = self._mock_hessian_inverse
-
-        # process buffered inputs
-        if len(self.fwd_inputs_buffered_data) > 0:
-            torch_sync(device=self.module.target_device)
-
-            for inp in self.fwd_inputs_buffered_data:
-                self.process_batch(inp)
-
-            # release buffer
-            del self.fwd_inputs_buffered_data
 
         # if self.device.type not in ["mps", "cpu"]:
         #     self.module.weight.data = self.module.weight.data.cpu()

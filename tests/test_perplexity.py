@@ -127,7 +127,7 @@ class TestPerplexity(unittest.TestCase):
             # (QUANT_METHOD.AUTO_ROUND, FORMAT.GPTQ, 4, 32, False),
         ]
     )
-    def test_quantized_perplexity(self, method: METHOD, format: FORMAT, bits: int, group_size: int, buffered_fwd: bool = False):
+    def test_quantized_perplexity(self, method: METHOD, format: FORMAT, bits: int, group_size: int):
         if method == METHOD.GPTQ:
             quantize_config = QuantizeConfig(
                 bits=bits,
@@ -156,7 +156,6 @@ class TestPerplexity(unittest.TestCase):
         model.quantize(
             dataset,
             batch_size=128 if IS_ROCM else 256,
-            # buffered_fwd=buffered_fwd,  TODO FIX ME
         )
         quant_time = time.time() - start
 

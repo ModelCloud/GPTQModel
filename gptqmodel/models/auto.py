@@ -613,8 +613,6 @@ class GPTQModel:
             calibration_enable_gpu_cache: Optional[bool] = True,
             tokenizer: Optional[PreTrainedTokenizerBase] = None,
             logger_board: Optional[str] = None,
-            # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
-            buffered_fwd: bool = False,
             # pass-through vars for load()
             trust_remote_code: bool = False,
             dtype: Optional[Union[str, torch.dtype]] = None,
@@ -662,6 +660,5 @@ class GPTQModel:
                     calibration_enable_gpu_cache=calibration_enable_gpu_cache,
                     tokenizer=tokenizer,
                     logger_board=logger_board,
-                    buffered_fwd=buffered_fwd,
                 )
             return

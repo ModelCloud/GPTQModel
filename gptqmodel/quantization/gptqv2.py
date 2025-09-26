@@ -119,14 +119,6 @@ class GPTQv2(GPTQ):
         if not TORCH_GTE_28:
             self.hessian_inverse = torch_compile(self.hessian_inverse)
 
-        # process buffered inputs
-        for inp in self.fwd_inputs_buffered_data:
-            torch_sync(device=self.module.target_device)
-            self.process_batch(inp)
-
-        # release buffer
-        del self.fwd_inputs_buffered_data
-
         # if self.device.type not in ["mps", "cpu"]:
         #     self.module.weight.data = self.module.weight.data.cpu()
 
