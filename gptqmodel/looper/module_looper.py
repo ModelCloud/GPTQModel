@@ -453,7 +453,7 @@ class ModuleLooper():
                                 # prevent cuda sync memory ctx bugs
                                 m_device = get_device(m)
                                 if HAS_CUDA and m_device is not None and m_device.type == "cuda":
-                                    torch.cuda.set_device(module.weight.device)
+                                    torch.cuda.set_device(m_device)
 
                                 processor.process(module=m)
                                 return name, m
@@ -544,7 +544,7 @@ class ModuleLooper():
                                 # prevent cuda sync memory ctx bugs
                                 m_device = get_device(module)
                                 if HAS_CUDA and m_device is not None and m_device.type == "cuda":
-                                    torch.cuda.set_device(module.weight.device)
+                                    torch.cuda.set_device(m_device)
 
                                 reverse_p.submodule_finalize(module, self.gptq_model)
 
