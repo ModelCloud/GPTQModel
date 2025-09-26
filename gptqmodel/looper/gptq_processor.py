@@ -21,7 +21,7 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 from ..utils.offload import undo_offload_to_disk
-from ..utils.torch import torch_streamCtx, torch_sync, HAS_CUDA
+from ..utils.torch import HAS_CUDA, torch_streamCtx, torch_sync
 
 log = setup_logger()
 lock = threading.Lock()

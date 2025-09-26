@@ -212,7 +212,24 @@ def print_module_tree(
     experts_regex: str = r"(^|\.)experts($|\.)",
     experts_show: int = 1,
 ):
-    _ = re.compile(filter_regex) if filter_regex else None  # reserved for future use
+    """
+    Pretty-print a module tree with sizes, devices, dtypes, and optional param/buffer details.
+    Each depth uses a distinct color for better readability.
+    """
+
+    # Color palette per depth (cycles if deeper)
+    DEPTH_COLORS = [
+        "\033[36m",  # cyan
+        "\033[33m",  # yellow
+        "\033[35m",  # magenta
+        "\033[32m",  # green
+        "\033[34m",  # blue
+    ]
+
+    def depth_color(depth: int) -> str:
+        return DEPTH_COLORS[depth % len(DEPTH_COLORS)]
+
+    _ = re.compile(filter_regex) if filter_regex else None
     experts_name_re = re.compile(experts_regex) if collapse_experts else None
     seen: Set[int] = set()
 
@@ -220,28 +237,51 @@ def print_module_tree(
     total_b = sum(b.numel() for b in model.buffers())
 
     def should_collapse(qual_name: str, container: nn.Module) -> bool:
-        if not experts_name_re: return False
-        if not experts_name_re.search(qual_name): return False
-        if not isinstance(container, (nn.ModuleList, nn.Sequential)): return False
+        if not experts_name_re:
+            return False
+        if not experts_name_re.search(qual_name):
+            return False
+        if not isinstance(container, (nn.ModuleList, nn.Sequential)):
+            return False
         names = [n for n, _ in container.named_children()]
-        if not names: return False
+        if not names:
+            return False
         return all(n.isdigit() for n in names) and len(names) > max(0, experts_show)
 
+    def _format_line(prefix: str, trunk: str, qual_name: str, mod: nn.Module,
+                     show_counts: bool, color: bool, depth: int) -> str:
+        cls = mod.__class__.__name__
+        left = _maybe(prefix + trunk, FG_GRAY, color=color)
+        # Apply depth-based color for the name
+        name = _maybe(qual_name, depth_color(depth), color=color)
+        klass = _maybe(cls, DIM, color=color)
+        if show_counts:
+            p, b = _counts_for_module(mod)
+            counts = _maybe(f"(P={human_count(p)} B={human_count(b)})", FG_YELLOW, color=color)
+            return f"{left}{name}: {klass}  {counts}"
+        else:
+            return f"{left}{name}: {klass}"
+
     def rec(mod: nn.Module, name: str, depth: int, prefix: str, is_last: bool):
-        if max_depth is not None and depth > max_depth: return
+        if max_depth is not None and depth > max_depth:
+            return
         mod_id = id(mod)
         shared = "" if mod_id not in seen else "  ↩ shared ref"
         seen.add(mod_id)
+
         trunk = "└─ " if is_last else "├─ "
-        line = _format_line(prefix, trunk, name, mod, show_counts=True, color=color)
+        line = _format_line(prefix, trunk, name, mod, show_counts=True, color=color, depth=depth)
         print(line + " " + _annotate(mod, color=color) + shared)
-        if shared: return
+        if shared:
+            return
 
         indent = prefix + ("   " if is_last else "│  ")
+        param_indent = indent + ("   " if is_last else "│  ")
+
         if show_all:
-            _print_params(indent, mod, include_buffers=True, color=color)
+            _print_params(param_indent, mod, include_buffers=True, color=color)
         elif show_params or show_buffers:
-            _print_params(indent, mod, include_buffers=show_buffers, color=color)
+            _print_params(param_indent, mod, include_buffers=show_buffers, color=color)
 
         children = list(mod.named_children())
         n = len(children)
@@ -249,8 +289,10 @@ def print_module_tree(
             last = (i == n - 1)
             child_prefix = prefix + ("   " if is_last else "│  ")
             display_name = f"{name}.{child_name}" if name else child_name
+
             if should_collapse(display_name, child):
-                line2 = _format_line(child_prefix, "└─ " if last else "├─ ", display_name, child, True, color)
+                line2 = _format_line(child_prefix, "└─ " if last else "├─ ",
+                                     display_name, child, True, color, depth+1)
                 print(line2 + " " + _annotate(child, color=color))
                 sub_children = list(child.named_children())
                 total_k = len(sub_children)
@@ -259,26 +301,36 @@ def print_module_tree(
                     sub_last = (j == k_show - 1) and (k_show == total_k)
                     sub_prefix = child_prefix + ("   " if last else "│  ")
                     sub_trunk = "└─ " if sub_last else "├─ "
-                    line3 = _format_line(sub_prefix, sub_trunk, f"{display_name}.{sub_name}", sub_mod, True, color)
+                    line3 = _format_line(sub_prefix, sub_trunk,
+                                         f"{display_name}.{sub_name}",
+                                         sub_mod, True, color, depth+2)
                     print(line3 + " " + _annotate(sub_mod, color=color))
-                    rec(sub_mod, f"{display_name}.{sub_name}", depth + 2, child_prefix + ("   " if last else "│  "), sub_last)
-                if k_show < total_k:
+                    rec(sub_mod, f"{display_name}.{sub_name}",
+                        depth + 2, child_prefix + ("   " if last else "│  "), sub_last)
+                if k_show < total_k and total_k > 0:
                     p_one, b_one = _param_summary(sub_children[0][1], recurse=True)
-                    collapsed = f"• … collapsed (repeats {k_show}..{total_k-1}, per-expert P={human_count(p_one)} B={human_count(b_one)})"
+                    collapsed = (
+                        f"• … collapsed (repeats {k_show}..{total_k-1}, "
+                        f"per-expert P={human_count(p_one)} B={human_count(b_one)})"
+                    )
                     print(_maybe(child_prefix + ("   " if last else "│  ") + collapsed, DIM, color=color))
                 continue
             rec(child, display_name, depth + 1, child_prefix, last)
 
-    print(_format_line("", "", root_name, model, show_counts=True, color=color) + " " + _annotate(model, color=color))
-    root_indent = "   "
-    if show_all:
-        _print_params(root_indent, model, include_buffers=True, color=color)
-    elif show_params or show_buffers:
-        _print_params(root_indent, model, include_buffers=show_buffers, color=color)
+    # Print root
+    print(_format_line("", "", root_name, model, show_counts=True, color=color, depth=0)
+          + " " + _annotate(model, color=color))
 
-    children_root = list(model.named_children())
-    for i, (child_name, child) in enumerate(children_root):
-        last = (i == len(children_root) - 1)
+    root_trunk_indent = "   "
+    root_param_indent = root_trunk_indent + "   "
+
+    if show_all:
+        _print_params(root_param_indent, model, include_buffers=True, color=color)
+    elif show_params or show_buffers:
+        _print_params(root_param_indent, model, include_buffers=show_buffers, color=color)
+
+    for i, (child_name, child) in enumerate(model.named_children()):
+        last = (i == len(list(model.named_children())) - 1)
         rec(child, f"{root_name}.{child_name}", 1, "", last)
 
     print("\nTotal parameters:", human_count(total_p), " | Total buffers:", human_count(total_b))
