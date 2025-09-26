@@ -112,7 +112,7 @@ class QQQProcessor(LoopProcessor):
             module.weight.data = module.weight.data.to(device=module.target_device, non_blocking=True)
 
 
-    def process(self, module: NamedModule, auto_gc: bool = True):
+    def process(self, module: NamedModule):
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
         qqq = self.tasks
 

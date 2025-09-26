@@ -493,8 +493,6 @@ class BaseQModel(nn.Module):
         backend: Optional[BACKEND] = BACKEND.AUTO,
         # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
         buffered_fwd: bool = False,
-        # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
-        auto_gc: bool = False,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter = None,
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
@@ -625,8 +623,6 @@ class BaseQModel(nn.Module):
             rotation_device = self.quantize_config.device if self.quantize_config.device != DEVICE.MPS else DEVICE.CPU
             self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
                                             device=rotation_device, **module_name_args)
-            if auto_gc:
-                torch_empty_cache()
 
         # init processor with default GPTQ processor
         if self.quantize_config.quant_method == METHOD.QQQ:
@@ -677,7 +673,6 @@ class BaseQModel(nn.Module):
         return module_looper.loop(
             calibration_enable_gpu_cache=calibration_enable_gpu_cache,
             buffered_fwd=buffered_fwd,
-            auto_gc=auto_gc,
             backend=backend,
             fail_safe=self.quantize_config.fail_safe,
         )
@@ -696,8 +691,6 @@ class BaseQModel(nn.Module):
         logger_board: Optional[str] = None,
         # Experimental: enables the buffering of fwd inputs to cpu, slower than non-buffered, may reduce vram usage
         buffered_fwd: bool = False,
-        # torch/cuda GC is auto enabled to reduce vram usage: disable to for small models or you know there is no possibility of oom due to vram to accelerate quantization
-        auto_gc: bool = True,
     ):
         if self.quantized:
             raise EnvironmentError("eora_generate() is called a model that is already quantized")
@@ -743,7 +736,6 @@ class BaseQModel(nn.Module):
         module_looper.loop(
             calibration_enable_gpu_cache=calibration_enable_gpu_cache,
             buffered_fwd=buffered_fwd,
-            auto_gc=auto_gc,
         )
 
         self.eora_save(save_dir=adapter.path, model_save_dir=self.model_local_path)

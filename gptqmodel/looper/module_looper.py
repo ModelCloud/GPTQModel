@@ -83,7 +83,7 @@ class ModuleLooper():
             return inner_hook(module, new_inputs, new_output)
         return hook
 
-    def cache_inputs(self, layers, auto_gc, calibration_data, calibration_enable_gpu_cache, use_cache):
+    def cache_inputs(self, layers, calibration_data, calibration_enable_gpu_cache, use_cache):
         layer_inputs = []
         attention_masks = []
         position_ids = []
@@ -188,7 +188,7 @@ class ModuleLooper():
                           attention_masks=attention_masks)
 
     @torch.inference_mode
-    def loop(self, auto_gc=True, calibration_enable_gpu_cache=True, buffered_fwd=False, fail_safe: bool = False, **kwargs):
+    def loop(self, calibration_enable_gpu_cache=True, buffered_fwd=False, fail_safe: bool = False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
                 tied_keys = self.gptq_model.model._tied_weights_keys
@@ -229,7 +229,7 @@ class ModuleLooper():
 
                 continue
 
-            input_cache = self.cache_inputs(layers=layers, auto_gc=auto_gc,
+            input_cache = self.cache_inputs(layers=layers,
                                             calibration_data=processor.calibration_dataset,
                                             calibration_enable_gpu_cache=calibration_enable_gpu_cache,
                                             use_cache=False)
@@ -443,7 +443,7 @@ class ModuleLooper():
                     if len(ALL_DEVICES) <= 1:
                         for name_index, name in enumerate(subset):
                             m = subset[name]
-                            processor.process(module=m, auto_gc=auto_gc)
+                            processor.process(module=m)
                             processed_subset[name] = m
                     else:
                         max_workers = len(ALL_DEVICES) if DEFAULT_BALANCE_STRATEGY == BalanceStrategy.GPU else len(ALL_DEVICES) - 1
@@ -456,7 +456,7 @@ class ModuleLooper():
                                 if HAS_CUDA and m_device is not None and m_device.type == "cuda":
                                     torch.cuda.set_device(module.weight.device)
 
-                                processor.process(module=m, auto_gc=auto_gc)
+                                processor.process(module=m)
                                 return name, m
 
                             for name in subset:
@@ -469,10 +469,6 @@ class ModuleLooper():
 
                         torch_sync()
                     # ---- End Process Hook ----
-
-                    if index == len(modules) - 1:
-                        if auto_gc:
-                            torch_empty_cache()
 
                 is_last_module = layer_index == len(quant_modules_pb) - 1
                 # second forward after process()
@@ -527,9 +523,6 @@ class ModuleLooper():
 
                         del layer_input
                         del additional_layer_inputs
-                        if processor.num_batches > 1 and j == processor.num_batches - 1:
-                            if auto_gc:
-                                torch_empty_cache()
 
                 # Finalize module after last processor
                 if p_index == len(self.processors) - 1:
@@ -571,9 +564,6 @@ class ModuleLooper():
                                     module=module,
                                 ))
 
-                if auto_gc:
-                    torch_empty_cache()
-
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         ASYNC_WORKER.join()
 
@@ -605,9 +595,6 @@ class ModuleLooper():
             reverse_p.finalize(model=self.gptq_model, **kwargs)
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
-
-        if auto_gc:
-            torch_empty_cache()
 
         return total_log
 

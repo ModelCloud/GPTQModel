@@ -763,7 +763,7 @@ class AWQProcessor(LoopProcessor):
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         pass
 
-    def process(self, module: NamedModule, auto_gc: bool = True):
+    def process(self, module: NamedModule):
         # awq uses model.layers[0] for quantization instead of model.layers.0.self_attn.q_proj
         # This method will not be called.
         pass

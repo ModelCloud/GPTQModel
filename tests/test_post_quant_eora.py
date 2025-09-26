@@ -72,7 +72,6 @@ class TestEoraPostQuant(ModelTest):
         rank = 256
         calibration_dataset_rows = 512
         calibration_dataset_concat_size = 0  # disable
-        auto_gc = False
 
         dataset_id = "allenai/c4"
         dataset_files = "en/c4-train.00001-of-01024.json.gz"
@@ -97,7 +96,7 @@ class TestEoraPostQuant(ModelTest):
                 quantized_model_id_or_path=self.QUANTIZED_MODEL_PATH,
                 calibration_dataset=calibration_dataset,
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
-                auto_gc=auto_gc)
+            )
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
             # for backend in [BACKEND.MARLIN]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN

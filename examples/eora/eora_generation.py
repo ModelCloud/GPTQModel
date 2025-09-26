@@ -72,7 +72,6 @@ if __name__ == '__main__':
     rank = args.eora_rank
     batch_size = 1
     calibration_dataset_concat_size = 0  # disable
-    auto_gc = False
 
     if args.quant_save_path is not None:
         quant_path = args.quant_save_path
@@ -111,7 +110,6 @@ if __name__ == '__main__':
         model.quantize(
             calibration=calibration_dataset,
             batch_size=batch_size,
-            auto_gc=auto_gc,
             calibration_concat_size=calibration_dataset_concat_size,
         )  #
     else:
@@ -121,7 +119,6 @@ if __name__ == '__main__':
         model.quantize(
             calibration=calibration_dataset,
             batch_size=batch_size,
-            auto_gc=auto_gc,
             calibration_concat_size=calibration_dataset_concat_size,
             adapter_calibration_dataset=eora_calibration_dataset
         )  #

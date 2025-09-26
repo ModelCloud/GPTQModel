@@ -40,7 +40,6 @@ class TestQuantTime(ModelTest):
             calibration=datasets,
             # calibration_dataset_concat_size=2048,
             batch_size=4,
-            auto_gc=False,
         )
         end_time = time.time()
 

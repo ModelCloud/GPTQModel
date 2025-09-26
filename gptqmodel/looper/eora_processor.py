@@ -114,7 +114,7 @@ class EoraProcessor(LoopProcessor):
             module.state["w_wq_diff"] = module.state["w_wq_diff"].to(device=module.target_device, non_blocking=True)
             module.state["wq"] = module.state["wq"].to(device=module.target_device, non_blocking=True)
 
-    def process(self, module: NamedModule, auto_gc: bool = True):
+    def process(self, module: NamedModule):
         assert isinstance(module.adapter_cfg, Lora)
 
         self.pb.title(f"EoRA: Processing {module.name} ({module.module_dtype}) in layer").draw()

@@ -157,7 +157,6 @@ class TestPerplexity(unittest.TestCase):
             dataset,
             batch_size=128 if IS_ROCM else 256,
             # buffered_fwd=buffered_fwd,  TODO FIX ME
-            auto_gc=False, # speed up quant
         )
         quant_time = time.time() - start
 
