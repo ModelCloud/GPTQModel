@@ -16,6 +16,7 @@ from accelerate.hooks import remove_hook_from_module, remove_hook_from_submodule
 from accelerate.utils import align_module_device, has_offloaded_params
 from torch import nn
 
+from .memory import MEM_LORD
 from ..looper.named_module import NamedModule
 from .device import get_device
 from .torch import CPU, HAS_CUDA, META
@@ -90,6 +91,7 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
         # print(f"[skip] '{name}' is on meta; leaving as-is")
         return
 
+    MEM_LORD.free(module)
     m_device = get_device(module)
     if m_device.type == "cuda":
         torch.cuda.set_device(m_device)
