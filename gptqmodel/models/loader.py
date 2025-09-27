@@ -180,30 +180,19 @@ def ModelLoader(cls):
         cls.before_model_load(cls, load_quantized_model=False)
         from ..utils.hf import build_shell_model
 
-        if not cls.support_offload_to_disk:
-            quantize_config.offload_to_disk = False
-            log.info(f"Current model class {cls.__name__} does not support offload_to_disk feature; quantize_config.offload_to_disk has been forcibly disabled.")
+        print("shell model-----------")
+        model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
+        model._model_init_kwargs = model_init_kwargs
+        print_module_tree(model=model)
+        
+        # enable mmap with low_cpu_mem_usage
+        turtle_model = cls.loader.from_pretrained(model_local_path, config=config, low_cpu_mem_usage=True, **model_init_kwargs)
 
-        if quantize_config.offload_to_disk:
-            print("shell model-----------")
-            model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
-            model._model_init_kwargs = model_init_kwargs
-            print_module_tree(model=model)
-            
-            # enable mmap with low_cpu_mem_usage
-            turtle_model = cls.loader.from_pretrained(model_local_path, config=config, low_cpu_mem_usage=True, **model_init_kwargs)
+        # TODO FIX ME...temp store model_init args
+        turtle_model._model_init_kwargs = model_init_kwargs
+        # print("actual turtle model-----------")
+        # print_module_tree(model=turtle_model)
 
-            # TODO FIX ME...temp store model_init args
-            turtle_model._model_init_kwargs = model_init_kwargs
-            # print("actual turtle model-----------")
-            # print_module_tree(model=turtle_model)
-        else:
-            print("loading model directly to CPU (not using meta device or turtle_model)-----------")
-            model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
-            model._model_init_kwargs = model_init_kwargs
-            print_module_tree(model=model)
-            
-            turtle_model = None
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
@@ -215,7 +204,7 @@ def ModelLoader(cls):
             model.seqlen = 4096
 
         model.eval()
-        turtle_model.eval() if turtle_model is not None else None
+        turtle_model.eval()
 
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
 

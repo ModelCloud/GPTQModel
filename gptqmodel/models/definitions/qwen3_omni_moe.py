@@ -18,8 +18,6 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
 
     pre_lm_head_norm_module = "thinker.model.norm"
 
-    support_offload_to_disk = False
-
     module_tree = [
         "thinker",
         "model",
@@ -39,12 +37,11 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
     ]
 
     def pre_quantize_generate_hook_start(self):
-        self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(self.quantize_config.device)
-        self.model.thinker.visual = self.model.thinker.visual.to(self.quantize_config.device)
-        self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(self.quantize_config.device)
-
-        self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(self.quantize_config.device)
-        self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(self.quantize_config.device)
+        self.shell_module_materialize(self.model.thinker.model.embed_tokens, self.quantize_config.device)
+        self.shell_module_materialize(self.model.thinker.visual, self.quantize_config.device)
+        self.shell_module_materialize(self.model.thinker.audio_tower, self.quantize_config.device)
+        self.shell_module_materialize(self.model.thinker.visual.rotary_pos_emb, self.quantize_config.device)
+        self.shell_module_materialize(self.model.thinker.model.rotary_emb, self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
         self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(CPU)
