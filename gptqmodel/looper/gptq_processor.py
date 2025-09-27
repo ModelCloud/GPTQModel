@@ -19,6 +19,7 @@ from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import METHOD, QuantizeConfig
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
+from ..utils.memory import MEM_LORD
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import HAS_CUDA, torch_streamCtx, torch_sync
@@ -126,6 +127,7 @@ class GPTQProcessor(LoopProcessor):
             g = self.tasks[module.name]
 
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        MEM_LORD.free((q_scales, q_zeros, q_g_idx))
 
         with self.lock:
             module.state.update({"q_scales": q_scales})
@@ -196,6 +198,7 @@ class GPTQProcessor(LoopProcessor):
                 "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
             })
 
+        MEM_LORD.free(module.weight)
         module.weight.data = wq
 
     # submodule_finalized is called in reverse after all next sequential processes are called
@@ -248,6 +251,7 @@ class GPTQProcessor(LoopProcessor):
         with self.lock:
             self.result_pop(module.full_name)
 
+        # MEM_LORD.free(module.weight)
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
@@ -256,6 +260,8 @@ class GPTQProcessor(LoopProcessor):
             torch_sync()
 
         model.model = undo_offload_to_disk(module=model.model, include_buffers=True, delete_offload_folders=True)
+        MEM_LORD.free(model.model)
+
         # print("finalize")
         # print_module_tree(model.model)
 
