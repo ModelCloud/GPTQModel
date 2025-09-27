@@ -116,6 +116,7 @@ from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
+from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)
@@ -180,6 +181,7 @@ MODEL_MAP = {
     "qwen2_vl": Qwen2VLQModel,
     "qwen2_5_vl": Qwen2_5_VLQModel,
     "qwen2_5_omni": Qwen2_5_OmniGPTQ,
+    "qwen3_omni_moe": Qwen3OmniMoeGPTQ,
     "dbrx": DbrxQModel,
     "dbrx_converted": DbrxConvertedQModel,
     "deepseek_v2": DeepSeekV2QModel,

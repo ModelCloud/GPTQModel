@@ -149,6 +149,12 @@ class BaseQModel(nn.Module):
 
     support_batch_quantize = True
 
+    ATTENTION_MASKS_DTYPE = torch.bool # default to bool
+
+    ATTENTION_MASKS_REQUIRED_FOR_INPUT: bool = False
+
+    INPUT_EMBEDDING_EXTRA_ARGS = None
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -275,6 +281,8 @@ class BaseQModel(nn.Module):
     def get_num_experts(cls, model_config):
         if hasattr(model_config, "text_config"):
             num_experts = getattr(model_config.text_config, cls.dynamic_expert_index)
+        elif hasattr(model_config, "thinker_config"):
+            num_experts = getattr(model_config.thinker_config.text_config, cls.dynamic_expert_index)
         else:
             num_experts = getattr(model_config, cls.dynamic_expert_index)
         return num_experts
@@ -1046,6 +1054,9 @@ class BaseQModel(nn.Module):
             device: torch.device,
             non_blocking: bool = False,
     ) -> torch.nn.Module:
+        if self.turtle_model is None:
+            return target_submodule
+            
         module = alias_from_turtle_for_submodule(
             target_model=self.model,
             turtle_model=self.turtle_model,
