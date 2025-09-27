@@ -257,9 +257,12 @@ class QuantizeConfig():
         if self.damp_percent is None:
             if self.quant_method == METHOD.QQQ:
                 self.damp_percent = 0.005
-                self.damp_auto_increment = 0.001
             else:
                 self.damp_percent = 0.05
+        if self.damp_auto_increment is None:
+            if self.quant_method == METHOD.QQQ:
+                self.damp_auto_increment = 0.001
+            else:
                 self.damp_auto_increment = 0.01
 
         # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
