@@ -50,17 +50,17 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
                         disk_path=self.quantize_config.offload_to_disk_path,
                         )
 
-        offload_to_disk(model=self.model.thinker.model,
+        offload_to_disk(model=self.model.thinker,
                         module=self.model.thinker.visual,
                         disk_path=self.quantize_config.offload_to_disk_path,
                         )
         
-        offload_to_disk(model=self.model.thinker.model,
+        offload_to_disk(model=self.model.thinker,
                         module=self.model.thinker.audio_tower,
                         disk_path=self.quantize_config.offload_to_disk_path,
                         )
 
-        offload_to_disk(model=self.model.thinker.model,
+        offload_to_disk(model=self.model.thinker.visual,
                         module=self.model.thinker.visual.rotary_pos_emb,
                         disk_path=self.quantize_config.offload_to_disk_path,
                         )
