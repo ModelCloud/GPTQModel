@@ -76,7 +76,7 @@ class TestLoadVLLM(ModelTest):
         if not tokenizer.pad_token_id:
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
-        calibration_dataset = self.load_dataset(tokenizer)
+        calibration_dataset = self.load_dataset(tokenizer, self.DATASET_SIZE)
 
         # support dynamic override of bits, group_size, desc_act, sym for each layer/module match
         #
