@@ -5,10 +5,12 @@
 
 from transformers import AutoModelForTextToWaveform
 from ..base import BaseQModel
-
+from .._const import CPU
 
 class Qwen3OmniMoeGPTQ(BaseQModel):
     loader = AutoModelForTextToWaveform
+
+    dynamic_expert_index = "num_experts"
 
     pre_lm_head_norm_module = "thinker.model.norm"
 
@@ -29,3 +31,19 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
             },
         }
     ]
+
+    def pre_quantize_generate_hook_start(self):
+        self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(self.quantize_config.device)
+        self.model.thinker.visual = self.model.thinker.visual.to(self.quantize_config.device)
+        self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(self.quantize_config.device)
+
+        self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(self.quantize_config.device)
+        self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(self.quantize_config.device)
+
+    def pre_quantize_generate_hook_end(self):
+        self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(CPU)
+        self.model.thinker.visual = self.model.thinker.visual.to(CPU)
+        self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(CPU)
+
+        self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(CPU)
+        self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(CPU)

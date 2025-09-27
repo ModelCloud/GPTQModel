@@ -275,6 +275,8 @@ class BaseQModel(nn.Module):
     def get_num_experts(cls, model_config):
         if hasattr(model_config, "text_config"):
             num_experts = getattr(model_config.text_config, cls.dynamic_expert_index)
+        elif hasattr(model_config, "thinker_config"):
+            num_experts = getattr(model_config.thinker_config.text_config, cls.dynamic_expert_index)
         else:
             num_experts = getattr(model_config, cls.dynamic_expert_index)
         return num_experts

@@ -109,7 +109,7 @@ class ModuleLooper():
 
             # Keyword arguments.
             # TODO FIX ME..why is Qwen2_5OmniDecoderLayer harded here?
-            if kwargs.get("attention_mask") is not None and str(type(module)) != "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
+            if kwargs.get("attention_mask") is not None and module.__class__.__name__ in ["Qwen2_5OmniDecoderLayer", "Qwen3OmniMoeThinkerTextDecoderLayer"]:
                 attention_masks.append(kwargs["attention_mask"].to(device=data_device))
             else:
                 attention_masks.append(None)
@@ -160,7 +160,7 @@ class ModuleLooper():
 
         for example in calibration_data:
             for k, v in example.items():
-                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
+                if layers[0].__class__.__name__ in ["Qwen2_5OmniDecoderLayer", "Qwen3OmniMoeThinkerTextDecoderLayer"]:
                     data_device = self.gptq_model.quantize_config.device
                 else:
                     data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
@@ -175,7 +175,7 @@ class ModuleLooper():
                         v = v.unsqueeze(0)
                     example[k] = move_to(v, device=data_device)
             try:
-                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
+                if layers[0].__class__.__name__ in ["Qwen2_5OmniDecoderLayer", "Qwen3OmniMoeThinkerTextDecoderLayer"]:
                     self.gptq_model.model.generate(**example, return_audio=False)
                 else:
                     self.gptq_model.model(**example, use_cache=use_cache)
