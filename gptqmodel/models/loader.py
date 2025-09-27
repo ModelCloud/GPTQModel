@@ -188,6 +188,11 @@ def ModelLoader(cls):
             
             # enable mmap with low_cpu_mem_usage
             turtle_model = cls.loader.from_pretrained(model_local_path, config=config, low_cpu_mem_usage=True, **model_init_kwargs)
+
+            # TODO FIX ME...temp store model_init args
+            turtle_model._model_init_kwargs = model_init_kwargs
+            # print("actual turtle model-----------")
+            # print_module_tree(model=turtle_model)
         else:
             print("loading model directly to CPU (not using meta device or turtle_model)-----------")
             model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
@@ -195,11 +200,6 @@ def ModelLoader(cls):
             print_module_tree(model=model)
             
             turtle_model = None
-
-            # TODO FIX ME...temp store model_init args
-            turtle_model._model_init_kwargs = model_init_kwargs
-            # print("actual turtle model-----------")
-            # print_module_tree(model=turtle_model)
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
