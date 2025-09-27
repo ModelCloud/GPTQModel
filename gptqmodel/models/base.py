@@ -168,7 +168,7 @@ class BaseQModel(nn.Module):
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
         self.turtle_model = turtle_model
 
-        self.compiled = False # set to True while compile() is triggered successfully
+        self.compiled = False  # set to True while compile() is triggered successfully
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
         if tokenizer is not None:

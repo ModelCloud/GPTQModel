@@ -258,7 +258,8 @@ def ModelWriter(cls):
         # --- end config save block ---
 
         # Due to shell/turtle state, we need to sync the modules from turtle to shell
-        alias_all_from_turtle_if_meta(shell_model=model, turtle_model=self.turtle_model)
+        if not self.load_quantized_model:
+            alias_all_from_turtle_if_meta(shell_model=model, turtle_model=self.turtle_model)
 
         state_dict = get_state_dict_for_save(model)
 
