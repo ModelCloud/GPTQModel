@@ -176,6 +176,9 @@ class ModuleLooper():
                     example[k] = move_to(v, device=data_device)
             try:
                 if layers[0].__class__.__name__ in ["Qwen2_5OmniDecoderLayer", "Qwen3OmniMoeThinkerTextDecoderLayer"]:
+                    # require attention_mask to be int type if model decoder layer type is Qwen2_5OmniDecoderLayer or Qwen3OmniMoeThinkerTextDecoderLayer
+                    if example["attention_mask"] is not None:
+                        example["attention_mask"] = example["attention_mask"].int()
                     self.gptq_model.model.generate(**example, return_audio=False)
                 else:
                     self.gptq_model.model(**example, use_cache=use_cache)
