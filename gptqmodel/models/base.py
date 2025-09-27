@@ -155,6 +155,8 @@ class BaseQModel(nn.Module):
 
     ATTENTION_MASKS_REQUIRED_FOR_INPUT: bool = False
 
+    INPUT_EMBEDDING_EXTRA_ARGS = None
+
     def __init__(
         self,
         model: PreTrainedModel,
