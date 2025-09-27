@@ -180,14 +180,21 @@ def ModelLoader(cls):
         cls.before_model_load(cls, load_quantized_model=False)
         from ..utils.hf import build_shell_model
 
-        #model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
-        print("shell model-----------")
-        model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
-        model._model_init_kwargs = model_init_kwargs
-
-        print_module_tree(model=model)
-        # enable mmap with low_cpu_mem_usage
-        turtle_model = cls.loader.from_pretrained(model_local_path, config=config, low_cpu_mem_usage=True, **model_init_kwargs)
+        if quantize_config.offload_to_disk:
+            print("shell model-----------")
+            model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
+            model._model_init_kwargs = model_init_kwargs
+            print_module_tree(model=model)
+            
+            # enable mmap with low_cpu_mem_usage
+            turtle_model = cls.loader.from_pretrained(model_local_path, config=config, low_cpu_mem_usage=True, **model_init_kwargs)
+        else:
+            print("loading model directly to CPU (not using meta device or turtle_model)-----------")
+            model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
+            model._model_init_kwargs = model_init_kwargs
+            print_module_tree(model=model)
+            
+            turtle_model = None
 
         # TODO FIX ME...temp store model_init args
         turtle_model._model_init_kwargs = model_init_kwargs
