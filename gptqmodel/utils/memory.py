@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
+import os
 import threading
 from typing import Dict, Iterable, Tuple, Generator
 
@@ -16,37 +17,22 @@ YELLOW  = "\033[93m"
 CYAN    = "\033[96m"
 MAGENTA = "\033[95m"
 
+# ---------- DEBUG FLAG ----------
+DEBUG_MODE = os.environ.get("DEBUG", "0") == "1"
+
+def _log(msg: str) -> None:
+    if DEBUG_MODE:
+        print(msg)
+
 # ---------- TYPE ALIASES ----------
 Obj = nn.Module | torch.Tensor
 ObjOrTuple = Obj | tuple[Obj, ...]
 
 
 class MemTracker:
-    """
-    Tracks memory per device instance (torch.device).
-
-    - allocate(obj|tuple): track allocations (nn.Module or torch.Tensor).
-    - free(obj|tuple):     track frees; optional auto-GC per device when freed bytes exceed threshold.
-    - allocated(device?):  -> (raw_bytes, human_str).
-    - freed(device?):      -> (raw_bytes, human_str).
-    - set_auto_gc(bytes|None): enable/disable/change threshold for auto-GC per device.
-
-    Debug logging (ANSI colored):
-      - allocate -> red
-      - free -> green
-      - summaries -> cyan
-      - auto-GC -> yellow
-      - reset -> magenta
-
-    Summary FIX:
-      - Summaries now list **all known device+index pairs** every time (not just affected devices),
-        then show per-type aggregates.
-    """
-
-    def __init__(self, auto_gc_bytes: int | None = None) -> None:
+    def __init__(self, auto_gc_bytes: int | str | None = "auto") -> None:
         self._allocated_by_dev: Dict[torch.device, int] = {}
         self._freed_by_dev: Dict[torch.device, int] = {}
-        self._auto_gc_bytes: int | None = auto_gc_bytes
 
         # GC accounting
         self._gc_count_by_dev: Dict[torch.device, int] = {}
@@ -54,28 +40,28 @@ class MemTracker:
 
         self._lock = threading.Lock()
 
+        # Resolve threshold
+        self._auto_gc_bytes: int | None = None
+        self._resolve_and_set_auto_gc(auto_gc_bytes, context="init")
+
     # ---------- Public API ----------
     def allocate(self, ob: ObjOrTuple) -> None:
         sizes = self._sizes_for_many(ob)
-        affected: set[torch.device] = set()
-
         with self._lock:
-            # Apply deltas
             for dev, b in sizes.items():
                 self._allocated_by_dev[dev] = self._allocated_by_dev.get(dev, 0) + b
-                affected.add(dev)
-                print(f"{RED}[allocate]{RESET} +{format_bytes(b)} on {dev}")
+                _log(f"{RED}[allocate]{RESET} +{format_bytes(b)} on {dev}")
 
-            # Build **complete** device set and per-type aggregates
             all_devs = self._all_known_devices_locked()
             type_totals = self._totals_by_type_locked(self._allocated_by_dev)
+            type_counts = self._counts_by_type_locked()
 
-        # Print summaries outside lock
         self._print_full_device_summary(
             header=f"{CYAN}[allocate-summary]{RESET}",
             per_device_map=self._allocated_by_dev,
             all_devices=all_devs,
             type_totals=type_totals,
+            type_counts=type_counts,
         )
 
     def free(self, ob: ObjOrTuple) -> None:
@@ -83,28 +69,26 @@ class MemTracker:
         affected: set[torch.device] = set()
 
         with self._lock:
-            # Apply deltas
             for dev, b in sizes.items():
                 if b <= 0:
                     continue
                 self._allocated_by_dev[dev] = max(0, self._allocated_by_dev.get(dev, 0) - b)
                 self._freed_by_dev[dev] = self._freed_by_dev.get(dev, 0) + b
                 affected.add(dev)
-                print(f"{GREEN}[free]{RESET} released {format_bytes(b)} on {dev}")
+                _log(f"{GREEN}[free]{RESET} released {format_bytes(b)} on {dev}")
 
-            # Build **complete** device set and per-type aggregates for freed
             all_devs = self._all_known_devices_locked()
             freed_type_totals = self._totals_by_type_locked(self._freed_by_dev)
+            type_counts = self._counts_by_type_locked()
 
-        # Print summaries outside lock
         self._print_full_device_summary(
             header=f"{CYAN}[free-summary]{RESET}",
             per_device_map=self._freed_by_dev,
             all_devices=all_devs,
             type_totals=freed_type_totals,
+            type_counts=type_counts,
         )
 
-        # Auto-GC checks (may reset a specific device's freed counter)
         if self._auto_gc_bytes is not None and self._auto_gc_bytes > 0:
             for dev in affected:
                 self._maybe_auto_gc(dev)
@@ -115,26 +99,67 @@ class MemTracker:
             self._freed_by_dev.clear()
             self._gc_count_by_dev.clear()
             self._gc_total_count = 0
-        print(f"{MAGENTA}[reset]{RESET} counters cleared")
+        _log(f"{MAGENTA}[reset]{RESET} counters cleared")
 
     def allocated(self, device: torch.device | None = None) -> Tuple[int, str]:
         with self._lock:
             val = sum(self._allocated_by_dev.values()) if device is None else _sum_for_device(self._allocated_by_dev, device)
-        print(f"{CYAN}[allocated]{RESET} query={device}, result={format_bytes(val)}")
+        _log(f"{CYAN}[allocated]{RESET} query={device}, result={format_bytes(val)}")
         return val, format_bytes(val)
 
     def freed(self, device: torch.device | None = None) -> Tuple[int, str]:
         with self._lock:
-            val = sum(self._freed_by_dev.values()) if device is None else __sum_for_device(self._freed_by_dev, device)
-        print(f"{CYAN}[freed]{RESET} query={device}, result={format_bytes(val)}")
+            val = sum(self._freed_by_dev.values()) if device is None else _sum_for_device(self._freed_by_dev, device)
+        _log(f"{CYAN}[freed]{RESET} query={device}, result={format_bytes(val)}")
         return val, format_bytes(val)
 
-    def set_auto_gc(self, bytes_threshold: int | None) -> None:
-        with self._lock:
-            self._auto_gc_bytes = bytes_threshold
-        print(f"{YELLOW}[set_auto_gc]{RESET} threshold={bytes_threshold}")
+    def set_auto_gc(self, bytes_threshold: int | str | None) -> None:
+        self._resolve_and_set_auto_gc(bytes_threshold, context="set_auto_gc")
 
-    # ---------- Helpers ----------
+    # ---------- Auto threshold ----------
+    def _resolve_and_set_auto_gc(self, val: int | str | None, context: str) -> None:
+        auto_requested = (val is None) or (isinstance(val, str) and val.lower() == "auto")
+
+        if not auto_requested:
+            if not isinstance(val, int) or val < 0:
+                raise ValueError("auto_gc_bytes must be an int >= 0, 'auto', or None")
+            with self._lock:
+                self._auto_gc_bytes = val
+            _log(f"{YELLOW}[{context}]{RESET} auto_gc_bytes set to {format_bytes(val)} (explicit)")
+            return
+
+        threshold, debug_msg = self._compute_auto_threshold()
+        with self._lock:
+            self._auto_gc_bytes = threshold
+
+        if threshold is None or threshold <= 0:
+            _log(f"{YELLOW}[{context}]{RESET} auto_gc_bytes: CUDA not available; auto-GC disabled. {debug_msg}")
+        else:
+            _log(f"{YELLOW}[{context}]{RESET} auto_gc_bytes (auto): {debug_msg} -> {format_bytes(threshold)}")
+
+    def _compute_auto_threshold(self) -> tuple[int | None, str]:
+        try:
+            if not torch.cuda.is_available():
+                return None, "torch.cuda.is_available() == False"
+            count = torch.cuda.device_count()
+            if count <= 0:
+                return None, "torch.cuda.device_count() == 0"
+            totals = []
+            parts = []
+            for i in range(count):
+                props = torch.cuda.get_device_properties(i)
+                total = int(getattr(props, "total_memory", 0))
+                totals.append(total)
+                parts.append(f"{i}:{format_bytes(total)}")
+            if not totals:
+                return None, "No visible CUDA totals found"
+            min_total = min(totals)
+            threshold = min_total // 3
+            return threshold, f"visible CUDA -> [{', '.join(parts)}]; min={format_bytes(min_total)}; min/3={format_bytes(threshold)}"
+        except Exception as e:
+            return None, f"auto detection error: {e}"
+
+    # ---------- Memory accounting helpers ----------
     def _sizes_for_many(self, ob: ObjOrTuple) -> Dict[torch.device, int]:
         agg: Dict[torch.device, int] = {}
         for item in self._iter_objs(ob):
@@ -168,10 +193,6 @@ class MemTracker:
             yield b
 
     def _sum_by_dev_dedup(self, tensors: Iterable[torch.Tensor]) -> Dict[torch.device, int]:
-        """
-        Sum bytes by device (torch.device), deduping shared storages via (data_ptr, nbytes).
-        Counts sparse indices/values; ignores 'meta'.
-        """
         seen_keys: set[tuple[int, int]] = set()
         by_dev: Dict[torch.device, int] = {}
 
@@ -211,13 +232,9 @@ class MemTracker:
 
         return by_dev
 
-    # ---- Device sets & summaries (BUGFIX area) ----
+    # ---------- Summaries ----------
     def _all_known_devices_locked(self) -> list[torch.device]:
-        """
-        Build a sorted list of **all** devices we know about from both allocated and freed maps.
-        """
         all_set = set(self._allocated_by_dev.keys()) | set(self._freed_by_dev.keys())
-        # Sort by (type, index_or_-1)
         return sorted(all_set, key=lambda d: (d.type, -1 if d.index is None else d.index))
 
     def _totals_by_type_locked(self, table: Dict[torch.device, int]) -> Dict[str, int]:
@@ -226,28 +243,30 @@ class MemTracker:
             out[d.type] = out.get(d.type, 0) + v
         return out
 
+    def _counts_by_type_locked(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for d in set(self._allocated_by_dev.keys()) | set(self._freed_by_dev.keys()):
+            counts[d.type] = counts.get(d.type, 0) + 1
+        return counts
+
     def _print_full_device_summary(
         self,
         header: str,
         per_device_map: Dict[torch.device, int],
         all_devices: list[torch.device],
         type_totals: Dict[str, int],
+        type_counts: Dict[str, int],
     ) -> None:
-        """
-        Print a full summary:
-          - one line per **device instance** (for every known device)
-          - one line per **device type** aggregate
-        """
-        # Per-device lines (ALL known devices)
+        if not DEBUG_MODE:
+            return
         for dev in all_devices:
             val = per_device_map.get(dev, 0)
             print(f"{header} {dev}: {format_bytes(val)}")
-
-        # Per-type aggregates
         for dtype in sorted(type_totals.keys()):
-            print(f"{header} {dtype}: {format_bytes(type_totals[dtype])}")
+            if type_counts.get(dtype, 0) > 1:
+                print(f"{header} {dtype}: {format_bytes(type_totals[dtype])}")
 
-    # ---- Auto-GC ----
+    # ---------- Auto-GC ----------
     def _maybe_auto_gc(self, dev: torch.device) -> None:
         threshold = self._auto_gc_bytes
         if threshold is None or threshold <= 0:
@@ -267,7 +286,7 @@ class MemTracker:
                 per_dev_count = self._gc_count_by_dev[dev]
                 total_count = self._gc_total_count
 
-            print(f"{YELLOW}[auto_gc]{RESET} {dev}: ran GC (count={per_dev_count}), total across devices={total_count}")
+            _log(f"{YELLOW}[auto_gc]{RESET} {dev}: ran GC (count={per_dev_count}), total across devices={total_count}")
 
 
 def _run_backend_gc(dev: torch.device) -> bool:
@@ -306,7 +325,5 @@ def format_bytes(n: int) -> str:
             return f"{x:.2f} {u}"
         x /= 1024.0
 
-
-
-# default to auto gc interval for every ~256GB of freed memory
-MEM_LORD = MemTracker(auto_gc_bytes=1024 * 1024 * 1024)
+# default to auto gc interval for every 8GB of freed memory
+MEM_LORD = MemTracker(auto_gc_bytes="auto")
