@@ -108,8 +108,7 @@ class ModuleLooper():
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
-            # TODO FIX ME..why is Qwen2_5OmniDecoderLayer harded here?
-            if kwargs.get("attention_mask") is not None and module.__class__.__name__ in ["Qwen2_5OmniDecoderLayer", "Qwen3OmniMoeThinkerTextDecoderLayer"]:
+            if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
                 attention_masks.append(kwargs["attention_mask"].to(device=data_device))
             else:
                 attention_masks.append(None)
@@ -160,7 +159,7 @@ class ModuleLooper():
 
         for example in calibration_data:
             for k, v in example.items():
-                if layers[0].__class__.__name__ in ["Qwen2_5OmniDecoderLayer", "Qwen3OmniMoeThinkerTextDecoderLayer"]:
+                if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
                     data_device = self.gptq_model.quantize_config.device
                 else:
                     data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
@@ -175,7 +174,10 @@ class ModuleLooper():
                         v = v.unsqueeze(0)
                     example[k] = move_to(v, device=data_device)
             try:
-                if layers[0].__class__.__name__ in ["Qwen2_5OmniDecoderLayer", "Qwen3OmniMoeThinkerTextDecoderLayer"]:
+                if example.get("attention_mask") is not None and example["attention_mask"].dtype != self.gptq_model.ATTENTION_MASKS_DTYPE:
+                    example["attention_mask"] = example["attention_mask"].to(self.gptq_model.ATTENTION_MASKS_DTYPE)
+
+                if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
                     self.gptq_model.model.generate(**example, return_audio=False)
                 else:
                     self.gptq_model.model(**example, use_cache=use_cache)

@@ -6,8 +6,12 @@
 from transformers import AutoModelForTextToWaveform
 from ..base import BaseQModel
 from .._const import CPU
+import torch
 
 class Qwen3OmniMoeGPTQ(BaseQModel):
+    ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
+    ATTENTION_MASKS_DTYPE = torch.long
+    
     loader = AutoModelForTextToWaveform
 
     dynamic_expert_index = "num_experts"

@@ -167,7 +167,7 @@ def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> 
         for r in range(len(ids_list)):
             ids = torch.as_tensor(ids_list[r], dtype=torch.long)
             # make mask boolean immediately
-            msk = torch.as_tensor(msk_list[r], dtype=torch.long)
+            msk = torch.as_tensor(msk_list[r], dtype=torch.bool)
 
             if ids.numel() != msk.numel():
                 raise ValueError("Row has mismatched lengths between input_ids and attention_mask")
@@ -193,11 +193,11 @@ def collate_data(batch: List[Dict[str, List[List[int]]]], pad_token_id: int) -> 
 
     padded_ids = [right_pad(t, pad_token_id, dtype=torch.long) for t in rows_ids]
     # pad masks with False, not 0
-    padded_msk = [right_pad(t, 0, dtype=torch.long) for t in rows_mask]
+    padded_msk = [right_pad(t, False, dtype=torch.bool) for t in rows_mask]
 
     # Stack into [total_rows_in_batch, max_len]
     input_ids = torch.stack(padded_ids, dim=0) if padded_ids else torch.empty((0, 0), dtype=torch.long)
-    attention_mask = torch.stack(padded_msk, dim=0) if padded_msk else torch.empty((0, 0), dtype=torch.long)
+    attention_mask = torch.stack(padded_msk, dim=0) if padded_msk else torch.empty((0, 0), dtype=torch.bool)
 
     return {
         "input_ids": input_ids,
