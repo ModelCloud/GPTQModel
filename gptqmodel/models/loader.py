@@ -180,6 +180,10 @@ def ModelLoader(cls):
         cls.before_model_load(cls, load_quantized_model=False)
         from ..utils.hf import build_shell_model
 
+        if not cls.support_offload_to_disk:
+            quantize_config.offload_to_disk = False
+            log.info(f"Current model class {cls.__name__} does not support offload_to_disk feature; quantize_config.offload_to_disk has been forcibly disabled.")
+
         if quantize_config.offload_to_disk:
             print("shell model-----------")
             model = build_shell_model(cls.loader, config=config, **model_init_kwargs)

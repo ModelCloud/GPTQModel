@@ -149,6 +149,8 @@ class BaseQModel(nn.Module):
 
     support_batch_quantize = True
 
+    support_offload_to_disk = True
+
     def __init__(
         self,
         model: PreTrainedModel,

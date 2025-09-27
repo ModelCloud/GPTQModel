@@ -14,6 +14,8 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
 
     pre_lm_head_norm_module = "thinker.model.norm"
 
+    support_offload_to_disk = False
+
     module_tree = [
         "thinker",
         "model",
