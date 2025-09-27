@@ -9,7 +9,7 @@ from torch import nn
 from .gptq import get_number_of_rows_and_cols
 from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
-from ..quantization.quantizer import QQQQuantizer, HF_OPTIMUM
+from ..quantization.quantizer import HF_OPTIMUM
 from ..utils.torch import device_next
 
 DEBUG = False
@@ -17,6 +17,7 @@ DEBUG = False
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
+log = setup_logger()
 
 def quantize(x, scale, zero, maxq, sym, groupsize):
     if maxq < 0:
@@ -258,6 +259,8 @@ class QQQ:
             self,
             blocksize=128,
     ):
+        start = time.time()
+
         percdamp = self.qcfg.damp_percent
         groupsize = self.qcfg.group_size
         actorder = self.qcfg.desc_act
@@ -374,6 +377,30 @@ class QQQ:
         print("time %.2f" % (time.time() - tick))
         print("error", torch.sum(Losses).item())
 
+        if Hinv is not None:
+            del Hinv
+            if self.nsamples != 0:
+                avg_loss = torch.sum(Losses).item() / self.nsamples
+
+                if math.isnan(avg_loss):
+                    print("Losses sum item:", torch.sum(Losses).item())
+                    if self.fail_safe:
+                        log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
+                        self.qcfg.mock_quantization = True
+                        return self.quantize(blocksize=blocksize)
+                    else:
+                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable fail_safe=True")
+            else:
+                if self.fail_safe:
+                    log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
+                else:
+                    log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
+                avg_loss = 999999999
+        else:
+            avg_loss = 999999999
+
+        del Losses
+
         groupsize = groupsize if groupsize != -1 else self.columns
         if static_groups and actorder:
             g_idx = [perm[i] // groupsize for i in range(self.columns)]
@@ -386,9 +413,10 @@ class QQQ:
 
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()
-        self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(
-            self.layer.weight.data.dtype
-        )
+        if Q.shape != self.layer.weight.shape:
+            Q = Q.reshape(self.layer.weight.shape).to(self.layer.weight.dtype)
+        else:
+            Q = Q.to(self.layer.weight.dtype)
         if DEBUG:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
 
@@ -397,6 +425,8 @@ class QQQ:
             zero.append(self.quantizer.zero)
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
+
+        Q = Q.to(device=self.layer.weight.data.device, non_blocking=False)
 
         # post int8 quant
         scale_extra = None
@@ -411,7 +441,10 @@ class QQQ:
             )
             quantizer_extra.find_params(self.layer.weight.data.clone(), weight=True)
             scale_extra = quantizer_extra.scale
-        return scale, zero, g_idx, scale_extra
+
+        duration = time.time() - start
+
+        return Q, scale, zero, g_idx, duration, avg_loss, damp, scale_extra, self.nsamples
 
     def free(self):
         if DEBUG:
