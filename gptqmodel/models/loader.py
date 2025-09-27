@@ -211,7 +211,7 @@ def ModelLoader(cls):
             model.seqlen = 4096
 
         model.eval()
-        turtle_model.eval()
+        turtle_model.eval() if turtle_model is not None else None
 
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
 
