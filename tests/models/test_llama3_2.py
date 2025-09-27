@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
+from gptqmodel.adapter.adapter import Lora
 
 
 # a100:0
@@ -23,6 +24,11 @@ class TestLlama3_2(ModelTest):
     DATASET_SIZE = 1024
     DATASET_SORT = "desc"
     QUANT_BATCH_SIZE = 4
+    # EORA = Lora(
+    #     # for quant, path is save path. for load, it is loading path
+    #     path="./eora_test",
+    #     rank=128,
+    # )
     # b1 = 0.315, b4 = 0.3106, b8 = 0.3148, b32 = 0.3148, b16 = 0.3234
 
     def test_llama3_2(self):

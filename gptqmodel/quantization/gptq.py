@@ -25,6 +25,7 @@ from ..utils.logger import setup_logger
 from ..utils.torch import HAS_CUDA, HAS_XPU, device_next
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
+from ..utils.memory import MEM_LORD
 
 log = setup_logger()
 
@@ -522,6 +523,7 @@ class GPTQ:
             avg_loss = 999999999
 
         del Losses
+        MEM_LORD.free(self.H)
         del self.H
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns

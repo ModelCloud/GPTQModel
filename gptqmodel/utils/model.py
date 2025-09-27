@@ -48,6 +48,7 @@ from .device import get_device
 from .importer import select_quant_linear
 from .logger import setup_logger
 from .torch import torch_empty_cache, torch_new_stream_ctx
+from ..utils.memory import MEM_LORD
 
 log = setup_logger()
 
@@ -79,6 +80,7 @@ def recurse_setattr(module, name, value):
 
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
     if get_device(obj) != device:
+        MEM_LORD.free(obj)
         if stream:
             # we cannot support changing dtype and stream at the same time
             assert dtype is None, f"streaming does not support changing dtype: actual = `{dtype}"
@@ -584,12 +586,15 @@ def pack_module(name, qModules, q_scales, q_zeros, q_g_idx, layers, quant_linear
             layer = layers[name]
             module = qModules[name]
 
+
         module = module.to(CPU)
 
         layer = layer.to(CPU)
         q_scales = q_scales.to(CPU)
         q_zeros = q_zeros.to(CPU)
-        q_g_idx = q_g_idx.to(CPU) if q_g_idx is not None else None
+
+        if q_g_idx is not None:
+            q_g_idx = q_g_idx.to(CPU)
 
         with lock:
             layers[name] = layer

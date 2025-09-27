@@ -75,6 +75,7 @@ class ModelTest(unittest.TestCase):
     V2 = False
     ACT_GROUP_AWARE = True
     FAIL_SAFE = True
+    EORA = None
 
     SAVE_PATH = None  # default is temp folder
 
@@ -87,7 +88,6 @@ class ModelTest(unittest.TestCase):
 
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
     EXPECT_LM_HEAD_LOSS = None
-
 
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
@@ -181,7 +181,8 @@ class ModelTest(unittest.TestCase):
             act_group_aware=self.ACT_GROUP_AWARE,
             fail_safe=self.FAIL_SAFE,
             sym=self.SYM,
-            v2=self.V2
+            v2=self.V2,
+            adapter=self.EORA,
         )
 
         log.info(f"Quant config: {quantize_config}")
@@ -267,6 +268,7 @@ class ModelTest(unittest.TestCase):
             backend=self.LOAD_BACKEND,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.TORCH_FUSED else "auto",
             debug=self.DEBUG,
+            adapter=self.EORA,
             **kargs
         )
 
@@ -296,6 +298,7 @@ class ModelTest(unittest.TestCase):
 
                 for framework, tasks in task_groups.items():
                     log.info(f"TEST: EVAL starting: backend = {self.LOAD_BACKEND}")
+                    log.info(f"Inference from model path: {model.model_local_path}")
                     results = GPTQModel.eval(
                         model_or_id_or_path=model.model_local_path,
                         llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
