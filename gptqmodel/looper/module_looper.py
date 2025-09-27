@@ -174,7 +174,7 @@ class ModuleLooper():
                         v = v.unsqueeze(0)
                     example[k] = move_to(v, device=data_device)
             try:
-                if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.bool:
+                if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
                     example["attention_mask"] = example["attention_mask"].long()
 
                 if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
