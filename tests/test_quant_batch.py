@@ -45,7 +45,7 @@ class TestQuantBatch(ModelTest):
         if not self.tokenizer.pad_token_id:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        self.calibration_dataset = self.load_dataset(self.tokenizer)
+        self.calibration_dataset = self.load_dataset(self.tokenizer, self.DATASET_SIZE)
 
     def test_diff_batch(self):
         quantize_config = QuantizeConfig(

@@ -134,7 +134,7 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     @classmethod
-    def load_dataset(self, tokenizer=None, rows: int = DATASET_SIZE):
+    def load_dataset(self, tokenizer=None, rows: int = 0):
 
         #traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
         traindata = load_dataset("neuralmagic/calibration", "LLM", split="train")

@@ -47,7 +47,7 @@ class TestsParameterCount(ModelTest):
     def test_parameter_count_with_quant(self):
         model_id = "/monster/data/model/Llama-3.2-1B-Instruct"  # meta-llama/Llama-3.2-1B-Instruct
 
-        calibration_dataset = self.load_dataset(self.load_tokenizer(model_id))
+        calibration_dataset = self.load_dataset(self.load_tokenizer(model_id), self.DATASET_SIZE)
 
         quant_config = QuantizeConfig(bits=4, group_size=128)
 
