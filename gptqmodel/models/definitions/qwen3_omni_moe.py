@@ -6,6 +6,7 @@
 from transformers import AutoModelForTextToWaveform
 from ..base import BaseQModel
 from .._const import CPU
+from ...utils.offload import offload_to_disk
 import torch
 
 class Qwen3OmniMoeGPTQ(BaseQModel):
@@ -44,9 +45,27 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
         self.shell_module_materialize(self.model.thinker.model.rotary_emb, self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
-        self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(CPU)
-        self.model.thinker.visual = self.model.thinker.visual.to(CPU)
-        self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(CPU)
+        offload_to_disk(model=self.model.thinker.model,
+                        module=self.model.thinker.model.embed_tokens,
+                        disk_path=self.quantize_config.offload_to_disk_path,
+                        )
 
-        self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(CPU)
-        self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(CPU)
+        offload_to_disk(model=self.model.thinker.model,
+                        module=self.model.thinker.visual,
+                        disk_path=self.quantize_config.offload_to_disk_path,
+                        )
+        
+        offload_to_disk(model=self.model.thinker.model,
+                        module=self.model.thinker.audio_tower,
+                        disk_path=self.quantize_config.offload_to_disk_path,
+                        )
+
+        offload_to_disk(model=self.model.thinker.model,
+                        module=self.model.thinker.visual.rotary_pos_emb,
+                        disk_path=self.quantize_config.offload_to_disk_path,
+                        )
+                        
+        offload_to_disk(model=self.model.thinker.model,
+                        module=self.model.thinker.model.rotary_emb,
+                        disk_path=self.quantize_config.offload_to_disk_path,
+                        )
