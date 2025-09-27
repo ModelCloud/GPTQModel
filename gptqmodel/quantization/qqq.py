@@ -197,6 +197,7 @@ class QQQ:
             self.layer = module
             # emulate NamedModule properties
             self.layer.target_device, self.layer.target_device_stream = device_next()
+        self.dev = self.layer.weight.device
 
         self._validate_module(self.layer)
 
@@ -214,7 +215,8 @@ class QQQ:
         self.fail_safe = False
 
         self.H = torch.zeros((self.columns, self.columns),
-                             dtype=torch.float32)
+                             dtype=torch.float32,
+                             device = self.dev)
 
     @staticmethod
     def _validate_module(module):
@@ -304,7 +306,7 @@ class QQQ:
         Q = torch.zeros_like(W)
 
         damp = percdamp * torch.mean(torch.diag(H))
-        diag = torch.arange(self.columns, device=H.device)
+        diag = torch.arange(self.columns, device=self.dev)
         H[diag, diag] += damp
         H = torch.linalg.cholesky(H)
         H = torch.cholesky_inverse(H)
