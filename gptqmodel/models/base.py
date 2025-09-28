@@ -280,19 +280,24 @@ class BaseQModel(nn.Module):
         return num_experts
 
     @classmethod
-    def filter_not_quantize_module(cls,layer_modules, quantize_config):
+    def filter_not_quantize_module(cls, layer_modules, quantize_config):
         layer_modules = [
             [name for name in block if NOT_QUANTIZE_FLAG not in name]
             for block in layer_modules
-            if any(NOT_QUANTIZE_FLAG not in name for name in block)
         ]
+        layer_modules = [block for block in layer_modules if block]  # 去掉空 block
 
-        if quantize_config.dynamic:
+        if getattr(quantize_config, "dynamic", None):
+            new_layer_modules = []
             for modules in layer_modules:
-                for module in modules:
-                    if dynamic_get(quantize_config.dynamic, module_name=module) == False:
-                        modules.remove(module)
-        
+                filtered = [
+                    m for m in modules
+                    if dynamic_get(quantize_config.dynamic, module_name=m) is not False
+                ]
+                if filtered:
+                    new_layer_modules.append(filtered)
+            layer_modules = new_layer_modules
+
         return layer_modules
 
     # Inside each `LlamaDecoderLayer` layer are many internal modules
@@ -305,6 +310,7 @@ class BaseQModel(nn.Module):
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
         layer_modules = cls.filter_not_quantize_module(layer_modules, quantize_config)
+        
         print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 
