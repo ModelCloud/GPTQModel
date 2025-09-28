@@ -1062,6 +1062,9 @@ class BaseQModel(nn.Module):
             non_blocking: bool = False,
     ) -> torch.nn.Module:
         if self.turtle_model is None:
+            if target_submodule.device != device:
+                target_submodule.to(device)
+                
             return target_submodule
             
         module = alias_from_turtle_for_submodule(
