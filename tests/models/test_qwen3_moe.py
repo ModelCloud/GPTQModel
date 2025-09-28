@@ -14,6 +14,13 @@ class TestQwen3Moe(ModelTest):
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = True
     EVAL_BATCH_SIZE = 6
+    V2 = False
+    DEBUG = True
+    ACT_GROUP_AWARE = True
+    DESC_ACT = False
+    DATASET_SIZE = 1024
+    DATASET_SORT = "desc"
+    QUANT_BATCH_SIZE = 4
 
     def test_mimo(self):
         self.quant_lm_eval()
