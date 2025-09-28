@@ -75,9 +75,21 @@ class QQQProcessor(LoopProcessor):
 
         tmp = QQQ(module=module, qcfg=qcfg_clone)
 
+        if self.qcfg.mse > 0.0:
+            mse = True
+            norm = self.qcfg.mse
+        else:
+            mse = False
+            norm = 100
         tmp.quantizer.configure(
+            self.qcfg.bits,
             perchannel=True,
+            sym=self.qcfg.sym,
+            mse=mse,
+            norm=norm,
+            groupsize=self.qcfg.group_size,
         )
+
         self.tasks[module.name] = tmp
 
     def is_skipped(self, module: NamedModule) -> bool:
