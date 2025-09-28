@@ -288,9 +288,10 @@ class BaseQModel(nn.Module):
         ]
 
         if quantize_config.dynamic:
-            for module in layer_modules:
-                if not dynamic_get(quantize_config.dynamic, module_name=module):
-                    layer_modules.remove(module)
+            for modules in layer_modules:
+                for module in modules:
+                    if dynamic_get(quantize_config.dynamic, module_name=module) == False:
+                        modules.remove(module)
         
         return layer_modules
 
@@ -1062,7 +1063,7 @@ class BaseQModel(nn.Module):
             non_blocking: bool = False,
     ) -> torch.nn.Module:
         if self.turtle_model is None:
-            if target_submodule.device != device:
+            if get_device(target_submodule) != device:
                 target_submodule.to(device)
                 
             return target_submodule
