@@ -280,16 +280,16 @@ class BaseQModel(nn.Module):
         return num_experts
 
     @classmethod
-    def filter_not_quantize_module(cls,layer_modules):
+    def filter_not_quantize_module(cls,layer_modules, quantize_config):
         layer_modules = [
             [name for name in block if NOT_QUANTIZE_FLAG not in name]
             for block in layer_modules
             if any(NOT_QUANTIZE_FLAG not in name for name in block)
         ]
 
-        if cls.quantize_config.dynamic:
+        if quantize_config.dynamic:
             for module in layer_modules:
-                if not dynamic_get(cls.quantize_config.dynamic, module_name=module):
+                if not dynamic_get(quantize_config.dynamic, module_name=module):
                     layer_modules.remove(module)
         
         return layer_modules
@@ -298,12 +298,12 @@ class BaseQModel(nn.Module):
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
     @classmethod
-    def simple_layer_modules(cls, model_config, is_awq_quantize: bool = False):
+    def simple_layer_modules(cls, model_config, quantize_config, is_awq_quantize: bool = False):
         layer_modules = cls.build_layer_modules(cls.module_tree)
 
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
-        layer_modules = cls.filter_not_quantize_module(layer_modules)
+        layer_modules = cls.filter_not_quantize_module(layer_modules, quantize_config)
         print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 

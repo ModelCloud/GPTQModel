@@ -242,7 +242,7 @@ class ModuleLooper():
         for processor in self.processors:
             processor.release_calibration_dataset()
 
-        layer_modules = self.gptq_model.simple_layer_modules(model_config=self.gptq_model.model.config)
+        layer_modules = self.gptq_model.simple_layer_modules(model_config=self.gptq_model.model.config, quantize_config=self.gptq_model.quantize_config)
 
         if not self.gptq_model.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
