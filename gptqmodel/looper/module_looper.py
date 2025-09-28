@@ -349,7 +349,7 @@ class ModuleLooper():
                         if hasattr(subset[name], 'forward_hook'):
                             original_hook = processor.pre_process_fwd_hook(name)
                             subset[name].forward_hook = self._masked_hook_wrapper(processor, original_hook)
-                            if is_last:
+                            if is_last and processor.fwd_after_process:
                                 subset[name].forward_hook_last = True
                         else:
                             # Older registration path

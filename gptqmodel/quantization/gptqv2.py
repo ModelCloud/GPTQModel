@@ -28,6 +28,7 @@ class GPTQv2(GPTQ):
 
         super().__init__(module, qcfg)
 
+        self.H = None
         self.dXXT = None
 
         self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
