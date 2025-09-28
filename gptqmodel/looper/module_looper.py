@@ -33,6 +33,7 @@ from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA,
                            device_next, device_next_reset, torch_empty_cache, torch_sync)
 from .awq_processor import AWQProcessor
 from .qqq_processor import QQQProcessor
+from memlord import MemLord
 
 log = setup_logger()
 
@@ -43,6 +44,14 @@ class ModuleLooper():
         self.gptq_model = model
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
+
+        # auto gc mem profiler/tracker
+        self.mem = MemLord()
+        self.mem.hook_into_torch()
+        # self.mem.hook_into_python(
+        #     enable_factory_wrappers=True,  # wrap common torch factories
+        #     enable_deep_autowrap=True,  # also wrap many tensor methods + torch.* funcs
+        # )
 
     # NEW: Wrap an existing hook so its inputs/outputs are pre-masked for GPTQ stats.
     # We *do not* alter the module's actual computation; only what the hook
