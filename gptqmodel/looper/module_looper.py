@@ -48,6 +48,7 @@ class ModuleLooper():
         # auto gc mem profiler/tracker
         self.mem = MemLord()
         self.mem.hook_into_torch()
+        self.mem.hook_into_python()
         # self.mem.hook_into_python(
         #     enable_factory_wrappers=True,  # wrap common torch factories
         #     enable_deep_autowrap=True,  # also wrap many tensor methods + torch.* funcs
