@@ -12,6 +12,10 @@ import torch
 class Qwen3OmniMoeGPTQ(BaseQModel):
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
     ATTENTION_MASKS_DTYPE = torch.long
+
+    INPUT_EMBEDDING_EXTRA_ARGS = {
+        "return_audio": False,
+    }
     
     loader = AutoModelForTextToWaveform
 

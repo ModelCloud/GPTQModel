@@ -177,8 +177,8 @@ class ModuleLooper():
                 if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
                     example["attention_mask"] = example["attention_mask"].long()
 
-                if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
-                    self.gptq_model.model.generate(**example, return_audio=False)
+                if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
+                    self.gptq_model.model.generate(**example, **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS)
                 else:
                     self.gptq_model.model(**example, use_cache=use_cache)
             except StopForward:
