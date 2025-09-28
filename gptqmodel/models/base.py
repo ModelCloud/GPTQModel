@@ -22,7 +22,7 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST
+from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
@@ -54,14 +54,6 @@ def classproperty(func):
     if not isinstance(func, (classmethod, staticmethod)):
         func = classmethod(func)
     return _ClassPropertyDescriptor(func)
-
-
-def filter_not_quantize_module(layer_modules):
-    return [
-        [name for name in block if NOT_QUANTIZE_FLAG not in name]
-        for block in layer_modules
-        if any(NOT_QUANTIZE_FLAG not in name for name in block)
-    ]
 
 
 def generate_node_for_awq_scaling(inp, prev_op, module_kwargs, nodes_size, subset, module2inspect):
@@ -287,6 +279,21 @@ class BaseQModel(nn.Module):
             num_experts = getattr(model_config, cls.dynamic_expert_index)
         return num_experts
 
+    @classmethod
+    def filter_not_quantize_module(cls,layer_modules):
+        layer_modules = [
+            [name for name in block if NOT_QUANTIZE_FLAG not in name]
+            for block in layer_modules
+            if any(NOT_QUANTIZE_FLAG not in name for name in block)
+        ]
+
+        if cls.quantize_config.dynamic:
+            for module in layer_modules:
+                if not dynamic_get(cls.quantize_config.dynamic, module_name=module):
+                    layer_modules.remove(module)
+        
+        return layer_modules
+
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
@@ -296,8 +303,8 @@ class BaseQModel(nn.Module):
 
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
-        layer_modules = filter_not_quantize_module(layer_modules)
-        # print(f"simple_layer_modules layer_modules: {layer_modules}")
+        layer_modules = cls.filter_not_quantize_module(layer_modules)
+        print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 
     @classmethod
