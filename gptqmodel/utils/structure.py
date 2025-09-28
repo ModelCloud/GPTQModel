@@ -608,6 +608,9 @@ def alias_all_from_turtle_if_meta(
 
     Logs each swap via log.info().
     """
+    if turtle_model is None:
+        return 0
+        
     turtle_map = dict(turtle_model.named_modules())
     swapped = 0
 
