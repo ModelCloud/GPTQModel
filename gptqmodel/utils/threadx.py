@@ -232,44 +232,72 @@ class _DeviceWorker:
     """
     Single worker thread bound to one device.
     Queue entries: (is_task: bool, fn, args, kwargs, future)
+    Supports configurable lifecycle: after N tasks, stop accepting new work,
+    drain its queue, and exit; the pool will spawn a replacement.
     """
     def __init__(
         self,
         device: torch.device,
         rwlock: _RWLock,
         on_task_finished: Callable[[str], None],
+        on_retire_request: Callable[[str, "._DeviceWorker"], None],
+        on_worker_exit: Callable[[str, "._DeviceWorker"], None],
         name: Optional[str] = None,
         inference_mode: bool = False,
+        lifecycle_calls: int = 50,
     ):
         self.device = device
         self.rwlock = rwlock
         self._on_task_finished = on_task_finished
+        self._on_retire_request = on_retire_request
+        self._on_worker_exit = on_worker_exit
+        self._lifecycle_limit = max(0, int(lifecycle_calls))  # 0 disables rotation
+        self._tasks_since_spawn = 0
+
         self.key = f"{device.type}:{device.index}" if device.index is not None else device.type
         self.name = name or f"DPWorker-{self.key}"
         self._q: "queue.Queue[Tuple[bool, Callable[..., Any], tuple, dict, Future]]" = queue.Queue()
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, name=self.name, daemon=True)
+        self._retire_requested = False
+        self._accepting = True
+
         self._inference_mode = inference_mode
+        self._thread = threading.Thread(target=self._run, name=self.name, daemon=True)
         self._thread.start()
 
+    # --- lifecycle / accept state ---
+    def is_accepting(self) -> bool:
+        return self._accepting and not self._stop.is_set()
+
+    def request_stop(self):
+        self._stop.set()
+        self._q.put((False, lambda: None, (), {}, Future()))
+
+    # --- public API for pool ---
     def submit(self, fn: Callable[..., Any], /, *args, **kwargs) -> Future:
         fut = Future()
         self._q.put((True, fn, args, kwargs, fut))
         return fut
 
     def stop(self):
-        self._stop.set()
-        self._q.put((False, lambda: None, (), {}, Future()))  # sentinel
+        self.request_stop()
 
     def join(self):
         self._thread.join()
 
+    # --- internal main loop ---
     def _run(self):
         _activate_thread_device(self.device)
         maybe_inference = torch.inference_mode() if self._inference_mode else contextlib.nullcontext()
         with maybe_inference:
             while not self._stop.is_set():
-                is_task, fn, args, kwargs, fut = self._q.get()
+                # If we're retiring and nothing is queued, exit gracefully
+                if self._retire_requested and self._q.empty():
+                    break
+                try:
+                    is_task, fn, args, kwargs, fut = self._q.get(timeout=0.05)
+                except queue.Empty:
+                    continue
                 try:
                     if not is_task:
                         break  # sentinel -> exit
@@ -289,8 +317,22 @@ class _DeviceWorker:
                         fut.set_exception(exc)
                 finally:
                     if is_task:
+                        self._tasks_since_spawn += 1
                         self._on_task_finished(self.key)
+                        # Lifecycle check: once we hit the limit, mark retiring (stop accepting)
+                        if self._lifecycle_limit > 0 and self._tasks_since_spawn >= self._lifecycle_limit:
+                            if not self._retire_requested:
+                                self._retire_requested = True
+                                self._accepting = False
+                                # Notify pool to spawn a replacement now
+                                self._on_retire_request(self.key, self)
                     self._q.task_done()
+
+        # Thread is exiting; notify pool for cleanup
+        try:
+            self._on_worker_exit(self.key, self)
+        finally:
+            pass
 
 
 # --------------------------- Public Pool ---------------------------
@@ -306,7 +348,8 @@ class DeviceThreadPool:
       - wait(scope, lock=False/True) to drain tasks (optionally with exclusive locks).
       - Per-device/global completed counters and in-flight counters.
       - Janitor: triggers empty-cache after N completions on accelerator devices, under a global lock.
-      - GC diagnostics: logs before/after snapshots as ANSI tables via `log.info`.
+      - GC diagnostics helpers.
+      - Worker lifecycle rotation: after N tasks (default 50), workers retire and are replaced.
     """
 
     def __init__(
@@ -321,6 +364,7 @@ class DeviceThreadPool:
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
+        worker_lifecycle_calls: int = 50,   # <=0 disables lifecycle rotation
     ):
         """
         Args:
@@ -334,6 +378,7 @@ class DeviceThreadPool:
                 - 'xpu:<i>': N            -> override for specific XPU index
               Unspecified devices default to 1 worker each.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
+            worker_lifecycle_calls: number of tasks a worker handles before retiring (0=disabled).
         """
         if devices is None:
             discovered: List[torch.device] = []
@@ -376,6 +421,11 @@ class DeviceThreadPool:
         # per-device watermark of "done" as of last GC that actually ran
         self._last_gc_done_per_device: Dict[str, int] = {}
 
+        # Worker lifecycle rotation
+        self._worker_lifecycle_calls = int(worker_lifecycle_calls)
+        # Store inference mode for worker spawns
+        self._inference_mode = bool(inference_mode)
+
         workers = workers or {}
 
         # Build locks, inflight structs, and workers eagerly
@@ -397,13 +447,7 @@ class DeviceThreadPool:
             n_workers = self._resolve_workers_for_device(dev, workers)
             group: List[_DeviceWorker] = []
             for wid in range(int(max(1, n_workers))):
-                worker = _DeviceWorker(
-                    device=dev,
-                    rwlock=self._locks[key],
-                    on_task_finished=self._on_task_finished,
-                    name=f"DPWorker-{key}#{wid}",
-                    inference_mode=inference_mode,
-                )
+                worker = self._spawn_worker(dev, name=f"DPWorker-{key}#{wid}")
                 group.append(worker)
             self._worker_groups[key] = group
             self._dispatch_rr[key] = 0
@@ -423,6 +467,46 @@ class DeviceThreadPool:
                 target=self._janitor_loop, name="DP-Janitor", daemon=True
             )
             self._janitor.start()
+
+    # --------------- Worker management (spawn/retire/cleanup) ---------------
+
+    def _spawn_worker(self, dev: torch.device, name: Optional[str] = None) -> _DeviceWorker:
+        key = self._key(dev)
+        return _DeviceWorker(
+            device=dev,
+            rwlock=self._locks[key],
+            on_task_finished=self._on_task_finished,
+            on_retire_request=self._on_worker_retire_request,
+            on_worker_exit=self._on_worker_exit,
+            name=name,
+            inference_mode=self._inference_mode,
+            lifecycle_calls=self._worker_lifecycle_calls,
+        )
+
+    def _on_worker_retire_request(self, key: str, worker: _DeviceWorker) -> None:
+        """
+        A worker hit its lifecycle limit. Mark it non-accepting (it already is),
+        and immediately spawn a replacement to maintain capacity.
+        """
+        dev = self._devices_by_key[key]
+        with self._dispatch_lock:
+            group = self._worker_groups.get(key, [])
+            if worker in group:
+                replacement = self._spawn_worker(dev, name=f"{worker.name}.r{int(time.time()*1000)}")
+                group.append(replacement)
+                self._worker_groups[key] = group
+
+    def _on_worker_exit(self, key: str, worker: _DeviceWorker) -> None:
+        """Cleanup finished workers from the group."""
+        with self._dispatch_lock:
+            group = self._worker_groups.get(key, [])
+            if worker in group:
+                group.remove(worker)
+                self._worker_groups[key] = group
+                if group:
+                    self._dispatch_rr[key] %= len(group)
+                else:
+                    self._dispatch_rr[key] = 0
 
     # --------------- Public Work API ---------------
 
@@ -588,12 +672,27 @@ class DeviceThreadPool:
         group = self._worker_groups.get(key)
         if not group:
             raise ValueError(f"Device {key} not part of this pool.")
-        if len(group) == 1:
-            return group[0]
+
         with self._dispatch_lock:
-            idx = self._dispatch_rr[key]
-            self._dispatch_rr[key] = (idx + 1) % len(group)
-            return group[idx]
+            n = len(group)
+            if n == 0:
+                raise ValueError(f"No workers available for device {key}")
+            start = self._dispatch_rr[key] % n
+            idx = start
+            # Find the next accepting worker
+            for _ in range(n):
+                w = group[idx]
+                if w.is_accepting():
+                    self._dispatch_rr[key] = (idx + 1) % n
+                    return w
+                idx = (idx + 1) % n
+            # If none are accepting, spawn a fresh one and use it
+            dev = self._devices_by_key[key]
+            neww = self._spawn_worker(dev, name=f"DPWorker-{key}#hot")
+            group.append(neww)
+            self._worker_groups[key] = group
+            self._dispatch_rr[key] = (len(group) - 1 + 1) % len(group)
+            return neww
 
     def _resolve_workers_for_device(self, dev: torch.device, table: Dict[str, int]) -> int:
         key = self._key(dev)
@@ -795,7 +894,8 @@ class DeviceThreadPool:
                     torch.xpu.synchronize()
 
         # MPS
-        if _mps_available() and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+        has_mps_device = any(self._devices_by_key[k].type == "mps" for k in self._ordered_keys)
+        if has_mps_device and hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
             torch.mps.synchronize()
 
     def _should_run_gc_from_snapshot(self, snap: Dict[str, Any]) -> bool:
@@ -906,6 +1006,8 @@ class DeviceThreadPool:
                 with torch.xpu.device(dev.index):
                     TORCH_XPU_EMPTY_CACHE()
 
-        # MPS
+        # MPS (only if this pool actually has an MPS device)
         if TORCH_MPS_EMPTY_CACHE is not None:
-            TORCH_MPS_EMPTY_CACHE()
+            has_mps_device = any(self._devices_by_key[k].type == "mps" for k in self._ordered_keys)
+            if has_mps_device:
+                TORCH_MPS_EMPTY_CACHE()
