@@ -16,7 +16,6 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
-import os
 from typing import List, Optional, Tuple
 
 import numpy as np

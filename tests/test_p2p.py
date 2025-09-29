@@ -5,6 +5,7 @@
 
 import torch
 
+
 def main():
     if not torch.cuda.is_available():
         print("CUDA not available")

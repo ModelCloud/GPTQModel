@@ -13,6 +13,7 @@ from concurrent.futures import Future
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch  # hard requirement
+
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -236,7 +237,7 @@ class _DeviceWorker:
 
     def stop(self):
         self._stop.set()
-        self._q.put((False, lambda: None, tuple(), {}, Future()))  # sentinel
+        self._q.put((False, lambda: None, (), {}, Future()))  # sentinel
 
     def join(self):
         self._thread.join()

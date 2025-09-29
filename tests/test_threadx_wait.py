@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Author: ModelCloud.ai / qubitium
-import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
 
 import pytest
 import torch
-
 from gptqmodel.utils.threadx import DeviceThreadPool
 
 pytestmark = [

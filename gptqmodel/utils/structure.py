@@ -610,7 +610,7 @@ def alias_all_from_turtle_if_meta(
     """
     if turtle_model is None:
         return 0
-        
+
     turtle_map = dict(turtle_model.named_modules())
     swapped = 0
 

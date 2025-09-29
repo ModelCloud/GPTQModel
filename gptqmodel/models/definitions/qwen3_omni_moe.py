@@ -3,11 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForTextToWaveform
-from ..base import BaseQModel
-from .._const import CPU
-from ...utils.offload import offload_to_disk
 import torch
+from transformers import AutoModelForTextToWaveform
+
+from ...utils.offload import offload_to_disk
+from .._const import CPU
+from ..base import BaseQModel
+
 
 class Qwen3OmniMoeGPTQ(BaseQModel):
     ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
@@ -16,7 +18,7 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
     INPUT_EMBEDDING_EXTRA_ARGS = {
         "return_audio": False,
     }
-    
+
     loader = AutoModelForTextToWaveform
 
     dynamic_expert_index = "num_experts"
@@ -59,7 +61,7 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
                             module=self.model.thinker.visual,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
-            
+
             offload_to_disk(model=self.model.thinker,
                             module=self.model.thinker.audio_tower,
                             disk_path=self.quantize_config.offload_to_disk_path,
@@ -69,7 +71,7 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
                             module=self.model.thinker.visual.rotary_pos_emb,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
-                            
+
             offload_to_disk(model=self.model.thinker.model,
                             module=self.model.thinker.model.rotary_emb,
                             disk_path=self.quantize_config.offload_to_disk_path,

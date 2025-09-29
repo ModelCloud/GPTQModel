@@ -5,6 +5,7 @@
 
 from typing import Dict, Optional
 
+import torch
 from PIL import Image
 from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
 
@@ -13,7 +14,6 @@ from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
 from .._const import CPU
 from ..base import BaseQModel
-import torch
 
 
 class BaseQwen2_5_OmniGPTQ(BaseQModel):
@@ -23,7 +23,7 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
     INPUT_EMBEDDING_EXTRA_ARGS = {
         "return_audio": False,
     }
-    
+
     loader = AutoModelForTextToWaveform
 
     pre_lm_head_norm_module = "thinker.model.norm"

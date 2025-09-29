@@ -112,11 +112,11 @@ from .definitions.qwen2_vl import Qwen2VLQModel  # noqa: E402
 from .definitions.qwen3 import Qwen3QModel  # noqa: E402
 from .definitions.qwen3_moe import Qwen3MoeQModel  # noqa: E402
 from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
+from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
-from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 
 # make quants and inference more determinisitc
 torch.manual_seed(787)

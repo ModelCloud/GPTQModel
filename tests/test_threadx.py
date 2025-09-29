@@ -10,9 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import torch
 import torch.nn as nn
-
 from gptqmodel.utils.threadx import DeviceThreadPool
-
 
 pytestmark = [
     pytest.mark.cuda,

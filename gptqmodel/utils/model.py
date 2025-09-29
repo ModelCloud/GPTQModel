@@ -42,13 +42,13 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, dynamic_get
+from ..utils.memory import MEM_LORD
 from . import has_gil_disabled
 from .backend import BACKEND
 from .device import get_device
 from .importer import select_quant_linear
 from .logger import setup_logger
 from .torch import torch_empty_cache, torch_new_stream_ctx
-from ..utils.memory import MEM_LORD
 
 log = setup_logger()
 

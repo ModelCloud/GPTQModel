@@ -185,7 +185,7 @@ def ModelLoader(cls):
             model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)
-            
+
             # enable mmap with low_cpu_mem_usage
             turtle_model = cls.loader.from_pretrained(model_local_path, config=config, low_cpu_mem_usage=True, **model_init_kwargs)
 
@@ -198,7 +198,7 @@ def ModelLoader(cls):
             model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)
-            
+
             turtle_model = None
 
         model_config = model.config.to_dict()

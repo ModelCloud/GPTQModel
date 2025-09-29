@@ -310,8 +310,8 @@ class BaseQModel(nn.Module):
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
         layer_modules = cls.filter_not_quantize_module(layer_modules, quantize_config)
-        
-        print(f"simple_layer_modules layer_modules: {layer_modules}")
+
+        # print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 
     @classmethod
@@ -1071,9 +1071,9 @@ class BaseQModel(nn.Module):
         if self.turtle_model is None:
             if get_device(target_submodule) != device:
                 target_submodule.to(device)
-                
+
             return target_submodule
-            
+
         module = alias_from_turtle_for_submodule(
             target_model=self.model,
             turtle_model=self.turtle_model,

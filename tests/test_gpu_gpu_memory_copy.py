@@ -18,9 +18,11 @@
 # - For accurate timing we synchronize before/after and use perf_counter.
 
 import argparse
-import time
 import math
+import time
+
 import torch
+
 
 def gib_to_elems_fp16(gib: float) -> int:
     # 1 GiB = 1024**3 bytes; fp16 = 2 bytes/elem

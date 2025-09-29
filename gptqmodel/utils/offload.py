@@ -16,9 +16,9 @@ from accelerate.hooks import remove_hook_from_module, remove_hook_from_submodule
 from accelerate.utils import align_module_device, has_offloaded_params
 from torch import nn
 
-from .memory import MEM_LORD
 from ..looper.named_module import NamedModule
 from .device import get_device
+from .memory import MEM_LORD
 from .torch import CPU, HAS_CUDA, META
 
 _lock = threading.Lock()

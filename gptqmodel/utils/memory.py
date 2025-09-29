@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
+
 import os
 import threading
-from typing import Dict, Iterable, Tuple, Generator
+from typing import Dict, Generator, Iterable, Tuple
 
 import torch
 import torch.nn as nn
