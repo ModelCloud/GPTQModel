@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import queue
 import threading
 import time
@@ -17,6 +18,9 @@ import torch
 from ..utils.logger import setup_logger
 
 log = setup_logger()
+
+# DEBUG guard (only emit debug logs if DEBUG=1/true/yes/on)
+DEBUG_ON = str(os.environ.get("DEBUG", "")).lower() in ("1", "true", "yes", "on")
 
 DeviceLike = Union[str, int, torch.device]
 
@@ -106,7 +110,7 @@ class _RWLock:
     def __init__(self):
         self._cond = threading.Condition()
         self._readers = 0
-        self._writer: Optional[int] = None
+        self._writer: Optional[int] = None  # thread id that owns write
         self._writer_depth = 0
         self._writers_waiting = 0
 
@@ -178,12 +182,15 @@ class _LockGroup(contextlib.AbstractContextManager):
         self._pairs = ordered_pairs
 
     def __enter__(self):
-        for _, lk in self._pairs:
+        for name, lk in self._pairs:
+            if DEBUG_ON: log.debug(f"_LockGroup: acquiring write lock for {name}")
             lk.acquire_write()
+            if DEBUG_ON: log.debug(f"_LockGroup: acquired write lock for {name}")
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        for _, lk in reversed(self._pairs):
+        for name, lk in reversed(self._pairs):
+            if DEBUG_ON: log.debug(f"_LockGroup: releasing write lock for {name}")
             lk.release_write()
         return False
 
@@ -193,12 +200,15 @@ class _ReadLockGroup(contextlib.AbstractContextManager):
         self._pairs = ordered_pairs
 
     def __enter__(self):
-        for _, lk in self._pairs:
+        for name, lk in self._pairs:
+            if DEBUG_ON: log.debug(f"_ReadLockGroup: acquiring read lock for {name}")
             lk.acquire_read()
+            if DEBUG_ON: log.debug(f"_ReadLockGroup: acquired read lock for {name}")
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        for _, lk in reversed(self._pairs):
+        for name, lk in reversed(self._pairs):
+            if DEBUG_ON: log.debug(f"_ReadLockGroup: releasing read lock for {name}")
             lk.release_read()
         return False
 
@@ -248,18 +258,22 @@ class _DeviceWorker:
         self._inference_mode = inference_mode
         self._thread = threading.Thread(target=self._run, name=self.name, daemon=True)
         self._thread.start()
+        if DEBUG_ON: log.debug(f"Spawned worker '{self.name}' for {self.key}")
 
     # --- public API for pool ---
     def submit(self, fn: Callable[..., Any], /, *args, **kwargs) -> Future:
         fut = Future()
         self._q.put((True, fn, args, kwargs, fut))
+        if DEBUG_ON: log.debug(f"{self.name}: task enqueued; qsize={self._q.qsize()}")
         return fut
 
     def stop(self):
         self._stop.set()
         self._q.put((False, lambda: None, (), {}, Future()))  # sentinel
+        if DEBUG_ON: log.debug(f"{self.name}: stop requested; sentinel queued")
 
     def join(self):
+        if DEBUG_ON: log.debug(f"{self.name}: joining thread")
         self._thread.join()
 
     # --- internal main loop ---
@@ -271,7 +285,9 @@ class _DeviceWorker:
                 is_task, fn, args, kwargs, fut = self._q.get()
                 try:
                     if not is_task:
+                        if DEBUG_ON: log.debug(f"{self.name}: received sentinel; exiting")
                         break  # sentinel -> exit
+                    if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
                     # Tasks take a read lock so GC's writer lock can't interleave
                     with self.rwlock.reader():
                         stream = kwargs.pop("_cuda_stream", None)
@@ -283,19 +299,20 @@ class _DeviceWorker:
                                 result = fn(*args, **kwargs)
                     if not fut.cancelled():
                         fut.set_result(result)
+                    if DEBUG_ON: log.debug(f"{self.name}: task done")
                 except BaseException as exc:
                     if not fut.cancelled():
                         fut.set_exception(exc)
+                    if DEBUG_ON: log.debug(f"{self.name}: task exception: {exc!r}")
                 finally:
-                    if is_task:
-                        self._on_task_finished(self.key)
+                    self._on_task_finished(self.key)
                     self._q.task_done()
 
         # Thread is exiting; notify pool for cleanup
         try:
             self._on_worker_exit(self.key, self)
         finally:
-            pass
+            if DEBUG_ON: log.debug(f"{self.name}: exited")
 
 # --------------------------- Public Pool ---------------------------
 
@@ -424,12 +441,15 @@ class DeviceThreadPool:
                 target=self._janitor_loop, name="DP-Janitor", daemon=True
             )
             self._janitor.start()
+            if DEBUG_ON: log.debug(f"DP-Janitor thread started (debounce={self._gc_debounce_s:.3f}s, threshold={self._empty_cache_every_n})")
+        else:
+            if DEBUG_ON: log.debug("DP-Janitor disabled (no accelerators or threshold <= 0)")
 
     # --------------- Worker management ---------------
 
     def _spawn_worker(self, dev: torch.device, name: Optional[str] = None) -> _DeviceWorker:
         key = self._key(dev)
-        return _DeviceWorker(
+        w = _DeviceWorker(
             device=dev,
             rwlock=self._locks[key],
             on_task_finished=self._on_task_finished,
@@ -437,6 +457,7 @@ class DeviceThreadPool:
             name=name,
             inference_mode=self._inference_mode,
         )
+        return w
 
     def _on_worker_exit(self, key: str, worker: _DeviceWorker) -> None:
         """Cleanup finished workers from the group."""
@@ -449,6 +470,7 @@ class DeviceThreadPool:
                     self._dispatch_rr[key] %= len(group)
                 else:
                     self._dispatch_rr[key] = 0
+        if DEBUG_ON: log.debug(f"Worker '{worker.name}' exited for {key}")
 
     # --------------- Public Work API ---------------
 
@@ -471,6 +493,7 @@ class DeviceThreadPool:
         if _cuda_stream is not None and dev.type != "cuda":
             raise ValueError("_cuda_stream is only valid for CUDA devices")
 
+        if DEBUG_ON: log.debug(f"submit: device={key} fn={getattr(fn, '__name__', repr(fn))}")
         # mark in-flight before enqueue to avoid races with wait()
         self._mark_scheduled(key)
         try:
@@ -498,6 +521,7 @@ class DeviceThreadPool:
         self._stop_event.set()
         self._gc_event.set()  # wake janitor
         if self._janitor is not None and wait:
+            if DEBUG_ON: log.debug("Joining DP-Janitor thread…")
             self._janitor.join()
 
         for group in self._worker_groups.values():
@@ -507,6 +531,7 @@ class DeviceThreadPool:
             for group in self._worker_groups.values():
                 for w in group:
                     w.join()
+        if DEBUG_ON: log.debug("DeviceThreadPool shutdown complete")
 
     # --------------- Public Lock API ---------------
 
@@ -602,26 +627,31 @@ class DeviceThreadPool:
                     self._group = _LockGroup(pairs_local)
 
                 def __enter__(self):
-                    # Drain first
+                    if DEBUG_ON: log.debug(f"wait(lock=True) drain start: keys={self._keys}")
                     for kk in self._keys:
                         cv = self._outer._inflight_cv[kk]
                         with cv:
                             while self._outer._inflight[kk] > 0:
+                                if DEBUG_ON: log.debug(f"wait(lock=True) blocking on inflight[{kk}]={self._outer._inflight[kk]}")
                                 cv.wait()
-                    # Then acquire writer locks to block any new tasks on the scope
+                    if DEBUG_ON: log.debug(f"wait(lock=True) acquire writer locks: keys={self._keys}")
                     return self._group.__enter__()
 
                 def __exit__(self, exc_type, exc, tb):
+                    if DEBUG_ON: log.debug(f"wait(lock=True) releasing writer locks: keys={self._keys}")
                     return self._group.__exit__(exc_type, exc, tb)
 
             return _WaitThenLock(self, pairs, keys)
 
         # Pure wait without lock: wait for inflight to reach zero for each key.
+        if DEBUG_ON: log.debug(f"wait(lock=False) drain start: keys={keys}")
         for k in keys:
             cv = self._inflight_cv[k]
             with cv:
                 while self._inflight[k] > 0:
+                    if DEBUG_ON: log.debug(f"wait(lock=False) blocking on inflight[{k}]={self._inflight[k]}")
                     cv.wait()
+        if DEBUG_ON: log.debug(f"wait(lock=False) drain done: keys={keys}")
         return None
 
     # --------------- Public Stats API ---------------
@@ -652,9 +682,8 @@ class DeviceThreadPool:
 
     def _pick_worker(self, key: str) -> _DeviceWorker:
         """
-        Simple round-robin over the current group. No lifecycle rotation,
-        no accept-state, no spawning here (workers are created up front).
-        If the group is somehow empty, spawn one to recover.
+        Simple round-robin over the current group.
+        If the group is empty (unlikely), spawn one to recover.
         """
         with self._dispatch_lock:
             group = self._worker_groups.get(key)
@@ -725,12 +754,18 @@ class DeviceThreadPool:
     def _mark_scheduled(self, key: str) -> None:
         cv = self._inflight_cv[key]
         with cv:
-            self._inflight[key] += 1
+            self._inflight[key] = self._inflight.get(key, 0) + 1
+            if DEBUG_ON: log.debug(f"inflight[{key}] ++ -> {self._inflight[key]}")
 
     def _mark_finished(self, key: str) -> None:
         cv = self._inflight_cv[key]
         with cv:
-            self._inflight[key] -= 1
+            new_val = self._inflight.get(key, 0) - 1
+            if new_val < 0:
+                if DEBUG_ON: log.debug(f"WARNING: inflight[{key}] underflow ({new_val}); clamping to 0")
+                new_val = 0
+            self._inflight[key] = new_val
+            if DEBUG_ON: log.debug(f"inflight[{key}] -- -> {self._inflight[key]}")
             if self._inflight[key] == 0:
                 cv.notify_all()
 
@@ -740,13 +775,15 @@ class DeviceThreadPool:
 
         trigger_gc = False
         with self._stats_lock:
-            self._per_device_done[key] += 1
+            self._per_device_done[key] = self._per_device_done.get(key, 0) + 1
             self._total_done += 1
             dev_type = self._devices_by_key[key].type
             if self._empty_cache_every_n > 0 and dev_type in ("cuda", "xpu", "mps"):
                 n = self._per_device_done[key]
                 if n % self._empty_cache_every_n == 0:
                     trigger_gc = True
+                    if DEBUG_ON:
+                        log.debug(f"GC trigger set by {key}: per_device_done={n} threshold={self._empty_cache_every_n} total_done={self._total_done}")
         if trigger_gc:
             self._gc_event.set()
 
@@ -910,24 +947,46 @@ class DeviceThreadPool:
             self._last_gc_done_per_device[k] = snap_after["per_done"].get(k, 0)
 
     def _janitor_loop(self):
+        # Use timeouts so we can honor stop_event without relying on a final trigger.
+        WAIT_TIMEOUT = 0.1  # seconds
         while True:
-            self._gc_event.wait()
+            if DEBUG_ON: log.debug("DP-Janitor: waiting for trigger…")
+            # Exit promptly if shutdown requested before/while waiting.
             if self._stop_event.is_set():
+                if DEBUG_ON: log.debug("DP-Janitor: stop event set before wait; exiting")
+                break
+
+            # Wait with a timeout so we can re-check stop_event periodically.
+            triggered = self._gc_event.wait(timeout=WAIT_TIMEOUT)
+            if not triggered:
+                # Timed out; loop to check stop again.
+                continue
+
+            # Clear the event and re-check stop before doing anything else.
+            self._gc_event.clear()
+            if self._stop_event.is_set():
+                if DEBUG_ON: log.debug("DP-Janitor: stop event set after trigger; exiting")
                 break
 
             # Debounce to coalesce bursty triggers; keep draining the event during the window.
             if self._gc_debounce_s > 0:
                 t_end = time.time() + self._gc_debounce_s
+                if DEBUG_ON: log.debug(f"DP-Janitor: debounce window start ({self._gc_debounce_s:.3f}s)")
                 while time.time() < t_end:
-                    self._gc_event.clear()
+                    # If stopping during debounce, honor it immediately
+                    if self._stop_event.is_set():
+                        if DEBUG_ON: log.debug("DP-Janitor: stop during debounce; exiting")
+                        return
+                    # Drain subsequent triggers within the window
                     self._gc_event.wait(timeout=max(0.0, t_end - time.time()))
-                self._gc_event.clear()
-            else:
-                self._gc_event.clear()
+                    self._gc_event.clear()
+                if DEBUG_ON: log.debug("DP-Janitor: debounce window end")
 
             try:
                 pre = self._collect_state_snapshot()
-                log.debug("GC trigger received; acquiring global exclusive lock…")
+                if DEBUG_ON:
+                    log.debug(f"DP-Janitor: pre-snapshot taken: total_done={pre['total_done']}, threshold={pre['threshold']}, inflight={pre['inflight']}")
+                    log.debug("GC trigger received; evaluating whether to run…")
             except Exception as e:
                 try:
                     log.warn(f"Failed to render GC pre-snapshot: {e!r}")
@@ -949,11 +1008,12 @@ class DeviceThreadPool:
                 }
 
             if not self._should_run_gc_from_snapshot(pre):
+                if DEBUG_ON: log.debug("DP-Janitor: skip GC (no device progressed by threshold since last pass)")
                 continue
 
             t0 = time.time()
 
-            # Optional sync (usually skipped for performance):
+            # Optional sync (disabled by default as it can be costly)
             # self._synchronize_all()
 
             # GC each device independently under its writer lock.
@@ -963,15 +1023,23 @@ class DeviceThreadPool:
                     continue
 
                 lk = self._locks[key]
+                if DEBUG_ON: log.debug(f"DP-Janitor: attempting writer lock for {key}")
                 with lk.writer():
+                    if DEBUG_ON: log.debug(f"DP-Janitor: acquired writer lock for {key}")
                     if dev.type == "cuda" and TORCH_CUDA_EMPTY_CACHE is not None:
+                        if DEBUG_ON: log.debug(f"DP-Janitor: empty_cache(cuda) begin on {key}")
                         with torch.cuda.device(dev.index):
                             TORCH_CUDA_EMPTY_CACHE()
+                        if DEBUG_ON: log.debug(f"DP-Janitor: empty_cache(cuda) done on {key}")
                     elif dev.type == "xpu" and TORCH_XPU_EMPTY_CACHE is not None:
+                        if DEBUG_ON: log.debug(f"DP-Janitor: empty_cache(xpu) begin on {key}")
                         with torch.xpu.device(dev.index):
                             TORCH_XPU_EMPTY_CACHE()
+                        if DEBUG_ON: log.debug(f"DP-Janitor: empty_cache(xpu) done on {key}")
                     elif dev.type == "mps" and TORCH_MPS_EMPTY_CACHE is not None:
+                        if DEBUG_ON: log.debug("DP-Janitor: empty_cache(mps) begin")
                         TORCH_MPS_EMPTY_CACHE()
+                        if DEBUG_ON: log.debug("DP-Janitor: empty_cache(mps) done")
 
             t1 = time.time()
 
@@ -982,6 +1050,7 @@ class DeviceThreadPool:
                 post = self._collect_state_snapshot()
                 self._update_gc_watermarks(post)
                 log.info(f"GC completed in {t1 - t0:.3f}s (pass #{self._gc_passes}).")
+                if DEBUG_ON: log.debug(f"DP-Janitor: post-snapshot: inflight={post['inflight']} per_done={post['per_done']}")
             except Exception as e:
                 try:
                     log.warn(f"Failed to render GC post-snapshot: {e!r}")
