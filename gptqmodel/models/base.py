@@ -22,7 +22,7 @@ from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST
+from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
@@ -54,14 +54,6 @@ def classproperty(func):
     if not isinstance(func, (classmethod, staticmethod)):
         func = classmethod(func)
     return _ClassPropertyDescriptor(func)
-
-
-def filter_not_quantize_module(layer_modules):
-    return [
-        [name for name in block if NOT_QUANTIZE_FLAG not in name]
-        for block in layer_modules
-        if any(NOT_QUANTIZE_FLAG not in name for name in block)
-    ]
 
 
 def generate_node_for_awq_scaling(inp, prev_op, module_kwargs, nodes_size, subset, module2inspect):
@@ -148,6 +140,12 @@ class BaseQModel(nn.Module):
     server = None
 
     support_batch_quantize = True
+
+    ATTENTION_MASKS_DTYPE = torch.bool # default to bool
+
+    ATTENTION_MASKS_REQUIRED_FOR_INPUT: bool = False
+
+    INPUT_EMBEDDING_EXTRA_ARGS = None
 
     def __init__(
         self,
@@ -275,21 +273,45 @@ class BaseQModel(nn.Module):
     def get_num_experts(cls, model_config):
         if hasattr(model_config, "text_config"):
             num_experts = getattr(model_config.text_config, cls.dynamic_expert_index)
+        elif hasattr(model_config, "thinker_config"):
+            num_experts = getattr(model_config.thinker_config.text_config, cls.dynamic_expert_index)
         else:
             num_experts = getattr(model_config, cls.dynamic_expert_index)
         return num_experts
+
+    @classmethod
+    def filter_not_quantize_module(cls, layer_modules, quantize_config):
+        layer_modules = [
+            [name for name in block if NOT_QUANTIZE_FLAG not in name]
+            for block in layer_modules
+        ]
+        layer_modules = [block for block in layer_modules if block]  # 去掉空 block
+
+        if getattr(quantize_config, "dynamic", None):
+            new_layer_modules = []
+            for modules in layer_modules:
+                filtered = [
+                    m for m in modules
+                    if dynamic_get(quantize_config.dynamic, module_name=m) is not False
+                ]
+                if filtered:
+                    new_layer_modules.append(filtered)
+            layer_modules = new_layer_modules
+
+        return layer_modules
 
     # Inside each `LlamaDecoderLayer` layer are many internal modules
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
     @classmethod
-    def simple_layer_modules(cls, model_config, is_awq_quantize: bool = False):
+    def simple_layer_modules(cls, model_config, quantize_config, is_awq_quantize: bool = False):
         layer_modules = cls.build_layer_modules(cls.module_tree)
 
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
-        layer_modules = filter_not_quantize_module(layer_modules)
-        # print(f"simple_layer_modules layer_modules: {layer_modules}")
+        layer_modules = cls.filter_not_quantize_module(layer_modules, quantize_config)
+        
+        print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 
     @classmethod
@@ -1046,6 +1068,12 @@ class BaseQModel(nn.Module):
             device: torch.device,
             non_blocking: bool = False,
     ) -> torch.nn.Module:
+        if self.turtle_model is None:
+            if get_device(target_submodule) != device:
+                target_submodule.to(device)
+                
+            return target_submodule
+            
         module = alias_from_turtle_for_submodule(
             target_model=self.model,
             turtle_model=self.turtle_model,

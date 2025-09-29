@@ -444,7 +444,7 @@ def ModelWriter(cls):
                     continue
 
                 if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
-                        not name.endswith(ignore_module) for sublist in self.simple_layer_modules(config) for ignore_module in sublist
+                        not name.endswith(ignore_module) for sublist in self.simple_layer_modules(config, qcfg) for ignore_module in sublist
                 ):
                     # log non-lm-head quantizerd modules only
                     if name is not self.lm_head:

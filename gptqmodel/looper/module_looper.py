@@ -108,8 +108,7 @@ class ModuleLooper():
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
-            # TODO FIX ME..why is Qwen2_5OmniDecoderLayer harded here?
-            if kwargs.get("attention_mask") is not None and str(type(module)) != "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
+            if kwargs.get("attention_mask") is not None and self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
                 attention_masks.append(kwargs["attention_mask"].to(device=data_device))
             else:
                 attention_masks.append(None)
@@ -160,7 +159,7 @@ class ModuleLooper():
 
         for example in calibration_data:
             for k, v in example.items():
-                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
+                if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
                     data_device = self.gptq_model.quantize_config.device
                 else:
                     data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
@@ -175,8 +174,11 @@ class ModuleLooper():
                         v = v.unsqueeze(0)
                     example[k] = move_to(v, device=data_device)
             try:
-                if str(type(layers[0])) == "<class 'transformers.models.qwen2_5_omni.modeling_qwen2_5_omni.Qwen2_5OmniDecoderLayer'>":
-                    self.gptq_model.model.generate(**example, return_audio=False)
+                if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
+                    example["attention_mask"] = example["attention_mask"].long()
+
+                if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
+                    self.gptq_model.model.generate(**example, **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS)
                 else:
                     self.gptq_model.model(**example, use_cache=use_cache)
             except StopForward:
@@ -240,7 +242,7 @@ class ModuleLooper():
         for processor in self.processors:
             processor.release_calibration_dataset()
 
-        layer_modules = self.gptq_model.simple_layer_modules(model_config=self.gptq_model.model.config)
+        layer_modules = self.gptq_model.simple_layer_modules(model_config=self.gptq_model.model.config, quantize_config=self.gptq_model.quantize_config)
 
         if not self.gptq_model.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]

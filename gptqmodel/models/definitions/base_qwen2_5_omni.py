@@ -13,9 +13,17 @@ from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
 from .._const import CPU
 from ..base import BaseQModel
+import torch
 
 
 class BaseQwen2_5_OmniGPTQ(BaseQModel):
+    ATTENTION_MASKS_REQUIRED_FOR_INPUT = True
+    ATTENTION_MASKS_DTYPE = torch.long
+
+    INPUT_EMBEDDING_EXTRA_ARGS = {
+        "return_audio": False,
+    }
+    
     loader = AutoModelForTextToWaveform
 
     pre_lm_head_norm_module = "thinker.model.norm"
