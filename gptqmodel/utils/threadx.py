@@ -627,7 +627,7 @@ class DeviceThreadPool:
 
     # --------------- Public Wait API ---------------
 
-    def wait(self, scope: Optional[Union[str, DeviceLike, Iterable[DeviceLike]]]) -> None | _WaitAndLock:
+    def wait(self, scope: Optional[Union[str, DeviceLike, Iterable[DeviceLike]]] = None) -> None | _WaitAndLock:
         """
         Wait until in-flight tasks for `scope` drain to zero.
         """
@@ -726,7 +726,7 @@ class DeviceThreadPool:
                 keys.append(k)
         return keys
 
-    def _resolve_scope_to_keys(self, scope: Optional[Union[str, DeviceLike, Iterable[DeviceLike]]]) -> List[str]:
+    def _resolve_scope_to_keys(self, scope: Optional[Union[str, DeviceLike, Iterable[DeviceLike]]] = None) -> List[str]:
         if scope is None or (isinstance(scope, str) and scope == "all"):
             return list(self._ordered_keys)
         if isinstance(scope, (str, torch.device, int)):
@@ -992,7 +992,7 @@ class DeviceThreadPool:
                     continue
                 with torch.cuda.device(dev.index):
                     TORCH_CUDA_EMPTY_CACHE()
-                    log.debug(f"cuda empty cache called on {dev.index}")
+                    # log.debug(f"cuda empty cache called on {dev.index}")
 
         # XPU
         if TORCH_XPU_EMPTY_CACHE is not None:
