@@ -22,6 +22,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import HAS_CUDA, torch_streamCtx, torch_sync
+from ..models._const import CPU
 
 log = setup_logger()
 lock = threading.Lock()
@@ -127,6 +128,10 @@ class GPTQProcessor(LoopProcessor):
 
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 
+        q_scales = q_scales.to(CPU)
+        q_zeros = q_zeros.to(CPU)
+        q_g_idx = q_g_idx.to(CPU)
+
         with self.lock:
             module.state.update({"q_scales": q_scales})
             module.state.update({"q_zeros": q_zeros})
@@ -196,6 +201,7 @@ class GPTQProcessor(LoopProcessor):
                 "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
             })
 
+        # single largest deallocation of vram happens here
         module.weight.data = wq
 
     # submodule_finalized is called in reverse after all next sequential processes are called
@@ -211,6 +217,10 @@ class GPTQProcessor(LoopProcessor):
             q_zeros = module.state.pop("q_zeros")
             q_scales = module.state.pop("q_scales")
             q_g_idx = module.state.pop("q_g_idx")
+
+        assert q_zeros.device == CPU
+        assert q_scales.device == CPU
+        assert q_g_idx.device == CPU
 
         layers = find_modules(model.model)
 
@@ -262,7 +272,6 @@ class GPTQProcessor(LoopProcessor):
 
         # set quantized state
         model.quantized = True
-
         model.quantize_config.quant_method = METHOD.GPTQ
 
         super().finalize(model=model, **kwargs)

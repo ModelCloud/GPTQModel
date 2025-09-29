@@ -25,6 +25,22 @@ log = setup_logger()
 
 DeviceLike = Union[str, int, torch.device]
 
+def get_empty_cache_fn():
+    # CUDA
+    if torch.cuda.is_available():
+       return torch.cuda.empty_cache
+
+    # XPU (if available)
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+       return torch.xpu.empty_cache()
+
+    # MPS (if available)
+    if _mps_available():
+        return torch.mps.empty_cache()
+
+    return None
+
+TORCH_EMPTY_CACHE = get_empty_cache_fn()
 
 def _mps_available() -> bool:
     return (
@@ -859,17 +875,18 @@ class DeviceThreadPool:
                 if dev.type != "cuda":
                     continue
                 with torch.cuda.device(dev.index):
-                    torch.cuda.empty_cache()
+                    TORCH_EMPTY_CACHE()
+                    log.debug(f"cuda empty cache clalled on {dev.index}")
 
         # XPU (if available)
-        if hasattr(torch, "xpu") and torch.xpu.is_available():  # type: ignore[attr-defined]
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
             for key in self._ordered_keys:
                 dev = self._devices_by_key[key]
                 if dev.type != "xpu":
                     continue
-                with torch.xpu.device(dev.index):  # type: ignore[attr-defined]
-                    torch.xpu.empty_cache()  # type: ignore[attr-defined]
+                with torch.xpu.device(dev.index):
+                    TORCH_EMPTY_CACHE()
 
         # MPS (if available)
         if _mps_available():
-            torch.mps.empty_cache()  # type: ignore[attr-defined]
+            TORCH_EMPTY_CACHE()
