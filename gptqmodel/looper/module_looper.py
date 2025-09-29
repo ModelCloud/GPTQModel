@@ -666,7 +666,7 @@ class ModuleLooper():
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained
-        self.pool.wait()  # same as wait('all')
+        self.pool.wait('all')  # wait for all devices
 
         # paranoid safety check
         # torch_sync()
