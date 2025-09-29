@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 09/29/2025 5.0.0-dev `main`: 🎉 New Qwen3 Omni model support. AWQ Marlin kernel integrated + many disk offload, threading, and memory usage fixes. 
 * 09/24/2025 5.0.0-dev `main`: 🎉 Up to 90% cpu mem saving for large MoE models with faster/inline packing! 26% quant time reduction for Qwen3 MoE! AWQ Marlin kernel added. AWQ Gemm loading bug fixes. `act_group_aware` now faster and auto enabled for GPTQ when `desc_act` is False for higher quality recovery. 
 * 09/19/2025 5.0.0-dev `main`: 👀 Cpu memory saving of ~73.5% during quantization stage with new `offload_to_disk` quantization config property default to `True`. 
 * 09/18/2025 5.0.0-dev `main`: 🎉 AWQ quantization support! Complete refractor and simplification of model definitions in prepreation for future quantization formats. 
@@ -176,7 +177,7 @@ Native support support some of the most popular multi-modal models:
 | Model             |   |                   |   |                |   |                |   |               |   |
 |-------------------|---|-------------------|---|----------------|---|----------------|---|---------------|---|
 | Apertus           | ✅ | EXAONE 3.0        | ✅ | InternLM 1/2.5 | ✅ | MobileLLM      | ✅ | Qwen 2/2.5 VL | ✅ |
-| Baichuan          | ✅ | Falcon (H1)       | ✅ | Kimi K2        | ✅ | MOSS           | ✅ | Qwen 2.5 Omni | ✅ |
+| Baichuan          | ✅ | Falcon (H1)       | ✅ | Kimi K2        | ✅ | MOSS           | ✅ | Qwen 2.5/3 Omni | ✅ |
 | Bloom             | ✅ | FastVLM           | ✅ | Klear          | ✅ | MPT            | ✅ | RefinedWeb    | ✅ |
 | ChatGLM           | ✅ | Gemma 1/2/3       | ✅ | Llama 1-3.3    | ✅ | Nemotron H     | ✅ | StableLM      | ✅ |
 | CodeGen           | ✅ | GPTBigCod         | ✅ | Llama 3.2 VL   | ✅ | Nemotron Ultra | ✅ | StarCoder2    | ✅ |
