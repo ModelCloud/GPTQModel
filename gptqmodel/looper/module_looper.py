@@ -9,11 +9,11 @@ import copy
 import gc
 import threading
 import time
+from contextlib import contextmanager
 from functools import partial
 from typing import Dict, List, Optional
 
 import torch
-from contextlib import contextmanager
 
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
@@ -31,13 +31,12 @@ from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
 from ..utils.structure import print_module_tree
+# Single shared device-aware pool
+from ..utils.threadx import DeviceThreadPool
 from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA, META, BalanceStrategy,
                            device_next, device_next_reset, torch_empty_cache, torch_sync)
 from .awq_processor import AWQProcessor
 from .qqq_processor import QQQProcessor
-
-# Single shared device-aware pool
-from ..utils.threadx import DeviceThreadPool
 
 log = setup_logger()
 
@@ -143,7 +142,7 @@ class ModuleLooper():
                 "mps": 1,
                 "cpu": 1,
             },
-            empty_cache_every_n=6,  # disable auto GC during quant loops; enable if you want
+            empty_cache_every_n=12,  # disable auto GC during quant loops; enable if you want
         )
 
     # NEW: Wrap an existing hook so its inputs/outputs are pre-masked for GPTQ stats.
@@ -491,7 +490,7 @@ class ModuleLooper():
 
                         try:
                             # Ensure internal buffers (e.g., RoPE caches) are on the layer's device
-                            _rehome_module_to_device(module, cur_layer_device, move_parameters=False, move_buffers=True)
+                            # _rehome_module_to_device(module, cur_layer_device, move_parameters=False, move_buffers=True)
 
                             # Acquire read lock so auto-GC cannot run while we forward
                             with self.pool.read_lock(cur_layer_device):

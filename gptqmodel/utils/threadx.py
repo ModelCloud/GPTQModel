@@ -813,11 +813,11 @@ class DeviceThreadPool:
             # PRE-GC snapshot & banner
             try:
                 pre = self._collect_state_snapshot()
-                log.info("┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓")
-                log.info("┃ DeviceThreadPool: GC pass starting               ┃")
-                log.info("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛")
+                # log.info("┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓")
+                # log.info("┃ DeviceThreadPool: GC pass starting               ┃")
+                # log.info("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛")
                 log.debug("GC trigger received; acquiring global exclusive lock…")
-                log.info(self._render_gc_table(pre))
+                #log.info(self._render_gc_table(pre))
             except Exception as e:
                 try:
                     log.warn(f"Failed to render GC pre-snapshot: {e!r}")
@@ -841,10 +841,10 @@ class DeviceThreadPool:
                 self._gc_passes += 1
                 self._last_gc_ts = t1
                 try:
-                    post = self._collect_state_snapshot()
+                    # post = self._collect_state_snapshot()
                     log.info(f"GC completed in {t1 - t0:.3f}s (pass #{self._gc_passes}).")
-                    log.info(self._render_gc_table(post))
-                    log.info("── GC pass finished ──")
+                    # log.info(self._render_gc_table(post))
+                    # log.info("── GC pass finished ──")
                 except Exception as e:
                     try:
                         log.warn(f"Failed to render GC post-snapshot: {e!r}")
