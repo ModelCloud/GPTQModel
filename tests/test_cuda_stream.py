@@ -1,10 +1,11 @@
 # test_d2h_concurrency.py
 # pytest -q -s test_d2h_concurrency.py
 import math
-import os
 import time
+
 import pytest
 import torch
+
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA required for this test"

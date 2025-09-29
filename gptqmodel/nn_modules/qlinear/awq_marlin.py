@@ -15,10 +15,18 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.marlin import (apply_awq_marlin_linear, awq_to_marlin_zero_points, marlin_make_empty_g_idx,
-                             marlin_make_workspace_new, marlin_permute_bias, marlin_permute_scales, replace_parameter)
+from ...utils.marlin import (
+    apply_awq_marlin_linear,
+    awq_to_marlin_zero_points,
+    marlin_make_empty_g_idx,
+    marlin_make_workspace_new,
+    marlin_permute_bias,
+    marlin_permute_scales,
+    replace_parameter,
+)
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
+
 
 marlin_import_exception = None
 try:

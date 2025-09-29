@@ -13,6 +13,7 @@ from torch.nn import Module
 from ..looper.loop_processor import LoopProcessor, get_max_memory
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
+from ..models._const import CPU
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ, GPTQv2
@@ -22,7 +23,6 @@ from ..utils.logger import setup_logger
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import HAS_CUDA, torch_streamCtx, torch_sync
-from ..models._const import CPU
 
 log = setup_logger()
 lock = threading.Lock()

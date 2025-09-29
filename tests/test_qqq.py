@@ -6,16 +6,20 @@ import tempfile
 import unittest
 
 from datasets import load_dataset
-from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
-from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
-from gptqmodel.utils.torch import torch_empty_cache
 from parameterized import parameterized
 from transformers import AutoTokenizer
 
+from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
+from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
+from gptqmodel.utils.torch import torch_empty_cache
+
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 # -- end do not touch
 from logbar import LogBar
+
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
+
 
 log = LogBar.shared()
 

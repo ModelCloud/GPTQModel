@@ -26,8 +26,11 @@ class NemotronHQModel(BaseQModel):
         if not self.load_quantized_model:
             return
 
-        from transformers.utils.import_utils import (is_causal_conv1d_available,
-                                                     is_flash_attn_2_available, is_mamba_2_ssm_available)
+        from transformers.utils.import_utils import (
+            is_causal_conv1d_available,
+            is_flash_attn_2_available,
+            is_mamba_2_ssm_available,
+        )
 
         if is_mamba_2_ssm_available():
             from mamba_ssm.ops.triton.selective_state_update import selective_state_update

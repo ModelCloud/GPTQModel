@@ -9,6 +9,7 @@ from .python import gte_python_3_13_3, has_gil_control, has_gil_disabled, log_gi
 from .threads import AsyncManager, SerialWorker
 from .vram import get_vram
 
+
 log = setup_logger()
 
 ASYNC_BG_QUEUE = AsyncManager(threads=4)

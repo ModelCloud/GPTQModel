@@ -9,6 +9,7 @@ import unittest
 from gptqmodel import GPTQModel
 from gptqmodel.utils.eval import EVAL
 
+
 # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 

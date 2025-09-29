@@ -5,7 +5,9 @@ import time
 
 import pytest
 import torch
+
 from gptqmodel.utils.threadx import DeviceThreadPool
+
 
 pytestmark = [
     pytest.mark.cuda,

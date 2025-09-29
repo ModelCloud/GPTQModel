@@ -14,6 +14,7 @@ from ..utils import BACKEND
 from ..utils.rocm import IS_ROCM
 from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
+
 CPU = device("cpu")
 META = device("meta")
 CUDA = device("cuda")

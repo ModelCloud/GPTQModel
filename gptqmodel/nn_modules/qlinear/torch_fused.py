@@ -15,6 +15,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_XPU_FUSED_OPS
 
+
 log = setup_logger()
 
 # TODO: not yet working for cuda/cpu fused int4 ops

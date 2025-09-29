@@ -15,6 +15,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import torch_compile
 
+
 log = setup_logger()
 
 class TorchQuantLinear(PackableQuantLinear):

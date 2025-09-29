@@ -13,6 +13,7 @@ from ..utils import setup_logger
 from ..utils.torch import device_next
 from .gptq import get_number_of_rows_and_cols
 
+
 DEBUG = False
 
 torch.backends.cuda.matmul.allow_tf32 = False

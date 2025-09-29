@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from model_test import ModelTest
+
+from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 
 
 class TestQwen2_VL(ModelTest):

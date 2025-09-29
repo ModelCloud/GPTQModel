@@ -12,6 +12,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from ..utils.logger import setup_logger
 
+
 choices = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"]
 max_model_length = 4096
 max_new_tokens = 2048

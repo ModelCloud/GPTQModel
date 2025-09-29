@@ -18,6 +18,7 @@ from random_word import random_word
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
 
+
 log = setup_logger()
 
 BITS_FIELD_CODE = "bits"

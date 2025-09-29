@@ -10,6 +10,7 @@ from typing import Dict, Generator, Iterable, Tuple
 import torch
 import torch.nn as nn
 
+
 # ---------- ANSI COLORS ----------
 RESET   = "\033[0m"
 RED     = "\033[91m"

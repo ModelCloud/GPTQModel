@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Union
 
+
 _SCALAR_TYPES_ID_MAP = {}
 
 

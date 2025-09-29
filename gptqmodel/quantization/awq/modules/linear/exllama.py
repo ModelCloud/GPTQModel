@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
+
 from gptqmodel.quantization.awq.utils.module import try_import
 from gptqmodel.quantization.awq.utils.packing_utils import unpack_reorder_pack
+
 
 exl_ext, msg = try_import("gptqmodel_exl_kernels")
 

@@ -16,6 +16,7 @@ import torch
 
 from ..utils.logger import setup_logger
 
+
 log = setup_logger()
 
 
@@ -240,8 +241,8 @@ class _DeviceWorker:
         device: torch.device,
         rwlock: _RWLock,
         on_task_finished: Callable[[str], None],
-        on_retire_request: Callable[[str, "._DeviceWorker"], None],
-        on_worker_exit: Callable[[str, "._DeviceWorker"], None],
+        on_retire_request: Callable[[str, _DeviceWorker], None],
+        on_worker_exit: Callable[[str, _DeviceWorker], None],
         name: Optional[str] = None,
         inference_mode: bool = False,
         lifecycle_calls: int = 50,
@@ -626,15 +627,11 @@ class DeviceThreadPool:
 
     # --------------- Public Wait API ---------------
 
-    def wait(self, scope: Optional[Union[str, DeviceLike, Iterable[DeviceLike]]] = None, *, lock: bool = False):
+    def wait(self, scope: Optional[Union[str, DeviceLike, Iterable[DeviceLike]]]) -> None | _WaitAndLock:
         """
         Wait until in-flight tasks for `scope` drain to zero.
         """
         keys = self._resolve_scope_to_keys(scope)
-        if lock:
-            pairs = [(k, self._locks[k]) for k in sorted(keys)]
-            return _WaitAndLock(pairs)
-
         for k in keys:
             cv = self._inflight_cv[k]
             with cv:
@@ -949,7 +946,7 @@ class DeviceThreadPool:
                     "per_done": {k: self._per_device_done.get(k, 0) for k in self._devices_by_key.keys()},
                     "threshold": self._empty_cache_every_n,
                     "meta": {k: {"type": self._devices_by_key[k].type} for k in self._devices_by_key.keys()},
-                    "inflight": {k: 0 for k in self._devices_by_key.keys()},
+                    "inflight": dict.fromkeys(self._devices_by_key.keys(), 0),
                     "workers": {k: len(self._worker_groups.get(k, [])) for k in self._devices_by_key.keys()},
                     "total_inflight": 0,
                     "total_workers": sum(len(v) for v in self._worker_groups.values()),

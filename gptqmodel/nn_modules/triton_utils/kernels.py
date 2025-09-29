@@ -12,6 +12,7 @@ from ...utils.logger import setup_logger
 from ...utils.torch import HAS_XPU
 from . import custom_autotune
 
+
 log = setup_logger()
 
 # code based https://github.com/fpgaminer/GPTQ-triton

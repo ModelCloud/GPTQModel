@@ -15,6 +15,7 @@ import transformers
 
 from ..utils.structure import print_module_tree
 
+
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
     try:
         from modelscope import snapshot_download
@@ -37,10 +38,20 @@ from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_device_support
-from ..utils.model import (auto_dtype, convert_gptq_v1_to_v2_format, find_config_seq_len, find_modules,
-                           get_checkpoints, get_module_by_name_prefix, gptqmodel_post_init,
-                           load_checkpoint_in_model_then_tie_weights, make_quant, simple_dispatch_model)
+from ..utils.model import (
+    auto_dtype,
+    convert_gptq_v1_to_v2_format,
+    find_config_seq_len,
+    find_modules,
+    get_checkpoints,
+    get_module_by_name_prefix,
+    gptqmodel_post_init,
+    load_checkpoint_in_model_then_tie_weights,
+    make_quant,
+    simple_dispatch_model,
+)
 from ._const import DEVICE, normalize_device
+
 
 log = setup_logger()
 

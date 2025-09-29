@@ -12,6 +12,7 @@ from pathlib import Path
 from setuptools import find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
+
 # ---------------------------
 # Helpers (no torch required)
 # ---------------------------

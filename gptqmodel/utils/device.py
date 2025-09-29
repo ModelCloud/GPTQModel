@@ -4,12 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from __future__ import annotations
 
+from typing import Optional, Union
+
 import torch
 from device_smi import Device
 from torch import nn as nn
 
 from ..models._const import CPU, CUDA_0
-from typing import Optional, Union
+
 
 # unit: GiB
 def get_gpu_usage_memory():

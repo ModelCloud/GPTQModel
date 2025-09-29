@@ -12,6 +12,7 @@ from ...quantization.awq.modules.linear.gemm import WQLinearMMFunction
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 
+
 log = setup_logger()
 
 class AwqGEMMQuantLinear(AWQuantLinear, PackableQuantLinear):

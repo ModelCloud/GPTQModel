@@ -6,6 +6,7 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -16,13 +17,14 @@ import logging  # noqa: E402
 import tempfile  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
+from parameterized import parameterized  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
+
 from gptqmodel import BACKEND, GPTQModel, __version__, get_best_device  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME  # noqa: E402
 from gptqmodel.quantization.config import META_FIELD_QUANTIZER, META_QUANTIZER_GPTQMODEL, QuantizeConfig  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-from models.model_test import ModelTest  # noqa: E402
-from parameterized import parameterized  # noqa: E402
-from transformers import AutoTokenizer  # noqa: E402
 
 
 class TestQuantization(ModelTest):

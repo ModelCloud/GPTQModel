@@ -13,6 +13,7 @@ from ...quantization.awq.utils.packing_utils import unpack_reorder_pack
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 
+
 log = setup_logger()
 
 exl_ext, msg = try_import("gptqmodel_exllama_kernels")

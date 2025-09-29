@@ -8,7 +8,9 @@ import time
 import pytest
 import torch
 import torch.nn as nn
+
 from gptqmodel.utils.threadx import DeviceThreadPool
+
 
 mps_available = hasattr(torch, "backends") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
 

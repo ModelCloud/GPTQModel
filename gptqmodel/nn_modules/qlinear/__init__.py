@@ -19,6 +19,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 
+
 log = setup_logger()
 
 class BaseQuantLinear(nn.Module):

@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from gptqmodel import BACKEND
 from model_test import ModelTest
+
+from gptqmodel import BACKEND
 
 
 class TestApertus(ModelTest):

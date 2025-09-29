@@ -16,17 +16,19 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # -- end do not touch
 
 from typing import Optional  # noqa: E402
 
+from lm_eval.utils import make_table  # noqa: E402
+
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
 
 
 def bench(path: str, backend: BACKEND, adapter: Optional[Lora], task):

@@ -11,6 +11,7 @@ from ..utils.logger import setup_logger
 from .marlin_scalar_type import ScalarType
 from .rocm import IS_ROCM
 
+
 log = setup_logger()
 
 marlin_import_exception = None

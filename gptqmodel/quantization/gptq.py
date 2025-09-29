@@ -26,6 +26,7 @@ from ..utils.torch import HAS_CUDA, HAS_XPU, device_next
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 
+
 log = setup_logger()
 
 lock = threading.Lock()
