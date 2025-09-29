@@ -6,12 +6,14 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-from gptqmodel.utils import BACKEND  # noqa: E402
 from inference_speed import InferenceSpeed  # noqa: E402
 from parameterized import parameterized  # noqa: E402
+
+from gptqmodel.utils import BACKEND  # noqa: E402
 
 
 class TestInferenceSpeedTorchFused(InferenceSpeed):

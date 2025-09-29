@@ -8,14 +8,17 @@ import time
 
 from gptqmodel.utils.torch import torch_empty_cache
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 
 import unittest
 
-from gptqmodel import GPTQModel
 from logbar import LogBar
 from transformers import AutoTokenizer
+
+from gptqmodel import GPTQModel
+
 
 logger = LogBar.shared()
 

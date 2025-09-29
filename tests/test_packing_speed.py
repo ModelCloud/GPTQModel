@@ -8,6 +8,7 @@ import os
 
 from gptqmodel import BACKEND
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -16,6 +17,7 @@ import unittest  # noqa: E402
 
 import threadpoolctl  # noqa: E402
 from parameterized import parameterized  # noqa: E402
+
 
 # isort: off
 import torch  # noqa: E402

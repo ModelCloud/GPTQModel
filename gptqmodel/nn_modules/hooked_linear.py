@@ -11,6 +11,7 @@ from torch import nn
 
 from ..utils.logger import setup_logger
 
+
 log = setup_logger()
 
 class StopForward(Exception):

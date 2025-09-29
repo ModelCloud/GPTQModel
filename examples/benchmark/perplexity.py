@@ -6,8 +6,10 @@
 import argparse
 import os
 
-from gptqmodel.utils.perplexity import Perplexity
 from transformers import AutoTokenizer
+
+from gptqmodel.utils.perplexity import Perplexity
+
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"

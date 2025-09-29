@@ -1,7 +1,9 @@
 import math
 
 import torch
+
 from gptqmodel.utils.logger import setup_logger
+
 
 # Adapted from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/lib/utils/matmul_had.py
 

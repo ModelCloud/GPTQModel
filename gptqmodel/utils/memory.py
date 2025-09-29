@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
+
 import os
 import threading
-from typing import Dict, Iterable, Tuple, Generator
+from typing import Dict, Generator, Iterable, Tuple
 
 import torch
 import torch.nn as nn
+
 
 # ---------- ANSI COLORS ----------
 RESET   = "\033[0m"
@@ -325,5 +327,3 @@ def format_bytes(n: int) -> str:
             return f"{x:.2f} {u}"
         x /= 1024.0
 
-# default to auto gc interval for every 8GB of freed memory
-MEM_LORD = MemTracker(auto_gc_bytes="auto")

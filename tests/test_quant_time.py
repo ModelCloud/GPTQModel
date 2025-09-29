@@ -5,13 +5,15 @@
 
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import time  # noqa: E402
 
+from models.model_test import ModelTest  # noqa: E402
+
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
-from models.model_test import ModelTest  # noqa: E402
 
 
 class TestQuantTime(ModelTest):

@@ -1,8 +1,10 @@
 import os
 
+
 os.environ["GPTQMODEL_USE_MODELSCOPE"] = "True"
-from gptqmodel import GPTQModel  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
+
+from gptqmodel import GPTQModel  # noqa: E402
 
 
 class TestLoadModelscope(ModelTest):

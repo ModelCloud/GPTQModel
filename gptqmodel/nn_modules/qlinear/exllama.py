@@ -15,6 +15,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import BaseQuantLinear
 
+
 exllama_import_exception = None
 try:
     from gptqmodel_exllama_kernels import make_q4, q4_matmul

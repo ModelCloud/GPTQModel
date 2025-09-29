@@ -23,8 +23,6 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
-from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
-from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from torch.nn.modules.conv import _ConvNd
@@ -32,10 +30,18 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
+from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+
 from ..adapter.adapter import Adapter
 from ..looper.named_module import NamedModule
-from ..models._const import (CPU, DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
-                             EXPERT_INDEX_PLACEHOLDER, SUPPORTS_MODULE_TYPES)
+from ..models._const import (
+    CPU,
+    DEVICE,
+    EXLLAMA_DEFAULT_MAX_INPUT_LENGTH,
+    EXPERT_INDEX_PLACEHOLDER,
+    SUPPORTS_MODULE_TYPES,
+)
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
@@ -48,7 +54,7 @@ from .device import get_device
 from .importer import select_quant_linear
 from .logger import setup_logger
 from .torch import torch_empty_cache, torch_new_stream_ctx
-from ..utils.memory import MEM_LORD
+
 
 log = setup_logger()
 
@@ -80,7 +86,6 @@ def recurse_setattr(module, name, value):
 
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
     if get_device(obj) != device:
-        MEM_LORD.free(obj)
         if stream:
             # we cannot support changing dtype and stream at the same time
             assert dtype is None, f"streaming does not support changing dtype: actual = `{dtype}"

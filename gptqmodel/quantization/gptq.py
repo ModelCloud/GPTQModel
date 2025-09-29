@@ -25,7 +25,7 @@ from ..utils.logger import setup_logger
 from ..utils.torch import HAS_CUDA, HAS_XPU, device_next
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
-from ..utils.memory import MEM_LORD
+
 
 log = setup_logger()
 
@@ -56,7 +56,7 @@ def get_number_of_rows_and_cols(layer: nn.Module):
 
 class GPTQ:
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig] = None):
-        # self.lock = threading.Lock()
+        self.lock = threading.Lock()
 
         # self.num_tied_handles = 0
         # if qcfg.tied_gptq_handle is not None:
@@ -136,11 +136,12 @@ class GPTQ:
         return clone.float()
 
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor):
-        self.fwd_counter += 1
+        with self.lock:
+            self.fwd_counter += 1
 
-        # print(f"self.module.target_device = {self.module.target_device}")
+            # print(f"self.module.target_device = {self.module.target_device}")
 
-        self.process_batch(inp)
+            self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
         # print(f"inp = {inp}")
@@ -523,7 +524,6 @@ class GPTQ:
             avg_loss = 999999999
 
         del Losses
-        MEM_LORD.free(self.H)
         del self.H
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns

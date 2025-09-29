@@ -14,6 +14,7 @@ from ...utils.backend import BACKEND
 from ...utils.exllamav2 import ScratchSpace
 from ...utils.logger import setup_logger
 
+
 log = setup_logger()
 
 exlv2_ext, msg = try_import("gptqmodel_exllamav2_kernels")

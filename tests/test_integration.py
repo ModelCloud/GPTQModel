@@ -4,12 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
+
+from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
 class TestIntegration(unittest.TestCase):

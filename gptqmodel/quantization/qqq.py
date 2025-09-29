@@ -6,12 +6,13 @@ import torch
 import transformers
 from torch import nn
 
-from .gptq import get_number_of_rows_and_cols
 from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
 from ..quantization.quantizer import HF_OPTIMUM
 from ..utils import setup_logger
 from ..utils.torch import device_next
+from .gptq import get_number_of_rows_and_cols
+
 
 DEBUG = False
 

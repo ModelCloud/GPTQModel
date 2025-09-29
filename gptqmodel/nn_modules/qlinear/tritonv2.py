@@ -15,6 +15,7 @@ from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
 from .torch import TorchQuantLinear
 
+
 try:
     import triton
     import triton.language as tl

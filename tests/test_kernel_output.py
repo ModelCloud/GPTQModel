@@ -1,6 +1,10 @@
 import unittest
 
 import torch
+from logbar import LogBar
+from parameterized import parameterized
+from torch import Tensor
+
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Adapter, AdapterCache, Lora
 from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
@@ -9,9 +13,7 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from gptqmodel.utils.model import find_modules
-from logbar import LogBar
-from parameterized import parameterized
-from torch import Tensor
+
 
 log = LogBar.shared()
 

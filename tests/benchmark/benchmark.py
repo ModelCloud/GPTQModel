@@ -4,8 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from benchmark_test import BenchmarkTest
-from gptqmodel import BACKEND
 from parameterized import parameterized  # noqa: E402
+
+from gptqmodel import BACKEND
 
 
 class TestInference(BenchmarkTest):

@@ -8,8 +8,10 @@ import subprocess
 import sys
 from argparse import ArgumentParser
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_best_device
 from transformers import AutoTokenizer
+
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, get_best_device
+
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"

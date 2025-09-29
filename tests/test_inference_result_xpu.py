@@ -5,13 +5,15 @@
 
 import os
 
+
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 import tempfile
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
-from gptqmodel.models._const import DEVICE
 from models.model_test import ModelTest
 from parameterized import parameterized
+
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+from gptqmodel.models._const import DEVICE
 
 
 class TestInferenceResultXPU(ModelTest):

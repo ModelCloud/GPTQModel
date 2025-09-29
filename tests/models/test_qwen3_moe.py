@@ -11,9 +11,16 @@ class TestQwen3Moe(ModelTest):
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
     NATIVE_ARC_CHALLENGE_ACC = 0.2739
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3055
-    TRUST_REMOTE_CODE = True
+    # TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = True
-    EVAL_BATCH_SIZE = 6
+    # EVAL_BATCH_SIZE = 6
+    V2 = False
+    DEBUG = True
+    ACT_GROUP_AWARE = True
+    DESC_ACT = False
+    DATASET_SIZE = 1024
+    DATASET_SORT = "desc"
+    QUANT_BATCH_SIZE = 4
 
     def test_mimo(self):
         self.quant_lm_eval()

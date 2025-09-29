@@ -1,6 +1,8 @@
 
 import torch
+
 from gptqmodel.quantization.awq.utils.module import try_import
+
 
 awq_v2_ext, msg = try_import("gptqmodel_awq_v2_kernels")
 

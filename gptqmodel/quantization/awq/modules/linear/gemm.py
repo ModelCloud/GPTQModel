@@ -2,10 +2,12 @@ import warnings
 
 import torch
 import torch.nn as nn
+from torch.autograd import Function
+
 from gptqmodel.quantization.awq.utils.module import try_import
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.quantization.awq.utils.utils import get_best_device
-from torch.autograd import Function
+
 
 # NOTE: We check if awq_ext or triton is available. awq_ext will be preferred if both are installed.
 

@@ -13,6 +13,7 @@ from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
 from ...utils.logger import setup_logger
 
+
 log = setup_logger()
 
 awq_ext, msg = try_import("gptqmodel_awq_kernels")

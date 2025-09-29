@@ -16,12 +16,14 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # -- end do not touch
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
+
 
 if __name__ == '__main__':
     import argparse

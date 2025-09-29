@@ -13,13 +13,13 @@ from torch.nn import Module
 from ..looper.loop_processor import LoopProcessor, get_max_memory
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
+from ..models._const import CPU
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import METHOD, QuantizeConfig
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.memory import MEM_LORD
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import HAS_CUDA, torch_streamCtx, torch_sync
@@ -127,7 +127,10 @@ class GPTQProcessor(LoopProcessor):
             g = self.tasks[module.name]
 
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
-        MEM_LORD.free((q_scales, q_zeros, q_g_idx))
+
+        q_scales = q_scales.to(CPU)
+        q_zeros = q_zeros.to(CPU)
+        q_g_idx = q_g_idx.to(CPU)
 
         with self.lock:
             module.state.update({"q_scales": q_scales})
@@ -198,7 +201,7 @@ class GPTQProcessor(LoopProcessor):
                 "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
             })
 
-        MEM_LORD.free(module.weight)
+        # single largest deallocation of vram happens here
         module.weight.data = wq
 
     # submodule_finalized is called in reverse after all next sequential processes are called
@@ -214,6 +217,10 @@ class GPTQProcessor(LoopProcessor):
             q_zeros = module.state.pop("q_zeros")
             q_scales = module.state.pop("q_scales")
             q_g_idx = module.state.pop("q_g_idx")
+
+        assert q_zeros.device == CPU
+        assert q_scales.device == CPU
+        assert q_g_idx.device == CPU
 
         layers = find_modules(model.model)
 
@@ -251,7 +258,6 @@ class GPTQProcessor(LoopProcessor):
         with self.lock:
             self.result_pop(module.full_name)
 
-        # MEM_LORD.free(module.weight)
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
@@ -260,14 +266,12 @@ class GPTQProcessor(LoopProcessor):
             torch_sync()
 
         model.model = undo_offload_to_disk(module=model.model, include_buffers=True, delete_offload_folders=True)
-        MEM_LORD.free(model.model)
 
         # print("finalize")
         # print_module_tree(model.model)
 
         # set quantized state
         model.quantized = True
-
         model.quantize_config.quant_method = METHOD.GPTQ
 
         super().finalize(model=model, **kwargs)

@@ -12,6 +12,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from .awq_gemm import AwqGEMMQuantLinear
 
+
 log = setup_logger()
 
 try:

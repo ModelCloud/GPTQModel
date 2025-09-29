@@ -10,6 +10,7 @@ import torch
 from datasets import load_dataset, load_from_disk
 from logbar import LogBar
 
+
 logger = LogBar.shared()
 
 class Perplexity:

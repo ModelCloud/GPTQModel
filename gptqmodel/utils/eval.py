@@ -7,6 +7,7 @@ import json
 import os
 from enum import Enum
 
+
 try:
     from enum import EnumType
 except ImportError:

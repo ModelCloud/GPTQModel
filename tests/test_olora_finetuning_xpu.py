@@ -17,6 +17,7 @@ import os
 
 from logbar import LogBar
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
@@ -26,11 +27,19 @@ from typing import List  # noqa: E402
 import torch  # noqa: E402
 import transformers  # noqa: E402
 from datasets import load_dataset  # noqa: E402
-from gptqmodel import BACKEND  # noqa: E402
 from peft import AdaLoraConfig, get_peft_model  # noqa: E402
 from tokenicer import Tokenicer  # noqa: E402
-from transformers import (AutoModelForCausalLM, GPTQConfig, TrainerCallback,  # noqa: E402
-                          TrainerControl, TrainerState, TrainingArguments)
+from transformers import (  # noqa: E402
+    AutoModelForCausalLM,
+    GPTQConfig,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
+    TrainingArguments,
+)
+
+from gptqmodel import BACKEND  # noqa: E402
+
 
 DEVICE = torch.device("cuda:0")
 

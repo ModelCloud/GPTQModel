@@ -1,13 +1,15 @@
 import unittest
 
 import torch
+from logbar import LogBar
+from parameterized import parameterized
+from torch import Tensor
+
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from gptqmodel.utils.model import find_modules
-from logbar import LogBar
-from parameterized import parameterized
-from torch import Tensor
+
 
 log = LogBar.shared()
 

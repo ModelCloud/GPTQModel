@@ -15,8 +15,14 @@ import torch
 import torch._dynamo
 import torch.nn as nn
 from tokenicer import Tokenicer
-from transformers import (AutoModelForCausalLM, AutoProcessor, PreTrainedModel,
-                          PreTrainedTokenizerBase, ProcessorMixin, modeling_utils)
+from transformers import (
+    AutoModelForCausalLM,
+    AutoProcessor,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+    ProcessorMixin,
+    modeling_utils,
+)
 
 from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
@@ -34,8 +40,14 @@ from ..utils.model import MODALITY, find_modules, get_module_by_name_prefix, mov
 from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
-from ._const import (CALIBRATION_DATASET_CONCAT_CHAR, CPU, DEFAULT_MAX_SHARD_SIZE,
-                     DEVICE, EXPERT_INDEX_PLACEHOLDER, META)
+from ._const import (
+    CALIBRATION_DATASET_CONCAT_CHAR,
+    CPU,
+    DEFAULT_MAX_SHARD_SIZE,
+    DEVICE,
+    EXPERT_INDEX_PLACEHOLDER,
+    META,
+)
 from .loader import ModelLoader
 from .writer import ModelWriter
 
@@ -310,8 +322,8 @@ class BaseQModel(nn.Module):
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
         layer_modules = cls.filter_not_quantize_module(layer_modules, quantize_config)
-        
-        print(f"simple_layer_modules layer_modules: {layer_modules}")
+
+        # print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 
     @classmethod
@@ -1071,9 +1083,9 @@ class BaseQModel(nn.Module):
         if self.turtle_model is None:
             if get_device(target_submodule) != device:
                 target_submodule.to(device)
-                
+
             return target_submodule
-            
+
         module = alias_from_turtle_for_submodule(
             target_model=self.model,
             turtle_model=self.turtle_model,

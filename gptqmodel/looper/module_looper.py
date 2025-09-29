@@ -2,13 +2,16 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+
+from __future__ import annotations
+
 import copy
 import gc
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from functools import partial
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import torch
 
@@ -22,13 +25,13 @@ from ..models import BaseQModel
 from ..models._const import CUDA, SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
-from ..utils import ASYNC_BG_QUEUE, SERIAL_BG_QUEUE
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
-from ..utils.device import get_device
+from ..utils.device import get_device, get_device_new
 from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
 from ..utils.structure import print_module_tree
+from ..utils.threadx import DeviceThreadPool
 from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA, META, BalanceStrategy,
                            device_next, device_next_reset, torch_empty_cache, torch_sync)
 from .awq_processor import AWQProcessor
@@ -37,12 +40,109 @@ from .qqq_processor import QQQProcessor
 log = setup_logger()
 
 
+# -------------------- Device helpers (local) --------------------
+
+@contextmanager
+def _device_ctx(dev: Optional[torch.device]):
+    """
+    Ensure the caller thread’s current device matches `dev` for the duration of the
+    context (CUDA/XPU). Prevents cuBLAS/cuDNN handle/device mismatches in multi-GPU.
+    """
+    if dev is None:
+        yield
+    else:
+        dtyp = getattr(dev, "type", None)
+        if dtyp == "cuda":
+            with torch.cuda.device(dev.index):
+                yield
+        elif dtyp == "xpu" and hasattr(torch, "xpu"):
+            with torch.xpu.device(dev.index):  # type: ignore[attr-defined]
+                yield
+        else:
+            # cpu/mps/meta -> nothing special needed
+            yield
+
+
+@torch.inference_mode()
+def _rehome_module_to_device(
+    module: torch.nn.Module,
+    device: torch.device,
+    *,
+    move_parameters: bool = False,
+    move_buffers: bool = True,
+    include_non_persistent_buffers: bool = True,
+    only_mismatched: bool = True,
+):
+    """
+    Move a module's **registered** tensors to `device`.
+    Defaults to buffers-only (fast; fixes RoPE cos/sin caches and other internal state).
+    Parameters can be moved too, but that risks breaking weight tying and increases VRAM churn.
+    """
+    for sub in module.modules():
+        # Buffers (covers most cached internal tensors if properly registered)
+        if move_buffers:
+            np_set = getattr(sub, "_non_persistent_buffers_set", set())
+            for name, buf in list(getattr(sub, "_buffers", {}).items()):
+                if buf is None or not isinstance(buf, torch.Tensor):
+                    continue
+                if not include_non_persistent_buffers and name in np_set:
+                    continue
+                if only_mismatched and buf.device == device:
+                    continue
+                try:
+                    sub._buffers[name] = buf.to(device, non_blocking=True)
+                except Exception:
+                    try:
+                        sub._buffers[name] = buf.to(device)
+                    except Exception:
+                        pass
+
+        # Parameters (rarely needed; default False)
+        if move_parameters:
+            for pname, p in list(getattr(sub, "_parameters", {}).items()):
+                if p is None or not isinstance(p, torch.nn.Parameter):
+                    continue
+                if only_mismatched and p.device == device:
+                    continue
+                try:
+                    with torch.no_grad():
+                        new_p = torch.nn.Parameter(
+                            p.data.to(device, non_blocking=True),
+                            requires_grad=p.requires_grad
+                        )
+                    sub._parameters[pname] = new_p
+                except Exception:
+                    try:
+                        with torch.no_grad():
+                            new_p = torch.nn.Parameter(
+                                p.data.to(device),
+                                requires_grad=p.requires_grad
+                            )
+                        sub._parameters[pname] = new_p
+                    except Exception:
+                        pass
+
+
 class ModuleLooper():
     def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
         self.processors = processors
         self.gptq_model = model
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
+
+        # Create a single pool for the entire looper lifecycle.
+        # Eagerly discovers devices and pins worker threads per device.
+        # Tune worker counts here if desired (example policy shown).
+        self.pool = DeviceThreadPool(
+            inference_mode=True,
+            workers={
+                "cuda:per": 4, # unique memory per instance
+                "xpu:per": 1, # unique memory per instance
+                "mps": 8, # unified memory
+                "cpu": 8, # unified memory
+            },
+            empty_cache_every_n=14,  # disable auto GC during quant loops; enable if you want
+        )
 
     # NEW: Wrap an existing hook so its inputs/outputs are pre-masked for GPTQ stats.
     # We *do not* alter the module's actual computation; only what the hook
@@ -76,7 +176,7 @@ class ModuleLooper():
                         if isinstance(output, tuple):
                             new_output = (yk,) + tuple(output[1:])
                         else:
-                            new_output = [yk] + list(output[1:])
+                            new_output = [yk] + list(output[1:] )
                 elif torch.is_tensor(output) and keep is not None and output.dim() >= 3:
                     new_output = apply_keep_mask_bt(output, keep)
             except Exception:
@@ -177,10 +277,13 @@ class ModuleLooper():
                 if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
                     example["attention_mask"] = example["attention_mask"].long()
 
-                if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
-                    self.gptq_model.model.generate(**example, **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS)
-                else:
-                    self.gptq_model.model(**example, use_cache=use_cache)
+                # Ensure initial caches (like RoPE) are created on the quant device
+                with self.pool.read_lock(self.gptq_model.quantize_config.device):
+                    with _device_ctx(self.gptq_model.quantize_config.device):
+                        if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
+                            self.gptq_model.model.generate(**example, **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS)
+                        else:
+                            self.gptq_model.model(**example, use_cache=use_cache)
             except StopForward:
                 pass
 
@@ -191,7 +294,7 @@ class ModuleLooper():
         return InputCache(layer_inputs=layer_inputs, layer_input_kwargs=layer_input_kwargs, position_ids=position_ids,
                           attention_masks=attention_masks)
 
-    @torch.inference_mode
+    @torch.inference_mode()
     def loop(self, fail_safe: bool = False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
@@ -300,9 +403,7 @@ class ModuleLooper():
                     # merge all subsets into one
                     modules = [sum(modules, [])]
 
-                # TODO: integrated AWQ module forward/hooks within module lopper so everything is unified
-                # AWQ does it's own per layer module hooks and calculations. Logic has not been fully integrated into
-                # the module_looper so we wil let awq handle per layer operations for now
+                # AWQ does per-layer itself; skip here
                 if isinstance(processor, AWQProcessor):
                     named_childs = dict()
                     for index, names in enumerate(modules):
@@ -313,10 +414,7 @@ class ModuleLooper():
                                                                  processor=processor,
                                                                  fail_safe=fail_safe)
                         named_childs.update(named_modules)
-
-                    # awq uses model.layers[0] for quantization instead of model.layers.0.self_attn.q_proj
                     processor.layer_quantize(module, cur_layer_device, named_childs)
-                    # skip module_looper processing for awq
                     continue
 
                 layer_inputs = processor.inputs_cache.layer_inputs
@@ -372,12 +470,10 @@ class ModuleLooper():
                         raw_mask = attention_masks[j]
                         layer_attention_mask = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device, stream=False)
 
-                        # Compute and set keep-mask for this batch, for hook wrappers to consume
+                        # Compute and set keep-mask for this batch
                         if raw_mask is not None:
-                            # Assume hidden_states is first arg with shape [B, S, H]
                             seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
                             keep_mask_bs = normalize_seq_mask(layer_attention_mask, seq_len=seq_len)
-                            # We don't require LoopProcessor to declare this attribute; set dynamically.
                             setattr(processor, "current_attention_mask", keep_mask_bs)
                         else:
                             setattr(processor, "current_attention_mask", None)
@@ -392,18 +488,23 @@ class ModuleLooper():
                             additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device, stream=False)
 
                         try:
-                            # reuse_kv special-case
-                            if hasattr(module, "reuse_kv") and module.reuse_kv:
-                                additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
-                                layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-                                if shared_kv_cache_dict.get(layer_index) is None:
-                                    shared_kv_cache_dict[layer_index] = layer_output[-1]
-                            else:
-                                layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                            # Ensure internal buffers (e.g., RoPE caches) are on the layer's device
+                            # _rehome_module_to_device(module, cur_layer_device, move_parameters=False, move_buffers=True)
+
+                            # Acquire read lock so auto-GC cannot run while we forward
+                            with self.pool.read_lock(cur_layer_device):
+                                with _device_ctx(cur_layer_device):
+                                    # reuse_kv special-case
+                                    if hasattr(module, "reuse_kv") and module.reuse_kv:
+                                        additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
+                                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
+                                        if shared_kv_cache_dict.get(layer_index) is None:
+                                            shared_kv_cache_dict[layer_index] = layer_output[-1]
+                                    else:
+                                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
                         except StopForward:
                             pass
                         finally:
-                            # Clear the per-batch mask no matter what
                             setattr(processor, "current_attention_mask", None)
                             del layer_input
                             del additional_layer_inputs
@@ -442,36 +543,25 @@ class ModuleLooper():
                             for name in moe_skip_modules:
                                 subset.pop(name)
 
-                    # ---- Start Process Hook ----
-                    if len(ALL_DEVICES) <= 1:
-                        for name_index, name in enumerate(subset):
-                            m = subset[name]
-                            processor.process(module=m)
-                            processed_subset[name] = m
-                    else:
-                        max_workers = len(ALL_DEVICES) if DEFAULT_BALANCE_STRATEGY == BalanceStrategy.GPU else len(ALL_DEVICES) - 1
-                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                            futures = []
+                    # ---- Start Process Hook (via DeviceThreadPool) ----
+                    futures = []
 
-                            @torch.inference_mode()
-                            def process_module(name, m):
-                                # prevent cuda sync memory ctx bugs
-                                m_device = get_device(m)
-                                if HAS_CUDA and m_device is not None and m_device.type == "cuda":
-                                    torch.cuda.set_device(m_device)
+                    @torch.inference_mode()
+                    def _process_on_worker(proc: LoopProcessor, nm: NamedModule):
+                        # Run processor.process for this NamedModule
+                        proc.process(module=nm)
+                        return nm.name, nm
 
-                                processor.process(module=m)
-                                return name, m
+                    for name in subset:
+                        m = subset[name]
+                        # Prefer the planned target_device; fallback to module's own device
+                        tgt_dev = getattr(m.module, "target_device", None) or get_device(m) or CPU
+                        futures.append(self.pool.submit(tgt_dev, _process_on_worker, processor, m))
 
-                            for name in subset:
-                                m = subset[name]
-                                futures.append(executor.submit(process_module, name, m))
-
-                            for future in futures:
-                                name, m = future.result()
-                                processed_subset[name] = m
-
-                        torch_sync()
+                    for fut in futures:
+                        name, m = fut.result()
+                        processed_subset[name] = m
+                    torch_sync()
                     # ---- End Process Hook ----
 
                 is_last_module = layer_index == len(quant_modules_pb) - 1
@@ -486,7 +576,6 @@ class ModuleLooper():
                         raw_mask = attention_masks[j]
                         layer_attention_mask = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device)
 
-                        # Keep-mask for this replay, for completeness (in case hooks capture again)
                         if raw_mask is not None:
                             seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
                             keep_mask_bs = normalize_seq_mask(layer_attention_mask, seq_len=seq_len)
@@ -501,14 +590,16 @@ class ModuleLooper():
                         for k, v in layer_input_kwargs[j].items():
                             additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
 
-                        if hasattr(module, "reuse_kv") and module.reuse_kv:
-                            additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
+                        # Rehome buffers again in case module ran on a different device previously
+                        _rehome_module_to_device(module, cur_layer_device, move_parameters=False, move_buffers=True)
 
-                        module_output = None
-                        if is_lm_head_module:
-                            module_output = module(*layer_input)
-                        else:
-                            module_output = module(*layer_input, **additional_layer_inputs)
+                        # Guard forward with read lock to block auto-GC
+                        with self.pool.read_lock(cur_layer_device):
+                            with _device_ctx(cur_layer_device):
+                                if is_lm_head_module:
+                                    module_output = module(*layer_input)
+                                else:
+                                    module_output = module(*layer_input, **additional_layer_inputs)
 
                         if isinstance(module_output, tuple):
                             layer_output = module_output[0]
@@ -522,7 +613,6 @@ class ModuleLooper():
 
                         layer_outputs.append([layer_output])
 
-                        # Clear per-batch mask
                         setattr(processor, "current_attention_mask", None)
 
                         del layer_input
@@ -543,20 +633,18 @@ class ModuleLooper():
 
                 if p_index == len(self.processors) - 1:
                     torch_sync()
+
+                    # Gather finalize tasks (can offload to disk); run them via the pool
+                    finalize_futures = []
+
                     for reverse_p in reversed(self.processors):
                         for name in processed_subset:
                             @torch.inference_mode()
                             def finalize_module(process, module):
-                                # prevent cuda sync memory ctx bugs
-                                m_device = get_device(module)
-                                if HAS_CUDA and m_device is not None and m_device.type == "cuda":
-                                    torch.cuda.set_device(m_device)
-
                                 process.submodule_finalize(module, self.gptq_model)
 
-                                # TODO FIX ME offloading to LoopProcessor lifecycle
+                                # Disk offload (lifecycle TODO note preserved)
                                 if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
-                                    # checking for disk offloading
                                     offload_to_disk(
                                         model=self.gptq_model.model,
                                         module=self.gptq_model.model.get_submodule(module.full_name),
@@ -565,21 +653,24 @@ class ModuleLooper():
 
                             module = processed_subset[name]
 
-                            if self.gptq_model.quantize_config.offload_to_disk:
-                                SERIAL_BG_QUEUE.submit(partial(
-                                    finalize_module,
-                                    process=reverse_p,
-                                    module=module,
-                                ))
-                            else:
-                                reverse_p.submodule_finalize(module, self.gptq_model)
+                            target_dev = get_device_new(module, recursive=True, assert_mode=True, expected="cpu")
+
+                            # Submit on the module's device thread (safe & deterministic)
+                            finalize_futures.append(
+                                self.pool.submit(target_dev, finalize_module, reverse_p, module)
+                            )
+
+                    # If any finalize tasks were queued, wait for them
+                    for fut in finalize_futures:
+                        fut.result()
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
-        SERIAL_BG_QUEUE.join()
+        # Ensure ANY remaining tasks the looper submitted have drained
+        self.pool.wait()  # same as wait('all')
 
         # paranoid safety check
-        torch_sync()
-        torch_sync(device=CPU)
+        # torch_sync()
+        # torch_sync(device=CPU)
 
         total_log = {}
 
