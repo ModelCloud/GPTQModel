@@ -599,20 +599,35 @@ class DeviceThreadPool:
     def shutdown(self, wait: bool = True):
         """
         Gracefully stop all workers and janitor.
+
+        IMPORTANT: We snapshot groups before stopping/joining to avoid mutating
+        the lists while iterating (workers remove themselves on exit).
         """
         self._stop_event.set()
         self._gc_event.set()  # wake janitor if waiting
+
+        # Take stable snapshots under the dispatch lock.
+        with self._dispatch_lock:
+            group_snapshots: Dict[str, List[_DeviceWorker]] = {
+                key: list(group) for key, group in self._worker_groups.items()
+            }
+
+        # Stop janitor first so it won't grab locks while workers wind down.
         if self._janitor is not None and wait:
             if DEBUG_ON: log.debug("Joining DP-Janitor thread…")
             self._janitor.join()
 
-        for group in self._worker_groups.values():
-            for w in group:
+        # Issue stop to every worker from the snapshots (no mutation hazards).
+        for key, snapshot in group_snapshots.items():
+            for w in snapshot:
                 w.stop()
+
+        # Join everyone if requested.
         if wait:
-            for group in self._worker_groups.values():
-                for w in group:
+            for key, snapshot in group_snapshots.items():
+                for w in snapshot:
                     w.join()
+
         if DEBUG_ON: log.debug("DeviceThreadPool shutdown complete")
 
     # --------------- Public Lock API ---------------
