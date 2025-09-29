@@ -326,5 +326,3 @@ def format_bytes(n: int) -> str:
             return f"{x:.2f} {u}"
         x /= 1024.0
 
-# default to auto gc interval for every 8GB of freed memory
-MEM_LORD = MemTracker(auto_gc_bytes="auto")

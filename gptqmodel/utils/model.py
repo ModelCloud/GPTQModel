@@ -42,7 +42,6 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, dynamic_get
-from ..utils.memory import MEM_LORD
 from . import has_gil_disabled
 from .backend import BACKEND
 from .device import get_device
@@ -80,7 +79,6 @@ def recurse_setattr(module, name, value):
 
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
     if get_device(obj) != device:
-        MEM_LORD.free(obj)
         if stream:
             # we cannot support changing dtype and stream at the same time
             assert dtype is None, f"streaming does not support changing dtype: actual = `{dtype}"

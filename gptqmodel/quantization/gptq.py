@@ -22,7 +22,6 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
-from ..utils.memory import MEM_LORD
 from ..utils.torch import HAS_CUDA, HAS_XPU, device_next
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
@@ -523,7 +522,6 @@ class GPTQ:
             avg_loss = 999999999
 
         del Losses
-        MEM_LORD.free(self.H)
         del self.H
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns

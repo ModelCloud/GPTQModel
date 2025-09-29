@@ -18,7 +18,6 @@ from torch import nn
 
 from ..looper.named_module import NamedModule
 from .device import get_device
-from .memory import MEM_LORD
 from .torch import CPU, HAS_CUDA, META
 
 _lock = threading.Lock()
@@ -58,30 +57,30 @@ def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: 
     assert module is not None
     assert model is not None
 
-    with _lock:
-        if isinstance(module, List):
-            for name in module:
-                m = get_submodule(model, name)
-                # unwrap named module
-                if isinstance(m, NamedModule):
-                    # print(f"offloading named module: {module.full_name}")
-                    m = m.module
-
-                full_name = get_module_fullname(model=model, module=m)
-                _offload_disk(module=m, name=full_name, disk_path=disk_path)
-        else:
+    #with _lock:
+    if isinstance(module, List):
+        for name in module:
+            m = get_submodule(model, name)
             # unwrap named module
-            if isinstance(module, NamedModule):
+            if isinstance(m, NamedModule):
                 # print(f"offloading named module: {module.full_name}")
-                module = module.module
+                m = m.module
 
-            full_name = get_module_fullname(model=model, module=module)
+            full_name = get_module_fullname(model=model, module=m)
+            _offload_disk(module=m, name=full_name, disk_path=disk_path)
+    else:
+        # unwrap named module
+        if isinstance(module, NamedModule):
+            # print(f"offloading named module: {module.full_name}")
+            module = module.module
 
-            _offload_disk(module=module, name=full_name, disk_path=disk_path)
+        full_name = get_module_fullname(model=model, module=module)
 
-        if hasattr(module, "config") and getattr(module.config,
-                                                 "tie_word_embeddings", False):
-            module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after offload
+        _offload_disk(module=module, name=full_name, disk_path=disk_path)
+
+    if hasattr(module, "config") and getattr(module.config,
+                                             "tie_word_embeddings", False):
+        module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after offload
 
     # print("offload_disk: list item tree")
             # print_module_tree(module)
@@ -91,7 +90,6 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
         # print(f"[skip] '{name}' is on meta; leaving as-is")
         return
 
-    MEM_LORD.free(module)
     m_device = get_device(module)
     if m_device.type == "cuda":
         torch.cuda.set_device(m_device)
@@ -262,43 +260,43 @@ def undo_offload_to_disk(
     Returns:
         The same `module`, now “de-offloaded”.
     """
-    with _lock:
-        # Track candidate offload dirs if user asks to delete them later.
-        offload_dirs: Set[str] = set()
+    #with _lock:
+    # Track candidate offload dirs if user asks to delete them later.
+    offload_dirs: Set[str] = set()
 
-        # 1) Materialize all offloaded leaves as real tensors on the target device/dtype.
-        with torch.inference_mode():
-            for sub in module.modules():
-                if not has_offloaded_params(sub):
-                    continue
+    # 1) Materialize all offloaded leaves as real tensors on the target device/dtype.
+    with torch.inference_mode():
+        for sub in module.modules():
+            if not has_offloaded_params(sub):
+                continue
 
-                # Discover offload folders opportunistically (optional cleanup)
-                offload_dirs |= _possible_offload_dirs_from_hook(sub)
+            # Discover offload folders opportunistically (optional cleanup)
+            offload_dirs |= _possible_offload_dirs_from_hook(sub)
 
-                # Prefer a fast path reading directly from the weights_map if exposed by this Accelerate version.
-                handled = _restore_leaves_from_weights_map(sub, device=device, dtype=dtype)
-                if handled:
-                    continue
+            # Prefer a fast path reading directly from the weights_map if exposed by this Accelerate version.
+            handled = _restore_leaves_from_weights_map(sub, device=device, dtype=dtype)
+            if handled:
+                continue
 
-                # Fallback path: ask Accelerate to align this submodule to the execution device,
-                # then clone+rebind leaves so they become regular, hook-free tensors.
-                with _maybe_align(sub, device=device):
-                    for name, tensor, is_param in list(_iter_leaf_tensors(sub, include_buffers=include_buffers)):
-                        is_meta = (getattr(tensor, "is_meta", False) or tensor.device is META)
-                        if not is_meta:
-                            # Still clone if the hook attached a tensor view that would be re-offloaded later.
-                            # Safer to always break links to hook-managed storages.
-                            src = tensor
-                        else:
-                            # After align, meta leaves should be backed by real memory on `device`.
-                            src = tensor
+            # Fallback path: ask Accelerate to align this submodule to the execution device,
+            # then clone+rebind leaves so they become regular, hook-free tensors.
+            with _maybe_align(sub, device=device):
+                for name, tensor, is_param in list(_iter_leaf_tensors(sub, include_buffers=include_buffers)):
+                    is_meta = (getattr(tensor, "is_meta", False) or tensor.device is META)
+                    if not is_meta:
+                        # Still clone if the hook attached a tensor view that would be re-offloaded later.
+                        # Safer to always break links to hook-managed storages.
+                        src = tensor
+                    else:
+                        # After align, meta leaves should be backed by real memory on `device`.
+                        src = tensor
 
-                        if is_param:
-                            new_p = _clone_into_parameter(src, device=device, dtype=dtype, requires_grad=tensor.requires_grad)
-                            setattr(sub, name, new_p)
-                        else:
-                            new_b = _clone_into_buffer(src, device=device, dtype=dtype)
-                            setattr(sub, name, new_b)
+                    if is_param:
+                        new_p = _clone_into_parameter(src, device=device, dtype=dtype, requires_grad=tensor.requires_grad)
+                        setattr(sub, name, new_p)
+                    else:
+                        new_b = _clone_into_buffer(src, device=device, dtype=dtype)
+                        setattr(sub, name, new_b)
 
         # 2) Remove all Accelerate hooks so future forwards won't offload again.
         remove_hook_from_submodules(module)      # public API
