@@ -136,10 +136,10 @@ class ModuleLooper():
         self.pool = DeviceThreadPool(
             inference_mode=True,
             workers={
-                "cuda:per": 1, # unique memory per instance
+                "cuda:per": 4, # unique memory per instance
                 "xpu:per": 1, # unique memory per instance
-                "mps": 4, # unified memory
-                "cpu": 4, # unified memory
+                "mps": 8, # unified memory
+                "cpu": 8, # unified memory
             },
             empty_cache_every_n=14,  # disable auto GC during quant loops; enable if you want
         )

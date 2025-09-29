@@ -876,7 +876,7 @@ class DeviceThreadPool:
                     continue
                 with torch.cuda.device(dev.index):
                     TORCH_EMPTY_CACHE()
-                    log.debug(f"cuda empty cache clalled on {dev.index}")
+                    # log.debug(f"cuda empty cache clalled on {dev.index}")
 
         # XPU (if available)
         if hasattr(torch, "xpu") and torch.xpu.is_available():
