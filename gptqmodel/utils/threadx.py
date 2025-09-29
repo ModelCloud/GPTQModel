@@ -34,6 +34,7 @@ def _mps_available() -> bool:
 
 
 # --- HARD COPIES of original empty_cache callables (never auto-switched) ---
+# We capture the original callables at import-time so later code cannot alias them to no-ops.
 TORCH_CUDA_EMPTY_CACHE: Optional[Callable[[], None]] = None
 TORCH_XPU_EMPTY_CACHE: Optional[Callable[[], None]] = None
 TORCH_MPS_EMPTY_CACHE: Optional[Callable[[], None]] = None
@@ -65,6 +66,7 @@ def _coerce_device(d: DeviceLike) -> torch.device:
     if isinstance(d, torch.device):
         return d
     if isinstance(d, int):
+        # Order: prefer CUDA -> XPU -> MPS -> CPU for numeric indices
         if torch.cuda.is_available():
             return torch.device("cuda", d)
         if hasattr(torch, "xpu") and torch.xpu.is_available():
@@ -586,6 +588,7 @@ class DeviceThreadPool:
           - 'all' for every device in the pool
         Returns a context manager.
         """
+        # family string shortcut
         if isinstance(device, str):
             if device == "all":
                 pairs = [(k, self._locks[k]) for k in self._ordered_keys]
@@ -600,6 +603,7 @@ class DeviceThreadPool:
         dev = _coerce_device(device)
         key = self._key(dev)
 
+        # family device with index=None -> all devices of that type
         if dev.index is None:
             fam = dev.type
             keys = [k for k in self._ordered_keys if k.startswith(fam)]
@@ -608,6 +612,7 @@ class DeviceThreadPool:
             pairs = [(k, self._locks[k]) for k in keys]
             return _ReadLockGroup(pairs)
 
+        # concrete device
         lk = self._locks.get(key)
         if lk is None:
             raise ValueError(f"Unknown device for pool: {dev}")
@@ -627,11 +632,54 @@ class DeviceThreadPool:
 
     # --------------- Public Wait API ---------------
 
-    def wait(self, scope: Optional[Union[str, DeviceLike, Iterable[DeviceLike]]] = None) -> None | _WaitAndLock:
+    def wait(
+        self,
+        scope: Optional[Union[str, DeviceLike, Iterable[DeviceLike]]] = None,
+        *,
+        lock: bool = False,
+    ) -> None | _WaitAndLock:
         """
         Wait until in-flight tasks for `scope` drain to zero.
+
+        scope:
+          - None or 'all' -> all devices
+          - 'cuda' | 'xpu' | 'mps' | 'cpu' -> all devices of that type
+          - 'cuda:0' | 'xpu:1' -> specific device key
+          - torch.device or iterable of the above
+
+        lock:
+          - False (default): block until drained, then return None.
+          - True: return a context manager that **waits for drain AND acquires
+                  exclusive write locks** over the scope. Usage:
+                  `with pool.wait("cuda", lock=True): ...`
         """
         keys = self._resolve_scope_to_keys(scope)
+
+        if lock:
+            # Build a context manager that, on __enter__, acquires writer locks for the scope.
+            # We additionally ensure the scope is drained *before* locks are taken, so that
+            # once the locks are held there is no in-flight work and no new readers can start.
+            pairs = [(k, self._locks[k]) for k in sorted(keys)]
+
+            class _WaitThenLock(_WaitAndLock):
+                def __init__(self_outer, outer: DeviceThreadPool, pairs_local: List[tuple[str, _RWLock]], keys_local: List[str]):
+                    self_outer._outer = outer
+                    self_outer._pairs = pairs_local
+                    super().__init__(pairs_local)
+
+                def __enter__(self_outer):
+                    # Drain first
+                    for kk in keys:
+                        cv = self_outer._outer._inflight_cv[kk]
+                        with cv:
+                            while self_outer._outer._inflight[kk] > 0:
+                                cv.wait()
+                    # Then acquire writer locks to block any new tasks on the scope
+                    return super()._WaitAndLock__enter__() if hasattr(super(), "_WaitAndLock__enter__") else super().__enter__()
+
+            return _WaitThenLock(self, pairs, keys)
+
+        # Pure wait without lock: wait for inflight to reach zero for each key.
         for k in keys:
             cv = self._inflight_cv[k]
             with cv:
@@ -713,6 +761,7 @@ class DeviceThreadPool:
                         raise ValueError(f"Unknown device key in scope: {s}")
                     keys.append(s)
                 else:
+                    # family: cuda/xpu/mps/cpu
                     fam = s
                     fam_keys = [k for k in self._ordered_keys if k.startswith(fam)]
                     if not fam_keys:
@@ -748,6 +797,7 @@ class DeviceThreadPool:
                 cv.notify_all()
 
     def _on_task_finished(self, key: str) -> None:
+        # inflight decrement + counters + potential GC trigger
         self._mark_finished(key)
 
         trigger_gc = False
@@ -765,6 +815,7 @@ class DeviceThreadPool:
     # ---- ANSI table rendering for GC diagnostics ----
 
     def _ansi_table(self, headers: List[str], rows: List[List[str]]) -> str:
+        """Render a simple ANSI/ASCII table with bold headers."""
         widths = [len(h) for h in headers]
         for r in rows:
             for i, cell in enumerate(r):
@@ -798,6 +849,7 @@ class DeviceThreadPool:
         return "\n".join(lines)
 
     def _collect_state_snapshot(self) -> Dict[str, Any]:
+        """Safely collect a snapshot of pool state for diagnostics."""
         with self._stats_lock:
             per_done = dict(self._per_device_done)
             total_done = int(self._total_done)
@@ -832,6 +884,7 @@ class DeviceThreadPool:
         return snap
 
     def _render_gc_table(self, snap: Dict[str, Any]) -> str:
+        """Build the ANSI table for the current snapshot."""
         headers = [
             "Device", "Type", "Index", "Workers", "Inflight",
             "Done", "Threshold", "NextGC", "Accel"
@@ -924,6 +977,7 @@ class DeviceThreadPool:
             if self._stop_event.is_set():
                 break
 
+            # Debounce to coalesce bursty triggers; we keep draining the event during the window.
             if self._gc_debounce_s > 0:
                 t_end = time.time() + self._gc_debounce_s
                 while time.time() < t_end:
@@ -983,6 +1037,7 @@ class DeviceThreadPool:
         """
         Call the captured originals if available; no redundant availability checks
         and no try/except around empty_cache (fail loud if backend misbehaves).
+        Only backends present in this pool are touched (prevents MPS backend errors).
         """
         # CUDA
         if TORCH_CUDA_EMPTY_CACHE is not None:
