@@ -26,12 +26,11 @@ from ..models._const import CUDA, SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
-from ..utils.device import get_device
+from ..utils.device import get_device, get_device_new
 from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
 from ..utils.structure import print_module_tree
-# Single shared device-aware pool
 from ..utils.threadx import DeviceThreadPool
 from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA, META, BalanceStrategy,
                            device_next, device_next_reset, torch_empty_cache, torch_sync)
@@ -137,10 +136,10 @@ class ModuleLooper():
         self.pool = DeviceThreadPool(
             inference_mode=True,
             workers={
-                "cuda:per": 1,
-                "xpu:per": 1,
-                "mps": 1,
-                "cpu": 1,
+                "cuda:per": 1, # unique memory per instance
+                "xpu:per": 1, # unique memory per instance
+                "mps": 4, # unified memory
+                "cpu": 4, # unified memory
             },
             empty_cache_every_n=14,  # disable auto GC during quant loops; enable if you want
         )
@@ -642,10 +641,6 @@ class ModuleLooper():
                         for name in processed_subset:
                             @torch.inference_mode()
                             def finalize_module(process, module):
-                                # Maintain device safety inside the worker
-                                m_device = get_device(module)
-                                if HAS_CUDA and m_device is not None and getattr(m_device, "type", "") == "cuda":
-                                    torch.cuda.set_device(m_device)
                                 process.submodule_finalize(module, self.gptq_model)
 
                                 # Disk offload (lifecycle TODO note preserved)
@@ -658,15 +653,12 @@ class ModuleLooper():
 
                             module = processed_subset[name]
 
-                            if self.gptq_model.quantize_config.offload_to_disk:
-                                # Submit on the module's device thread (safe & deterministic)
-                                target_dev = get_device(module) or CPU
-                                finalize_futures.append(
-                                    self.pool.submit(target_dev, finalize_module, reverse_p, module)
-                                )
-                            else:
-                                # Immediate finalize on the caller thread
-                                reverse_p.submodule_finalize(module, self.gptq_model)
+                            target_dev = get_device_new(module, recursive=True, assert_mode=True, expected="cpu")
+
+                            # Submit on the module's device thread (safe & deterministic)
+                            finalize_futures.append(
+                                self.pool.submit(target_dev, finalize_module, reverse_p, module)
+                            )
 
                     # If any finalize tasks were queued, wait for them
                     for fut in finalize_futures:
@@ -677,8 +669,8 @@ class ModuleLooper():
         self.pool.wait()  # same as wait('all')
 
         # paranoid safety check
-        torch_sync()
-        torch_sync(device=CPU)
+        # torch_sync()
+        # torch_sync(device=CPU)
 
         total_log = {}
 
