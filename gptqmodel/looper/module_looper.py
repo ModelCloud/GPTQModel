@@ -142,7 +142,7 @@ class ModuleLooper():
                 "mps": 1,
                 "cpu": 1,
             },
-            empty_cache_every_n=12,  # disable auto GC during quant loops; enable if you want
+            empty_cache_every_n=14,  # disable auto GC during quant loops; enable if you want
         )
 
     # NEW: Wrap an existing hook so its inputs/outputs are pre-masked for GPTQ stats.
