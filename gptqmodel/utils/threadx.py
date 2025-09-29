@@ -297,15 +297,20 @@ class _DeviceWorker:
                                     result = fn(*args, **kwargs)
                             else:
                                 result = fn(*args, **kwargs)
+                    # IMPORTANT: mark finished (decrement inflight & bump counters)
+                    # BEFORE resolving the future so stats() reflects completion
+                    # as soon as do()/submit().result() returns.
+                    self._on_task_finished(self.key)
                     if not fut.cancelled():
                         fut.set_result(result)
                     if DEBUG_ON: log.debug(f"{self.name}: task done")
                 except BaseException as exc:
+                    # Also mark finished BEFORE surfacing exception to caller
+                    self._on_task_finished(self.key)
                     if not fut.cancelled():
                         fut.set_exception(exc)
                     if DEBUG_ON: log.debug(f"{self.name}: task exception: {exc!r}")
                 finally:
-                    self._on_task_finished(self.key)
                     self._q.task_done()
 
         # Thread is exiting; notify pool for cleanup
