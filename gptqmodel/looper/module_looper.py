@@ -137,7 +137,7 @@ class ModuleLooper():
                 "mps": 8, # unified memory
                 "cpu": 8, # unified memory
             },
-            empty_cache_every_n=14,  # disable auto GC during quant loops; enable if you want
+            empty_cache_every_n=28,  # disable auto GC during quant loops; enable if you want
         )
 
         for processor in self.processors:
@@ -175,21 +175,16 @@ class ModuleLooper():
 
     def _clone_module_for_devices(self, module: torch.nn.Module, devices: List[torch.device]) -> Dict[torch.device, torch.nn.Module]:
         clones: Dict[torch.device, torch.nn.Module] = {}
-        base_device = get_device(module)
 
         cleared_attrs = self._clear_non_picklable_state(module)
         try:
             for dev in devices:
-                if base_device is not None and dev == base_device:
-                    clones[dev] = module
-                    _rehome_module_to_device(module, dev, move_parameters=False, move_buffers=True)
-                else:
-                    replica = copy.deepcopy(module)
-                    replica = replica.to(dev)
-                    replica.eval()
-                    _rehome_module_to_device(replica, dev, move_parameters=False, move_buffers=True)
-                    self._clear_non_picklable_state(replica)
-                    clones[dev] = replica
+                replica = copy.deepcopy(module)
+                replica = replica.to(dev)
+                replica.eval()
+                _rehome_module_to_device(replica, dev, move_parameters=False, move_buffers=True)
+                self._clear_non_picklable_state(replica)
+                clones[dev] = replica
         finally:
             self._restore_non_picklable_state(cleared_attrs)
         return clones
@@ -302,6 +297,131 @@ class ModuleLooper():
         reuse_kv: bool,
     ) -> List[List[torch.Tensor]]:
         devices = self._select_forward_devices(cur_layer_device)
+
+        if len(devices) <= 1:
+            return self._run_forward_batches_single(
+                module=module,
+                processor=processor,
+                layer_inputs=layer_inputs,
+                layer_input_kwargs=layer_input_kwargs,
+                position_ids=position_ids,
+                attention_masks=attention_masks,
+                cur_layer_device=cur_layer_device,
+                is_lm_head_module=is_lm_head_module,
+                shared_kv_cache_dict=shared_kv_cache_dict,
+                layer_index=layer_index,
+                need_outputs=need_outputs,
+                reuse_kv=reuse_kv,
+            )
+
+        return self._run_forward_batches_parallel(
+            module=module,
+            processor=processor,
+            layer_inputs=layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            position_ids=position_ids,
+            attention_masks=attention_masks,
+            cur_layer_device=cur_layer_device,
+            is_lm_head_module=is_lm_head_module,
+            shared_kv_cache_dict=shared_kv_cache_dict,
+            layer_index=layer_index,
+            need_outputs=need_outputs,
+            reuse_kv=reuse_kv,
+            devices=devices,
+        )
+
+    def _run_forward_batches_single(
+        self,
+        *,
+        module: torch.nn.Module,
+        processor: LoopProcessor,
+        layer_inputs: List[List[torch.Tensor]],
+        layer_input_kwargs: List[Dict[str, torch.Tensor]],
+        position_ids: List[torch.Tensor],
+        attention_masks: List[torch.Tensor],
+        cur_layer_device: torch.device,
+        is_lm_head_module: bool,
+        shared_kv_cache_dict: Dict[int, torch.Tensor],
+        layer_index: int,
+        need_outputs: bool,
+        reuse_kv: bool,
+    ) -> List[List[torch.Tensor]]:
+        outputs: List[List[torch.Tensor]] = []
+        prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
+
+        for batch_idx in range(processor.num_batches):
+            layer_input = [move_to(inp, device=cur_layer_device, stream=False) for inp in layer_inputs[batch_idx]]
+
+            raw_mask = attention_masks[batch_idx]
+            attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device, stream=False)
+
+            keep_mask = None
+            if attn_tensor is not None:
+                seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
+                keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
+            self._set_processor_mask(processor, keep_mask)
+
+            additional_inputs: Dict[str, torch.Tensor] = {}
+            if self.support_batch_quantize and attn_tensor is not None:
+                additional_inputs["attention_mask"] = attn_tensor
+
+            if position_ids:
+                pos = position_ids[batch_idx]
+                if pos is not None:
+                    additional_inputs["position_ids"] = move_to(pos, device=cur_layer_device, stream=False)
+
+            for key, value in layer_input_kwargs[batch_idx].items():
+                additional_inputs[key] = nested_move_to(value, device=cur_layer_device, stream=False)
+
+            if reuse_kv and prev_kv is not None:
+                additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=cur_layer_device, stream=False)
+
+            _rehome_module_to_device(module, cur_layer_device, move_parameters=False, move_buffers=True)
+
+            module_output = None
+            try:
+                if is_lm_head_module:
+                    module_output = module(*layer_input)
+                else:
+                    module_output = module(*layer_input, **additional_inputs)
+            except StopForward:
+                module_output = None
+            finally:
+                self._set_processor_mask(processor, None)
+
+            if (
+                reuse_kv
+                and module_output is not None
+                and isinstance(module_output, tuple)
+                and len(module_output) > 0
+                and shared_kv_cache_dict.get(layer_index) is None
+            ):
+                shared_kv_cache_dict[layer_index] = module_output[-1]
+
+            if need_outputs and module_output is not None:
+                primary = module_output[0] if isinstance(module_output, tuple) else module_output
+                primary = move_to(primary, device=cur_layer_device, stream=False)
+                outputs.append([primary])
+
+        return outputs
+
+    def _run_forward_batches_parallel(
+        self,
+        *,
+        module: torch.nn.Module,
+        processor: LoopProcessor,
+        layer_inputs: List[List[torch.Tensor]],
+        layer_input_kwargs: List[Dict[str, torch.Tensor]],
+        position_ids: List[torch.Tensor],
+        attention_masks: List[torch.Tensor],
+        cur_layer_device: torch.device,
+        is_lm_head_module: bool,
+        shared_kv_cache_dict: Dict[int, torch.Tensor],
+        layer_index: int,
+        need_outputs: bool,
+        reuse_kv: bool,
+        devices: List[torch.device],
+    ) -> List[List[torch.Tensor]]:
         module_replicas = self._clone_module_for_devices(module, devices)
 
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
