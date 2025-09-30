@@ -47,11 +47,10 @@ def _device_ctx(dev: Optional[torch.device]):
     if dev is None:
         yield
     else:
-        dtyp = getattr(dev, "type", None)
-        if dtyp == "cuda":
+        if dev.type == "cuda":
             with torch.cuda.device(dev.index):
                 yield
-        elif dtyp == "xpu" and hasattr(torch, "xpu"):
+        elif dev.type == "xpu" and hasattr(torch, "xpu"):
             with torch.xpu.device(dev.index):  # type: ignore[attr-defined]
                 yield
         else:
@@ -168,10 +167,10 @@ class ModuleLooper():
             return [CPU]
 
         devices = [base_device]
-        base_type = getattr(base_device, "type", None)
+        base_type = base_device.type
         if base_type in ("cuda", "xpu", "mps"):
             for dev in ALL_DEVICES:
-                if getattr(dev, "type", None) == base_type and dev not in devices:
+                if dev.type == base_type and dev not in devices:
                     devices.append(dev)
         return devices
 
