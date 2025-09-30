@@ -30,7 +30,7 @@ from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import SUPPORTS_MODULE_TYPES
+from ..models._const import SUPPORTS_MODULE_TYPES, DEVICE
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
@@ -49,7 +49,7 @@ log = setup_logger()
 # -------------------- Device helpers (local) --------------------
 
 @contextmanager
-def _device_ctx(dev: Optional[torch.device]):
+def _device_ctx(dev: Optional[torch.device|DEVICE]):
     """
     Ensure the caller thread’s current device matches `dev` for the duration of the
     context (CUDA/XPU). Prevents cuBLAS/cuDNN handle/device mismatches in multi-GPU.
@@ -154,7 +154,7 @@ class ModuleLooper():
                 "mps": 8, # unified memory
                 "cpu": 8, # unified memory
             },
-            empty_cache_every_n=0,  # disable auto GC during quant loops; enable if you want
+            empty_cache_every_n=64,  # disable auto GC during quant loops; enable if you want
         )
 
         self.gptq_model.register_background_pool(self.pool)
