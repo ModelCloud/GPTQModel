@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch
-from transformers import AutoModelForTextToWaveform
+from transformers import AutoModelForTextToWaveform, AutoProcessor
 
 from ...utils.offload import offload_to_disk
 from .._const import CPU
@@ -84,3 +84,11 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
 
         self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(CPU)
         self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(CPU)
+
+    def after_model_load(self, model, load_quantized_model=False):
+        # need to load processor for save processor_config and chat_template
+        if not load_quantized_model:
+            self.processor = AutoProcessor.from_pretrained(self.model_local_path)
+        
+        return model
+

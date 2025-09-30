@@ -4,14 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from typing import Dict, Optional
-
+import os
 import torch
 from PIL import Image
 from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
-
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
+from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 
@@ -46,18 +46,50 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
     require_load_processor = True
 
     def pre_quantize_generate_hook_start(self):
+        # load speaker
+        spk_path = os.path.join(self.model_local_path, "spk_dict.pt")
+        self.model.load_speakers(spk_path)
 
-        self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(self.quantize_config.device)
-        self.model.thinker.visual = self.model.thinker.visual.to(self.quantize_config.device)
-        self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(self.quantize_config.device)
-
-        self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(self.quantize_config.device)
-        self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(self.quantize_config.device)
-
+        self.shell_module_materialize(self.model.thinker.model.embed_tokens, self.quantize_config.device)
+        self.shell_module_materialize(self.model.thinker.visual, self.quantize_config.device)
+        self.shell_module_materialize(self.model.thinker.audio_tower, self.quantize_config.device)
+        self.shell_module_materialize(self.model.thinker.visual.rotary_pos_emb, self.quantize_config.device)
+        self.shell_module_materialize(self.model.thinker.model.rotary_emb, self.quantize_config.device)
         for layer in self.model.thinker.model.layers:
-            layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(self.quantize_config.device)
+            self.shell_module_materialize(layer.self_attn.rotary_emb, self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
+        if self.quantize_config.offload_to_disk:
+            offload_to_disk(model=self.model.thinker.model,
+                            module=self.model.thinker.model.embed_tokens,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+
+            offload_to_disk(model=self.model.thinker,
+                            module=self.model.thinker.visual,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+
+            offload_to_disk(model=self.model.thinker,
+                            module=self.model.thinker.audio_tower,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+
+            offload_to_disk(model=self.model.thinker.visual,
+                            module=self.model.thinker.visual.rotary_pos_emb,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+
+            offload_to_disk(model=self.model.thinker.model,
+                            module=self.model.thinker.model.rotary_emb,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            
+            for layer in self.model.thinker.model.layers:
+                layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(CPU)
+
+            return
+
         self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(CPU)
         self.model.thinker.visual = self.model.thinker.visual.to(CPU)
         self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(CPU)
@@ -67,6 +99,7 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
 
         for layer in self.model.thinker.model.layers:
             layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(CPU)
+
     @staticmethod
     def process_vision_info(
             conversations: list[dict] | list[list[dict]],
@@ -89,7 +122,7 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path)
 
-    def prepare_dataset(self, calibration_dataset, calibration_dataset_concat_size=None, batch_size: int = 1):
+    def prepare_dataset(self, calibration_dataset, calibration_dataset_concat_size=None, batch_size: int = 1, **kwargs):
         processor = self.load_processor()
         calib_data = []
         for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
