@@ -1352,21 +1352,24 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     model.tie_weights()
 
 
-# 64MB for io transfer buffer
-_STREAM_BUFFER_BYTES = 64 * 1024 * 1024
+# 32MB read/write i/o buffer
+_STREAM_BUFFER_SIZE = 32 * 1024 * 1024
+_STREAM_BUFFER = memoryview(bytearray(_STREAM_BUFFER_SIZE))
+_STREAM_BUFFER_LOCK = threading.Lock()
 
-
-def _copy_file_stream(src_path: str, dst_fh, length: int, *, offset: int = 0, buffer_size: int = _STREAM_BUFFER_BYTES) -> None:
-    with open(src_path, "rb") as src:
-        if offset:
-            src.seek(offset)
-        remaining = length
-        while remaining > 0:
-            chunk = src.read(min(buffer_size, remaining))
-            if not chunk:
-                raise IOError(f"Unexpected EOF while copying from {src_path}")
-            dst_fh.write(chunk)
-            remaining -= len(chunk)
+def _copy_file_stream(src_path: str, dst_fh, length: int, *, offset: int = 0) -> None:
+    with open(src_path, "rb", buffering=0) as src:
+        with _STREAM_BUFFER_LOCK:
+            if offset:
+                src.seek(offset)
+            remaining = length
+            while remaining > 0:
+                chunk_size = min(_STREAM_BUFFER_SIZE, remaining)
+                read = src.readinto(_STREAM_BUFFER[:chunk_size])
+                if not read:
+                    raise IOError(f"Unexpected EOF while copying from {src_path}")
+                dst_fh.write(_STREAM_BUFFER[:read])
+                remaining -= read
 
 
 def _write_tensor_bytes(out, tensor: torch.Tensor, dtype: torch.dtype) -> None:
@@ -1401,13 +1404,15 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
         for entry in entries:
             source = entry.source
             if isinstance(source, OffloadTensorRef):
-                print("offload tesnor io buffered transfer")
                 if source.format == "dat":
+                    # print("offload tensor io buffered transfer DAT")
                     _copy_file_stream(source.path, out, entry.num_bytes)
                 elif source.format == "safetensors" and source.data_offsets is not None:
+                    # print("offload tensor io buffered transfer SAFETENSOR stream")
                     start, end = source.data_offsets
                     _copy_file_stream(source.path, out, end - start, offset=start)
                 else:
+                    # print("offload tensor slow tensor read")
                     with safe_open(source.path, framework="pt", device="cpu") as handler:
                         tensor = handler.get_tensor(source.weight_name or entry.name)
                     tensor = tensor.to(source.torch_dtype)
