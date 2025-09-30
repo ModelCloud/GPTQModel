@@ -8,7 +8,6 @@ import os
 import torch
 from PIL import Image
 from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
-from transformers.utils.hub import cached_file
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
