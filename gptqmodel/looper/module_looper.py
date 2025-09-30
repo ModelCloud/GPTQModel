@@ -137,8 +137,10 @@ class ModuleLooper():
                 "mps": 8, # unified memory
                 "cpu": 8, # unified memory
             },
-            empty_cache_every_n=28,  # disable auto GC during quant loops; enable if you want
+            empty_cache_every_n=0,  # disable auto GC during quant loops; enable if you want
         )
+
+        self.gptq_model.register_background_pool(self.pool)
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
@@ -930,6 +932,8 @@ class ModuleLooper():
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained
         self.pool.wait()  # same as wait('all')
+
+        self.gptq_model.wait_for_turtle_reload()
 
         # paranoid safety check
         # torch_sync()
