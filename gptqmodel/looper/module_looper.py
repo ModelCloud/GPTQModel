@@ -6,11 +6,9 @@
 from __future__ import annotations
 
 import copy
-import gc
 import threading
 import time
 from contextlib import contextmanager
-from functools import partial
 from typing import Dict, List, Optional
 
 import torch
@@ -22,7 +20,7 @@ from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import CUDA, SUPPORTS_MODULE_TYPES
+from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
@@ -30,10 +28,8 @@ from ..utils.device import get_device, get_device_new
 from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
-from ..utils.structure import print_module_tree
 from ..utils.threadx import DeviceThreadPool
-from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA, META, BalanceStrategy,
-                           device_next, device_next_reset, torch_empty_cache, torch_sync)
+from ..utils.torch import (ALL_DEVICES, CPU, META, device_next, device_next_reset, torch_sync)
 from .awq_processor import AWQProcessor
 from .qqq_processor import QQQProcessor
 
@@ -144,12 +140,233 @@ class ModuleLooper():
             empty_cache_every_n=14,  # disable auto GC during quant loops; enable if you want
         )
 
+        for processor in self.processors:
+            self._processor_mask_tls(processor)
+
     # NEW: Wrap an existing hook so its inputs/outputs are pre-masked for GPTQ stats.
     # We *do not* alter the module's actual computation; only what the hook
     # passes down to the processor capture path is masked.
+    def _processor_mask_tls(self, processor: LoopProcessor) -> threading.local:
+        tls = getattr(processor, "_mask_tls", None)
+        if tls is None:
+            tls = threading.local()
+            setattr(processor, "_mask_tls", tls)
+        return tls
+
+    def _set_processor_mask(self, processor: LoopProcessor, mask):
+        tls = self._processor_mask_tls(processor)
+        tls.value = mask
+
+    def _get_processor_mask(self, processor: LoopProcessor):
+        tls = getattr(processor, "_mask_tls", None)
+        return getattr(tls, "value", None) if tls else None
+
+    def _select_forward_devices(self, base_device: Optional[torch.device]) -> List[torch.device]:
+        if base_device is None:
+            return [CPU]
+
+        devices = [base_device]
+        base_type = getattr(base_device, "type", None)
+        if base_type in ("cuda", "xpu", "mps"):
+            for dev in ALL_DEVICES:
+                if getattr(dev, "type", None) == base_type and dev not in devices:
+                    devices.append(dev)
+        return devices
+
+    def _clone_module_for_devices(self, module: torch.nn.Module, devices: List[torch.device]) -> Dict[torch.device, torch.nn.Module]:
+        clones: Dict[torch.device, torch.nn.Module] = {}
+        base_device = get_device(module)
+
+        cleared_attrs = self._clear_non_picklable_state(module)
+        try:
+            for dev in devices:
+                if base_device is not None and dev == base_device:
+                    clones[dev] = module
+                    _rehome_module_to_device(module, dev, move_parameters=False, move_buffers=True)
+                else:
+                    replica = copy.deepcopy(module)
+                    replica = replica.to(dev)
+                    replica.eval()
+                    _rehome_module_to_device(replica, dev, move_parameters=False, move_buffers=True)
+                    self._clear_non_picklable_state(replica)
+                    clones[dev] = replica
+        finally:
+            self._restore_non_picklable_state(cleared_attrs)
+        return clones
+
+    def _clear_non_picklable_state(self, module: torch.nn.Module):
+        cleared = []
+        seen = set()
+
+        def maybe_clear(obj: torch.nn.Module):
+            if id(obj) in seen:
+                return
+            seen.add(id(obj))
+            if hasattr(obj, "target_device_stream"):
+                cleared.append((obj, getattr(obj, "target_device_stream")))
+                setattr(obj, "target_device_stream", None)
+
+        if isinstance(module, torch.nn.Module):
+            for sub in module.modules():
+                maybe_clear(sub)
+        else:
+            maybe_clear(module)
+
+        return cleared
+
+    @staticmethod
+    def _restore_non_picklable_state(cleared):
+        for obj, value in cleared:
+            setattr(obj, "target_device_stream", value)
+
+    @staticmethod
+    def _forward_batch_worker(
+        module: torch.nn.Module,
+        processor: LoopProcessor,
+        batch_index: int,
+        layer_input: List[torch.Tensor],
+        layer_input_kwargs: Dict[str, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.Tensor],
+        *,
+        support_batch_quantize: bool,
+        is_lm_head_module: bool,
+        need_output: bool,
+        reuse_kv: bool,
+        prev_kv,
+    ):
+        module_device = get_device(module)
+        _rehome_module_to_device(module, module_device, move_parameters=False, move_buffers=True)
+
+        inputs = [move_to(inp, device=module_device, stream=False) for inp in layer_input]
+
+        attn_tensor = None
+        if attention_mask is not None:
+            attn_tensor = move_to(attention_mask, device=module_device, stream=False)
+
+        additional_inputs: Dict[str, torch.Tensor] = {}
+        if support_batch_quantize and attn_tensor is not None:
+            additional_inputs["attention_mask"] = attn_tensor
+
+        if position_ids is not None:
+            additional_inputs["position_ids"] = move_to(position_ids, device=module_device, stream=False)
+
+        for key, value in layer_input_kwargs.items():
+            additional_inputs[key] = nested_move_to(value, device=module_device, stream=False)
+
+        keep_mask = None
+        if attn_tensor is not None:
+            seq_len = inputs[0].shape[1] if (len(inputs) > 0 and inputs[0].dim() >= 2) else None
+            keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
+
+        mask_tls = getattr(processor, "_mask_tls", None)
+        if mask_tls is not None:
+            mask_tls.value = keep_mask
+
+        if reuse_kv and prev_kv is not None:
+            additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=module_device, stream=False)
+
+        module_output = None
+        kv_next = None
+        try:
+            if is_lm_head_module:
+                module_output = module(*inputs)
+            else:
+                module_output = module(*inputs, **additional_inputs)
+        except StopForward:
+            module_output = None
+        finally:
+            if mask_tls is not None:
+                mask_tls.value = None
+
+        if reuse_kv and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:
+            kv_next = module_output[-1]
+
+        result_output = module_output if need_output else None
+        return batch_index, result_output, kv_next
+
+    def _run_forward_batches(
+        self,
+        *,
+        module: torch.nn.Module,
+        processor: LoopProcessor,
+        layer_inputs: List[List[torch.Tensor]],
+        layer_input_kwargs: List[Dict[str, torch.Tensor]],
+        position_ids: List[torch.Tensor],
+        attention_masks: List[torch.Tensor],
+        cur_layer_device: torch.device,
+        is_lm_head_module: bool,
+        shared_kv_cache_dict: Dict[int, torch.Tensor],
+        layer_index: int,
+        need_outputs: bool,
+        reuse_kv: bool,
+    ) -> List[List[torch.Tensor]]:
+        devices = self._select_forward_devices(cur_layer_device)
+        module_replicas = self._clone_module_for_devices(module, devices)
+
+        prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
+
+        results: Dict[int, torch.Tensor | tuple | None] = {}
+
+        chunk = len(devices)
+        total_batches = processor.num_batches
+        for start in range(0, total_batches, chunk):
+            futures = []
+            end = min(start + chunk, total_batches)
+            for offset, batch_idx in enumerate(range(start, end)):
+                device = devices[offset]
+                replica = module_replicas[device]
+                futures.append(
+                    self.pool.submit(
+                        device,
+                        self._forward_batch_worker,
+                        replica,
+                        processor,
+                        batch_idx,
+                        layer_inputs[batch_idx],
+                        layer_input_kwargs[batch_idx],
+                        attention_masks[batch_idx],
+                        position_ids[batch_idx] if position_ids else None,
+                        support_batch_quantize=self.support_batch_quantize,
+                        is_lm_head_module=is_lm_head_module,
+                        need_output=need_outputs,
+                        reuse_kv=reuse_kv,
+                        prev_kv=prev_kv,
+                    )
+                )
+
+            for fut in futures:
+                batch_idx, module_output, kv_next = fut.result()
+                if need_outputs and module_output is not None:
+                    results[batch_idx] = module_output
+                if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
+                    shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device, stream=False)
+
+        # ensure replicas that are clones release promptly
+        for dev in list(module_replicas.keys()):
+            if dev != cur_layer_device:
+                del module_replicas[dev]
+
+        if not need_outputs:
+            return []
+
+        ordered_outputs: List[List[torch.Tensor]] = []
+        for idx in range(total_batches):
+            module_output = results.get(idx)
+            if module_output is None:
+                raise RuntimeError("Forward batch returned no output; data-parallel execution produced empty result.")
+            if isinstance(module_output, tuple):
+                primary = module_output[0]
+            else:
+                primary = module_output
+            primary = move_to(primary, device=cur_layer_device, stream=False)
+            ordered_outputs.append([primary])
+
+        return ordered_outputs
+
     def _masked_hook_wrapper(self, processor: LoopProcessor, inner_hook):
         def hook(module, inputs, output):
-            keep = getattr(processor, "current_attention_mask", None)
+            keep = self._get_processor_mask(processor)
 
             # Mask first tensor-like input if it's [B, S, ...]
             new_inputs = inputs
@@ -461,66 +678,27 @@ class ModuleLooper():
                     # ---- Start Pre-Quantized Forward ----
                     fwd_start = time.time()
 
-                    layer_outputs = []
-                    for j in range(processor.num_batches):
-                        layer_input = []
-                        for k, layer_inp in enumerate(layer_inputs[j]):
-                            layer_input.append(move_to(layer_inp, device=cur_layer_device, stream=False))
+                    need_outputs = not processor.fwd_after_process
+                    reuse_kv = bool(getattr(module, "reuse_kv", False))
+                    forward_outputs = self._run_forward_batches(
+                        module=module,
+                        processor=processor,
+                        layer_inputs=layer_inputs,
+                        layer_input_kwargs=layer_input_kwargs,
+                        position_ids=position_ids,
+                        attention_masks=attention_masks,
+                        cur_layer_device=cur_layer_device,
+                        is_lm_head_module=is_lm_head_module,
+                        shared_kv_cache_dict=shared_kv_cache_dict,
+                        layer_index=layer_index,
+                        need_outputs=need_outputs,
+                        reuse_kv=reuse_kv,
+                    )
+                    if need_outputs:
+                        processor.receive_layer_inputs(forward_outputs)
+                        del forward_outputs
 
-                        raw_mask = attention_masks[j]
-                        layer_attention_mask = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device, stream=False)
-
-                        # Compute and set keep-mask for this batch
-                        if raw_mask is not None:
-                            seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
-                            keep_mask_bs = normalize_seq_mask(layer_attention_mask, seq_len=seq_len)
-                            setattr(processor, "current_attention_mask", keep_mask_bs)
-                        else:
-                            setattr(processor, "current_attention_mask", None)
-
-                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
-                        layer_position_ids = (
-                            None if not position_ids else move_to(position_ids[j], device=cur_layer_device, stream=False)
-                        )
-                        if layer_position_ids is not None:
-                            additional_layer_inputs["position_ids"] = layer_position_ids
-                        for k, v in layer_input_kwargs[j].items():
-                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device, stream=False)
-
-                        try:
-                            # Ensure internal buffers (e.g., RoPE caches) are on the layer's device
-                            # _rehome_module_to_device(module, cur_layer_device, move_parameters=False, move_buffers=True)
-
-                            # Acquire read lock so auto-GC cannot run while we forward
-                            with self.pool.read_lock(cur_layer_device):
-                                with _device_ctx(cur_layer_device):
-                                    # reuse_kv special-case
-                                    if hasattr(module, "reuse_kv") and module.reuse_kv:
-                                        additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
-                                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-                                        if shared_kv_cache_dict.get(layer_index) is None:
-                                            shared_kv_cache_dict[layer_index] = layer_output[-1]
-                                    else:
-                                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-                        except StopForward:
-                            pass
-                        finally:
-                            setattr(processor, "current_attention_mask", None)
-                            del layer_input
-                            del additional_layer_inputs
-
-                        if not processor.fwd_after_process:
-                            if isinstance(layer_output, tuple):
-                                layer_outputs.append([layer_output[0]])
-                            else:
-                                layer_outputs.append([layer_output])
-
-                    if not processor.fwd_after_process:
-                        processor.receive_layer_inputs(layer_outputs)
-                        del layer_outputs
-
-                    fwd_end = time.time()
-                    fwd_time = fwd_end - fwd_start
+                    fwd_time = time.time() - fwd_start
                     processor.set_fwd_time(fwd_time)
 
                     for h in handle:
@@ -565,58 +743,23 @@ class ModuleLooper():
                     # ---- End Process Hook ----
 
                 is_last_module = layer_index == len(quant_modules_pb) - 1
+                layer_outputs: List[List[torch.Tensor]] = []
                 # second forward after process()
                 if not is_last_module and processor.fwd_after_process:
-                    layer_outputs = []
-                    for j in range(processor.num_batches):
-                        layer_input = []
-                        for k, layer_inp in enumerate(layer_inputs[j]):
-                            layer_input.append(move_to(layer_inp, device=cur_layer_device))
-
-                        raw_mask = attention_masks[j]
-                        layer_attention_mask = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device)
-
-                        if raw_mask is not None:
-                            seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
-                            keep_mask_bs = normalize_seq_mask(layer_attention_mask, seq_len=seq_len)
-                            setattr(processor, "current_attention_mask", keep_mask_bs)
-                        else:
-                            setattr(processor, "current_attention_mask", None)
-
-                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
-                        layer_position_ids = None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
-                        if layer_position_ids is not None:
-                            additional_layer_inputs["position_ids"] = layer_position_ids
-                        for k, v in layer_input_kwargs[j].items():
-                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
-
-                        # Rehome buffers again in case module ran on a different device previously
-                        _rehome_module_to_device(module, cur_layer_device, move_parameters=False, move_buffers=True)
-
-                        # Guard forward with read lock to block auto-GC
-                        with self.pool.read_lock(cur_layer_device):
-                            with _device_ctx(cur_layer_device):
-                                if is_lm_head_module:
-                                    module_output = module(*layer_input)
-                                else:
-                                    module_output = module(*layer_input, **additional_layer_inputs)
-
-                        if isinstance(module_output, tuple):
-                            layer_output = module_output[0]
-                        else:
-                            layer_output = module_output
-
-                        layer_output = move_to(
-                            layer_output,
-                            device=cur_layer_device,
-                        )
-
-                        layer_outputs.append([layer_output])
-
-                        setattr(processor, "current_attention_mask", None)
-
-                        del layer_input
-                        del additional_layer_inputs
+                    layer_outputs = self._run_forward_batches(
+                        module=module,
+                        processor=processor,
+                        layer_inputs=layer_inputs,
+                        layer_input_kwargs=layer_input_kwargs,
+                        position_ids=position_ids,
+                        attention_masks=attention_masks,
+                        cur_layer_device=cur_layer_device,
+                        is_lm_head_module=is_lm_head_module,
+                        shared_kv_cache_dict=shared_kv_cache_dict,
+                        layer_index=layer_index,
+                        need_outputs=True,
+                        reuse_kv=False,
+                    )
 
                 # Finalize module after last processor
                 if p_index == len(self.processors) - 1:
