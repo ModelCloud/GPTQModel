@@ -818,6 +818,7 @@ class ModuleLooper():
                     )
                     if need_outputs:
                         processor.receive_layer_inputs(forward_outputs)
+                        layer_inputs = processor.inputs_cache.layer_inputs
                         del forward_outputs
 
                     fwd_time = time.time() - fwd_start
@@ -895,6 +896,7 @@ class ModuleLooper():
                 if processor.fwd_after_process:
                     processor.clear_cache_data()
                     processor.receive_layer_inputs(layer_outputs)
+                    layer_inputs = processor.inputs_cache.layer_inputs
 
                 if p_index == len(self.processors) - 1:
                     torch_sync()
