@@ -3,6 +3,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+"""Utilities for orchestrating the quantisation loop across multiple devices.
+
+ModuleLooper is the high-level coordinator that fans calibration batches across
+the available accelerators, runs each processing stage, and keeps the shell and
+turtle model state coherent. The implementation mixes synchronous orchestration
+with asynchronous workers, so the helpers below focus on keeping device context
+consistent and ensuring data dependencies survive the roundtrips through the
+thread pool.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -119,15 +129,23 @@ def _rehome_module_to_device(
 
 
 class ModuleLooper():
+    """Drive the per-layer quantisation workflow over one or more devices.
+
+    The looper owns a :class:`DeviceThreadPool` that executes CPU and accelerator
+    work. Forward passes can be replicated across devices, processors can enqueue
+    asynchronous tasks, and the class handles the bookkeeping required to stitch
+    the results back into a sequential quantisation order.
+    """
     def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
         self.processors = processors
         self.gptq_model = model
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
 
-        # Create a single pool for the entire looper lifecycle.
-        # Eagerly discovers devices and pins worker threads per device.
-        # Tune worker counts here if desired (example policy shown).
+        # The looper shares one pool for its lifetime so tasks such as module
+        # reloading, forward passes and finalisation reuse the same worker
+        # threads. The first worker per device is treated as the serial lane for
+        # forward execution; additional workers handle background jobs.
         self.pool = DeviceThreadPool(
             inference_mode=True,
             workers={
@@ -144,9 +162,8 @@ class ModuleLooper():
         for processor in self.processors:
             self._processor_mask_tls(processor)
 
-    # NEW: Wrap an existing hook so its inputs/outputs are pre-masked for GPTQ stats.
-    # We *do not* alter the module's actual computation; only what the hook
-    # passes down to the processor capture path is masked.
+    # Processors capture activations through hooks that need thread-local state
+    # so masks survive the roundtrip to worker threads.
     def _processor_mask_tls(self, processor: LoopProcessor) -> threading.local:
         tls = getattr(processor, "_mask_tls", None)
         if tls is None:
@@ -231,6 +248,13 @@ class ModuleLooper():
         reuse_kv: bool,
         prev_kv,
     ):
+        """Run one forward micro-batch on a pool worker and return its output.
+
+        The worker receives pre-moved inputs, executes the module on its bound
+        device and ships back both the model outputs and any next-layer KV cache
+        update. The thin signature keeps the function pickleable for the worker
+        queue.
+        """
         module_device = get_device(module)
         _rehome_module_to_device(module, module_device, move_parameters=False, move_buffers=True)
 
@@ -297,6 +321,13 @@ class ModuleLooper():
         need_outputs: bool,
         reuse_kv: bool,
     ) -> List[List[torch.Tensor]]:
+        """Dispatch the captured layer inputs through the module.
+
+        When multiple accelerators of the same type are available we clone the
+        module and execute batches in parallel, otherwise we fall back to a
+        single threaded path. The helper returns the ordered outputs that feed
+        the next processor stage when ``need_outputs`` is set.
+        """
         devices = self._select_forward_devices(cur_layer_device)
 
         if len(devices) <= 1:
@@ -347,6 +378,7 @@ class ModuleLooper():
         need_outputs: bool,
         reuse_kv: bool,
     ) -> List[List[torch.Tensor]]:
+        """Sequential fallback when only one forward device is in use."""
         outputs: List[List[torch.Tensor]] = []
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
 
@@ -423,6 +455,7 @@ class ModuleLooper():
         reuse_kv: bool,
         devices: List[torch.device],
     ) -> List[List[torch.Tensor]]:
+        """Fan batches across device clones and preserve result ordering."""
         module_replicas = self._clone_module_for_devices(module, devices)
 
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
