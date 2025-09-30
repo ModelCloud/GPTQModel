@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import contextlib
-import os
 import queue
 import threading
 import time
@@ -15,6 +14,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 
+from .. import DEBUG_ON
 from ..utils.logger import setup_logger
 
 
@@ -22,7 +22,6 @@ log = setup_logger()
 
 # Debug logging is very chatty and can alter timings subtly in tests.
 # We gate all extra diagnostics behind the DEBUG env (1/true/yes/on).
-DEBUG_ON = str(os.environ.get("DEBUG", "")).lower() in ("1", "true", "yes", "on")
 
 # DeviceLike allows ergonomic call sites: 'cuda:0', 0, torch.device('cuda', 0), etc.
 DeviceLike = Union[str, int, torch.device]
@@ -1169,20 +1168,16 @@ class DeviceThreadPool:
             empty_cache() using the LIVE attribute if callable, otherwise the
             HARD COPY captured at import time.
         """
-        WAIT_TIMEOUT = 0.1
         while True:
-            if DEBUG_ON: log.debug("DP-Janitor: waiting for trigger…")
-            if self._stop_event.is_set():
-                if DEBUG_ON: log.debug("DP-Janitor: stop event set before wait; exiting")
-                break
+            if DEBUG_ON:
+                log.debug("DP-Janitor: waiting for trigger…")
 
-            triggered = self._gc_event.wait(timeout=WAIT_TIMEOUT)
-            if not triggered:
-                continue
-
+            self._gc_event.wait()
             self._gc_event.clear()
+
             if self._stop_event.is_set():
-                if DEBUG_ON: log.debug("DP-Janitor: stop event set after trigger; exiting")
+                if DEBUG_ON:
+                    log.debug("DP-Janitor: stop event set; exiting")
                 break
 
             # Debounce window: absorb additional triggers before deciding.
@@ -1201,7 +1196,7 @@ class DeviceThreadPool:
                 while self._auto_gc_disable_count > 0 and not self._stop_event.is_set():
                     if DEBUG_ON:
                         log.debug("DP-Janitor: auto-GC disabled; waiting…")
-                    self._auto_gc_disable_cv.wait(timeout=WAIT_TIMEOUT)
+                    self._auto_gc_disable_cv.wait()
                 if self._stop_event.is_set():
                     if DEBUG_ON: log.debug("DP-Janitor: stop event set during auto-GC wait; exiting")
                     break
