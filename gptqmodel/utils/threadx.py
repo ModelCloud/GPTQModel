@@ -448,6 +448,7 @@ class DeviceThreadPool:
         self._worker_groups: Dict[str, List[_DeviceWorker]] = {}
         self._dispatch_rr: Dict[str, int] = {}
         self._dispatch_lock = threading.Lock()
+        self._serial_workers: Dict[str, _DeviceWorker] = {}
 
         # Stats / GC / inflight control
         self._stats_lock = threading.Lock()
@@ -501,6 +502,8 @@ class DeviceThreadPool:
                 group.append(worker)
             self._worker_groups[key] = group
             self._dispatch_rr[key] = 0
+            if group:
+                self._serial_workers[key] = group[0]
 
         # A canonical ordering for multi-device lock acquisitions.
         self._ordered_keys = sorted(self._locks.keys())
@@ -583,6 +586,36 @@ class DeviceThreadPool:
             return worker.submit(fn, *args, _cuda_stream=_cuda_stream, **kwargs)
         except BaseException:
             # Roll back inflight if enqueue fails (rare)
+            self._mark_finished(key)
+            raise
+
+    def submit_serial(
+        self,
+        device: DeviceLike,
+        fn: Callable[..., Any],
+        /,
+        *args,
+        _cuda_stream: Optional[torch.cuda.Stream] = None,
+        **kwargs,
+    ) -> Future:
+        """
+        Schedule work that must execute sequentially on a device. Tasks are
+        enqueued onto a dedicated worker so they run in submission order.
+        """
+        dev = _coerce_device(device)
+        key = self._key(dev)
+        if _cuda_stream is not None and dev.type != "cuda":
+            raise ValueError("_cuda_stream is only valid for CUDA devices")
+
+        worker = self._serial_workers.get(key)
+        if worker is None:
+            raise ValueError(f"No serial worker available for device '{key}'")
+
+        if DEBUG_ON: log.debug(f"submit_serial: device={key} fn={getattr(fn, '__name__', repr(fn))}")
+        self._mark_scheduled(key)
+        try:
+            return worker.submit(fn, *args, _cuda_stream=_cuda_stream, **kwargs)
+        except BaseException:
             self._mark_finished(key)
             raise
 

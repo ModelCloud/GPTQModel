@@ -438,8 +438,10 @@ class ModuleLooper():
             for offset, batch_idx in enumerate(range(start, end)):
                 device = devices[offset]
                 replica = module_replicas[device]
+                submitter = self.pool.submit_serial if device.type in ("cuda", "xpu", "mps") else self.pool.submit
+
                 futures.append(
-                    self.pool.submit(
+                    submitter(
                         device,
                         self._forward_batch_worker,
                         replica,
