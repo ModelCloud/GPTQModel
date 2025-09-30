@@ -6,15 +6,16 @@
 from __future__ import annotations
 
 import copy
+import csv
 import json
 import os
 import re
 from os.path import isfile, join
-import csv
 from typing import Any, Dict, Optional, Union
 
 import torch
 import transformers
+from safetensors.torch import save_file
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config

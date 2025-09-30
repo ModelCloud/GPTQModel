@@ -26,9 +26,9 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
-from safetensors import safe_open
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
+from safetensors import safe_open
 from torch.nn.modules.conv import _ConvNd
 from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
