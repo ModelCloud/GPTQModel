@@ -154,7 +154,7 @@ class ModuleLooper():
                 "mps": 8, # unified memory
                 "cpu": 8, # unified memory
             },
-            empty_cache_every_n=64,  # disable auto GC during quant loops; enable if you want
+            empty_cache_every_n=1024,  # disable auto gc based gpu work rate; enable if you want
         )
 
         self.gptq_model.register_background_pool(self.pool)
