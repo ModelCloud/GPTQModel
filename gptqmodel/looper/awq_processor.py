@@ -29,7 +29,6 @@ from ..quantization.awq.utils.utils import clear_memory, get_best_device
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import get_module_by_name_prefix, move_to
-from ..utils.offload import undo_offload_to_disk
 from ..utils.torch import CPU, torch_sync
 
 log = setup_logger()
@@ -778,8 +777,6 @@ class AWQProcessor(LoopProcessor):
         # block for streams
         if self.stream:
             torch_sync()
-
-        model.model = undo_offload_to_disk(module=model.model, include_buffers=True, delete_offload_folders=True)
 
         if model.quantize_config.format == FORMAT.GEMM:
             model.qlinear_kernel = AwqGEMMQuantLinear

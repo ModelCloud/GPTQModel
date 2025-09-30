@@ -8,13 +8,16 @@ from __future__ import annotations
 import collections
 import functools
 import json
+import math
 import operator
 import os
 import re
 import shutil
+import struct
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -23,6 +26,7 @@ import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
+from safetensors import safe_open
 from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from torch.nn.modules.conv import _ConvNd
@@ -57,6 +61,85 @@ from .torch import torch_empty_cache, torch_new_stream_ctx
 
 
 log = setup_logger()
+
+
+_DTYPE_SAFE_MAP = {
+    torch.float32: ("F32", 4),
+    torch.float16: ("F16", 2),
+    torch.float64: ("F64", 8),
+    torch.bfloat16: ("BF16", 2),
+    torch.int64: ("I64", 8),
+    torch.int32: ("I32", 4),
+    torch.int16: ("I16", 2),
+    torch.int8: ("I8", 1),
+    torch.uint8: ("U8", 1),
+    torch.bool: ("BOOL", 1),
+}
+
+
+_DTYPE_STR_MAP = {
+    "float32": torch.float32,
+    "float": torch.float32,
+    "float16": torch.float16,
+    "half": torch.float16,
+    "float64": torch.float64,
+    "double": torch.float64,
+    "bfloat16": torch.bfloat16,
+    "int64": torch.int64,
+    "long": torch.int64,
+    "int32": torch.int32,
+    "int": torch.int32,
+    "int16": torch.int16,
+    "short": torch.int16,
+    "int8": torch.int8,
+    "uint8": torch.uint8,
+    "bool": torch.bool,
+}
+
+
+def _torch_dtype_num_bytes(dtype: torch.dtype) -> int:
+    if dtype not in _DTYPE_SAFE_MAP:
+        raise NotImplementedError(f"Unsupported dtype for safetensors export: {dtype}")
+    return _DTYPE_SAFE_MAP[dtype][1]
+
+
+def _torch_dtype_to_safetensors(dtype: torch.dtype) -> str:
+    if dtype not in _DTYPE_SAFE_MAP:
+        raise NotImplementedError(f"Unsupported dtype for safetensors export: {dtype}")
+    return _DTYPE_SAFE_MAP[dtype][0]
+
+
+def _dtype_string_to_torch(dtype_str: Optional[str], fallback: torch.dtype) -> torch.dtype:
+    if dtype_str is None:
+        return fallback
+    key = dtype_str.lower()
+    return _DTYPE_STR_MAP.get(key, fallback)
+
+
+@dataclass(frozen=True)
+class OffloadTensorRef:
+    path: str
+    torch_dtype: torch.dtype
+    shape: Tuple[int, ...]
+    format: str  # 'dat' or 'safetensors'
+    weight_name: Optional[str] = None
+    data_offsets: Optional[Tuple[int, int]] = None
+
+    @property
+    def num_bytes(self) -> int:
+        return _torch_dtype_num_bytes(self.torch_dtype) * math.prod(self.shape or (1,))
+
+
+@dataclass
+class TensorSource:
+    name: str
+    torch_dtype: torch.dtype
+    shape: Tuple[int, ...]
+    source: Union[torch.Tensor, OffloadTensorRef]
+
+    @property
+    def num_bytes(self) -> int:
+        return _torch_dtype_num_bytes(self.torch_dtype) * math.prod(self.shape or (1,))
 
 def recurse_getattr(obj, attr: str):
     """
@@ -1073,29 +1156,164 @@ class MODALITY(str, Enum):
     # TEXT_TO_IMAGE = "text_to_image"
 
 
-def get_state_dict_for_save(model: nn.Module) -> Dict:
+def _split_parameter_path(full_name: str) -> Tuple[str, str]:
+    if "." in full_name:
+        module_path, leaf = full_name.rsplit(".", 1)
+    else:
+        module_path, leaf = "", full_name
+    return module_path, leaf
+
+
+def _resolve_offload_entry(
+    offload_root: str,
+    module_path: str,
+    leaf: str,
+    dtype: torch.dtype,
+    shape_hint: Tuple[int, ...],
+    index_cache: Dict[str, Optional[Dict]],
+) -> Optional[OffloadTensorRef]:
+    if not offload_root:
+        return None
+
+    module_dir = os.path.join(offload_root, module_path) if module_path else offload_root
+    index = index_cache.get(module_dir)
+    if index is None:
+        index_path = os.path.join(module_dir, "index.json")
+        if not os.path.isfile(index_path):
+            index_cache[module_dir] = None
+            return None
+        with open(index_path, "r", encoding="utf-8") as fh:
+            index = json.load(fh)
+        index_cache[module_dir] = index
+
+    if not index:
+        return None
+
+    entry = index.get(leaf) or index.get(f"{module_path}.{leaf}")
+    if entry is None:
+        return None
+
+    resolved_dtype = _dtype_string_to_torch(entry.get("dtype"), dtype)
+    if "shape" in entry:
+        shape = tuple(entry["shape"])
+    else:
+        shape = shape_hint
+
+    safetensors_file = entry.get("safetensors_file")
+    if safetensors_file:
+        path = safetensors_file
+        if not os.path.isabs(path):
+            path = os.path.join(module_dir, path)
+        offsets = entry.get("data_offsets")
+        if offsets is not None:
+            offsets = tuple(int(x) for x in offsets)
+        return OffloadTensorRef(
+            path=os.path.abspath(path),
+            torch_dtype=resolved_dtype,
+            shape=shape,
+            format="safetensors",
+            weight_name=entry.get("weight_name", leaf),
+            data_offsets=offsets,
+        )
+
+    data_path = os.path.join(module_dir, f"{leaf}.dat")
+    if not os.path.isfile(data_path):
+        return None
+
+    return OffloadTensorRef(
+        path=os.path.abspath(data_path),
+        torch_dtype=resolved_dtype,
+        shape=shape,
+        format="dat",
+        weight_name=None,
+        data_offsets=None,
+    )
+
+
+def _collect_state_dict_with_offload(model: nn.Module, offload_root: str) -> Dict[str, TensorSource]:
+    state_dict: Dict[str, TensorSource] = collections.OrderedDict()
+    index_cache: Dict[str, Optional[Dict]] = {}
+
+    for name, param in model.named_parameters():
+        module_path, leaf = _split_parameter_path(name)
+        source = None
+        if getattr(param, "is_meta", False) or param.device.type == "meta":
+            source = _resolve_offload_entry(
+                offload_root,
+                module_path,
+                leaf,
+                param.dtype,
+                tuple(param.shape),
+                index_cache,
+            )
+            if source is None:
+                raise FileNotFoundError(
+                    f"Offloaded tensor '{name}' not found in offload directory '{offload_root}'."
+                )
+        else:
+            source = param
+        state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=source)
+
+    for name, buf in model.named_buffers():
+        if name in state_dict:
+            continue
+        module_path, leaf = _split_parameter_path(name)
+        if getattr(buf, "is_meta", False) or buf.device.type == "meta":
+            source = _resolve_offload_entry(
+                offload_root,
+                module_path,
+                leaf,
+                buf.dtype,
+                tuple(buf.shape),
+                index_cache,
+            )
+            if source is None:
+                raise FileNotFoundError(
+                    f"Offloaded buffer '{name}' not found in offload directory '{offload_root}'."
+                )
+        else:
+            source = buf
+        state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=source)
+
+    return state_dict
+
+
+def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None) -> Dict[str, TensorSource]:
     """
     Filter weight-sharing tensors.
     Referenced from transformers.modeling_utils.PreTrainedModel.save_pretrained.
 
     See https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/modeling_utils.py#L2369
     """
+    if offload_root:
+        state_dict = _collect_state_dict_with_offload(model, offload_root)
+    else:
+        state_dict = collections.OrderedDict()
+        for name, param in model.named_parameters():
+            state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=param)
+        for name, buf in model.named_buffers():
+            if name in state_dict:
+                continue
+            state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
 
-    state_dict = model.state_dict()
-
-    # Safetensors does not allow tensor aliasing.
-    # We're going to remove aliases before saving
     ptrs = collections.defaultdict(list)
-    for name, tensor in state_dict.items():
-        # Sometimes in the state_dict we have non-tensor objects.
-        # e.g. in bitsandbytes we have some `str` objects in the state_dict
-        if isinstance(tensor, torch.Tensor):
-            ptrs[id_tensor_storage(tensor)].append(name)
+    for name, entry in state_dict.items():
+        source = entry.source
+        if isinstance(source, OffloadTensorRef):
+            key = ("offload", source.path, source.weight_name or name, source.data_offsets)
+        elif isinstance(source, torch.Tensor):
+            tensor = source
+            if getattr(tensor, "is_meta", False) or tensor.device.type == "meta":
+                key = ("meta", id(tensor))
+            else:
+                try:
+                    key = ("storage", id_tensor_storage(tensor))
+                except Exception:
+                    key = ("tensor", id(tensor))
         else:
-            # In the non-tensor case, fall back to the pointer of the object itself
-            ptrs[id(tensor)].append(name)
+            key = ("other", id(source))
+        ptrs[key].append(name)
 
-    # These are all the pointers of shared tensors.
     shared_ptrs = {ptr: names for ptr, names in ptrs.items() if len(names) > 1}
     warn_names = set()
     for names in shared_ptrs.values():
@@ -1132,6 +1350,138 @@ def get_state_dict_for_save(model: nn.Module) -> Dict:
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     accelerate.load_checkpoint_in_model(model, *args, **kwargs)
     model.tie_weights()
+
+
+_STREAM_BUFFER_BYTES = 128 * 1024 * 1024
+
+
+def _copy_file_stream(src_path: str, dst_fh, length: int, *, offset: int = 0, buffer_size: int = _STREAM_BUFFER_BYTES) -> None:
+    with open(src_path, "rb") as src:
+        if offset:
+            src.seek(offset)
+        remaining = length
+        while remaining > 0:
+            chunk = src.read(min(buffer_size, remaining))
+            if not chunk:
+                raise IOError(f"Unexpected EOF while copying from {src_path}")
+            dst_fh.write(chunk)
+            remaining -= len(chunk)
+
+
+def _write_tensor_bytes(out, tensor: torch.Tensor, dtype: torch.dtype) -> None:
+    if tensor.device.type != "cpu":
+        tensor = tensor.to("cpu")
+    if not tensor.is_contiguous():
+        tensor = tensor.contiguous()
+    if dtype is torch.bfloat16:
+        view = tensor.view(torch.int16)
+        out.write(view.numpy().tobytes())
+    else:
+        out.write(tensor.numpy().tobytes())
+
+
+def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str, str]) -> int:
+    header: Dict[str, Any] = {}
+    if metadata:
+        header["__metadata__"] = metadata
+
+    offset = 0
+    for entry in entries:
+        header[entry.name] = {
+            "dtype": _torch_dtype_to_safetensors(entry.torch_dtype),
+            "shape": list(entry.shape),
+            "data_offsets": [offset, offset + entry.num_bytes],
+        }
+        offset += entry.num_bytes
+
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+
+    with open(path, "wb") as out:
+        out.write(struct.pack("<Q", len(header_bytes)))
+        out.write(header_bytes)
+
+        for entry in entries:
+            source = entry.source
+            if isinstance(source, OffloadTensorRef):
+                if source.format == "dat":
+                    _copy_file_stream(source.path, out, entry.num_bytes)
+                elif source.format == "safetensors" and source.data_offsets is not None:
+                    start, end = source.data_offsets
+                    _copy_file_stream(source.path, out, end - start, offset=start)
+                else:
+                    with safe_open(source.path, framework="pt", device="cpu") as handler:
+                        tensor = handler.get_tensor(source.weight_name or entry.name)
+                    tensor = tensor.to(source.torch_dtype)
+                    _write_tensor_bytes(out, tensor, source.torch_dtype)
+            else:
+                tensor = source.detach()
+                _write_tensor_bytes(out, tensor, entry.torch_dtype)
+                del tensor
+
+        file_size = out.tell()
+
+    return file_size
+
+
+def _plan_shards(entries: List[TensorSource], max_shard_size: Optional[int]) -> List[List[TensorSource]]:
+    if not max_shard_size or max_shard_size <= 0:
+        return [entries]
+
+    shards: List[List[TensorSource]] = []
+    current: List[TensorSource] = []
+    current_size = 0
+
+    for entry in entries:
+        size = entry.num_bytes
+        if size > max_shard_size:
+            if current:
+                shards.append(current)
+                current = []
+                current_size = 0
+            shards.append([entry])
+            continue
+        if current_size + size > max_shard_size and current:
+            shards.append(current)
+            current = []
+            current_size = 0
+        current.append(entry)
+        current_size += size
+
+    if current:
+        shards.append(current)
+
+    return shards
+
+
+def streaming_state_dict_to_shards(
+    state_dict: Dict[str, TensorSource],
+    save_dir: str,
+    model_base_name: str,
+    single_file_name: str,
+    metadata: Dict[str, str],
+    max_shard_size: Optional[int],
+) -> Tuple[List[str], Dict[str, str], int]:
+    entries = list(state_dict.values())
+    shards = _plan_shards(entries, max_shard_size)
+    num_shards = len(shards)
+    filenames: List[str] = []
+    tensor_to_filename: Dict[str, str] = {}
+    total_size = 0
+
+    for idx, shard_entries in enumerate(shards, start=1):
+        if num_shards == 1:
+            filename = single_file_name
+        else:
+            filename = f"{model_base_name}-{idx:05d}-of-{num_shards:05d}.safetensors"
+
+        path = os.path.join(save_dir, filename)
+        size = _write_shard_file(path, shard_entries, metadata)
+        total_size += size
+        filenames.append(filename)
+        for entry in shard_entries:
+            tensor_to_filename[entry.name] = filename
+
+    return filenames, tensor_to_filename, total_size
 
 
 def find_config_seq_len(config_dict, target_keys):
