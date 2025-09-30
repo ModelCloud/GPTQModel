@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+from __future__ import annotations
 
 from enum import Enum
 
@@ -42,6 +43,25 @@ class DEVICE(str, Enum):
         if IS_ROCM and f"{value}".lower() == "rocm":
             return cls.ROCM
         return super()._missing_(value)
+
+    @property
+    def type(self) -> str:
+        """Return the backend type compatible with torch.device semantics."""
+        if self == DEVICE.ROCM:
+            return "cuda"
+        return str(self)
+
+    @property
+    def index(self) -> int | None:
+        """Default index used when materialising a torch.device from this enum."""
+        if self in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU):
+            return 0
+        return None
+
+    def to_torch_device(self) -> torch.device:
+        """Convert the enum to a concrete torch.device, defaulting to index 0."""
+        idx = self.index
+        return torch.device(self.type if idx is None else f"{self.type}:{idx}")
 
     def to_device_map(self):
         return {"": DEVICE.CUDA if self == DEVICE.ROCM else self}

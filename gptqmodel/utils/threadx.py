@@ -17,6 +17,7 @@ import torch
 
 from ..utils.logger import setup_logger
 
+
 log = setup_logger()
 
 # Debug logging is very chatty and can alter timings subtly in tests.
@@ -447,6 +448,7 @@ class DeviceThreadPool:
         self._worker_groups: Dict[str, List[_DeviceWorker]] = {}
         self._dispatch_rr: Dict[str, int] = {}
         self._dispatch_lock = threading.Lock()
+        self._serial_workers: Dict[str, _DeviceWorker] = {}
 
         # Stats / GC / inflight control
         self._stats_lock = threading.Lock()
@@ -457,6 +459,10 @@ class DeviceThreadPool:
         self._gc_event = threading.Event()
         self._stop_event = threading.Event()
         self._janitor: Optional[threading.Thread] = None
+
+        # Auto-GC disable tracking (allows latency-sensitive regions to pause janitor)
+        self._auto_gc_disable_count = 0
+        self._auto_gc_disable_cv = threading.Condition()
 
         # In-flight (scheduled but not finished) counters + per-device CVs.
         # Each device has a condition variable to let wait() callers block
@@ -496,6 +502,8 @@ class DeviceThreadPool:
                 group.append(worker)
             self._worker_groups[key] = group
             self._dispatch_rr[key] = 0
+            if group:
+                self._serial_workers[key] = group[0]
 
         # A canonical ordering for multi-device lock acquisitions.
         self._ordered_keys = sorted(self._locks.keys())
@@ -581,6 +589,36 @@ class DeviceThreadPool:
             self._mark_finished(key)
             raise
 
+    def submit_serial(
+        self,
+        device: DeviceLike,
+        fn: Callable[..., Any],
+        /,
+        *args,
+        _cuda_stream: Optional[torch.cuda.Stream] = None,
+        **kwargs,
+    ) -> Future:
+        """
+        Schedule work that must execute sequentially on a device. Tasks are
+        enqueued onto a dedicated worker so they run in submission order.
+        """
+        dev = _coerce_device(device)
+        key = self._key(dev)
+        if _cuda_stream is not None and dev.type != "cuda":
+            raise ValueError("_cuda_stream is only valid for CUDA devices")
+
+        worker = self._serial_workers.get(key)
+        if worker is None:
+            raise ValueError(f"No serial worker available for device '{key}'")
+
+        if DEBUG_ON: log.debug(f"submit_serial: device={key} fn={getattr(fn, '__name__', repr(fn))}")
+        self._mark_scheduled(key)
+        try:
+            return worker.submit(fn, *args, _cuda_stream=_cuda_stream, **kwargs)
+        except BaseException:
+            self._mark_finished(key)
+            raise
+
     def do(
         self,
         device: DeviceLike,
@@ -629,6 +667,28 @@ class DeviceThreadPool:
                     w.join()
 
         if DEBUG_ON: log.debug("DeviceThreadPool shutdown complete")
+
+    @contextlib.contextmanager
+    def no_auto_gc(self):
+        """
+        Temporarily disable automatic empty-cache passes. Useful for latency-sensitive
+        critical sections (e.g., forwarding) where janitor interference is undesirable.
+        """
+        with self._auto_gc_disable_cv:
+            self._auto_gc_disable_count += 1
+        try:
+            yield
+        finally:
+            should_signal = False
+            with self._auto_gc_disable_cv:
+                if self._auto_gc_disable_count > 0:
+                    self._auto_gc_disable_count -= 1
+                if self._auto_gc_disable_count == 0:
+                    should_signal = True
+                    self._auto_gc_disable_cv.notify_all()
+            if should_signal:
+                # Wake janitor in case a trigger is pending.
+                self._gc_event.set()
 
     # --------------- Public Lock API ---------------
 
@@ -1136,6 +1196,15 @@ class DeviceThreadPool:
                     self._gc_event.wait(timeout=max(0.0, t_end - time.time()))
                     self._gc_event.clear()
                 if DEBUG_ON: log.debug("DP-Janitor: debounce window end")
+
+            with self._auto_gc_disable_cv:
+                while self._auto_gc_disable_count > 0 and not self._stop_event.is_set():
+                    if DEBUG_ON:
+                        log.debug("DP-Janitor: auto-GC disabled; waiting…")
+                    self._auto_gc_disable_cv.wait(timeout=WAIT_TIMEOUT)
+                if self._stop_event.is_set():
+                    if DEBUG_ON: log.debug("DP-Janitor: stop event set during auto-GC wait; exiting")
+                    break
 
             # Snapshot & decision
             try:
