@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import contextlib
-import os
 import queue
 import threading
 import time
@@ -15,6 +14,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 
+from .. import DEBUG_ON
 from ..utils.logger import setup_logger
 
 
@@ -22,7 +22,6 @@ log = setup_logger()
 
 # Debug logging is very chatty and can alter timings subtly in tests.
 # We gate all extra diagnostics behind the DEBUG env (1/true/yes/on).
-DEBUG_ON = str(os.environ.get("DEBUG", "")).lower() in ("1", "true", "yes", "on")
 
 # DeviceLike allows ergonomic call sites: 'cuda:0', 0, torch.device('cuda', 0), etc.
 DeviceLike = Union[str, int, torch.device]
