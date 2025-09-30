@@ -1352,7 +1352,8 @@ def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     model.tie_weights()
 
 
-_STREAM_BUFFER_BYTES = 128 * 1024 * 1024
+# 64MB for io transfer buffer
+_STREAM_BUFFER_BYTES = 64 * 1024 * 1024
 
 
 def _copy_file_stream(src_path: str, dst_fh, length: int, *, offset: int = 0, buffer_size: int = _STREAM_BUFFER_BYTES) -> None:
@@ -1369,10 +1370,7 @@ def _copy_file_stream(src_path: str, dst_fh, length: int, *, offset: int = 0, bu
 
 
 def _write_tensor_bytes(out, tensor: torch.Tensor, dtype: torch.dtype) -> None:
-    if tensor.device.type != "cpu":
-        tensor = tensor.to("cpu")
-    if not tensor.is_contiguous():
-        tensor = tensor.contiguous()
+    tensor = tensor.detach().to("cpu").contiguous()
     if dtype is torch.bfloat16:
         view = tensor.view(torch.int16)
         out.write(view.numpy().tobytes())
@@ -1403,6 +1401,7 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
         for entry in entries:
             source = entry.source
             if isinstance(source, OffloadTensorRef):
+                print("offload tesnor io buffered transfer")
                 if source.format == "dat":
                     _copy_file_stream(source.path, out, entry.num_bytes)
                 elif source.format == "safetensors" and source.data_offsets is not None:
