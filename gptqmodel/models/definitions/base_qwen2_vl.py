@@ -65,7 +65,7 @@ class BaseQwen2VLGPTQ(BaseQModel):
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path)
 
-    def prepare_dataset(self, calibration_dataset, calibration_dataset_concat_size=None, batch_size: int = 1):
+    def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         processor = self.load_processor()
         calib_data = []
         for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):

@@ -1244,14 +1244,30 @@ class BaseQModel(nn.Module):
         """
         Return list of base modules directly under 'model' but not 'model.layers'.
         """
-        root = cls.module_tree[0]  # "model"
-        exclude = cls.module_tree[1]  # "layers"
+        # Find the index of "#"
+        tree = cls.module_tree
+        try:
+            sharp_idx = tree.index("#")
+        except ValueError:
+            raise ValueError("module_tree must contain '#' to separate hierarchy")
 
-        base = getattr(model, root)
+        assert sharp_idx > 0, "failed to get_base_modules"
+        # root_path = ["model"] or ["model", "language_model"]
+        root_path = tree[:sharp_idx-1]
+
         out = []
-        for name, _ in base.named_children():
-            if name != exclude:  # skip second node which is parallel in scope
-                out.append(f"{root}.{name}")
+        # Traverse each layer in root_path
+        for i in range(len(root_path)):
+            path = root_path[:i + 1]
+            base = model
+            exclude = tree[len(path)]
+
+            for node in path:
+                base = getattr(base, node)
+
+            for name, _ in base.named_children():
+                if name != exclude:
+                    out.append(".".join(path + [name]))
 
         # print(f"Base Modules: {out}")
         return out
