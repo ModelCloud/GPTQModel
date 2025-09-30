@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from typing import Dict, Optional
-
+import os
 import torch
 from PIL import Image
 from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
@@ -48,7 +48,7 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
 
     def pre_quantize_generate_hook_start(self):
         # load speaker
-        spk_path = cached_file(self.model_local_path, "spk_dict.pt")
+        spk_path = os.path.join(self.model_local_path, "spk_dict.pt")
         self.model.load_speakers(spk_path)
 
         self.shell_module_materialize(self.model.thinker.model.embed_tokens, self.quantize_config.device)
@@ -85,13 +85,10 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
                             module=self.model.thinker.model.rotary_emb,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
-
+            
             for layer in self.model.thinker.model.layers:
-                offload_to_disk(model=layer,
-                                module=layer.self_attn.rotary_emb,
-                                disk_path=self.quantize_config.offload_to_disk_path,
-                                )
-                                
+                layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(CPU)
+
             return
 
         self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(CPU)
