@@ -8,10 +8,11 @@ from typing import Dict, Optional
 import torch
 from PIL import Image
 from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
-
+from transformers.utils.hub import cached_file
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
+from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
 
@@ -46,6 +47,10 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
     require_load_processor = True
 
     def pre_quantize_generate_hook_start(self):
+        # load speaker
+        spk_path = cached_file(self.model_local_path, "spk_dict.pt")
+        self.model.load_speakers(spk_path)
+
         self.shell_module_materialize(self.model.thinker.model.embed_tokens, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.visual, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.audio_tower, self.quantize_config.device)
