@@ -33,6 +33,7 @@ from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES, DEVICE
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
+from .. import DEBUG_ON
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.device import get_device, get_device_new
 from ..utils.logger import setup_logger
@@ -193,18 +194,26 @@ class ModuleLooper():
 
     def _clone_module_for_devices(self, module: torch.nn.Module, devices: List[torch.device]) -> Dict[torch.device, torch.nn.Module]:
         clones: Dict[torch.device, torch.nn.Module] = {}
+        module_label = getattr(module, "full_name", module.__class__.__name__)
+        clone_timings = [] if DEBUG_ON else None
 
         cleared_attrs = self._clear_non_picklable_state(module)
         try:
             for dev in devices:
+                start_ts = time.perf_counter() if DEBUG_ON else None
                 replica = copy.deepcopy(module)
                 replica = replica.to(dev)
                 replica.eval()
                 _rehome_module_to_device(replica, dev, move_parameters=False, move_buffers=True)
                 self._clear_non_picklable_state(replica)
                 clones[dev] = replica
+                if clone_timings is not None and start_ts is not None:
+                    clone_timings.append((dev, time.perf_counter() - start_ts))
         finally:
             self._restore_non_picklable_state(cleared_attrs)
+        if clone_timings:
+            timing_str = ", ".join(f"{str(dev)}={duration * 1000:.2f}ms" for dev, duration in clone_timings)
+            log.debug(f"ModuleLooper: deepcopy {module_label} -> {timing_str}")
         return clones
 
     def _clear_non_picklable_state(self, module: torch.nn.Module):
