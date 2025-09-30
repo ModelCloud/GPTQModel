@@ -17,6 +17,7 @@ import torch
 
 from ..utils.logger import setup_logger
 
+
 log = setup_logger()
 
 # Debug logging is very chatty and can alter timings subtly in tests.
@@ -458,6 +459,10 @@ class DeviceThreadPool:
         self._stop_event = threading.Event()
         self._janitor: Optional[threading.Thread] = None
 
+        # Auto-GC disable tracking (allows latency-sensitive regions to pause janitor)
+        self._auto_gc_disable_count = 0
+        self._auto_gc_disable_cv = threading.Condition()
+
         # In-flight (scheduled but not finished) counters + per-device CVs.
         # Each device has a condition variable to let wait() callers block
         # until inflight hits zero for that device scope.
@@ -629,6 +634,28 @@ class DeviceThreadPool:
                     w.join()
 
         if DEBUG_ON: log.debug("DeviceThreadPool shutdown complete")
+
+    @contextlib.contextmanager
+    def no_auto_gc(self):
+        """
+        Temporarily disable automatic empty-cache passes. Useful for latency-sensitive
+        critical sections (e.g., forwarding) where janitor interference is undesirable.
+        """
+        with self._auto_gc_disable_cv:
+            self._auto_gc_disable_count += 1
+        try:
+            yield
+        finally:
+            should_signal = False
+            with self._auto_gc_disable_cv:
+                if self._auto_gc_disable_count > 0:
+                    self._auto_gc_disable_count -= 1
+                if self._auto_gc_disable_count == 0:
+                    should_signal = True
+                    self._auto_gc_disable_cv.notify_all()
+            if should_signal:
+                # Wake janitor in case a trigger is pending.
+                self._gc_event.set()
 
     # --------------- Public Lock API ---------------
 
@@ -1136,6 +1163,15 @@ class DeviceThreadPool:
                     self._gc_event.wait(timeout=max(0.0, t_end - time.time()))
                     self._gc_event.clear()
                 if DEBUG_ON: log.debug("DP-Janitor: debounce window end")
+
+            with self._auto_gc_disable_cv:
+                while self._auto_gc_disable_count > 0 and not self._stop_event.is_set():
+                    if DEBUG_ON:
+                        log.debug("DP-Janitor: auto-GC disabled; waiting…")
+                    self._auto_gc_disable_cv.wait(timeout=WAIT_TIMEOUT)
+                if self._stop_event.is_set():
+                    if DEBUG_ON: log.debug("DP-Janitor: stop event set during auto-GC wait; exiting")
+                    break
 
             # Snapshot & decision
             try:
