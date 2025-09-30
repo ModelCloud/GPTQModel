@@ -3,14 +3,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+"""Utilities for orchestrating the quantisation loop across multiple devices.
+
+ModuleLooper is the high-level coordinator that fans calibration batches across
+the available accelerators, runs each processing stage, and keeps the shell and
+turtle model state coherent. The implementation mixes synchronous orchestration
+with asynchronous workers, so the helpers below focus on keeping device context
+consistent and ensuring data dependencies survive the roundtrips through the
+thread pool.
+"""
+
 from __future__ import annotations
 
 import copy
-import gc
 import threading
 import time
 from contextlib import contextmanager
-from functools import partial
 from typing import Dict, List, Optional
 
 import torch
@@ -22,7 +30,7 @@ from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import CUDA, SUPPORTS_MODULE_TYPES
+from ..models._const import SUPPORTS_MODULE_TYPES, DEVICE
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
@@ -30,10 +38,8 @@ from ..utils.device import get_device, get_device_new
 from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
-from ..utils.structure import print_module_tree
 from ..utils.threadx import DeviceThreadPool
-from ..utils.torch import (ALL_DEVICES, CPU, DEFAULT_BALANCE_STRATEGY, HAS_CUDA, META, BalanceStrategy,
-                           device_next, device_next_reset, torch_empty_cache, torch_sync)
+from ..utils.torch import (ALL_DEVICES, CPU, META, device_next, device_next_reset, torch_sync)
 from .awq_processor import AWQProcessor
 from .qqq_processor import QQQProcessor
 
@@ -43,7 +49,7 @@ log = setup_logger()
 # -------------------- Device helpers (local) --------------------
 
 @contextmanager
-def _device_ctx(dev: Optional[torch.device]):
+def _device_ctx(dev: Optional[torch.device|DEVICE]):
     """
     Ensure the caller thread’s current device matches `dev` for the duration of the
     context (CUDA/XPU). Prevents cuBLAS/cuDNN handle/device mismatches in multi-GPU.
@@ -51,11 +57,10 @@ def _device_ctx(dev: Optional[torch.device]):
     if dev is None:
         yield
     else:
-        dtyp = getattr(dev, "type", None)
-        if dtyp == "cuda":
+        if dev.type == "cuda":
             with torch.cuda.device(dev.index):
                 yield
-        elif dtyp == "xpu" and hasattr(torch, "xpu"):
+        elif dev.type == "xpu" and hasattr(torch, "xpu"):
             with torch.xpu.device(dev.index):  # type: ignore[attr-defined]
                 yield
         else:
@@ -124,15 +129,23 @@ def _rehome_module_to_device(
 
 
 class ModuleLooper():
+    """Drive the per-layer quantisation workflow over one or more devices.
+
+    The looper owns a :class:`DeviceThreadPool` that executes CPU and accelerator
+    work. Forward passes can be replicated across devices, processors can enqueue
+    asynchronous tasks, and the class handles the bookkeeping required to stitch
+    the results back into a sequential quantisation order.
+    """
     def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
         self.processors = processors
         self.gptq_model = model
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
 
-        # Create a single pool for the entire looper lifecycle.
-        # Eagerly discovers devices and pins worker threads per device.
-        # Tune worker counts here if desired (example policy shown).
+        # The looper shares one pool for its lifetime so tasks such as module
+        # reloading, forward passes and finalisation reuse the same worker
+        # threads. The first worker per device is treated as the serial lane for
+        # forward execution; additional workers handle background jobs.
         self.pool = DeviceThreadPool(
             inference_mode=True,
             workers={
@@ -141,15 +154,375 @@ class ModuleLooper():
                 "mps": 8, # unified memory
                 "cpu": 8, # unified memory
             },
-            empty_cache_every_n=14,  # disable auto GC during quant loops; enable if you want
+            empty_cache_every_n=1024,  # disable auto gc based gpu work rate; enable if you want
         )
 
-    # NEW: Wrap an existing hook so its inputs/outputs are pre-masked for GPTQ stats.
-    # We *do not* alter the module's actual computation; only what the hook
-    # passes down to the processor capture path is masked.
+        self.gptq_model.register_background_pool(self.pool)
+
+        for processor in self.processors:
+            self._processor_mask_tls(processor)
+
+    # Processors capture activations through hooks that need thread-local state
+    # so masks survive the roundtrip to worker threads.
+    def _processor_mask_tls(self, processor: LoopProcessor) -> threading.local:
+        tls = getattr(processor, "_mask_tls", None)
+        if tls is None:
+            tls = threading.local()
+            setattr(processor, "_mask_tls", tls)
+        return tls
+
+    def _set_processor_mask(self, processor: LoopProcessor, mask):
+        tls = self._processor_mask_tls(processor)
+        tls.value = mask
+
+    def _get_processor_mask(self, processor: LoopProcessor):
+        tls = getattr(processor, "_mask_tls", None)
+        return getattr(tls, "value", None) if tls else None
+
+    def _select_forward_devices(self, base_device: Optional[torch.device]) -> List[torch.device]:
+        if base_device is None:
+            return [CPU]
+
+        devices = [base_device]
+        base_type = base_device.type
+        if base_type in ("cuda", "xpu", "mps"):
+            for dev in ALL_DEVICES:
+                if dev.type == base_type and dev not in devices:
+                    devices.append(dev)
+        return devices
+
+    def _clone_module_for_devices(self, module: torch.nn.Module, devices: List[torch.device]) -> Dict[torch.device, torch.nn.Module]:
+        clones: Dict[torch.device, torch.nn.Module] = {}
+
+        cleared_attrs = self._clear_non_picklable_state(module)
+        try:
+            for dev in devices:
+                replica = copy.deepcopy(module)
+                replica = replica.to(dev)
+                replica.eval()
+                _rehome_module_to_device(replica, dev, move_parameters=False, move_buffers=True)
+                self._clear_non_picklable_state(replica)
+                clones[dev] = replica
+        finally:
+            self._restore_non_picklable_state(cleared_attrs)
+        return clones
+
+    def _clear_non_picklable_state(self, module: torch.nn.Module):
+        cleared = []
+        seen = set()
+
+        def maybe_clear(obj: torch.nn.Module):
+            if id(obj) in seen:
+                return
+            seen.add(id(obj))
+            if hasattr(obj, "target_device_stream"):
+                cleared.append((obj, getattr(obj, "target_device_stream")))
+                setattr(obj, "target_device_stream", None)
+
+        if isinstance(module, torch.nn.Module):
+            for sub in module.modules():
+                maybe_clear(sub)
+        else:
+            maybe_clear(module)
+
+        return cleared
+
+    @staticmethod
+    def _restore_non_picklable_state(cleared):
+        for obj, value in cleared:
+            setattr(obj, "target_device_stream", value)
+
+    @staticmethod
+    def _forward_batch_worker(
+        module: torch.nn.Module,
+        processor: LoopProcessor,
+        batch_index: int,
+        layer_input: List[torch.Tensor],
+        layer_input_kwargs: Dict[str, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.Tensor],
+        *,
+        support_batch_quantize: bool,
+        is_lm_head_module: bool,
+        need_output: bool,
+        reuse_kv: bool,
+        prev_kv,
+    ):
+        """Run one forward micro-batch on a pool worker and return its output.
+
+        The worker receives pre-moved inputs, executes the module on its bound
+        device and ships back both the model outputs and any next-layer KV cache
+        update. The thin signature keeps the function pickleable for the worker
+        queue.
+        """
+        module_device = get_device(module)
+        _rehome_module_to_device(module, module_device, move_parameters=False, move_buffers=True)
+
+        inputs = [move_to(inp, device=module_device, stream=False) for inp in layer_input]
+
+        attn_tensor = None
+        if attention_mask is not None:
+            attn_tensor = move_to(attention_mask, device=module_device, stream=False)
+
+        additional_inputs: Dict[str, torch.Tensor] = {}
+        if support_batch_quantize and attn_tensor is not None:
+            additional_inputs["attention_mask"] = attn_tensor
+
+        if position_ids is not None:
+            additional_inputs["position_ids"] = move_to(position_ids, device=module_device, stream=False)
+
+        for key, value in layer_input_kwargs.items():
+            additional_inputs[key] = nested_move_to(value, device=module_device, stream=False)
+
+        keep_mask = None
+        if attn_tensor is not None:
+            seq_len = inputs[0].shape[1] if (len(inputs) > 0 and inputs[0].dim() >= 2) else None
+            keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
+
+        mask_tls = getattr(processor, "_mask_tls", None)
+        if mask_tls is not None:
+            mask_tls.value = keep_mask
+
+        if reuse_kv and prev_kv is not None:
+            additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=module_device, stream=False)
+
+        module_output = None
+        kv_next = None
+        try:
+            if is_lm_head_module:
+                module_output = module(*inputs)
+            else:
+                module_output = module(*inputs, **additional_inputs)
+        except StopForward:
+            module_output = None
+        finally:
+            if mask_tls is not None:
+                mask_tls.value = None
+
+        if reuse_kv and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:
+            kv_next = module_output[-1]
+
+        result_output = module_output if need_output else None
+        return batch_index, result_output, kv_next
+
+    def _run_forward_batches(
+        self,
+        *,
+        module: torch.nn.Module,
+        processor: LoopProcessor,
+        layer_inputs: List[List[torch.Tensor]],
+        layer_input_kwargs: List[Dict[str, torch.Tensor]],
+        position_ids: List[torch.Tensor],
+        attention_masks: List[torch.Tensor],
+        cur_layer_device: torch.device,
+        is_lm_head_module: bool,
+        shared_kv_cache_dict: Dict[int, torch.Tensor],
+        layer_index: int,
+        need_outputs: bool,
+        reuse_kv: bool,
+    ) -> List[List[torch.Tensor]]:
+        """Dispatch the captured layer inputs through the module.
+
+        When multiple accelerators of the same type are available we clone the
+        module and execute batches in parallel, otherwise we fall back to a
+        single threaded path. The helper returns the ordered outputs that feed
+        the next processor stage when ``need_outputs`` is set.
+        """
+        devices = self._select_forward_devices(cur_layer_device)
+
+        if len(devices) <= 1:
+            return self._run_forward_batches_single(
+                module=module,
+                processor=processor,
+                layer_inputs=layer_inputs,
+                layer_input_kwargs=layer_input_kwargs,
+                position_ids=position_ids,
+                attention_masks=attention_masks,
+                cur_layer_device=cur_layer_device,
+                is_lm_head_module=is_lm_head_module,
+                shared_kv_cache_dict=shared_kv_cache_dict,
+                layer_index=layer_index,
+                need_outputs=need_outputs,
+                reuse_kv=reuse_kv,
+            )
+
+        return self._run_forward_batches_parallel(
+            module=module,
+            processor=processor,
+            layer_inputs=layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            position_ids=position_ids,
+            attention_masks=attention_masks,
+            cur_layer_device=cur_layer_device,
+            is_lm_head_module=is_lm_head_module,
+            shared_kv_cache_dict=shared_kv_cache_dict,
+            layer_index=layer_index,
+            need_outputs=need_outputs,
+            reuse_kv=reuse_kv,
+            devices=devices,
+        )
+
+    def _run_forward_batches_single(
+        self,
+        *,
+        module: torch.nn.Module,
+        processor: LoopProcessor,
+        layer_inputs: List[List[torch.Tensor]],
+        layer_input_kwargs: List[Dict[str, torch.Tensor]],
+        position_ids: List[torch.Tensor],
+        attention_masks: List[torch.Tensor],
+        cur_layer_device: torch.device,
+        is_lm_head_module: bool,
+        shared_kv_cache_dict: Dict[int, torch.Tensor],
+        layer_index: int,
+        need_outputs: bool,
+        reuse_kv: bool,
+    ) -> List[List[torch.Tensor]]:
+        """Sequential fallback when only one forward device is in use."""
+        outputs: List[List[torch.Tensor]] = []
+        prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
+
+        for batch_idx in range(processor.num_batches):
+            layer_input = [move_to(inp, device=cur_layer_device, stream=False) for inp in layer_inputs[batch_idx]]
+
+            raw_mask = attention_masks[batch_idx]
+            attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device, stream=False)
+
+            keep_mask = None
+            if attn_tensor is not None:
+                seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
+                keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
+            self._set_processor_mask(processor, keep_mask)
+
+            additional_inputs: Dict[str, torch.Tensor] = {}
+            if self.support_batch_quantize and attn_tensor is not None:
+                additional_inputs["attention_mask"] = attn_tensor
+
+            if position_ids:
+                pos = position_ids[batch_idx]
+                if pos is not None:
+                    additional_inputs["position_ids"] = move_to(pos, device=cur_layer_device, stream=False)
+
+            for key, value in layer_input_kwargs[batch_idx].items():
+                additional_inputs[key] = nested_move_to(value, device=cur_layer_device, stream=False)
+
+            if reuse_kv and prev_kv is not None:
+                additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=cur_layer_device, stream=False)
+
+            _rehome_module_to_device(module, cur_layer_device, move_parameters=False, move_buffers=True)
+
+            module_output = None
+            try:
+                if is_lm_head_module:
+                    module_output = module(*layer_input)
+                else:
+                    module_output = module(*layer_input, **additional_inputs)
+            except StopForward:
+                module_output = None
+            finally:
+                self._set_processor_mask(processor, None)
+
+            if (
+                reuse_kv
+                and module_output is not None
+                and isinstance(module_output, tuple)
+                and len(module_output) > 0
+                and shared_kv_cache_dict.get(layer_index) is None
+            ):
+                shared_kv_cache_dict[layer_index] = module_output[-1]
+
+            if need_outputs and module_output is not None:
+                primary = module_output[0] if isinstance(module_output, tuple) else module_output
+                primary = move_to(primary, device=cur_layer_device, stream=False)
+                outputs.append([primary])
+
+        return outputs
+
+    def _run_forward_batches_parallel(
+        self,
+        *,
+        module: torch.nn.Module,
+        processor: LoopProcessor,
+        layer_inputs: List[List[torch.Tensor]],
+        layer_input_kwargs: List[Dict[str, torch.Tensor]],
+        position_ids: List[torch.Tensor],
+        attention_masks: List[torch.Tensor],
+        cur_layer_device: torch.device,
+        is_lm_head_module: bool,
+        shared_kv_cache_dict: Dict[int, torch.Tensor],
+        layer_index: int,
+        need_outputs: bool,
+        reuse_kv: bool,
+        devices: List[torch.device],
+    ) -> List[List[torch.Tensor]]:
+        """Fan batches across device clones and preserve result ordering."""
+        module_replicas = self._clone_module_for_devices(module, devices)
+
+        prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
+
+        results: Dict[int, torch.Tensor | tuple | None] = {}
+
+        chunk = len(devices)
+        total_batches = processor.num_batches
+        for start in range(0, total_batches, chunk):
+            futures = []
+            end = min(start + chunk, total_batches)
+            for offset, batch_idx in enumerate(range(start, end)):
+                device = devices[offset]
+                replica = module_replicas[device]
+                submitter = self.pool.submit_serial if device.type in ("cuda", "xpu", "mps") else self.pool.submit
+
+                futures.append(
+                    submitter(
+                        device,
+                        self._forward_batch_worker,
+                        replica,
+                        processor,
+                        batch_idx,
+                        layer_inputs[batch_idx],
+                        layer_input_kwargs[batch_idx],
+                        attention_masks[batch_idx],
+                        position_ids[batch_idx] if position_ids else None,
+                        support_batch_quantize=self.support_batch_quantize,
+                        is_lm_head_module=is_lm_head_module,
+                        need_output=need_outputs,
+                        reuse_kv=reuse_kv,
+                        prev_kv=prev_kv,
+                    )
+                )
+
+            for fut in futures:
+                batch_idx, module_output, kv_next = fut.result()
+                if need_outputs and module_output is not None:
+                    results[batch_idx] = module_output
+                if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
+                    shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device, stream=False)
+
+        # ensure replicas that are clones release promptly
+        for dev in list(module_replicas.keys()):
+            if dev != cur_layer_device:
+                del module_replicas[dev]
+
+        if not need_outputs:
+            return []
+
+        ordered_outputs: List[List[torch.Tensor]] = []
+        for idx in range(total_batches):
+            module_output = results.get(idx)
+            if module_output is None:
+                raise RuntimeError("Forward batch returned no output; data-parallel execution produced empty result.")
+            if isinstance(module_output, tuple):
+                primary = module_output[0]
+            else:
+                primary = module_output
+            primary = move_to(primary, device=cur_layer_device, stream=False)
+            ordered_outputs.append([primary])
+
+        return ordered_outputs
+
     def _masked_hook_wrapper(self, processor: LoopProcessor, inner_hook):
         def hook(module, inputs, output):
-            keep = getattr(processor, "current_attention_mask", None)
+            keep = self._get_processor_mask(processor)
 
             # Mask first tensor-like input if it's [B, S, ...]
             new_inputs = inputs
@@ -461,66 +834,28 @@ class ModuleLooper():
                     # ---- Start Pre-Quantized Forward ----
                     fwd_start = time.time()
 
-                    layer_outputs = []
-                    for j in range(processor.num_batches):
-                        layer_input = []
-                        for k, layer_inp in enumerate(layer_inputs[j]):
-                            layer_input.append(move_to(layer_inp, device=cur_layer_device, stream=False))
+                    need_outputs = not processor.fwd_after_process
+                    reuse_kv = bool(getattr(module, "reuse_kv", False))
+                    forward_outputs = self._run_forward_batches(
+                        module=module,
+                        processor=processor,
+                        layer_inputs=layer_inputs,
+                        layer_input_kwargs=layer_input_kwargs,
+                        position_ids=position_ids,
+                        attention_masks=attention_masks,
+                        cur_layer_device=cur_layer_device,
+                        is_lm_head_module=is_lm_head_module,
+                        shared_kv_cache_dict=shared_kv_cache_dict,
+                        layer_index=layer_index,
+                        need_outputs=need_outputs,
+                        reuse_kv=reuse_kv,
+                    )
+                    if need_outputs:
+                        processor.receive_layer_inputs(forward_outputs)
+                        layer_inputs = processor.inputs_cache.layer_inputs
+                        del forward_outputs
 
-                        raw_mask = attention_masks[j]
-                        layer_attention_mask = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device, stream=False)
-
-                        # Compute and set keep-mask for this batch
-                        if raw_mask is not None:
-                            seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
-                            keep_mask_bs = normalize_seq_mask(layer_attention_mask, seq_len=seq_len)
-                            setattr(processor, "current_attention_mask", keep_mask_bs)
-                        else:
-                            setattr(processor, "current_attention_mask", None)
-
-                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
-                        layer_position_ids = (
-                            None if not position_ids else move_to(position_ids[j], device=cur_layer_device, stream=False)
-                        )
-                        if layer_position_ids is not None:
-                            additional_layer_inputs["position_ids"] = layer_position_ids
-                        for k, v in layer_input_kwargs[j].items():
-                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device, stream=False)
-
-                        try:
-                            # Ensure internal buffers (e.g., RoPE caches) are on the layer's device
-                            # _rehome_module_to_device(module, cur_layer_device, move_parameters=False, move_buffers=True)
-
-                            # Acquire read lock so auto-GC cannot run while we forward
-                            with self.pool.read_lock(cur_layer_device):
-                                with _device_ctx(cur_layer_device):
-                                    # reuse_kv special-case
-                                    if hasattr(module, "reuse_kv") and module.reuse_kv:
-                                        additional_layer_inputs["kv_last_layer"] = shared_kv_cache_dict.get(layer_index - 1)
-                                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-                                        if shared_kv_cache_dict.get(layer_index) is None:
-                                            shared_kv_cache_dict[layer_index] = layer_output[-1]
-                                    else:
-                                        layer_output = module(*layer_input) if is_lm_head_module else module(*layer_input, **additional_layer_inputs)
-                        except StopForward:
-                            pass
-                        finally:
-                            setattr(processor, "current_attention_mask", None)
-                            del layer_input
-                            del additional_layer_inputs
-
-                        if not processor.fwd_after_process:
-                            if isinstance(layer_output, tuple):
-                                layer_outputs.append([layer_output[0]])
-                            else:
-                                layer_outputs.append([layer_output])
-
-                    if not processor.fwd_after_process:
-                        processor.receive_layer_inputs(layer_outputs)
-                        del layer_outputs
-
-                    fwd_end = time.time()
-                    fwd_time = fwd_end - fwd_start
+                    fwd_time = time.time() - fwd_start
                     processor.set_fwd_time(fwd_time)
 
                     for h in handle:
@@ -565,58 +900,23 @@ class ModuleLooper():
                     # ---- End Process Hook ----
 
                 is_last_module = layer_index == len(quant_modules_pb) - 1
+                layer_outputs: List[List[torch.Tensor]] = []
                 # second forward after process()
                 if not is_last_module and processor.fwd_after_process:
-                    layer_outputs = []
-                    for j in range(processor.num_batches):
-                        layer_input = []
-                        for k, layer_inp in enumerate(layer_inputs[j]):
-                            layer_input.append(move_to(layer_inp, device=cur_layer_device))
-
-                        raw_mask = attention_masks[j]
-                        layer_attention_mask = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device)
-
-                        if raw_mask is not None:
-                            seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
-                            keep_mask_bs = normalize_seq_mask(layer_attention_mask, seq_len=seq_len)
-                            setattr(processor, "current_attention_mask", keep_mask_bs)
-                        else:
-                            setattr(processor, "current_attention_mask", None)
-
-                        additional_layer_inputs = {"attention_mask": layer_attention_mask} if self.support_batch_quantize else {}
-                        layer_position_ids = None if not position_ids else move_to(position_ids[j], device=cur_layer_device)
-                        if layer_position_ids is not None:
-                            additional_layer_inputs["position_ids"] = layer_position_ids
-                        for k, v in layer_input_kwargs[j].items():
-                            additional_layer_inputs[k] = nested_move_to(v, device=cur_layer_device)
-
-                        # Rehome buffers again in case module ran on a different device previously
-                        _rehome_module_to_device(module, cur_layer_device, move_parameters=False, move_buffers=True)
-
-                        # Guard forward with read lock to block auto-GC
-                        with self.pool.read_lock(cur_layer_device):
-                            with _device_ctx(cur_layer_device):
-                                if is_lm_head_module:
-                                    module_output = module(*layer_input)
-                                else:
-                                    module_output = module(*layer_input, **additional_layer_inputs)
-
-                        if isinstance(module_output, tuple):
-                            layer_output = module_output[0]
-                        else:
-                            layer_output = module_output
-
-                        layer_output = move_to(
-                            layer_output,
-                            device=cur_layer_device,
-                        )
-
-                        layer_outputs.append([layer_output])
-
-                        setattr(processor, "current_attention_mask", None)
-
-                        del layer_input
-                        del additional_layer_inputs
+                    layer_outputs = self._run_forward_batches(
+                        module=module,
+                        processor=processor,
+                        layer_inputs=layer_inputs,
+                        layer_input_kwargs=layer_input_kwargs,
+                        position_ids=position_ids,
+                        attention_masks=attention_masks,
+                        cur_layer_device=cur_layer_device,
+                        is_lm_head_module=is_lm_head_module,
+                        shared_kv_cache_dict=shared_kv_cache_dict,
+                        layer_index=layer_index,
+                        need_outputs=True,
+                        reuse_kv=False,
+                    )
 
                 # Finalize module after last processor
                 if p_index == len(self.processors) - 1:
@@ -630,6 +930,7 @@ class ModuleLooper():
                 if processor.fwd_after_process:
                     processor.clear_cache_data()
                     processor.receive_layer_inputs(layer_outputs)
+                    layer_inputs = processor.inputs_cache.layer_inputs
 
                 if p_index == len(self.processors) - 1:
                     torch_sync()
@@ -667,6 +968,8 @@ class ModuleLooper():
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained
         self.pool.wait()  # same as wait('all')
+
+        self.gptq_model.wait_for_turtle_reload()
 
         # paranoid safety check
         # torch_sync()

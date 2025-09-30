@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 09/30/2025 5.0.0-dev `main`: 👀: New Data Parallel + Multi-GPU + Python 3.13g (PYTHON_GIL=0) equals 80%+ overall quant time reduction of large MoE models va v4.2.5. 
 * 09/29/2025 5.0.0-dev `main`: 🎉 New Qwen3 Omni model support. AWQ Marlin kernel integrated + many disk offload, threading, and memory usage fixes. 
 * 09/24/2025 5.0.0-dev `main`: 🎉 Up to 90% cpu mem saving for large MoE models with faster/inline packing! 26% quant time reduction for Qwen3 MoE! AWQ Marlin kernel added. AWQ Gemm loading bug fixes. `act_group_aware` now faster and auto enabled for GPTQ when `desc_act` is False for higher quality recovery. 
 * 09/19/2025 5.0.0-dev `main`: 👀 Cpu memory saving of ~73.5% during quantization stage with new `offload_to_disk` quantization config property default to `True`. 
@@ -152,14 +153,17 @@ Native support support some of the most popular multi-modal models:
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model with format = `FORMAT.GPTQ`
+* ✨ GPTQ, AWQ, and QQQ quantization format with hw accelerated inference kernels. 
+* 🚀 Data Parallism for 80%+ quantization speed reduction with Multi-GPU.
+* 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
 * ✨ Linux, MacOS, Windows platform quantization and accelerated inference support for CUDA (Nvidia), XPU (Intel), ROCm (AMD), MPS (Apple Silicon), CPU (Intel/AMD/Apple Silicon).
-* 💯 100% CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
 * ✨ `Dynamic` mixed quantization control on a per-module basis. Each layer/module can have a unique quantization config or be excluded from quantization all together. 
 * 🚀 Intel Torch 2.8 fused kernel support for XPU [`Arc` + `Datacenter Max`] and CPU [`avx`, `amx`, `xmx`].
 * 🚀 Python 3.13.3t (free-threading, GIL disabled) support for multi-gpu accelerated quantization for MoE models and multi-core cpu boost for post-quant packing.
 * ✨ Asymmetric `Sym=False` support. Model weights sharding support with optional hash check of model weights on load.
 * ✨ `lm_head` module quant inference support for further VRAM reduction.
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference.
+* 💯 100% CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
 
 
 ## Quality: GPTQ 4bit (5.0 bpw) can match BF16:

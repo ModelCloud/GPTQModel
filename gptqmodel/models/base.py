@@ -8,8 +8,10 @@ import copy
 import json
 import os
 import random
+import threading
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Type, Union
+from concurrent.futures import Future
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
 
 import torch
 import torch._dynamo
@@ -50,6 +52,10 @@ from ._const import (
 )
 from .loader import ModelLoader
 from .writer import ModelWriter
+
+
+if TYPE_CHECKING:
+    from ..utils.threadx import DeviceThreadPool
 
 
 class _ClassPropertyDescriptor:
@@ -197,6 +203,10 @@ class BaseQModel(nn.Module):
             autofix_hf_model_config(self.model, path=model_local_path)
 
         self.quantize_config = quantize_config
+
+        self._background_pool: Optional["DeviceThreadPool"] = None
+        self._turtle_reload_future: Optional[Future] = None
+        self._turtle_reload_lock = threading.Lock()
 
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         self.qlinear_kernel = qlinear_kernel
@@ -1073,6 +1083,114 @@ class BaseQModel(nn.Module):
         # print("DEBUG AWQ NODES:", format_nodes(nodes))
         return nodes
 
+    def register_background_pool(self, pool: Optional["DeviceThreadPool"]) -> None:
+        self._background_pool = pool
+
+    def _clone_model_init_kwargs(self, source: PreTrainedModel) -> Dict[str, Any]:
+        kwargs = getattr(source, "_model_init_kwargs", {}) or {}
+        if isinstance(kwargs, dict):
+            return dict(kwargs)
+        return copy.deepcopy(kwargs)
+
+    def _reload_turtle_model_sync(self) -> Optional[PreTrainedModel]:
+        if self.turtle_model is None or self.model_local_path is None:
+            return self.turtle_model
+
+        reload_kwargs = self._clone_model_init_kwargs(self.turtle_model)
+        config = self.turtle_model.config
+
+        new_model = self.loader.from_pretrained(
+            self.model_local_path,
+            config=config,
+            low_cpu_mem_usage=True,
+            **reload_kwargs,
+        )
+        new_model._model_init_kwargs = reload_kwargs
+        return new_model
+
+    def _schedule_turtle_reload(self) -> None:
+        self._apply_completed_turtle_reload()
+
+        if self.turtle_model is None or self.model_local_path is None:
+            return
+
+        pool = self._background_pool
+        if pool is None:
+            new_model = self._reload_turtle_model_sync()
+            if new_model is not None:
+                self.turtle_model = new_model
+            return
+
+        with self._turtle_reload_lock:
+            future = self._turtle_reload_future
+            if future is not None and not future.done():
+                return
+
+            reload_kwargs = self._clone_model_init_kwargs(self.turtle_model)
+            config = self.turtle_model.config
+            model_local_path = self.model_local_path
+            loader = self.loader
+
+            def _reload_task():
+                model = loader.from_pretrained(
+                    model_local_path,
+                    config=config,
+                    low_cpu_mem_usage=True,
+                    **reload_kwargs,
+                )
+                model._model_init_kwargs = reload_kwargs
+                return model
+
+            try:
+                self._turtle_reload_future = pool.submit(CPU, _reload_task)
+            except Exception as exc:
+                log.warning("Turtle reload scheduling failed; falling back to sync reload: %s", exc)
+                self._turtle_reload_future = None
+
+        if self._turtle_reload_future is None:
+            new_model = self._reload_turtle_model_sync()
+            if new_model is not None:
+                self.turtle_model = new_model
+
+    def _apply_completed_turtle_reload(self, *, wait: bool = False) -> None:
+        """Adopt the result of any finished background turtle reload."""
+        future: Optional[Future]
+        with self._turtle_reload_lock:
+            future = self._turtle_reload_future
+
+        if future is None:
+            return
+
+        if wait and not future.done():
+            try:
+                future.result()
+            except Exception:
+                # result() already logs in the calling path
+                pass
+
+        if not future.done():
+            return
+
+        try:
+            new_model = future.result()
+        except Exception as exc:
+            log.warning("Background turtle reload failed; retrying synchronously: %s", exc)
+            new_model = self._reload_turtle_model_sync()
+            with self._turtle_reload_lock:
+                if self._turtle_reload_future is future:
+                    self._turtle_reload_future = None
+                    if new_model is not None:
+                        self.turtle_model = new_model
+            return
+
+        with self._turtle_reload_lock:
+            if self._turtle_reload_future is future:
+                self.turtle_model = new_model
+                self._turtle_reload_future = None
+
+    def wait_for_turtle_reload(self) -> None:
+        self._apply_completed_turtle_reload(wait=True)
+
     # transfer actually materizlied module from turtle (real) to shell
     def shell_module_materialize(
             self,
@@ -1080,6 +1198,8 @@ class BaseQModel(nn.Module):
             device: torch.device,
             non_blocking: bool = False,
     ) -> torch.nn.Module:
+        self._apply_completed_turtle_reload()
+
         if self.turtle_model is None:
             if get_device(target_submodule) != device:
                 target_submodule.to(device)
@@ -1090,16 +1210,9 @@ class BaseQModel(nn.Module):
             target_model=self.model,
             turtle_model=self.turtle_model,
             target_submodule=target_submodule,
-            device=self.quantize_config.device,
+            device=device,
         )
-
-        # reload turle
-        # FIX ME..need trust remote true
-        model_init_kwargs = self.turtle_model._model_init_kwargs
-        self.turtle_model = self.loader.from_pretrained(self.model_local_path, config=self.turtle_model.config, low_cpu_mem_usage=True, **model_init_kwargs)
-        self.turtle_model._model_init_kwargs = model_init_kwargs
-
-        # gc.collect()
+        self._schedule_turtle_reload()
         return module
 
     ## overrides nn.module.train()
@@ -1244,14 +1357,30 @@ class BaseQModel(nn.Module):
         """
         Return list of base modules directly under 'model' but not 'model.layers'.
         """
-        root = cls.module_tree[0]  # "model"
-        exclude = cls.module_tree[1]  # "layers"
+        # Find the index of "#"
+        tree = cls.module_tree
+        try:
+            sharp_idx = tree.index("#")
+        except ValueError:
+            raise ValueError("module_tree must contain '#' to separate hierarchy")
 
-        base = getattr(model, root)
+        assert sharp_idx > 0, "failed to get_base_modules"
+        # root_path = ["model"] or ["model", "language_model"]
+        root_path = tree[:sharp_idx-1]
+
         out = []
-        for name, _ in base.named_children():
-            if name != exclude:  # skip second node which is parallel in scope
-                out.append(f"{root}.{name}")
+        # Traverse each layer in root_path
+        for i in range(len(root_path)):
+            path = root_path[:i + 1]
+            base = model
+            exclude = tree[len(path)]
+
+            for node in path:
+                base = getattr(base, node)
+
+            for name, _ in base.named_children():
+                if name != exclude:
+                    out.append(".".join(path + [name]))
 
         # print(f"Base Modules: {out}")
         return out
