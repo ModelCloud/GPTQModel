@@ -25,7 +25,7 @@ from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_GEMVFast, WQLinear_Marlin
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, set_op_by_name
-from ..quantization.awq.utils.utils import clear_memory, get_best_device
+from ..quantization.awq.utils.utils import get_best_device
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import get_module_by_name_prefix, move_to
@@ -166,8 +166,6 @@ class AWQProcessor(LoopProcessor):
         # we no longer need embed, reduce vram
         self.gptq_model.move_embed("cpu")
 
-        clear_memory()
-
         if layer_kwargs.get("attention_mask") is not None:
             layer_kwargs["attention_mask"] = layer_kwargs["attention_mask"].to(
                 best_device
@@ -271,7 +269,7 @@ class AWQProcessor(LoopProcessor):
         w_scale = w_scale.view(org_shape)
         # Gets the average rescaled magnitude for each output channel
         w_mean = w_scale.mean(0)
-        clear_memory(weight)
+        del weight
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
         # move inp to cpu to avoid memory leak
@@ -293,7 +291,7 @@ class AWQProcessor(LoopProcessor):
             x_sum += chunk_sum.to(inp.device)
 
         x_mean = (x_sum / num_elements).to(inp.dtype)
-        clear_memory(x_sum)
+        del x_sum
 
         # [STEP 3]: Compute output of module
         module_kwargs = self._sanitize_kwargs(kwargs, module2inspect)
@@ -360,8 +358,6 @@ class AWQProcessor(LoopProcessor):
 
         input_feat = self._get_input_feat(module, named_linears)
 
-        clear_memory()
-
         # [STEP 2]: Compute and apply scale list
         with tf32_disable_guard():
             module_config: List[Dict] = self.gptq_model.awq_get_modules_for_scaling(
@@ -391,8 +387,6 @@ class AWQProcessor(LoopProcessor):
         if not self.export_compatible:
             with tf32_disable_guard():
                 self._apply_quant(module, named_childs, start, scales_list)
-
-        clear_memory()
 
     @torch.inference_mode()
     def _search_best_clip(self, layer, named_linears, input_feat):
@@ -469,9 +463,8 @@ class AWQProcessor(LoopProcessor):
             best_max_val_all.append(best_max_val)
 
         best_max_val = torch.cat(best_max_val_all, dim=0)
-
-        clear_memory(input_feat)
-        clear_memory(org_out)
+        del input_feat
+        del org_out
 
         return best_max_val.squeeze(1)
     
@@ -705,7 +698,6 @@ class AWQProcessor(LoopProcessor):
             linear_layer.cpu()
             q_linear.to(next(module.parameters()).device)
             set_op_by_name(module, name, q_linear)
-            clear_memory()
 
             # records
             duration = time.time() - start_time
