@@ -9,6 +9,7 @@ import shutil
 import threading
 from typing import Iterable, List, Optional, Set, Tuple
 
+import accelerate
 import torch
 
 # move base_module tensors to disk
@@ -19,10 +20,18 @@ from torch import nn
 
 from ..looper.named_module import NamedModule
 from .device import get_device
-from .torch import CPU, HAS_CUDA, META
+from .torch import CPU, META
 
 
 _lock = threading.Lock()
+
+# Patch fix thread unsafe accelerate.utils.modeling.clear_device_cache
+def _fake_clear_device_cache(garbage_collection=False):
+    pass
+
+# keep original
+ACCELERATE_CLEAR_DEVICE_CACHE = accelerate.utils.modeling.clear_device_cache
+accelerate.utils.modeling.clear_device_cache = _fake_clear_device_cache
 
 def get_module_fullname(model: torch.nn.Module, module: torch.nn.Module) -> str:
     for name, mod in model.named_modules():
@@ -104,14 +113,6 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
     if not has_params and not has_buffers:
         return
 
-    # print(f"Offload source device: {m_device}")
-    # print_module_tree(module)
-    # TODO FIXME pending PR upstream: https://github.com/huggingface/accelerate/pull/3796
-    real_cache_flush = None
-    if HAS_CUDA:
-        real_cache_flush = torch.cuda.empty_cache
-        torch.cuda.empty_cache = lambda: None
-
     _ = disk_offload(
         module,
         # device_map={ "" : "disk" },  # only touch this subtree
@@ -119,9 +120,6 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
         offload_buffers=True,  # needed for buffers
         execution_device=m_device,
     )
-
-    if real_cache_flush:
-        torch.cuda.empty_cache = real_cache_flush
 
     # print("offload_disk: list item tree")
     # print_module_tree(module)

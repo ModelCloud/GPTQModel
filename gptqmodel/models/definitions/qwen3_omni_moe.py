@@ -89,6 +89,6 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
         # need to load processor for save processor_config and chat_template
         if not load_quantized_model:
             self.processor = AutoProcessor.from_pretrained(self.model_local_path)
-        
+
         return model
 
