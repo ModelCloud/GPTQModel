@@ -808,6 +808,8 @@ class ModuleLooper():
                 quant_modules_pb.title(f"Quantizing layer {layer_index} of {layer_count - 1}").draw()
                 module = layers[layer_index]
 
+            self.gptq_model.wait_for_turtle_reload()
+
             if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
