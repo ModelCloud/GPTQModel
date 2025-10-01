@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from typing import Dict, List, Optional
 
 import torch
+from torch.nn.parallel import replicate as torch_replicate
 
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
@@ -203,10 +204,49 @@ class ModuleLooper():
             module.eval()
             _rehome_module_to_device(module, target_device, move_parameters=True, move_buffers=True)
             self._clear_non_picklable_state(module)
+            setattr(module, "_gptqmodule_device_hint", target_device)
             clones[target_device] = module
             return clones
 
         self._clear_non_picklable_state(module)
+        primary_device = devices[0]
+        replicate_devices = [dev for dev in devices if dev.type == primary_device.type]
+        use_replicate = (
+            len(replicate_devices) == len(devices)
+            and primary_device.type == "cuda"
+            and torch.cuda.is_available()
+        )
+
+        if use_replicate:
+            try:
+                module = module.to(primary_device)
+                module.eval()
+                _rehome_module_to_device(module, primary_device, move_parameters=True, move_buffers=True)
+                setattr(module, "_gptqmodule_device_hint", primary_device)
+                replicate_start = time.perf_counter() if DEBUG_ON else None
+                replicas = torch_replicate(module, devices)
+                if clone_timings is not None and replicate_start is not None:
+                    clone_timings.append(("replicate", time.perf_counter() - replicate_start))
+
+                for dev, replica in zip(devices, replicas):
+                    replica.eval()
+                    _rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
+                    self._clear_non_picklable_state(replica)
+                    setattr(replica, "_gptqmodule_device_hint", dev)
+                    clones[dev] = replica
+
+                if clone_timings:
+                    timing_str = ", ".join(
+                        f"{str(dev)}={duration * 1000:.2f}ms" for dev, duration in clone_timings
+                    )
+                    log.debug(f"ModuleLooper: replicate {module_label} -> {timing_str}")
+                return clones
+            except Exception:
+                log.info("Clone: fast clone failed")
+                # Fall back to deepcopy path if replicate is unsupported for this module.
+                if clone_timings is not None:
+                    clone_timings.append(("replicate_failed", 0.0))
+
         for dev in devices:
             start_ts = time.perf_counter() if DEBUG_ON else None
             replica = copy.deepcopy(module)
@@ -214,6 +254,7 @@ class ModuleLooper():
             replica.eval()
             _rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
             self._clear_non_picklable_state(replica)
+            setattr(replica, "_gptqmodule_device_hint", dev)
             clones[dev] = replica
             if clone_timings is not None and start_ts is not None:
                 clone_timings.append((dev, time.perf_counter() - start_ts))
@@ -263,7 +304,7 @@ class ModuleLooper():
         update. The thin signature keeps the function pickleable for the worker
         queue.
         """
-        module_device = get_device(module)
+        module_device = getattr(module, "_gptqmodule_device_hint", None) or get_device(module)
         _rehome_module_to_device(module, module_device, move_parameters=True, move_buffers=True)
 
         inputs = [move_to(inp, device=module_device, stream=False) for inp in layer_input]
