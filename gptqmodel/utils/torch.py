@@ -213,26 +213,26 @@ DEVICE_0_STREAM = ALL_STREAMS[0]
 
 NEXT_DEVICE_INDEX = 0
 
-def device_next_reset():
-    global NEXT_DEVICE_INDEX
-    NEXT_DEVICE_INDEX = 0
-
-def device_next(balance_strategy: BalanceStrategy = DEFAULT_BALANCE_STRATEGY) -> torch.device:
-    global NEXT_DEVICE_INDEX
-
-    if len(ALL_DEVICES) <= 1:
-        return ALL_DEVICES[0]
-
-    device = ALL_DEVICES[NEXT_DEVICE_INDEX]
-    if NEXT_DEVICE_INDEX < len(ALL_DEVICES) - 1:
-        NEXT_DEVICE_INDEX += 1
-    else:
-        if balance_strategy == BalanceStrategy.MEMORY:
-            NEXT_DEVICE_INDEX = 1
-        else:
-            NEXT_DEVICE_INDEX = 0
-
-    return device
+# def device_next_reset():
+#     global NEXT_DEVICE_INDEX
+#     NEXT_DEVICE_INDEX = 0
+#
+# def device_next(balance_strategy: BalanceStrategy = DEFAULT_BALANCE_STRATEGY) -> torch.device:
+#     global NEXT_DEVICE_INDEX
+#
+#     if len(ALL_DEVICES) <= 1:
+#         return ALL_DEVICES[0]
+#
+#     device = ALL_DEVICES[NEXT_DEVICE_INDEX]
+#     if NEXT_DEVICE_INDEX < len(ALL_DEVICES) - 1:
+#         NEXT_DEVICE_INDEX += 1
+#     else:
+#         if balance_strategy == BalanceStrategy.MEMORY:
+#             NEXT_DEVICE_INDEX = 1
+#         else:
+#             NEXT_DEVICE_INDEX = 0
+#
+#     return device
 
 def torch_streamCtx(stream: Union[torch.cuda.Stream, torch.xpu.Stream]) -> StreamContext:
     return torch.cuda.stream(stream) if HAS_CUDA else torch.xpu.stream(stream)

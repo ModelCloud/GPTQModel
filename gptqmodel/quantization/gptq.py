@@ -22,7 +22,7 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_CUDA, HAS_XPU, device_next
+from ..utils.torch import HAS_CUDA, HAS_XPU
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -73,8 +73,6 @@ class GPTQ:
         else:
             self.name = HF_OPTIMUM
             self.module = module
-            # emulate NamedModule properties
-            self.module.target_device = device_next()
 
         self._validate_module(self.module)
 
@@ -333,7 +331,7 @@ class GPTQ:
                 groups.append(quantizer)
 
         if self.qcfg.desc_act:
-            perm = torch.argsort(torch.diag(H), descending=True)
+            perm = torch.argsort(torch.diag(self.H), descending=True)
             W = W[:, perm]
             self.H = self.H[perm][:, perm]
             invperm = torch.argsort(perm)

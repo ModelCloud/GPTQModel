@@ -41,7 +41,7 @@ from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
 from ..utils.threadx import DeviceThreadPool
-from ..utils.torch import (ALL_DEVICES, CPU, META, device_next, device_next_reset, torch_sync)
+from ..utils.torch import (ALL_DEVICES, CPU, META, torch_sync)
 from .awq_processor import AWQProcessor
 from .qqq_processor import QQQProcessor
 
@@ -864,15 +864,10 @@ class ModuleLooper():
                         continue
 
                     handle = []
-                    device_next_reset()
 
                     subset_size = len(subset)
                     for idx, (name, m) in enumerate(subset.items()):
                         is_last = (idx == subset_size - 1)
-
-                        target_device = device_next()
-                        m.target_device = target_device
-                        m.module.target_device = target_device
 
                         # Wrap the processor hook with masking
                         if hasattr(subset[name], 'forward_hook'):
