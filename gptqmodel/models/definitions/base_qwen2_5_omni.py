@@ -3,11 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from typing import Dict, Optional
 import os
+from typing import Dict, Optional
+
 import torch
 from PIL import Image
 from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
+
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
@@ -84,7 +86,7 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
                             module=self.model.thinker.model.rotary_emb,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
-            
+
             for layer in self.model.thinker.model.layers:
                 layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(CPU)
 
