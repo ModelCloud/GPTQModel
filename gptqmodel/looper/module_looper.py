@@ -15,14 +15,11 @@ thread pool.
 
 from __future__ import annotations
 
-import copy
 import threading
 import time
-from contextlib import contextmanager
 from typing import Dict, List, Optional
 
 import torch
-from torch.nn.parallel import replicate as torch_replicate
 
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
@@ -31,103 +28,28 @@ from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models._const import SUPPORTS_MODULE_TYPES, DEVICE
+from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
-from .. import DEBUG_ON
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.device import get_device, get_device_new
 from ..utils.logger import setup_logger
+from ..utils.looper_helpers import (
+    clone_module_for_devices,
+    device_ctx,
+    forward_batch_worker,
+    normalize_device_like,
+    rehome_module_to_device,
+    select_forward_devices,
+)
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
 from ..utils.threadx import DeviceThreadPool
-from ..utils.torch import (ALL_DEVICES, CPU, META, torch_sync)
+from ..utils.torch import (CPU, META, torch_sync)
 from .awq_processor import AWQProcessor
 from .qqq_processor import QQQProcessor
 
 log = setup_logger()
-
-
-# -------------------- Device helpers (local) --------------------
-
-@contextmanager
-def _device_ctx(dev: Optional[torch.device|DEVICE]):
-    """
-    Ensure the caller thread’s current device matches `dev` for the duration of the
-    context (CUDA/XPU). Prevents cuBLAS/cuDNN handle/device mismatches in multi-GPU.
-    """
-    if dev is None:
-        yield
-    else:
-        if dev.type == "cuda":
-            with torch.cuda.device(dev.index):
-                yield
-        elif dev.type == "xpu" and hasattr(torch, "xpu"):
-            with torch.xpu.device(dev.index):  # type: ignore[attr-defined]
-                yield
-        else:
-            # cpu/mps/meta -> nothing special needed
-            yield
-
-
-@torch.inference_mode()
-def _rehome_module_to_device(
-    module: torch.nn.Module,
-    device: torch.device,
-    *,
-    move_parameters: bool = False,
-    move_buffers: bool = True,
-    include_non_persistent_buffers: bool = True,
-    only_mismatched: bool = True,
-):
-    """
-    Move a module's **registered** tensors to `device`.
-    Defaults to buffers-only (fast; fixes RoPE cos/sin caches and other internal state).
-    Parameters can be moved too, but that risks breaking weight tying and increases VRAM churn.
-    """
-    for sub in module.modules():
-        # Buffers (covers most cached internal tensors if properly registered)
-        if move_buffers:
-            np_set = getattr(sub, "_non_persistent_buffers_set", set())
-            for name, buf in list(getattr(sub, "_buffers", {}).items()):
-                if buf is None or not isinstance(buf, torch.Tensor):
-                    continue
-                if not include_non_persistent_buffers and name in np_set:
-                    continue
-                if only_mismatched and buf.device == device:
-                    continue
-                try:
-                    sub._buffers[name] = buf.to(device, non_blocking=True)
-                except Exception:
-                    try:
-                        sub._buffers[name] = buf.to(device)
-                    except Exception:
-                        pass
-
-        # Parameters (rarely needed; default False)
-        if move_parameters:
-            for pname, p in list(getattr(sub, "_parameters", {}).items()):
-                if p is None or not isinstance(p, torch.nn.Parameter):
-                    continue
-                if only_mismatched and p.device == device:
-                    continue
-                try:
-                    with torch.no_grad():
-                        new_p = torch.nn.Parameter(
-                            p.data.to(device, non_blocking=True),
-                            requires_grad=p.requires_grad
-                        )
-                    sub._parameters[pname] = new_p
-                except Exception:
-                    try:
-                        with torch.no_grad():
-                            new_p = torch.nn.Parameter(
-                                p.data.to(device),
-                                requires_grad=p.requires_grad
-                            )
-                        sub._parameters[pname] = new_p
-                    except Exception:
-                        pass
 
 
 class ModuleLooper():
@@ -160,8 +82,8 @@ class ModuleLooper():
         )
 
         quant_device_hint = getattr(self.gptq_model.quantize_config, "device", None)
-        normalized_quant_device = self._normalize_device_like(quant_device_hint)
-        quant_devices = self._select_forward_devices(normalized_quant_device) if normalized_quant_device else [CPU]
+        normalized_quant_device = normalize_device_like(quant_device_hint)
+        quant_devices = select_forward_devices(normalized_quant_device) if normalized_quant_device else [CPU]
         if not quant_devices:
             quant_devices = [CPU]
 
@@ -191,115 +113,6 @@ class ModuleLooper():
     def _get_processor_mask(self, processor: LoopProcessor):
         tls = getattr(processor, "_mask_tls", None)
         return getattr(tls, "value", None) if tls else None
-
-    def _select_forward_devices(self, base_device: Optional[torch.device]) -> List[torch.device]:
-        if base_device is None:
-            return [CPU]
-
-        devices = [base_device]
-        base_type = base_device.type
-        if base_type in ("cuda", "xpu", "mps"):
-            for dev in ALL_DEVICES:
-                if dev.type == base_type and dev not in devices:
-                    devices.append(dev)
-        return devices
-
-    def _clone_module_for_devices(self, module: torch.nn.Module, devices: List[torch.device]) -> Dict[torch.device, torch.nn.Module]:
-        clones: Dict[torch.device, torch.nn.Module] = {}
-        module_label = getattr(module, "full_name", module.__class__.__name__)
-        clone_timings = [] if DEBUG_ON else None
-
-        if len(devices) == 1:
-            target_device = devices[0]
-            module = module.to(target_device)
-            module.eval()
-            _rehome_module_to_device(module, target_device, move_parameters=True, move_buffers=True)
-            self._clear_non_picklable_state(module)
-            setattr(module, "_gptqmodule_device_hint", target_device)
-            clones[target_device] = module
-            return clones
-
-        self._clear_non_picklable_state(module)
-        primary_device = devices[0]
-        replicate_devices = [dev for dev in devices if dev.type == primary_device.type]
-        use_replicate = (
-            len(replicate_devices) == len(devices)
-            and primary_device.type == "cuda"
-            and torch.cuda.is_available()
-        )
-
-        if use_replicate:
-            try:
-                module = module.to(primary_device)
-                module.eval()
-                _rehome_module_to_device(module, primary_device, move_parameters=True, move_buffers=True)
-                setattr(module, "_gptqmodule_device_hint", primary_device)
-                replicate_start = time.perf_counter() if DEBUG_ON else None
-                replicas = torch_replicate(module, devices)
-                if clone_timings is not None and replicate_start is not None:
-                    clone_timings.append(("replicate", time.perf_counter() - replicate_start))
-
-                for dev, replica in zip(devices, replicas):
-                    replica.eval()
-                    _rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
-                    self._clear_non_picklable_state(replica)
-                    setattr(replica, "_gptqmodule_device_hint", dev)
-                    clones[dev] = replica
-
-                if clone_timings:
-                    timing_str = ", ".join(
-                        f"{str(dev)}={duration * 1000:.2f}ms" for dev, duration in clone_timings
-                    )
-                    log.debug(f"ModuleLooper: replicate {module_label} -> {timing_str}")
-                return clones
-            except Exception:
-                log.info("Clone: fast clone failed")
-                # Fall back to deepcopy path if replicate is unsupported for this module.
-                if clone_timings is not None:
-                    clone_timings.append(("replicate_failed", 0.0))
-
-        for dev in devices:
-            start_ts = time.perf_counter() if DEBUG_ON else None
-            replica = copy.deepcopy(module)
-            replica = replica.to(dev)
-            replica.eval()
-            _rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
-            self._clear_non_picklable_state(replica)
-            setattr(replica, "_gptqmodule_device_hint", dev)
-            clones[dev] = replica
-            if clone_timings is not None and start_ts is not None:
-                clone_timings.append((dev, time.perf_counter() - start_ts))
-
-        if clone_timings:
-            timing_str = ", ".join(f"{str(dev)}={duration * 1000:.2f}ms" for dev, duration in clone_timings)
-            log.debug(f"ModuleLooper: deepcopy {module_label} -> {timing_str}")
-        return clones
-
-    def _clear_non_picklable_state(self, module: torch.nn.Module):
-        cleared = []
-        seen = set()
-
-        def maybe_clear(obj: torch.nn.Module):
-            if id(obj) in seen:
-                return
-            seen.add(id(obj))
-
-        if isinstance(module, torch.nn.Module):
-            for sub in module.modules():
-                maybe_clear(sub)
-        else:
-            maybe_clear(module)
-
-        return cleared
-
-    def _normalize_device_like(self, device_like) -> Optional[torch.device]:
-        if device_like is None:
-            return None
-        if isinstance(device_like, torch.device):
-            return device_like
-        if isinstance(device_like, DEVICE):
-            return device_like.to_torch_device()
-        return torch.device(str(device_like))
 
     def _assign_quant_device_for_module(
         self,
@@ -346,13 +159,13 @@ class ModuleLooper():
         module_attr = getattr(task, "module", None)
         if isinstance(module_attr, torch.nn.Module):
             move_to(module_attr, device=target_device, stream=False)
-            _rehome_module_to_device(module_attr, target_device, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(module_attr, target_device, move_parameters=True, move_buffers=True)
             setattr(module_attr, "target_device", target_device)
 
         layer_attr = getattr(task, "layer", None)
         if isinstance(layer_attr, torch.nn.Module):
             move_to(layer_attr, device=target_device, stream=False)
-            _rehome_module_to_device(layer_attr, target_device, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(layer_attr, target_device, move_parameters=True, move_buffers=True)
             setattr(layer_attr, "target_device", target_device)
 
         quantizer = getattr(task, "quantizer", None)
@@ -380,7 +193,7 @@ class ModuleLooper():
         target_device = self._assign_quant_device_for_module(named_module, fallback_device=fallback_device)
 
         move_to(named_module.module, device=target_device, stream=False)
-        _rehome_module_to_device(named_module.module, target_device, move_parameters=True, move_buffers=True)
+        rehome_module_to_device(named_module.module, target_device, move_parameters=True, move_buffers=True)
 
         setattr(named_module, "target_device", target_device)
         setattr(named_module.module, "target_device", target_device)
@@ -388,79 +201,6 @@ class ModuleLooper():
         self._rehome_processor_task(processor, named_module, target_device)
 
         return target_device
-
-    @staticmethod
-    def _forward_batch_worker(
-        module: torch.nn.Module,
-        processor: LoopProcessor,
-        batch_index: int,
-        layer_input: List[torch.Tensor],
-        layer_input_kwargs: Dict[str, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        position_ids: Optional[torch.Tensor],
-        *,
-        support_batch_quantize: bool,
-        is_lm_head_module: bool,
-        need_output: bool,
-        reuse_kv: bool,
-        prev_kv,
-    ):
-        """Run one forward micro-batch on a pool worker and return its output.
-
-        The worker receives pre-moved inputs, executes the module on its bound
-        device and ships back both the model outputs and any next-layer KV cache
-        update. The thin signature keeps the function pickleable for the worker
-        queue.
-        """
-        module_device = getattr(module, "_gptqmodule_device_hint", None) or get_device(module)
-        _rehome_module_to_device(module, module_device, move_parameters=True, move_buffers=True)
-
-        inputs = [move_to(inp, device=module_device, stream=False) for inp in layer_input]
-
-        attn_tensor = None
-        if attention_mask is not None:
-            attn_tensor = move_to(attention_mask, device=module_device, stream=False)
-
-        additional_inputs: Dict[str, torch.Tensor] = {}
-        if support_batch_quantize and attn_tensor is not None:
-            additional_inputs["attention_mask"] = attn_tensor
-
-        if position_ids is not None:
-            additional_inputs["position_ids"] = move_to(position_ids, device=module_device, stream=False)
-
-        for key, value in layer_input_kwargs.items():
-            additional_inputs[key] = nested_move_to(value, device=module_device, stream=False)
-
-        keep_mask = None
-        if attn_tensor is not None:
-            seq_len = inputs[0].shape[1] if (len(inputs) > 0 and inputs[0].dim() >= 2) else None
-            keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
-
-        mask_tls = getattr(processor, "_mask_tls", None)
-        if mask_tls is not None:
-            mask_tls.value = keep_mask
-
-        if reuse_kv and prev_kv is not None:
-            additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=module_device, stream=False)
-
-        module_output = None
-        kv_next = None
-        try:
-            if is_lm_head_module:
-                module_output = module(*inputs)
-            else:
-                module_output = module(*inputs, **additional_inputs)
-        except StopForward:
-            module_output = None
-        finally:
-            if mask_tls is not None:
-                mask_tls.value = None
-
-        if reuse_kv and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:
-            kv_next = module_output[-1]
-
-        result_output = module_output if need_output else None
-        return batch_index, result_output, kv_next
 
     def _run_forward_batches(
         self,
@@ -485,7 +225,7 @@ class ModuleLooper():
         single threaded path. The helper returns the ordered outputs that feed
         the next processor stage when ``need_outputs`` is set.
         """
-        devices = self._select_forward_devices(cur_layer_device)
+        devices = select_forward_devices(cur_layer_device)
 
         if len(devices) <= 1:
             return self._run_forward_batches_single(
@@ -566,7 +306,7 @@ class ModuleLooper():
             if reuse_kv and prev_kv is not None:
                 additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=cur_layer_device, stream=False)
 
-            _rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
             module_output = None
             try:
@@ -613,7 +353,7 @@ class ModuleLooper():
         devices: List[torch.device],
     ) -> List[List[torch.Tensor]]:
         """Fan batches across device clones and preserve result ordering."""
-        module_replicas = self._clone_module_for_devices(module, devices)
+        module_replicas = clone_module_for_devices(module, devices)
 
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
 
@@ -632,7 +372,7 @@ class ModuleLooper():
                 futures.append(
                     submitter(
                         device,
-                        self._forward_batch_worker,
+                        forward_batch_worker,
                         replica,
                         processor,
                         batch_idx,
@@ -812,7 +552,7 @@ class ModuleLooper():
 
                 # Ensure initial caches (like RoPE) are created on the quant device
                 with self.pool.read_lock(self.gptq_model.quantize_config.device):
-                    with _device_ctx(self.gptq_model.quantize_config.device):
+                    with device_ctx(self.gptq_model.quantize_config.device):
                         if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
                             self.gptq_model.model.generate(**example, **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS)
                         else:

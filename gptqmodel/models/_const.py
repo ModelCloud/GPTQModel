@@ -49,7 +49,7 @@ class DEVICE(str, Enum):
         """Return the backend type compatible with torch.device semantics."""
         if self == DEVICE.ROCM:
             return "cuda"
-        return str(self)
+        return self.value
 
     @property
     def index(self) -> int | None:
