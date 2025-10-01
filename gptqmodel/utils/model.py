@@ -576,6 +576,7 @@ def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack
     module.qzero_format(format=2)
 
 # Optionally convert weight from gptq_v1 to v2 format if Kernel is compatible with v2
+@torch.inference_mode()
 def convert_gptq_v1_to_v2_format(
     model,
     cfg: QuantizeConfig,
@@ -651,6 +652,7 @@ def convert_gptq_v2_to_v1_format_module(
     module.qzero_format(format=1)
 
 # Optionally convert weight from gptq_v2 to v1 export format if Kernel is compatible with v2
+@torch.inference_mode()
 def convert_gptq_v2_to_v1_format(
     model,
     quantize_config: QuantizeConfig,
