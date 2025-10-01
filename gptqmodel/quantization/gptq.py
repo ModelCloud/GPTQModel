@@ -74,6 +74,9 @@ class GPTQ:
             self.name = HF_OPTIMUM
             self.module = module
 
+        module_device = get_device(self.module)
+        setattr(self.module, "target_device", module_device)
+
         self._validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg

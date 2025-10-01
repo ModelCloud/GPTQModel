@@ -159,6 +159,17 @@ class ModuleLooper():
             empty_cache_every_n=1024,  # disable auto gc based gpu work rate; enable if you want
         )
 
+        quant_device_hint = getattr(self.gptq_model.quantize_config, "device", None)
+        normalized_quant_device = self._normalize_device_like(quant_device_hint)
+        quant_devices = self._select_forward_devices(normalized_quant_device) if normalized_quant_device else [CPU]
+        if not quant_devices:
+            quant_devices = [CPU]
+
+        self._quant_devices = quant_devices
+        self._quant_device_rr = 0
+        self._module_device_map: Dict[str, torch.device] = {}
+        self._quant_device_lock = threading.Lock()
+
         self.gptq_model.register_background_pool(self.pool)
 
         for processor in self.processors:
@@ -280,6 +291,103 @@ class ModuleLooper():
             maybe_clear(module)
 
         return cleared
+
+    def _normalize_device_like(self, device_like) -> Optional[torch.device]:
+        if device_like is None:
+            return None
+        if isinstance(device_like, torch.device):
+            return device_like
+        if isinstance(device_like, DEVICE):
+            return device_like.to_torch_device()
+        return torch.device(str(device_like))
+
+    def _assign_quant_device_for_module(
+        self,
+        named_module: NamedModule,
+        fallback_device: torch.device,
+    ) -> torch.device:
+        key = getattr(named_module, "full_name", None) or named_module.name
+        with self._quant_device_lock:
+            cached = self._module_device_map.get(key)
+            if cached is not None:
+                return cached
+
+            if len(self._quant_devices) <= 1:
+                device = self._quant_devices[0]
+            else:
+                device = self._quant_devices[self._quant_device_rr % len(self._quant_devices)]
+                self._quant_device_rr += 1
+
+            if device is None:
+                device = fallback_device
+
+            self._module_device_map[key] = device
+            return device
+
+    def _rehome_processor_task(
+        self,
+        processor: LoopProcessor,
+        named_module: NamedModule,
+        target_device: torch.device,
+    ) -> None:
+        task_map = getattr(processor, "tasks", None)
+        if not task_map:
+            return
+
+        task = task_map.get(named_module.name)
+        if task is None:
+            return
+
+        to_device_fn = getattr(task, "to_device", None)
+        if callable(to_device_fn):
+            to_device_fn(target_device)
+            return
+
+        module_attr = getattr(task, "module", None)
+        if isinstance(module_attr, torch.nn.Module):
+            move_to(module_attr, device=target_device, stream=False)
+            _rehome_module_to_device(module_attr, target_device, move_parameters=True, move_buffers=True)
+            setattr(module_attr, "target_device", target_device)
+
+        layer_attr = getattr(task, "layer", None)
+        if isinstance(layer_attr, torch.nn.Module):
+            move_to(layer_attr, device=target_device, stream=False)
+            _rehome_module_to_device(layer_attr, target_device, move_parameters=True, move_buffers=True)
+            setattr(layer_attr, "target_device", target_device)
+
+        quantizer = getattr(task, "quantizer", None)
+        if quantizer is not None and hasattr(quantizer, "to"):
+            try:
+                quantizer.to(target_device)
+            except Exception:
+                pass
+
+        tensor_attrs = ("H", "module_copy")
+        for attr_name in tensor_attrs:
+            tensor_value = getattr(task, attr_name, None)
+            if isinstance(tensor_value, torch.Tensor):
+                setattr(task, attr_name, tensor_value.to(device=target_device, non_blocking=True))
+
+        if hasattr(task, "dev"):
+            task.dev = target_device
+
+    def _prepare_named_module_for_quantization(
+        self,
+        processor: LoopProcessor,
+        named_module: NamedModule,
+        fallback_device: torch.device,
+    ) -> torch.device:
+        target_device = self._assign_quant_device_for_module(named_module, fallback_device=fallback_device)
+
+        move_to(named_module.module, device=target_device, stream=False)
+        _rehome_module_to_device(named_module.module, target_device, move_parameters=True, move_buffers=True)
+
+        setattr(named_module, "target_device", target_device)
+        setattr(named_module.module, "target_device", target_device)
+
+        self._rehome_processor_task(processor, named_module, target_device)
+
+        return target_device
 
     @staticmethod
     def _forward_batch_worker(
@@ -930,6 +1038,24 @@ class ModuleLooper():
                                 subset.pop(name)
 
                     # ---- Start Process Hook (via DeviceThreadPool) ----
+                    quant_target_devices: Dict[str, torch.device] = {}
+                    for name, named_module in subset.items():
+                        task_map = getattr(processor, "tasks", None)
+                        has_task = bool(task_map and task_map.get(name) is not None)
+
+                        if has_task:
+                            target_device = self._prepare_named_module_for_quantization(
+                                processor=processor,
+                                named_module=named_module,
+                                fallback_device=cur_layer_device,
+                            )
+                        else:
+                            target_device = get_device(named_module.module)
+                            setattr(named_module, "target_device", target_device)
+                            setattr(named_module.module, "target_device", target_device)
+
+                        quant_target_devices[name] = target_device
+
                     futures = []
 
                     @torch.inference_mode()
@@ -938,10 +1064,8 @@ class ModuleLooper():
                         proc.process(module=nm)
                         return nm.name, nm
 
-                    for name in subset:
-                        m = subset[name]
-                        # Prefer the planned target_device; fallback to module's own device
-                        tgt_dev = getattr(m.module, "target_device", None) or get_device(m) or CPU
+                    for name, m in subset.items():
+                        tgt_dev = quant_target_devices.get(name, cur_layer_device)
                         futures.append(self.pool.submit(tgt_dev, _process_on_worker, processor, m))
 
                     for fut in futures:

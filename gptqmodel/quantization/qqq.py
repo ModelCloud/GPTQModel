@@ -195,6 +195,9 @@ class QQQ:
             self.name = HF_OPTIMUM
             self.layer = module
 
+        layer_device = self.layer.weight.device
+        setattr(self.layer, "target_device", layer_device)
+
         self.dev = self.layer.weight.device
 
         self._validate_module(self.layer)
