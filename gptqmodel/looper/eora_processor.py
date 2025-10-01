@@ -177,7 +177,7 @@ class EoraProcessor(LoopProcessor):
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
             PROCESS_LOG_TIME: f"{duration:.3f}",
-            PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
+            PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
             PROCESS_MAX_MEMORY: max_memory,
         }
 

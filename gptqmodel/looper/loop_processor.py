@@ -277,6 +277,10 @@ class LoopProcessor:
     def set_fwd_time(self, fwd_time: float):
         self.fwd_time = fwd_time
 
+    def formatted_fwd_time(self) -> str:
+        fwd_time = self.fwd_time if self.fwd_time is not None else 0.0
+        return f"{fwd_time:.3f}"
+
     # called first
     def preprocess(self, module: NamedModule, **kwargs):
         pass

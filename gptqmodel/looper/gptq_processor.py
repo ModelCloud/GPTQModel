@@ -165,7 +165,7 @@ class GPTQProcessor(LoopProcessor):
             QUANT_LOG_NSAMPLES: f"{nsamples}",
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
-            PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
+            PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
             PROCESS_MAX_MEMORY: get_max_memory(),
         }
 
