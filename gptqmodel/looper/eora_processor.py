@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import contextlib
 import copy
 import time
 from typing import Callable, Dict, Optional, Tuple
@@ -105,15 +106,6 @@ class EoraProcessor(LoopProcessor):
                     device=module.target_device,
                 )
         return tmp
-
-    def pre_process_streaming(self, module: NamedModule):
-        eigen_matrix = self.eigen_scaling_diag_matrix[module.name]
-        with torch_streamCtx(module.target_device_stream):
-            if eigen_matrix is not None:
-                self.eigen_scaling_diag_matrix[module.name] = eigen_matrix.to(device=module.target_device, non_blocking=True)
-
-            module.state["w_wq_diff"] = module.state["w_wq_diff"].to(device=module.target_device, non_blocking=True)
-            module.state["wq"] = module.state["wq"].to(device=module.target_device, non_blocking=True)
 
     def process(self, module: NamedModule):
         assert isinstance(module.adapter_cfg, Lora)

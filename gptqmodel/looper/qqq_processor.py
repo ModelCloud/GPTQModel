@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import contextlib
 import copy
 from typing import Callable, Optional, Tuple
 
@@ -106,14 +107,6 @@ class QQQProcessor(LoopProcessor):
             with tf32_disable_guard():
                 q.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
-
-    def pre_process_streaming(self, module: NamedModule):
-        q = self.tasks[module.name]
-        with torch_streamCtx(module.target_device_stream):
-            if q.H is not None:
-                q.H = q.H.to(device=module.target_device, non_blocking=True)
-            module.weight.data = module.weight.data.to(device=module.target_device, non_blocking=True)
-
 
     def process(self, module: NamedModule):
         self.pb.title(f"Quantizing {module.name} in layer ").draw()

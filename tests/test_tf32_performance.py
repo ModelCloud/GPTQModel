@@ -3,6 +3,7 @@ import torch
 
 from gptqmodel.utils.torch import tf32_disable_guard, tf32_enable_guard
 
+
 try:
     from tabulate import tabulate
 except ImportError:  # pragma: no cover

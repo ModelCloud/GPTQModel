@@ -74,7 +74,7 @@ class GPTQ:
             self.name = HF_OPTIMUM
             self.module = module
             # emulate NamedModule properties
-            self.module.target_device, self.module.target_device_stream = device_next()
+            self.module.target_device = device_next()
 
         self._validate_module(self.module)
 
