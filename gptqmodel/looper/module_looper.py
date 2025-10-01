@@ -576,6 +576,9 @@ class ModuleLooper():
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device
 
+        # make sure turtle is ready for lias
+        self.gptq_model.wait_for_turtle_reload()
+
         # TODO HookLinear add register_forward_pre_hook()
         def store_input_hook(module, args, kwargs):
             # Positional arguments.
