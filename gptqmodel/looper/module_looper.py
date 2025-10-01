@@ -197,13 +197,22 @@ class ModuleLooper():
         module_label = getattr(module, "full_name", module.__class__.__name__)
         clone_timings = [] if DEBUG_ON else None
 
+        if len(devices) == 1:
+            target_device = devices[0]
+            module = module.to(target_device)
+            module.eval()
+            _rehome_module_to_device(module, target_device, move_parameters=True, move_buffers=True)
+            self._clear_non_picklable_state(module)
+            clones[target_device] = module
+            return clones
+
         self._clear_non_picklable_state(module)
         for dev in devices:
             start_ts = time.perf_counter() if DEBUG_ON else None
             replica = copy.deepcopy(module)
             replica = replica.to(dev)
             replica.eval()
-            _rehome_module_to_device(replica, dev, move_parameters=False, move_buffers=True)
+            _rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
             self._clear_non_picklable_state(replica)
             clones[dev] = replica
             if clone_timings is not None and start_ts is not None:
@@ -255,7 +264,7 @@ class ModuleLooper():
         queue.
         """
         module_device = get_device(module)
-        _rehome_module_to_device(module, module_device, move_parameters=False, move_buffers=True)
+        _rehome_module_to_device(module, module_device, move_parameters=True, move_buffers=True)
 
         inputs = [move_to(inp, device=module_device, stream=False) for inp in layer_input]
 
@@ -408,7 +417,7 @@ class ModuleLooper():
             if reuse_kv and prev_kv is not None:
                 additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=cur_layer_device, stream=False)
 
-            _rehome_module_to_device(module, cur_layer_device, move_parameters=False, move_buffers=True)
+            _rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
             module_output = None
             try:
