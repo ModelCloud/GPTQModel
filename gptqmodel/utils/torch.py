@@ -5,6 +5,7 @@
 
 import contextlib
 import gc as py_gc
+from contextlib import contextmanager
 from enum import Enum
 from typing import Callable, List, Union
 
@@ -236,3 +237,39 @@ def device_next(balance_strategy: BalanceStrategy = DEFAULT_BALANCE_STRATEGY) ->
 
 def torch_streamCtx(stream: Union[torch.cuda.Stream, torch.xpu.Stream]) -> StreamContext:
     return torch.cuda.stream(stream) if HAS_CUDA else torch.xpu.stream(stream)
+
+
+@contextmanager
+def tf32_enable_guard():
+    if not HAS_CUDA:
+        yield
+        return
+
+    prev_matmul = torch.backends.cuda.matmul.allow_tf32
+    prev_cudnn = torch.backends.cudnn.allow_tf32
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev_matmul
+        torch.backends.cudnn.allow_tf32 = prev_cudnn
+
+
+@contextmanager
+def tf32_disable_guard():
+    if not HAS_CUDA:
+        yield
+        return
+
+    prev_matmul = torch.backends.cuda.matmul.allow_tf32
+    prev_cudnn = torch.backends.cudnn.allow_tf32
+
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev_matmul
+        torch.backends.cudnn.allow_tf32 = prev_cudnn

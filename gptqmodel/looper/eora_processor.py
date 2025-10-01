@@ -96,13 +96,14 @@ class EoraProcessor(LoopProcessor):
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(module, input: Tuple[torch.Tensor, ...], output: torch.Tensor):
-            self.eora_process_input(
-                input=input,
-                name=name,
-                eigen_scaling_diag_matrix=self.eigen_scaling_diag_matrix,
-                sample_size=self.num_batches,
-                device=module.target_device,
-            )
+            with tf32_disable_guard():
+                self.eora_process_input(
+                    input=input,
+                    name=name,
+                    eigen_scaling_diag_matrix=self.eigen_scaling_diag_matrix,
+                    sample_size=self.num_batches,
+                    device=module.target_device,
+                )
         return tmp
 
     def pre_process_streaming(self, module: NamedModule):
@@ -131,19 +132,20 @@ class EoraProcessor(LoopProcessor):
         assert w_wq_delta.dtype == torch.float32, f"w_wq_delta dtype: {w_wq_delta.dtype}"
 
         # log.info(f"EoRA: module native dtype = `{module_native_dtype}")
-        A, B = self.eora_compute_lora(
-            w_wq_delta=w_wq_delta,
-            name=module.name,
-            eigen_scaling_diag_matrix=eigen_scaling_diag_matrix,
-            rank=module.adapter_cfg.rank,
-            dtype=module.module_dtype,
-            device=module.target_device,
-        )
+        with tf32_disable_guard():
+            A, B = self.eora_compute_lora(
+                w_wq_delta=w_wq_delta,
+                name=module.name,
+                eigen_scaling_diag_matrix=eigen_scaling_diag_matrix,
+                rank=module.adapter_cfg.rank,
+                dtype=module.module_dtype,
+                device=module.target_device,
+            )
 
-        del eigen_scaling_diag_matrix
+            del eigen_scaling_diag_matrix
 
-        # wq with A/B applied
-        computed_wq = wq + (B @ A)
+            # wq with A/B applied
+            computed_wq = wq + (B @ A)
 
         module.state.update({
             "wq": move_to(wq, device=CPU, stream=self.stream),
