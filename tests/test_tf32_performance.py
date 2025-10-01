@@ -1,6 +1,10 @@
 import pytest
 import torch
-from tabulate import tabulate
+
+try:
+    from tabulate import tabulate
+except ImportError:  # pragma: no cover
+    tabulate = None
 
 
 def _supports_bfloat16() -> bool:
@@ -44,8 +48,15 @@ def test_tf32_toggle_has_no_large_perf_regression(dtype: torch.dtype):
 
     try:
         shapes = [
+            # Llama 3 / Mistral style hidden dims
             (64, 4096, 4096),
-            (128, 2048, 8192),
+            (128, 4096, 11008),
+            # Qwen 2/3 7B/14B style
+            (64, 3584, 15360),
+            (64, 8192, 28672),
+            # DeepSeek V3 large experts
+            (32, 7168, 28672),
+            (32, 12288, 49152),
         ]
 
         results = []
@@ -55,7 +66,7 @@ def test_tf32_toggle_has_no_large_perf_regression(dtype: torch.dtype):
             times_no_tf32 = []
             max_diff = 0.0
 
-            for _ in range(100):
+            for _ in range(10):
                 # TF32 enabled
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
@@ -93,14 +104,22 @@ def test_tf32_toggle_has_no_large_perf_regression(dtype: torch.dtype):
                 }
             )
 
-        table = tabulate(
-            [
-                [r["dtype"], r["shape"], f"{r['avg_tf32_ms']:.3f}", f"{r['avg_no_tf32_ms']:.3f}", f"{r['max_abs_diff']:.3e}"]
-                for r in results
-            ],
-            headers=["dtype", "shape", "avg_tf32_ms", "avg_no_tf32_ms", "max_abs_diff"],
-        )
-        print("\nTF32 performance summary:\n" + table)
+        if tabulate:
+            table = tabulate(
+                [
+                    [r["dtype"], r["shape"], f"{r['avg_tf32_ms']:.3f}", f"{r['avg_no_tf32_ms']:.3f}", f"{r['max_abs_diff']:.3e}"]
+                    for r in results
+                ],
+                headers=["dtype", "shape", "avg_tf32_ms", "avg_no_tf32_ms", "max_abs_diff"],
+            )
+            print("\nTF32 performance summary:\n" + table)
+        else:
+            print("\nTF32 performance summary:")
+            for r in results:
+                print(
+                    f"dtype={r['dtype']} shape={r['shape']} avg_tf32={r['avg_tf32_ms']:.3f}ms "
+                    f"avg_no_tf32={r['avg_no_tf32_ms']:.3f}ms max_abs_diff={r['max_abs_diff']:.3e}"
+                )
     finally:
         torch.backends.cuda.matmul.allow_tf32 = original_matmul
         torch.backends.cudnn.allow_tf32 = original_cudnn
