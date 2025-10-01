@@ -30,8 +30,6 @@ from .quantizer import HF_OPTIMUM, Quantizer
 log = setup_logger()
 
 lock = threading.Lock()
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
 
 # TODO: is there a buffer init threading init bug in torch.linalg?
 # bypass strange threading bug by warming up torch.linalg.cholesky to setup internal setup calls

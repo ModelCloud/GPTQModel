@@ -10,9 +10,11 @@ import transformers
 from torch import nn
 
 from ..utils.logger import setup_logger
+from ..utils.torch import tf32_enable_guard
 
 
 log = setup_logger()
+
 
 class StopForward(Exception):
     """Signal an intentional early stop of the forward pass."""
@@ -37,9 +39,12 @@ class HookedConv1D(transformers.Conv1D):
         custom.bias = m.bias
         return custom
 
+    @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = input.to(device=self.weight.data.device)
-        output = super().forward(input)
+        with tf32_enable_guard():
+            output = super().forward(input)
+
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
@@ -93,9 +98,11 @@ class HookedConv1d(torch.nn.Conv1d):
         custom.bias = m.bias
         return custom
 
+    @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = input.to(device=self.weight.data.device)
-        output = super().forward(input)
+        with tf32_enable_guard():
+            output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
@@ -150,9 +157,11 @@ class HookedConv2d(torch.nn.Conv2d):
         custom.bias = m.bias
         return custom
 
+    @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = input.to(device=self.weight.data.device)
-        output = super().forward(input)
+        with tf32_enable_guard():
+            output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
@@ -175,9 +184,11 @@ class HookedTransformerConv1D(transformers.Conv1D):
         custom.bias = conv1d.bias
         return custom
 
+    @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = input.to(device=self.weight.data.device)
-        output = super().forward(input)
+        with tf32_enable_guard():
+            output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
@@ -201,9 +212,11 @@ class HookedLinear(torch.nn.Linear):
         custom_linear.bias = linear.bias
         return custom_linear
 
+    @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = input.to(device=self.weight.data.device)
-        output = super().forward(input)
+        with tf32_enable_guard():
+            output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:

@@ -20,7 +20,7 @@ from ..quantization.config import METHOD, QuantizeConfig
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
-from ..utils.torch import CPU, DEVICE_0, torch_streamCtx, torch_sync
+from ..utils.torch import CPU, DEVICE_0, tf32_disable_guard, torch_streamCtx, torch_sync
 
 log = setup_logger()
 
@@ -103,7 +103,8 @@ class QQQProcessor(LoopProcessor):
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             # gptq is mutable.
             q = self.tasks[name]  # noqa: F821
-            q.add_batch(inp[0].data, out.data)  # noqa: F821
+            with tf32_disable_guard():
+                q.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
 
     def pre_process_streaming(self, module: NamedModule):
@@ -121,7 +122,8 @@ class QQQProcessor(LoopProcessor):
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
         q = qqq[module.name]
-        wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, q_scales_extra, nsamples = q.quantize()
+        with tf32_disable_guard():
+            wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, q_scales_extra, nsamples = q.quantize()
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
 

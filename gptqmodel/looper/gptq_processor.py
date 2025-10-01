@@ -21,7 +21,7 @@ from ..quantization.config import METHOD, QuantizeConfig
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
-from ..utils.torch import HAS_CUDA, torch_streamCtx, torch_sync
+from ..utils.torch import HAS_CUDA, tf32_disable_guard, torch_streamCtx, torch_sync
 
 log = setup_logger()
 lock = threading.Lock()
@@ -103,7 +103,8 @@ class GPTQProcessor(LoopProcessor):
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             g = self.tasks[name]  # noqa: F821
-            g.add_batch(inp[0].data, out.data)  # noqa: F821
+            with tf32_disable_guard():
+                g.add_batch(inp[0].data, out.data)  # noqa: F821
             del inp, out
         return tmp
 
@@ -125,7 +126,8 @@ class GPTQProcessor(LoopProcessor):
         with self.lock:
             g = self.tasks[module.name]
 
-        wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        with tf32_disable_guard():
+            wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 
         q_scales = q_scales.to(CPU)
         q_zeros = q_zeros.to(CPU)
