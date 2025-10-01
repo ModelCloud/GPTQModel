@@ -197,12 +197,14 @@ class ModuleLooper():
         module_label = getattr(module, "full_name", module.__class__.__name__)
         clone_timings = [] if DEBUG_ON else None
 
+        self._clear_non_picklable_state(module)
         for dev in devices:
             start_ts = time.perf_counter() if DEBUG_ON else None
             replica = copy.deepcopy(module)
             replica = replica.to(dev)
             replica.eval()
             _rehome_module_to_device(replica, dev, move_parameters=False, move_buffers=True)
+            self._clear_non_picklable_state(replica)
             clones[dev] = replica
             if clone_timings is not None and start_ts is not None:
                 clone_timings.append((dev, time.perf_counter() - start_ts))
