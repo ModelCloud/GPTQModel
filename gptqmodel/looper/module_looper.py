@@ -197,20 +197,16 @@ class ModuleLooper():
         module_label = getattr(module, "full_name", module.__class__.__name__)
         clone_timings = [] if DEBUG_ON else None
 
-        cleared_attrs = self._clear_non_picklable_state(module)
-        try:
-            for dev in devices:
-                start_ts = time.perf_counter() if DEBUG_ON else None
-                replica = copy.deepcopy(module)
-                replica = replica.to(dev)
-                replica.eval()
-                _rehome_module_to_device(replica, dev, move_parameters=False, move_buffers=True)
-                self._clear_non_picklable_state(replica)
-                clones[dev] = replica
-                if clone_timings is not None and start_ts is not None:
-                    clone_timings.append((dev, time.perf_counter() - start_ts))
-        finally:
-            self._restore_non_picklable_state(cleared_attrs)
+        for dev in devices:
+            start_ts = time.perf_counter() if DEBUG_ON else None
+            replica = copy.deepcopy(module)
+            replica = replica.to(dev)
+            replica.eval()
+            _rehome_module_to_device(replica, dev, move_parameters=False, move_buffers=True)
+            clones[dev] = replica
+            if clone_timings is not None and start_ts is not None:
+                clone_timings.append((dev, time.perf_counter() - start_ts))
+
         if clone_timings:
             timing_str = ", ".join(f"{str(dev)}={duration * 1000:.2f}ms" for dev, duration in clone_timings)
             log.debug(f"ModuleLooper: deepcopy {module_label} -> {timing_str}")
@@ -224,9 +220,6 @@ class ModuleLooper():
             if id(obj) in seen:
                 return
             seen.add(id(obj))
-            if hasattr(obj, "target_device_stream"):
-                cleared.append((obj, getattr(obj, "target_device_stream")))
-                setattr(obj, "target_device_stream", None)
 
         if isinstance(module, torch.nn.Module):
             for sub in module.modules():
@@ -235,11 +228,6 @@ class ModuleLooper():
             maybe_clear(module)
 
         return cleared
-
-    @staticmethod
-    def _restore_non_picklable_state(cleared):
-        for obj, value in cleared:
-            setattr(obj, "target_device_stream", value)
 
     @staticmethod
     def _forward_batch_worker(
@@ -828,7 +816,9 @@ class ModuleLooper():
                     for idx, (name, m) in enumerate(subset.items()):
                         is_last = (idx == subset_size - 1)
 
-                        m.module.target_device, m.module.target_device_stream = device_next()
+                        target_device = device_next()
+                        m.target_device = target_device
+                        m.module.target_device = target_device
 
                         # Wrap the processor hook with masking
                         if hasattr(subset[name], 'forward_hook'):

@@ -196,7 +196,7 @@ class QQQ:
             self.name = HF_OPTIMUM
             self.layer = module
             # emulate NamedModule properties
-            self.layer.target_device, self.layer.target_device_stream = device_next()
+            self.layer.target_device = device_next()
         self.dev = self.layer.weight.device
 
         self._validate_module(self.layer)

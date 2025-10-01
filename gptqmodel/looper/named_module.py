@@ -28,8 +28,8 @@ class NamedModule(torch.nn.Module):
         self.layer_index = layer_index # layerid in a repeating layer, if in outside layer, this info may be fake
 
         # some processing will move this module to target_device gptq, eora, etc
-        # self.target_device, self.target_device_stream = device_next()
-        self.target_device, self.target_device_stream = None, None
+        # self.target_device = device_next()
+        self.target_device = None
 
 
         # persistent work state for named module (used by some LoopProcessors)

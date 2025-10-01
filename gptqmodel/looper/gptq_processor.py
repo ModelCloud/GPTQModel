@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import contextlib
 import copy
 import threading
 from typing import Callable, Optional, Tuple
@@ -108,14 +109,6 @@ class GPTQProcessor(LoopProcessor):
             del inp, out
         return tmp
 
-    def pre_process_streaming(self, module: NamedModule):
-        g = self.tasks[module.name]
-        with torch_streamCtx(module.target_device_stream):
-            # log.debug(f"streaming module `{g.name}` to device = `{module.target_device}`")
-            if g.H is not None:
-                g.H = g.H.to(device=module.target_device, non_blocking=True)
-            g.module.weight.data = g.module.weight.data.to(device=module.target_device, non_blocking=True)
-
     def process(self, module: NamedModule):
         # Reset peak memory stats
         #torch.cuda.reset_peak_memory_stats()
@@ -172,7 +165,7 @@ class GPTQProcessor(LoopProcessor):
             QUANT_LOG_NSAMPLES: f"{nsamples}",
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
-            PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
+            PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
             PROCESS_MAX_MEMORY: get_max_memory(),
         }
 
