@@ -29,17 +29,17 @@ from ..quantization.awq.utils.utils import clear_memory, get_best_device
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import get_module_by_name_prefix, move_to
-from ..utils.torch import CPU, torch_sync
+from ..utils.torch import CPU, tf32_disable_guard, tf32_enable_guard, torch_sync
 
 log = setup_logger()
 
 class AWQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration, prepare_dataset_func,
-                 calibration_concat_size: Optional[int], batch_size: int, gptq_model, model,
+                 calibration_concat_size: Optional[int], calibration_sort: Optional[str], batch_size: int, gptq_model, model,
                  logger_board: str = "", require_fwd: bool = True, calculate_w_wq_diff: bool = False):
 
         super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration=calibration,
-                         calibration_concat_size=calibration_concat_size,
+                         calibration_concat_size=calibration_concat_size, calibration_sort=calibration_sort,
                          prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
                          logger_board=logger_board, require_fwd=require_fwd)
 
@@ -147,8 +147,9 @@ class AWQProcessor(LoopProcessor):
                 target_device = model_device
 
             print(f"AWQProcessor: model parameters are on meta device, using {target_device} instead")
-            
-            self.model(samples.to(torch.device(target_device)), use_cache=False)
+
+            with tf32_enable_guard():
+                self.model(samples.to(torch.device(target_device)), use_cache=False)
         except ValueError:  # work with early exit
             pass
         modules[0] = modules[0].module  # restore
@@ -295,15 +296,18 @@ class AWQProcessor(LoopProcessor):
         clear_memory(x_sum)
 
         # [STEP 3]: Compute output of module
+        module_kwargs = self._sanitize_kwargs(kwargs, module2inspect)
         with torch.inference_mode():
-            module_kwargs = self._sanitize_kwargs(kwargs, module2inspect)
-            fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
-            fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
+            with tf32_enable_guard():
+                fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
 
-        # [STEP 4]: Compute loss
-        best_scales, loss = self._compute_best_scale(
-            inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs
-        )
+            with tf32_disable_guard():
+                fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
+
+                # [STEP 4]: Compute loss
+                best_scales, loss = self._compute_best_scale(
+                    inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs
+                )
 
         return (
             get_op_name(module, prev_op),
@@ -326,10 +330,11 @@ class AWQProcessor(LoopProcessor):
         # self.gptq_model.move_embed(common_device)
 
         # Transformers >= 4.48.0 requires positional embeddings should be computed before forward pass
-        if (self.module_kwargs.get("position_embeddings") is None):
-            self.module_kwargs["position_embeddings"] = self.model.model.rotary_emb(
-                self.inps, self.module_kwargs["position_ids"]
-            )
+        if self.module_kwargs.get("position_embeddings") is None:
+            with tf32_enable_guard():
+                self.module_kwargs["position_embeddings"] = self.model.model.rotary_emb(
+                    self.inps, self.module_kwargs["position_ids"]
+                )
 
         # TODO FIX ME: ???
         if (self.module_kwargs.get('attention_mask') is None):
@@ -358,31 +363,34 @@ class AWQProcessor(LoopProcessor):
         clear_memory()
 
         # [STEP 2]: Compute and apply scale list
-        module_config: List[Dict] = self.gptq_model.awq_get_modules_for_scaling(
-            module, input_feat, self.module_kwargs
-        )
-        scales_list = [
-            self._search_best_scale(module, **layer)
-            for layer in module_config
-        ]
-        apply_scale(module, scales_list, input_feat_dict=input_feat)
+        with tf32_disable_guard():
+            module_config: List[Dict] = self.gptq_model.awq_get_modules_for_scaling(
+                module, input_feat, self.module_kwargs
+            )
+            scales_list = [
+                self._search_best_scale(module, **layer)
+                for layer in module_config
+            ]
+            apply_scale(module, scales_list, input_feat_dict=input_feat)
         scales_list = append_str_prefix(
             scales_list, get_op_name(self.model, module) + "."
         )
 
         # [STEP 3]: Compute and apply clipping list
         if self.apply_clip:
-            clip_list = self._search_best_clip(
-                module, named_linears, input_feat
-            )
-            apply_clip(module, clip_list)
+            with tf32_disable_guard():
+                clip_list = self._search_best_clip(
+                    module, named_linears, input_feat
+                )
+                apply_clip(module, clip_list)
             clip_list = append_str_prefix(
                 clip_list, get_op_name(self.model, module) + "."
             )
 
         # [STEP 4]: Quantize weights
         if not self.export_compatible:
-            self._apply_quant(module, named_childs, start, scales_list)
+            with tf32_disable_guard():
+                self._apply_quant(module, named_childs, start, scales_list)
 
         clear_memory()
 
@@ -397,9 +405,10 @@ class AWQProcessor(LoopProcessor):
                 continue
 
             named_linears[name].to(get_best_device())
-            max_val = self._compute_best_clip(
-                named_linears[name].weight, input_feat[name]
-            )
+            with tf32_disable_guard():
+                max_val = self._compute_best_clip(
+                    named_linears[name].weight, input_feat[name]
+                )
             clip_list.append((name, max_val))
             named_linears[name].cpu()
 
@@ -615,25 +624,26 @@ class AWQProcessor(LoopProcessor):
     def _module_forward(
             self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
     ) -> torch.Tensor:
-        if self.n_parallel_calib_samples is None:
-            # runs through all samples at once
-            module_output = module(x, **module_kwargs)
-            if isinstance(module_output, tuple):
-                module_output = module_output[0]
-        else:
-            # memory efficiently runs through all calibration samples
-            # but only n_parallel_calib_samples at a time
-            module_output = []
-            partitioned_inputs = torch.split(x, self.n_parallel_calib_samples)
-            for x_partial in partitioned_inputs:
-                partial_output = module(x_partial, **module_kwargs)
+        with tf32_enable_guard():
+            if self.n_parallel_calib_samples is None:
+                # runs through all samples at once
+                module_output = module(x, **module_kwargs)
+                if isinstance(module_output, tuple):
+                    module_output = module_output[0]
+            else:
+                # memory efficiently runs through all calibration samples
+                # but only n_parallel_calib_samples at a time
+                module_output = []
+                partitioned_inputs = torch.split(x, self.n_parallel_calib_samples)
+                for x_partial in partitioned_inputs:
+                    partial_output = module(x_partial, **module_kwargs)
 
-                if isinstance(partial_output, tuple):
-                    partial_output = partial_output[0]
+                    if isinstance(partial_output, tuple):
+                        partial_output = partial_output[0]
 
-                module_output.append(partial_output.cpu())
+                    module_output.append(partial_output.cpu())
 
-            module_output = torch.cat(module_output, dim=0)
+                module_output = torch.cat(module_output, dim=0)
 
         return module_output
 
