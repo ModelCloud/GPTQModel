@@ -103,7 +103,7 @@ class EoraProcessor(LoopProcessor):
                     name=name,
                     eigen_scaling_diag_matrix=self.eigen_scaling_diag_matrix,
                     sample_size=self.num_batches,
-                    device=module.target_device,
+                    device=module.weight.data.device,
                 )
         return tmp
 
@@ -131,7 +131,7 @@ class EoraProcessor(LoopProcessor):
                 eigen_scaling_diag_matrix=eigen_scaling_diag_matrix,
                 rank=module.adapter_cfg.rank,
                 dtype=module.module_dtype,
-                device=module.target_device,
+                device=module.weight.data.device,
             )
 
             del eigen_scaling_diag_matrix

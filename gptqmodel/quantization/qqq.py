@@ -10,7 +10,6 @@ from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
 from ..quantization.quantizer import HF_OPTIMUM
 from ..utils import setup_logger
-from ..utils.torch import device_next
 from .gptq import get_number_of_rows_and_cols
 
 
@@ -195,8 +194,10 @@ class QQQ:
         else:
             self.name = HF_OPTIMUM
             self.layer = module
-            # emulate NamedModule properties
-            self.layer.target_device = device_next()
+
+        layer_device = self.layer.weight.device
+        setattr(self.layer, "target_device", layer_device)
+
         self.dev = self.layer.weight.device
 
         self._validate_module(self.layer)

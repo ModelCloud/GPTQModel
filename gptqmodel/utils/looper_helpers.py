@@ -1,0 +1,302 @@
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+from __future__ import annotations
+
+import copy
+import time
+from contextlib import contextmanager
+from typing import Dict, List, Optional, Tuple
+
+import torch
+from torch.nn.parallel import replicate as torch_replicate
+
+from .. import DEBUG_ON
+from ..nn_modules.hooked_linear import StopForward
+from ..utils.attn_mask import normalize_seq_mask
+from ..utils.device import get_device
+from ..utils.logger import setup_logger
+from ..utils.model import move_to, nested_move_to
+from ..utils.torch import ALL_DEVICES, CPU
+
+
+log = setup_logger()
+
+
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from ..looper.loop_processor import LoopProcessor
+    from ..models._const import DEVICE
+
+
+__all__ = [
+    "device_ctx",
+    "rehome_module_to_device",
+    "clear_non_picklable_state",
+    "select_forward_devices",
+    "normalize_device_like",
+    "clone_module_for_devices",
+    "forward_batch_worker",
+]
+
+
+@contextmanager
+def device_ctx(dev: Optional[torch.device | "DEVICE"]):
+    """Temporarily set the thread-local device for CUDA/XPU backends."""
+    if dev is None:
+        yield
+        return
+
+    if dev.type == "cuda":
+        with torch.cuda.device(dev.index):
+            yield
+        return
+    if dev.type == "xpu" and hasattr(torch, "xpu"):
+        with torch.xpu.device(dev.index):  # type: ignore[attr-defined]
+            yield
+        return
+
+    # cpu/mps/meta -> nothing special needed
+    yield
+
+
+@torch.inference_mode()
+def rehome_module_to_device(
+    module: torch.nn.Module,
+    device: torch.device,
+    *,
+    move_parameters: bool = False,
+    move_buffers: bool = True,
+    include_non_persistent_buffers: bool = True,
+    only_mismatched: bool = True,
+) -> None:
+    """Move registered tensors on ``module`` to ``device`` with defensive fallbacks."""
+    for sub in module.modules():
+        if move_buffers:
+            np_set = getattr(sub, "_non_persistent_buffers_set", set())
+            for name, buf in list(getattr(sub, "_buffers", {}).items()):
+                if buf is None or not isinstance(buf, torch.Tensor):
+                    continue
+                if not include_non_persistent_buffers and name in np_set:
+                    continue
+                if only_mismatched and buf.device == device:
+                    continue
+                try:
+                    sub._buffers[name] = buf.to(device, non_blocking=True)
+                except Exception:
+                    try:
+                        sub._buffers[name] = buf.to(device)
+                    except Exception:
+                        pass
+
+        if move_parameters:
+            for pname, p in list(getattr(sub, "_parameters", {}).items()):
+                if p is None or not isinstance(p, torch.nn.Parameter):
+                    continue
+                if only_mismatched and p.device == device:
+                    continue
+                try:
+                    with torch.no_grad():
+                        new_p = torch.nn.Parameter(
+                            p.data.to(device, non_blocking=True),
+                            requires_grad=p.requires_grad,
+                        )
+                    sub._parameters[pname] = new_p
+                except Exception:
+                    try:
+                        with torch.no_grad():
+                            new_p = torch.nn.Parameter(
+                                p.data.to(device),
+                                requires_grad=p.requires_grad,
+                            )
+                        sub._parameters[pname] = new_p
+                    except Exception:
+                        pass
+
+
+def clear_non_picklable_state(module: torch.nn.Module) -> List[Tuple[str, int]]:
+    """Placeholder hook that tracks visited modules; extended elsewhere as needed."""
+    cleared: List[Tuple[str, int]] = []
+    seen = set()
+
+    def maybe_clear(obj: torch.nn.Module):
+        if id(obj) in seen:
+            return
+        seen.add(id(obj))
+
+    if isinstance(module, torch.nn.Module):
+        for sub in module.modules():
+            maybe_clear(sub)
+    else:
+        maybe_clear(module)
+
+    return cleared
+
+
+def select_forward_devices(base_device: Optional[torch.device]) -> List[torch.device]:
+    if base_device is None:
+        return [CPU]
+
+    devices = [base_device]
+    base_type = base_device.type
+    if base_type in ("cuda", "xpu", "mps"):
+        for dev in ALL_DEVICES:
+            if dev.type == base_type and dev not in devices:
+                devices.append(dev)
+    return devices
+
+
+def normalize_device_like(device_like) -> Optional[torch.device]:
+    if device_like is None:
+        return None
+    if isinstance(device_like, torch.device):
+        return device_like
+    if hasattr(device_like, "to_torch_device"):
+        return device_like.to_torch_device()
+    return torch.device(str(device_like))
+
+
+def clone_module_for_devices(
+    module: torch.nn.Module,
+    devices: List[torch.device],
+    *,
+    clear_state_fn=clear_non_picklable_state,
+) -> Dict[torch.device, torch.nn.Module]:
+    clones: Dict[torch.device, torch.nn.Module] = {}
+    module_label = getattr(module, "full_name", module.__class__.__name__)
+    clone_timings = [] if DEBUG_ON else None
+
+    if len(devices) == 1:
+        target_device = devices[0]
+        module = module.to(target_device)
+        module.eval()
+        rehome_module_to_device(module, target_device, move_parameters=True, move_buffers=True)
+        clear_state_fn(module)
+        setattr(module, "_gptqmodule_device_hint", target_device)
+        clones[target_device] = module
+        return clones
+
+    clear_state_fn(module)
+    primary_device = devices[0]
+    replicate_devices = [dev for dev in devices if dev.type == primary_device.type]
+    use_replicate = (
+        len(replicate_devices) == len(devices)
+        and primary_device.type == "cuda"
+        and torch.cuda.is_available()
+    )
+
+    if use_replicate:
+        try:
+            module = module.to(primary_device)
+            module.eval()
+            rehome_module_to_device(module, primary_device, move_parameters=True, move_buffers=True)
+            setattr(module, "_gptqmodule_device_hint", primary_device)
+            replicate_start = time.perf_counter() if DEBUG_ON else None
+            replicas = torch_replicate(module, devices)
+            if clone_timings is not None and replicate_start is not None:
+                clone_timings.append(("replicate", time.perf_counter() - replicate_start))
+
+            for dev, replica in zip(devices, replicas):
+                replica.eval()
+                rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
+                clear_state_fn(replica)
+                setattr(replica, "_gptqmodule_device_hint", dev)
+                clones[dev] = replica
+
+            if clone_timings:
+                timing_str = ", ".join(
+                    f"{str(dev)}={duration * 1000:.2f}ms" for dev, duration in clone_timings
+                )
+                log.debug(f"ModuleLooper: replicate {module_label} -> {timing_str}")
+            return clones
+        except Exception:
+            log.info("Clone: fast clone failed")
+            if clone_timings is not None:
+                clone_timings.append(("replicate_failed", 0.0))
+
+    for dev in devices:
+        start_ts = time.perf_counter() if DEBUG_ON else None
+        replica = copy.deepcopy(module)
+        replica = replica.to(dev)
+        replica.eval()
+        rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
+        clear_state_fn(replica)
+        setattr(replica, "_gptqmodule_device_hint", dev)
+        clones[dev] = replica
+        if clone_timings is not None and start_ts is not None:
+            clone_timings.append((dev, time.perf_counter() - start_ts))
+
+    if clone_timings:
+        timing_str = ", ".join(f"{str(dev)}={duration * 1000:.2f}ms" for dev, duration in clone_timings)
+        log.debug(f"ModuleLooper: deepcopy {module_label} -> {timing_str}")
+    return clones
+
+
+@torch.inference_mode()
+def forward_batch_worker(
+    module: torch.nn.Module,
+    processor: "LoopProcessor",
+    batch_index: int,
+    layer_input: List[torch.Tensor],
+    layer_input_kwargs: Dict[str, torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
+    position_ids: Optional[torch.Tensor],
+    *,
+    support_batch_quantize: bool,
+    is_lm_head_module: bool,
+    need_output: bool,
+    reuse_kv: bool,
+    prev_kv,
+):
+    module_device = getattr(module, "_gptqmodule_device_hint", None) or get_device(module)
+    rehome_module_to_device(module, module_device, move_parameters=True, move_buffers=True)
+
+    inputs = [move_to(inp, device=module_device, stream=False) for inp in layer_input]
+
+    attn_tensor = None
+    if attention_mask is not None:
+        attn_tensor = move_to(attention_mask, device=module_device, stream=False)
+
+    additional_inputs: Dict[str, torch.Tensor] = {}
+    if support_batch_quantize and attn_tensor is not None:
+        additional_inputs["attention_mask"] = attn_tensor
+
+    if position_ids is not None:
+        additional_inputs["position_ids"] = move_to(position_ids, device=module_device, stream=False)
+
+    for key, value in layer_input_kwargs.items():
+        additional_inputs[key] = nested_move_to(value, device=module_device, stream=False)
+
+    keep_mask = None
+    if attn_tensor is not None:
+        seq_len = inputs[0].shape[1] if (len(inputs) > 0 and inputs[0].dim() >= 2) else None
+        keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
+
+    mask_tls = getattr(processor, "_mask_tls", None)
+    if mask_tls is not None:
+        mask_tls.value = keep_mask
+
+    if reuse_kv and prev_kv is not None:
+        additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=module_device, stream=False)
+
+    module_output = None
+    kv_next = None
+    try:
+        if is_lm_head_module:
+            module_output = module(*inputs)
+        else:
+            module_output = module(*inputs, **additional_inputs)
+    except StopForward:
+        module_output = None
+    finally:
+        if mask_tls is not None:
+            mask_tls.value = None
+
+    if reuse_kv and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:
+        kv_next = module_output[-1]
+
+    result_output = module_output if need_output else None
+    return batch_index, result_output, kv_next

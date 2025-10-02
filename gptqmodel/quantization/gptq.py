@@ -22,7 +22,7 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_CUDA, HAS_XPU, device_next
+from ..utils.torch import HAS_CUDA, HAS_XPU
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -73,8 +73,9 @@ class GPTQ:
         else:
             self.name = HF_OPTIMUM
             self.module = module
-            # emulate NamedModule properties
-            self.module.target_device = device_next()
+
+        module_device = get_device(self.module)
+        setattr(self.module, "target_device", module_device)
 
         self._validate_module(self.module)
 
@@ -148,7 +149,7 @@ class GPTQ:
         if inp_device.type == "cuda":
             torch.cuda.set_device(inp_device)
 
-        inp = inp.to(device=self.module.target_device, dtype=torch.float32)
+        #inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
         # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
@@ -186,10 +187,12 @@ class GPTQ:
                 reshaped_inp = unfold(reshaped_inp)
             reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
 
+        # Delay float32 cast until after reshaping to avoid an extra temporary tensor
+        reshaped_inp = reshaped_inp.to(dtype=torch.float32)
+
         batch_token_size = reshaped_inp.shape[0]
 
-        if self.H.device != reshaped_inp.device:
-            self.H = self.H.to(device=reshaped_inp.device)
+        self.H = self.H.to(device=reshaped_inp.device)
 
         # moe model may receive an empty batch, return early
         if batch_token_size == 0:
@@ -301,17 +304,17 @@ class GPTQ:
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module(device=self.module.target_device)
+            W = self._clone_module(device=self.H.device)
         else:
-            W = self.module_copy.to(device=self.module.target_device)
+            W = self.module_copy.to(device=self.H.device)
             del self.module_copy
 
         self.quantizer.find_params(W, weight=True)
 
-        H = self.H.to(device=self.module.target_device)
+        # H = self.H.to(device=self.H.device)
 
-        dead = torch.diag(H) == 0
-        H[dead, dead] = 1
+        dead = torch.diag(self.H) == 0
+        self.H[dead, dead] = 1
         W[:, dead] = 0
 
         # g_idx = []
@@ -332,23 +335,23 @@ class GPTQ:
                 groups.append(quantizer)
 
         if self.qcfg.desc_act:
-            perm = torch.argsort(torch.diag(H), descending=True)
+            perm = torch.argsort(torch.diag(self.H), descending=True)
             W = W[:, perm]
-            H = H[perm][:, perm]
+            self.H = self.H[perm][:, perm]
             invperm = torch.argsort(perm)
 
         elif self.qcfg.act_group_aware:
-            diag_h = torch.diag(H)
+            diag_h = torch.diag(self.H)
             local_perms = compute_local_perms(diag_h, self.qcfg.group_size)
             global_perm = compute_global_perm(diag_h, self.qcfg.group_size)
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
             W = W[:, final_perm]
-            H = H[final_perm][:, final_perm]
+            self.H = self.H[final_perm][:, final_perm]
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        Hinv, damp = self.hessian_inverse(H)
+        Hinv, damp = self.hessian_inverse(self.H)
 
         # Use simplified loop when mock_quantization is active
         if self.qcfg.mock_quantization or (self.fail_safe and self.fwd_counter == 0):
