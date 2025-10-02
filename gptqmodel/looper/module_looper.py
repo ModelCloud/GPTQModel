@@ -461,6 +461,18 @@ class ModuleLooper():
         position_ids = []
         layer_input_kwargs = []
 
+        try:
+            calibration_batches = len(calibration_data)
+        except (TypeError, AttributeError):
+            calibration_batches = None
+
+        if calibration_batches is None:
+            log.info("ModuleLooper: capturing layer inputs (batch count unknown)")
+        else:
+            log.info(
+                f"ModuleLooper: capturing layer inputs from {calibration_batches} calibration batches"
+            )
+
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device
 
@@ -667,6 +679,13 @@ class ModuleLooper():
             cur_layer_device = get_device(module)
             full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
 
+            if is_lm_head_module:
+                layer_descriptor = self.gptq_model.lm_head
+            elif layers_prefix:
+                layer_descriptor = f"{layers_prefix}.{layer_index}"
+            else:
+                layer_descriptor = str(layer_index)
+
             for p_index, processor in enumerate(self.processors):
                 processor.log_call_count = 0  # reset
                 processor.collect_memory_info(layer_index)
@@ -712,6 +731,16 @@ class ModuleLooper():
                         continue
 
                     handle = []
+                    subset_total = len(modules)
+                    batch_count = getattr(processor, "num_batches", None)
+                    if not batch_count:
+                        cached_inputs = getattr(processor.inputs_cache, "layer_inputs", None)
+                        if cached_inputs is not None:
+                            try:
+                                batch_count = len(cached_inputs)
+                            except TypeError:
+                                batch_count = 0
+                    batch_count = batch_count or 0
 
                     subset_size = len(subset)
                     for idx, (name, m) in enumerate(subset.items()):
@@ -735,6 +764,12 @@ class ModuleLooper():
 
                     need_outputs = not processor.fwd_after_process
                     reuse_kv = bool(getattr(module, "reuse_kv", False))
+                    forward_msg = (
+                        "ModuleLooper: forward start "
+                        f"(processor=`{processor.name()}`, layer=`{layer_descriptor}`, "
+                        f"subset={index + 1}/{subset_total}, batches={batch_count})"
+                    )
+                    log.info(forward_msg)
                     forward_outputs = self._run_forward_batches(
                         module=module,
                         processor=processor,
@@ -818,6 +853,21 @@ class ModuleLooper():
                 layer_outputs: List[List[torch.Tensor]] = []
                 # second forward after process()
                 if not is_last_module and processor.fwd_after_process:
+                    replay_batch_count = getattr(processor, "num_batches", None)
+                    if not replay_batch_count:
+                        cached_inputs = getattr(processor.inputs_cache, "layer_inputs", None)
+                        if cached_inputs is not None:
+                            try:
+                                replay_batch_count = len(cached_inputs)
+                            except TypeError:
+                                replay_batch_count = 0
+                    replay_batch_count = replay_batch_count or 0
+                    replay_msg = (
+                        "ModuleLooper: forward replay "
+                        f"(processor=`{processor.name()}`, layer=`{layer_descriptor}`, "
+                        f"batches={replay_batch_count})"
+                    )
+                    log.info(replay_msg)
                     layer_outputs = self._run_forward_batches(
                         module=module,
                         processor=processor,
