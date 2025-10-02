@@ -1,12 +1,12 @@
 [build-system]
 requires = [
-    "setuptools>=80.9.0",
+    "setuptools>=80.9",
     "ninja>=1.13.0"
 ]
 build-backend = "setuptools.build_meta:__legacy__"
 
 [project]
-name = "GPT-QModel"
+name = "GPTQModel"
 dynamic = ["version"]
 description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
 readme = "README.md"
@@ -32,7 +32,6 @@ classifiers = [
 ]
 dependencies = [
     "accelerate>=1.10.1",
-    # "datasets>=3.5.0",
     "numpy==2.2.6",
     "torch>=2.8.0",
     "safetensors>=0.6.2",
@@ -47,6 +46,10 @@ dependencies = [
     "random_word>=1.0.13",
     "tokenicer>=0.0.5",
     "logbar>=0.0.5",
+    "maturin>=1.9.4", # required by safetensors and hf_transfer
+    "datasets>=4.1.1",
+    "pyarrow>=21.0",
+    #"cython>=3.1.4", # required by hf-xet/hf-transfer
     # "flash-attn>=2.8.3", <-- install for lower vram usage
 ]
 

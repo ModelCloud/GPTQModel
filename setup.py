@@ -191,6 +191,18 @@ def _major_minor(v: str) -> str:
     return v
 
 
+def _version_geq(version: str | None, major: int, minor: int = 0) -> bool:
+    if not version:
+        return False
+    try:
+        parts = re.split(r"[._-]", version)
+        ver_major = int(parts[0]) if parts else 0
+        ver_minor = int(parts[1]) if len(parts) > 1 else 0
+        return (ver_major, ver_minor) >= (major, minor)
+    except Exception:
+        return False
+
+
 def _detect_cuda_version() -> str | None:
     # Priority: env → nvidia-smi → nvcc
     v = os.environ.get("CUDA_VERSION")
@@ -211,6 +223,15 @@ def _detect_cuda_version() -> str | None:
         if m:
             return f"{m.group(1)}.{m.group(2)}"
 
+    return None
+
+
+def _detect_nvcc_version() -> str | None:
+    out = _probe_cmd(["nvcc", "--version"])
+    if out:
+        m = re.search(r"release\s+(\d+)\.(\d+)", out)
+        if m:
+            return f"{m.group(1)}.{m.group(2)}"
     return None
 
 
@@ -242,6 +263,7 @@ RELEASE_MODE = _read_env("RELEASE_MODE")
 CUDA_VERSION = _read_env("CUDA_VERSION")
 ROCM_VERSION = _read_env("ROCM_VERSION")
 TORCH_CUDA_ARCH_LIST = _read_env("TORCH_CUDA_ARCH_LIST")
+NVCC_VERSION = _read_env("NVCC_VERSION")
 
 # respect user env then detect
 if not TORCH_VERSION:
@@ -250,6 +272,8 @@ if not CUDA_VERSION:
     CUDA_VERSION = _detect_cuda_version()
 if not ROCM_VERSION:
     ROCM_VERSION = _detect_rocm_version()
+if not NVCC_VERSION:
+    NVCC_VERSION = _detect_nvcc_version()
 
 SKIP_ROCM_VERSION_CHECK = _read_env("SKIP_ROCM_VERSION_CHECK")
 FORCE_BUILD = _bool_env("GPTQMODEL_FORCE_BUILD", False)
@@ -432,6 +456,8 @@ if BUILD_CUDA_EXT == "1":
         extra_compile_args["nvcc"] += [f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}"]
 
         if not ROCM_VERSION:
+            if _version_geq(NVCC_VERSION, 13, 0):
+                extra_compile_args["nvcc"].append("--device-entity-has-hidden-visibility=false")
             extra_compile_args["nvcc"] += [
                 "--threads", "8",  # NVCC parallelism
                 "--optimize=3",  # alias for -O3
