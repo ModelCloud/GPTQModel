@@ -46,7 +46,7 @@ dependencies = [
     "random_word>=1.0.13",
     "tokenicer>=0.0.5",
     "logbar>=0.0.5",
-    "flash-attn>=2.8.3",
+    # "flash-attn>=2.8.3", <-- install for lower vram usage
 ]
 
 [project.urls]
