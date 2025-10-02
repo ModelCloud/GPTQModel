@@ -143,13 +143,129 @@ class GPTQ:
             self.process_batch(inp)
 
     def process_batch(self, inp: torch.Tensor):
+        inp_device = get_device(inp)
+        if inp_device.type == "cuda":
+            dev_index = inp_device.index if inp_device.index is not None else 0
+            torch.cuda.set_device(dev_index)
+
+        inp = inp.to(device=self.module.target_device)
+
+        if self.H.device != self.module.target_device:
+            self.H = self.H.to(device=self.module.target_device)
+
+        compute_dtype = torch.float32
+        bytes_per_elem = 4
+        target_mb = getattr(self.qcfg, "hessian_chunk_mb", None)
+        if target_mb is None:
+            target_mb = int(os.getenv("HESSIAN_CHUNK_MB", "64"))
+        target_bytes = max(16, target_mb) * 1024 * 1024
+        cols = self.columns
+        rows_per_chunk = max(256, (target_bytes // max(1, cols * bytes_per_elem)))
+        rows_per_chunk = int((rows_per_chunk // 256) * 256) or 256
+
+        with torch.no_grad():
+            def stream_rows_and_update_H(flat2d: torch.Tensor):
+                N = flat2d.shape[0]
+                if N == 0:
+                    return
+                start = 0
+                while start < N:
+                    end = min(start + rows_per_chunk, N)
+                    Xc = flat2d[start:end].to(dtype=compute_dtype, non_blocking=True).contiguous()
+                    m = Xc.shape[0]
+                    beta = self.nsamples / (self.nsamples + m)
+                    alpha = 2.0 / (self.nsamples + m)
+                    self.H.addmm_(Xc.T, Xc, beta=beta, alpha=alpha)
+                    self.nsamples += m
+                    del Xc  # free chunk immediately
+                    start = end
+
+            # Linear / Conv1D simple reshape
+            if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
+                flat = inp.reshape(-1, inp.shape[-1])
+                stream_rows_and_update_H(flat)
+                del flat
+                return
+
+            if isinstance(self.module, nn.Conv1d):
+                B, Cin, L = inp.size()
+                groups = self.module.groups
+                k = self.module.kernel_size[0]
+                d = self.module.dilation[0]
+                s = self.module.stride[0]
+                p = self.module.padding[0]
+                Lout = (L + 2 * p - d * (k - 1) - 1) // s + 1
+                rows_per_item = groups * Lout
+                bchunk = max(1, rows_per_chunk // max(1, rows_per_item))
+
+                unfold = nn.Unfold(
+                    self.module.kernel_size + (1,),
+                    dilation=self.module.dilation + (1,),
+                    padding=self.module.padding + (0,),
+                    stride=self.module.stride + (1,),
+                )
+
+                b0 = 0
+                while b0 < B:
+                    b1 = min(b0 + bchunk, B)
+                    sub = inp[b0:b1].reshape(
+                        (b1 - b0) * groups,
+                        Cin // groups,
+                        L,
+                        1,
+                    )
+                    patches = unfold(sub)  # (B*g, Ck, Lout)
+                    del sub
+                    flat = patches.transpose(1, 2).flatten(0, 1)
+                    del patches
+                    stream_rows_and_update_H(flat)
+                    del flat
+                    b0 = b1
+                del unfold
+                return
+
+            if isinstance(self.module, nn.Conv2d):
+                B, Cin, H_in, W_in = inp.size()
+                groups = self.module.groups
+                kh, kw = self.module.kernel_size
+                dh, dw = self.module.dilation
+                sh, sw = self.module.stride
+                ph, pw = self.module.padding
+
+                Hout = (H_in + 2 * ph - dh * (kh - 1) - 1) // sh + 1
+                Wout = (W_in + 2 * pw - dw * (kw - 1) - 1) // sw + 1
+                rows_per_item = groups * Hout * Wout
+                bchunk = max(1, rows_per_chunk // max(1, rows_per_item))
+
+                unfold = nn.Unfold(
+                    self.module.kernel_size,
+                    dilation=self.module.dilation,
+                    padding=self.module.padding,
+                    stride=self.module.stride,
+                )
+
+                b0 = 0
+                while b0 < B:
+                    b1 = min(b0 + bchunk, B)
+                    sub = inp[b0:b1]
+                    patches = unfold(sub)  # (B, Ck, Hout*Wout)
+                    del sub
+                    flat = patches.transpose(1, 2).flatten(0, 1)  # (B*Hout*Wout, Ck)
+                    del patches
+                    stream_rows_and_update_H(flat)
+                    del flat
+                    b0 = b1
+                del unfold
+                return
+
+    def process_batch_old(self, inp: torch.Tensor):
         # print(f"inp = {inp}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
         inp_device = get_device(inp)
         if inp_device.type == "cuda":
             torch.cuda.set_device(inp_device)
 
-        #inp = inp.to(device=self.module.target_device, dtype=torch.float32)
+        inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
         # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
@@ -187,12 +303,10 @@ class GPTQ:
                 reshaped_inp = unfold(reshaped_inp)
             reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
 
-        # Delay float32 cast until after reshaping to avoid an extra temporary tensor
-        reshaped_inp = reshaped_inp.to(dtype=torch.float32)
-
         batch_token_size = reshaped_inp.shape[0]
 
-        self.H = self.H.to(device=reshaped_inp.device)
+        if self.H.device != reshaped_inp.device:
+            self.H = self.H.to(device=reshaped_inp.device)
 
         # moe model may receive an empty batch, return early
         if batch_token_size == 0:
