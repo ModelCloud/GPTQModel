@@ -1,6 +1,7 @@
 [build-system]
 requires = [
-    "setuptools >= 64",
+    "setuptools>=80.9.0",
+    "ninja>=1.13.0"
 ]
 build-backend = "setuptools.build_meta:__legacy__"
 
@@ -37,17 +38,15 @@ dependencies = [
     "transformers>=4.56.0",
     "threadpoolctl>=3.6.0",
     "packaging>=24.2",
-    "device-smi==0.4.1",
+    "device-smi>=0.5.0",
     "protobuf>=6.32.0",
     "pillow>=11.3.0",
     "hf_transfer>=0.1.9",
     "huggingface_hub>=0.34.4",
-    "random_word==1.0.13",
+    "random_word>=1.0.13",
     "tokenicer>=0.0.5",
     "logbar>=0.0.5",
-    # "soundfile==0.13.1",   # Qwen-Omni dependent pkg
-    "wheel>=0.45.1",
-    "maturin>=1.9.3",
+    # "flash-attn>=2.8.3", <-- install for lower vram usage
 ]
 
 [project.urls]

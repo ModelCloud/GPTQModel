@@ -11,12 +11,12 @@ from typing import Callable, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import LoopProcessor, get_max_memory
+from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import METHOD, QuantizeConfig
 from ..utils.importer import select_quant_linear
@@ -166,7 +166,7 @@ class GPTQProcessor(LoopProcessor):
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
-            PROCESS_MAX_MEMORY: get_max_memory(),
+            PROCESS_USED_MEMORY: self.device_memory_report(),
         }
 
         if self.qcfg.dynamic is not None:
