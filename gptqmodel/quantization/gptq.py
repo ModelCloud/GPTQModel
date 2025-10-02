@@ -161,7 +161,7 @@ class GPTQ:
         # --- Block size selection ---
         target_mb = getattr(self.qcfg, "hessian_chunk_mb", None)
         if target_mb is None:
-            # fallback: default to ~128 MB working buffer if not set
+            # fallback: default to ~256 MB working buffer if not set
             target_mb = int(os.getenv("HESSIAN_CHUNK_MB", "256"))
 
         target_bytes = max(16, target_mb) * 1024 * 1024
@@ -172,7 +172,7 @@ class GPTQ:
         if not hasattr(self, "_logged_rows_per_block"):
             mb_eff = rows_per_block * cols * bytes_per_elem / (1024 * 1024)
             log.info(
-                f"[GPTQ] process_batch using rows_per_block={rows_per_block} "
+                f"GPTQ: process_batch using rows_per_block={rows_per_block} "
                 f"(~{mb_eff:.1f} MB per chunk, target={target_mb} MB)"
             )
             self._logged_rows_per_block = True
