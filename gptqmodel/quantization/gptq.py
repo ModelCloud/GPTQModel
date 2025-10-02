@@ -157,7 +157,7 @@ class GPTQ:
         bytes_per_elem = 4
         target_mb = getattr(self.qcfg, "hessian_chunk_mb", None)
         if target_mb is None:
-            target_mb = int(os.getenv("HESSIAN_CHUNK_MB", "64"))
+            target_mb = int(os.getenv("HESSIAN_CHUNK_MB", "256"))
         target_bytes = max(16, target_mb) * 1024 * 1024
         cols = self.columns
         rows_per_chunk = max(256, (target_bytes // max(1, cols * bytes_per_elem)))
