@@ -305,6 +305,7 @@ class MarlinQuantLinear(BaseQuantLinear):
             is_k_full=self.is_k_full,
             bias=self.bias,
             use_fp32_reduce=self.fp32,
+            use_atomics=False, # reduces accuracy with slightly faster performance
         )
 
         if self.adapter:
