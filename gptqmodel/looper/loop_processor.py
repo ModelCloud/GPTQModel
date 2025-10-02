@@ -6,8 +6,9 @@ import json
 import queue
 import threading
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from device_smi import Device
 import torch
 from random_word import RandomWords
 from torch import Tensor
@@ -17,7 +18,6 @@ from ..looper.input_cache import InputCache
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..quantization.config import QuantizeConfig
-from ..utils.device import get_cpu_usage_memory, get_gpu_usage_memory
 from ..utils.logger import setup_logger
 from ..utils.torch import DEVICE_0, DEVICE_1
 
@@ -93,6 +93,9 @@ class LoopProcessor:
         self.log_tmp_log_file_name = f"{self.name()}_log_{RandomWords().get_random_word()}_time_{current_time}.log"
         self.log_worker_queue = queue.Queue()
         self.log_worker: threading.Thread = None
+        self._device_smi_handles = self._init_device_smi_handles()
+        self._cpu_device_smi = self._init_cpu_device_handle()
+        self._device_metric_failures: Set[str] = set()
 
         if self.logger_board == "clearml":
             try:
@@ -224,6 +227,95 @@ class LoopProcessor:
         log.info(formatted_row)
         log.info(len(formatted_row) * "-")
 
+    def _init_device_smi_handles(self) -> Dict[str, Device]:
+        handles: Dict[str, Device] = {}
+
+        for device_id in self._discover_accelerator_devices():
+            try:
+                handles[device_id] = Device(device_id)
+            except Exception as exc:  # pragma: no cover - defensive, external tool
+                log.debug(f"Device-SMI initialisation failed for `{device_id}`: {exc}")
+
+        return handles
+
+    def _init_cpu_device_handle(self) -> Optional[Device]:
+        try:
+            return Device("cpu")
+        except Exception as exc:  # pragma: no cover - defensive, external tool
+            log.debug(f"Device-SMI CPU initialisation failed: {exc}")
+            return None
+
+    def _discover_accelerator_devices(self) -> List[str]:
+        devices: List[str] = []
+
+        if hasattr(torch, "cuda"):
+            try:
+                if torch.cuda.is_available():
+                    device_type = "rocm" if getattr(torch.version, "hip", None) else "cuda"
+                    for idx in range(torch.cuda.device_count()):
+                        devices.append(f"{device_type}:{idx}")
+            except Exception:  # pragma: no cover - defensive, CUDA runtime differences
+                pass
+
+        xpu = getattr(torch, "xpu", None)
+        if xpu is not None:
+            try:
+                if torch.xpu.is_available():
+                    for idx in range(torch.xpu.device_count()):
+                        devices.append(f"xpu:{idx}")
+            except Exception:  # pragma: no cover - defensive, XPU runtime differences
+                pass
+
+        return devices
+
+    def _safe_query_metric(self, device_key: str, handle: Device):
+        try:
+            return handle.metrics(fast=True)
+        except Exception as exc:  # pragma: no cover - defensive, external tool
+            if device_key not in self._device_metric_failures:
+                log.debug(f"Device-SMI metrics failed for `{device_key}`: {exc}")
+                self._device_metric_failures.add(device_key)
+            return None
+
+    def _snapshot_device_memory_gib(self) -> Dict[str, float]:
+        snapshot: Dict[str, float] = {}
+        for device_id, handle in self._device_smi_handles.items():
+            metrics = self._safe_query_metric(device_id, handle)
+            if metrics is None:
+                continue
+            snapshot[device_id] = metrics.memory_used / (1024 ** 3)
+        return snapshot
+
+    def _snapshot_cpu_memory_gib(self) -> Optional[float]:
+        if self._cpu_device_smi is None:
+            return None
+        metrics = self._safe_query_metric("cpu", self._cpu_device_smi)
+        if metrics is None:
+            return None
+        return metrics.memory_used / (1024 ** 3)
+
+    def device_memory_report(self) -> str:
+        snapshot = self._snapshot_device_memory_gib()
+        if not snapshot:
+            return "n/a"
+        parts = [f"{device_id}={value:.1f}GB" for device_id, value in snapshot.items()]
+        return ", ".join(parts)
+
+    def _close_device_smi_handles(self) -> None:
+        for handle in self._device_smi_handles.values():
+            try:
+                handle.close()
+            except Exception:
+                pass
+        self._device_smi_handles.clear()
+
+        if self._cpu_device_smi is not None:
+            try:
+                self._cpu_device_smi.close()
+            except Exception:
+                pass
+            self._cpu_device_smi = None
+
     # Loop Procssor level scoped state data
     def result_save(self, key: str, value: Any):
         with self._results_lock:
@@ -250,14 +342,17 @@ class LoopProcessor:
 
     def collect_memory_info(self, layer_index: int):
         if self.logger_task is not None:
-            gpu_memory = get_gpu_usage_memory()
-            cpu_memory = get_cpu_usage_memory()
+            device_snapshot = self._snapshot_device_memory_gib()
+            total_gpu_memory = sum(device_snapshot.values()) if device_snapshot else 0.0
+
             self.logger_task.get_logger().report_scalar(
                 title='GPU Memory',
                 series='GPU Memory',
-                value=gpu_memory,
+                value=total_gpu_memory,
                 iteration=layer_index,
             )
+
+            cpu_memory = self._snapshot_cpu_memory_gib() or 0.0
 
             self.logger_task.get_logger().report_scalar(
                 title='CPU Memory',
@@ -265,7 +360,7 @@ class LoopProcessor:
                 value=cpu_memory,
                 iteration=layer_index,
             )
-            self.gpu_memorys.append(gpu_memory)
+            self.gpu_memorys.append(total_gpu_memory)
             self.cpu_memorys.append(cpu_memory)
 
     def log_plotly(self):
@@ -322,6 +417,7 @@ class LoopProcessor:
     # last step, after all loop processor is called
     # finalize is called in reverse after all next sequential processes are called
     def finalize(self, model: BaseQModel, **kwargs):
+        self._close_device_smi_handles()
         del self.inputs_cache
         del self._results
 

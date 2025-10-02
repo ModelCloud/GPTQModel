@@ -13,11 +13,11 @@ import torch
 from torch import nn
 from torch.nn import Module
 
-from ..looper.loop_processor import LoopProcessor, get_max_memory
+from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_MAX_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
@@ -718,7 +718,7 @@ class AWQProcessor(LoopProcessor):
                 # QUANT_LOG_DAMP: f"{damp_percent:.5f}",
                 PROCESS_LOG_TIME: f"{duration:.3f}",
                 # PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
-                PROCESS_MAX_MEMORY: get_max_memory(),
+                PROCESS_USED_MEMORY: self.device_memory_report(),
             }
             self.module_names.append(f"layer-{named_module.layer_index}-{named_module.name}")
 

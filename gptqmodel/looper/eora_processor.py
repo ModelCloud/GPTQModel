@@ -17,7 +17,7 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
-                             PROCESS_LOG_NAME, PROCESS_LOG_TIME, PROCESS_MAX_MEMORY)
+                             PROCESS_LOG_NAME, PROCESS_LOG_TIME, PROCESS_USED_MEMORY)
 from ..quantization.config import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
@@ -178,7 +178,7 @@ class EoraProcessor(LoopProcessor):
             PROCESS_LOG_MODULE: module.name,
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
-            PROCESS_MAX_MEMORY: max_memory,
+            PROCESS_USED_MEMORY: max_memory,
         }
 
         if self.qcfg.dynamic is not None:
