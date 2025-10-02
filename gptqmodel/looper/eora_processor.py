@@ -22,6 +22,7 @@ from ..quantization.config import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
 from ..utils.torch import CPU, DEVICE_0, DEVICE_1, torch_streamCtx, torch_sync
+from ..utils.torch import HAS_CUDA, tf32_disable_guard, torch_streamCtx, torch_sync
 
 log = setup_logger()
 
