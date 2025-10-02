@@ -1,6 +1,7 @@
+import time
+
 import pytest
 import torch
-import time
 from tabulate import tabulate
 
 from gptqmodel.quantization.gptq import GPTQ
@@ -9,9 +10,12 @@ from gptqmodel.quantization.gptq import GPTQ
 LLAMA_INPUT_SHAPES = [
     (1, 1, 4096),     # single token
     (1, 16, 4096),    # micro batch
-    (4, 128, 4096),   # medium
-    (8, 512, 4096),   # large
-    (16, 2048, 4096)  # very large
+    (4, 128, 4096),
+    (8, 512, 4096),
+    (8, 1024, 4096),
+    (16, 1024, 4096),
+    (8, 2048, 4096),
+    (16, 2048, 4096),
 ]
 
 
