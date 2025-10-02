@@ -150,7 +150,6 @@ class GPTQ:
             torch.cuda.set_device(inp_device)
 
         #inp = inp.to(device=self.module.target_device, dtype=torch.float32)
-        inp = inp.to(dtype=torch.float32)
 
         # input reshaping
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
@@ -188,10 +187,12 @@ class GPTQ:
                 reshaped_inp = unfold(reshaped_inp)
             reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
 
+        # Delay float32 cast until after reshaping to avoid an extra temporary tensor
+        reshaped_inp = reshaped_inp.to(dtype=torch.float32)
+
         batch_token_size = reshaped_inp.shape[0]
 
-        if self.H.device != reshaped_inp.device:
-            self.H = self.H.to(device=reshaped_inp.device)
+        self.H = self.H.to(device=reshaped_inp.device)
 
         # moe model may receive an empty batch, return early
         if batch_token_size == 0:
