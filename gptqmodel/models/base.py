@@ -532,7 +532,7 @@ class BaseQModel(nn.Module):
         calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
         calibration_concat_size: Optional[int] = None,
-        calibration_sort: Optional[str] = None,  # valid values are asc, desc, shuffle
+        calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle
         batch_size: int = 1,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         logger_board: Optional[str] = None,

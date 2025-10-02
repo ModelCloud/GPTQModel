@@ -36,9 +36,7 @@ from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
 class Test(ModelTest):
-    #NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
-    #NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
-    NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
 
     NATIVE_ARC_CHALLENGE_ACC = 0.3567
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
@@ -50,9 +48,7 @@ class Test(ModelTest):
 
     @parameterized.expand(
         [
-            # (QUANT_METHOD.GPTQ, FORMAT.GPTQ), # gptq v2
             (METHOD.GPTQ, FORMAT.GPTQ), # gptq v1
-            #(QUANT_METHOD.QQQ, FORMAT.QQQ),
         ]
     )
     def test_quant_and_eora(self, quant_method: METHOD, format: FORMAT):
@@ -61,8 +57,8 @@ class Test(ModelTest):
         desc_act = False
         act_group_aware = True
         rank = 128
-        batch_size = 1
-        calibration_dataset_rows = 512
+        batch_size = 4
+        calibration_dataset_rows = 1024
         calibration_dataset_concat_size = 0 # disable
         adapter_path = "eora"
         dataset_id = "allenai/c4"
@@ -99,10 +95,12 @@ class Test(ModelTest):
             model = GPTQModel.load(
                 model_id_or_path=self.NATIVE_MODEL_ID,
                 quantize_config=quant_config,
+                # apply_chat_template=True,
             )
 
             model.quantize(
                 calibration=calibration_dataset,
+                calibration_sort="desc",
                 batch_size=batch_size,
                 calibration_concat_size=calibration_dataset_concat_size,
             ) #
@@ -153,6 +151,7 @@ class Test(ModelTest):
             model_or_id_or_path=model,
             framework=EVAL.LM_EVAL,
             tasks=[EVAL.LM_EVAL.ARC_CHALLENGE],
+            apply_chat_template=True,
             # MMLU is too slow for ci test
             # EVAL.LM_EVAL.MMLU
         )
