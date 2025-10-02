@@ -493,7 +493,8 @@ class ModuleLooper():
             layer_inputs.append(layer_input)
 
             # Keyword arguments.
-            if kwargs.get("attention_mask") is not None and self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
+            # Always capture attention_mask so downstream masking can drop padded tokens
+            if kwargs.get("attention_mask") is not None:
                 attention_masks.append(kwargs["attention_mask"].to(device=data_device))
             else:
                 attention_masks.append(None)
