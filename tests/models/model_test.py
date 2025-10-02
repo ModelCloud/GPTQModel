@@ -13,6 +13,12 @@ if sys.platform == "darwin":
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+# the CUBLAS env is required for use_deterministic_algorithms
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+import torch
+torch.use_deterministic_algorithms(True)
+
 # -- end do not touch
 
 from pathlib import Path  # noqa: E402
