@@ -169,13 +169,13 @@ class GPTQ:
         rows_per_block = int((rows_per_block // 256) * 256) or 256
 
         # Optional: log once for visibility
-        if not hasattr(self, "_logged_rows_per_block"):
-            mb_eff = rows_per_block * cols * bytes_per_elem / (1024 * 1024)
-            log.info(
-                f"GPTQ: process_batch using rows_per_block={rows_per_block} "
-                f"(~{mb_eff:.1f} MB per chunk, target={target_mb} MB)"
-            )
-            self._logged_rows_per_block = True
+        # if not hasattr(self, "_logged_rows_per_block"):
+        #     mb_eff = rows_per_block * cols * bytes_per_elem / (1024 * 1024)
+        #     log.info(
+        #         f"GPTQ: process_batch using rows_per_block={rows_per_block} "
+        #         f"(~{mb_eff:.1f} MB per chunk, target={target_mb} MB)"
+        #     )
+        #     self._logged_rows_per_block = True
 
         def stream_rows_and_update_H(flat2d: torch.Tensor):
             N = flat2d.shape[0]
