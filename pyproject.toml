@@ -46,8 +46,7 @@ dependencies = [
     "random_word>=1.0.13",
     "tokenicer>=0.0.5",
     "logbar>=0.0.5",
-    # "soundfile==0.13.1",   # Qwen-Omni dependent pkg
-    "wheel>=0.45.1",
+    "flash-attn>=2.8.3",
 ]
 
 [project.urls]
