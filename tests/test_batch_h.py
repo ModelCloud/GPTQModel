@@ -18,7 +18,7 @@ LLAMA_INPUT_SHAPES = [
     (16, 2048, 4096),
 ]
 
-
+@torch.inference_mode()
 def _benchmark(fn, x, n_iter=50, warmup=10):
     """Run warmup + timed iterations, return avg ms per call."""
     for _ in range(warmup):
@@ -35,6 +35,7 @@ def _benchmark(fn, x, n_iter=50, warmup=10):
 
 
 #@pytest.mark.cuda
+@torch.inference_mode()
 def test_gptq_process_batch_vs_old():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required for benchmark")

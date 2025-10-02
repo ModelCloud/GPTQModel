@@ -142,6 +142,7 @@ class GPTQ:
 
             self.process_batch(inp)
 
+    @torch.inference_mode()
     def process_batch(self, inp: torch.Tensor):
         inp_device = get_device(inp)
         if inp_device.type == "cuda":
@@ -155,109 +156,124 @@ class GPTQ:
 
         compute_dtype = torch.float32
         bytes_per_elem = 4
+        cols = self.columns
+
+        # --- Block size selection ---
         target_mb = getattr(self.qcfg, "hessian_chunk_mb", None)
         if target_mb is None:
+            # fallback: default to ~128 MB working buffer if not set
             target_mb = int(os.getenv("HESSIAN_CHUNK_MB", "256"))
+
         target_bytes = max(16, target_mb) * 1024 * 1024
-        cols = self.columns
-        rows_per_chunk = max(256, (target_bytes // max(1, cols * bytes_per_elem)))
-        rows_per_chunk = int((rows_per_chunk // 256) * 256) or 256
+        rows_per_block = target_bytes // (cols * bytes_per_elem)
+        rows_per_block = int((rows_per_block // 256) * 256) or 256
 
-        with torch.no_grad():
-            def stream_rows_and_update_H(flat2d: torch.Tensor):
-                N = flat2d.shape[0]
-                if N == 0:
-                    return
-                start = 0
-                while start < N:
-                    end = min(start + rows_per_chunk, N)
-                    Xc = flat2d[start:end].to(dtype=compute_dtype, non_blocking=True).contiguous()
-                    m = Xc.shape[0]
-                    beta = self.nsamples / (self.nsamples + m)
-                    alpha = 2.0 / (self.nsamples + m)
-                    self.H.addmm_(Xc.T, Xc, beta=beta, alpha=alpha)
-                    self.nsamples += m
-                    del Xc  # free chunk immediately
-                    start = end
+        # Optional: log once for visibility
+        if not hasattr(self, "_logged_rows_per_block"):
+            mb_eff = rows_per_block * cols * bytes_per_elem / (1024 * 1024)
+            log.info(
+                f"[GPTQ] process_batch using rows_per_block={rows_per_block} "
+                f"(~{mb_eff:.1f} MB per chunk, target={target_mb} MB)"
+            )
+            self._logged_rows_per_block = True
 
-            # Linear / Conv1D simple reshape
-            if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
-                flat = inp.reshape(-1, inp.shape[-1])
+        def stream_rows_and_update_H(flat2d: torch.Tensor):
+            N = flat2d.shape[0]
+            if N == 0:
+                return
+            start = 0
+            while start < N:
+                end = min(start + rows_per_block, N)
+                Xc = flat2d[start:end].to(dtype=compute_dtype, non_blocking=True).contiguous()
+                m = Xc.shape[0]
+                beta = self.nsamples / (self.nsamples + m)
+                alpha = 2.0 / (self.nsamples + m)
+                self.H.addmm_(Xc.T, Xc, beta=beta, alpha=alpha)
+                self.nsamples += m
+                del Xc
+                start = end
+
+        # ---- Linear / Conv1D ----
+        if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
+            flat = inp.reshape(-1, inp.shape[-1])
+            stream_rows_and_update_H(flat)
+            del flat
+            return
+
+        # ---- Conv1d ----
+        if isinstance(self.module, nn.Conv1d):
+            B, Cin, L = inp.size()
+            groups = self.module.groups
+            k = self.module.kernel_size[0]
+            d = self.module.dilation[0]
+            s = self.module.stride[0]
+            p = self.module.padding[0]
+            Lout = (L + 2 * p - d * (k - 1) - 1) // s + 1
+            rows_per_item = groups * Lout
+            bchunk = max(1, rows_per_block // max(1, rows_per_item))
+
+            unfold = nn.Unfold(
+                self.module.kernel_size + (1,),
+                dilation=self.module.dilation + (1,),
+                padding=self.module.padding + (0,),
+                stride=self.module.stride + (1,),
+            )
+
+            b0 = 0
+            while b0 < B:
+                b1 = min(b0 + bchunk, B)
+                sub = inp[b0:b1].reshape(
+                    (b1 - b0) * groups,
+                    Cin // groups,
+                    L,
+                    1,
+                )
+                patches = unfold(sub)
+                del sub
+                flat = patches.transpose(1, 2).flatten(0, 1)
+                del patches
                 stream_rows_and_update_H(flat)
                 del flat
-                return
+                b0 = b1
+            del unfold
+            return
 
-            if isinstance(self.module, nn.Conv1d):
-                B, Cin, L = inp.size()
-                groups = self.module.groups
-                k = self.module.kernel_size[0]
-                d = self.module.dilation[0]
-                s = self.module.stride[0]
-                p = self.module.padding[0]
-                Lout = (L + 2 * p - d * (k - 1) - 1) // s + 1
-                rows_per_item = groups * Lout
-                bchunk = max(1, rows_per_chunk // max(1, rows_per_item))
+        # ---- Conv2d ----
+        if isinstance(self.module, nn.Conv2d):
+            B, Cin, H_in, W_in = inp.size()
+            groups = self.module.groups
+            kh, kw = self.module.kernel_size
+            dh, dw = self.module.dilation
+            sh, sw = self.module.stride
+            ph, pw = self.module.padding
 
-                unfold = nn.Unfold(
-                    self.module.kernel_size + (1,),
-                    dilation=self.module.dilation + (1,),
-                    padding=self.module.padding + (0,),
-                    stride=self.module.stride + (1,),
-                )
+            Hout = (H_in + 2 * ph - dh * (kh - 1) - 1) // sh + 1
+            Wout = (W_in + 2 * pw - dw * (kw - 1) - 1) // sw + 1
+            rows_per_item = groups * Hout * Wout
+            bchunk = max(1, rows_per_block // max(1, rows_per_item))
 
-                b0 = 0
-                while b0 < B:
-                    b1 = min(b0 + bchunk, B)
-                    sub = inp[b0:b1].reshape(
-                        (b1 - b0) * groups,
-                        Cin // groups,
-                        L,
-                        1,
-                    )
-                    patches = unfold(sub)  # (B*g, Ck, Lout)
-                    del sub
-                    flat = patches.transpose(1, 2).flatten(0, 1)
-                    del patches
-                    stream_rows_and_update_H(flat)
-                    del flat
-                    b0 = b1
-                del unfold
-                return
+            unfold = nn.Unfold(
+                self.module.kernel_size,
+                dilation=self.module.dilation,
+                padding=self.module.padding,
+                stride=self.module.stride,
+            )
 
-            if isinstance(self.module, nn.Conv2d):
-                B, Cin, H_in, W_in = inp.size()
-                groups = self.module.groups
-                kh, kw = self.module.kernel_size
-                dh, dw = self.module.dilation
-                sh, sw = self.module.stride
-                ph, pw = self.module.padding
+            b0 = 0
+            while b0 < B:
+                b1 = min(b0 + bchunk, B)
+                sub = inp[b0:b1]
+                patches = unfold(sub)
+                del sub
+                flat = patches.transpose(1, 2).flatten(0, 1)
+                del patches
+                stream_rows_and_update_H(flat)
+                del flat
+                b0 = b1
+            del unfold
+            return
 
-                Hout = (H_in + 2 * ph - dh * (kh - 1) - 1) // sh + 1
-                Wout = (W_in + 2 * pw - dw * (kw - 1) - 1) // sw + 1
-                rows_per_item = groups * Hout * Wout
-                bchunk = max(1, rows_per_chunk // max(1, rows_per_item))
-
-                unfold = nn.Unfold(
-                    self.module.kernel_size,
-                    dilation=self.module.dilation,
-                    padding=self.module.padding,
-                    stride=self.module.stride,
-                )
-
-                b0 = 0
-                while b0 < B:
-                    b1 = min(b0 + bchunk, B)
-                    sub = inp[b0:b1]
-                    patches = unfold(sub)  # (B, Ck, Hout*Wout)
-                    del sub
-                    flat = patches.transpose(1, 2).flatten(0, 1)  # (B*Hout*Wout, Ck)
-                    del patches
-                    stream_rows_and_update_H(flat)
-                    del flat
-                    b0 = b1
-                del unfold
-                return
-
+    @torch.inference_mode()
     def process_batch_old(self, inp: torch.Tensor):
         # print(f"inp = {inp}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
