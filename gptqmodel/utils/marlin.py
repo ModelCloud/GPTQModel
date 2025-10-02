@@ -145,21 +145,13 @@ def get_scale_perms():
             [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
     return scale_perm, scale_perm_single
 
-
-# Whether to use atomicAdd reduce in gptq/awq marlin kernel. experimental
-GPTQMODEL_MARLIN_USE_ATOMIC_ADD = True
-
-
 def maybe_warn_marlin_atomic_add_env():
     if torch.compiler.is_dynamo_compiling():
         return
-    if GPTQMODEL_MARLIN_USE_ATOMIC_ADD:
-        return
-    log.info_once(
-        "Marlin kernel can achieve better performance for small size_n "
-        "with experimental use_atomic_add feature. "
-        "You can consider set environment variable "
-        "GPTQMODEL_MARLIN_USE_ATOMIC_ADD to 1 if possible.")
+
+    # log.info_once(
+    #     "Marlin kernel can achieve better performance for small size_n "
+    #     "with experimental use_atomic_add feature.")
 
 
 def maybe_warn_marlin_atomic_add(device, dtype):
@@ -178,12 +170,6 @@ def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
     # the performance of atomicAdd is better than global reduce
     # only when m*n is small and k is large
     if n >= 2048 or k < 2048 or device.type != "cuda":
-        return False
-
-    # disable atomicAdd reduce by default,
-    # one can enable it with GPTQMODEL_MARLIN_USE_ATOMIC_ADD=1
-    if not GPTQMODEL_MARLIN_USE_ATOMIC_ADD:
-        maybe_warn_marlin_atomic_add_env()
         return False
 
     # sm8x doesn't support atomicAdd + bfloat16 natively
@@ -208,11 +194,14 @@ def apply_gptq_marlin_linear(
         input_size_per_partition: int,
         is_k_full: bool,
         bias: Optional[torch.Tensor] = None,
-        use_fp32_reduce: bool = True) -> torch.Tensor:
+        use_fp32_reduce: bool = True,
+        use_atomics: bool = False,
+
+) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
-    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+    use_atomics = use_atomics and should_use_atomic_add_reduce(m=reshaped_x.size(0),
                                                   n=output_size_per_partition,
                                                   k=reshaped_x.size(1),
                                                   device=input.device,
@@ -233,7 +222,7 @@ def apply_gptq_marlin_linear(
                               size_n=output_size_per_partition,
                               size_k=input_size_per_partition,
                               is_k_full=is_k_full,
-                              use_atomic_add=use_atomic_add,
+                              use_atomic_add=use_atomics,
                               use_fp32_reduce=use_fp32_reduce,
                               is_zp_float=False)
 
