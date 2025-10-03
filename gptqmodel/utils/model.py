@@ -973,7 +973,7 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
 
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():
-        if isinstance(submodule, ExllamaV2QuantLinear) or isinstance(submodule, AwqExllamaV2QuantLinear):
+        if isinstance(submodule, (ExllamaV2QuantLinear, AwqExllamaV2QuantLinear)):
             device = submodule.qweight.device
             submodule.post_init(scratch_space=model.device_tensors[device])
         elif isinstance(submodule, BaseQuantLinear):

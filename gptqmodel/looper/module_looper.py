@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import nullcontext
 from typing import Dict, List, Optional
 
 import torch
@@ -711,7 +712,14 @@ class ModuleLooper():
                                                                  processor=processor,
                                                                  fail_safe=fail_safe)
                         named_childs.update(named_modules)
-                    processor.layer_quantize(module, cur_layer_device, named_childs)
+
+                    lock_ctx = nullcontext()
+                    device_for_ctx = cur_layer_device if getattr(cur_layer_device, 'type', None) != 'meta' else None
+                    if device_for_ctx is not None:
+                        lock_ctx = self.pool.read_lock(cur_layer_device)
+                    with lock_ctx:
+                        with device_ctx(device_for_ctx):
+                            processor.layer_quantize(module, cur_layer_device, named_childs)
                     continue
 
                 layer_inputs = processor.inputs_cache.layer_inputs
