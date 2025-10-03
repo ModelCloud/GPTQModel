@@ -40,7 +40,7 @@ class TestGroupSize(unittest.TestCase):
 
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
                                  split="train")
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        self.calibration_dataset = traindata.select(range(1024))
 
     # def test_load_group_128(self):
     #     model = GPTQModel.load(
@@ -71,7 +71,7 @@ class TestGroupSize(unittest.TestCase):
             quantize_config=quantize_config,
             debug=True,
         )
-        model.quantize(self.calibration_dataset, batch_size=1, calibration_concat_size=2048)
+        model.quantize(self.calibration_dataset, batch_size=1, calibration_concat_size=0)
         with tempfile.TemporaryDirectory() as tmp_dir_name:
             model.save(tmp_dir_name)
 

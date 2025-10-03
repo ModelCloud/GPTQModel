@@ -76,6 +76,7 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             bias: bool = False,
             pack_dtype: torch.dtype = torch.int32,
             adapter: Adapter = None,
+            register_buffers=False,
             **kwargs):
         if marlin_import_exception is not None:
             raise ValueError(
@@ -95,54 +96,55 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.MARLIN),
             adapter=adapter,
-            register_awq_buffers=False,
+            register_buffers=False,
             **kwargs)
 
-        self.register_parameter(
-            "qweight",
-            torch.nn.Parameter(
-                torch.empty(
-                    self.in_features,
-                    self.out_features // self.pack_factor,
-                    dtype=torch.int32,
+        if register_buffers:
+            self.register_parameter(
+                "qweight",
+                torch.nn.Parameter(
+                    torch.empty(
+                        self.in_features,
+                        self.out_features // self.pack_factor,
+                        dtype=torch.int32,
+                    ),
+                    requires_grad=False
                 ),
-                requires_grad=False
-            ),
-        )
-        self.register_parameter(
-            "qzeros",
-            torch.nn.Parameter(
-                torch.empty(
-                    self.in_features // self.group_size,
-                    self.out_features // self.pack_factor,
-                    dtype=torch.int32,
-                ),
-                requires_grad=False
             )
-        )
+            self.register_parameter(
+                "qzeros",
+                torch.nn.Parameter(
+                    torch.empty(
+                        self.in_features // self.group_size,
+                        self.out_features // self.pack_factor,
+                        dtype=torch.int32,
+                    ),
+                    requires_grad=False
+                )
+            )
 
-        self.register_parameter(
-            "scales",
-            torch.nn.Parameter(
-                torch.empty(
-                    self.in_features // self.group_size,
-                    self.out_features,
-                    dtype=torch.float16,
-                ),
-                requires_grad=False
+            self.register_parameter(
+                "scales",
+                torch.nn.Parameter(
+                    torch.empty(
+                        self.in_features // self.group_size,
+                        self.out_features,
+                        dtype=torch.float16,
+                    ),
+                    requires_grad=False
+                )
             )
-        )
 
-        if bias:
-            self.register_buffer(
-                "bias",
-                torch.zeros(
-                    (out_features),
-                    dtype=torch.float16,
-                ),
-            )
-        else:
-            self.bias = None
+            if bias:
+                self.register_buffer(
+                    "bias",
+                    torch.zeros(
+                        (out_features),
+                        dtype=torch.float16,
+                    ),
+                )
+            else:
+                self.bias = None
 
         self.is_lm_head = False
         if kwargs.get("name") is not None and kwargs.get("lm_head_name") is not None:

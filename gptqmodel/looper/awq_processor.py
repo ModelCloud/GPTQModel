@@ -28,6 +28,7 @@ from ..quantization.awq.utils.module import append_str_prefix, get_op_name, set_
 from ..quantization.awq.utils.utils import get_best_device
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
+from ..utils.ctx import ctx
 from ..utils.model import get_module_by_name_prefix, move_to
 from ..utils.torch import CPU, tf32_disable_guard, tf32_enable_guard, torch_sync
 
@@ -295,17 +296,16 @@ class AWQProcessor(LoopProcessor):
 
         # [STEP 3]: Compute output of module
         module_kwargs = self._sanitize_kwargs(kwargs, module2inspect)
-        with torch.inference_mode():
-            with tf32_enable_guard():
-                fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
+        with ctx(torch.inference_mode(), tf32_enable_guard()):
+            fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
 
-            with tf32_disable_guard():
-                fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
+        with tf32_disable_guard():
+            fp16_output = fp16_output.clip(torch.finfo(fp16_output.dtype).min, torch.finfo(fp16_output.dtype).max)
 
-                # [STEP 4]: Compute loss
-                best_scales, loss = self._compute_best_scale(
-                    inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs
-                )
+            # [STEP 4]: Compute loss
+            best_scales, loss = self._compute_best_scale(
+                inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs
+            )
 
         return (
             get_op_name(module, prev_op),

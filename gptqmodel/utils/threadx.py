@@ -16,6 +16,7 @@ import torch
 
 from .. import DEBUG_ON
 from ..utils.logger import setup_logger
+from ..utils.ctx import ctx
 
 
 log = setup_logger()
@@ -356,15 +357,14 @@ class _DeviceWorker:
                 use_inference = self._inference_mode if override_inference is None else bool(override_inference)
 
                 # Tasks take a **read** lock so janitor's write lock can't interleave
-                with self.rwlock.reader():
-                    with _device_ctx(self.device):
-                        inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
-                        with inference_ctx:
-                            if stream is not None and self.device.type == "cuda":
-                                with torch.cuda.stream(stream):
-                                    result = fn(*args, **kwargs)
-                            else:
+                with ctx(self.rwlock.reader(), _device_ctx(self.device)):
+                    inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
+                    with inference_ctx:
+                        if stream is not None and self.device.type == "cuda":
+                            with torch.cuda.stream(stream):
                                 result = fn(*args, **kwargs)
+                        else:
+                            result = fn(*args, **kwargs)
                 # Counters must be updated before resolving futures to prevent
                 # tests reading stats mid-transition and seeing stale totals.
                 self._on_task_finished(self.key)

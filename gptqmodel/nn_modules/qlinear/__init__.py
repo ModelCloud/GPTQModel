@@ -789,7 +789,6 @@ class AWQuantLinear(BaseQuantLinear):
     def __init__(self,
                  bias: bool = False,
                  use_bf16: bool = False,
-                 register_awq_buffers: bool = True,
                  register_buffers: bool = False,
                  **kwargs):
         super().__init__(bias=bias, register_buffers=False, **kwargs)
@@ -799,7 +798,7 @@ class AWQuantLinear(BaseQuantLinear):
         in_features = self.in_features
         out_features = self.out_features
 
-        if register_awq_buffers:
+        if register_buffers:
             self.register_buffer(
                 "qweight",
                 t.zeros((in_features, out_features // (self.pack_dtype_bits // self.bits)), dtype=self.pack_dtype),

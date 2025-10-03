@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import nullcontext
 from typing import Dict, List, Optional
 
 import torch
@@ -32,6 +33,7 @@ from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
+from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
@@ -564,12 +566,14 @@ class ModuleLooper():
                     example["attention_mask"] = example["attention_mask"].long()
 
                 # Ensure initial caches (like RoPE) are created on the quant device
-                with self.pool.read_lock(self.gptq_model.quantize_config.device):
-                    with device_ctx(self.gptq_model.quantize_config.device):
-                        if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
-                            self.gptq_model.model.generate(**example, **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS)
-                        else:
-                            self.gptq_model.model(**example, use_cache=use_cache)
+                with ctx(
+                    self.pool.read_lock(self.gptq_model.quantize_config.device),
+                    device_ctx(self.gptq_model.quantize_config.device),
+                ):
+                    if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
+                        self.gptq_model.model.generate(**example, **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS)
+                    else:
+                        self.gptq_model.model(**example, use_cache=use_cache)
             except StopForward:
                 pass
 
@@ -711,7 +715,13 @@ class ModuleLooper():
                                                                  processor=processor,
                                                                  fail_safe=fail_safe)
                         named_childs.update(named_modules)
-                    processor.layer_quantize(module, cur_layer_device, named_childs)
+
+                    lock_ctx = nullcontext()
+                    device_for_ctx = cur_layer_device if getattr(cur_layer_device, 'type', None) != 'meta' else None
+                    if device_for_ctx is not None:
+                        lock_ctx = self.pool.read_lock(cur_layer_device)
+                    with ctx(lock_ctx, device_ctx(device_for_ctx)):
+                        processor.layer_quantize(module, cur_layer_device, named_childs)
                     continue
 
                 layer_inputs = processor.inputs_cache.layer_inputs
