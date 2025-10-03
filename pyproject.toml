@@ -49,6 +49,7 @@ dependencies = [
     "maturin>=1.9.4", # required by safetensors and hf_transfer
     "datasets>=3.6.0",
     "pyarrow>=21.0",
+    "dill>=0.3.8", # datasets requirements
     # "cython>=3.1.4", # required by hf-xet/hf-transfer
     # "flash-attn>=2.8.3", <-- install for lower vram usage
 ]
