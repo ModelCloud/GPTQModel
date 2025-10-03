@@ -1283,6 +1283,7 @@ class BaseQModel(nn.Module):
             **reload_kwargs,
         )
         new_model._model_init_kwargs = reload_kwargs
+        new_model.eval()
         return new_model
 
     def _schedule_turtle_reload(self) -> None:
@@ -1320,6 +1321,7 @@ class BaseQModel(nn.Module):
                         **reload_kwargs,
                     )
                     model._model_init_kwargs = reload_kwargs
+                    model.eval()
                     return model
                 finally:
                     self._turtle_ready.set()
@@ -1327,7 +1329,9 @@ class BaseQModel(nn.Module):
             self._turtle_ready.clear()
 
             try:
-                future = pool.submit(CPU, _reload_task)
+                # Re-loading constructs new Parameter objects; run outside inference mode
+                # so autograd metadata stays intact even on inference-optimised workers.
+                future = pool.submit(CPU, _reload_task, _threadx_inference_mode=False)
             except Exception as exc:
                 log.warning("Turtle reload scheduling failed; falling back to sync reload: %s", exc)
                 self._turtle_reload_future = None
@@ -1339,6 +1343,7 @@ class BaseQModel(nn.Module):
         self._turtle_ready.clear()
         new_model = self._reload_turtle_model_sync()
         if new_model is not None:
+            new_model.eval()
             self.turtle_model = new_model
         self._turtle_ready.set()
 
@@ -1366,6 +1371,8 @@ class BaseQModel(nn.Module):
         except Exception as exc:
             log.warning("Background turtle reload failed; retrying synchronously: %s", exc)
             new_model = self._reload_turtle_model_sync()
+            if new_model is not None:
+                new_model.eval()
             with self._turtle_reload_lock:
                 if self._turtle_reload_future is future:
                     self._turtle_reload_future = None
@@ -1376,7 +1383,9 @@ class BaseQModel(nn.Module):
 
         with self._turtle_reload_lock:
             if self._turtle_reload_future is future:
-                self.turtle_model = new_model
+                if new_model is not None:
+                    new_model.eval()
+                    self.turtle_model = new_model
                 self._turtle_reload_future = None
                 self._turtle_ready.set()
 
