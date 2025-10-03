@@ -5,6 +5,24 @@
 
 import torch
 
+from gptqmodel.utils import setup_logger
+
+log = setup_logger()
+
+_HAS_STABLE_ARGSORT: bool | None = None
+
+
+def _supports_stable_argsort() -> bool:
+    global _HAS_STABLE_ARGSORT
+    if _HAS_STABLE_ARGSORT is None:
+        try:
+            torch.argsort(torch.tensor([0.0, 1.0]), stable=True)
+            _HAS_STABLE_ARGSORT = True
+        except TypeError:
+            _HAS_STABLE_ARGSORT = False
+            log.warn("Torch: missing argsort with `stable` support.")
+    return _HAS_STABLE_ARGSORT
+
 
 # optimized
 def compute_local_perms(
@@ -76,7 +94,15 @@ def compute_global_perm(
         else:
             raise ValueError(f"Unknown metric: {metric}")
 
-    global_perm = torch.argsort(scores, descending=True)
+    # if scores.is_cuda:
+    #     idx = torch.arange(num_groups, device=scores.device, dtype=torch.float64)
+    #     scores_fp64 = scores.to(dtype=torch.float64) - idx * torch.finfo(torch.float64).eps
+    #     global_perm = torch.argsort(scores_fp64, descending=True)
+    # elif _supports_stable_argsort():
+    if _supports_stable_argsort():
+        global_perm = torch.argsort(scores, descending=True, stable=True)
+    else:
+        global_perm = torch.argsort(scores, descending=True)
     return global_perm
 
 # optimized
