@@ -673,7 +673,19 @@ def convert_gptq_v2_to_v1_format(
     return model
 
 
-def pack_module(name, qModules, q_scales, q_zeros, q_g_idx, layers, quant_linear_cls, lock: threading.Lock, q_scales_extra = None):
+def pack_module(
+    name,
+    qModules,
+    q_scales,
+    q_zeros,
+    q_g_idx,
+    layers,
+    quant_linear_cls,
+    lock: threading.Lock,
+    q_scales_extra=None,
+    quantize_config: Optional[QuantizeConfig] = None,
+    quant_result: Optional[Dict[str, Any]] = None,
+):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     with tctl.threadpool_limits(limits=1):
         with lock:
@@ -701,6 +713,17 @@ def pack_module(name, qModules, q_scales, q_zeros, q_g_idx, layers, quant_linear
             module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
         else:
             module.pack(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
+
+        if (
+            quantize_config is not None
+            and quantize_config.quant_method == METHOD.GPTQ
+            and quantize_config.format == FORMAT.GPTQ
+            and getattr(quant_linear_cls, "REQUIRES_FORMAT_V2", False)
+        ):
+            convert_gptq_v2_to_v1_format_module(
+                module=module,
+                quantize_config=quantize_config,
+            )
 
         # TODO: why move it back to gpu?
         # start = time.time()
@@ -767,8 +790,15 @@ def pack_model(
                 # TODO FIX, thread pool executor does not advance iterator
                 pb.next()
                 pb.title(f"Packing {name}").draw()
-                pack_module(name=name, qModules=qModules, quant_result=quant_result, layers=modules,
-                            quant_linear_cls=quant_linear_cls, lock=lock)
+                pack_module(
+                    name=name,
+                    qModules=qModules,
+                    quant_result=quant_result,
+                    layers=modules,
+                    quant_linear_cls=quant_linear_cls,
+                    lock=lock,
+                    quantize_config=qcfg,
+                )
 
             for _ in executor.map(wrapper, names):
                 pass

@@ -230,6 +230,7 @@ class QQQProcessor(LoopProcessor):
             quant_linear_cls=QQQQuantLinear,
             lock=self.lock,
             q_scales_extra=q_scales_extra,
+            quantize_config=self.qcfg,
         )
 
         # TODO: store module quant results in module, not global processor result

@@ -25,6 +25,7 @@ from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX
 from ..adapter.peft import LoraConfig
 from ..quantization.config import (
     FORMAT,
+    METHOD,
     META_FIELD_ACT_GROUP_AWARE,
     META_FIELD_DAMP_AUTO_INCREMENT,
     META_FIELD_DAMP_PERCENT,
@@ -225,9 +226,13 @@ def ModelWriter(cls):
 
         if not self.load_quantized_model:
             model = self.model
-            # # internal is always gptq v2 but allow users to pass gptq (v1) via config
-            if quantize_config.format in (FORMAT.GPTQ): # or quantize_config.format == FORMAT.GEMM:
-                # Model qzeros may be edited in place.
+            # internal is always gptq v2 but allow users to pass gptq (v1) via config
+            if (
+                quantize_config.format == FORMAT.GPTQ
+                and quantize_config.quant_method == METHOD.GPTQ
+                and self.qlinear_kernel.REQUIRES_FORMAT_V2
+            ):
+                # Model qzeros may be edited in place for export compatibility.
                 model = convert_gptq_v2_to_v1_format(
                     model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
                 )
