@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import json
 from typing import Any, Optional
 
 import torch
@@ -14,6 +15,49 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
+GENERATION_SAMPLING_FIELDS = ("temperature", "top_p")
+
+
+def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
+    changed = False
+    if cfg is None:
+        return changed
+
+    if getattr(cfg, "do_sample", None) is not True:
+        cfg.do_sample = True
+        changed = True
+
+    if drop_sampling_fields:
+        for field in GENERATION_SAMPLING_FIELDS:
+            if hasattr(cfg, field):
+                if getattr(cfg, field) is not None:
+                    changed = True
+                setattr(cfg, field, None)
+    return changed
+
+
+def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
+    try:
+        config_dict, kwargs = GenerationConfig.get_config_dict(path)
+    except Exception:
+        return None
+
+    cleaned = dict(config_dict)
+    removed = False
+    for field in GENERATION_SAMPLING_FIELDS:
+        if field in cleaned:
+            cleaned.pop(field, None)
+            removed = True
+    if cleaned.get("do_sample") is not True:
+        cleaned["do_sample"] = True
+
+    cfg = GenerationConfig.from_dict(cleaned, **kwargs)
+    if removed:
+        log.info("Model: Removed unsupported sampling fields from `generation_config.json` during load.")
+    _sanitize_generation_config(cfg, drop_sampling_fields=True)
+    return cfg
+
+
 # TODO FIXME! Pre-quantized use AutoModelForCausalLM.from_pretrained() but post-quantized use AutoModelForCausalLM.from_config()
 def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
     if model.can_generate():
@@ -21,7 +65,10 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
         if path:
             log.info(f"Model: Loaded `generation_config`: {model.generation_config}")
             try:
-                cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
+                cfg = _load_sanitized_generation_config(path)
+                if cfg is None:
+                    cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
+                    _sanitize_generation_config(cfg, drop_sampling_fields=True)
                 if cfg != model.generation_config:
                     # migrated pad_token_id to config
                     if hasattr(model.generation_config, "pad_token_id"):
@@ -41,7 +88,9 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
         autofix_hf_generation_config(model.generation_config)
         # print(f"After autofix_hf_model_config: {model.generation_config}")
 
+
 def autofix_hf_generation_config(cfg: GenerationConfig):
+    _sanitize_generation_config(cfg, drop_sampling_fields=True)
     # HF has recently started to perform very strict validation model save which results in warnings on load()
     # to become exceptions on save().
     if cfg.do_sample is False:
@@ -66,6 +115,30 @@ def autofix_hf_generation_config(cfg: GenerationConfig):
         if errors > 0:
             cfg.do_sample = True
             log.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
+
+
+def sanitize_generation_config_file(path: str) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+    except FileNotFoundError:
+        return False
+
+    changed = False
+    for field in GENERATION_SAMPLING_FIELDS:
+        if field in data:
+            data.pop(field, None)
+            changed = True
+
+    if data.get("do_sample") is not True:
+        data["do_sample"] = True
+        changed = True
+
+    if changed:
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(data, fp, indent=2)
+
+    return changed
 
 # load hf model with empty tensors on meta device (zero tensor memory usage)
 def build_shell_model(

@@ -41,6 +41,7 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
 )
 from ..utils.backend import BACKEND
+from ..utils.hf import sanitize_generation_config_file
 from ..utils.logger import setup_logger
 from ..utils.model import (
     convert_gptq_v2_to_v1_format,
@@ -250,6 +251,10 @@ def ModelWriter(cls):
         # Save model config, including generation_config
         # Use empty state_dict hack to bypass saving weights
         self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+
+        gen_config_path = os.path.join(save_dir, "generation_config.json")
+        if sanitize_generation_config_file(gen_config_path):
+            log.info("Model: Sanitized `generation_config.json` before packaging.")
 
         # Save `quantize_config.json`
         quantize_config.save_pretrained(save_dir)
