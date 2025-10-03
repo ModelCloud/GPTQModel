@@ -11,7 +11,7 @@ if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7" #"expandable_segments:True"
 
 # Following makes test results more deterministic but much slower
 # # the CUBLAS env is required for use_deterministic_algorithms
@@ -33,6 +33,7 @@ import contextlib  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
+from collections.abc import Iterable  # noqa: E402
 
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
@@ -145,36 +146,77 @@ class ModelTest(unittest.TestCase):
         return tokenizer
 
     @classmethod
-    def load_dataset(self, tokenizer=None, rows: int = 0):
+    def load_dataset(cls, tokenizer=None, rows: int = 0):
+        try:
+            dataset = load_dataset(path="~/nm-calibration", name="LLM", split="train")
+        except Exception as exc:  # pragma: no cover - exercised in fallbacks
+            log.warning("load_dataset failed; falling back to local parquet: %s", exc)
+            dataset = cls._load_calibration_parquet()
 
-        #traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-        traindata = load_dataset("neuralmagic/calibration", "LLM", split="train")
-        #neuralmagic / calibration
-        # Load data directly from gzipped JSON file
-        # with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
-        #     traindata = [json.loads(line) for line in f]
-        #
-        if not tokenizer:
-            return traindata.select(range(rows))
-        #     return traindata[:rows]
+        if rows > 0:
+            return dataset.select(range(min(rows, len(dataset))))
+        return dataset
 
-        # Count total rows
-        # print("Total rows:", len(traindata), "wanted rows=", rows)
+    @staticmethod
+    def _load_calibration_parquet():
+        parquet_path = Path("~/nm-calibration/llm.parquet").expanduser()
+        if not parquet_path.exists():
+            raise FileNotFoundError(f"Calibration parquet not found at {parquet_path}")
 
-        # Select the first N rows (e.g., N=10)
-        subset = traindata.select(range(min(rows, len(traindata))))
+        try:
+            import pandas as pd
+        except ImportError:  # pragma: no cover - depends on test environment
+            pd = None
 
-        return subset["text"]
+        if pd is not None:
+            records = pd.read_parquet(parquet_path).to_dict(orient="records")
+            return ModelTest._LocalCalibrationDataset(records)
 
-        datas = []
-        for index, sample in enumerate(traindata):
-            tokenized = tokenizer(sample['text'])
-            if len(tokenized.data['input_ids']) < self.INPUTS_MAX_LENGTH:
-                datas.append(tokenized)
-                if len(datas) >= rows:
-                    break
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as err:
+            raise RuntimeError(
+                "Neither pandas nor pyarrow is available to load calibration parquet"
+            ) from err
 
-        return datas
+        table = pq.read_table(parquet_path)
+        records = table.to_pylist()
+        return ModelTest._LocalCalibrationDataset(records)
+
+    class _LocalCalibrationDataset:
+        __slots__ = ("_records",)
+
+        def __init__(self, records):
+            normalized = []
+            for record in records:
+                item = {}
+                for key, value in dict(record).items():
+                    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+                        value = value.tolist()
+                    item[key] = value
+                normalized.append(item)
+            self._records = normalized
+
+        def __len__(self):
+            return len(self._records)
+
+        def __iter__(self):
+            return iter(self._records)
+
+        def __getitem__(self, index):
+            return self._records[index]
+
+        def select(self, indices):
+            if isinstance(indices, slice):
+                selected = self._records[indices]
+            else:
+                if isinstance(indices, range):
+                    indices = list(indices)
+                elif not isinstance(indices, Iterable):
+                    raise TypeError("select `indices` must be a slice or iterable of integers")
+                selected = [self._records[i] for i in indices]
+            return self.__class__(selected)
+
 
     def check_kernel(self, model, expected_kernels):
         modules = {module.__class__ for _, module in model.named_modules() if isinstance(module, BaseQuantLinear)}
