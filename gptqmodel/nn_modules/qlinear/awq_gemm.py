@@ -78,7 +78,7 @@ class AwqGEMMQuantLinear(AWQuantLinear, PackableQuantLinear):
         #                               device=self.g_idx.device)
 
         # awq only accepts float16
-        if self.scales:
+        if self.scales is not None:
             self.scales = self.scales.to(dtype=torch.float16)
 
         super().post_init()
