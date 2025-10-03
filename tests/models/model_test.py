@@ -31,6 +31,7 @@ from tabulate import tabulate  # noqa: E402
 
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402
 import contextlib  # noqa: E402
+import json  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import textwrap  # noqa: E402
@@ -239,6 +240,80 @@ class ModelTest(unittest.TestCase):
                 torch_empty_cache()
         self.render_inference_summary(inference_records)
         self.render_arc_summary(arc_records)
+
+    @staticmethod
+    def _human_size(num_bytes: int) -> str:
+        step = 1024.0
+        units = ["B", "KB", "MB", "GB", "TB"]
+        value = float(num_bytes)
+        for unit in units:
+            if value < step or unit == units[-1]:
+                return f"{value:.2f}{unit}"
+            value /= step
+        return f"{num_bytes}B"
+
+    @staticmethod
+    def _print_post_quant_artifacts(root_path: str) -> None:
+        path = Path(root_path)
+        if not path.exists():
+            log.warn(f"Post-quant artifact path missing: {root_path}")
+            return
+
+        reset = "\033[0m"
+        depth_colors = [
+            "\033[36m",
+            "\033[33m",
+            "\033[35m",
+            "\033[32m",
+            "\033[34m",
+            "\033[31m",
+        ]
+
+        def colorize(name: str, depth: int, is_dir: bool) -> str:
+            if not sys.stdout.isatty():
+                return name
+            if is_dir:
+                code = depth_colors[depth % len(depth_colors)]
+            else:
+                code = "\033[37m"
+            return f"{code}{name}{reset}"
+
+        def walk(directory: Path, prefix: str, depth: int) -> None:
+            entries = sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+            for idx, entry in enumerate(entries):
+                connector = "└──" if idx == len(entries) - 1 else "├──"
+                display_name = entry.name + ("/" if entry.is_dir() else "")
+                line = f"{prefix}{connector} {colorize(display_name, depth, entry.is_dir())}"
+                if entry.is_file():
+                    try:
+                        size = entry.stat().st_size
+                        line += f" ({ModelTest._human_size(size)})"
+                    except OSError:
+                        pass
+                print(line)
+                if entry.is_dir():
+                    extension = "    " if idx == len(entries) - 1 else "│   "
+                    walk(entry, prefix + extension, depth + 1)
+
+        header = f"Post-quant artifacts: {path.resolve()}"
+        print(f"\n{colorize(header, 0, True)}")
+        walk(path, "", 1)
+
+        index_files = sorted(path.rglob("*.safetensors.index.json"))
+        if not index_files:
+            fallback = sorted(path.glob("*.index.json"))
+            index_files = fallback
+
+        for idx_file in index_files:
+            try:
+                with idx_file.open("r", encoding="utf-8") as fh:
+                    content = json.load(fh)
+            except (OSError, json.JSONDecodeError) as exc:
+                log.warn(f"Failed to read index `{idx_file}`: {exc}")
+                continue
+            rel_name = idx_file.relative_to(path)
+            print(f"\n{colorize(f'Index file: {rel_name}', 0, False)}")
+            print(json.dumps(content, indent=2, sort_keys=True))
 
     @staticmethod
     def _colorize(text, matched):
@@ -486,6 +561,7 @@ class ModelTest(unittest.TestCase):
 
                 model.save(path)
                 tokenizer.save_pretrained(path)
+                self._print_post_quant_artifacts(path)
                 log.info(f"Quantized Model saved to tmp dir: {path}")
                 self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
                 q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
