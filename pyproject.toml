@@ -75,7 +75,7 @@ sglang = [
     "flashinfer-python>=0.3.1",
 ]
 bitblas = [
-    "bitblas==0.0.1-dev13",
+    "bitblas==0.1.0.post1",
 ]
 hf = [
     "optimum>=1.21.2",

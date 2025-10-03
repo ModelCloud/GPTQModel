@@ -5,13 +5,16 @@
 
 import unittest
 
+import os
+
 import torch
 from logbar import LogBar
 from parameterized import parameterized
-from torch import Tensor
+from tabulate import tabulate
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Adapter, AdapterCache, Lora
+from gptqmodel.nn_modules.qlinear.bitblas import BitblasQuantLinear
 from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
@@ -24,6 +27,13 @@ log = LogBar.shared()
 
 DEVICE = torch.device("cuda:0")
 
+GREEN = "\033[32m"
+RED = "\033[31m"
+RESET = "\033[0m"
+
+os.environ.setdefault("BITBLAS_ENABLE_TUNING", "0")
+os.environ.setdefault("BITBLAS_ENABLE_TENSORCORE", "0")
+
 class Data:
     def __init__(self):
         self.m = 1
@@ -35,12 +45,12 @@ class TestKernelOutput(unittest.TestCase):
     model_path = "sliuau/Llama-3.2-3B_4bits_128group_size"
     target_qliner_map = {
         # BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
-        BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
+        # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
         # BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
-        # BACKEND.BITBLAS: BitBLASQuantLinear,
+        BACKEND.BITBLAS: BitblasQuantLinear,
         # BACKEND.IPEX: IPEXQuantLinear,
         BACKEND.MARLIN: MarlinQuantLinear,
         # BACKEND.MARLIN_FP16: MarlinQuantLinear,
@@ -118,9 +128,66 @@ class TestKernelOutput(unittest.TestCase):
 
         return result
 
-    def assert_on_mismatch(self, a: Tensor, b: Tensor, atol):
-        torch.testing.assert_close(a, b, rtol=0.15, atol=atol)
-        #torch.allclose(a, b, rtol=0.15, atol=atol)
+    def _summarize_results(
+        self,
+        reference_outputs,
+        actual_outputs,
+        backend: BACKEND,
+        dtype: torch.dtype,
+        atol: float,
+        title: str,
+        reference_label: str,
+    ):
+        failures = []
+        total = len(actual_outputs)
+
+        for i in range(total):
+            reference = reference_outputs[i]
+            actual = actual_outputs[i]
+
+            is_close_tensor = torch.isclose(reference, actual, rtol=0.15, atol=atol)
+            passed = bool(torch.all(is_close_tensor))
+
+            if not passed:
+                failures.append(
+                    "Sample {idx}:\nExpected ({ref_label}) = {expected}\nActual = {actual_val}".format(
+                        idx=i,
+                        ref_label=reference_label,
+                        expected=reference.detach().cpu().tolist(),
+                        actual_val=actual.detach().cpu().tolist(),
+                    )
+                )
+
+        status = f"{GREEN}PASS{RESET}" if not failures else f"{RED}FAIL{RESET}"
+        details = "\n\n".join(str(detail) for detail in failures) if failures else "-"
+
+        table = tabulate(
+            [
+                [
+                    backend.name,
+                    str(dtype),
+                    total,
+                    status,
+                    len(failures),
+                    details,
+                ]
+            ],
+            headers=[
+                "Backend",
+                "DType",
+                "Samples",
+                "Status",
+                "Failures",
+                "Expected vs Actual",
+            ],
+            tablefmt="github",
+        )
+        log.info("\n" + title + "\n" + table)
+
+        if failures:
+            raise AssertionError(
+                f"{len(failures)} mismatched outputs for backend `{backend}` and dtype `{dtype}`"
+            )
 
     @parameterized.expand([
         (BACKEND.TORCH, torch.float16, 0.0000),
@@ -129,26 +196,26 @@ class TestKernelOutput(unittest.TestCase):
         # (BACKEND.EXLLAMA_V1, torch.float16, 0.0050),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
         (BACKEND.MARLIN, torch.float16, 0.00035),
+        (BACKEND.BITBLAS, torch.float16, 0.0035),
         # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
         # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0025),
     ])
     def test_kernel_float16(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
+        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
+            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+
+        data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype)
 
-        # torch as ref
-        pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
-        for i in pb:
-            data = self.data[dtype]
-            pb.subtitle(f"backed = `{backend}`").draw()
-            try:
-                self.assert_on_mismatch(data.torch_kernel_out[i], out[i],
-                                        a_tolerance)  # use torch as reference
-            except AssertionError:
-                log.error(
-                    f"Torch with Lora output: dtype = `{dtype}`, backed = `{BACKEND.TORCH}`, i = `{i}`, {data.torch_kernel_out[i][:10]}")
-                log.error(
-                    f"Actual with Lora output: dtype = `{dtype}`, backed = `{backend}`, i = `{i}`, {out[i][:10]}")
-                raise AssertionError
+        self._summarize_results(
+            reference_outputs=data.torch_kernel_out,
+            actual_outputs=out,
+            backend=backend,
+            dtype=dtype,
+            atol=a_tolerance,
+            title=f"Kernel Output {dtype}",
+            reference_label="Torch output",
+        )
 
     @parameterized.expand([
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
@@ -157,26 +224,26 @@ class TestKernelOutput(unittest.TestCase):
         # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0064),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
         (BACKEND.MARLIN, torch.bfloat16, 0.0031),
+        (BACKEND.BITBLAS, torch.bfloat16, 0.0031),
         # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.012),
         # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0031), TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
     ])
     def test_kernel_bfloat16(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
+        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
+            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+
+        data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype)
 
-        # torch as ref
-        pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
-        for i in pb:
-            data = self.data[dtype]
-            pb.subtitle(f"backed = `{backend}`").draw()
-            try:
-                self.assert_on_mismatch(data.torch_kernel_out[i], out[i],
-                                        a_tolerance)  # use torch as reference
-            except AssertionError:
-                log.error(
-                    f"Torch with Lora output: dtype = `{dtype}`, backed = `{BACKEND.TORCH}`, i = `{i}`, {data.torch_kernel_out[i][:10]}")
-                log.error(
-                    f"Actual with Lora output: dtype = `{dtype}`, backed = `{backend}`, i = `{i}`, {out[i][:10]}")
-                raise AssertionError
+        self._summarize_results(
+            reference_outputs=data.torch_kernel_out,
+            actual_outputs=out,
+            backend=backend,
+            dtype=dtype,
+            atol=a_tolerance,
+            title=f"Kernel Output {dtype}",
+            reference_label="Torch output",
+        )
 
     @parameterized.expand([
         (BACKEND.TORCH, torch.float16, 0.0000),
@@ -185,22 +252,25 @@ class TestKernelOutput(unittest.TestCase):
         # (BACKEND.EXLLAMA_V1, torch.float16, 0.0054),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
         (BACKEND.MARLIN, torch.float16, 0.00035),
+        (BACKEND.BITBLAS, torch.float16, 0.00035),
         # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
         # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0020)
     ])
     def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
+        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
+            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
-
-        # torch as ref
-        pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
-        for i in pb:
-            pb.subtitle(f"backed = `{backend}`").draw()
-            try:
-                self.assert_on_mismatch(data.torch_kernel_out_with_lora[i], out[i], a_tolerance)  # use torch as reference
-            except AssertionError:
-                log.error(f"Torch with Lora output: backed = dtype = `{dtype}`, `{backend}`, i = `{i}`, {data.torch_kernel_out_with_lora[i][:10]}")
-                raise AssertionError
+        self._summarize_results(
+            reference_outputs=data.torch_kernel_out_with_lora,
+            actual_outputs=out,
+            backend=backend,
+            dtype=dtype,
+            atol=a_tolerance,
+            title=f"Kernel Output With Lora {dtype}",
+            reference_label="Torch with Lora output",
+        )
 
 
     @parameterized.expand([
@@ -210,19 +280,22 @@ class TestKernelOutput(unittest.TestCase):
         # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0062),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
         (BACKEND.MARLIN, torch.bfloat16, 0.0033),
+        (BACKEND.BITBLAS, torch.bfloat16, 0.0033),
         # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.011),
         # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0014)  TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
     ])
     def test_kernel_bfloat16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
+        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
+            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
-
-        # torch as ref
-        pb = log.pb(len(out)).title(f"Actual Kernel Output With Lora {dtype}").manual()
-        for i in pb:
-            pb.subtitle(f"backed = `{backend}`").draw()
-            try:
-                self.assert_on_mismatch(data.torch_kernel_out_with_lora[i], out[i], a_tolerance)  # use torch as reference
-            except AssertionError:
-                log.error(f"Torch with Lora output: dtype = `{dtype}`, backed = `{backend}`, i = `{i}`, {data.torch_kernel_out_with_lora[i][:10]}")
-                raise AssertionError
+        self._summarize_results(
+            reference_outputs=data.torch_kernel_out_with_lora,
+            actual_outputs=out,
+            backend=backend,
+            dtype=dtype,
+            atol=a_tolerance,
+            title=f"Kernel Output With Lora {dtype}",
+            reference_label="Torch with Lora output",
+        )
