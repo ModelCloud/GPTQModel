@@ -18,6 +18,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from .ctx import ctx
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -687,24 +688,22 @@ def pack_module(
     quant_result: Optional[Dict[str, Any]] = None,
 ):
     # Limit pack() thread usage to avoid auto-parallizataion regression
-    with tctl.threadpool_limits(limits=1):
-        with lock:
-            layer = layers[name]
-            module = qModules[name]
+    with ctx(tctl.threadpool_limits(limits=1), lock):
+        layer = layers[name]
+        module = qModules[name]
 
+    module = module.to(CPU)
 
-        module = module.to(CPU)
+    layer = layer.to(CPU)
+    q_scales = q_scales.to(CPU)
+    q_zeros = q_zeros.to(CPU)
 
-        layer = layer.to(CPU)
-        q_scales = q_scales.to(CPU)
-        q_zeros = q_zeros.to(CPU)
+    if q_g_idx is not None:
+        q_g_idx = q_g_idx.to(CPU)
 
-        if q_g_idx is not None:
-            q_g_idx = q_g_idx.to(CPU)
-
-        with lock:
-            layers[name] = layer
-            qModules[name] = module
+    with lock:
+        layers[name] = layer
+        qModules[name] = module
 
         # TODO FIX ME..remove hard coded qqq pack
         if quant_linear_cls.QUANT_TYPE == "qqq":
@@ -784,24 +783,23 @@ def pack_model(
     else:
         max_packers = 1 # due to gil, there is no point packing with more than 1 thread
 
-    with ThreadPoolExecutor(max_workers=max_packers) as executor:
-        with log.pb(names).manual() as pb:
-            def wrapper(name):
-                # TODO FIX, thread pool executor does not advance iterator
-                pb.next()
-                pb.title(f"Packing {name}").draw()
-                pack_module(
-                    name=name,
-                    qModules=qModules,
-                    quant_result=quant_result,
-                    layers=modules,
-                    quant_linear_cls=quant_linear_cls,
-                    lock=lock,
-                    quantize_config=qcfg,
-                )
+    with ctx(ThreadPoolExecutor(max_workers=max_packers), log.pb(names).manual()) as (executor, pb):
+        def wrapper(name):
+            # TODO FIX, thread pool executor does not advance iterator
+            pb.next()
+            pb.title(f"Packing {name}").draw()
+            pack_module(
+                name=name,
+                qModules=qModules,
+                quant_result=quant_result,
+                layers=modules,
+                quant_linear_cls=quant_linear_cls,
+                lock=lock,
+                quantize_config=qcfg,
+            )
 
-            for _ in executor.map(wrapper, names):
-                pass
+        for _ in executor.map(wrapper, names):
+            pass
 
     log.info("Model packed.")
     return quant_linear_cls
@@ -1394,18 +1392,17 @@ _STREAM_BUFFER = memoryview(bytearray(_STREAM_BUFFER_SIZE))
 _STREAM_BUFFER_LOCK = threading.Lock()
 
 def _copy_file_stream(src_path: str, dst_fh, length: int, *, offset: int = 0) -> None:
-    with open(src_path, "rb", buffering=0) as src:
-        with _STREAM_BUFFER_LOCK:
-            if offset:
-                src.seek(offset)
-            remaining = length
-            while remaining > 0:
-                chunk_size = min(_STREAM_BUFFER_SIZE, remaining)
-                read = src.readinto(_STREAM_BUFFER[:chunk_size])
-                if not read:
-                    raise IOError(f"Unexpected EOF while copying from {src_path}")
-                dst_fh.write(_STREAM_BUFFER[:read])
-                remaining -= read
+    with ctx(open(src_path, "rb", buffering=0), _STREAM_BUFFER_LOCK) as (src, _):
+        if offset:
+            src.seek(offset)
+        remaining = length
+        while remaining > 0:
+            chunk_size = min(_STREAM_BUFFER_SIZE, remaining)
+            read = src.readinto(_STREAM_BUFFER[:chunk_size])
+            if not read:
+                raise IOError(f"Unexpected EOF while copying from {src_path}")
+            dst_fh.write(_STREAM_BUFFER[:read])
+            remaining -= read
 
 
 def _write_tensor_bytes(out, tensor: torch.Tensor, dtype: torch.dtype) -> None:
