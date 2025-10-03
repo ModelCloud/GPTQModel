@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+
 from .exllama import WQLinear_Exllama, exllama_post_init
 from .exllamav2 import WQLinear_ExllamaV2, exllamav2_post_init
 from .gemm import WQLinear_GEMM

@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+
 # Adapted from https://github.com/spcl/QuaRot/blob/main/fake_quant/rotation_utils.py
 import typing
 

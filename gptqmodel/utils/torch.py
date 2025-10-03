@@ -14,7 +14,7 @@ from packaging import version
 from torch.cpu import StreamContext
 
 from ..utils.logger import setup_logger
-from . import gte_python_3_13_3, has_gil_disabled, log_gil_requirements_for
+from . import gte_python_3_13_3, gte_python_3_14, has_gil_disabled, log_gil_requirements_for
 
 
 # pytorch 2.6.0 fixes many compilation errors
@@ -75,6 +75,10 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
         log_gil_requirements_for("Torch Compile")
         return module
 
+    if gte_python_3_14():
+        log_gil_requirements_for("Torch Compile")
+        return module
+
     if not TORCH_HAS_COMPILE:
         return module
     if HAS_MPS and not TORCH_GTE_28:
@@ -85,8 +89,8 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
         return module
     try:
         return torch.compile(module, backend=backend, mode=mode, fullgraph=fullgraph)
-    except BaseException:
-        log.warn(f"Failed to compile `{module}`")
+    except BaseException as e:
+        log.warn.once(f"Failed to compile `{module}`, {e}")
         return module
 
 def torch_new_stream():
