@@ -222,7 +222,8 @@ class ModelTest(unittest.TestCase):
     def perform_post_quant_validation(self, model_path, trust_remote_code=False):
         inference_records = {}
         arc_records = {}
-        for backend in (BACKEND.MARLIN, BACKEND.TORCH):
+        compare_backends = (BACKEND.MARLIN, BACKEND.TORCH) if self.FORMAT is FORMAT.GPTQ else (BACKEND.MARLIN, BACKEND.GEMM)
+        for backend in compare_backends:
             log.info(f"Loading post-quant model with backend `{backend.name}`")
             model = self.loadQuantModel(
                 model_path,

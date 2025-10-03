@@ -50,8 +50,10 @@ class AwqGEMVFastQuantLinear(AWQuantLinear, PackableQuantLinear):
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
+        register_buffers: bool = False,
         **kwargs,
     ):
+        backend = kwargs.pop("backend", BACKEND.GEMV_FAST)
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -61,9 +63,9 @@ class AwqGEMVFastQuantLinear(AWQuantLinear, PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.GEMV_FAST),
+            backend=backend,
             adapter=adapter,
-            register_awq_buffers=False,
+            register_buffers=False,
             **kwargs)
 
         self.split_k_iters = 8
@@ -71,31 +73,32 @@ class AwqGEMVFastQuantLinear(AWQuantLinear, PackableQuantLinear):
 
         int32_pack_factor = 32 // self.bits
 
-        self.register_buffer(
-            "qweight",
-            torch.zeros((out_features // self.interleave, in_features // self.pack_factor * self.interleave), dtype=self.pack_dtype),
-        )
-        self.register_buffer(
-            "qzeros",
-            torch.zeros(
-                calculate_zeros_width(in_features, self.group_size) * int32_pack_factor,
-                out_features,
-                dtype=torch.float16,
-            ),
-        )
-        self.register_buffer(
-            "scales",
-            torch.zeros(
-                calculate_zeros_width(in_features, self.group_size) * int32_pack_factor,
-                out_features,
-                dtype=torch.float16,
-            ),
-        )
+        self.bias = None
 
-        if bias:
-            self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
-        else:
-            self.bias = None
+        if register_buffers:
+            self.register_buffer(
+                "qweight",
+                torch.zeros((out_features // self.interleave, in_features // self.pack_factor * self.interleave), dtype=self.pack_dtype),
+            )
+            self.register_buffer(
+                "qzeros",
+                torch.zeros(
+                    calculate_zeros_width(in_features, self.group_size) * int32_pack_factor,
+                    out_features,
+                    dtype=torch.float16,
+                ),
+            )
+            self.register_buffer(
+                "scales",
+                torch.zeros(
+                    calculate_zeros_width(in_features, self.group_size) * int32_pack_factor,
+                    out_features,
+                    dtype=torch.float16,
+                ),
+            )
+
+            if bias:
+                self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
 
     def post_init(self):
         # if self.padded_infeatures != self.in_features:

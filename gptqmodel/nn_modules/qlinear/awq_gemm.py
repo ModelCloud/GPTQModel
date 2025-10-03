@@ -49,6 +49,7 @@ class AwqGEMMQuantLinear(AWQuantLinear, PackableQuantLinear):
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
+        register_buffers: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -62,6 +63,7 @@ class AwqGEMMQuantLinear(AWQuantLinear, PackableQuantLinear):
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.GEMM),
             adapter=adapter,
+            register_buffers=register_buffers,
             **kwargs)
 
     def post_init(self):
