@@ -8,6 +8,7 @@ import numpy
 import torch
 
 from ..utils.logger import setup_logger
+from ._extension_loader import load_extension_module
 from .marlin_scalar_type import ScalarType
 from .rocm import IS_ROCM
 
@@ -16,7 +17,7 @@ log = setup_logger()
 
 marlin_import_exception = None
 try:
-    import gptqmodel_marlin_kernels
+    gptqmodel_marlin_kernels = load_extension_module("gptqmodel_marlin_kernels")
 except ImportError as e:
     marlin_import_exception = str(e)
 

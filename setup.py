@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-import glob
 import os
 import re
 import subprocess
@@ -191,27 +190,44 @@ def _major_minor(v: str) -> str:
     return v
 
 
+def _version_geq(version: str | None, major: int, minor: int = 0) -> bool:
+    if not version:
+        return False
+    try:
+        parts = re.split(r"[._-]", version)
+        ver_major = int(parts[0]) if parts else 0
+        ver_minor = int(parts[1]) if len(parts) > 1 else 0
+        return (ver_major, ver_minor) >= (major, minor)
+    except Exception:
+        return False
+
+
+def _nvcc_release_version() -> str | None:
+    out = _probe_cmd(["nvcc", "--version"])
+    if not out:
+        print(
+            "NVCC not found: For Ubuntu, run `sudo update-alternatives --config cuda` to fix path for already installed Cuda."
+        )
+        return None
+
+    match = re.search(r"release\s+(\d+)\.(\d+)", out)
+    if match:
+        return f"{match.group(1)}.{match.group(2)}"
+    return None
+
+
 def _detect_cuda_version() -> str | None:
     # Priority: env → nvidia-smi → nvcc
     v = os.environ.get("CUDA_VERSION")
     if v and v.strip():
         return v.strip()
 
-    # nvidia-smi (modern drivers expose cuda_version)
-    out = _probe_cmd(["nvidia-smi", "--query-gpu=cuda_version", "--format=csv,noheader"])
-    if out:
-        line = _first_token_line(out)
-        if line and re.match(r"^\d+\.\d+(\.\d+)?$", line):
-            return line
-
     # nvcc --version (parse 'release X.Y')
-    out = _probe_cmd(["nvcc", "--version"])
-    if out:
-        m = re.search(r"release\s+(\d+)\.(\d+)", out)
-        if m:
-            return f"{m.group(1)}.{m.group(2)}"
+    return _nvcc_release_version()
 
-    return None
+
+def _detect_nvcc_version() -> str | None:
+    return _nvcc_release_version()
 
 
 def get_version_tag() -> str:
@@ -242,6 +258,7 @@ RELEASE_MODE = _read_env("RELEASE_MODE")
 CUDA_VERSION = _read_env("CUDA_VERSION")
 ROCM_VERSION = _read_env("ROCM_VERSION")
 TORCH_CUDA_ARCH_LIST = _read_env("TORCH_CUDA_ARCH_LIST")
+NVCC_VERSION = _read_env("NVCC_VERSION")
 
 # respect user env then detect
 if not TORCH_VERSION:
@@ -250,6 +267,8 @@ if not CUDA_VERSION:
     CUDA_VERSION = _detect_cuda_version()
 if not ROCM_VERSION:
     ROCM_VERSION = _detect_rocm_version()
+if not NVCC_VERSION:
+    NVCC_VERSION = _detect_nvcc_version()
 
 SKIP_ROCM_VERSION_CHECK = _read_env("SKIP_ROCM_VERSION_CHECK")
 FORCE_BUILD = _bool_env("GPTQMODEL_FORCE_BUILD", False)
@@ -432,7 +451,12 @@ if BUILD_CUDA_EXT == "1":
         extra_compile_args["nvcc"] += [f"-D_GLIBCXX_USE_CXX11_ABI={CXX11_ABI}"]
 
         if not ROCM_VERSION:
+            # if _version_geq(NVCC_VERSION, 13, 0):
+            #     extra_compile_args["nvcc"].append("--device-entity-has-hidden-visibility=false")
             extra_compile_args["nvcc"] += [
+                # Allow instantiations of __global__ templates to live in different
+                # translation units (we split marlin kernels for Ninja parallelism).
+                "-static-global-template-stub=false",
                 "--threads", "8",  # NVCC parallelism
                 "--optimize=3",  # alias for -O3
                 # "-rdc=true",  # enable relocatable device code, required for future cuda > 13.x <-- TODO FIX ME broken loading
@@ -472,7 +496,22 @@ if BUILD_CUDA_EXT == "1":
         if sys.platform != "win32":
             if not ROCM_VERSION and HAS_CUDA_V8:
                 if BUILD_MARLIN:
-                    marlin_template_kernel_srcs = glob.glob("gptqmodel_ext/marlin/kernel_*.cu")
+                    marlin_kernel_dir = Path("gptqmodel_ext/marlin")
+                    marlin_kernel_files = sorted(marlin_kernel_dir.glob("kernel_*.cu"))
+
+                    if not marlin_kernel_files:
+                        generator_script = marlin_kernel_dir / "generate_kernels.py"
+                        if generator_script.exists():
+                            print("Regenerating marlin template instantiations for parallel compilation...")
+                            subprocess.check_call([sys.executable, str(generator_script)])
+                            marlin_kernel_files = sorted(marlin_kernel_dir.glob("kernel_*.cu"))
+
+                    if not marlin_kernel_files:
+                        raise RuntimeError(
+                            "No generated marlin kernel templates detected. Run generate_kernels.py before building."
+                        )
+
+                    marlin_template_kernel_srcs = [str(path) for path in marlin_kernel_files]
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_marlin_kernels",
