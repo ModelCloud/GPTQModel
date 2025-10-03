@@ -202,43 +202,32 @@ def _version_geq(version: str | None, major: int, minor: int = 0) -> bool:
         return False
 
 
+def _nvcc_release_version() -> str | None:
+    out = _probe_cmd(["nvcc", "--version"])
+    if not out:
+        print(
+            "NVCC not found: For Ubuntu, run `sudo update-alternatives --config cuda` to fix path for already installed Cuda."
+        )
+        return None
+
+    match = re.search(r"release\s+(\d+)\.(\d+)", out)
+    if match:
+        return f"{match.group(1)}.{match.group(2)}"
+    return None
+
+
 def _detect_cuda_version() -> str | None:
     # Priority: env → nvidia-smi → nvcc
     v = os.environ.get("CUDA_VERSION")
     if v and v.strip():
         return v.strip()
 
-    # nvidia-smi (modern drivers expose cuda_version)
-    # out = _probe_cmd(["nvidia-smi", "--query-gpu=cuda_version", "--format=csv,noheader"])
-    # if out:
-    #     line = _first_token_line(out)
-    #     if line and re.match(r"^\d+\.\d+(\.\d+)?$", line):
-    #         return line
-
     # nvcc --version (parse 'release X.Y')
-    out = _probe_cmd(["nvcc", "--version"])
-    if not out:
-        print("NVCC not found: For Ubuntu, run `sudo update-alternatives --config cuda` to fix path for already installed Cuda.")
-
-    if out:
-        m = re.search(r"release\s+(\d+)\.(\d+)", out)
-        if m:
-            return f"{m.group(1)}.{m.group(2)}"
-
-    return None
+    return _nvcc_release_version()
 
 
 def _detect_nvcc_version() -> str | None:
-    out = _probe_cmd(["nvcc", "--version"])
-    if not out:
-        print(
-            "NVCC not found: For Ubuntu, run `sudo update-alternatives --config cuda` to fix path for already installed Cuda.")
-
-    if out:
-        m = re.search(r"release\s+(\d+)\.(\d+)", out)
-        if m:
-            return f"{m.group(1)}.{m.group(2)}"
-    return None
+    return _nvcc_release_version()
 
 
 def get_version_tag() -> str:
@@ -475,10 +464,10 @@ if BUILD_CUDA_EXT == "1":
                 # Print register/shared-memory usage per kernel (debug aid, no perf effect)
                 # Ensure PTXAS uses maximum optimization
                 # Cache global loads in both L1 and L2 (better for memory-bound kernels)
-                #"-Xptxas", "-v,-O3,-dlcm=ca",
+                "-Xptxas", "-v,-O3,-dlcm=ca",
                 "-lineinfo",  # keep source line info for profiling
                 # "--resource-usage",  # show per-kernel register/SMEM usage
-                #"-Xfatbin", "-compress-all",  # compress fatbin
+                "-Xfatbin", "-compress-all",  # compress fatbin
                 # "--expt-relaxed-constexpr",  # relaxed constexpr rules <-- not used
                 # "--expt-extended-lambda",  # allow device lambdas <-- not used
                 "-diag-suppress=179,39,177",  # silence some template warnings
