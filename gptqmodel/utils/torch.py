@@ -244,16 +244,24 @@ def tf32_enable_guard():
         yield
         return
 
-    prev_matmul = torch.backends.cuda.matmul.allow_tf32
-    prev_cudnn = torch.backends.cudnn.allow_tf32
+    if torch.backends.fp32_precision == "tf32":
+        yield
+        return
 
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.fp32_precision = "tf32"
+    torch.backends.cuda.matmul.fp32_precision = "tf32"
+    torch.backends.cudnn.fp32_precision = "tf32"
+    torch.backends.cudnn.conv.fp32_precision = "tf32"
+    torch.backends.cudnn.rnn.fp32_precision = "tf32"
+
     try:
         yield
     finally:
-        torch.backends.cuda.matmul.allow_tf32 = prev_matmul
-        torch.backends.cudnn.allow_tf32 = prev_cudnn
+        torch.backends.fp32_precision = "ieee"
+        torch.backends.cuda.matmul.fp32_precision = "ieee"
+        torch.backends.cudnn.fp32_precision = "ieee"
+        torch.backends.cudnn.conv.fp32_precision = "ieee"
+        torch.backends.cudnn.rnn.fp32_precision = "ieee"
 
 
 @contextmanager
@@ -262,13 +270,21 @@ def tf32_disable_guard():
         yield
         return
 
-    prev_matmul = torch.backends.cuda.matmul.allow_tf32
-    prev_cudnn = torch.backends.cudnn.allow_tf32
+    if torch.backends.fp32_precision == "ieee":
+        yield
+        return
 
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.fp32_precision = "ieee"
+    torch.backends.cuda.matmul.fp32_precision = "ieee"
+    torch.backends.cudnn.fp32_precision = "ieee"
+    torch.backends.cudnn.conv.fp32_precision = "ieee"
+    torch.backends.cudnn.rnn.fp32_precision = "ieee"
+
     try:
         yield
     finally:
-        torch.backends.cuda.matmul.allow_tf32 = prev_matmul
-        torch.backends.cudnn.allow_tf32 = prev_cudnn
+        torch.backends.fp32_precision = "tf32"
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
+        torch.backends.cudnn.fp32_precision = "tf32"
+        torch.backends.cudnn.conv.fp32_precision = "tf32"
+        torch.backends.cudnn.rnn.fp32_precision = "tf32"
