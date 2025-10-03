@@ -19,8 +19,8 @@ log = setup_logger()
 #     log.info("ENV: Auto disable GIL and use free-threading mode when applicable: Python 3.13t+. You must install the -t edition of Python.")
 
 if not os.environ.get("PYTORCH_ALLOC_CONF", None):
-    os.environ["PYTORCH_ALLOC_CONF"] = 'expandable_segments:True'
-    log.info("ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True' for memory saving.")
+    os.environ["PYTORCH_ALLOC_CONF"] = 'expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7'
+    log.info("ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7' for memory saving.")
 
 if not os.environ.get("CUDA_DEVICE_ORDER", None):
     os.environ["CUDA_DEVICE_ORDER"] = 'PCI_BUS_ID'
