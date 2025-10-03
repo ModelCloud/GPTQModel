@@ -10,6 +10,7 @@ import os
 import random
 import threading
 from collections import defaultdict
+from collections.abc import Sequence
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
 
@@ -25,6 +26,13 @@ from transformers import (
     ProcessorMixin,
     modeling_utils,
 )
+
+try:  # Optional dependency for huggingface datasets support
+    from datasets import Dataset as HFDataset
+    from datasets import IterableDataset as HFIterableDataset
+except Exception:  # pragma: no cover - datasets may not be installed
+    HFDataset = None
+    HFIterableDataset = None
 
 from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
@@ -56,6 +64,11 @@ from .writer import ModelWriter
 
 if TYPE_CHECKING:
     from ..utils.threadx import DeviceThreadPool
+    try:
+        from datasets import Dataset as HFDatasetType
+        from datasets import IterableDataset as HFIterableDatasetType
+    except Exception:  # pragma: no cover - optional dependency
+        HFDatasetType = HFIterableDatasetType = object
 
 
 class _ClassPropertyDescriptor:
@@ -347,36 +360,179 @@ class BaseQModel(nn.Module):
 
     def prepare_dataset(
         self,
-        calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[List[int]]],
+        calibration_dataset: Union[
+            List[Dict[str, Union[List[int], torch.LongTensor]]],
+            List[str],
+            List[List[int]],
+            "HFDatasetType",
+            "HFIterableDatasetType",
+        ],
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
         calibration_dataset_concat_size: Optional[int] = None,
         calibration_dataset_sort: Optional[str] = None,
         batch_size: int = 1,
         calibration_data_min_length: int = 10,
     ):
-        if isinstance(calibration_dataset[0], (str, list)) or (isinstance(calibration_dataset[0], list) and all(isinstance(x, int) for x in calibration_dataset[0])):
-            if self.tokenizer is None:
-                raise ValueError(f"tokenizer must be provided when calibration_dataset is List[str] or List[int], type: {type(calibration_dataset[0])}")
+        hf_dataset_types: tuple = ()
+        if HFDataset is not None:
+            hf_dataset_types += (HFDataset,)
+        if HFIterableDataset is not None:
+            hf_dataset_types += (HFIterableDataset,)
 
-            # Convert strings/ints to tokenized format
-            new_calibration_dataset = []
-            for data in calibration_dataset:
-                # convert to tensor directly if already in token ids format (ints)
-                if isinstance(data, list) and all(isinstance(x, int) for x in data):
-                    input_ids = torch.tensor([data], dtype=torch.long)
-                    attention_mask = torch.ones_like(input_ids)
-                    new_calibration_dataset.append({
-                        "input_ids": input_ids,
-                        "attention_mask": attention_mask
-                    })
-                # call tokenizer if dataset still string format (str)
-                else:
-                    tokenized = self.tokenizer(data, return_tensors="pt")
-                    new_calibration_dataset.append({
-                        "input_ids": tokenized["input_ids"],
-                        "attention_mask": tokenized["attention_mask"]
-                    })
-            calibration_dataset = new_calibration_dataset
+        if isinstance(calibration_dataset, str):
+            raise ValueError("Quantize: calibration dataset must be iterable, not a single string.")
+
+        if hf_dataset_types and isinstance(calibration_dataset, hf_dataset_types):
+            raw_examples = list(calibration_dataset)
+        elif isinstance(calibration_dataset, list):
+            raw_examples = calibration_dataset
+        elif isinstance(calibration_dataset, Sequence) and not isinstance(calibration_dataset, (bytes, bytearray)):
+            raw_examples = list(calibration_dataset)
+        else:
+            raw_examples = list(calibration_dataset)
+
+        if len(raw_examples) == 0:
+            raise ValueError("Quantize: calibration dataset is empty.")
+
+        def _require_tokenizer(reason: str) -> None:
+            if self.tokenizer is None:
+                raise ValueError(f"tokenizer must be provided when {reason}.")
+
+        def _to_2d_long_tensor(value: Any, name: str, idx: int) -> torch.Tensor:
+            try:
+                tensor = torch.as_tensor(value, dtype=torch.long)
+            except Exception as exc:
+                raise ValueError(f"Quantize: failed to convert `{name}` to tensor for calibration item {idx}.") from exc
+
+            if tensor.ndim == 0:
+                raise ValueError(f"Quantize: `{name}` for calibration item {idx} must be 1D or 2D, got scalar.")
+            if tensor.ndim == 1:
+                tensor = tensor.unsqueeze(0)
+            elif tensor.ndim != 2:
+                raise ValueError(
+                    f"Quantize: `{name}` for calibration item {idx} must be rank 1 or 2, got rank {tensor.ndim}."
+                )
+            return tensor
+
+        def _pack_ids(ids_value: Any, mask_value: Any, idx: int) -> Dict[str, torch.Tensor]:
+            ids_tensor = _to_2d_long_tensor(ids_value, "input_ids", idx)
+
+            if mask_value is None:
+                mask_tensor = torch.ones_like(ids_tensor, dtype=torch.long)
+            else:
+                mask_tensor = _to_2d_long_tensor(mask_value, "attention_mask", idx)
+                if mask_tensor.shape != ids_tensor.shape:
+                    if mask_tensor.numel() == ids_tensor.numel():
+                        mask_tensor = mask_tensor.reshape(ids_tensor.shape)
+                    else:
+                        raise ValueError(
+                            f"Quantize: attention_mask shape {tuple(mask_tensor.shape)} does not match input_ids shape "
+                            f"{tuple(ids_tensor.shape)} for calibration item {idx}."
+                        )
+
+            return {
+                "input_ids": ids_tensor.detach(),
+                "attention_mask": mask_tensor.detach(),
+            }
+
+        def _tokenize_text_value(text_value: Any, idx: int) -> Dict[str, torch.Tensor]:
+            _require_tokenizer("calibration data contains raw text")
+            tokenized = self.tokenizer(
+                text_value,
+                add_special_tokens=True,
+                return_tensors="pt",
+            )
+            input_ids = tokenized["input_ids"]
+            attention_mask = tokenized.get("attention_mask")
+            return _pack_ids(input_ids, attention_mask, idx)
+
+        def _tokenize_messages_value(messages_value: Any, idx: int) -> Dict[str, torch.Tensor]:
+            _require_tokenizer("calibration data uses the `messages` feature")
+            apply_fn = getattr(self.tokenizer, "apply_template", None)
+            if apply_fn is None:
+                raise ValueError("tokenizer must expose `apply_template` to handle `messages` calibration data.")
+            try:
+                templated = apply_fn(messages_value, tokenize=False)
+            except TypeError:
+                templated = apply_fn(messages_value)
+
+            if templated is None:
+                raise ValueError(f"tokenizer.apply_template returned None for calibration item {idx}.")
+
+            if hasattr(templated, "get"):
+                ids_value = templated.get("input_ids")
+                mask_value = templated.get("attention_mask")
+                text_value = templated.get("text")
+                if ids_value is not None:
+                    return _pack_ids(ids_value, mask_value, idx)
+                if text_value is not None:
+                    return _tokenize_text_value(text_value, idx)
+
+            if isinstance(templated, (list, tuple)):
+                if len(templated) > 0 and isinstance(templated[0], int):
+                    return _pack_ids(list(templated), None, idx)
+                raise ValueError(
+                    f"tokenizer.apply_template returned an unsupported sequence type for calibration item {idx}."
+                )
+
+            if torch.is_tensor(templated):
+                return _pack_ids(templated, None, idx)
+
+            if isinstance(templated, str):
+                return _tokenize_text_value(templated, idx)
+
+            raise ValueError(
+                f"tokenizer.apply_template returned unsupported type {type(templated)} for calibration item {idx}."
+            )
+
+        processed_examples: List[Dict[str, torch.Tensor]] = []
+        for idx, example in enumerate(raw_examples):
+            if isinstance(example, dict):
+                if "messages" in example:
+                    apply_fn = getattr(self.tokenizer, "apply_template", None) if self.tokenizer else None
+                    if apply_fn is None:
+                        if "text" in example:
+                            processed_examples.append(_tokenize_text_value(example["text"], idx))
+                            continue
+                        raise ValueError(
+                            "tokenizer must expose `apply_template` or calibration data must provide `text` when using `messages`."
+                        )
+                    processed_examples.append(_tokenize_messages_value(example["messages"], idx))
+                    continue
+                if "text" in example:
+                    processed_examples.append(_tokenize_text_value(example["text"], idx))
+                    continue
+                if "input_ids" in example:
+                    processed_examples.append(_pack_ids(example["input_ids"], example.get("attention_mask"), idx))
+                    continue
+                raise ValueError(
+                    f"Quantize: unsupported calibration example structure at index {idx}: keys={list(example.keys())}"
+                )
+
+            if isinstance(example, str):
+                processed_examples.append(_tokenize_text_value(example, idx))
+                continue
+
+            if isinstance(example, (list, tuple)):
+                if all(isinstance(x, int) for x in example):
+                    processed_examples.append(_pack_ids(list(example), None, idx))
+                    continue
+                raise ValueError(
+                    f"Quantize: list-based calibration example at index {idx} must contain only integers."
+                )
+
+            if torch.is_tensor(example):
+                processed_examples.append(_pack_ids(example, None, idx))
+                continue
+
+            try:
+                processed_examples.append(_pack_ids(example, None, idx))
+            except Exception as exc:
+                raise ValueError(
+                    f"Quantize: unsupported calibration example type {type(example)} at index {idx}."
+                ) from exc
+
+        calibration_dataset = processed_examples
 
         def _convert_tensor_to_list(tensor):
             if isinstance(tensor, torch.Tensor):
@@ -409,6 +565,7 @@ class BaseQModel(nn.Module):
                      f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length.")
 
         if calibration_dataset_concat_size:
+            _require_tokenizer("`calibration_dataset_concat_size` is specified")
             concatenated_data = []
             input_ids_buff = []
             attention_mask_buff = []

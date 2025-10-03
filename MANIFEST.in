@@ -1,7 +1,10 @@
-global-include gptqmodel_ext/**/*.cuh
-global-include gptqmodel_ext/**/*.h
-global-include gptqmodel_ext/**/*.cpp
-global-include gptqmodel_ext/**/*.cu
-global-include gptqmodel_ext/**/*.py
+recursive-include gptqmodel_ext/awq *.h *.cuh *.cu *.cpp
+recursive-include gptqmodel_ext/exllama *.h *.cuh *.cu *.cpp
+recursive-include gptqmodel_ext/exllamav2 *.h *.cuh *.cu *.cpp
+recursive-include gptqmodel_ext/exllama_eora/eora *.h *.cuh *.cu *.cpp *.py
+recursive-include gptqmodel_ext/marlin *.h *.cuh *.cu *.cpp
+recursive-include gptqmodel_ext/qqq *.h *.cuh *.cu *.cpp
+include gptqmodel_ext/marlin/generate_kernels.py
+recursive-exclude gptqmodel_ext __pycache__ *.pyc
 prune tests/
 prune format/
