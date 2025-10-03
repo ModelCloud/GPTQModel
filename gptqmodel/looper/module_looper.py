@@ -33,6 +33,7 @@ from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
+from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
@@ -717,9 +718,8 @@ class ModuleLooper():
                     device_for_ctx = cur_layer_device if getattr(cur_layer_device, 'type', None) != 'meta' else None
                     if device_for_ctx is not None:
                         lock_ctx = self.pool.read_lock(cur_layer_device)
-                    with lock_ctx:
-                        with device_ctx(device_for_ctx):
-                            processor.layer_quantize(module, cur_layer_device, named_childs)
+                    with ctx(lock_ctx, device_ctx(device_for_ctx)):
+                        processor.layer_quantize(module, cur_layer_device, named_childs)
                     continue
 
                 layer_inputs = processor.inputs_cache.layer_inputs
