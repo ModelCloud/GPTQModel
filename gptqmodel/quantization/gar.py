@@ -5,24 +5,71 @@
 
 import torch
 
+from gptqmodel.utils import setup_logger
+
+
+log = setup_logger()
+
+_HAS_STABLE_ARGSORT: bool | None = None
+
+
+def _supports_stable_argsort() -> bool:
+    global _HAS_STABLE_ARGSORT
+    if _HAS_STABLE_ARGSORT is None:
+        try:
+            torch.argsort(torch.tensor([0.0, 1.0]), stable=True)
+            _HAS_STABLE_ARGSORT = True
+        except TypeError:
+            _HAS_STABLE_ARGSORT = False
+            log.warn("Torch: missing argsort with `stable` support.")
+    return _HAS_STABLE_ARGSORT
+
 
 # optimized
-def compute_local_perms(diag_H: torch.Tensor, groupsize: int) -> torch.Tensor:
+def compute_local_perms(
+    diag_H: torch.Tensor,
+    groupsize: int,
+    *,
+    return_values: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    """Vectorized within-group permutations.
+
+    Optionally returns the sorted diagonal statistics so callers can reuse them
+    (e.g. to derive max-based group scores without another kernel launch).
     """
-    Returns a (num_groups, groupsize) LongTensor of within-group permutations.
-    """
+
     n = diag_H.numel()
     num_groups = n // groupsize
     if num_groups == 0:
-        return torch.empty(0, groupsize, dtype=torch.long, device=diag_H.device)
+        empty = torch.empty(0, groupsize, dtype=torch.long, device=diag_H.device)
+        if return_values:
+            return empty, torch.empty(0, groupsize, dtype=diag_H.dtype, device=diag_H.device)
+        return empty
 
     H = diag_H[: num_groups * groupsize].view(num_groups, groupsize)
-    # Argsort along the group dimension -> indices that sort each row descending
-    local_perms = torch.argsort(H, dim=1, descending=True)
-    return local_perms
+
+    # CUDA `topk` outperforms `argsort`/`sort` for the typical
+    # group sizes (<=192) used by GPTQModel while keeping identical ordering.
+    use_topk = diag_H.is_cuda and groupsize <= 192 and groupsize > 0
+    if use_topk:
+        values, indices = torch.topk(H, k=groupsize, dim=1, largest=True, sorted=True)
+    else:
+        values, indices = torch.sort(H, dim=1, descending=True)
+
+    indices = indices.to(dtype=torch.long)
+    if return_values:
+        return indices, values
+    return indices
+
 
 # optimized
-def compute_global_perm(diag_H: torch.Tensor, groupsize: int, metric: str = "max") -> torch.Tensor:
+def compute_global_perm(
+    diag_H: torch.Tensor,
+    groupsize: int,
+    metric: str = "max",
+    *,
+    precomputed_values: torch.Tensor | None = None,
+) -> torch.Tensor:
     """
     Returns a (num_groups,) LongTensor with the order of groups by a chosen metric.
     metric ∈ {"max", "mean", "sum", "median"}.
@@ -32,20 +79,31 @@ def compute_global_perm(diag_H: torch.Tensor, groupsize: int, metric: str = "max
     if num_groups == 0:
         return torch.empty(0, dtype=torch.long, device=diag_H.device)
 
-    H = diag_H[: num_groups * groupsize].view(num_groups, groupsize)
-
-    if metric == "max":
-        scores = H.max(dim=1).values
-    elif metric == "mean":
-        scores = H.mean(dim=1)
-    elif metric == "sum":
-        scores = H.sum(dim=1)
-    elif metric == "median":
-        scores = H.median(dim=1).values
+    if metric == "max" and precomputed_values is not None:
+        scores = precomputed_values[:, 0]
     else:
-        raise ValueError(f"Unknown metric: {metric}")
+        H = diag_H[: num_groups * groupsize].view(num_groups, groupsize)
 
-    global_perm = torch.argsort(scores, descending=True)
+        if metric == "max":
+            scores = H.max(dim=1).values
+        elif metric == "mean":
+            scores = H.mean(dim=1)
+        elif metric == "sum":
+            scores = H.sum(dim=1)
+        elif metric == "median":
+            scores = H.median(dim=1).values
+        else:
+            raise ValueError(f"Unknown metric: {metric}")
+
+    # if scores.is_cuda:
+    #     idx = torch.arange(num_groups, device=scores.device, dtype=torch.float64)
+    #     scores_fp64 = scores.to(dtype=torch.float64) - idx * torch.finfo(torch.float64).eps
+    #     global_perm = torch.argsort(scores_fp64, descending=True)
+    # elif _supports_stable_argsort():
+    if _supports_stable_argsort():
+        global_perm = torch.argsort(scores, descending=True, stable=True)
+    else:
+        global_perm = torch.argsort(scores, descending=True)
     return global_perm
 
 # optimized
