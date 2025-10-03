@@ -33,8 +33,8 @@ sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # n
 import contextlib  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
-import unittest  # noqa: E402
 import textwrap  # noqa: E402
+import unittest  # noqa: E402
 from collections.abc import Iterable  # noqa: E402
 
 import torch.cuda  # noqa: E402

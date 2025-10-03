@@ -25,7 +25,6 @@ from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX
 from ..adapter.peft import LoraConfig
 from ..quantization.config import (
     FORMAT,
-    METHOD,
     META_FIELD_ACT_GROUP_AWARE,
     META_FIELD_DAMP_AUTO_INCREMENT,
     META_FIELD_DAMP_PERCENT,
@@ -38,6 +37,7 @@ from ..quantization.config import (
     META_FIELD_V2_ENABLED,
     META_QUANTIZER_GPTQMODEL,
     META_VALUE_URI,
+    METHOD,
     MIN_VERSION_WITH_V2,
 )
 from ..utils.backend import BACKEND

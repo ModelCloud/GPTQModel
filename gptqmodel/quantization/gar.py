@@ -7,6 +7,7 @@ import torch
 
 from gptqmodel.utils import setup_logger
 
+
 log = setup_logger()
 
 _HAS_STABLE_ARGSORT: bool | None = None
