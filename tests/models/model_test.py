@@ -26,6 +26,7 @@ from pathlib import Path  # noqa: E402
 from typing import Dict, List  # noqa: E402
 
 from logbar import LogBar  # noqa: E402
+from tabulate import tabulate  # noqa: E402
 
 
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402
@@ -33,6 +34,7 @@ import contextlib  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
+import textwrap  # noqa: E402
 from collections.abc import Iterable  # noqa: E402
 
 import torch.cuda  # noqa: E402
@@ -101,6 +103,14 @@ class ModelTest(unittest.TestCase):
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
     EXPECT_LM_HEAD_LOSS = None
 
+    GENERIC_TEST_PROMPTS = [
+        {"prompt": "Which city is the capital city of France?", "keywords": ["paris"]},
+        {"prompt": "What is the smallest habitable planet in the milky way?", "keywords": ["earth"]},
+        {"prompt": "Who wrote the play Romeo and Juliet?", "keywords": ["shakespeare"]},
+        {"prompt": "What gas do plants primarily absorb from the atmosphere during photosynthesis?", "keywords": ["carbon dioxide"]},
+        {"prompt": "Name the largest ocean on Earth.", "keywords": ["pacific"]},
+    ]
+
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
         # gptqmodel can auto init tokenizer internally
@@ -141,6 +151,195 @@ class ModelTest(unittest.TestCase):
         print(f"Result is: \n{output}")
         return output
 
+    def generate_with_limit(self, model, tokenizer, prompt, max_new_tokens=512):
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+        generated = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            num_beams=1,
+            pad_token_id=pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+        return tokenizer.decode(generated[0], skip_special_tokens=True)
+
+    def run_generic_inference_checks(self, model, tokenizer, backend):
+        model.eval()
+        log.info(f"Post-quant inference checks for backend `{backend.name}`")
+        results = []
+        for idx, item in enumerate(self.GENERIC_TEST_PROMPTS, start=1):
+            prompt = item["prompt"]
+            keywords = item["keywords"]
+            try:
+                response = self.generate_with_limit(model, tokenizer, prompt)
+                normalized = response.lower()
+                matched = any(keyword.lower() in normalized for keyword in keywords)
+                results.append(
+                    {
+                        "prompt": prompt,
+                        "keywords": keywords,
+                        "response": response,
+                        "matched": matched,
+                    }
+                )
+                snippet = self._summarize_response(response, width=160)
+                if matched:
+                    log.info(
+                        f"[{backend.name}] Prompt {idx} PASS: `{prompt}` -> `{snippet}`"
+                    )
+                else:
+                    log.error(
+                        f"[{backend.name}] Prompt {idx} MISS: `{prompt}` -> `{snippet}`"
+                    )
+            except Exception as exc:  # pragma: no cover - informative logging for test harness
+                log.error(f"[{backend.name}] Prompt {idx} ERROR: `{prompt}` -> {exc}")
+                results.append(
+                    {
+                        "prompt": prompt,
+                        "keywords": keywords,
+                        "response": str(exc),
+                        "matched": False,
+                    }
+                )
+        return results
+
+    def run_arc_challenge_eval(self, model, backend, trust_remote_code=False):
+        previous_backend = self.LOAD_BACKEND
+        self.LOAD_BACKEND = backend
+        try:
+            task_results = self.lm_eval(
+                model=model,
+                apply_chat_template=self.APPLY_CHAT_TEMPLATE,
+                trust_remote_code=trust_remote_code,
+                delete_quantized_model=False,
+            )
+            log.info(f"[{backend.name}] ARC summary: {task_results}")
+        finally:
+            self.LOAD_BACKEND = previous_backend
+        return task_results
+
+    def perform_post_quant_validation(self, model_path, trust_remote_code=False):
+        inference_records = {}
+        arc_records = {}
+        for backend in (BACKEND.MARLIN, BACKEND.TORCH):
+            log.info(f"Loading post-quant model with backend `{backend.name}`")
+            model = self.loadQuantModel(
+                model_path,
+                trust_remote_code=trust_remote_code,
+                backend=backend,
+            )
+            tokenizer = model.tokenizer or self.load_tokenizer(model_path, trust_remote_code=trust_remote_code)
+            inference_records[backend] = self.run_generic_inference_checks(model, tokenizer, backend)
+            try:
+                arc_records[backend] = self.run_arc_challenge_eval(model, backend, trust_remote_code=trust_remote_code)
+            finally:
+                del model
+                torch_empty_cache()
+        self.render_inference_summary(inference_records)
+        self.render_arc_summary(arc_records)
+
+    @staticmethod
+    def _colorize(text, matched):
+        color = "\033[92m" if matched else "\033[91m"
+        reset = "\033[0m"
+        return f"{color}{text}{reset}"
+
+    def render_inference_summary(self, inference_records):
+        if not inference_records:
+            return
+        ordered_backends = [backend for backend in (BACKEND.MARLIN, BACKEND.TORCH) if backend in inference_records]
+        if not ordered_backends:
+            return
+
+        prompts = [item["prompt"] for item in self.GENERIC_TEST_PROMPTS]
+        sanity_scores = {}
+        for backend in ordered_backends:
+            entries = {entry["prompt"]: entry for entry in inference_records[backend]}
+            matched_count = sum(1 for entry in entries.values() if entry.get("matched"))
+            total_count = len(entries) if entries else 1
+            sanity_scores[backend] = (matched_count, total_count)
+
+        log.info("Sanity prompt comparison:")
+        for prompt in prompts:
+            expected = ", ".join(
+                self._normalize_keyword_case(k) for k in self._keywords_for_prompt(prompt)
+            )
+            lines = [f"Prompt: {prompt}", f"  Expected: {expected or 'None'}"]
+            for backend in ordered_backends:
+                entry = next((item for item in inference_records[backend] if item["prompt"] == prompt), None)
+                if entry is None:
+                    lines.append(f"  {backend.name:<6}: {self._colorize('N/A', False)}")
+                    continue
+                lines.append(
+                    f"  {backend.name:<6}: {self._format_inference_entry(entry)}"
+                )
+            log.info("\n".join(lines))
+
+        for backend, (matched, total) in sanity_scores.items():
+            score_pct = 100.0 * matched / max(total, 1)
+            result_text = f"{matched}/{total} ({score_pct:.1f}%)"
+            log.info("Sanity score [%s]: %s", backend.name, result_text)
+
+    @staticmethod
+    def _normalize_keyword_case(keyword):
+        return keyword.lower()
+
+    def _keywords_for_prompt(self, prompt):
+        for item in self.GENERIC_TEST_PROMPTS:
+            if item["prompt"] == prompt:
+                return item["keywords"]
+        return []
+
+    @staticmethod
+    def _summarize_response(response, width=80):
+        clean = " ".join(response.split()) if response else ""
+        if not clean:
+            return ""
+        return textwrap.shorten(clean, width=width, placeholder="…")
+
+    def _format_inference_entry(self, entry):
+        matched = entry.get("matched", False)
+        response = entry.get("response", "")
+        snippet = self._summarize_response(response)
+        status = "PASS" if matched else "MISS"
+        cell = f"{status} | {snippet}" if snippet else status
+        return self._colorize(cell, matched)
+
+    def render_arc_summary(self, arc_records):
+        if not arc_records:
+            return
+        ordered_backends = [backend for backend in (BACKEND.MARLIN, BACKEND.TORCH) if backend in arc_records]
+        if not ordered_backends:
+            return
+
+        metrics = set()
+        for results in arc_records.values():
+            metrics.update(results.keys())
+        metrics = sorted(metrics)
+
+        table_rows = []
+        tolerance = 0.01
+        torch_reference = arc_records.get(BACKEND.TORCH, {})
+
+        for metric in metrics:
+            row = [metric]
+            reference_value = torch_reference.get(metric)
+            for backend in ordered_backends:
+                value = arc_records[backend].get(metric)
+                if value is None:
+                    row.append(self._colorize("N/A", False))
+                    continue
+                if backend == BACKEND.TORCH:
+                    row.append(self._colorize(f"{value:.4f}", True))
+                else:
+                    matched = reference_value is not None and abs(value - reference_value) <= tolerance
+                    row.append(self._colorize(f"{value:.4f}", matched))
+            table_rows.append(row)
+
+        headers = ["Metric"] + [backend.name for backend in ordered_backends]
+        log.info("ARC challenge comparison:\n%s", tabulate(table_rows, headers=headers, tablefmt="github"))
+
     def load_tokenizer(self, model_id_or_path, trust_remote_code=False):
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
         return tokenizer
@@ -159,7 +358,7 @@ class ModelTest(unittest.TestCase):
 
     @staticmethod
     def _load_calibration_parquet():
-        parquet_path = Path("~/nm-calibration/llm.parquet").expanduser()
+        parquet_path = Path("/monster/data/_ci_/nm-calibration/llm.parquet").expanduser()
         if not parquet_path.exists():
             raise FileNotFoundError(f"Calibration parquet not found at {parquet_path}")
 
@@ -287,6 +486,7 @@ class ModelTest(unittest.TestCase):
                 model.save(path)
                 tokenizer.save_pretrained(path)
                 log.info(f"Quantized Model saved to tmp dir: {path}")
+                self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
                 q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
                 q_tokenizer = q_model.tokenizer
                 if need_create_processor:
@@ -308,21 +508,23 @@ class ModelTest(unittest.TestCase):
             else:
                 return model, tokenizer
 
-    def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, **args):
+    def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, backend=None, **args):
 
-        kargs = args if args else {}
+        load_kwargs = dict(args)
 
         if self.USE_FLASH_ATTN:
-            args["attn_implementation"] = "flash_attention_2"
+            load_kwargs["attn_implementation"] = "flash_attention_2"
+
+        active_backend = backend if backend is not None else self.LOAD_BACKEND
 
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
-            backend=self.LOAD_BACKEND,
-            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.TORCH_FUSED else "auto",
+            backend=active_backend,
+            device_map={"": "cpu"} if active_backend == BACKEND.TORCH_FUSED else "auto",
             debug=self.DEBUG,
             adapter=self.EORA,
-            **kargs
+            **load_kwargs
         )
 
         return model
@@ -357,6 +559,7 @@ class ModelTest(unittest.TestCase):
                         llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
                         model_args=model_args,
                         output_path=tmp_dir,
+                        backend=self.LOAD_BACKEND,
                         framework=framework,
                         tasks=tasks,
                         apply_chat_template=apply_chat_template,

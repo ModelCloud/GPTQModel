@@ -546,22 +546,24 @@ def ModelLoader(cls):
                 offload_state_dict=True,
                 offload_buffers=True,
             )
-            # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
-            if not qcfg.sym and not qcfg.is_quantized_by_v2():
-                raise ValueError(
-                    f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
-                )
-
-            model = convert_gptq_v1_to_v2_format(
-                model,
-                cfg=qcfg,
-                qlinear_kernel=preload_qlinear_kernel,
-            )
 
             load_checkpoint_in_model = False
 
-            if preload_qlinear_kernel.REQUIRES_FORMAT_V2:
-                qcfg.runtime_format = FORMAT.GPTQ_V2
+            if qcfg.format == FORMAT.GPTQ:
+                # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
+                if not qcfg.sym and not qcfg.is_quantized_by_v2():
+                    raise ValueError(
+                        f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
+                    )
+
+                if preload_qlinear_kernel.REQUIRES_FORMAT_V2:
+                    model = convert_gptq_v1_to_v2_format(
+                        model,
+                        cfg=qcfg,
+                        qlinear_kernel=preload_qlinear_kernel,
+                    )
+
+                    qcfg.runtime_format = FORMAT.GPTQ_V2
 
         if backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and (
                 preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):

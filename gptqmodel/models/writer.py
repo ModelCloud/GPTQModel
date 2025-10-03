@@ -25,6 +25,7 @@ from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX
 from ..adapter.peft import LoraConfig
 from ..quantization.config import (
     FORMAT,
+    METHOD,
     META_FIELD_ACT_GROUP_AWARE,
     META_FIELD_DAMP_AUTO_INCREMENT,
     META_FIELD_DAMP_PERCENT,
@@ -40,6 +41,7 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
 )
 from ..utils.backend import BACKEND
+from ..utils.hf import sanitize_generation_config_file
 from ..utils.logger import setup_logger
 from ..utils.model import (
     convert_gptq_v2_to_v1_format,
@@ -225,9 +227,13 @@ def ModelWriter(cls):
 
         if not self.load_quantized_model:
             model = self.model
-            # # internal is always gptq v2 but allow users to pass gptq (v1) via config
-            if quantize_config.format == FORMAT.GPTQ or quantize_config.format == FORMAT.GEMM:
-                # Model qzeros may be edited in place.
+            # internal is always gptq v2 but allow users to pass gptq (v1) via config
+            if (
+                quantize_config.format == FORMAT.GPTQ
+                and quantize_config.quant_method == METHOD.GPTQ
+                and self.qlinear_kernel.REQUIRES_FORMAT_V2
+            ):
+                # Model qzeros may be edited in place for export compatibility.
                 model = convert_gptq_v2_to_v1_format(
                     model, quantize_config=quantize_config, qlinear_kernel=self.qlinear_kernel
                 )
@@ -245,6 +251,10 @@ def ModelWriter(cls):
         # Save model config, including generation_config
         # Use empty state_dict hack to bypass saving weights
         self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+
+        gen_config_path = os.path.join(save_dir, "generation_config.json")
+        if sanitize_generation_config_file(gen_config_path):
+            log.info("Model: Sanitized `generation_config.json` before packaging.")
 
         # Save `quantize_config.json`
         quantize_config.save_pretrained(save_dir)

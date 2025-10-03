@@ -246,6 +246,7 @@ class GPTQProcessor(LoopProcessor):
             layers=layers,
             quant_linear_cls=model.qlinear_kernel,
             lock=self.lock,
+            quantize_config=self.qcfg,
         )
 
         # TODO: store module quant results in module, not global processor result
