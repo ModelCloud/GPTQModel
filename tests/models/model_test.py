@@ -34,6 +34,7 @@ import contextlib  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
+import textwrap  # noqa: E402
 from collections.abc import Iterable  # noqa: E402
 
 import torch.cuda  # noqa: E402
@@ -182,11 +183,15 @@ class ModelTest(unittest.TestCase):
                         "matched": matched,
                     }
                 )
+                snippet = self._summarize_response(response, width=160)
                 if matched:
-                    log.info(f"[{backend.name}] Prompt {idx} PASS: `{prompt}`")
+                    log.info(
+                        f"[{backend.name}] Prompt {idx} PASS: `{prompt}` -> `{snippet}`"
+                    )
                 else:
-                    snippet = response.replace("\n", " ")[:200]
-                    log.error(f"[{backend.name}] Prompt {idx} MISS: `{prompt}` -> `{snippet}`")
+                    log.error(
+                        f"[{backend.name}] Prompt {idx} MISS: `{prompt}` -> `{snippet}`"
+                    )
             except Exception as exc:  # pragma: no cover - informative logging for test harness
                 log.error(f"[{backend.name}] Prompt {idx} ERROR: `{prompt}` -> {exc}")
                 results.append(
@@ -248,7 +253,6 @@ class ModelTest(unittest.TestCase):
             return
 
         prompts = [item["prompt"] for item in self.GENERIC_TEST_PROMPTS]
-        table_rows = []
         sanity_scores = {}
         for backend in ordered_backends:
             entries = {entry["prompt"]: entry for entry in inference_records[backend]}
@@ -256,20 +260,21 @@ class ModelTest(unittest.TestCase):
             total_count = len(entries) if entries else 1
             sanity_scores[backend] = (matched_count, total_count)
 
+        log.info("Sanity prompt comparison:")
         for prompt in prompts:
-            row = [prompt, ", ".join(self._normalize_keyword_case(k) for k in self._keywords_for_prompt(prompt))]
+            expected = ", ".join(
+                self._normalize_keyword_case(k) for k in self._keywords_for_prompt(prompt)
+            )
+            lines = [f"Prompt: {prompt}", f"  Expected: {expected or 'None'}"]
             for backend in ordered_backends:
                 entry = next((item for item in inference_records[backend] if item["prompt"] == prompt), None)
                 if entry is None:
-                    row.append(self._colorize("N/A", False))
+                    lines.append(f"  {backend.name:<6}: {self._colorize('N/A', False)}")
                     continue
-                matched = entry["matched"]
-                snippet = entry["response"].replace("\n", " ")[:80]
-                row.append(self._colorize(f"{'PASS' if matched else 'MISS'} | {snippet}", matched))
-            table_rows.append(row)
-
-        headers = ["Prompt", "Expected Keywords"] + [backend.name for backend in ordered_backends]
-        log.info("Sanity prompt comparison:\n%s", tabulate(table_rows, headers=headers, tablefmt="github"))
+                lines.append(
+                    f"  {backend.name:<6}: {self._format_inference_entry(entry)}"
+                )
+            log.info("\n".join(lines))
 
         for backend, (matched, total) in sanity_scores.items():
             score_pct = 100.0 * matched / max(total, 1)
@@ -285,6 +290,21 @@ class ModelTest(unittest.TestCase):
             if item["prompt"] == prompt:
                 return item["keywords"]
         return []
+
+    @staticmethod
+    def _summarize_response(response, width=80):
+        clean = " ".join(response.split()) if response else ""
+        if not clean:
+            return ""
+        return textwrap.shorten(clean, width=width, placeholder="…")
+
+    def _format_inference_entry(self, entry):
+        matched = entry.get("matched", False)
+        response = entry.get("response", "")
+        snippet = self._summarize_response(response)
+        status = "PASS" if matched else "MISS"
+        cell = f"{status} | {snippet}" if snippet else status
+        return self._colorize(cell, matched)
 
     def render_arc_summary(self, arc_records):
         if not arc_records:
@@ -539,6 +559,7 @@ class ModelTest(unittest.TestCase):
                         llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
                         model_args=model_args,
                         output_path=tmp_dir,
+                        backend=self.LOAD_BACKEND,
                         framework=framework,
                         tasks=tasks,
                         apply_chat_template=apply_chat_template,
