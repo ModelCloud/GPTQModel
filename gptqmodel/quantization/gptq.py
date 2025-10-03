@@ -342,8 +342,15 @@ class GPTQ:
 
         elif self.qcfg.act_group_aware:
             diag_h = torch.diag(self.H)
-            local_perms = compute_local_perms(diag_h, self.qcfg.group_size)
-            global_perm = compute_global_perm(diag_h, self.qcfg.group_size)
+            local_perms, local_values = compute_local_perms(
+                diag_h, self.qcfg.group_size, return_values=True
+            )
+            global_perm = compute_global_perm(
+                diag_h,
+                self.qcfg.group_size,
+                precomputed_values=local_values,
+            )
+            del local_values
             final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
             W = W[:, final_perm]
             self.H = self.H[final_perm][:, final_perm]

@@ -1,3 +1,4 @@
+import random
 import statistics
 import time
 
@@ -33,9 +34,9 @@ def _benchmark_fn(label, fn, device, warmup_runs=3, measured_runs=10):
 
 
 def test_benchmark_gar_cuda():
-    device_index = 1
+    device_index = 0
     if torch.cuda.device_count() <= device_index:
-        pytest.skip("GPU 1 not available for benchmark")
+        pytest.skip("GPU 0 not available for benchmark")
 
     device = torch.device(f"cuda:{device_index}")
     torch.cuda.set_device(device)
@@ -45,9 +46,13 @@ def test_benchmark_gar_cuda():
     diag_H = torch.randn(num_groups * groupsize, device=device, dtype=torch.float32)
 
     def optimized_call():
-        local = gar.compute_local_perms(diag_H, groupsize)
-        global_perm = gar.compute_global_perm(diag_H, groupsize)
-        return gar.compose_final_perm(local, global_perm, groupsize)
+        local, values = gar.compute_local_perms(diag_H, groupsize, return_values=True)
+        global_perm = gar.compute_global_perm(
+            diag_H, groupsize, precomputed_values=values
+        )
+        result = gar.compose_final_perm(local, global_perm, groupsize)
+        del values
+        return result
 
     def original_call():
         local = gar.compute_local_perms_original(diag_H, groupsize)
@@ -106,3 +111,41 @@ def test_benchmark_gar_cuda():
     )
 
     assert optimized_summary["time_mean_ms"] < original_summary["time_mean_ms"]
+
+
+@pytest.mark.parametrize("seed", range(512))
+def test_gar_accuracy_randomized(seed):
+    device_index = 0
+    if torch.cuda.device_count() <= device_index:
+        pytest.skip("GPU 4 not available for accuracy sweep")
+
+    device = torch.device(f"cuda:{device_index}")
+    torch.cuda.set_device(device)
+
+    random.seed(seed)
+    torch.manual_seed(seed)
+
+    groupsize_candidates = [8, 16, 32, 48, 64, 96, 128, 160, 192, 224, 256]
+    groupsize = random.choice(groupsize_candidates)
+    num_groups = random.randint(0, 2048)
+    remainder = random.randint(0, max(groupsize - 1, 0))
+    length = num_groups * groupsize + remainder
+
+    diag_H = torch.randn(length, device=device, dtype=torch.float32)
+
+    opt_local, opt_values = gar.compute_local_perms(diag_H, groupsize, return_values=True)
+    opt_global = gar.compute_global_perm(
+        diag_H, groupsize, precomputed_values=opt_values
+    )
+    opt_final = gar.compose_final_perm(opt_local, opt_global, groupsize)
+
+    orig_local = gar.compute_local_perms_original(diag_H, groupsize)
+    orig_global = gar.compute_global_perm_original(diag_H, groupsize)
+    orig_final = gar.compose_final_perm_original(orig_local, orig_global, groupsize)
+
+    torch.testing.assert_close(
+        opt_final.to(device="cpu", dtype=torch.float64),
+        orig_final.to(device="cpu", dtype=torch.float64),
+        rtol=0,
+        atol=0,
+    )
