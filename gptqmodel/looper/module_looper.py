@@ -783,6 +783,8 @@ class ModuleLooper():
                         f"subset={index + 1}/{subset_total}, batches={batch_count})"
                     )
                     log.info(forward_msg)
+                    # Drain any background work so the forward spike does not race pooled tasks.
+                    self.pool.wait()
                     forward_outputs = self._run_forward_batches(
                         module=module,
                         processor=processor,
@@ -881,6 +883,8 @@ class ModuleLooper():
                         f"batches={replay_batch_count})"
                     )
                     log.info(replay_msg)
+                    # Forward replay shares the same VRAM spike; block until the pool drains first.
+                    self.pool.wait()
                     layer_outputs = self._run_forward_batches(
                         module=module,
                         processor=processor,
