@@ -345,7 +345,7 @@ class _DeviceWorker:
         may override via `_threadx_inference_mode`.
         """
         _activate_thread_device(self.device)
-        while not self._stop.is_set():
+        while True:
             is_task, fn, args, kwargs, fut = self._q.get()
             try:
                 if not is_task:

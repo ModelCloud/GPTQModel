@@ -30,6 +30,19 @@ GENERATION_SAMPLING_FIELDS = (
     "penalty_alpha",
 )
 
+# Default values enforced by Transformers when `do_sample` is disabled.
+_GREEDY_DEFAULTS = {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "min_p": None,
+    "typical_p": 1.0,
+    "top_k": 50,
+    "epsilon_cutoff": 0.0,
+    "eta_cutoff": 0.0,
+    # Contrastive search uses penalty_alpha; keep unset when not sampling
+    "penalty_alpha": None,
+}
+
 _DUPLICATE_CONFIG_PATTERN = re.compile(r"'([^']+)' is already used by a Transformers config")
 
 
@@ -48,7 +61,7 @@ def _ensure_pretrained_model_defaults():
 _ensure_pretrained_model_defaults()
 
 
-def _clear_generation_field(cfg: GenerationConfig, field: str) -> bool:
+def _drop_generation_field(cfg: GenerationConfig, field: str) -> bool:
     """Remove a generation field from the config and return True if mutated."""
     changed = False
     # GenerationConfig keeps its data in both __dict__ and _internal_dict
@@ -58,25 +71,11 @@ def _clear_generation_field(cfg: GenerationConfig, field: str) -> bool:
             container.pop(field, None)
             changed = True
 
-    # Ensure the attribute still exists so downstream consumers don't crash.
-    try:
-        current = getattr(cfg, field)
-    except AttributeError:
-        current = None
-
-    if current is not None:
-        setattr(cfg, field, None)
-        changed = True
-    elif not hasattr(cfg, field):
-        # Guarantee the attribute exists with a `None` default.
-        setattr(cfg, field, None)
-        changed = True
-
-    # Transformers stores generation parameters in `_internal_dict` too; keep it consistent.
-    internal = getattr(cfg, "_internal_dict", None)
-    if isinstance(internal, dict) and internal.get(field) is not None:
-        internal[field] = None
-        changed = True
+    if hasattr(cfg, field):
+        try:
+            delattr(cfg, field)
+        except AttributeError:
+            pass
 
     return changed
 
@@ -103,6 +102,25 @@ def _has_sampling_params(cfg: GenerationConfig) -> bool:
         else:
             return True
     return False
+
+
+def _set_generation_field(cfg: GenerationConfig, field: str, value: Any) -> bool:
+    """Ensure a generation field matches the requested value, syncing internal dict as well."""
+    current = getattr(cfg, field, None)
+    changed = False
+
+    if value is None:
+        changed = _drop_generation_field(cfg, field) or changed
+    else:
+        if current != value:
+            setattr(cfg, field, value)
+            changed = True
+        internal = getattr(cfg, "_internal_dict", None)
+        if isinstance(internal, dict) and internal.get(field) != value:
+            internal[field] = value
+            changed = True
+
+    return changed
 
 
 def _deregister_auto_config(model_type: str) -> bool:
@@ -148,19 +166,32 @@ def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: 
     if cfg is None:
         return changed
 
-    do_sample = getattr(cfg, "do_sample", None)
-    if do_sample is not True:
-        for field in GENERATION_SAMPLING_FIELDS:
-            if _clear_generation_field(cfg, field):
-                changed = True
+    if not hasattr(cfg, "do_sample") or getattr(cfg, "do_sample") is None:
+        cfg.do_sample = False
+        changed = True
 
-    if drop_sampling_fields:
-        for field in GENERATION_SAMPLING_FIELDS:
-            if _clear_generation_field(cfg, field):
+    if getattr(cfg, "do_sample", False) is not True and not drop_sampling_fields:
+        if getattr(cfg, "do_sample") is not False:
+            cfg.do_sample = False
+            changed = True
+        for field, default in _GREEDY_DEFAULTS.items():
+            if _set_generation_field(cfg, field, default):
                 changed = True
-
-    # Transformers expects `do_sample=False` when no sampling parameters are configured.
-    if getattr(cfg, "do_sample", False) and not _has_sampling_params(cfg):
+    elif getattr(cfg, "do_sample", False) is not True and drop_sampling_fields:
+        if getattr(cfg, "do_sample") is not False:
+            cfg.do_sample = False
+            changed = True
+        for field, default in _GREEDY_DEFAULTS.items():
+            if default is None:
+                if _drop_generation_field(cfg, field):
+                    changed = True
+            else:
+                if _set_generation_field(cfg, field, default):
+                    changed = True
+    elif drop_sampling_fields:
+        # Sampling configuration is intentionally preserved when `do_sample` remains enabled.
+        pass
+    elif getattr(cfg, "do_sample", False) and not _has_sampling_params(cfg):
         cfg.do_sample = False
         changed = True
         log.info("Model: Auto-Fixed `generation_config` by disabling sampling due to missing sampling parameters.")
@@ -179,9 +210,8 @@ def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
         if field in cleaned:
             cleaned.pop(field, None)
             removed = True
-    # Preserve explicit do_sample requests, otherwise leave unset for defaults.
-    if cleaned.get("do_sample") is not True:
-        cleaned.pop("do_sample", None)
+    if "do_sample" not in cleaned:
+        cleaned["do_sample"] = False
 
     cfg = GenerationConfig.from_dict(cleaned, **kwargs)
     if removed:
@@ -257,14 +287,21 @@ def sanitize_generation_config_file(path: str) -> bool:
         return False
 
     changed = False
-    for field in GENERATION_SAMPLING_FIELDS:
-        if field in data:
-            data.pop(field, None)
-            changed = True
-
-    if data.get("do_sample") is not True:
-        data["do_sample"] = True
+    do_sample_value = data.get("do_sample")
+    if do_sample_value is None:
+        data["do_sample"] = False
+        do_sample_value = False
         changed = True
+
+    if do_sample_value is False:
+        for field, default in _GREEDY_DEFAULTS.items():
+            if field in data:
+                if default is None:
+                    data.pop(field, None)
+                    changed = True
+                elif data[field] != default:
+                    data[field] = default
+                    changed = True
 
     if changed:
         with open(path, "w", encoding="utf-8") as fp:

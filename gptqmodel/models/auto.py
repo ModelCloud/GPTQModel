@@ -455,19 +455,46 @@ class GPTQModel:
 
             # use model.generation_config whenever possible
             if gen_kwargs is None:
-                # TODO: move to utils
                 if hasattr(model, "generation_config") and isinstance(model.generation_config, GenerationConfig):
-                    gen_dict = {
-                        "do_sample": model.generation_config.do_sample,
-                        "temperature": model.generation_config.temperature,
-                        "top_k": model.generation_config.top_k,
-                        "top_p": model.generation_config.top_p,
-                        "min_p": model.generation_config.min_p,
+                    cfg = model.generation_config
+                    kv_pairs = []
+                    if getattr(cfg, "do_sample", False):
+                        kv_pairs.append("do_sample=True")
+                        temperature = getattr(cfg, "temperature", None)
+                        if temperature is not None and temperature != 1.0:
+                            kv_pairs.append(f"temperature={temperature}")
+                        top_k = getattr(cfg, "top_k", None)
+                        if top_k is not None:
+                            kv_pairs.append(f"top_k={top_k}")
+                        top_p = getattr(cfg, "top_p", None)
+                        if top_p is not None and top_p != 1.0:
+                            kv_pairs.append(f"top_p={top_p}")
+                        min_p = getattr(cfg, "min_p", None)
+                        if min_p is not None and min_p > 0.0:
+                            kv_pairs.append(f"min_p={min_p}")
+                        typical_p = getattr(cfg, "typical_p", None)
+                        if typical_p is not None and typical_p != 1.0:
+                            kv_pairs.append(f"typical_p={typical_p}")
+                        epsilon_cutoff = getattr(cfg, "epsilon_cutoff", None)
+                        if epsilon_cutoff is not None and epsilon_cutoff != 0.0:
+                            kv_pairs.append(f"epsilon_cutoff={epsilon_cutoff}")
+                        eta_cutoff = getattr(cfg, "eta_cutoff", None)
+                        if eta_cutoff is not None and eta_cutoff != 0.0:
+                            kv_pairs.append(f"eta_cutoff={eta_cutoff}")
+                        penalty_alpha = getattr(cfg, "penalty_alpha", None)
+                        if penalty_alpha is not None:
+                            kv_pairs.append(f"penalty_alpha={penalty_alpha}")
+                    else:
+                        kv_pairs.append("do_sample=False")
+                        temperature = getattr(cfg, "temperature", None)
+                        if temperature is None:
+                            temperature = 0.0
+                        if temperature != 1.0:
+                            kv_pairs.append(f"temperature={temperature}")
 
-                    }
-                    gen_kwargs = ','.join(f"{key}={value}" for key, value in gen_dict.items() if value not in ["", {}, None, []])
+                    gen_kwargs = ",".join(kv_pairs)
                 else:
-                    gen_kwargs = "temperature=0.0,top_k=50" # default
+                    gen_kwargs = "do_sample=False,temperature=0.0"  # default
 
             log.info(f"LM-EVAL: `gen_kwargs` = `{gen_kwargs}`")
 
