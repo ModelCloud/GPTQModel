@@ -8,6 +8,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from typing import Any, Iterator
 
+
 ContextArg = AbstractContextManager[Any] | None
 
 

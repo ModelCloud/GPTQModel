@@ -15,8 +15,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 import torch
 
 from .. import DEBUG_ON
-from ..utils.logger import setup_logger
 from ..utils.ctx import ctx
+from ..utils.logger import setup_logger
 
 
 log = setup_logger()

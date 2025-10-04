@@ -3,9 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import unittest
-
 import os
+import unittest
 
 import torch
 from logbar import LogBar
@@ -15,7 +14,6 @@ from tabulate import tabulate
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Adapter, AdapterCache, Lora
 from gptqmodel.nn_modules.qlinear.bitblas import BitblasQuantLinear
-from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear

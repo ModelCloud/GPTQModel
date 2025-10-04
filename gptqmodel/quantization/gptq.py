@@ -22,7 +22,7 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
-from ..utils.torch import HAS_CUDA, HAS_XPU
+from ..utils.safe import TORCH_LINALG
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -30,13 +30,6 @@ from .quantizer import HF_OPTIMUM, Quantizer
 log = setup_logger()
 
 lock = threading.Lock()
-
-# TODO: is there a buffer init threading init bug in torch.linalg?
-# bypass strange threading bug by warming up torch.linalg.cholesky to setup internal setup calls
-if HAS_CUDA or HAS_XPU:
-    tmp_eye = torch.eye(64, dtype=torch.float32, device="cuda" if HAS_CUDA else "xpu")
-    torch.linalg.cholesky(tmp_eye)
-    del tmp_eye
 
 
 def get_number_of_rows_and_cols(layer: nn.Module):
@@ -254,8 +247,8 @@ class GPTQ:
                 H2 = H.clone()
                 H2[diag, diag] += damp * mean
                 # TODO call to torch.linalg is not threadsafe? Porque no? Esta muy mal.
-                H2 = torch.linalg.cholesky(H2)
-                Hinv = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
+                H2 = TORCH_LINALG.cholesky(H2)
+                Hinv = TORCH_LINALG.cholesky(torch.cholesky_inverse(H2), upper=True)
                 del H, H2
                 break
             except torch._C._LinAlgError as e:
