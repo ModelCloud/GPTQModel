@@ -18,7 +18,17 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
-GENERATION_SAMPLING_FIELDS = ("temperature", "top_p")
+# Parameters that enable sampling-style generation when non-default.
+GENERATION_SAMPLING_FIELDS = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "typical_p",
+    "epsilon_cutoff",
+    "eta_cutoff",
+    "penalty_alpha",
+)
 
 _DUPLICATE_CONFIG_PATTERN = re.compile(r"'([^']+)' is already used by a Transformers config")
 
@@ -48,20 +58,51 @@ def _clear_generation_field(cfg: GenerationConfig, field: str) -> bool:
             container.pop(field, None)
             changed = True
 
-    if hasattr(cfg, field):
-        try:
-            delattr(cfg, field)
-            changed = True
-        except AttributeError:
-            pass
+    # Ensure the attribute still exists so downstream consumers don't crash.
+    try:
+        current = getattr(cfg, field)
+    except AttributeError:
+        current = None
 
-    if hasattr(cfg, field):
-        value = getattr(cfg, field)
-        if value is not None:
-            setattr(cfg, field, None)
-            changed = True
+    if current is not None:
+        setattr(cfg, field, None)
+        changed = True
+    elif not hasattr(cfg, field):
+        # Guarantee the attribute exists with a `None` default.
+        setattr(cfg, field, None)
+        changed = True
+
+    # Transformers stores generation parameters in `_internal_dict` too; keep it consistent.
+    internal = getattr(cfg, "_internal_dict", None)
+    if isinstance(internal, dict) and internal.get(field) is not None:
+        internal[field] = None
+        changed = True
 
     return changed
+
+
+def _has_sampling_params(cfg: GenerationConfig) -> bool:
+    for field in GENERATION_SAMPLING_FIELDS:
+        try:
+            value = getattr(cfg, field)
+        except AttributeError:
+            value = None
+        if value is None:
+            continue
+        if isinstance(value, (int, float)):
+            if field == "temperature" and value != 1.0:
+                return True
+            if field in {"top_p", "min_p", "typical_p"} and value < 1.0:
+                return True
+            if field == "top_k" and value not in (None, 50):
+                return True
+            if field in {"epsilon_cutoff", "eta_cutoff"} and value != 0.0:
+                return True
+            if field == "penalty_alpha" and value is not None:
+                return True
+        else:
+            return True
+    return False
 
 
 def _deregister_auto_config(model_type: str) -> bool:
@@ -117,6 +158,12 @@ def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: 
         for field in GENERATION_SAMPLING_FIELDS:
             if _clear_generation_field(cfg, field):
                 changed = True
+
+    # Transformers expects `do_sample=False` when no sampling parameters are configured.
+    if getattr(cfg, "do_sample", False) and not _has_sampling_params(cfg):
+        cfg.do_sample = False
+        changed = True
+        log.info("Model: Auto-Fixed `generation_config` by disabling sampling due to missing sampling parameters.")
     return changed
 
 
@@ -132,8 +179,9 @@ def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
         if field in cleaned:
             cleaned.pop(field, None)
             removed = True
+    # Preserve explicit do_sample requests, otherwise leave unset for defaults.
     if cleaned.get("do_sample") is not True:
-        cleaned["do_sample"] = True
+        cleaned.pop("do_sample", None)
 
     cfg = GenerationConfig.from_dict(cleaned, **kwargs)
     if removed:
