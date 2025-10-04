@@ -49,7 +49,7 @@ from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
 from transformers.utils import is_flash_attn_2_available  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.models import OvisQModel, Ovis2_5QModel  # noqa: E402
+from gptqmodel.models import Ovis2_5QModel, OvisQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402

@@ -4,18 +4,18 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import json
-from pathlib import Path
-
 import os
-import torch
-import pytest
+from pathlib import Path
 from types import SimpleNamespace
 
-from gptqmodel import GPTQModel, BACKEND
-from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
-from gptqmodel.quantization.config import QuantizeConfig
+import pytest
+import torch
 from model_test import ModelTest
 from ovis.image_to_test_dataset import get_calib_dataset
+
+from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
+from gptqmodel.quantization.config import QuantizeConfig
 
 
 def test_ovis2_5_config_shape():
