@@ -49,6 +49,10 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
         self.shell_module_materialize(self.model.thinker.audio_tower, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.visual.rotary_pos_emb, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.model.rotary_emb, self.quantize_config.device)
+        if hasattr(self.model, "talker"):
+            self.shell_module_materialize(self.model.talker, self.quantize_config.device)
+        if hasattr(self.model, "code2wav"):
+            self.shell_module_materialize(self.model.code2wav, self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
         if self.quantize_config.offload_to_disk:
@@ -76,11 +80,26 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
                             module=self.model.thinker.model.rotary_emb,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
+
+            if hasattr(self.model, "talker"):
+                offload_to_disk(model=self.model,
+                                module=self.model.talker,
+                                disk_path=self.quantize_config.offload_to_disk_path,
+                                )
+            if hasattr(self.model, "code2wav"):
+                offload_to_disk(model=self.model,
+                                module=self.model.code2wav,
+                                disk_path=self.quantize_config.offload_to_disk_path,
+                                )
             return
 
         self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(CPU)
         self.model.thinker.visual = self.model.thinker.visual.to(CPU)
         self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(CPU)
+        if hasattr(self.model, "talker"):
+            self.model.talker = self.model.talker.to(CPU)
+        if hasattr(self.model, "code2wav"):
+            self.model.code2wav = self.model.code2wav.to(CPU)
 
         self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(CPU)
         self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(CPU)
@@ -91,4 +110,3 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
             self.processor = AutoProcessor.from_pretrained(self.model_local_path)
 
         return model
-
