@@ -38,6 +38,32 @@ def _ensure_pretrained_model_defaults():
 _ensure_pretrained_model_defaults()
 
 
+def _clear_generation_field(cfg: GenerationConfig, field: str) -> bool:
+    """Remove a generation field from the config and return True if mutated."""
+    changed = False
+    # GenerationConfig keeps its data in both __dict__ and _internal_dict
+    for attr in ("__dict__", "_internal_dict"):
+        container = getattr(cfg, attr, None)
+        if isinstance(container, dict) and field in container:
+            container.pop(field, None)
+            changed = True
+
+    if hasattr(cfg, field):
+        try:
+            delattr(cfg, field)
+            changed = True
+        except AttributeError:
+            pass
+
+    if hasattr(cfg, field):
+        value = getattr(cfg, field)
+        if value is not None:
+            setattr(cfg, field, None)
+            changed = True
+
+    return changed
+
+
 def _deregister_auto_config(model_type: str) -> bool:
     removed = False
     for attr in ("_mapping", "_extra_content", "_modules"):
@@ -81,16 +107,16 @@ def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: 
     if cfg is None:
         return changed
 
-    if getattr(cfg, "do_sample", None) is not True:
-        cfg.do_sample = True
-        changed = True
+    do_sample = getattr(cfg, "do_sample", None)
+    if do_sample is not True:
+        for field in GENERATION_SAMPLING_FIELDS:
+            if _clear_generation_field(cfg, field):
+                changed = True
 
     if drop_sampling_fields:
         for field in GENERATION_SAMPLING_FIELDS:
-            if hasattr(cfg, field):
-                if getattr(cfg, field) is not None:
-                    changed = True
-                setattr(cfg, field, None)
+            if _clear_generation_field(cfg, field):
+                changed = True
     return changed
 
 
