@@ -25,7 +25,7 @@ else:
     from huggingface_hub import snapshot_download
 
 from packaging.version import InvalidVersion, Version
-from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
+from transformers import AutoTokenizer, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
 from transformers.utils import is_flash_attn_2_available
 from transformers.utils.generic import ContextManagers
@@ -50,6 +50,7 @@ from ..utils.model import (
     make_quant,
     simple_dispatch_model,
 )
+from ..utils.hf import safe_auto_config_from_pretrained
 from ._const import DEVICE, normalize_device
 
 
@@ -201,7 +202,7 @@ def ModelLoader(cls):
 
         model_init_kwargs["trust_remote_code"] = trust_remote_code
 
-        config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
+        config = safe_auto_config_from_pretrained(model_local_path, **model_init_kwargs)
         normalized_config_dtype = _normalize_config_dtype(config)
 
         atten_impl = model_init_kwargs.get("attn_implementation", None)
@@ -378,7 +379,7 @@ def ModelLoader(cls):
         revision = kwargs.pop("revision", None)
         subfolder = kwargs.pop("subfolder", "")
         commit_hash = kwargs.pop("_commit_hash", None)
-        attn_implementation = kwargs.pop("attn_implementation", None)
+        attn_arg = kwargs.pop("attn_implementation", None)
         torch_dtype_arg = kwargs.pop("torch_dtype", None)
 
         cached_file_kwargs = {
@@ -392,15 +393,26 @@ def ModelLoader(cls):
             "subfolder": subfolder,
             "_raise_exceptions_for_missing_entries": False,
             "_commit_hash": commit_hash,
-            "attn_implementation": attn_implementation,
         }
 
         # == step1: prepare configs and file names == #
-        config: PretrainedConfig = AutoConfig.from_pretrained(
+        print("[DEBUG] safe_auto_config call", trust_remote_code, model_local_path)
+        config: PretrainedConfig = safe_auto_config_from_pretrained(
             model_local_path,
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
         )
+        log.info("Loader: safe_auto_config_from_pretrained called with trust_remote_code=%s for %s",
+                 trust_remote_code, model_local_path)
+        print("[DEBUG] loaded config model_type", getattr(config, "model_type", None))
+        attn_override = attn_arg
+        if getattr(config, "model_type", "").lower() == "ovis":
+            for key in ("attn_implementation", "_attn_implementation"):
+                value = getattr(config, key, None)
+                if value == "flash_attention_2" or value is None:
+                    setattr(config, key, "eager")
+            attn_override = "eager"
+        cached_file_kwargs.pop("attn_implementation", None)
         normalized_config_dtype = _normalize_config_dtype(config)
 
         if cls.require_dtype:
@@ -565,7 +577,9 @@ def ModelLoader(cls):
                         supports_flash_attn = bool(model_supports_flash)
 
             args = {}
-            if ATTN_IMPLEMENTATION in kwargs:
+            if attn_override is not None:
+                args[ATTN_IMPLEMENTATION] = attn_override
+            elif ATTN_IMPLEMENTATION in kwargs:
                 args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
             elif device in [DEVICE.CUDA, DEVICE.ROCM]:
                 if supports_flash_attn and is_flash_attn_2_available():

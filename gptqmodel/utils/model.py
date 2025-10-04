@@ -193,7 +193,15 @@ def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dt
                 # cpu to non-cpu or non-cpu to non-cpu  uses normal .to() api
                 obj = obj.to(device=device, non_blocking=True)
         else:
-            obj = obj.to(device=device, dtype=dtype, non_blocking=False)
+            try:
+                obj = obj.to(device=device, dtype=dtype, non_blocking=False)
+            except NotImplementedError as err:
+                if isinstance(obj, nn.Module) and "Cannot copy out of meta tensor" in str(err):
+                    obj = obj.to_empty(device=device)
+                    if dtype is not None:
+                        obj = obj.to(dtype=dtype)
+                else:
+                    raise
 
     return obj
 

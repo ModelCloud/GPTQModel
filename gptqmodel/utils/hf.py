@@ -4,11 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import json
+import os
+import re
 from typing import Any, Optional
 
 import torch
 from accelerate import init_empty_weights
-from transformers import GenerationConfig, PreTrainedModel
+from transformers import AutoConfig, GenerationConfig, PreTrainedModel
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from ..utils.logger import setup_logger
 
@@ -16,6 +19,61 @@ from ..utils.logger import setup_logger
 log = setup_logger()
 
 GENERATION_SAMPLING_FIELDS = ("temperature", "top_p")
+
+_DUPLICATE_CONFIG_PATTERN = re.compile(r"'([^']+)' is already used by a Transformers config")
+
+
+def _ensure_pretrained_model_defaults():
+    fallback_attrs = {
+        "is_parallelizable": False,
+        "_no_split_modules": (),
+        "_keep_in_fp32_modules": (),
+        "_skip_keys_device_placement": (),
+    }
+    for name, value in fallback_attrs.items():
+        if not hasattr(PreTrainedModel, name):
+            setattr(PreTrainedModel, name, value)
+
+
+_ensure_pretrained_model_defaults()
+
+
+def _deregister_auto_config(model_type: str) -> bool:
+    removed = False
+    for attr in ("_mapping", "_extra_content", "_modules"):
+        container = getattr(CONFIG_MAPPING, attr, None)
+        if isinstance(container, dict) and model_type in container:
+            container.pop(model_type, None)
+            removed = True
+    return removed
+
+
+def safe_auto_config_from_pretrained(*args, **kwargs):
+    trust_flag = kwargs.get("trust_remote_code")
+    prev_env = None
+    if trust_flag:
+        prev_env = os.environ.get("TRANSFORMERS_TRUST_REMOTE_CODE")
+        os.environ["TRANSFORMERS_TRUST_REMOTE_CODE"] = "1"
+    try:
+        return AutoConfig.from_pretrained(*args, **kwargs)
+    except ValueError as err:
+        message = str(err)
+        if "already used by a Transformers config" not in message:
+            raise
+        match = _DUPLICATE_CONFIG_PATTERN.search(message)
+        if not match:
+            raise
+        model_type = match.group(1)
+        if not _deregister_auto_config(model_type):
+            raise
+        log.info("Transformers: cleared cached config registration for `%s` and retrying load.", model_type)
+        return AutoConfig.from_pretrained(*args, **kwargs)
+    finally:
+        if trust_flag:
+            if prev_env is None:
+                os.environ.pop("TRANSFORMERS_TRUST_REMOTE_CODE", None)
+            else:
+                os.environ["TRANSFORMERS_TRUST_REMOTE_CODE"] = prev_env
 
 
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:

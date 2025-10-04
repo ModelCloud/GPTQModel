@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional, Union
 import torch
 import transformers
 from safetensors.torch import save_file
-from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
+from transformers import PreTrainedTokenizerFast, ProcessorMixin
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.generic import ContextManagers
@@ -41,7 +41,7 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
 )
 from ..utils.backend import BACKEND
-from ..utils.hf import sanitize_generation_config_file
+from ..utils.hf import sanitize_generation_config_file, safe_auto_config_from_pretrained
 from ..utils.logger import setup_logger
 from ..utils.model import (
     convert_gptq_v2_to_v1_format,
@@ -456,7 +456,7 @@ def ModelWriter(cls):
 
     def get_model_with_quantize(self, qcfg, model_id_or_path):
 
-        config = AutoConfig.from_pretrained(
+        config = safe_auto_config_from_pretrained(
             model_id_or_path,
             trust_remote_code=True,
         )
