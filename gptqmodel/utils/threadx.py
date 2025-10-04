@@ -491,7 +491,9 @@ class DeviceThreadPool:
               Unspecified devices default to 1 worker each.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
         """
-        self._sync_mode = os.environ.get("PYTHON_GIL", "1") == "0"
+        # Default to threaded workers; allow explicit opt-in to synchronous mode for
+        # environments where background threads are prohibited.
+        self._sync_mode = os.environ.get("THREADX_FORCE_SYNC", "0") == "1"
 
         if devices is None:
             discovered: List[torch.device] = []
