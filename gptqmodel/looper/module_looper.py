@@ -941,7 +941,7 @@ class ModuleLooper():
 
                             # Submit on the module's device thread (safe & deterministic)
                             finalize_futures.append(
-                                self.pool.submit(target_dev, finalize_module, reverse_p, module)
+                                self.pool.submit_serial(target_dev, finalize_module, reverse_p, module)
                             )
 
                     # If any finalize tasks were queued, wait for them
