@@ -61,6 +61,7 @@ import math  # noqa: E402
 RAND_SEED = 898
 
 log = LogBar.shared()
+ATTN_IMPLEMENTATION_KEY = "attn_implementation"
 
 class ModelTest(unittest.TestCase):
     DEBUG = True # enable extra debug output
@@ -115,6 +116,7 @@ class ModelTest(unittest.TestCase):
     SAVE_PATH = None  # default is temp folder
 
     MOCK_QUANTIZATION = False
+    ATTN_IMPLEMENTATION = None  # allow forcing a specific attention backend when needed; use "flash_attention_2" or "flex_attention"
 
     COMPUTE_PPL = False
     PPL_DATASET_PATH = "wikitext"
@@ -1027,6 +1029,11 @@ class ModelTest(unittest.TestCase):
         log.info(f"Quant batch_size: {batch_size}")
 
         args = kwargs if kwargs else {}
+        if (
+            self.ATTN_IMPLEMENTATION is not None
+            and ATTN_IMPLEMENTATION_KEY not in args
+        ):
+            args[ATTN_IMPLEMENTATION_KEY] = self.ATTN_IMPLEMENTATION
 
         log.info(f"args: {args}")
         model = GPTQModel.load(
@@ -1123,6 +1130,11 @@ class ModelTest(unittest.TestCase):
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, backend=None, **args):
 
         load_kwargs = dict(args)
+        if (
+            self.ATTN_IMPLEMENTATION is not None
+            and ATTN_IMPLEMENTATION_KEY not in load_kwargs
+        ):
+            load_kwargs[ATTN_IMPLEMENTATION_KEY] = self.ATTN_IMPLEMENTATION
 
         active_backend = backend if backend is not None else self.LOAD_BACKEND
 
