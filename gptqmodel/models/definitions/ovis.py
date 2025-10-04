@@ -153,6 +153,89 @@ class OvisQModel(BaseQModel):
             quant_device = getattr(self.quantize_config, "device", None)
             model_device = torch.device(quant_device if quant_device is not None else "cpu")
 
+        llm = getattr(self.model, "llm", None)
+
+        pixel_values = None
+        if isinstance(inputs, dict):
+            pixel_values = inputs.get("pixel_values")
+        if pixel_values is None:
+            pixel_values = kwargs.get("pixel_values")
+
+        has_real_pixels = False
+        if pixel_values is not None:
+            if isinstance(pixel_values, (list, tuple)):
+                has_real_pixels = any(p is not None for p in pixel_values)
+            else:
+                has_real_pixels = True
+
+        text_only = (llm is not None) and not has_real_pixels
+
+        if text_only:
+            kwargs = dict(kwargs)
+            kwargs.pop("pixel_values", None)
+
+            if isinstance(inputs, dict):
+                if inputs.get("pixel_values") is not None:
+                    inputs = dict(inputs)
+                    inputs.pop("pixel_values", None)
+
+            llm_device = next(self.model.llm.parameters()).device
+
+            def ensure_attention_mask(payload):
+                if payload.get("attention_mask") is not None or "input_ids" not in payload:
+                    return payload
+                mask = torch.ones_like(payload["input_ids"], dtype=torch.bool, device=payload["input_ids"].device)
+                payload["attention_mask"] = mask
+                return payload
+
+            if isinstance(inputs, (str, list)):
+                if isinstance(inputs, str) or (isinstance(inputs, list) and all(isinstance(x, str) for x in inputs)):
+                    if self.tokenizer is None:
+                        raise ValueError(
+                            "You passed in text to OvisQModel.generate() but tokenizer is missing."
+                        )
+                    tokenized = self.tokenizer(
+                        inputs,
+                        return_tensors="pt",
+                        padding=True,
+                        padding_side="left"
+                    ).to(llm_device)
+                    with torch.amp.autocast(device_type=llm_device.type):
+                        return self.model.llm.generate(**tokenized, **kwargs)
+
+            if isinstance(inputs, dict):
+                payload = {k: v for k, v in inputs.items() if k != "pixel_values"}
+                if "input_ids" in payload and isinstance(payload["input_ids"], torch.Tensor):
+                    payload["input_ids"] = payload["input_ids"].to(llm_device)
+                if "attention_mask" in payload and isinstance(payload["attention_mask"], torch.Tensor):
+                    payload["attention_mask"] = payload["attention_mask"].to(llm_device)
+                payload = ensure_attention_mask(payload)
+                payload.update(kwargs)
+                with torch.amp.autocast(device_type=llm_device.type):
+                    return self.model.llm.generate(**payload)
+
+            if isinstance(inputs, torch.Tensor):
+                inputs = inputs.to(llm_device)
+                attention_mask = kwargs.pop("attention_mask", None)
+                if attention_mask is None:
+                    attention_mask = torch.ones_like(inputs, dtype=torch.bool, device=inputs.device)
+                else:
+                    attention_mask = attention_mask.to(inputs.device)
+
+                with torch.amp.autocast(device_type=llm_device.type):
+                    return self.model.llm.generate(
+                        inputs=inputs,
+                        attention_mask=attention_mask,
+                        **kwargs
+                    )
+
+            if inputs is None:
+                payload = ensure_attention_mask({k: v for k, v in kwargs.items() if k in {"input_ids", "attention_mask"}})
+                remaining = {k: v for k, v in kwargs.items() if k not in payload}
+                payload = {k: (v.to(llm_device) if isinstance(v, torch.Tensor) else v) for k, v in payload.items()}
+                with torch.amp.autocast(device_type=llm_device.type):
+                    return self.model.llm.generate(**payload, **remaining)
+
         with torch.amp.autocast(device_type=model_device.type):
             return super().generate(inputs=inputs, **kwargs)
 

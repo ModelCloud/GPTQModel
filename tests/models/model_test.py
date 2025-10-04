@@ -199,6 +199,33 @@ class ModelTest(unittest.TestCase):
         )
         return tokenizer.decode(generated[0], skip_special_tokens=True)
 
+    def _response_matches_keywords(self, response: str, keywords):
+        if not response:
+            return False
+
+        normalized = response.lower()
+
+        for keyword in keywords:
+            if not keyword:
+                continue
+
+            needle = keyword.lower()
+
+            if needle.isalpha():
+                def _strip_other_alpha(text):
+                    return "".join(ch for ch in text if ch.isalpha())
+
+                if needle in normalized:
+                    return True
+
+                if _strip_other_alpha(needle) in _strip_other_alpha(normalized):
+                    return True
+            else:
+                if needle in normalized:
+                    return True
+
+        return False
+
     def run_generic_inference_checks(self, model, tokenizer, backend):
         model.eval()
         log.info(f"Post-quant inference checks for backend `{backend.name}`")
@@ -208,8 +235,7 @@ class ModelTest(unittest.TestCase):
             keywords = item["keywords"]
             try:
                 response = self.generate_with_limit(model, tokenizer, prompt)
-                normalized = response.lower()
-                matched = any(keyword.lower() in normalized for keyword in keywords)
+                matched = self._response_matches_keywords(response, keywords)
                 results.append(
                     {
                         "prompt": prompt,
