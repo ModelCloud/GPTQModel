@@ -351,6 +351,13 @@ class _DeviceWorker:
                 if not is_task:
                     if DEBUG_ON: log.debug(f"{self.name}: received sentinel; exiting")
                     break
+                if self._stop.is_set():
+                    # Pool is stopping; skip executing queued work to allow fast shutdown.
+                    if DEBUG_ON:
+                        log.debug(f"{self.name}: dropping task during shutdown; qsize={self._q.qsize()}")
+                    self._on_task_finished(self.key)
+                    fut.cancel()
+                    continue
                 if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
 
                 stream = kwargs.pop("_cuda_stream", None)
