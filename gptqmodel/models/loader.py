@@ -181,6 +181,10 @@ def ModelLoader(cls):
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
             dtype = auto_dtype(config=config, device=quantize_config.device, quant_inference=False)
 
+        if isinstance(dtype, torch.dtype) and getattr(config, "torch_dtype", None) != dtype:
+            # Align config metadata with the dtype we will materialize weights in.
+            config.torch_dtype = dtype
+
         # enforce some values despite user specified
         # non-quantized models are always loaded into cpu
         model_init_kwargs["device_map"] = cpu_device_map
@@ -319,6 +323,10 @@ def ModelLoader(cls):
         if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype) :
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
             dtype = auto_dtype(config=config, device=device, quant_inference=True)
+
+        if isinstance(dtype, torch.dtype) and getattr(config, "torch_dtype", None) != dtype:
+            # Ensure flash attention kernels see an explicit dtype instead of relying on defaults.
+            config.torch_dtype = dtype
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 

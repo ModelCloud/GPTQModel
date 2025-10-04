@@ -195,12 +195,20 @@ class BaseQModel(nn.Module):
     ):
         super().__init__()
 
-        self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
-        self.turtle_model = turtle_model
-
+        # record configuration early so model lifecycle hooks can rely on them
         self.compiled = False  # set to True while compile() is triggered successfully
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
+        self.qlinear_kernel = qlinear_kernel
+        self.trust_remote_code = trust_remote_code
+        self.model_local_path = model_local_path
+        self.quantize_config = quantize_config
+
+        self.processor: ProcessorMixin = None
+
+        self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
+        self.turtle_model = turtle_model
+
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
                 self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=trust_remote_code)
@@ -216,8 +224,6 @@ class BaseQModel(nn.Module):
         if isinstance(self.model, PreTrainedModel):
             autofix_hf_model_config(self.model, path=model_local_path)
 
-        self.quantize_config = quantize_config
-
         self._background_pool: Optional["DeviceThreadPool"] = None
         self._turtle_reload_future: Optional[Future] = None
         self._turtle_reload_lock = threading.Lock()
@@ -225,13 +231,9 @@ class BaseQModel(nn.Module):
         self._turtle_ready.set()
 
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
-        self.qlinear_kernel = qlinear_kernel
-        self.trust_remote_code = trust_remote_code
-        self.model_local_path = model_local_path
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
 
-        self.processor: ProcessorMixin = None
         if self.require_load_processor:
             self.processor = AutoProcessor.from_pretrained(model_local_path)
 
@@ -545,9 +547,69 @@ class BaseQModel(nn.Module):
 
         new_calibration_dataset = []
         too_short_calibration_data_count = 0
+
+        max_positions = None
+        max_positions_source = None
+        trimmed_row_count = 0
+        longest_trimmed_row = 0
+
+        def _maybe_resolve_length(value, source_name):
+            nonlocal max_positions, max_positions_source
+            try:
+                if value is None:
+                    return False
+                limit = int(value)
+            except Exception:
+                return False
+            if limit <= 0:
+                return False
+            if max_positions is None or limit < max_positions:
+                max_positions = limit
+                max_positions_source = source_name
+            return True
+
+        model_config = getattr(self.model, "config", None)
+        if model_config is not None:
+            primary_names = ("max_position_embeddings",)
+            fallback_names = (
+                "max_sequence_length",
+                "max_seq_len",
+                "n_positions",
+                "seq_length",
+            )
+
+            for attr_name in primary_names:
+                if _maybe_resolve_length(getattr(model_config, attr_name, None), attr_name):
+                    break
+            if max_positions is None:
+                for attr_name in fallback_names:
+                    if _maybe_resolve_length(getattr(model_config, attr_name, None), attr_name):
+                        break
+
         for example in calibration_dataset:
             input_ids = _convert_tensor_to_list(example["input_ids"])
             attention_mask = _convert_tensor_to_list(example["attention_mask"])
+
+            if max_positions is not None:
+                trimmed = False
+                trimmed_input_ids = []
+                trimmed_attention_mask = []
+
+                for row_ids, row_mask in zip(input_ids, attention_mask):
+                    row_len = len(row_ids)
+                    if row_len > max_positions:
+                        trimmed = True
+                        trimmed_row_count += 1
+                        longest_trimmed_row = max(longest_trimmed_row, row_len)
+                        trimmed_input_ids.append(row_ids[:max_positions])
+                        trimmed_attention_mask.append(row_mask[:max_positions])
+                    else:
+                        trimmed_input_ids.append(row_ids)
+                        trimmed_attention_mask.append(row_mask)
+
+                if trimmed:
+                    input_ids = trimmed_input_ids
+                    attention_mask = trimmed_attention_mask
 
             # filter if input_ids is too short
             if len(input_ids[0]) <= calibration_data_min_length:
@@ -564,6 +626,15 @@ class BaseQModel(nn.Module):
         if too_short_calibration_data_count > 0:
             log.warn(f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
                      f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length.")
+
+        if trimmed_row_count > 0:
+            log.info(
+                "Quantize: trimmed %s calibration rows above %s=%s (longest original length=%s)",
+                trimmed_row_count,
+                max_positions_source,
+                max_positions,
+                longest_trimmed_row,
+            )
 
         if calibration_dataset_concat_size:
             _require_tokenizer("`calibration_dataset_concat_size` is specified")
@@ -1629,8 +1700,13 @@ class BaseQModel(nn.Module):
     def __getattr__(self, item):
         try:
             return super().__getattr__(item)
-        except Exception:
-            return getattr(self.model, item)
+        except Exception as exc:  # torch Modules raise AttributeError here
+            model = self.__dict__.get("model")
+            if model is None:
+                model = self._modules.get("model") if hasattr(self, "_modules") else None
+            if model is not None and item != "model":
+                return getattr(model, item)
+            raise exc
 
 __all__ = ["BaseQModel"]
 

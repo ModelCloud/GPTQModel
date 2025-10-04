@@ -18,7 +18,7 @@ class TestQwen3Moe(ModelTest):
     DEBUG = True
     ACT_GROUP_AWARE = True
     DESC_ACT = False
-    DATASET_SIZE = 1024 * 8
+    DATASET_SIZE = 1024
     DATASET_SORT = "desc"
     QUANT_BATCH_SIZE = 4
 

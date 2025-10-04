@@ -6,7 +6,7 @@
 import contextlib
 import os
 import shutil
-import threading
+import sys
 from typing import Iterable, List, Optional, Set, Tuple
 
 import accelerate
@@ -21,9 +21,8 @@ from torch import nn
 from ..looper.named_module import NamedModule
 from .device import get_device
 from .torch import CPU, META
+from .safe import ThreadSafe
 
-
-_lock = threading.Lock()
 
 # Patch fix thread unsafe accelerate.utils.modeling.clear_device_cache
 def _fake_clear_device_cache(garbage_collection=False):
@@ -95,6 +94,11 @@ def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: 
 
     # print("offload_disk: list item tree")
             # print_module_tree(module)
+
+
+# Serialize accelerate's disk hook mutations across threads.
+_OFFLOAD_SAFE = ThreadSafe(sys.modules[__name__])
+offload_to_disk = _OFFLOAD_SAFE.offload_to_disk
 
 def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
     if is_meta_module(module):

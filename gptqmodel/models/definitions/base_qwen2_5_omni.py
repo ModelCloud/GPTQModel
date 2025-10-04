@@ -57,6 +57,10 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
         self.shell_module_materialize(self.model.thinker.audio_tower, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.visual.rotary_pos_emb, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.model.rotary_emb, self.quantize_config.device)
+        if hasattr(self.model, "talker"):
+            self.shell_module_materialize(self.model.talker, self.quantize_config.device)
+        if hasattr(self.model, "token2wav"):
+            self.shell_module_materialize(self.model.token2wav, self.quantize_config.device)
         for layer in self.model.thinker.model.layers:
             self.shell_module_materialize(layer.self_attn.rotary_emb, self.quantize_config.device)
 
@@ -87,6 +91,17 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
 
+            if hasattr(self.model, "talker"):
+                offload_to_disk(model=self.model,
+                                module=self.model.talker,
+                                disk_path=self.quantize_config.offload_to_disk_path,
+                                )
+            if hasattr(self.model, "token2wav"):
+                offload_to_disk(model=self.model,
+                                module=self.model.token2wav,
+                                disk_path=self.quantize_config.offload_to_disk_path,
+                                )
+
             for layer in self.model.thinker.model.layers:
                 layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(CPU)
 
@@ -95,6 +110,10 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
         self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(CPU)
         self.model.thinker.visual = self.model.thinker.visual.to(CPU)
         self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(CPU)
+        if hasattr(self.model, "talker"):
+            self.model.talker = self.model.talker.to(CPU)
+        if hasattr(self.model, "token2wav"):
+            self.model.token2wav = self.model.token2wav.to(CPU)
 
         self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(CPU)
         self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(CPU)
@@ -120,6 +139,16 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
+
+    def forward(self, *args, **kwargs):
+        """Delegate textual forward passes to the thinker submodule.
+
+        The top-level Hugging Face wrapper leaves ``forward`` unimplemented when
+        ``trust_remote_code`` is disabled, so we expose the thinker equivalent to
+        keep tooling such as lm-eval operational in quantized environments.
+        """
+
+        return self.model.thinker(*args, **kwargs)
 
     def load_processor(self) -> ProcessorMixin:
         return AutoProcessor.from_pretrained(self.model_local_path)

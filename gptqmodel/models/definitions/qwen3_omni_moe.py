@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
+
 import torch
 from transformers import AutoModelForTextToWaveform, AutoProcessor
 
@@ -44,11 +46,19 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
     ]
 
     def pre_quantize_generate_hook_start(self):
+        spk_path = os.path.join(self.model_local_path, "spk_dict.pt")
+        if os.path.isfile(spk_path):
+            self.model.load_speakers(spk_path)
+
         self.shell_module_materialize(self.model.thinker.model.embed_tokens, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.visual, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.audio_tower, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.visual.rotary_pos_emb, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.model.rotary_emb, self.quantize_config.device)
+        if hasattr(self.model, "talker"):
+            self.shell_module_materialize(self.model.talker, self.quantize_config.device)
+        if hasattr(self.model, "code2wav"):
+            self.shell_module_materialize(self.model.code2wav, self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
         if self.quantize_config.offload_to_disk:
@@ -76,11 +86,26 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
                             module=self.model.thinker.model.rotary_emb,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
+
+            if hasattr(self.model, "talker"):
+                offload_to_disk(model=self.model,
+                                module=self.model.talker,
+                                disk_path=self.quantize_config.offload_to_disk_path,
+                                )
+            if hasattr(self.model, "code2wav"):
+                offload_to_disk(model=self.model,
+                                module=self.model.code2wav,
+                                disk_path=self.quantize_config.offload_to_disk_path,
+                                )
             return
 
         self.model.thinker.model.embed_tokens = self.model.thinker.model.embed_tokens.to(CPU)
         self.model.thinker.visual = self.model.thinker.visual.to(CPU)
         self.model.thinker.audio_tower = self.model.thinker.audio_tower.to(CPU)
+        if hasattr(self.model, "talker"):
+            self.model.talker = self.model.talker.to(CPU)
+        if hasattr(self.model, "code2wav"):
+            self.model.code2wav = self.model.code2wav.to(CPU)
 
         self.model.thinker.visual.rotary_pos_emb = self.model.thinker.visual.rotary_pos_emb.to(CPU)
         self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(CPU)
@@ -91,4 +116,3 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
             self.processor = AutoProcessor.from_pretrained(self.model_local_path)
 
         return model
-
