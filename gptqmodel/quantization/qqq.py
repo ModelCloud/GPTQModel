@@ -15,6 +15,7 @@ from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
 from ..quantization.quantizer import HF_OPTIMUM
 from ..utils import setup_logger
+from ..utils.safe import TORCH_LINALG
 from .gptq import get_number_of_rows_and_cols
 
 
@@ -316,9 +317,9 @@ class QQQ:
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
         H[diag, diag] += damp
-        H = torch.linalg.cholesky(H)
+        H = TORCH_LINALG.cholesky(H)
         H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
+        H = TORCH_LINALG.cholesky(H, upper=True)
         Hinv = H
 
         for i1 in range(0, self.columns, blocksize):

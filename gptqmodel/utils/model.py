@@ -18,7 +18,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from .ctx import ctx
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -55,6 +54,7 @@ from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, dynamic_get
 from . import has_gil_disabled
 from .backend import BACKEND
+from .ctx import ctx
 from .device import get_device
 from .importer import select_quant_linear
 from .logger import setup_logger

@@ -4,7 +4,8 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
-from gptqmodel.quantization import METHOD, FORMAT
+
+from gptqmodel.quantization import FORMAT, METHOD
 
 
 # a100:0

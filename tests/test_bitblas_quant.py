@@ -13,8 +13,9 @@ from tabulate import tabulate
 
 from gptqmodel.nn_modules.qlinear.bitblas import BitblasQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear, marlin_import_exception
-from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
+
 
 RTOL = 5e-2
 ATOL = 5e-2

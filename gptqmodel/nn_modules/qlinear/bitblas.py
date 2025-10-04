@@ -17,6 +17,7 @@ from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils import BACKEND
 from ...utils.logger import setup_logger
 
+
 log = setup_logger()
 
 MINIMUM_BITBLAS_VERSION = "0.1.0"
