@@ -195,12 +195,20 @@ class BaseQModel(nn.Module):
     ):
         super().__init__()
 
-        self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
-        self.turtle_model = turtle_model
-
+        # record configuration early so model lifecycle hooks can rely on them
         self.compiled = False  # set to True while compile() is triggered successfully
         self.quantized = quantized
         self.load_quantized_model = load_quantized_model
+        self.qlinear_kernel = qlinear_kernel
+        self.trust_remote_code = trust_remote_code
+        self.model_local_path = model_local_path
+        self.quantize_config = quantize_config
+
+        self.processor: ProcessorMixin = None
+
+        self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
+        self.turtle_model = turtle_model
+
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
                 self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=trust_remote_code)
@@ -216,8 +224,6 @@ class BaseQModel(nn.Module):
         if isinstance(self.model, PreTrainedModel):
             autofix_hf_model_config(self.model, path=model_local_path)
 
-        self.quantize_config = quantize_config
-
         self._background_pool: Optional["DeviceThreadPool"] = None
         self._turtle_reload_future: Optional[Future] = None
         self._turtle_reload_lock = threading.Lock()
@@ -225,13 +231,9 @@ class BaseQModel(nn.Module):
         self._turtle_ready.set()
 
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
-        self.qlinear_kernel = qlinear_kernel
-        self.trust_remote_code = trust_remote_code
-        self.model_local_path = model_local_path
         # stores all per-layer quant stats such as avg loss and processing time
         self.quant_log = []
 
-        self.processor: ProcessorMixin = None
         if self.require_load_processor:
             self.processor = AutoProcessor.from_pretrained(model_local_path)
 
@@ -1698,8 +1700,13 @@ class BaseQModel(nn.Module):
     def __getattr__(self, item):
         try:
             return super().__getattr__(item)
-        except Exception:
-            return getattr(self.model, item)
+        except Exception as exc:  # torch Modules raise AttributeError here
+            model = self.__dict__.get("model")
+            if model is None:
+                model = self._modules.get("model") if hasattr(self, "_modules") else None
+            if model is not None and item != "model":
+                return getattr(model, item)
+            raise exc
 
 __all__ = ["BaseQModel"]
 

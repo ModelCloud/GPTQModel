@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
+
 import torch
 from transformers import AutoModelForTextToWaveform, AutoProcessor
 
@@ -44,6 +46,10 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
     ]
 
     def pre_quantize_generate_hook_start(self):
+        spk_path = os.path.join(self.model_local_path, "spk_dict.pt")
+        if os.path.isfile(spk_path):
+            self.model.load_speakers(spk_path)
+
         self.shell_module_materialize(self.model.thinker.model.embed_tokens, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.visual, self.quantize_config.device)
         self.shell_module_materialize(self.model.thinker.audio_tower, self.quantize_config.device)
