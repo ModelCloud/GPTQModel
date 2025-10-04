@@ -27,7 +27,6 @@ class TestLlama3_2(ModelTest):
     QUANT_BATCH_SIZE = 4
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
-    # USE_FLASH_ATTN = False
     # EORA = Lora(
     #     # for quant, path is save path. for load, it is loading path
     #     path="./eora_test",
