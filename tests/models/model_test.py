@@ -49,6 +49,7 @@ from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
 from transformers.utils import is_flash_attn_2_available  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel.models import OvisQModel, Ovis2_5QModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
@@ -1098,7 +1099,7 @@ class ModelTest(unittest.TestCase):
         is_quantized = model.quantized
 
         # ovis cannot load processor
-        is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
+        is_ovis_model = isinstance(model, (OvisQModel, Ovis2_5QModel))
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
             prev_max_layers = os.environ.get("GPTQMODEL_MAX_QUANT_LAYERS")
