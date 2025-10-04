@@ -90,8 +90,8 @@ class ModelTest(unittest.TestCase):
     POST_QUANT_VALIDATION_BACKENDS = None  # default preserves legacy double-backend check
 
     # calibration noise controls
-    CALIB_NOISE_PERCENT = 0.5  # share of calibration samples to synthesize
-    CALIB_NOISE_MODE = "unseen"  # supported: none|random|unseen
+    CALIB_NOISE_PERCENT = 0.0  # share of calibration samples to synthesize
+    CALIB_NOISE_MODE = "none" # "unseen"  # supported: none|random|unseen
     CALIB_NOISE_RANDOM_SEED = 1337
     CALIB_NOISE_MIN_SEQ_LEN = 32
     CALIB_NOISE_MAX_SEQ_LEN = 256
@@ -1141,6 +1141,11 @@ class ModelTest(unittest.TestCase):
 
         active_backend = backend if backend is not None else self.LOAD_BACKEND
 
+        import os
+        print("[DEBUG] loadQuantModel", model_id_or_path, trust_remote_code, active_backend)
+        if trust_remote_code:
+            prev_env = os.environ.get("TRANSFORMERS_TRUST_REMOTE_CODE")
+            os.environ["TRANSFORMERS_TRUST_REMOTE_CODE"] = "1"
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
@@ -1150,6 +1155,11 @@ class ModelTest(unittest.TestCase):
             adapter=self.EORA,
             **load_kwargs
         )
+        if trust_remote_code:
+            if prev_env is None:
+                os.environ.pop("TRANSFORMERS_TRUST_REMOTE_CODE", None)
+            else:
+                os.environ["TRANSFORMERS_TRUST_REMOTE_CODE"] = prev_env
 
         return model
 

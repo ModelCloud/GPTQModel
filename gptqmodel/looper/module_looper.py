@@ -75,10 +75,10 @@ class ModuleLooper():
         self.pool = DeviceThreadPool(
             inference_mode=True,
             workers={
-                "cuda:per": 4, # unique memory per instance
+                "cuda:per": 1, # unique memory per instance
                 "xpu:per": 1, # unique memory per instance
                 "mps": 8, # unified memory
-                "cpu": 8, # unified memory
+                "cpu": 4, # unified memory
             },
             empty_cache_every_n=1024,  # disable auto gc based gpu work rate; enable if you want
         )
