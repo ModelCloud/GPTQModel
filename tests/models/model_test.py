@@ -93,8 +93,8 @@ class ModelTest(unittest.TestCase):
     CALIB_NOISE_PERCENT = 0.0  # share of calibration samples to synthesize
     CALIB_NOISE_MODE = "none" # "unseen"  # supported: none|random|unseen
     CALIB_NOISE_RANDOM_SEED = 1337
-    CALIB_NOISE_MIN_SEQ_LEN = 32
-    CALIB_NOISE_MAX_SEQ_LEN = 256
+    CALIB_NOISE_MIN_SEQ_LEN = 512
+    CALIB_NOISE_MAX_SEQ_LEN = 1024
     CALIB_NOISE_GUARD_MAX_FREQ_RATIO = 1.3
     CALIB_NOISE_GUARD_MIN_TTR_FACTOR = 0.95
     CALIB_NOISE_GUARD_MAX_FRACTION = 0.1
@@ -703,6 +703,61 @@ class ModelTest(unittest.TestCase):
             "max_freq": max_freq,
         }
 
+    @staticmethod
+    def _get_special_token_id_set(tokenizer):
+        special_ids = set()
+
+        def _add(value):
+            if value is None:
+                return
+            if isinstance(value, int):
+                special_ids.add(int(value))
+                return
+            if isinstance(value, str):
+                converted = tokenizer.convert_tokens_to_ids(value)
+                if converted is None:
+                    return
+                if isinstance(converted, list):
+                    for item in converted:
+                        if item is not None:
+                            special_ids.add(int(item))
+                else:
+                    special_ids.add(int(converted))
+                return
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    _add(item)
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    _add(item)
+
+        attr_names = (
+            "all_special_ids",
+            "additional_special_tokens_ids",
+            "special_tokens_map",
+            "special_tokens_map_extended",
+            "bos_token_id",
+            "eos_token_id",
+            "pad_token_id",
+            "sep_token_id",
+            "cls_token_id",
+            "mask_token_id",
+            "unk_token_id",
+        )
+
+        for name in attr_names:
+            _add(getattr(tokenizer, name, None))
+
+        return {int(token_id) for token_id in special_ids if token_id is not None and token_id >= 0}
+
+    @classmethod
+    def _filter_special_token_ids(cls, token_ids, tokenizer):
+        if not token_ids:
+            return []
+        special_ids = cls._get_special_token_id_set(tokenizer)
+        return [tok for tok in token_ids if tok not in special_ids and tok is not None]
+
     @classmethod
     def _build_noise_records(cls, tokenizer, stats, sample_count, mode, base_records):
         if sample_count <= 0:
@@ -723,8 +778,7 @@ class ModelTest(unittest.TestCase):
         except Exception:  # pragma: no cover - tokenizer fallback
             vocab_values = list(range(getattr(tokenizer, "vocab_size", 0)))
 
-        special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
-        vocab_ids = [tok for tok in vocab_values if tok not in special_ids]
+        vocab_ids = cls._filter_special_token_ids(vocab_values, tokenizer)
         if not vocab_ids:
             return [], []
 
@@ -805,12 +859,13 @@ class ModelTest(unittest.TestCase):
             return [], []
 
         rng = random.Random(cls.CALIB_NOISE_RANDOM_SEED + 17)
-        replacement_pool = list(stats["counts"].keys())
+        replacement_pool = cls._filter_special_token_ids(list(stats["counts"].keys()), tokenizer)
         if not replacement_pool:
             try:
                 replacement_pool = list(tokenizer.get_vocab().values())
             except Exception:  # pragma: no cover - tokenizer fallback
                 replacement_pool = list(range(getattr(tokenizer, "vocab_size", 0)))
+            replacement_pool = cls._filter_special_token_ids(replacement_pool, tokenizer)
 
         records = []
         token_sequences = []
@@ -945,8 +1000,15 @@ class ModelTest(unittest.TestCase):
             span = max(1, min(len(tokens) // 5, 16))
             if len(tokens) > span:
                 start = rng.randint(0, len(tokens) - span)
-                replacement = cls._sample_replacement_tokens(rng, replacement_pool, span, stats)
-                tokens[start:start + span] = replacement
+                replacement = cls._sample_replacement_tokens(
+                    rng,
+                    replacement_pool,
+                    span,
+                    stats,
+                    tokenizer,
+                )
+                if replacement:
+                    tokens[start:start + span] = replacement
 
         if not tokens:
             tokens = token_ids
@@ -955,11 +1017,15 @@ class ModelTest(unittest.TestCase):
         return new_text or text.strip()
 
     @classmethod
-    def _sample_replacement_tokens(cls, rng, candidates, length, stats):
+    def _sample_replacement_tokens(cls, rng, candidates, length, stats, tokenizer):
         if not candidates:
             candidates = list(stats["counts"].keys())
+            candidates = cls._filter_special_token_ids(candidates, tokenizer)
         if not candidates:
             candidates = list(range(1, max(512, length * 4)))
+        candidates = cls._filter_special_token_ids(candidates, tokenizer)
+        if not candidates:
+            return []
         return [rng.choice(candidates) for _ in range(length)]
 
     @classmethod

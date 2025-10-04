@@ -861,7 +861,8 @@ class ModuleLooper():
                     for fut in futures:
                         name, m = fut.result()
                         processed_subset[name] = m
-                    torch_sync()
+
+                    #torch_sync()
                     # ---- End Process Hook ----
 
                 is_last_module = layer_index == len(quant_modules_pb) - 1
