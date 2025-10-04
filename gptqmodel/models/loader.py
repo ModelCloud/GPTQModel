@@ -56,6 +56,45 @@ from ._const import DEVICE, normalize_device
 log = setup_logger()
 
 ATTN_IMPLEMENTATION = "attn_implementation"
+
+
+def _coerce_torch_dtype(value):
+    if value is None:
+        return None
+    if isinstance(value, torch.dtype):
+        return value
+    attr = None
+    if isinstance(value, str):
+        attr = getattr(torch, value, None)
+        if isinstance(attr, torch.dtype):
+            return attr
+    raise TypeError(f"Unsupported torch dtype value: {value!r}")
+
+
+def _clear_config_attr(config, name: str) -> None:
+    store = getattr(config, "__dict__", None)
+    if isinstance(store, dict) and name in store:
+        del store[name]
+
+
+def _normalize_config_dtype(config) -> Optional[torch.dtype]:
+    legacy = getattr(config, "torch_dtype", None)
+    if legacy is not None:
+        try:
+            coerced = _coerce_torch_dtype(legacy)
+        except TypeError:
+            coerced = None
+        if coerced is not None:
+            setattr(config, "dtype", coerced)
+        _clear_config_attr(config, "torch_dtype")
+    current = getattr(config, "dtype", None)
+    if isinstance(current, str):
+        try:
+            current = _coerce_torch_dtype(current)
+            setattr(config, "dtype", current)
+        except TypeError:
+            current = None
+    return current if isinstance(current, torch.dtype) else None
 def parse_version_string(version_str: str):
     try:
         return Version(version_str)
@@ -158,9 +197,12 @@ def ModelLoader(cls):
         torch.nn.init.uniform_ = skip
         torch.nn.init.normal_ = skip
 
+        torch_dtype_arg = model_init_kwargs.pop("torch_dtype", None)
+
         model_init_kwargs["trust_remote_code"] = trust_remote_code
 
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
+        normalized_config_dtype = _normalize_config_dtype(config)
 
         atten_impl = model_init_kwargs.get("attn_implementation", None)
 
@@ -177,15 +219,32 @@ def ModelLoader(cls):
         if cls.require_dtype:
             dtype = cls.require_dtype
 
+        if torch_dtype_arg is not None:
+            coerced = _coerce_torch_dtype(torch_dtype_arg)
+            if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
+                dtype = coerced
+            else:
+                log.info("Loader: overriding legacy torch_dtype argument with `dtype` and removing duplication.")
+            model_init_kwargs["dtype"] = dtype
+
         if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
-            # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
-            dtype = auto_dtype(config=config, device=quantize_config.device, quant_inference=False)
+            if normalized_config_dtype is not None:
+                dtype = normalized_config_dtype
+            else:
+                # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
+                dtype = auto_dtype(config=config, device=quantize_config.device, quant_inference=False)
 
         if isinstance(dtype, torch.dtype):
-            current = getattr(config, "dtype", getattr(config, "torch_dtype", None))
+            current = getattr(config, "dtype", None)
+            if isinstance(current, str):
+                try:
+                    current = _coerce_torch_dtype(current)
+                except TypeError:
+                    current = None
             if current != dtype:
                 # Align config metadata with the dtype we will materialize weights in.
                 config.dtype = dtype
+            _clear_config_attr(config, "torch_dtype")
 
         # enforce some values despite user specified
         # non-quantized models are always loaded into cpu
@@ -199,12 +258,21 @@ def ModelLoader(cls):
 
         if quantize_config.offload_to_disk:
             print("shell model-----------")
-            model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
+            shell_kwargs = model_init_kwargs.copy()
+            shell_dtype = shell_kwargs.pop("dtype", dtype)
+            model = build_shell_model(cls.loader, config=config, dtype=shell_dtype, **shell_kwargs)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)
 
             # enable mmap with low_cpu_mem_usage
-            turtle_model = cls.loader.from_pretrained(model_local_path, config=config, low_cpu_mem_usage=True, **model_init_kwargs)
+            turtle_kwargs = model_init_kwargs.copy()
+            turtle_kwargs.setdefault("dtype", dtype)
+            turtle_model = cls.loader.from_pretrained(
+                model_local_path,
+                config=config,
+                low_cpu_mem_usage=True,
+                **turtle_kwargs,
+            )
 
             # TODO FIX ME...temp store model_init args
             turtle_model._model_init_kwargs = model_init_kwargs
@@ -212,11 +280,25 @@ def ModelLoader(cls):
             # print_module_tree(model=turtle_model)
         else:
             print("loading model directly to CPU (not using meta device or turtle_model)-----------")
-            model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
+            direct_kwargs = model_init_kwargs.copy()
+            direct_kwargs.setdefault("dtype", dtype)
+            model = cls.loader.from_pretrained(
+                model_local_path,
+                config=config,
+                **direct_kwargs,
+            )
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)
 
             turtle_model = None
+
+        if isinstance(dtype, torch.dtype):
+            if getattr(model, "config", None) is not None:
+                model.config.dtype = dtype
+                _clear_config_attr(model.config, "torch_dtype")
+            if turtle_model is not None and getattr(turtle_model, "config", None) is not None:
+                turtle_model.config.dtype = dtype
+                _clear_config_attr(turtle_model.config, "torch_dtype")
 
         model_config = model.config.to_dict()
         seq_len_keys = ["max_position_embeddings", "seq_length", "n_positions", "multimodal_max_length"]
@@ -297,6 +379,7 @@ def ModelLoader(cls):
         subfolder = kwargs.pop("subfolder", "")
         commit_hash = kwargs.pop("_commit_hash", None)
         attn_implementation = kwargs.pop("attn_implementation", None)
+        torch_dtype_arg = kwargs.pop("torch_dtype", None)
 
         cached_file_kwargs = {
             "cache_dir": cache_dir,
@@ -318,19 +401,37 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
         )
+        normalized_config_dtype = _normalize_config_dtype(config)
 
         if cls.require_dtype:
             dtype = cls.require_dtype
 
+        if torch_dtype_arg is not None:
+            coerced = _coerce_torch_dtype(torch_dtype_arg)
+            if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
+                dtype = coerced
+            else:
+                log.info("Loader: overriding legacy torch_dtype argument with `dtype` and removing duplication.")
+            kwargs["dtype"] = dtype
+
         if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
-            # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
-            dtype = auto_dtype(config=config, device=device, quant_inference=True)
+            if normalized_config_dtype is not None:
+                dtype = normalized_config_dtype
+            else:
+                # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
+                dtype = auto_dtype(config=config, device=device, quant_inference=True)
 
         if isinstance(dtype, torch.dtype):
-            current = getattr(config, "dtype", getattr(config, "torch_dtype", None))
+            current = getattr(config, "dtype", None)
+            if isinstance(current, str):
+                try:
+                    current = _coerce_torch_dtype(current)
+                except TypeError:
+                    current = None
             if current != dtype:
                 # Ensure flash attention kernels see an explicit dtype instead of relying on defaults.
                 config.dtype = dtype
+            _clear_config_attr(config, "torch_dtype")
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 
@@ -472,10 +573,19 @@ def ModelLoader(cls):
                     args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
                     log.info("Loader: Auto enabling flash attention2")
 
+            flash_attn_requested = args.get(ATTN_IMPLEMENTATION) == "flash_attention_2"
+            if flash_attn_requested and isinstance(dtype, torch.dtype):
+                config.dtype = dtype
+                _clear_config_attr(config, "torch_dtype")
+
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, dtype=dtype, **args
             )
             model.checkpoint_file_name = model_save_name
+
+            if flash_attn_requested and isinstance(dtype, torch.dtype) and getattr(model, "config", None) is not None:
+                model.config.dtype = dtype
+                _clear_config_attr(model.config, "torch_dtype")
 
             # Get the first layer to determine layer type
             layers, _ = get_module_by_name_prefix(model, cls.extract_layers_node())

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import queue
 import threading
 import time
@@ -385,6 +386,57 @@ class _DeviceWorker:
             if DEBUG_ON: log.debug(f"{self.name}: exited")
 
 
+class _SyncWorker:
+    """Fallback worker that executes tasks synchronously when threads are unsafe."""
+
+    def __init__(
+        self,
+        *,
+        key: str,
+        device: torch.device,
+        rwlock: _RWLock,
+        on_task_finished: Callable[[str], None],
+        on_worker_exit: Callable[[str, "_SyncWorker"], None],
+        inference_mode: bool = False,
+    ) -> None:
+        self.key = key
+        self.device = device
+        self.rwlock = rwlock
+        self._on_task_finished = on_task_finished
+        self._on_worker_exit = on_worker_exit
+        self._inference_mode = inference_mode
+        self.name = f"DPWorker-{key}#sync"
+
+    def submit(self, fn: Callable[..., Any], /, *args, _cuda_stream=None, **kwargs) -> Future:
+        fut = Future()
+        try:
+            stream = _cuda_stream
+            override_inference = kwargs.pop("_threadx_inference_mode", None)
+            use_inference = self._inference_mode if override_inference is None else bool(override_inference)
+            with ctx(self.rwlock.reader(), _device_ctx(self.device)):
+                inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
+                with inference_ctx:
+                    if stream is not None and self.device.type == "cuda":
+                        with torch.cuda.stream(stream):
+                            result = fn(*args, **kwargs)
+                    else:
+                        result = fn(*args, **kwargs)
+            self._on_task_finished(self.key)
+            if not fut.cancelled():
+                fut.set_result(result)
+        except BaseException as exc:
+            self._on_task_finished(self.key)
+            if not fut.cancelled():
+                fut.set_exception(exc)
+        return fut
+
+    def stop(self) -> None:
+        self._on_worker_exit(self.key, self)
+
+    def join(self) -> None:
+        return
+
+
 # --------------------------- Public Pool ---------------------------
 # - Builds workers per device with per-device RWLocks
 # - Tracks inflight counts (with condition vars) and completion counters
@@ -432,6 +484,8 @@ class DeviceThreadPool:
               Unspecified devices default to 1 worker each.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
         """
+        self._sync_mode = os.environ.get("PYTHON_GIL", "1") == "0"
+
         if devices is None:
             discovered: List[torch.device] = []
             if include_cuda and torch.cuda.is_available():
@@ -461,7 +515,7 @@ class DeviceThreadPool:
         self._per_device_done: Dict[str, int] = {}
         self._total_done: int = 0
 
-        self._empty_cache_every_n = int(empty_cache_every_n)
+        self._empty_cache_every_n = 0 if self._sync_mode else int(empty_cache_every_n)
         self._gc_event = threading.Event()
         self._stop_event = threading.Event()
         self._janitor: Optional[threading.Thread] = None
@@ -534,19 +588,29 @@ class DeviceThreadPool:
 
     # --------------- Worker management ---------------
 
-    def _spawn_worker(self, dev: torch.device, name: Optional[str] = None) -> _DeviceWorker:
+    def _spawn_worker(self, dev: torch.device, name: Optional[str] = None):
         """
         Create and start a worker bound to the provided device.
         """
         key = self._key(dev)
-        w = _DeviceWorker(
-            device=dev,
-            rwlock=self._locks[key],
-            on_task_finished=self._on_task_finished,
-            on_worker_exit=self._on_worker_exit,
-            name=name,
-            inference_mode=self._inference_mode,
-        )
+        if self._sync_mode:
+            w = _SyncWorker(
+                key=key,
+                device=dev,
+                rwlock=self._locks[key],
+                on_task_finished=self._on_task_finished,
+                on_worker_exit=self._on_worker_exit,
+                inference_mode=self._inference_mode,
+            )
+        else:
+            w = _DeviceWorker(
+                device=dev,
+                rwlock=self._locks[key],
+                on_task_finished=self._on_task_finished,
+                on_worker_exit=self._on_worker_exit,
+                name=name,
+                inference_mode=self._inference_mode,
+            )
         return w
 
     def _on_worker_exit(self, key: str, worker: _DeviceWorker) -> None:

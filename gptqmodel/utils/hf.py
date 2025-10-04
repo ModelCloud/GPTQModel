@@ -159,11 +159,22 @@ def build_shell_model(
     """
     init_kwargs = model_init_kwargs.copy()
 
-    del init_kwargs["device_map"]
-    del init_kwargs["_fast_init"]
+    configured_dtype = init_kwargs.pop("dtype", None)
+    if dtype is None and configured_dtype is not None:
+        dtype = configured_dtype
+    elif dtype is not None and configured_dtype is not None and configured_dtype != dtype:
+        log.info("Shell model: overriding duplicate dtype argument from kwargs with explicit `dtype` parameter.")
+    init_kwargs.pop("device_map", None)
+    init_kwargs.pop("_fast_init", None)
     # All nn.Parameters and buffers are created
 
     # All nn.Parameters and buffers are created on 'meta' and initializers are skipped.
+    if dtype is not None:
+        setattr(config, "dtype", dtype)
+        store = getattr(config, "__dict__", None)
+        if isinstance(store, dict) and store.get("torch_dtype") != dtype:
+            store.pop("torch_dtype", None)
+
     with init_empty_weights(include_buffers=True):
         shell = loader.from_config(
             config,
