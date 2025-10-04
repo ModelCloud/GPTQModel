@@ -6,7 +6,7 @@
 import contextlib
 import os
 import shutil
-import sys
+from threading import Lock
 from typing import Iterable, List, Optional, Set, Tuple
 
 import accelerate
@@ -21,7 +21,6 @@ from torch import nn
 from ..looper.named_module import NamedModule
 from .device import get_device
 from .torch import CPU, META
-from .safe import ThreadSafe
 
 
 # Patch fix thread unsafe accelerate.utils.modeling.clear_device_cache
@@ -63,11 +62,18 @@ def is_meta_module(m: nn.Module) -> bool:
             return True
     return False
 
-def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "." ):
+_OFFLOAD_LOCK = Lock()
+
+
+def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
+    with _OFFLOAD_LOCK:
+        _offload_to_disk_impl(module=module, model=model, disk_path=disk_path)
+
+
+def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
     assert module is not None
     assert model is not None
 
-    #with _lock:
     if isinstance(module, List):
         for name in module:
             m = get_submodule(model, name)
@@ -95,10 +101,6 @@ def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: 
     # print("offload_disk: list item tree")
             # print_module_tree(module)
 
-
-# Serialize accelerate's disk hook mutations across threads.
-_OFFLOAD_SAFE = ThreadSafe(sys.modules[__name__])
-offload_to_disk = _OFFLOAD_SAFE.offload_to_disk
 
 def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
     if is_meta_module(module):

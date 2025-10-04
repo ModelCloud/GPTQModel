@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional, Union
 import torch
 import transformers
 from safetensors.torch import save_file
-from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
+from transformers import PreTrainedTokenizerFast, ProcessorMixin
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.generic import ContextManagers
@@ -41,7 +41,7 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
 )
 from ..utils.backend import BACKEND
-from ..utils.hf import sanitize_generation_config_file
+from ..utils.hf import safe_auto_config_from_pretrained, sanitize_generation_config_file
 from ..utils.logger import setup_logger
 from ..utils.model import (
     convert_gptq_v2_to_v1_format,
@@ -60,6 +60,32 @@ from ._const import DEFAULT_MAX_SHARD_SIZE
 
 
 log = setup_logger()
+
+_ATTN_IMPLEMENTATION_KEYS = ("attn_implementation", "_attn_implementation")
+
+
+def _stash_and_clear_attention_attr(config_like):
+    """Temporarily remove transient attention implementation flags before serialization."""
+    if config_like is None:
+        return {}
+    store = getattr(config_like, "__dict__", None)
+    if not isinstance(store, dict):
+        return {}
+    removed = {}
+    for key in _ATTN_IMPLEMENTATION_KEYS:
+        if key in store:
+            removed[key] = store.pop(key)
+    return removed
+
+
+def _restore_attention_attr(config_like, removed_attrs):
+    if not removed_attrs:
+        return
+    store = getattr(config_like, "__dict__", None)
+    if not isinstance(store, dict):
+        return
+    for key, value in removed_attrs.items():
+        store[key] = value
 
 PROCESS_LOG_NAME = "process"
 PROCESS_LOG_LAYER = "layer"
@@ -248,9 +274,17 @@ def ModelWriter(cls):
         config.quantization_config = quantize_config.to_dict()
         self.model.config = config
 
+        removed_config_attn = _stash_and_clear_attention_attr(config)
+        generation_config = getattr(self.model, "generation_config", None)
+        removed_generation_attn = _stash_and_clear_attention_attr(generation_config)
+
         # Save model config, including generation_config
         # Use empty state_dict hack to bypass saving weights
-        self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+        try:
+            self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+        finally:
+            _restore_attention_attr(config, removed_config_attn)
+            _restore_attention_attr(generation_config, removed_generation_attn)
 
         gen_config_path = os.path.join(save_dir, "generation_config.json")
         if sanitize_generation_config_file(gen_config_path):
@@ -422,7 +456,7 @@ def ModelWriter(cls):
 
     def get_model_with_quantize(self, qcfg, model_id_or_path):
 
-        config = AutoConfig.from_pretrained(
+        config = safe_auto_config_from_pretrained(
             model_id_or_path,
             trust_remote_code=True,
         )

@@ -12,7 +12,6 @@ class TestPhi_4(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5674
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = True
-    USE_FLASH_ATTN = False
     BATCH_SIZE = 1
 
     def test_phi_4(self):

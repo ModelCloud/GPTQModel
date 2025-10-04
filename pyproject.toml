@@ -64,7 +64,6 @@ test = [
 ]
 quality = [
     "ruff==0.13.0",
-    # "isort==6.0.1",
 ]
 vllm = [
     "vllm>=0.10.2",

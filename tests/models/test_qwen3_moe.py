@@ -21,6 +21,8 @@ class TestQwen3Moe(ModelTest):
     DATASET_SIZE = 1024
     DATASET_SORT = "desc"
     QUANT_BATCH_SIZE = 4
+    CALIB_NOISE_MODE = "unseen"
+    CALIB_NOISE_PERCENT = 0.10
 
     def test_mimo(self):
         self.quant_lm_eval()
