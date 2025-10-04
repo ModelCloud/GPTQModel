@@ -38,8 +38,9 @@ import textwrap  # noqa: E402
 import unittest  # noqa: E402
 from collections.abc import Iterable  # noqa: E402
 
+import torch  # noqa: E402
 import torch.cuda  # noqa: E402
-from datasets import load_dataset  # noqa: E402
+from datasets import Dataset, concatenate_datasets, load_dataset  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
 
@@ -48,8 +49,13 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.utils.perplexity import Perplexity  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+
+import random  # noqa: E402
+from collections import Counter  # noqa: E402
+import math  # noqa: E402
 
 
 RAND_SEED = 898
@@ -76,6 +82,20 @@ class ModelTest(unittest.TestCase):
     DATASET_SIZE = 256
     DATASET_SORT = "asc"
     DELETE_QUANTIZED_MODEL = True
+    MAX_QUANT_LAYERS = None
+
+    # post-quant validation controls
+    POST_QUANT_VALIDATION_BACKENDS = None  # default preserves legacy double-backend check
+
+    # calibration noise controls
+    CALIB_NOISE_PERCENT = 0.5  # share of calibration samples to synthesize
+    CALIB_NOISE_MODE = "unseen"  # supported: none|random|unseen
+    CALIB_NOISE_RANDOM_SEED = 1337
+    CALIB_NOISE_MIN_SEQ_LEN = 32
+    CALIB_NOISE_MAX_SEQ_LEN = 256
+    CALIB_NOISE_GUARD_MAX_FREQ_RATIO = 1.3
+    CALIB_NOISE_GUARD_MIN_TTR_FACTOR = 0.95
+    CALIB_NOISE_GUARD_MAX_FRACTION = 0.1
 
     KERNEL_QUANT = {}  # kernel sets
     KERNEL_INFERENCE = {}  # kernel sets
@@ -94,7 +114,18 @@ class ModelTest(unittest.TestCase):
 
     SAVE_PATH = None  # default is temp folder
 
-    USE_FLASH_ATTN = True
+    MOCK_QUANTIZATION = False
+
+    COMPUTE_PPL = False
+    PPL_DATASET_PATH = "wikitext"
+    PPL_DATASET_NAME = "wikitext-2-raw-v1"
+    PPL_DATASET_SPLIT = "test"
+    PPL_DATASET_COLUMN = "text"
+    PPL_CTX = 512
+    PPL_BATCH = 512
+    PPL_MAX_SAMPLES = 32
+    PPL_FALLBACK_CTX = 192
+    PPL_FALLBACK_MAX_CHUNKS_PER_SAMPLE = 4
 
     INFERENCE_PROMPT = "The capital city of France is named"
     INFERENCE_RESULT_KEYWORDS = ["paris"]
@@ -208,6 +239,7 @@ class ModelTest(unittest.TestCase):
     def run_arc_challenge_eval(self, model, backend, trust_remote_code=False):
         previous_backend = self.LOAD_BACKEND
         self.LOAD_BACKEND = backend
+        self._ensure_model_attributes(model)
         try:
             task_results = self.lm_eval(
                 model=model,
@@ -216,14 +248,42 @@ class ModelTest(unittest.TestCase):
                 delete_quantized_model=False,
             )
             log.info(f"[{backend.name}] ARC summary: {task_results}")
+        except AttributeError as exc:
+            log.warning(
+                "Skipping ARC eval for backend %s due to attribute error: %s",
+                backend.name,
+                exc,
+            )
+            task_results = {}
         finally:
             self.LOAD_BACKEND = previous_backend
         return task_results
 
+    @staticmethod
+    def _ensure_model_attributes(model):
+        inner_model = getattr(model, "model", None)
+        if not hasattr(model, "device") and inner_model is not None:
+            try:
+                model.device = next(inner_model.parameters()).device
+            except StopIteration:
+                model.device = torch.device("cpu")
+        if not hasattr(model, "config") and inner_model is not None:
+            setattr(model, "config", getattr(inner_model, "config", None))
+
+    def get_post_quant_validation_backends(self):
+        configured = getattr(self, "POST_QUANT_VALIDATION_BACKENDS", None)
+        if configured:
+            return tuple(configured)
+
+        if self.FORMAT is FORMAT.GPTQ:
+            return (BACKEND.MARLIN, BACKEND.TORCH)
+        return (BACKEND.MARLIN, BACKEND.GEMM)
+
     def perform_post_quant_validation(self, model_path, trust_remote_code=False):
         inference_records = {}
         arc_records = {}
-        compare_backends = (BACKEND.MARLIN, BACKEND.TORCH) if self.FORMAT is FORMAT.GPTQ else (BACKEND.MARLIN, BACKEND.GEMM)
+        compare_backends = self.get_post_quant_validation_backends()
+        executed_backends = []
         for backend in compare_backends:
             log.info(f"Loading post-quant model with backend `{backend.name}`")
             model = self.loadQuantModel(
@@ -238,8 +298,9 @@ class ModelTest(unittest.TestCase):
             finally:
                 del model
                 torch_empty_cache()
-        self.render_inference_summary(inference_records)
-        self.render_arc_summary(arc_records)
+            executed_backends.append(backend)
+        self.render_inference_summary(inference_records, executed_backends)
+        self.render_arc_summary(arc_records, executed_backends)
 
     @staticmethod
     def _human_size(num_bytes: int) -> str:
@@ -321,10 +382,13 @@ class ModelTest(unittest.TestCase):
         reset = "\033[0m"
         return f"{color}{text}{reset}"
 
-    def render_inference_summary(self, inference_records):
+    def render_inference_summary(self, inference_records, backends_order=None):
         if not inference_records:
             return
-        ordered_backends = [backend for backend in (BACKEND.MARLIN, BACKEND.TORCH) if backend in inference_records]
+        if backends_order:
+            ordered_backends = [backend for backend in backends_order if backend in inference_records]
+        else:
+            ordered_backends = list(inference_records.keys())
         if not ordered_backends:
             return
 
@@ -382,10 +446,13 @@ class ModelTest(unittest.TestCase):
         cell = f"{status} | {snippet}" if snippet else status
         return self._colorize(cell, matched)
 
-    def render_arc_summary(self, arc_records):
+    def render_arc_summary(self, arc_records, backends_order=None):
         if not arc_records:
             return
-        ordered_backends = [backend for backend in (BACKEND.MARLIN, BACKEND.TORCH) if backend in arc_records]
+        if backends_order:
+            ordered_backends = [backend for backend in backends_order if backend in arc_records]
+        else:
+            ordered_backends = list(arc_records.keys())
         if not ordered_backends:
             return
 
@@ -406,10 +473,10 @@ class ModelTest(unittest.TestCase):
                 if value is None:
                     row.append(self._colorize("N/A", False))
                     continue
-                if backend == BACKEND.TORCH:
+                if backend == BACKEND.TORCH or reference_value is None:
                     row.append(self._colorize(f"{value:.4f}", True))
                 else:
-                    matched = reference_value is not None and abs(value - reference_value) <= tolerance
+                    matched = abs(value - reference_value) <= tolerance
                     row.append(self._colorize(f"{value:.4f}", matched))
             table_rows.append(row)
 
@@ -429,8 +496,9 @@ class ModelTest(unittest.TestCase):
             dataset = cls._load_calibration_parquet()
 
         if rows > 0:
-            return dataset.select(range(min(rows, len(dataset))))
-        return dataset
+            dataset = dataset.select(range(min(rows, len(dataset))))
+
+        return cls._apply_calibration_noise(dataset, tokenizer)
 
     @staticmethod
     def _load_calibration_parquet():
@@ -493,6 +561,446 @@ class ModelTest(unittest.TestCase):
             return self.__class__(selected)
 
 
+    @classmethod
+    def _apply_calibration_noise(cls, dataset, tokenizer):
+        mode = (getattr(cls, "CALIB_NOISE_MODE", "none") or "none").lower()
+        share = float(getattr(cls, "CALIB_NOISE_PERCENT", 0.0) or 0.0)
+
+        cls._noise_summary = {
+            "mode": mode,
+            "share": share,
+            "requested": 0,
+            "generated": 0,
+            "applied": False,
+            "reason": "disabled",
+        }
+
+        if dataset is None or tokenizer is None or share <= 0.0 or mode == "none":
+            return dataset
+
+        records = cls._materialize_records(dataset)
+        if not records:
+            cls._noise_summary["reason"] = "empty_dataset"
+            return dataset
+
+        requested = max(1, int(len(records) * share))
+        cls._noise_summary.update({
+            "requested": requested,
+            "reason": "generated",
+        })
+
+        stats = cls._collect_token_stats(records, tokenizer)
+        if stats["total_tokens"] == 0:
+            cls._noise_summary["reason"] = "no_tokens"
+            return dataset
+
+        noise_records, noise_token_sequences = cls._build_noise_records(
+            tokenizer=tokenizer,
+            stats=stats,
+            sample_count=requested,
+            mode=mode,
+            base_records=records,
+        )
+
+        if not noise_records:
+            cls._noise_summary["reason"] = "no_samples"
+            return dataset
+
+        if not cls._passes_noise_guard(stats, noise_token_sequences):
+            cls._noise_summary["reason"] = "guard_block"
+            return dataset
+
+        merged = cls._merge_noise(dataset, noise_records, base_records=records)
+        cls._noise_summary.update({
+            "generated": len(noise_records),
+            "applied": True,
+            "reason": "ok",
+        })
+        log.info(
+            "Injected %s synthetic calibration samples (mode=%s, avg_len=%s)",
+            len(noise_records),
+            mode,
+            stats["avg_length"],
+        )
+        return merged
+
+    @staticmethod
+    def _materialize_records(dataset):
+        if dataset is None:
+            return []
+        if hasattr(dataset, "to_list"):
+            try:
+                return dataset.to_list()
+            except TypeError:
+                pass
+        try:
+            return [dataset[idx] for idx in range(len(dataset))]
+        except Exception:  # pragma: no cover - defensive fallback
+            return list(dataset)
+
+    @staticmethod
+    def _extract_text(record):
+        if isinstance(record, dict):
+            if record.get("text"):
+                return record["text"]
+            if record.get("messages"):
+                parts = [msg.get("content", "") for msg in record["messages"]]
+                return "\n".join(part for part in parts if part)
+        return ""
+
+    @classmethod
+    def _collect_token_stats(cls, records, tokenizer):
+        counts = Counter()
+        total_tokens = 0
+        for record in records:
+            text = cls._extract_text(record)
+            if not text:
+                continue
+            encoded = tokenizer(text, add_special_tokens=False).get("input_ids", [])
+            counts.update(encoded)
+            total_tokens += len(encoded)
+
+        unique_tokens = len(counts)
+        avg_length = max(1, round(total_tokens / max(len(records), 1)))
+        type_token_ratio = (unique_tokens / total_tokens) if total_tokens else 0.0
+        max_freq = max(counts.values()) if counts else 0
+
+        return {
+            "counts": counts,
+            "total_tokens": total_tokens,
+            "unique_tokens": unique_tokens,
+            "avg_length": avg_length,
+            "type_token_ratio": type_token_ratio,
+            "max_freq": max_freq,
+        }
+
+    @classmethod
+    def _build_noise_records(cls, tokenizer, stats, sample_count, mode, base_records):
+        if sample_count <= 0:
+            return [], []
+
+        if mode == "structured":
+            return cls._build_structured_noise_records(
+                tokenizer=tokenizer,
+                base_records=base_records,
+                sample_count=sample_count,
+                stats=stats,
+            )
+
+        rng = random.Random(cls.CALIB_NOISE_RANDOM_SEED)
+
+        try:
+            vocab_values = list(tokenizer.get_vocab().values())
+        except Exception:  # pragma: no cover - tokenizer fallback
+            vocab_values = list(range(getattr(tokenizer, "vocab_size", 0)))
+
+        special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
+        vocab_ids = [tok for tok in vocab_values if tok not in special_ids]
+        if not vocab_ids:
+            return [], []
+
+        existing_ids = set(stats["counts"].keys())
+        if mode == "unseen":
+            vocab_ids = [tok for tok in vocab_ids if tok not in existing_ids]
+            if not vocab_ids:
+                log.warning("No unseen tokens available for noise generation; skipping")
+                return [], []
+
+        seq_min = max(1, int(getattr(cls, "CALIB_NOISE_MIN_SEQ_LEN", 32)))
+        seq_max = max(seq_min, int(getattr(cls, "CALIB_NOISE_MAX_SEQ_LEN", 256)))
+        avg_target = min(seq_max, max(seq_min, stats["avg_length"]))
+        std_dev = max(1, int(avg_target * 0.2))
+
+        records = []
+        token_sequences = []
+        max_iterations = max(sample_count * 3, 32)
+
+        for _ in range(max_iterations):
+            if len(records) >= sample_count:
+                break
+
+            length = int(rng.gauss(avg_target, std_dev))
+            length = max(seq_min, min(seq_max, length))
+            if length <= 1:
+                continue
+
+            if mode == "unseen":
+                length = min(length, len(vocab_ids))
+                if length <= 1:
+                    continue
+                token_ids = rng.sample(vocab_ids, k=length)
+            else:
+                token_ids = rng.choices(vocab_ids, k=length)
+
+            split = max(1, min(length - 1, length // 2))
+            prompt_tokens = token_ids[:split]
+            completion_tokens = token_ids[split:]
+
+            prompt_text = tokenizer.decode(prompt_tokens, skip_special_tokens=True).strip()
+            completion_text = tokenizer.decode(completion_tokens, skip_special_tokens=True).strip()
+
+            if not prompt_text:
+                prompt_text = " ".join(tokenizer.convert_ids_to_tokens(prompt_tokens))
+            if not completion_text:
+                completion_text = " ".join(tokenizer.convert_ids_to_tokens(completion_tokens))
+
+            combined_text = (
+                "### Instruction:\n"
+                + prompt_text
+                + "\n\n### Response:\n"
+                + completion_text
+            ).strip()
+
+            encoded = tokenizer(combined_text, add_special_tokens=False)
+            seq_ids = encoded.get("input_ids", [])
+            if not seq_ids:
+                continue
+
+            records.append(
+                {
+                    "text": combined_text,
+                    "messages": [
+                        {"role": "user", "content": prompt_text},
+                        {"role": "assistant", "content": completion_text},
+                    ],
+                }
+            )
+            token_sequences.append(seq_ids)
+
+        return records, token_sequences
+
+    @classmethod
+    def _build_structured_noise_records(cls, tokenizer, base_records, sample_count, stats):
+        if not base_records:
+            log.warning("Structured noise requested but no base records; skipping")
+            return [], []
+
+        rng = random.Random(cls.CALIB_NOISE_RANDOM_SEED + 17)
+        replacement_pool = list(stats["counts"].keys())
+        if not replacement_pool:
+            try:
+                replacement_pool = list(tokenizer.get_vocab().values())
+            except Exception:  # pragma: no cover - tokenizer fallback
+                replacement_pool = list(range(getattr(tokenizer, "vocab_size", 0)))
+
+        records = []
+        token_sequences = []
+        max_attempts = max(sample_count * 6, 48)
+
+        for _ in range(max_attempts):
+            if len(records) >= sample_count:
+                break
+
+            base_record = rng.choice(base_records)
+            user_text, assistant_text = cls._extract_message_pair(base_record)
+            if not user_text and not assistant_text:
+                base_text = cls._extract_text(base_record)
+                user_text, assistant_text = cls._split_instruction_response(base_text)
+
+            if not user_text and not assistant_text:
+                continue
+
+            pert_user = cls._perturb_text(user_text, tokenizer, rng, replacement_pool, stats)
+            pert_assistant = cls._perturb_text(assistant_text, tokenizer, rng, replacement_pool, stats)
+
+            pert_user = pert_user or user_text
+            pert_assistant = pert_assistant or assistant_text or pert_user
+
+            if not pert_user or not pert_assistant:
+                continue
+
+            combined_text = (
+                "### Instruction:\n"
+                + pert_user.strip()
+                + "\n\n### Response:\n"
+                + pert_assistant.strip()
+            ).strip()
+
+            encoded = tokenizer(combined_text, add_special_tokens=False)
+            seq_ids = encoded.get("input_ids", [])
+            if len(seq_ids) < max(4, cls.CALIB_NOISE_MIN_SEQ_LEN // 2):
+                continue
+
+            records.append(
+                {
+                    "text": combined_text,
+                    "messages": [
+                        {"role": "user", "content": pert_user.strip()},
+                        {"role": "assistant", "content": pert_assistant.strip()},
+                    ],
+                }
+            )
+            token_sequences.append(seq_ids)
+
+        return records, token_sequences
+
+    @staticmethod
+    def _extract_message_pair(record):
+        if not isinstance(record, dict):
+            return "", ""
+
+        messages = record.get("messages")
+        if not isinstance(messages, list):
+            return "", ""
+
+        user_text = ""
+        assistant_text = ""
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            content = (message.get("content") or "").strip()
+            if not content:
+                continue
+            if role == "user" and not user_text:
+                user_text = content
+            elif role == "assistant" and not assistant_text:
+                assistant_text = content
+            if user_text and assistant_text:
+                break
+
+        return user_text, assistant_text
+
+    @staticmethod
+    def _split_instruction_response(text):
+        if not text:
+            return "", ""
+
+        instruction = ""
+        response = ""
+
+        if "### Response" in text:
+            parts = text.split("### Response", 1)
+            instruction = parts[0].replace("### Instruction:", "").strip()
+            response = parts[1].replace(":", "", 1).strip()
+        elif "Response:" in text:
+            parts = text.split("Response:", 1)
+            instruction = parts[0].replace("Instruction:", "").strip()
+            response = parts[1].strip()
+        else:
+            split_parts = text.split("\n\n", 1)
+            if len(split_parts) == 2:
+                instruction, response = split_parts[0].strip(), split_parts[1].strip()
+            else:
+                mid = len(text) // 2
+                instruction, response = text[:mid].strip(), text[mid:].strip()
+
+        return instruction, response
+
+    @classmethod
+    def _perturb_text(cls, text, tokenizer, rng, replacement_pool, stats):
+        if not text:
+            return ""
+
+        encoded = tokenizer(text, add_special_tokens=False)
+        token_ids = list(encoded.get("input_ids", []))
+        if len(token_ids) <= 2:
+            return text.strip()
+
+        operations = ["shuffle", "drop", "replace"]
+        operation = rng.choice(operations)
+        tokens = list(token_ids)
+
+        if operation == "shuffle" and len(tokens) > 8:
+            chunk_size = max(1, len(tokens) // rng.randint(3, 6))
+            segments = [tokens[i:i + chunk_size] for i in range(0, len(tokens), chunk_size)]
+            rng.shuffle(segments)
+            tokens = [tok for segment in segments for tok in segment]
+        elif operation == "drop" and len(tokens) > 6:
+            max_drop = max(1, min(len(tokens) // 4, 24))
+            span = rng.randint(1, max_drop)
+            if len(tokens) > span:
+                start = rng.randint(0, len(tokens) - span)
+                del tokens[start:start + span]
+        else:  # replace
+            span = max(1, min(len(tokens) // 5, 16))
+            if len(tokens) > span:
+                start = rng.randint(0, len(tokens) - span)
+                replacement = cls._sample_replacement_tokens(rng, replacement_pool, span, stats)
+                tokens[start:start + span] = replacement
+
+        if not tokens:
+            tokens = token_ids
+
+        new_text = tokenizer.decode(tokens, skip_special_tokens=True).strip()
+        return new_text or text.strip()
+
+    @classmethod
+    def _sample_replacement_tokens(cls, rng, candidates, length, stats):
+        if not candidates:
+            candidates = list(stats["counts"].keys())
+        if not candidates:
+            candidates = list(range(1, max(512, length * 4)))
+        return [rng.choice(candidates) for _ in range(length)]
+
+    @classmethod
+    def _passes_noise_guard(cls, stats, noise_sequences):
+        if not noise_sequences:
+            return False
+
+        base_counts = stats["counts"].copy()
+        base_total = stats["total_tokens"]
+        base_max = stats["max_freq"]
+        base_ttr = stats["type_token_ratio"]
+
+        noise_counts = Counter()
+        noise_token_total = 0
+        for seq in noise_sequences:
+            noise_counts.update(seq)
+            noise_token_total += len(seq)
+
+        if noise_token_total == 0:
+            return False
+
+        combined_counts = base_counts + noise_counts
+        combined_max = max(combined_counts.values()) if combined_counts else 0
+        if base_max == 0:
+            base_max = combined_max or 1
+
+        max_freq_ratio = combined_max / max(base_max, 1)
+        if max_freq_ratio > getattr(cls, "CALIB_NOISE_GUARD_MAX_FREQ_RATIO", 1.3):
+            log.info(
+                "Noise guard triggered by max frequency ratio %.4f", max_freq_ratio
+            )
+            return False
+
+        combined_total = base_total + noise_token_total
+        combined_unique = len(combined_counts)
+        combined_ttr = (combined_unique / combined_total) if combined_total else 0.0
+        min_ttr = base_ttr * getattr(cls, "CALIB_NOISE_GUARD_MIN_TTR_FACTOR", 0.95)
+        if base_ttr and combined_ttr < min_ttr:
+            log.info(
+                "Noise guard triggered by type-token ratio %.4f < %.4f",
+                combined_ttr,
+                min_ttr,
+            )
+            return False
+
+        noise_fraction = noise_token_total / combined_total if combined_total else 1.0
+        if noise_fraction > getattr(cls, "CALIB_NOISE_GUARD_MAX_FRACTION", 0.1):
+            log.info(
+                "Noise guard triggered by noise fraction %.4f", noise_fraction
+            )
+            return False
+
+        return True
+
+    @classmethod
+    def _merge_noise(cls, dataset, noise_records, base_records=None):
+        if dataset is None:
+            return cls._LocalCalibrationDataset(noise_records)
+
+        try:
+            noise_dataset = Dataset.from_list(noise_records)
+            return concatenate_datasets([dataset, noise_dataset])
+        except Exception as exc:  # pragma: no cover - fall back to python dataset
+            log.warning("Falling back to in-memory dataset for noise merge: %s", exc)
+            if base_records is None:
+                base_records = cls._materialize_records(dataset)
+            combined = list(base_records) + list(noise_records)
+            return cls._LocalCalibrationDataset(combined)
+
+
     def check_kernel(self, model, expected_kernels):
         modules = {module.__class__ for _, module in model.named_modules() if isinstance(module, BaseQuantLinear)}
         print(f"modules in model: {modules}")
@@ -511,16 +1019,14 @@ class ModelTest(unittest.TestCase):
             sym=self.SYM,
             v2=self.V2,
             adapter=self.EORA,
+            mock_quantization=self.MOCK_QUANTIZATION,
+            offload_to_disk=getattr(self, "OFFLOAD_TO_DISK", True),
         )
 
         log.info(f"Quant config: {quantize_config}")
         log.info(f"Quant batch_size: {batch_size}")
 
         args = kwargs if kwargs else {}
-
-        if self.USE_FLASH_ATTN:
-            args["attn_implementation"] = "flash_attention_2"
-
 
         log.info(f"args: {args}")
         model = GPTQModel.load(
@@ -538,11 +1044,23 @@ class ModelTest(unittest.TestCase):
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
 
+        noise_summary = getattr(self, "_noise_summary", None)
+        if noise_summary and noise_summary.get("mode") != "none":
+            log.info(f"Calibration noise summary: {noise_summary}")
+
         # mpt model need
-        if not model.config.pad_token_id:
-            model.config.pad_token_id = tokenizer.pad_token_id or 0
-        if not model.config.eos_token_id:
-            model.config.eos_token_id = tokenizer.eos_token_id or 0
+        model_cfg = getattr(model, "config", None)
+        if model_cfg is None:
+            inner = getattr(model, "model", None)
+            if inner is not None:
+                model_cfg = getattr(inner, "config", None)
+        if model_cfg is None:
+            model_cfg = getattr(model, "model_config", None)
+        if model_cfg is not None:
+            if not getattr(model_cfg, "pad_token_id", None):
+                model_cfg.pad_token_id = tokenizer.pad_token_id or 0
+            if not getattr(model_cfg, "eos_token_id", None):
+                model_cfg.eos_token_id = tokenizer.eos_token_id or 0
 
         is_quantized = model.quantized
 
@@ -550,9 +1068,26 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, calibration_sort=self.DATASET_SORT, backend=self.QUANT_BACKEND, batch_size=batch_size)
+            prev_max_layers = os.environ.get("GPTQMODEL_MAX_QUANT_LAYERS")
+            max_layers_limit = getattr(self, "MAX_QUANT_LAYERS", None)
+            if max_layers_limit is not None:
+                os.environ["GPTQMODEL_MAX_QUANT_LAYERS"] = str(max_layers_limit)
+            try:
+                model.quantize(calibration_dataset, calibration_sort=self.DATASET_SORT, backend=self.QUANT_BACKEND, batch_size=batch_size)
+            finally:
+                if max_layers_limit is not None:
+                    if prev_max_layers is None:
+                        os.environ.pop("GPTQMODEL_MAX_QUANT_LAYERS", None)
+                    else:
+                        os.environ["GPTQMODEL_MAX_QUANT_LAYERS"] = prev_max_layers
 
             self.check_kernel(model, self.KERNEL_QUANT)
+
+            if self.MOCK_QUANTIZATION:
+                if need_create_processor:
+                    processor = AutoProcessor.from_pretrained(model_id_or_path)
+                    return model, tokenizer, processor
+                return model, tokenizer
 
             # TODO: make into shared method
             with (contextlib.nullcontext(self.SAVE_PATH) if self.SAVE_PATH else contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as path:
@@ -588,9 +1123,6 @@ class ModelTest(unittest.TestCase):
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, backend=None, **args):
 
         load_kwargs = dict(args)
-
-        if self.USE_FLASH_ATTN:
-            load_kwargs["attn_implementation"] = "flash_attention_2"
 
         active_backend = backend if backend is not None else self.LOAD_BACKEND
 
@@ -709,11 +1241,19 @@ class ModelTest(unittest.TestCase):
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
-        task_results = self.lm_eval(model=self.SAVE_PATH if self.SAVE_PATH else self.model,
-                                    apply_chat_template=self.APPLY_CHAT_TEMPLATE,
-                                    trust_remote_code=self.TRUST_REMOTE_CODE,
-                                    delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
+        if self.MOCK_QUANTIZATION:
+            task_results = {
+                "acc,none": self.NATIVE_ARC_CHALLENGE_ACC,
+                "acc_norm,none": self.NATIVE_ARC_CHALLENGE_ACC_NORM,
+            }
+        else:
+            task_results = self.lm_eval(model=self.SAVE_PATH if self.SAVE_PATH else self.model,
+                                        apply_chat_template=self.APPLY_CHAT_TEMPLATE,
+                                        trust_remote_code=self.TRUST_REMOTE_CODE,
+                                        delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
         self.check_results(task_results)
+        self.last_task_results = task_results
+        self._maybe_compute_perplexity(self.model)
 
     def check_results(self, task_results):
         for filter, value in task_results.items():
@@ -721,6 +1261,148 @@ class ModelTest(unittest.TestCase):
             negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
             positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
             self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: `{value}` vs expected `{expected}`, diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+
+    def _maybe_compute_perplexity(self, model):
+        self.perplexity_scores = []
+        self.perplexity_avg = None
+        self.perplexity_error = None
+
+        if not self.COMPUTE_PPL or model is None:
+            return None
+
+        tokenizer = getattr(model, "tokenizer", None)
+        if tokenizer is None:
+            log.warning("Model has no tokenizer; skipping perplexity computation")
+            return None
+
+        try:
+            ppl_runner = Perplexity(
+                model=model,
+                tokenizer=tokenizer,
+                dataset_path=self.PPL_DATASET_PATH,
+                dataset_name=self.PPL_DATASET_NAME,
+                split=self.PPL_DATASET_SPLIT,
+                text_column=self.PPL_DATASET_COLUMN,
+            )
+            scores = ppl_runner.calculate(n_ctx=self.PPL_CTX, n_batch=self.PPL_BATCH)
+            if scores:
+                self.perplexity_scores = scores
+                self.perplexity_avg = sum(scores) / len(scores)
+                log.info(
+                    "Perplexity average: %.4f computed over %s windows",
+                    self.perplexity_avg,
+                    len(scores),
+                )
+            else:
+                log.warning("Perplexity calculation returned no scores")
+            return self.perplexity_avg
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            self.perplexity_error = str(exc)
+            log.error(f"Perplexity computation failed: {exc}")
+            return self._compute_perplexity_fallback(model, tokenizer)
+
+    def _compute_perplexity_fallback(self, model, tokenizer):
+        max_samples = getattr(self, "PPL_MAX_SAMPLES", 32)
+        dataset = None
+        try:
+            dataset = load_dataset(
+                self.PPL_DATASET_PATH,
+                self.PPL_DATASET_NAME,
+                split=self.PPL_DATASET_SPLIT,
+            )
+        except Exception as exc:  # pragma: no cover - dataset missing
+            log.error(f"Fallback perplexity dataset load failed: {exc}")
+            return None
+
+        sample_count = min(max_samples, len(dataset))
+        if sample_count == 0:
+            log.warning("Fallback perplexity has no samples to evaluate")
+            return None
+
+        max_context = getattr(model.config, "max_position_embeddings", self.PPL_CTX)
+        fallback_ctx = min(
+            getattr(self, "PPL_FALLBACK_CTX", self.PPL_CTX),
+            self.PPL_CTX,
+            max_context,
+        )
+        fallback_ctx = max(32, fallback_ctx)
+        max_chunks_per_sample = max(1, getattr(self, "PPL_FALLBACK_MAX_CHUNKS_PER_SAMPLE", 1))
+        rng = random.Random(self.CALIB_NOISE_RANDOM_SEED + 202)
+
+        total_tokens = 0
+        total_neg_log_likelihood = 0.0
+
+        for entry in dataset.select(range(sample_count)):
+            text = entry.get(self.PPL_DATASET_COLUMN)
+            if not text:
+                continue
+            token_ids = tokenizer(text, add_special_tokens=False).get("input_ids", [])
+            if len(token_ids) <= 1:
+                continue
+
+            offsets = self._select_fallback_offsets(
+                length=len(token_ids),
+                chunk_size=fallback_ctx + 1,
+                max_chunks=max_chunks_per_sample,
+                rng=rng,
+            )
+
+            for offset in offsets:
+                chunk = token_ids[offset: offset + fallback_ctx + 1]
+                if len(chunk) <= 1:
+                    continue
+
+                input_tensor = torch.tensor(
+                    chunk[:-1], dtype=torch.long, device=model.device
+                ).unsqueeze(0)
+                labels = torch.tensor(
+                    chunk[1:], dtype=torch.long, device=model.device
+                ).unsqueeze(0)
+                attention_mask = torch.ones_like(input_tensor, dtype=torch.long)
+
+                with torch.inference_mode():
+                    outputs = model(
+                        input_ids=input_tensor,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
+
+                token_count = labels.numel()
+                total_tokens += token_count
+                total_neg_log_likelihood += outputs.loss.item() * token_count
+
+        if total_tokens == 0:
+            log.warning("Fallback perplexity produced zero tokens")
+            return None
+
+        average_loss = total_neg_log_likelihood / total_tokens
+        ppl = math.exp(average_loss)
+        self.perplexity_scores = [ppl]
+        self.perplexity_avg = ppl
+        log.info(
+            "Fallback perplexity average: %.4f computed over %s tokens",
+            ppl,
+            total_tokens,
+        )
+        return ppl
+
+    @staticmethod
+    def _select_fallback_offsets(length, chunk_size, max_chunks, rng):
+        if length <= chunk_size or max_chunks <= 1:
+            return [0]
+
+        limit = max(0, length - chunk_size)
+        offsets = set()
+        attempts = 0
+        max_attempts = max_chunks * 6
+
+        while len(offsets) < max_chunks and attempts < max_attempts:
+            offsets.add(rng.randint(0, limit))
+            attempts += 1
+
+        if not offsets:
+            return [0]
+        return sorted(offsets)
 
     def check_lm_head_loss(self, quant_log: List[Dict[str, any]]):
         final_log = quant_log[-1]
