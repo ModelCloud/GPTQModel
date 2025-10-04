@@ -5,6 +5,7 @@
 
 import contextlib
 import gc as py_gc
+import sys
 from contextlib import contextmanager
 from enum import Enum
 from typing import Callable, List, Union

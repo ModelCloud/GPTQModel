@@ -515,7 +515,7 @@ class DeviceThreadPool:
         self._per_device_done: Dict[str, int] = {}
         self._total_done: int = 0
 
-        self._empty_cache_every_n = 0 if self._sync_mode else int(empty_cache_every_n)
+        self._empty_cache_every_n = int(empty_cache_every_n)
         self._gc_event = threading.Event()
         self._stop_event = threading.Event()
         self._janitor: Optional[threading.Thread] = None

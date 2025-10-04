@@ -43,6 +43,7 @@ import torch.cuda  # noqa: E402
 from datasets import Dataset, concatenate_datasets, load_dataset  # noqa: E402
 from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
+from transformers.utils import is_flash_attn_2_available  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
@@ -116,7 +117,7 @@ class ModelTest(unittest.TestCase):
     SAVE_PATH = None  # default is temp folder
 
     MOCK_QUANTIZATION = False
-    ATTN_IMPLEMENTATION = None  # allow forcing a specific attention backend when needed; use "flash_attention_2" or "flex_attention"
+    ATTN_IMPLEMENTATION = None  # allow forcing a specific attention backend when needed; use "flash_attention_2"
 
     COMPUTE_PPL = False
     PPL_DATASET_PATH = "wikitext"
@@ -1135,6 +1136,8 @@ class ModelTest(unittest.TestCase):
             and ATTN_IMPLEMENTATION_KEY not in load_kwargs
         ):
             load_kwargs[ATTN_IMPLEMENTATION_KEY] = self.ATTN_IMPLEMENTATION
+        elif ATTN_IMPLEMENTATION_KEY not in load_kwargs and is_flash_attn_2_available():
+            load_kwargs[ATTN_IMPLEMENTATION_KEY] = "flash_attention_2"
 
         active_backend = backend if backend is not None else self.LOAD_BACKEND
 

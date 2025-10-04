@@ -61,6 +61,32 @@ from ._const import DEFAULT_MAX_SHARD_SIZE
 
 log = setup_logger()
 
+_ATTN_IMPLEMENTATION_KEYS = ("attn_implementation", "_attn_implementation")
+
+
+def _stash_and_clear_attention_attr(config_like):
+    """Temporarily remove transient attention implementation flags before serialization."""
+    if config_like is None:
+        return {}
+    store = getattr(config_like, "__dict__", None)
+    if not isinstance(store, dict):
+        return {}
+    removed = {}
+    for key in _ATTN_IMPLEMENTATION_KEYS:
+        if key in store:
+            removed[key] = store.pop(key)
+    return removed
+
+
+def _restore_attention_attr(config_like, removed_attrs):
+    if not removed_attrs:
+        return
+    store = getattr(config_like, "__dict__", None)
+    if not isinstance(store, dict):
+        return
+    for key, value in removed_attrs.items():
+        store[key] = value
+
 PROCESS_LOG_NAME = "process"
 PROCESS_LOG_LAYER = "layer"
 PROCESS_LOG_MODULE = "module"
@@ -248,9 +274,17 @@ def ModelWriter(cls):
         config.quantization_config = quantize_config.to_dict()
         self.model.config = config
 
+        removed_config_attn = _stash_and_clear_attention_attr(config)
+        generation_config = getattr(self.model, "generation_config", None)
+        removed_generation_attn = _stash_and_clear_attention_attr(generation_config)
+
         # Save model config, including generation_config
         # Use empty state_dict hack to bypass saving weights
-        self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+        try:
+            self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+        finally:
+            _restore_attention_attr(config, removed_config_attn)
+            _restore_attention_attr(generation_config, removed_generation_attn)
 
         gen_config_path = os.path.join(save_dir, "generation_config.json")
         if sanitize_generation_config_file(gen_config_path):
