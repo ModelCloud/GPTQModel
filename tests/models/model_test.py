@@ -32,10 +32,13 @@ from tabulate import tabulate  # noqa: E402
 sys.path.insert(0, f"{str(Path(__file__).resolve().parent.parent)}/models")  # noqa: E402
 import contextlib  # noqa: E402
 import json  # noqa: E402
+import math  # noqa: E402
+import random  # noqa: E402
 import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import textwrap  # noqa: E402
 import unittest  # noqa: E402
+from collections import Counter  # noqa: E402
 from collections.abc import Iterable  # noqa: E402
 
 import torch  # noqa: E402
@@ -50,13 +53,9 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
-from gptqmodel.utils.perplexity import Perplexity  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
+from gptqmodel.utils.perplexity import Perplexity  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
-
-import random  # noqa: E402
-from collections import Counter  # noqa: E402
-import math  # noqa: E402
 
 
 RAND_SEED = 898

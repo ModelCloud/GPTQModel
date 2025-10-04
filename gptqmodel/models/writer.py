@@ -41,7 +41,7 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
 )
 from ..utils.backend import BACKEND
-from ..utils.hf import sanitize_generation_config_file, safe_auto_config_from_pretrained
+from ..utils.hf import safe_auto_config_from_pretrained, sanitize_generation_config_file
 from ..utils.logger import setup_logger
 from ..utils.model import (
     convert_gptq_v2_to_v1_format,

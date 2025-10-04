@@ -35,6 +35,7 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
+from ..utils.hf import safe_auto_config_from_pretrained
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_device_support
@@ -50,7 +51,6 @@ from ..utils.model import (
     make_quant,
     simple_dispatch_model,
 )
-from ..utils.hf import safe_auto_config_from_pretrained
 from ._const import DEVICE, normalize_device
 
 
