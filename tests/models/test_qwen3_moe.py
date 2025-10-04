@@ -9,8 +9,8 @@ from model_test import ModelTest
 class TestQwen3Moe(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
-    NATIVE_ARC_CHALLENGE_ACC = 0.2739
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3055
+    NATIVE_ARC_CHALLENGE_ACC = 0.39
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.39
     # TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = True
     # EVAL_BATCH_SIZE = 6
