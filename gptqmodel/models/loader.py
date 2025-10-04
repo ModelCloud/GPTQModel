@@ -27,7 +27,13 @@ else:
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.modeling_utils import no_init_weights
-from transformers.utils import is_flash_attn_2_available
+try:
+    from transformers.utils import is_flash_attn_2_available, is_torch_flex_attn_available
+except ImportError:  # pragma: no cover - older transformers
+    from transformers.utils import is_flash_attn_2_available
+
+    def is_torch_flex_attn_available() -> bool:
+        return False
 from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import Adapter
@@ -556,22 +562,32 @@ def ModelLoader(cls):
         with (ContextManagers(init_contexts)):
             cls.before_model_load(cls, load_quantized_model=True)
 
+            supports_flash_attn = bool(getattr(config, "_supports_flash_attn_2", False))
+            supports_flex_attn = bool(
+                getattr(config, "_supports_torch_flex_attn", supports_flash_attn)
+            )
             if config.architectures:
                 model_class = getattr(transformers, config.architectures[0], None)
-                if model_class is not None and hasattr(model_class, "_supports_flash_attn_2"):
-                    supports_flash_attn = model_class._supports_flash_attn_2
-                else:
-                    supports_flash_attn = None
-            else:
-                supports_flash_attn = None
+                if model_class is not None:
+                    model_supports_flash = getattr(model_class, "_supports_flash_attn_2", None)
+                    model_supports_flex = getattr(model_class, "_supports_torch_flex_attn", None)
+                    if model_supports_flash is not None:
+                        supports_flash_attn = bool(model_supports_flash)
+                    if model_supports_flex is not None:
+                        supports_flex_attn = bool(model_supports_flex)
+                    elif model_supports_flash is not None:
+                        supports_flex_attn = bool(model_supports_flash)
 
             args = {}
-            if supports_flash_attn and device in [DEVICE.CUDA, DEVICE.ROCM]:
-                if ATTN_IMPLEMENTATION in kwargs:
-                    args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
-                elif is_flash_attn_2_available():
-                    args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
+            if ATTN_IMPLEMENTATION in kwargs:
+                args[ATTN_IMPLEMENTATION] = kwargs.pop(ATTN_IMPLEMENTATION, None)
+            elif device in [DEVICE.CUDA, DEVICE.ROCM]:
+                if supports_flash_attn and is_flash_attn_2_available():
+                    args[ATTN_IMPLEMENTATION] = "flash_attention_2"
                     log.info("Loader: Auto enabling flash attention2")
+                elif supports_flex_attn and is_torch_flex_attn_available():
+                    args[ATTN_IMPLEMENTATION] = "flex_attention"
+                    log.info("Loader: Flash attention2 unavailable, falling back to flex attention")
 
             flash_attn_requested = args.get(ATTN_IMPLEMENTATION) == "flash_attention_2"
             if flash_attn_requested and isinstance(dtype, torch.dtype):
