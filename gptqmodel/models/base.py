@@ -9,9 +9,10 @@ import json
 import os
 import random
 import threading
+import time
 from collections import defaultdict
 from collections.abc import Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, TimeoutError
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
 
 import torch
@@ -35,6 +36,7 @@ except Exception:  # pragma: no cover - datasets may not be installed
     HFDataset = None
     HFIterableDataset = None
 
+from .. import DEVICE_THREAD_POOL
 from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -224,9 +226,8 @@ class BaseQModel(nn.Module):
         if isinstance(self.model, PreTrainedModel):
             autofix_hf_model_config(self.model, path=model_local_path)
 
-        self._background_pool: Optional["DeviceThreadPool"] = None
         self._turtle_reload_future: Optional[Future] = None
-        self._turtle_reload_lock = threading.Lock()
+        self._turtle_lock = threading.RLock()
         self._turtle_ready = threading.Event()
         self._turtle_ready.set()
 
@@ -1314,14 +1315,39 @@ class BaseQModel(nn.Module):
         # print("DEBUG AWQ NODES:", format_nodes(nodes))
         return nodes
 
-    def register_background_pool(self, pool: Optional["DeviceThreadPool"]) -> None:
-        self._background_pool = pool
-
     def _wait_for_turtle_ready(self, timeout: Optional[float] = None) -> None:
         if self.turtle_model is None:
             return
 
-        self._turtle_ready.wait(timeout=timeout)
+        deadline = None if timeout is None else time.monotonic() + timeout
+
+        while True:
+            if self._turtle_ready.is_set():
+                return
+
+            with self._turtle_lock:
+                future = self._turtle_reload_future
+
+            if future is not None:
+                try:
+                    fut_timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+                    future.result(timeout=fut_timeout)
+                except TimeoutError:
+                    if deadline is not None:
+                        return
+                    continue
+                except Exception:
+                    # Exception handling deferred to _apply_completed_turtle_reload.
+                    pass
+
+                self._apply_completed_turtle_reload(wait=True)
+                continue
+
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if self._turtle_ready.wait(timeout=remaining):
+                return
+            if deadline is not None and time.monotonic() >= deadline:
+                return
 
     def _ensure_turtle_ready(self) -> None:
         if self.turtle_model is None:
@@ -1358,24 +1384,36 @@ class BaseQModel(nn.Module):
         new_model.eval()
         return new_model
 
+    def _adopt_turtle_model(
+        self,
+        new_model: Optional[PreTrainedModel],
+        *,
+        future: Optional[Future] = None,
+    ) -> None:
+        """Install ``new_model`` as the active turtle model and release waiters."""
+
+        with self._turtle_lock:
+            if future is not None and self._turtle_reload_future is not future:
+                return
+
+            self._turtle_reload_future = None
+
+            if new_model is not None:
+                new_model.eval()
+                self.turtle_model = new_model
+
+            self._turtle_ready.set()
+
     def _schedule_turtle_reload(self) -> None:
         self._apply_completed_turtle_reload()
 
-        if self.turtle_model is None or self.model_local_path is None:
-            self._turtle_ready.set()
-            return
+        with self._turtle_lock:
+            if self.turtle_model is None or self.model_local_path is None:
+                self._turtle_ready.set()
+                return
 
-        pool = self._background_pool
-        if pool is None:
-            self._turtle_ready.clear()
-            new_model = self._reload_turtle_model_sync()
-            if new_model is not None:
-                self.turtle_model = new_model
-            self._turtle_ready.set()
-            return
-
-        with self._turtle_reload_lock:
             future = self._turtle_reload_future
+
             if future is not None and not future.done():
                 return
 
@@ -1384,45 +1422,34 @@ class BaseQModel(nn.Module):
             model_local_path = self.model_local_path
             loader = self.loader
 
-            def _reload_task():
-                try:
-                    model = loader.from_pretrained(
-                        model_local_path,
-                        config=config,
-                        low_cpu_mem_usage=True,
-                        **reload_kwargs,
-                    )
-                    model._model_init_kwargs = reload_kwargs
-                    model.eval()
-                    return model
-                finally:
-                    self._turtle_ready.set()
-
             self._turtle_ready.clear()
+
+            def _reload_task() -> Optional[PreTrainedModel]:
+                model = loader.from_pretrained(
+                    model_local_path,
+                    config=config,
+                    low_cpu_mem_usage=True,
+                    **reload_kwargs,
+                )
+                model._model_init_kwargs = reload_kwargs
+                model.eval()
+                return model
 
             try:
                 # Re-loading constructs new Parameter objects; run outside inference mode
                 # so autograd metadata stays intact even on inference-optimised workers.
-                future = pool.submit(CPU, _reload_task, _threadx_inference_mode=False)
+                future = DEVICE_THREAD_POOL.submit_serial(CPU, _reload_task, _threadx_inference_mode=False)
             except Exception as exc:
                 log.warning("Turtle reload scheduling failed; falling back to sync reload: %s", exc)
-                self._turtle_reload_future = None
+                new_model = self._reload_turtle_model_sync()
+                self._adopt_turtle_model(new_model)
             else:
                 self._turtle_reload_future = future
-                return
-
-        # Fallback: synchronous reload (either pool missing or submit failed)
-        self._turtle_ready.clear()
-        new_model = self._reload_turtle_model_sync()
-        if new_model is not None:
-            new_model.eval()
-            self.turtle_model = new_model
-        self._turtle_ready.set()
 
     def _apply_completed_turtle_reload(self, *, wait: bool = False) -> None:
         """Adopt the result of any finished background turtle reload."""
         future: Optional[Future]
-        with self._turtle_reload_lock:
+        with self._turtle_lock:
             future = self._turtle_reload_future
 
         if future is None:
@@ -1443,23 +1470,10 @@ class BaseQModel(nn.Module):
         except Exception as exc:
             log.warning("Background turtle reload failed; retrying synchronously: %s", exc)
             new_model = self._reload_turtle_model_sync()
-            if new_model is not None:
-                new_model.eval()
-            with self._turtle_reload_lock:
-                if self._turtle_reload_future is future:
-                    self._turtle_reload_future = None
-                    if new_model is not None:
-                        self.turtle_model = new_model
-                        self._turtle_ready.set()
+            self._adopt_turtle_model(new_model, future=future)
             return
 
-        with self._turtle_reload_lock:
-            if self._turtle_reload_future is future:
-                if new_model is not None:
-                    new_model.eval()
-                    self.turtle_model = new_model
-                self._turtle_reload_future = None
-                self._turtle_ready.set()
+        self._adopt_turtle_model(new_model, future=future)
 
     def wait_for_turtle_reload(self) -> None:
         self._ensure_turtle_ready()
@@ -1472,19 +1486,21 @@ class BaseQModel(nn.Module):
             non_blocking: bool = False,
     ) -> torch.nn.Module:
         self._ensure_turtle_ready()
+        with self._turtle_lock:
+            turtle_model = self.turtle_model
 
-        if self.turtle_model is None:
-            if get_device(target_submodule) != device:
-                target_submodule.to(device)
+            if turtle_model is None:
+                if get_device(target_submodule) != device:
+                    target_submodule.to(device)
 
-            return target_submodule
+                return target_submodule
 
-        module = alias_from_turtle_for_submodule(
-            target_model=self.model,
-            turtle_model=self.turtle_model,
-            target_submodule=target_submodule,
-            device=device,
-        )
+            module = alias_from_turtle_for_submodule(
+                target_model=self.model,
+                turtle_model=turtle_model,
+                target_submodule=target_submodule,
+                device=device,
+            )
         self._schedule_turtle_reload()
         return module
 

@@ -8,6 +8,20 @@ import os
 
 DEBUG_ON = str(os.environ.get("DEBUG", "")).lower() in ("1", "true", "yes", "on")
 
+from .utils.threadx import DeviceThreadPool
+
+
+DEVICE_THREAD_POOL = DeviceThreadPool(
+    inference_mode=True,
+    workers={
+        "cuda:per": 4,
+        "xpu:per": 1,
+        "mps": 8,
+        "cpu": 8,
+    },
+    empty_cache_every_n=1024,
+)
+
 from .models import GPTQModel, get_best_device
 from .quantization import BaseQuantizeConfig, QuantizeConfig
 from .utils import BACKEND
