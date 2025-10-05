@@ -7,12 +7,12 @@ import json
 from pathlib import Path
 
 import torch
+from safetensors import safe_open
 from tabulate import tabulate
 from torch import nn
-from safetensors import safe_open
 
-from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
 from gptqmodel.utils.model import get_state_dict_for_save, streaming_state_dict_to_shards
+from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
 
 
 class _LinearWithBuffers(nn.Module):
