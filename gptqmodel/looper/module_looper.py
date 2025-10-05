@@ -669,11 +669,13 @@ class ModuleLooper():
             is_lm_head_module = layer_index >= layer_count
 
             if is_lm_head_module:
-                quant_modules_pb.title("Quantizing lm_head").draw()
+                layer_title = "Quantizing lm_head"
                 module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
             else:
-                quant_modules_pb.title(f"Quantizing layer {layer_index} of {layer_count - 1}").draw()
+                layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
                 module = layers[layer_index]
+
+            quant_modules_pb.title(layer_title).subtitle("").draw()
 
             self.gptq_model.wait_for_turtle_reload()
 
@@ -782,7 +784,7 @@ class ModuleLooper():
                         f"(layer=`{layer_descriptor}`, subset={index + 1}/{subset_total}, "
                         f"batches={batch_count})"
                     )
-                    quant_modules_pb.subtitle(forward_msg).draw()
+                    quant_modules_pb.title(forward_msg).draw()
                     # Drain any background work so the forward spike does not race pooled tasks.
                     DEVICE_THREAD_POOL.wait()
                     forward_outputs = self._run_forward_batches(
@@ -806,6 +808,8 @@ class ModuleLooper():
 
                     fwd_time = time.time() - fwd_start
                     processor.set_fwd_time(fwd_time)
+
+                    quant_modules_pb.title(layer_title).subtitle("").draw()
 
                     for h in handle:
                         h.remove()
@@ -884,6 +888,7 @@ class ModuleLooper():
                         "Forward replay "
                         f"(layer=`{layer_descriptor}`, batches={replay_batch_count})"
                     )
+                    quant_modules_pb.title(replay_msg).draw()
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
                     DEVICE_THREAD_POOL.wait()
                     layer_outputs = self._run_forward_batches(
@@ -914,6 +919,8 @@ class ModuleLooper():
                     processor.clear_cache_data()
                     processor.receive_layer_inputs(layer_outputs)
                     layer_inputs = processor.inputs_cache.layer_inputs
+
+                    quant_modules_pb.title(layer_title).subtitle("").draw()
 
                 if p_index == len(self.processors) - 1:
                     torch_sync()
