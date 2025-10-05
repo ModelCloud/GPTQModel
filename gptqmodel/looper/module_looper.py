@@ -397,10 +397,9 @@ class ModuleLooper():
                 if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
                     shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device, stream=False)
 
-        # ensure replicas that are clones release promptly
+        # ensure replicas release promptly and free GPU memory
         for dev in list(module_replicas.keys()):
-            if dev != cur_layer_device:
-                del module_replicas[dev]
+            del module_replicas[dev]
 
         if not need_outputs:
             return []
