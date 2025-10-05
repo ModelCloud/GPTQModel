@@ -4,17 +4,21 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
+import json
 import os
 import shutil
 from threading import Lock
 from typing import Iterable, List, Optional, Set, Tuple
 
 import accelerate
+import accelerate.utils.offload as accelerate_offload
 import torch
+import numpy as np
 
 # move base_module tensors to disk
 from accelerate import disk_offload
 from accelerate.hooks import remove_hook_from_module, remove_hook_from_submodules
+from accelerate.utils import OffloadedWeightsLoader as _AccelerateOffloadedWeightsLoader
 from accelerate.utils import align_module_device, has_offloaded_params
 from torch import nn
 
@@ -63,6 +67,146 @@ def is_meta_module(m: nn.Module) -> bool:
     return False
 
 _OFFLOAD_LOCK = Lock()
+
+
+_ORIGINAL_OFFLOADED_LOADER = accelerate_offload.OffloadedWeightsLoader
+_ORIGINAL_LOAD_WEIGHT = accelerate_offload.load_offloaded_weight
+
+
+class _ModuleBundledWeightsLoader(_AccelerateOffloadedWeightsLoader):
+    def __getitem__(self, key: str):
+        weight_info = self.index.get(key)
+        bundle_file = None if weight_info is None else weight_info.get("filename")
+        if bundle_file:
+            file_path = bundle_file if os.path.isabs(bundle_file) else os.path.join(self.save_folder, bundle_file)
+            storage_dtype = weight_info.get("storage_dtype", weight_info.get("dtype"))
+            offset = weight_info.get("offset", 0)
+            shape = tuple(weight_info.get("shape", ()))
+            squeezed = bool(weight_info.get("squeezed", False))
+
+            memmap_shape = shape if len(shape) > 0 else (1,)
+            np_dtype = np.dtype(storage_dtype)
+            mm = np.memmap(file_path, dtype=np_dtype, mode="r", offset=offset, shape=memmap_shape, order="C")
+            array = np.array(mm, copy=True)
+            del mm
+
+            tensor = torch.from_numpy(array)
+            target_dtype = weight_info.get("dtype")
+            if target_dtype == "bfloat16":
+                tensor = tensor.view(torch.bfloat16)
+            elif target_dtype is not None and target_dtype != storage_dtype:
+                tensor = tensor.to(getattr(torch, target_dtype))
+
+            if squeezed and len(shape) == 0:
+                tensor = tensor.reshape(())
+            return tensor
+
+        return super().__getitem__(key)
+
+
+def _load_offloaded_weight_with_bundle(weight_file, weight_info):
+    bundle_file = weight_info.get("filename") if isinstance(weight_info, dict) else None
+    if bundle_file:
+        folder = os.path.dirname(weight_file)
+        file_path = bundle_file if os.path.isabs(bundle_file) else os.path.join(folder, bundle_file)
+        storage_dtype = weight_info.get("storage_dtype", weight_info.get("dtype"))
+        offset = weight_info.get("offset", 0)
+        shape = tuple(weight_info.get("shape", ()))
+        squeezed = bool(weight_info.get("squeezed", False))
+
+        memmap_shape = shape if len(shape) > 0 else (1,)
+        np_dtype = np.dtype(storage_dtype)
+        mm = np.memmap(file_path, dtype=np_dtype, mode="r", offset=offset, shape=memmap_shape, order="C")
+        array = np.array(mm, copy=True)
+        del mm
+
+        tensor = torch.from_numpy(array)
+        target_dtype = weight_info.get("dtype")
+        if target_dtype == "bfloat16":
+            tensor = tensor.view(torch.bfloat16)
+        elif target_dtype is not None and target_dtype != storage_dtype:
+            tensor = tensor.to(getattr(torch, target_dtype))
+
+        if squeezed and len(shape) == 0:
+            tensor = tensor.reshape(())
+        return tensor
+
+    return _ORIGINAL_LOAD_WEIGHT(weight_file, weight_info)
+
+
+_ACCELERATE_PATCHED = False
+
+
+def _ensure_accelerate_bundle_patch():
+    global _ACCELERATE_PATCHED
+    if _ACCELERATE_PATCHED:
+        return
+
+    accelerate.utils.OffloadedWeightsLoader = _ModuleBundledWeightsLoader
+    accelerate_offload.OffloadedWeightsLoader = _ModuleBundledWeightsLoader
+    accelerate.utils.load_offloaded_weight = _load_offloaded_weight_with_bundle
+    accelerate_offload.load_offloaded_weight = _load_offloaded_weight_with_bundle
+    _ACCELERATE_PATCHED = True
+
+
+def _prepare_offload_directory(target_dir: str) -> None:
+    if os.path.isdir(target_dir):
+        shutil.rmtree(target_dir)
+    os.makedirs(target_dir, exist_ok=True)
+
+
+def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
+    bundle_path = os.path.join(offload_dir, "module.dat")
+    index: dict[str, dict] = {}
+    offset = 0
+
+    with open(bundle_path, "wb") as bundle_fp:
+        state_items = module.state_dict()
+
+        for key, tensor in state_items.items():
+            with torch.no_grad():
+                tensor_cpu = tensor.detach().to("cpu")
+
+            storage_tensor = tensor_cpu
+            storage_dtype = storage_tensor.dtype
+            target_dtype = tensor_cpu.dtype
+
+            if target_dtype == torch.bfloat16:
+                storage_tensor = storage_tensor.view(torch.int16)
+                storage_dtype = torch.int16
+
+            storage_tensor = storage_tensor.contiguous()
+            array = storage_tensor.numpy()
+            squeezed = False
+            if array.ndim == 0:
+                array = array.reshape(1)
+                squeezed = True
+
+            bundle_fp.write(array.tobytes(order="C"))
+
+            dtype_str = "bfloat16" if target_dtype == torch.bfloat16 else str(array.dtype)
+            entry = {
+                "dtype": dtype_str,
+                "shape": list(tensor.shape),
+                "filename": "module.dat",
+                "offset": offset,
+            }
+
+            if squeezed:
+                entry["squeezed"] = True
+
+            storage_dtype_str = str(array.dtype)
+            if storage_dtype_str != dtype_str:
+                entry["storage_dtype"] = storage_dtype_str
+
+            index[key] = entry
+            offset += array.nbytes
+
+    index_path = os.path.join(offload_dir, "index.json")
+    with open(index_path, "w", encoding="utf-8") as fp:
+        json.dump(index, fp, indent=2)
+
+    return index
 
 
 def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
@@ -119,11 +263,17 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
     if not has_params and not has_buffers:
         return
 
+    module_offload_dir = os.path.join(disk_path, name)
+
+    _prepare_offload_directory(module_offload_dir)
+    _bundle_module_state_dict(module, module_offload_dir)
+
+    _ensure_accelerate_bundle_patch()
+
     _ = disk_offload(
         module,
-        # device_map={ "" : "disk" },  # only touch this subtree
-        offload_dir=f"{disk_path}/{name}",
-        offload_buffers=True,  # needed for buffers
+        offload_dir=module_offload_dir,
+        offload_buffers=True,
         execution_device=m_device,
     )
 
