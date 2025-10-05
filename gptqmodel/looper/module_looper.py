@@ -35,6 +35,7 @@ from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
+from ..utils.disk import estimate_disk_io_speed
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
@@ -66,6 +67,19 @@ class ModuleLooper():
         self.gptq_model = model
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
+
+        disk_speed = estimate_disk_io_speed()
+        disk_speed_mb = disk_speed / (1024 * 1024)
+        if disk_speed < 200 * 1024 * 1024:
+            log.warn(
+                "Disk subsystem write throughput detected at "
+                f"{disk_speed_mb:.1f} MB/s; quantization may be slowed by IO."
+            )
+        else:
+            log.info(
+                "Disk subsystem write throughput detected at "
+                f"{disk_speed_mb:.1f} MB/s."
+            )
 
         quant_device_hint = getattr(self.gptq_model.quantize_config, "device", None)
         normalized_quant_device = normalize_device_like(quant_device_hint)
