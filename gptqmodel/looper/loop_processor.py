@@ -197,18 +197,6 @@ class LoopProcessor:
 
         self.log_worker_queue.put(stat)
 
-    def loss_color(self, loss_value):
-        if loss_value <= 0.1:
-            return "\033[92m"  # Green
-        elif loss_value <= 1:
-            return "\033[96m" # Cyan
-        elif loss_value <= 5:
-            return "\033[93m"  # Yellow
-        elif loss_value <= 20:
-            return "\033[33m"  # Orange
-        else:
-            return "\033[91m"  # Red
-
     def log_new_row(self, stat):
         self.log_call_count += 1
         self.log_save_async(stat)
@@ -223,6 +211,18 @@ class LoopProcessor:
 
         row_values = [self._format_log_value(column, stat.get(column, "")) for column in self._log_column_labels]
         self._log_columns.info(*row_values)
+
+    def loss_color(self, loss_value):
+        if loss_value <= 0.1:
+            return "\033[92m"  # Green
+        elif loss_value <= 1:
+            return "\033[96m" # Cyan
+        elif loss_value <= 5:
+            return "\033[93m"  # Yellow
+        elif loss_value <= 20:
+            return "\033[33m"  # Orange
+        else:
+            return "\033[91m"  # Red
 
     def _ensure_log_columns(self, stat: Dict[str, Any]) -> bool:
         desired_labels = list(DEFAULT_LOG_COLUMNS)
