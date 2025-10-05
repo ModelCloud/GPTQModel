@@ -778,11 +778,11 @@ class ModuleLooper():
                     need_outputs = not processor.fwd_after_process
                     reuse_kv = bool(getattr(module, "reuse_kv", False))
                     forward_msg = (
-                        "ModuleLooper: forward start "
-                        f"(processor=`{processor.name()}`, layer=`{layer_descriptor}`, "
-                        f"subset={index + 1}/{subset_total}, batches={batch_count})"
+                        "Forward start "
+                        f"(layer=`{layer_descriptor}`, subset={index + 1}/{subset_total}, "
+                        f"batches={batch_count})"
                     )
-                    log.info(forward_msg)
+                    quant_modules_pb.subtitle(forward_msg).draw()
                     # Drain any background work so the forward spike does not race pooled tasks.
                     DEVICE_THREAD_POOL.wait()
                     forward_outputs = self._run_forward_batches(
@@ -881,11 +881,9 @@ class ModuleLooper():
                                 replay_batch_count = 0
                     replay_batch_count = replay_batch_count or 0
                     replay_msg = (
-                        "ModuleLooper: forward replay "
-                        f"(processor=`{processor.name()}`, layer=`{layer_descriptor}`, "
-                        f"batches={replay_batch_count})"
+                        "Forward replay "
+                        f"(layer=`{layer_descriptor}`, batches={replay_batch_count})"
                     )
-                    log.info(replay_msg)
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
                     DEVICE_THREAD_POOL.wait()
                     layer_outputs = self._run_forward_batches(
