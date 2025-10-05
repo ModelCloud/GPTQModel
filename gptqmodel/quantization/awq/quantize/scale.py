@@ -7,7 +7,7 @@ from typing import List, Tuple
 
 import torch
 import torch.nn as nn
-from transformers.activations import GELUActivation, NewGELUActivation, PytorchGELUTanh
+from transformers.activations import GELUActivation, NewGELUActivation, GELUTanh
 from transformers.models.bloom.modeling_bloom import BloomGelu
 from transformers.models.cohere.modeling_cohere import CohereLayerNorm
 from transformers.models.gemma.modeling_gemma import GemmaRMSNorm
@@ -24,7 +24,7 @@ allowed_act_fns = [
     nn.GELU,
     BloomGelu,
     NewGELUActivation,
-    PytorchGELUTanh,
+    GELUTanh,
     GELUActivation,
 ]
 

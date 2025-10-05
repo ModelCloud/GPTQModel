@@ -68,6 +68,10 @@ class ModuleLooper():
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
 
+        # quantization is unsafe with GIL=0 and torch.compile/graphs
+        import torch._dynamo
+        torch._dynamo.disable()
+
         disk_speed = estimate_disk_io_speed()
         disk_speed_mb = disk_speed / (1024 * 1024)
         if disk_speed < 200 * 1024 * 1024:
