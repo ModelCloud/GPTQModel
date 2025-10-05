@@ -177,40 +177,43 @@ class LoopProcessor:
         self.calibration_dataset = calibration
 
     def log_save_async(self, stat):
-        # start log worker async writer
-        if self.log_worker is None:
-            log.info(f"Process: progress logs for `{self.name()}` will be streamed to file: `{self.log_tmp_log_file_name}`")
-            def _thread_log_worker():
-                while True:
-                    data = self.log_worker_queue.get()
-                    # false is special data packet to queue to stop worker
-                    if data == False:
-                        return
-                    with open(self.log_tmp_log_file_name, 'a') as f:  # append
-                        json.dump(data, f, indent=4)
-                        f.write("\n")
+        with self.lock:
+            # start log worker async writer
+            if self.log_worker is None:
+                log.info(f"Process: progress logs for `{self.name()}` will be streamed to file: `{self.log_tmp_log_file_name}`")
 
-                    self.log_worker_queue.task_done()
+                def _thread_log_worker():
+                    while True:
+                        data = self.log_worker_queue.get()
+                        # false is special data packet to queue to stop worker
+                        if data == False:
+                            return
+                        with open(self.log_tmp_log_file_name, 'a') as f:  # append
+                            json.dump(data, f, indent=4)
+                            f.write("\n")
 
-            self.log_worker = threading.Thread(target=_thread_log_worker, daemon=True)
-            self.log_worker.start()
+                        self.log_worker_queue.task_done()
+
+                self.log_worker = threading.Thread(target=_thread_log_worker, daemon=True)
+                self.log_worker.start()
 
         self.log_worker_queue.put(stat)
 
     def log_new_row(self, stat):
-        self.log_call_count += 1
+        with self.lock:
+            self.log_call_count += 1
+            columns_rebuilt = self._ensure_log_columns(stat)
+
+            if self._log_columns is None:
+                return
+
+            if columns_rebuilt or self.log_call_count % self._log_header_interval == 1:
+                self._log_columns.info.header()
+
+            row_values = [self._format_log_value(column, stat.get(column, "")) for column in self._log_column_labels]
+            self._log_columns.info(*row_values)
+
         self.log_save_async(stat)
-
-        columns_rebuilt = self._ensure_log_columns(stat)
-
-        if self._log_columns is None:
-            return
-
-        if columns_rebuilt or self.log_call_count % self._log_header_interval == 1:
-            self._log_columns.info.header()
-
-        row_values = [self._format_log_value(column, stat.get(column, "")) for column in self._log_column_labels]
-        self._log_columns.info(*row_values)
 
     def loss_color(self, loss_value):
         if loss_value <= 0.1:
@@ -359,10 +362,6 @@ class LoopProcessor:
     def result_pop(self, key: str, default: Any = None):
         with self._results_lock:
             return self._results.pop(key, default)
-
-    # Loop Procssor level scoped state data
-    def result_pop(self, key: str, default: Any = None) -> Any:
-        return self._results.pop(key, default)
 
     # Loop Procssor level scoped state data
     def results(self):

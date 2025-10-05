@@ -720,9 +720,8 @@ class AWQProcessor(LoopProcessor):
                 # PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
                 PROCESS_USED_MEMORY: self.device_memory_report(),
             }
-            self.module_names.append(f"layer-{named_module.layer_index}-{named_module.name}")
-
             with self.lock:
+                self.module_names.append(f"layer-{named_module.layer_index}-{named_module.name}")
                 self.log.append(stat)
 
             # Log the new row
