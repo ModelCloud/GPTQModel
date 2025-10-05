@@ -236,6 +236,10 @@ class LoopProcessor:
         self._log_column_labels = desired_labels
         column_specs = [{"label": label, "width": "fit"} for label in self._log_column_labels]
         self._log_columns = log.columns(cols=column_specs, padding=1)
+        # simulate some data to snap columns on first print
+        self._log_columns.info.simulate(
+            "gptq", "13", "mlp.experts.110.down_proj", "0.0000158448", "0.0000158448",
+            "36616", "0.05000", "0.841", "7.984", "cuda:0=9.1GB","")
         return True
 
     def _format_log_value(self, key: str, value: Any) -> str:
