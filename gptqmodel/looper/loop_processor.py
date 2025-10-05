@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import json
 import queue
+import re
 import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -25,6 +26,8 @@ log = setup_logger()
 
 # global level lock
 PROCESSOR_GLOBAL_LOCK = threading.Lock()
+
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
@@ -191,41 +194,58 @@ class LoopProcessor:
         else:
             return "\033[91m"  # Red
 
+    def _strip_ansi(self, text: Any) -> str:
+        return ANSI_ESCAPE_RE.sub("", str(text))
+
+    def _visible_length(self, text: Any) -> int:
+        return len(self._strip_ansi(text))
+
+    def _ljust_visible(self, text: str, width: int) -> str:
+        padding = max(width - self._visible_length(text), 0)
+        if padding:
+            return f"{text}{' ' * padding}"
+        return text
+
     def log_new_row(self, stat):
         self.log_call_count += 1
         self.log_save_async(stat) # write to temp log file
 
         # Update max_widths with the new row's column widths
         for key, value in stat.items():
-            current_width = max(len(str(key)), len(str(value))) + 4 # 4 is for padding
+            key_str = str(key)
+            value_str = str(value)
+            current_width = max(self._visible_length(key_str), self._visible_length(value_str)) + 4 # 4 is for padding
             if key not in self.log_max_widths or current_width > self.log_max_widths[key]:
                 self.log_max_widths[key] = current_width
 
         if self.log_call_count % 20 == 1:
             # Format the header row
-            header_row = "| " + " | ".join(
-                str(key).ljust(self.log_max_widths[key]) for key in self.log_max_widths.keys()) + " |"
+            header_cells = [
+                self._ljust_visible(str(key), self.log_max_widths[key]) for key in self.log_max_widths.keys()
+            ]
+            header_row = "| " + " | ".join(header_cells) + " |"
+            header_separator = "-" * self._visible_length(header_row)
 
             if self.log_call_count == 1:
-                log.info(len(header_row) * "-")
+                log.info(header_separator)
             log.info(header_row)
-            log.info(len(header_row) * "-")
+            log.info(header_separator)
 
-        formatted_row = "| "
+        row_cells = []
         for key in self.log_max_widths.keys():
             value = stat.get(key, "")
-            if key == "loss":
-                color_code = self.loss_color(float(value))
-                formatted_value = f"{color_code}{value}\033[0m"
+            value_str = str(value)
+            if key == "loss" and value_str:
+                color_code = self.loss_color(float(value_str))
+                formatted_value = f"{color_code}{value_str}\033[0m"
             else:
-                formatted_value = str(value)
-            formatted_row += formatted_value.ljust(self.log_max_widths[key]) + " | "
+                formatted_value = value_str
+            row_cells.append(self._ljust_visible(formatted_value, self.log_max_widths[key]))
 
-        # formatted_row = "| " + " | ".join(
-        #     str(stat.get(key, "")).ljust(self.log_max_widths[key]) for key in self.log_max_widths.keys()) + " |"
-
+        formatted_row = "| " + " | ".join(row_cells) + " |"
+        row_separator = "-" * self._visible_length(formatted_row)
         log.info(formatted_row)
-        log.info(len(formatted_row) * "-")
+        log.info(row_separator)
 
     def _init_device_smi_handles(self) -> Dict[str, Device]:
         handles: Dict[str, Device] = {}

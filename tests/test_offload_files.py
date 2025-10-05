@@ -9,8 +9,10 @@ from pathlib import Path
 import torch
 from tabulate import tabulate
 from torch import nn
+from safetensors import safe_open
 
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
+from gptqmodel.utils.model import get_state_dict_for_save, streaming_state_dict_to_shards
 
 
 class _LinearWithBuffers(nn.Module):
@@ -53,6 +55,25 @@ def test_offload_to_disk_writes_single_dat_file(tmp_path):
     assert set(index.keys()) == expected_keys
     assert all(Path(entry.get("safetensors_file")).name == "module.safetensors" for entry in index.values())
     assert all(entry.get("data_offsets") is not None for entry in index.values())
+
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+    expected_files, tensor_to_filename, _ = streaming_state_dict_to_shards(
+        state_dict,
+        save_dir=str(save_dir),
+        model_base_name="model",
+        single_file_name="model.safetensors",
+        metadata={},
+        max_shard_size=None,
+    )
+
+    assert len(expected_files) == 1
+    shard_path = save_dir / expected_files[0]
+    with safe_open(str(shard_path), framework="pt", device="cpu") as handler:
+        for name, tensor in original_state.items():
+            saved = handler.get_tensor(f"linear.{name}")
+            torch.testing.assert_close(saved, tensor)
 
     # Materialize the module back and ensure values match the snapshot captured before offload.
     undo_offload_to_disk(model.linear, delete_offload_folders=False)

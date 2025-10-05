@@ -96,6 +96,7 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
     with open(bundle_path, "rb") as fh:
         header_len = struct.unpack("<Q", fh.read(8))[0]
         header = json.loads(fh.read(header_len).decode("utf-8"))
+        data_offset_base = fh.tell()
 
     for key, tensor_meta in header.items():
         if key == "__metadata__":
@@ -105,7 +106,8 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
             continue
         offsets = tensor_meta.get("data_offsets")
         if offsets is not None:
-            entry["data_offsets"] = offsets
+            start, end = (int(offsets[0]), int(offsets[1]))
+            entry["data_offsets"] = [data_offset_base + start, data_offset_base + end]
 
     index_path = os.path.join(offload_dir, "index.json")
     with open(index_path, "w", encoding="utf-8") as fp:
