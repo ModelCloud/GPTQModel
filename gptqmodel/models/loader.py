@@ -166,6 +166,10 @@ def ModelLoader(cls):
             device: Optional[Union[str, int]] = None,
             **model_init_kwargs,
     ):
+        # quantization is unsafe with GIL=0 and torch.compile/graphs
+        import torch._dynamo
+        torch._dynamo.disable()
+
         # non-quantized models are always loaded into cpu
         cpu_device_map = {"": "cpu"}
 
@@ -340,6 +344,11 @@ def ModelLoader(cls):
             max_memory: Optional[dict] = None,
             **kwargs,
     ):
+
+        # post-quant is safe with GIL=0 and torch.compile/graphs
+        import torch._dynamo
+        torch._dynamo.reset()
+
         # normalized device + device_map into single device
         device = normalize_device_device_map(device, device_map)
 
