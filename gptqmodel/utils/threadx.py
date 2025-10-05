@@ -635,6 +635,7 @@ class DeviceThreadPool:
                     self._dispatch_rr[key] %= len(group)
                 else:
                     self._dispatch_rr[key] = 0
+            self._refresh_serial_worker_locked(key)
         if DEBUG_ON: log.debug(f"Worker '{worker.name}' exited for {key}")
 
     # --------------- Public Work API ---------------
@@ -686,7 +687,20 @@ class DeviceThreadPool:
         if _cuda_stream is not None and dev.type != "cuda":
             raise ValueError("_cuda_stream is only valid for CUDA devices")
 
-        worker = self._serial_workers.get(key)
+        with self._dispatch_lock:
+            group = self._worker_groups.get(key)
+            if group is None:
+                group = []
+                self._worker_groups[key] = group
+            if key not in self._dispatch_rr:
+                self._dispatch_rr[key] = 0
+            if not group:
+                fresh = self._spawn_worker(dev, name=f"DPWorker-{key}#0")
+                group.append(fresh)
+                self._dispatch_rr[key] = 0
+            self._refresh_serial_worker_locked(key)
+            worker = self._serial_workers.get(key)
+
         if worker is None:
             raise ValueError(f"No serial worker available for device '{key}'")
 
@@ -946,22 +960,34 @@ class DeviceThreadPool:
             if not group:
                 dev = self._devices_by_key[key]
                 w = self._spawn_worker(dev, name=f"DPWorker-{key}#0")
-                self._worker_groups[key] = [w]
+                group = [w]
+                self._worker_groups[key] = group
                 self._dispatch_rr[key] = 0
+                self._refresh_serial_worker_locked(key)
                 return w
 
             n = len(group)
-            if n == 0:
-                dev = self._devices_by_key[key]
-                w = self._spawn_worker(dev, name=f"DPWorker-{key}#0")
-                group.append(w)
-                self._dispatch_rr[key] = 0
-                return w
-
             idx = self._dispatch_rr[key] % n
             w = group[idx]
             self._dispatch_rr[key] = (idx + 1) % n
+            self._refresh_serial_worker_locked(key)
             return w
+
+    def _refresh_serial_worker_locked(self, key: str) -> None:
+        """
+        Ensure the serial worker mapping references a live worker.
+        Caller must hold self._dispatch_lock.
+        """
+        group = self._worker_groups.get(key, [])
+        if not group:
+            self._serial_workers.pop(key, None)
+            return
+
+        current = self._serial_workers.get(key)
+        if current in group:
+            return
+
+        self._serial_workers[key] = group[0]
 
     def _resolve_workers_for_device(self, dev: torch.device, table: Dict[str, int]) -> int:
         """

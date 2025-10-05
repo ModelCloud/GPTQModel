@@ -173,6 +173,36 @@ def test_parallel_submissions_from_many_threads(pool, devices_two):
     assert sum(o.device == d1 for o in outs) == cnt1
 
 
+def test_submit_serial_recovers_after_worker_exit(pool, devices_two):
+    d0 = devices_two[0]
+    key = pool._key(d0)
+
+    def echo(v):
+        return v
+
+    # Ensure the serial worker exists and is healthy.
+    assert pool.submit_serial(d0, echo, 1).result(timeout=2) == 1
+    pool.wait(d0)
+
+    with pool._dispatch_lock:
+        worker = pool._serial_workers[key]
+
+    # Simulate an unexpected worker shutdown.
+    worker.stop()
+    worker.join()
+
+    # Submitting serial work should spawn a fresh worker and run to completion.
+    futs = [pool.submit_serial(d0, echo, i) for i in range(3)]
+    outs = [f.result(timeout=5) for f in futs]
+    assert outs == [0, 1, 2]
+
+    with pool._dispatch_lock:
+        new_worker = pool._serial_workers.get(key)
+
+    assert new_worker is not None
+    assert new_worker is not worker
+
+
 def test_device_lock_blocks_only_that_device(pool, devices_two):
     d0, d1 = devices_two
 
@@ -293,4 +323,3 @@ def test_janitor_triggers_empty_cache_every_n(pool, devices_two, monkeypatch):
 
     # Restore
     monkeypatch.setattr(torch.cuda, "empty_cache", orig_empty)
-
