@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import json
-import queue
 import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -14,6 +13,7 @@ from random_word import RandomWords
 from torch import Tensor
 from torch.nn import Module
 
+from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -22,7 +22,7 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
                              QUANT_LOG_NSAMPLES)
 from ..quantization.config import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import DEVICE_0, DEVICE_1
+from ..utils.torch import CPU, DEVICE_0, DEVICE_1
 
 log = setup_logger()
 
@@ -109,8 +109,6 @@ class LoopProcessor:
         self._log_header_interval = 20
         current_time = datetime.now().strftime("%m_%d_%Y_%Hh_%Mm_%Ss")
         self.log_tmp_log_file_name = f"{self.name()}_log_{RandomWords().get_random_word()}_time_{current_time}.log"
-        self.log_worker_queue = queue.Queue()
-        self.log_worker: threading.Thread = None
         self._device_smi_handles = self._init_device_smi_handles()
         self._cpu_device_smi = self._init_cpu_device_handle()
         self._device_metric_failures: Set[str] = set()
@@ -176,28 +174,14 @@ class LoopProcessor:
 
         self.calibration_dataset = calibration
 
+    def _async_log_writer(self, stat):
+        with open(self.log_tmp_log_file_name, 'a') as f:
+            json.dump(stat, f, indent=4)
+            f.write("\n")
+
     def log_save_async(self, stat):
-        with self.lock:
-            # start log worker async writer
-            if self.log_worker is None:
-                log.info(f"Process: progress logs for `{self.name()}` will be streamed to file: `{self.log_tmp_log_file_name}`")
-
-                def _thread_log_worker():
-                    while True:
-                        data = self.log_worker_queue.get()
-                        # false is special data packet to queue to stop worker
-                        if data == False:
-                            return
-                        with open(self.log_tmp_log_file_name, 'a') as f:  # append
-                            json.dump(data, f, indent=4)
-                            f.write("\n")
-
-                        self.log_worker_queue.task_done()
-
-                self.log_worker = threading.Thread(target=_thread_log_worker, daemon=True)
-                self.log_worker.start()
-
-        self.log_worker_queue.put(stat)
+        # Serialize writes on the CPU-bound worker to avoid interleaved JSON output.
+        DEVICE_THREAD_POOL.submit_serial(CPU, self._async_log_writer, stat)
 
     def log_new_row(self, stat):
         with self.lock:
@@ -448,12 +432,10 @@ class LoopProcessor:
         del self.inputs_cache
         del self._results
 
-        if self.log_worker is not None:
-            self.log_worker_queue.put(False)
-            # TODO make this file delete based on user toggle
-            # cleanup temp log file
-            # if os.path.exists(self.log_tmp_log_file_name):
-            #     os.remove(file_path)
+        # TODO make this file delete based on user toggle
+        # cleanup temp log file
+        # if os.path.exists(self.log_tmp_log_file_name):
+        #     os.remove(file_path)
 
     def release_calibration_dataset(self):
         del self.calibration_dataset
