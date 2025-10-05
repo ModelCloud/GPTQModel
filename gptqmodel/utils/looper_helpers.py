@@ -176,19 +176,26 @@ def clone_module_for_devices(
         return clones
 
     module_label = getattr(module, "full_name", module.__class__.__name__)
-    clone_timings = [] if DEBUG_ON else None
+    clone_timings: List[Tuple[str, float]] = []
+    overall_start = time.perf_counter()
 
-    holding_device = CPU
-    holding_start = time.perf_counter() if DEBUG_ON else None
-    module = module.to(holding_device)
-    module.eval()
-    rehome_module_to_device(module, holding_device, move_parameters=True, move_buffers=True)
-    clear_state_fn(module)
-    setattr(module, "_gptqmodule_device_hint", holding_device)
-    if clone_timings is not None and holding_start is not None:
-        clone_timings.append(("holding_cpu", time.perf_counter() - holding_start))
+    def _record(name: str, start_ts: Optional[float]) -> None:
+        if not DEBUG_ON or start_ts is None:
+            return
+        clone_timings.append((name, time.perf_counter() - start_ts))
 
-    device_type = devices[0].type
+    def _emit_clone_log(method: str) -> None:
+        if not DEBUG_ON:
+            return
+        total_duration = (time.perf_counter() - overall_start) * 1000.0
+        if clone_timings:
+            timing_str = ", ".join(f"{step}={duration * 1000:.2f}ms" for step, duration in clone_timings)
+            log.info(f"ModuleLooper: clone {module_label} via {method} in {total_duration:.2f}ms [{timing_str}]")
+        else:
+            log.info(f"ModuleLooper: clone {module_label} via {method} in {total_duration:.2f}ms")
+
+    base_device = devices[0]
+    device_type = base_device.type
     homogeneous_type = all(dev.type == device_type for dev in devices)
 
     def backend_available(dev_type: str) -> bool:
@@ -200,19 +207,30 @@ def clone_module_for_devices(
             return bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
         return False
 
-    use_replicate = homogeneous_type and backend_available(device_type)
+    def _prepare_module(target_device: torch.device, step_name: str) -> None:
+        start_ts = time.perf_counter()
+        module.to(target_device)
+        module.eval()
+        rehome_module_to_device(module, target_device, move_parameters=True, move_buffers=True)
+        clear_state_fn(module)
+        setattr(module, "_gptqmodule_device_hint", target_device)
+        _record(step_name, start_ts)
+
+    use_replicate = (
+        homogeneous_type
+        and backend_available(device_type)
+        and device_type != "cpu"
+    )
+
+    stage_device = base_device if base_device.type != "cpu" else CPU
 
     if use_replicate:
         try:
-            base_device = devices[0]
-            module = module.to(base_device)
-            rehome_module_to_device(module, base_device, move_parameters=True, move_buffers=True)
-            setattr(module, "_gptqmodule_device_hint", base_device)
+            _prepare_module(base_device, f"stage_{base_device}")
 
-            replicate_start = time.perf_counter() if DEBUG_ON else None
+            replicate_start = time.perf_counter()
             replicas = torch_replicate(module, devices)
-            if clone_timings is not None and replicate_start is not None:
-                clone_timings.append(("replicate", time.perf_counter() - replicate_start))
+            _record("replicate", replicate_start)
 
             for dev, replica in zip(devices, replicas):
                 replica.eval()
@@ -221,43 +239,34 @@ def clone_module_for_devices(
                 setattr(replica, "_gptqmodule_device_hint", dev)
                 clones[dev] = replica
 
-            if clone_timings:
-                timing_str = ", ".join(
-                    f"{str(dev)}={duration * 1000:.2f}ms" for dev, duration in clone_timings
-                )
-                log.debug(f"ModuleLooper: replicate {module_label} -> {timing_str}")
+            _emit_clone_log("replicate")
             return clones
         except Exception as e:
             log.info(f"Clone: fast clone failed {e}")
-            if clone_timings is not None:
-                clone_timings.append(("replicate_failed", 0.0))
-            module = module.to(holding_device)
-            rehome_module_to_device(module, holding_device, move_parameters=True, move_buffers=True)
-            setattr(module, "_gptqmodule_device_hint", holding_device)
+            clone_timings.append(("replicate_failed", 0.0))
+            if stage_device != base_device:
+                _prepare_module(stage_device, f"stage_{stage_device}")
 
     if len(devices) == 1 and devices[0].type == "cpu":
+        _prepare_module(CPU, "stage_cpu")
         clones[devices[0]] = module
-        if clone_timings:
-            timing_str = ", ".join(
-                f"{str(dev)}={duration * 1000:.2f}ms" for dev, duration in clone_timings
-            )
-            log.debug(f"ModuleLooper: reuse {module_label} -> {timing_str}")
+        _emit_clone_log("reuse")
         return clones
 
+    if not use_replicate:
+        _prepare_module(stage_device, f"stage_{stage_device}")
+
     for dev in devices:
-        start_ts = time.perf_counter() if DEBUG_ON else None
+        start_ts = time.perf_counter()
         replica = copy.deepcopy(module)
         replica.eval()
         rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
         clear_state_fn(replica)
         setattr(replica, "_gptqmodule_device_hint", dev)
         clones[dev] = replica
-        if clone_timings is not None and start_ts is not None:
-            clone_timings.append((dev, time.perf_counter() - start_ts))
+        _record(str(dev), start_ts)
 
-    if clone_timings:
-        timing_str = ", ".join(f"{str(dev)}={duration * 1000:.2f}ms" for dev, duration in clone_timings)
-        log.debug(f"ModuleLooper: deepcopy {module_label} -> {timing_str}")
+    _emit_clone_log("deepcopy")
     return clones
 
 
