@@ -10,16 +10,22 @@ from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from torch.nn.parallel import replicate as torch_replicate
+from torch.nn import parallel as torch_parallel
 
-from .. import DEBUG_ON
+from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..nn_modules.hooked_linear import StopForward
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, nested_move_to
 from ..utils.torch import ALL_DEVICES, CPU
+from ..utils.safe import ThreadSafe
 
+_THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
+
+def torch_replicate(*args, **kwargs):
+    with DEVICE_THREAD_POOL.lock():
+        return _THREAD_SAFE_PARALLEL.replicate(*args, **kwargs)
 
 log = setup_logger()
 
@@ -166,34 +172,43 @@ def clone_module_for_devices(
     clear_state_fn=clear_non_picklable_state,
 ) -> Dict[torch.device, torch.nn.Module]:
     clones: Dict[torch.device, torch.nn.Module] = {}
+    if not devices:
+        return clones
+
     module_label = getattr(module, "full_name", module.__class__.__name__)
     clone_timings = [] if DEBUG_ON else None
 
-    if len(devices) == 1:
-        target_device = devices[0]
-        module = module.to(target_device)
-        module.eval()
-        rehome_module_to_device(module, target_device, move_parameters=True, move_buffers=True)
-        clear_state_fn(module)
-        setattr(module, "_gptqmodule_device_hint", target_device)
-        clones[target_device] = module
-        return clones
-
+    holding_device = CPU
+    holding_start = time.perf_counter() if DEBUG_ON else None
+    module = module.to(holding_device)
+    module.eval()
+    rehome_module_to_device(module, holding_device, move_parameters=True, move_buffers=True)
     clear_state_fn(module)
-    primary_device = devices[0]
-    replicate_devices = [dev for dev in devices if dev.type == primary_device.type]
-    use_replicate = (
-        len(replicate_devices) == len(devices)
-        and primary_device.type == "cuda"
-        and torch.cuda.is_available()
-    )
+    setattr(module, "_gptqmodule_device_hint", holding_device)
+    if clone_timings is not None and holding_start is not None:
+        clone_timings.append(("holding_cpu", time.perf_counter() - holding_start))
+
+    device_type = devices[0].type
+    homogeneous_type = all(dev.type == device_type for dev in devices)
+
+    def backend_available(dev_type: str) -> bool:
+        if dev_type == "cuda":
+            return torch.cuda.is_available()
+        if dev_type == "xpu" and hasattr(torch, "xpu"):
+            return bool(getattr(torch.xpu, "is_available", lambda: False)())  # type: ignore[attr-defined]
+        if dev_type == "mps":
+            return bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+        return False
+
+    use_replicate = homogeneous_type and backend_available(device_type)
 
     if use_replicate:
         try:
-            module = module.to(primary_device)
-            module.eval()
-            rehome_module_to_device(module, primary_device, move_parameters=True, move_buffers=True)
-            setattr(module, "_gptqmodule_device_hint", primary_device)
+            base_device = devices[0]
+            module = module.to(base_device)
+            rehome_module_to_device(module, base_device, move_parameters=True, move_buffers=True)
+            setattr(module, "_gptqmodule_device_hint", base_device)
+
             replicate_start = time.perf_counter() if DEBUG_ON else None
             replicas = torch_replicate(module, devices)
             if clone_timings is not None and replicate_start is not None:
@@ -212,15 +227,26 @@ def clone_module_for_devices(
                 )
                 log.debug(f"ModuleLooper: replicate {module_label} -> {timing_str}")
             return clones
-        except Exception:
-            log.info("Clone: fast clone failed")
+        except Exception as e:
+            log.info(f"Clone: fast clone failed {e}")
             if clone_timings is not None:
                 clone_timings.append(("replicate_failed", 0.0))
+            module = module.to(holding_device)
+            rehome_module_to_device(module, holding_device, move_parameters=True, move_buffers=True)
+            setattr(module, "_gptqmodule_device_hint", holding_device)
+
+    if len(devices) == 1 and devices[0].type == "cpu":
+        clones[devices[0]] = module
+        if clone_timings:
+            timing_str = ", ".join(
+                f"{str(dev)}={duration * 1000:.2f}ms" for dev, duration in clone_timings
+            )
+            log.debug(f"ModuleLooper: reuse {module_label} -> {timing_str}")
+        return clones
 
     for dev in devices:
         start_ts = time.perf_counter() if DEBUG_ON else None
         replica = copy.deepcopy(module)
-        replica = replica.to(dev)
         replica.eval()
         rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
         clear_state_fn(replica)

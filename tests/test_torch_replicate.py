@@ -3,7 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from __future__ import annotations
+
 import copy
+import gc
 from typing import Callable
 
 import pytest
@@ -30,7 +33,7 @@ def _replicate_strategy(module: torch.nn.Module, devices: list[torch.device]) ->
 
 
 def _deepcopy_strategy(module: torch.nn.Module, devices: list[torch.device]) -> list[torch.nn.Module]:
-    clones = []
+    clones: list[torch.nn.Module] = []
     for dev in devices:
         replica = copy.deepcopy(module)
         clones.append(replica.to(dev))
@@ -101,8 +104,63 @@ def _summarise_metrics(times: list[float], mems: list[int]):
     }
 
 
+def _random_linear(in_features: int = 8, out_features: int = 4) -> torch.nn.Linear:
+    torch.manual_seed(0)
+    layer = torch.nn.Linear(in_features, out_features, bias=True)
+    layer.eval()
+    return layer
+
+
+def _assert_replicas_match(
+    replicas: list[torch.nn.Module],
+    devices: list[torch.device],
+    reference_output: torch.Tensor,
+    input_tensor: torch.Tensor,
+) -> None:
+    for replica, device in zip(replicas, devices):
+        assert replica is not None
+        replica.eval()
+        for param in replica.parameters():
+            assert param.device == device
+        result = replica(input_tensor.to(device)).to("cpu")
+        torch.testing.assert_close(result, reference_output, atol=1e-6, rtol=1e-5)
+
+
 @pytest.mark.cuda
-def test_torch_replicate():
+@pytest.mark.inference
+@pytest.mark.xfail(reason="torch.nn.parallel.replicate requires GPU resident tensors", strict=True)
+def test_replicate_from_cpu_to_multiple_gpu():
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        pytest.skip("Requires at least two CUDA devices")
+
+    devices = [torch.device(f"cuda:{idx}") for idx in range(2)]
+    module = _random_linear()
+    input_tensor = torch.randn(2, module.in_features)
+
+    torch_replicate(module, devices)
+
+
+@pytest.mark.cuda
+@pytest.mark.inference
+def test_replicate_from_gpu_to_multiple_gpu():
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        pytest.skip("Requires at least two CUDA devices")
+
+    devices = [torch.device(f"cuda:{idx}") for idx in range(2)]
+    module = _random_linear().to(devices[0])
+    input_tensor = torch.randn(2, module.in_features, device=devices[0])
+    reference = module(input_tensor).to("cpu")
+
+    replicas = torch_replicate(module, devices)
+    _assert_replicas_match(replicas, devices, reference, input_tensor.to("cpu"))
+
+    del replicas
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+@pytest.mark.cuda
+def test_torch_replicate_benchmark():
     if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
         pytest.skip("torch.nn.parallel.replicate comparison requires at least two CUDA devices")
 
@@ -121,18 +179,18 @@ def test_torch_replicate():
             replicate_summary["time_avg"],
             replicate_summary["time_min"],
             replicate_summary["time_max"],
-            replicate_summary["mem_avg"] / (1024 ** 2),
-            replicate_summary["mem_min"] / (1024 ** 2),
-            replicate_summary["mem_max"] / (1024 ** 2),
+            replicate_summary["mem_avg"] / (1024**2),
+            replicate_summary["mem_min"] / (1024**2),
+            replicate_summary["mem_max"] / (1024**2),
         ],
         [
             "deepcopy",
             deepcopy_summary["time_avg"],
             deepcopy_summary["time_min"],
             deepcopy_summary["time_max"],
-            deepcopy_summary["mem_avg"] / (1024 ** 2),
-            deepcopy_summary["mem_min"] / (1024 ** 2),
-            deepcopy_summary["mem_max"] / (1024 ** 2),
+            deepcopy_summary["mem_avg"] / (1024**2),
+            deepcopy_summary["mem_min"] / (1024**2),
+            deepcopy_summary["mem_max"] / (1024**2),
         ],
     ]
 
@@ -154,6 +212,6 @@ def test_torch_replicate():
     )
     assert replicate_summary["mem_avg"] <= deepcopy_summary["mem_avg"], (
         "replicate used more memory: "
-        f"replicate={replicate_summary['mem_avg'] / (1024 ** 2):.1f}MB, "
-        f"deepcopy={deepcopy_summary['mem_avg'] / (1024 ** 2):.1f}MB"
+        f"replicate={replicate_summary['mem_avg'] / (1024**2):.1f}MB, "
+        f"deepcopy={deepcopy_summary['mem_avg'] / (1024**2):.1f}MB"
     )

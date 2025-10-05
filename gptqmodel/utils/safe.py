@@ -25,14 +25,18 @@ class ThreadSafe(ModuleType):
         self._callable_cache: dict[str, object] = {}
         # Keep core module metadata available so tools relying on attributes
         # like __doc__ or __spec__ see the original values.
-        self.__dict__.update(
-            {
-                "__doc__": module.__doc__,
-                "__package__": module.__package__,
-                "__file__": getattr(module, "__file__", None),
-                "__spec__": getattr(module, "__spec__", None),
-            }
-        )
+        metadata = {}
+        if module.__doc__ is not None:
+            metadata["__doc__"] = module.__doc__
+        if getattr(module, "__package__", None) is not None:
+            metadata["__package__"] = module.__package__
+        module_file = getattr(module, "__file__", None)
+        if module_file is not None:
+            metadata["__file__"] = module_file
+        module_spec = getattr(module, "__spec__", None)
+        if module_spec is not None:
+            metadata["__spec__"] = module_spec
+        self.__dict__.update(metadata)
 
     def __getattr__(self, name: str):
         attr = getattr(self._module, name)
