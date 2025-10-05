@@ -66,7 +66,6 @@ from .writer import ModelWriter
 
 
 if TYPE_CHECKING:
-    from ..utils.threadx import DeviceThreadPool
     try:
         from datasets import Dataset as HFDatasetType
         from datasets import IterableDataset as HFIterableDatasetType
