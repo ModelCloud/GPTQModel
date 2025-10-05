@@ -135,7 +135,7 @@ def test_replicate_from_cpu_to_multiple_gpu():
 
     devices = [torch.device(f"cuda:{idx}") for idx in range(2)]
     module = _random_linear()
-    input_tensor = torch.randn(2, module.in_features)
+    torch.randn(2, module.in_features)
 
     torch_replicate(module, devices)
 

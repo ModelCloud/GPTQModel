@@ -18,8 +18,9 @@ from ..utils.attn_mask import normalize_seq_mask
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, nested_move_to
-from ..utils.torch import ALL_DEVICES, CPU
 from ..utils.safe import ThreadSafe
+from ..utils.torch import ALL_DEVICES, CPU
+
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
 
