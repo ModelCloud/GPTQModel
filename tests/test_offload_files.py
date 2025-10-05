@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import json
+from pathlib import Path
 
 import torch
 from tabulate import tabulate
@@ -41,19 +42,17 @@ def test_offload_to_disk_writes_single_dat_file(tmp_path):
     rows = [(path.name, path.stat().st_size) for path in files]
     print(tabulate(rows, headers=["file", "bytes"], tablefmt="github"))
 
-    dat_files = [path for path in files if path.suffix == ".dat"]
-    assert len(dat_files) == 1, "offload_to_disk should produce exactly one .dat file per module"
-    assert dat_files[0].name == "module.dat"
+    safetensor_files = [path for path in files if path.suffix == ".safetensors"]
+    assert len(safetensor_files) == 1, "offload_to_disk should produce exactly one safetensors file per module"
+    assert safetensor_files[0].name == "module.safetensors"
 
     with open(module_dir / "index.json", encoding="utf-8") as fp:
         index = json.load(fp)
 
     expected_keys = set(model.linear.state_dict().keys())
     assert set(index.keys()) == expected_keys
-    assert all(entry.get("filename") == "module.dat" for entry in index.values())
-
-    offsets = [entry["offset"] for entry in index.values()]
-    assert offsets == sorted(offsets), "Offsets should be monotonically increasing"
+    assert all(Path(entry.get("safetensors_file")).name == "module.safetensors" for entry in index.values())
+    assert all(entry.get("data_offsets") is not None for entry in index.values())
 
     # Materialize the module back and ensure values match the snapshot captured before offload.
     undo_offload_to_disk(model.linear, delete_offload_folders=False)
