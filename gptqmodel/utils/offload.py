@@ -4,8 +4,10 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
+import json
 import os
 import shutil
+import struct
 from threading import Lock
 from typing import Iterable, List, Optional, Set, Tuple
 
@@ -16,6 +18,7 @@ import torch
 from accelerate import disk_offload
 from accelerate.hooks import remove_hook_from_module, remove_hook_from_submodules
 from accelerate.utils import align_module_device, has_offloaded_params
+from safetensors.torch import save_file as safetensors_save_file
 from torch import nn
 
 from ..looper.named_module import NamedModule
@@ -63,6 +66,54 @@ def is_meta_module(m: nn.Module) -> bool:
     return False
 
 _OFFLOAD_LOCK = Lock()
+
+
+def _prepare_offload_directory(target_dir: str) -> None:
+    if os.path.isdir(target_dir):
+        shutil.rmtree(target_dir)
+    os.makedirs(target_dir, exist_ok=True)
+
+
+def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
+    bundle_path = os.path.join(offload_dir, "module.safetensors")
+    index: dict[str, dict] = {}
+    tensors: dict[str, torch.Tensor] = {}
+
+    with torch.inference_mode():
+        for key, tensor in module.state_dict().items():
+            cpu_tensor = tensor.detach().to("cpu")
+            tensors[key] = cpu_tensor.contiguous()
+            entry = {
+                "dtype": str(cpu_tensor.dtype).replace("torch.", ""),
+                "shape": list(cpu_tensor.shape),
+                "safetensors_file": os.path.abspath(bundle_path),
+                "weight_name": key,
+            }
+            index[key] = entry
+
+    safetensors_save_file(tensors, bundle_path)
+
+    with open(bundle_path, "rb") as fh:
+        header_len = struct.unpack("<Q", fh.read(8))[0]
+        header = json.loads(fh.read(header_len).decode("utf-8"))
+        data_offset_base = fh.tell()
+
+    for key, tensor_meta in header.items():
+        if key == "__metadata__":
+            continue
+        entry = index.get(key)
+        if entry is None:
+            continue
+        offsets = tensor_meta.get("data_offsets")
+        if offsets is not None:
+            start, end = (int(offsets[0]), int(offsets[1]))
+            entry["data_offsets"] = [data_offset_base + start, data_offset_base + end]
+
+    index_path = os.path.join(offload_dir, "index.json")
+    with open(index_path, "w", encoding="utf-8") as fp:
+        json.dump(index, fp, indent=2)
+
+    return index
 
 
 def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
@@ -119,11 +170,15 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
     if not has_params and not has_buffers:
         return
 
+    module_offload_dir = os.path.join(disk_path, name)
+
+    _prepare_offload_directory(module_offload_dir)
+    _bundle_module_state_dict(module, module_offload_dir)
+
     _ = disk_offload(
         module,
-        # device_map={ "" : "disk" },  # only touch this subtree
-        offload_dir=f"{disk_path}/{name}",
-        offload_buffers=True,  # needed for buffers
+        offload_dir=module_offload_dir,
+        offload_buffers=True,
         execution_device=m_device,
     )
 

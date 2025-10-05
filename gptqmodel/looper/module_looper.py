@@ -925,36 +925,56 @@ class ModuleLooper():
                     torch_sync()
 
                     # Gather finalize tasks (can offload to disk); run them via the pool
-                    finalize_futures = []
+                    finalize_tasks = []
 
                     for reverse_p in reversed(self.processors):
-                        for name in processed_subset:
-                            @torch.inference_mode()
-                            def finalize_module(process, module):
-                                process.submodule_finalize(module, self.gptq_model)
-
-                                # Disk offload (lifecycle TODO note preserved)
-                                if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
-                                    offload_to_disk(
-                                        model=self.gptq_model.model,
-                                        module=self.gptq_model.model.get_submodule(module.full_name),
-                                        disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
-                                    )
-
-                            module = processed_subset[name]
-
+                        for module in processed_subset.values():
                             target_dev = get_device_new(module, recursive=True, assert_mode=True, expected="cpu")
+                            module_label = getattr(module, "full_name", getattr(module, "name", ""))
+                            finalize_tasks.append((reverse_p, module, module_label, target_dev))
 
-                            # Submit on the module's device thread (safe & deterministic)
-                            finalize_futures.append(
-                                DEVICE_THREAD_POOL.submit_serial(
-                                    target_dev, finalize_module, reverse_p, module
-                                )
+                    finalize_count = len(finalize_tasks)
+                    if finalize_count:
+                        quant_modules_pb.subtitle(
+                            f"Finalizing submodules ({finalize_count})"
+                        ).draw()
+
+                    finalize_futures = []
+
+                    @torch.inference_mode()
+                    def _finalize_on_worker(process, module, idx, total, module_label):
+                        quant_modules_pb.subtitle(
+                            f"{process.name()}: finalizing {idx}/{total} ({module_label})"
+                        ).draw()
+
+                        process.submodule_finalize(module, self.gptq_model)
+
+                        # Disk offload (lifecycle TODO note preserved)
+                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
+                            offload_to_disk(
+                                model=self.gptq_model.model,
+                                module=self.gptq_model.model.get_submodule(module.full_name),
+                                disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
                             )
 
-                    # If any finalize tasks were queued, wait for them
+                    for index, (process, module, module_label, target_dev) in enumerate(finalize_tasks, start=1):
+                        finalize_futures.append(
+                            DEVICE_THREAD_POOL.submit_serial(
+                                target_dev,
+                                _finalize_on_worker,
+                                process,
+                                module,
+                                index,
+                                finalize_count,
+                                module_label,
+                            )
+                        )
+
                     for fut in finalize_futures:
                         fut.result()
+
+                    if finalize_count:
+                        quant_modules_pb.subtitle("").draw()
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained

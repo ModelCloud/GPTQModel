@@ -1261,6 +1261,20 @@ def _resolve_offload_entry(
             data_offsets=offsets,
         )
 
+    filename = entry.get("filename")
+    if filename:
+        path = filename if os.path.isabs(filename) else os.path.join(module_dir, filename)
+        start = int(entry.get("offset", 0))
+        end = start + (_torch_dtype_num_bytes(resolved_dtype) * math.prod(shape or (1,)))
+        return OffloadTensorRef(
+            path=os.path.abspath(path),
+            dtype=resolved_dtype,
+            shape=shape,
+            format="dat",
+            weight_name=None,
+            data_offsets=(start, end),
+        )
+
     data_path = os.path.join(module_dir, f"{leaf}.dat")
     if not os.path.isfile(data_path):
         return None
@@ -1450,7 +1464,10 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
             if isinstance(source, OffloadTensorRef):
                 if source.format == "dat":
                     # print("offload tensor io buffered transfer DAT")
-                    _copy_file_stream(source.path, out, entry.num_bytes)
+                    start = 0
+                    if source.data_offsets is not None:
+                        start = source.data_offsets[0]
+                    _copy_file_stream(source.path, out, entry.num_bytes, offset=start)
                 elif source.format == "safetensors" and source.data_offsets is not None:
                     # print("offload tensor io buffered transfer SAFETENSOR stream")
                     start, end = source.data_offsets
