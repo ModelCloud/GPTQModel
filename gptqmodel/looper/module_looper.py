@@ -46,8 +46,8 @@ from ..utils.looper_helpers import (
 )
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
-from ..utils.threadx import DeviceThreadPool
 from ..utils.torch import (CPU, META, torch_sync)
+from .. import DEVICE_THREAD_POOL
 from .awq_processor import AWQProcessor
 from .qqq_processor import QQQProcessor
 
@@ -57,31 +57,15 @@ log = setup_logger()
 class ModuleLooper():
     """Drive the per-layer quantisation workflow over one or more devices.
 
-    The looper owns a :class:`DeviceThreadPool` that executes CPU and accelerator
-    work. Forward passes can be replicated across devices, processors can enqueue
-    asynchronous tasks, and the class handles the bookkeeping required to stitch
-    the results back into a sequential quantisation order.
+    The looper executes work on the shared global :class:`DeviceThreadPool`
+    instance so tasks such as module reloading, forward passes, and finalisation
+    reuse the same worker threads.
     """
     def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
         self.processors = processors
         self.gptq_model = model
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
-
-        # The looper shares one pool for its lifetime so tasks such as module
-        # reloading, forward passes and finalisation reuse the same worker
-        # threads. The first worker per device is treated as the serial lane for
-        # forward execution; additional workers handle background jobs.
-        self.pool = DeviceThreadPool(
-            inference_mode=True,
-            workers={
-                "cuda:per": 4, # unique memory per instance
-                "xpu:per": 1, # unique memory per instance
-                "mps": 8, # unified memory
-                "cpu": 8, # unified memory
-            },
-            empty_cache_every_n=1024,  # disable auto gc based gpu work rate; enable if you want
-        )
 
         quant_device_hint = getattr(self.gptq_model.quantize_config, "device", None)
         normalized_quant_device = normalize_device_like(quant_device_hint)
@@ -93,8 +77,6 @@ class ModuleLooper():
         self._quant_device_rr = 0
         self._module_device_map: Dict[str, torch.device] = {}
         self._quant_device_lock = threading.Lock()
-
-        self.gptq_model.register_background_pool(self.pool)
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
@@ -369,7 +351,11 @@ class ModuleLooper():
             for offset, batch_idx in enumerate(range(start, end)):
                 device = devices[offset]
                 replica = module_replicas[device]
-                submitter = self.pool.submit_serial if device.type in ("cuda", "xpu", "mps") else self.pool.submit
+                submitter = (
+                    DEVICE_THREAD_POOL.submit_serial
+                    if device.type in ("cuda", "xpu", "mps")
+                    else DEVICE_THREAD_POOL.submit
+                )
 
                 futures.append(
                     submitter(
@@ -567,7 +553,7 @@ class ModuleLooper():
 
                 # Ensure initial caches (like RoPE) are created on the quant device
                 with ctx(
-                    self.pool.read_lock(self.gptq_model.quantize_config.device),
+                    DEVICE_THREAD_POOL.read_lock(self.gptq_model.quantize_config.device),
                     device_ctx(self.gptq_model.quantize_config.device),
                 ):
                     if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
@@ -719,7 +705,7 @@ class ModuleLooper():
                     lock_ctx = nullcontext()
                     device_for_ctx = cur_layer_device if getattr(cur_layer_device, 'type', None) != 'meta' else None
                     if device_for_ctx is not None:
-                        lock_ctx = self.pool.read_lock(cur_layer_device)
+                        lock_ctx = DEVICE_THREAD_POOL.read_lock(cur_layer_device)
                     with ctx(lock_ctx, device_ctx(device_for_ctx)):
                         processor.layer_quantize(module, cur_layer_device, named_childs)
                     continue
@@ -784,7 +770,7 @@ class ModuleLooper():
                     )
                     log.info(forward_msg)
                     # Drain any background work so the forward spike does not race pooled tasks.
-                    self.pool.wait()
+                    DEVICE_THREAD_POOL.wait()
                     forward_outputs = self._run_forward_batches(
                         module=module,
                         processor=processor,
@@ -856,7 +842,9 @@ class ModuleLooper():
 
                     for name, m in subset.items():
                         tgt_dev = quant_target_devices.get(name, cur_layer_device)
-                        futures.append(self.pool.submit(tgt_dev, _process_on_worker, processor, m))
+                        futures.append(
+                            DEVICE_THREAD_POOL.submit(tgt_dev, _process_on_worker, processor, m)
+                        )
 
                     for fut in futures:
                         name, m = fut.result()
@@ -885,7 +873,7 @@ class ModuleLooper():
                     )
                     log.info(replay_msg)
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
-                    self.pool.wait()
+                    DEVICE_THREAD_POOL.wait()
                     layer_outputs = self._run_forward_batches(
                         module=module,
                         processor=processor,
@@ -941,7 +929,9 @@ class ModuleLooper():
 
                             # Submit on the module's device thread (safe & deterministic)
                             finalize_futures.append(
-                                self.pool.submit_serial(target_dev, finalize_module, reverse_p, module)
+                                DEVICE_THREAD_POOL.submit_serial(
+                                    target_dev, finalize_module, reverse_p, module
+                                )
                             )
 
                     # If any finalize tasks were queued, wait for them
@@ -950,7 +940,7 @@ class ModuleLooper():
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained
-        self.pool.wait()  # same as wait('all')
+        DEVICE_THREAD_POOL.wait()  # same as wait('all')
 
         self.gptq_model.wait_for_turtle_reload()
 
