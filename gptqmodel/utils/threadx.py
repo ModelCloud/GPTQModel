@@ -14,6 +14,7 @@ from concurrent.futures import Future
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
+import threadpoolctl as tctl
 
 from .. import DEBUG_ON
 from ..utils.ctx import ctx
@@ -345,48 +346,49 @@ class _DeviceWorker:
         may override via `_threadx_inference_mode`.
         """
         _activate_thread_device(self.device)
-        while True:
-            is_task, fn, args, kwargs, fut = self._q.get()
-            try:
-                if not is_task:
-                    if DEBUG_ON: log.debug(f"{self.name}: received sentinel; exiting")
-                    break
-                if self._stop.is_set():
-                    # Pool is stopping; skip executing queued work to allow fast shutdown.
-                    if DEBUG_ON:
-                        log.debug(f"{self.name}: dropping task during shutdown; qsize={self._q.qsize()}")
-                    self._on_task_finished(self.key)
-                    fut.cancel()
-                    continue
-                if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
+        with tctl.threadpool_limits(limits=1):
+            while True:
+                is_task, fn, args, kwargs, fut = self._q.get()
+                try:
+                    if not is_task:
+                        if DEBUG_ON: log.debug(f"{self.name}: received sentinel; exiting")
+                        break
+                    if self._stop.is_set():
+                        # Pool is stopping; skip executing queued work to allow fast shutdown.
+                        if DEBUG_ON:
+                            log.debug(f"{self.name}: dropping task during shutdown; qsize={self._q.qsize()}")
+                        self._on_task_finished(self.key)
+                        fut.cancel()
+                        continue
+                    if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
 
-                stream = kwargs.pop("_cuda_stream", None)
-                override_inference = kwargs.pop("_threadx_inference_mode", None)
-                use_inference = self._inference_mode if override_inference is None else bool(override_inference)
+                    stream = kwargs.pop("_cuda_stream", None)
+                    override_inference = kwargs.pop("_threadx_inference_mode", None)
+                    use_inference = self._inference_mode if override_inference is None else bool(override_inference)
 
-                # Tasks take a **read** lock so janitor's write lock can't interleave
-                with ctx(self.rwlock.reader(), _device_ctx(self.device)):
-                    inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
-                    with inference_ctx:
-                        if stream is not None and self.device.type == "cuda":
-                            with torch.cuda.stream(stream):
+                    # Tasks take a **read** lock so janitor's write lock can't interleave
+                    with ctx(self.rwlock.reader(), _device_ctx(self.device)):
+                        inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
+                        with inference_ctx:
+                            if stream is not None and self.device.type == "cuda":
+                                with torch.cuda.stream(stream):
+                                    result = fn(*args, **kwargs)
+                            else:
                                 result = fn(*args, **kwargs)
-                        else:
-                            result = fn(*args, **kwargs)
-                # Counters must be updated before resolving futures to prevent
-                # tests reading stats mid-transition and seeing stale totals.
-                self._on_task_finished(self.key)
-                if not fut.cancelled():
-                    fut.set_result(result)
-                if DEBUG_ON: log.debug(f"{self.name}: task done")
-            except BaseException as exc:
-                # Even on exception we must decrement inflight and update totals.
-                self._on_task_finished(self.key)
-                if not fut.cancelled():
-                    fut.set_exception(exc)
-                if DEBUG_ON: log.debug(f"{self.name}: task exception: {exc!r}")
-            finally:
-                self._q.task_done()
+                    # Counters must be updated before resolving futures to prevent
+                    # tests reading stats mid-transition and seeing stale totals.
+                    self._on_task_finished(self.key)
+                    if not fut.cancelled():
+                        fut.set_result(result)
+                    if DEBUG_ON: log.debug(f"{self.name}: task done")
+                except BaseException as exc:
+                    # Even on exception we must decrement inflight and update totals.
+                    self._on_task_finished(self.key)
+                    if not fut.cancelled():
+                        fut.set_exception(exc)
+                    if DEBUG_ON: log.debug(f"{self.name}: task exception: {exc!r}")
+                finally:
+                    self._q.task_done()
         try:
             self._on_worker_exit(self.key, self)
         finally:
@@ -421,13 +423,14 @@ class _SyncWorker:
             override_inference = kwargs.pop("_threadx_inference_mode", None)
             use_inference = self._inference_mode if override_inference is None else bool(override_inference)
             with ctx(self.rwlock.reader(), _device_ctx(self.device)):
-                inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
-                with inference_ctx:
-                    if stream is not None and self.device.type == "cuda":
-                        with torch.cuda.stream(stream):
+                with tctl.threadpool_limits(limits=1):
+                    inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
+                    with inference_ctx:
+                        if stream is not None and self.device.type == "cuda":
+                            with torch.cuda.stream(stream):
+                                result = fn(*args, **kwargs)
+                        else:
                             result = fn(*args, **kwargs)
-                    else:
-                        result = fn(*args, **kwargs)
             self._on_task_finished(self.key)
             if not fut.cancelled():
                 fut.set_result(result)
