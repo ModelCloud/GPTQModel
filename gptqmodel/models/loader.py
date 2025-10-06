@@ -350,9 +350,6 @@ def ModelLoader(cls):
         import gc
         torch._dynamo.reset()
 
-
-        gc.set_debug(gc.DEBUG_LEAK)
-
         # normalized device + device_map into single device
         device = normalize_device_device_map(device, device_map)
 
