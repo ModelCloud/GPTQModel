@@ -16,9 +16,13 @@ import time  # noqa: E402
 import unittest  # noqa: E402
 
 import threadpoolctl  # noqa: E402
+from parameterized import parameterized  # noqa: E402
+
+
+# isort: off
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
-from parameterized import parameterized  # noqa: E402
+# isort: on
 
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 

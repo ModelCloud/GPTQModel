@@ -44,7 +44,6 @@ from .moss import MossQModel
 from .mpt import MptQModel
 from .opt import OptQModel
 from .ovis import OvisQModel
-from .ovis2_5 import Ovis2_5QModel
 from .phi import PhiQModel
 from .phi3 import Phi3QModel
 from .qwen import QwenQModel

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from gptqmodel.models import Ovis2_5QModel, OvisQModel
+from gptqmodel.models import OvisQModel
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
 
@@ -31,31 +31,6 @@ def format_qwen2_vl_dataset(image, assistant):
             "content": [
                 {"type": "image", "image": image},
                 {"type": "text", "text": "generate a caption for this image"},
-            ],
-        },
-        {"role": "assistant", "content": assistant},
-    ]
-
-
-def format_ovis2_5_dataset(image, assistant):
-    return [
-        {
-            "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "You are a helpful multimodal assistant. Provide factual image descriptions and mention visible text."
-                }
-            ],
-        },
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {
-                    "type": "text",
-                    "text": "Write a detailed description of this image, including any visible text and the overall style."
-                },
             ],
         },
         {"role": "assistant", "content": assistant},
@@ -93,9 +68,6 @@ def prepare_dataset(format_func, n_sample: int = 20) -> list[list[dict]]:
 
 
 def get_calib_dataset(model):
-    if isinstance(model, Ovis2_5QModel):
-        return prepare_dataset(format_ovis2_5_dataset, n_sample=20)
-
     if isinstance(model, OvisQModel):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
 

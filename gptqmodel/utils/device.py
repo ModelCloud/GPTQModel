@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from __future__ import annotations
 
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 import torch
 from device_smi import Device
@@ -23,65 +23,18 @@ def get_cpu_usage_memory():
     smi = Device(CPU)
     return smi.memory_used() / 1024 / 1024 / 1024 #GB
 
-def _coerce_device(value: Any) -> Optional[torch.device]:
-    if isinstance(value, torch.device):
-        return value
-    if isinstance(value, str):
-        try:
-            return torch.device(value)
-        except (TypeError, ValueError):  # pragma: no cover - defensive
-            return None
-    return None
-
-
-def _extract_tensor_device(obj: Any) -> Optional[torch.device]:
-    # Prefer explicit attribute before reflective search.
-    direct = _coerce_device(getattr(obj, "device", None))
-    if direct is not None:
-        return direct
-
-    # Try common tensor holders (e.g. dataclasses) via __dict__.
-    values = []
-    store = getattr(obj, "__dict__", None)
-    if isinstance(store, dict):
-        values.extend(store.values())
-    else:
-        # Fallback to dir() to support __slots__ or C++ backed objects without __dict__.
-        for attr in dir(obj):
-            if attr.startswith("_"):
-                continue
-            try:
-                values.append(getattr(obj, attr))
-            except AttributeError:  # pragma: no cover - dynamic attr access
-                continue
-            except Exception:  # pragma: no cover - defensive against @property side effects
-                continue
-
-    for value in values:
-        if isinstance(value, torch.Tensor):
-            return value.device
-
-    return None
-
-
-def get_device(obj: Any) -> torch.device:
+def get_device(obj: torch.Tensor | nn.Module) -> torch.device:
     if isinstance(obj, torch.Tensor):
         return obj.device
 
-    if isinstance(obj, nn.Module):
-        params = list(obj.parameters())
-        buffers = list(obj.buffers())
-        if params:
-            return params[0].device
-        if buffers:
-            return buffers[0].device
+    params = list(obj.parameters())
+    buffers = list(obj.buffers())
+    if len(params) > 0:
+        return params[0].device
+    elif len(buffers) > 0:
+        return buffers[0].device
+    else:
         return CPU
-
-    extracted = _extract_tensor_device(obj)
-    if extracted is not None:
-        return extracted
-
-    return CPU
 
 def get_device_new(
     obj: torch.Tensor | nn.Module,

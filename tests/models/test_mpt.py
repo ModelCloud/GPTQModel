@@ -13,10 +13,7 @@ class TestMpt(ModelTest):
     APPLY_CHAT_TEMPLATE = False
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
-    DATASET_SIZE = 96
-    MAX_QUANT_LAYERS = None
-    MOCK_QUANTIZATION = True
-    OFFLOAD_TO_DISK = False
+    USE_FLASH_ATTN = False
 
     def test_mpt(self):
         self.quant_lm_eval()

@@ -15,6 +15,7 @@ class TestXVerse(ModelTest):
     APPLY_CHAT_TEMPLATE = True
     EVAL_BATCH_SIZE = 6
     USE_VLLM = False
+    USE_FLASH_ATTN = False
 
     def test_xverse(self):
         self.quant_lm_eval()

@@ -666,7 +666,7 @@ setup(
     packages=find_packages(),
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
-        "quality": ["ruff==0.13.0"],
+        "quality": ["ruff==0.13.0", "isort==6.0.1"],
         "vllm": ["vllm>=0.8.5", "flashinfer-python>=0.2.1"],
         "sglang": ["sglang[srt]>=0.4.6", "flashinfer-python>=0.2.1"],
         "bitblas": ["bitblas==0.0.1-dev13"],
