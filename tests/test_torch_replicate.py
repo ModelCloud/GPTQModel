@@ -15,6 +15,7 @@ from torch.nn.parallel import replicate as torch_replicate
 
 from gptqmodel.utils.torch import timed_gc_collect
 
+
 TIMED_TRIALS = 5
 WARMUP_TRIALS = 1
 

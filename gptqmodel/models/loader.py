@@ -346,8 +346,8 @@ def ModelLoader(cls):
     ):
 
         # post-quant is safe with GIL=0 and torch.compile/graphs
+
         import torch._dynamo
-        import gc
         torch._dynamo.reset()
 
         # normalized device + device_map into single device

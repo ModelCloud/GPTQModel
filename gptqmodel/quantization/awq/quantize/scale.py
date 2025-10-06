@@ -7,7 +7,15 @@ from typing import List, Tuple
 
 import torch
 import torch.nn as nn
-from transformers.activations import GELUActivation, NewGELUActivation, GELUTanh
+from packaging.version import Version
+from transformers import __version__ as transformers_version
+from transformers.activations import GELUActivation, NewGELUActivation
+
+
+if Version(transformers_version) >= Version("4.57.0"):
+    from transformers.activations import GELUTanh
+else:
+    from transformers.activations import PytorchGELUTanh as GELUTanh
 from transformers.models.bloom.modeling_bloom import BloomGelu
 from transformers.models.cohere.modeling_cohere import CohereLayerNorm
 from transformers.models.gemma.modeling_gemma import GemmaRMSNorm
