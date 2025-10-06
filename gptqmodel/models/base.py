@@ -1323,21 +1323,20 @@ class BaseQModel(nn.Module):
             model_local_path = self.model_local_path
             loader = self.loader
 
-        if turtle_model is None or model_local_path is None:
-            return
+            assert turtle_model is not None and  model_local_path is not None
 
-        reload_kwargs = self._clone_model_init_kwargs(turtle_model)
-        config = turtle_model.config
+            reload_kwargs = self._clone_model_init_kwargs(turtle_model)
+            config = turtle_model.config
+            del turtle_model
 
-        new_model = loader.from_pretrained(
-            model_local_path,
-            config=config,
-            low_cpu_mem_usage=True,
-            **reload_kwargs,
-        )
-        new_model._model_init_kwargs = reload_kwargs
-        new_model.eval()
-        with self._turtle_lock:
+            new_model = loader.from_pretrained(
+                model_local_path,
+                config=config,
+                low_cpu_mem_usage=True,
+                **reload_kwargs,
+            )
+            new_model._model_init_kwargs = reload_kwargs
+            new_model.eval()
             self.turtle_model = new_model
 
     # transfer actually materizlied module from turtle (real) to shell
