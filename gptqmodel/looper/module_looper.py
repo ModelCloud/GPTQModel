@@ -643,13 +643,13 @@ class ModuleLooper():
             layer_modules = [sum(layer_modules, [])]
 
         layer_count = len(layers)
-        quant_modules_pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
+        pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
                             .manual()
                             .set(left_steps_offset=1))
 
         for processor in self.processors:
             processor.layer_count = layer_count
-            processor.pb = quant_modules_pb
+            processor.pb = pb
 
         shared_kv_cache_dict = {}
 
@@ -665,7 +665,7 @@ class ModuleLooper():
                     parent = getattr(parent, part)
                 setattr(parent, module_path[-1], hooked_lm_head)
 
-        for layer_index in quant_modules_pb:
+        for layer_index in pb:
             is_lm_head_module = layer_index >= layer_count
 
             if is_lm_head_module:
@@ -675,7 +675,7 @@ class ModuleLooper():
                 layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
                 module = layers[layer_index]
 
-            quant_modules_pb.title(layer_title).subtitle("").draw()
+            pb.title(layer_title).subtitle("").draw()
 
             if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
@@ -784,7 +784,7 @@ class ModuleLooper():
                         f"(layer=`{layer_descriptor}`, subset={index + 1}/{subset_total}, "
                         f"batches={batch_count})"
                     )
-                    quant_modules_pb.title(forward_msg).draw()
+                    pb.title(forward_msg).draw()
                     # Drain any background work so the forward spike does not race pooled tasks.
                     DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
@@ -812,7 +812,7 @@ class ModuleLooper():
                     fwd_time = time.time() - fwd_start
                     processor.set_fwd_time(fwd_time)
 
-                    quant_modules_pb.title(layer_title).subtitle("").draw()
+                    pb.title(layer_title).subtitle("").draw()
 
                     for h in handle:
                         h.remove()
@@ -874,7 +874,7 @@ class ModuleLooper():
                     #torch_sync()
                     # ---- End Process Hook ----
 
-                is_last_module = layer_index == len(quant_modules_pb) - 1
+                is_last_module = layer_index == len(pb) - 1
                 layer_outputs: List[List[torch.Tensor]] = []
                 # second forward after process()
                 if not is_last_module and processor.fwd_after_process:
@@ -891,7 +891,7 @@ class ModuleLooper():
                         "Forward replay "
                         f"(layer=`{layer_descriptor}`, batches={replay_batch_count})"
                     )
-                    quant_modules_pb.title(replay_msg).draw()
+                    pb.title(replay_msg).draw()
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
                     DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
@@ -926,7 +926,7 @@ class ModuleLooper():
                     processor.receive_layer_inputs(layer_outputs)
                     layer_inputs = processor.inputs_cache.layer_inputs
 
-                    quant_modules_pb.title(layer_title).subtitle("").draw()
+                    pb.title(layer_title).subtitle("").draw()
 
                 if p_index == len(self.processors) - 1:
                     torch_sync()
@@ -942,7 +942,7 @@ class ModuleLooper():
 
                     finalize_count = len(finalize_tasks)
                     if finalize_count:
-                        quant_modules_pb.subtitle(
+                        pb.subtitle(
                             f"Finalizing submodules ({finalize_count})"
                         ).draw()
 
@@ -950,7 +950,7 @@ class ModuleLooper():
 
                     @torch.inference_mode()
                     def _finalize_on_worker(process, module, idx, total, module_label):
-                        quant_modules_pb.subtitle(
+                        pb.subtitle(
                             f"{process.name()}: Finalizing {idx}/{total} {module_label}"
                         ).draw()
 
@@ -993,12 +993,12 @@ class ModuleLooper():
 
                     for future, idx, module_label, process in finalize_futures:
                         future.result()
-                        quant_modules_pb.subtitle(
+                        pb.subtitle(
                             f"{process.name()}: Finalized {idx}/{finalize_count} {module_label}"
                         ).draw()
 
                     if finalize_count:
-                        quant_modules_pb.subtitle("").draw()
+                        pb.subtitle("").draw()
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained
