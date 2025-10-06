@@ -980,7 +980,7 @@ class ModuleLooper():
                                     )
 
                     for index, (process, module, module_label, target_dev) in enumerate(finalize_tasks, start=1):
-                        future = DEVICE_THREAD_POOL.submit_serial(
+                        future = DEVICE_THREAD_POOL.submit(
                             target_dev,
                             _finalize_on_worker,
                             process,
@@ -993,13 +993,9 @@ class ModuleLooper():
 
                     for future, idx, module_label, process in finalize_futures:
                         future.result()
-                        log.info(
-                            "Finalized module %s/%s via %s: %s",
-                            idx,
-                            finalize_count,
-                            process.name(),
-                            module_label,
-                        )
+                        quant_modules_pb.subtitle(
+                            f"{process.name()}: Finalized {idx}/{finalize_count} {module_label}"
+                        ).draw()
 
                     if finalize_count:
                         quant_modules_pb.subtitle("").draw()
