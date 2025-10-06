@@ -6,8 +6,7 @@
 import multiprocessing as mp
 
 import torch
-
-from .hf import safe_auto_config_from_pretrained
+from transformers import AutoConfig
 
 
 try:
@@ -32,7 +31,7 @@ def load_model_by_sglang(
         **kwargs,
     )
     sgl.set_default_backend(runtime)
-    hf_config = safe_auto_config_from_pretrained(
+    hf_config = AutoConfig.from_pretrained(
         model, trust_remote_code=trust_remote_code
     )
     return runtime, hf_config

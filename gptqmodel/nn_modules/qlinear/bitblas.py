@@ -140,7 +140,7 @@ class BitblasQuantizationConfig:
             raise ValueError("weight_bits must divide 32 for GPTQ packing")
         self.pack_factor = 32 // self.weight_bits
         self.torch_storage_dtype = getattr(torch, self.storage_dtype)
-        self.dtype = torch.float16
+        self.torch_dtype = torch.float16
 
     @property
     def with_zeros(self) -> bool:

@@ -24,6 +24,7 @@ from torch import nn
 from ..looper.named_module import NamedModule
 from .device import get_device
 from .torch import CPU, META
+from .safe import ThreadSafe
 
 
 # Patch fix thread unsafe accelerate.utils.modeling.clear_device_cache
@@ -125,6 +126,7 @@ def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_
     assert module is not None
     assert model is not None
 
+    #with _lock:
     if isinstance(module, List):
         for name in module:
             m = get_submodule(model, name)
@@ -152,6 +154,10 @@ def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_
     # print("offload_disk: list item tree")
             # print_module_tree(module)
 
+
+# Serialize accelerate's disk hook mutations across threads.
+_OFFLOAD_SAFE = ThreadSafe(sys.modules[__name__])
+offload_to_disk = _OFFLOAD_SAFE.offload_to_disk
 
 def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
     if is_meta_module(module):

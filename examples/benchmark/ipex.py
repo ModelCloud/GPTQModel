@@ -7,9 +7,7 @@ import os
 import time
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-from gptqmodel.utils.hf import safe_auto_config_from_pretrained
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 
 try:
@@ -55,7 +53,7 @@ def prepare_dataset_for_bench(tokenizer, batch_size=8):
 
 # load model, check model backend
 start_load = time.time()
-config = safe_auto_config_from_pretrained(ars.model)
+config = AutoConfig.from_pretrained(ars.model)
 is_quantized_model = hasattr(config, "quantization_config")
 if is_quantized_model:
     from gptqmodel import BACKEND, GPTQModel

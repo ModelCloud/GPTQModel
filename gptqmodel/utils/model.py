@@ -120,7 +120,7 @@ def _dtype_string_to_torch(dtype_str: Optional[str], fallback: torch.dtype) -> t
 @dataclass(frozen=True)
 class OffloadTensorRef:
     path: str
-    dtype: torch.dtype
+    torch_dtype: torch.dtype
     shape: Tuple[int, ...]
     format: str  # 'dat' or 'safetensors'
     weight_name: Optional[str] = None
@@ -128,19 +128,19 @@ class OffloadTensorRef:
 
     @property
     def num_bytes(self) -> int:
-        return _torch_dtype_num_bytes(self.dtype) * math.prod(self.shape or (1,))
+        return _torch_dtype_num_bytes(self.torch_dtype) * math.prod(self.shape or (1,))
 
 
 @dataclass
 class TensorSource:
     name: str
-    dtype: torch.dtype
+    torch_dtype: torch.dtype
     shape: Tuple[int, ...]
     source: Union[torch.Tensor, OffloadTensorRef]
 
     @property
     def num_bytes(self) -> int:
-        return _torch_dtype_num_bytes(self.dtype) * math.prod(self.shape or (1,))
+        return _torch_dtype_num_bytes(self.torch_dtype) * math.prod(self.shape or (1,))
 
 def recurse_getattr(obj, attr: str):
     """
@@ -193,15 +193,7 @@ def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dt
                 # cpu to non-cpu or non-cpu to non-cpu  uses normal .to() api
                 obj = obj.to(device=device, non_blocking=True)
         else:
-            try:
-                obj = obj.to(device=device, dtype=dtype, non_blocking=False)
-            except NotImplementedError as err:
-                if isinstance(obj, nn.Module) and "Cannot copy out of meta tensor" in str(err):
-                    obj = obj.to_empty(device=device)
-                    if dtype is not None:
-                        obj = obj.to(dtype=dtype)
-                else:
-                    raise
+            obj = obj.to(device=device, dtype=dtype, non_blocking=False)
 
     return obj
 
@@ -846,9 +838,6 @@ def simple_dispatch_model(model, device_map):
 
     for n, d in device_map.items():
         m = get_module_by_name_suffix(model, n)
-        if m is None:
-            log.warning("Device map entry `%s` could not be resolved to a module; skipping hook.", n)
-            continue
         if d != "cpu":
             d = torch.device(d)
             hook = AlignDevicesHook(d, io_same_device=True, place_submodules=True)
@@ -1259,7 +1248,7 @@ def _resolve_offload_entry(
             offsets = tuple(int(x) for x in offsets)
         return OffloadTensorRef(
             path=os.path.abspath(path),
-            dtype=resolved_dtype,
+            torch_dtype=resolved_dtype,
             shape=shape,
             format="safetensors",
             weight_name=entry.get("weight_name", leaf),
@@ -1286,7 +1275,7 @@ def _resolve_offload_entry(
 
     return OffloadTensorRef(
         path=os.path.abspath(data_path),
-        dtype=resolved_dtype,
+        torch_dtype=resolved_dtype,
         shape=shape,
         format="dat",
         weight_name=None,
@@ -1316,7 +1305,7 @@ def _collect_state_dict_with_offload(model: nn.Module, offload_root: str) -> Dic
                 )
         else:
             source = param
-        state_dict[name] = TensorSource(name=name, dtype=param.dtype, shape=tuple(param.shape), source=source)
+        state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=source)
 
     for name, buf in model.named_buffers():
         if name in state_dict:
@@ -1337,7 +1326,7 @@ def _collect_state_dict_with_offload(model: nn.Module, offload_root: str) -> Dic
                 )
         else:
             source = buf
-        state_dict[name] = TensorSource(name=name, dtype=buf.dtype, shape=tuple(buf.shape), source=source)
+        state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=source)
 
     return state_dict
 
@@ -1354,11 +1343,11 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
     else:
         state_dict = collections.OrderedDict()
         for name, param in model.named_parameters():
-            state_dict[name] = TensorSource(name=name, dtype=param.dtype, shape=tuple(param.shape), source=param)
+            state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=param)
         for name, buf in model.named_buffers():
             if name in state_dict:
                 continue
-            state_dict[name] = TensorSource(name=name, dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
+            state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
 
     ptrs = collections.defaultdict(list)
     for name, entry in state_dict.items():
@@ -1452,7 +1441,7 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
     offset = 0
     for entry in entries:
         header[entry.name] = {
-            "dtype": _torch_dtype_to_safetensors(entry.dtype),
+            "dtype": _torch_dtype_to_safetensors(entry.torch_dtype),
             "shape": list(entry.shape),
             "data_offsets": [offset, offset + entry.num_bytes],
         }
@@ -1481,11 +1470,11 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
                     # print("offload tensor slow tensor read")
                     with safe_open(source.path, framework="pt", device="cpu") as handler:
                         tensor = handler.get_tensor(source.weight_name or entry.name)
-                    tensor = tensor.to(source.dtype)
-                    _write_tensor_bytes(out, tensor, source.dtype)
+                    tensor = tensor.to(source.torch_dtype)
+                    _write_tensor_bytes(out, tensor, source.torch_dtype)
             else:
                 tensor = source.detach()
-                _write_tensor_bytes(out, tensor, entry.dtype)
+                _write_tensor_bytes(out, tensor, entry.torch_dtype)
                 del tensor
 
         file_size = out.tell()
