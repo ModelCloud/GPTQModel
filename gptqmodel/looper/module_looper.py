@@ -18,7 +18,7 @@ from __future__ import annotations
 import threading
 import time
 from contextlib import nullcontext
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 import torch
 
@@ -53,6 +53,9 @@ from .awq_processor import AWQProcessor
 from .qqq_processor import QQQProcessor
 
 log = setup_logger()
+
+if TYPE_CHECKING:  # pragma: no cover - type hints only
+    from logbar.progress import ProgressBar
 
 
 class ModuleLooper():
@@ -111,6 +114,85 @@ class ModuleLooper():
     def _get_processor_mask(self, processor: LoopProcessor):
         tls = getattr(processor, "_mask_tls", None)
         return getattr(tls, "value", None) if tls else None
+
+    def _safe_len(self, sequence) -> Optional[int]:
+        if sequence is None:
+            return None
+        try:
+            return len(sequence)
+        except (TypeError, AttributeError):
+            return None
+
+    def _coerce_to_int(self, value) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+
+        indexer = getattr(value, "__index__", None)
+        if callable(indexer):
+            try:
+                return indexer()
+            except Exception:
+                pass
+
+        if torch.is_tensor(value):
+            if value.numel() == 1:
+                try:
+                    return int(value.item())
+                except Exception:
+                    return None
+            return None
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _resolve_batch_total(self, raw_count, fallback_sequence) -> int:
+        count = self._coerce_to_int(raw_count)
+        if count is not None and count > 0:
+            return count
+
+        fallback_len = self._safe_len(fallback_sequence)
+        fallback = self._coerce_to_int(fallback_len)
+        if fallback is not None:
+            return max(fallback, 0)
+
+        if count is not None:
+            return max(count, 0)
+
+        return 0
+
+    def _batch_row_count(self, batch_inputs: Optional[List[torch.Tensor]]) -> int:
+        if not batch_inputs:
+            return 0
+
+        primary = batch_inputs[0]
+
+        if isinstance(primary, torch.Tensor):
+            if primary.ndim > 0:
+                return max(int(primary.shape[0]), 0)
+            return max(int(primary.numel()), 0)
+
+        if isinstance(primary, (list, tuple)) and primary:
+            nested_first = primary[0]
+            if isinstance(nested_first, torch.Tensor) and nested_first.ndim > 0:
+                return max(int(nested_first.shape[0]), 0)
+
+        return 0
+
+    def _collect_row_counts(self, layer_inputs: Optional[List[List[torch.Tensor]]]) -> List[int]:
+        if not layer_inputs:
+            return []
+
+        counts: List[int] = []
+        for batch_inputs in layer_inputs:
+            count = self._batch_row_count(batch_inputs)
+            counts.append(count if count > 0 else 0)
+        return counts
 
     def _assign_quant_device_for_module(
         self,
@@ -215,6 +297,11 @@ class ModuleLooper():
         layer_index: int,
         need_outputs: bool,
         reuse_kv: bool,
+        progress_pb: "ProgressBar" | None = None,
+        progress_title: Optional[str] = None,
+        progress_stage: Optional[str] = None,
+        progress_rows_per_batch: Optional[List[int]] = None,
+        progress_total_rows: Optional[int] = None,
     ) -> List[List[torch.Tensor]]:
         """Dispatch the captured layer inputs through the module.
 
@@ -239,6 +326,11 @@ class ModuleLooper():
                 layer_index=layer_index,
                 need_outputs=need_outputs,
                 reuse_kv=reuse_kv,
+                progress_pb=progress_pb,
+                progress_title=progress_title,
+                progress_stage=progress_stage,
+                progress_rows_per_batch=progress_rows_per_batch,
+                progress_total_rows=progress_total_rows,
             )
 
         return self._run_forward_batches_parallel(
@@ -255,6 +347,11 @@ class ModuleLooper():
             need_outputs=need_outputs,
             reuse_kv=reuse_kv,
             devices=devices,
+            progress_pb=progress_pb,
+            progress_title=progress_title,
+            progress_stage=progress_stage,
+            progress_rows_per_batch=progress_rows_per_batch,
+            progress_total_rows=progress_total_rows,
         )
 
     def _run_forward_batches_single(
@@ -272,12 +369,30 @@ class ModuleLooper():
         layer_index: int,
         need_outputs: bool,
         reuse_kv: bool,
+        progress_pb: "ProgressBar" | None = None,
+        progress_title: Optional[str] = None,
+        progress_stage: Optional[str] = None,
+        progress_rows_per_batch: Optional[List[int]] = None,
+        progress_total_rows: Optional[int] = None,
     ) -> List[List[torch.Tensor]]:
         """Sequential fallback when only one forward device is in use."""
         outputs: List[List[torch.Tensor]] = []
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
+        total_batches = self._resolve_batch_total(processor.num_batches, layer_inputs)
+        batch_row_counts = progress_rows_per_batch or self._collect_row_counts(layer_inputs)
+        batch_row_counts = list(batch_row_counts)
+        if len(batch_row_counts) > total_batches:
+            batch_row_counts = batch_row_counts[:total_batches]
+        elif len(batch_row_counts) < total_batches:
+            batch_row_counts.extend([0] * (total_batches - len(batch_row_counts)))
+        total_rows = progress_total_rows if progress_total_rows is not None else sum(batch_row_counts)
+        if total_rows <= 0 and total_batches > 0:
+            total_rows = total_batches
+        total_rows = max(total_rows, 1)
+        processed_rows = 0
+        stage_label = progress_stage or "Forward"
 
-        for batch_idx in range(processor.num_batches):
+        for batch_idx in range(total_batches):
             layer_input = [move_to(inp, device=cur_layer_device, stream=False) for inp in layer_inputs[batch_idx]]
 
             raw_mask = attention_masks[batch_idx]
@@ -331,6 +446,20 @@ class ModuleLooper():
                 primary = move_to(primary, device=cur_layer_device, stream=False)
                 outputs.append([primary])
 
+            rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
+            if rows_for_batch <= 0:
+                rows_for_batch = self._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
+                rows_for_batch = max(rows_for_batch, 1)
+
+            processed_rows = min(processed_rows + rows_for_batch, total_rows)
+            if progress_pb is not None:
+                if progress_title:
+                    progress_pb.title(progress_title)
+                progress_pb.current_iter_step = processed_rows
+                progress_pb.subtitle(
+                    f"{stage_label} rows {processed_rows}/{total_rows}"
+                ).draw()
+
         return outputs
 
     def _run_forward_batches_parallel(
@@ -349,6 +478,11 @@ class ModuleLooper():
         need_outputs: bool,
         reuse_kv: bool,
         devices: List[torch.device],
+        progress_pb: "ProgressBar" | None = None,
+        progress_title: Optional[str] = None,
+        progress_stage: Optional[str] = None,
+        progress_rows_per_batch: Optional[List[int]] = None,
+        progress_total_rows: Optional[int] = None,
     ) -> List[List[torch.Tensor]]:
         """Fan batches across device clones and preserve result ordering."""
         module_replicas = clone_module_for_devices(module, devices)
@@ -358,7 +492,19 @@ class ModuleLooper():
         results: Dict[int, torch.Tensor | tuple | None] = {}
 
         chunk = len(devices)
-        total_batches = processor.num_batches
+        total_batches = self._resolve_batch_total(processor.num_batches, layer_inputs)
+        batch_row_counts = progress_rows_per_batch or self._collect_row_counts(layer_inputs)
+        batch_row_counts = list(batch_row_counts)
+        if len(batch_row_counts) > total_batches:
+            batch_row_counts = batch_row_counts[:total_batches]
+        elif len(batch_row_counts) < total_batches:
+            batch_row_counts.extend([0] * (total_batches - len(batch_row_counts)))
+        total_rows = progress_total_rows if progress_total_rows is not None else sum(batch_row_counts)
+        if total_rows <= 0 and total_batches > 0:
+            total_rows = total_batches
+        total_rows = max(total_rows, 1)
+        processed_rows = 0
+        stage_label = progress_stage or "Forward"
         for start in range(0, total_batches, chunk):
             futures = []
             end = min(start + chunk, total_batches)
@@ -396,6 +542,20 @@ class ModuleLooper():
                     results[batch_idx] = module_output
                 if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
                     shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device, stream=False)
+
+                rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
+                if rows_for_batch <= 0:
+                    rows_for_batch = self._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
+                    rows_for_batch = max(rows_for_batch, 1)
+
+                processed_rows = min(processed_rows + rows_for_batch, total_rows)
+                if progress_pb is not None:
+                    if progress_title:
+                        progress_pb.title(progress_title)
+                    progress_pb.current_iter_step = processed_rows
+                    progress_pb.subtitle(
+                        f"{stage_label} rows {processed_rows}/{total_rows}"
+                    ).draw()
 
         # ensure replicas release promptly and free GPU memory
         for dev in list(module_replicas.keys()):
@@ -746,15 +906,19 @@ class ModuleLooper():
 
                     handle = []
                     subset_total = len(modules)
-                    batch_count = getattr(processor, "num_batches", None)
-                    if not batch_count:
-                        cached_inputs = getattr(processor.inputs_cache, "layer_inputs", None)
-                        if cached_inputs is not None:
-                            try:
-                                batch_count = len(cached_inputs)
-                            except TypeError:
-                                batch_count = 0
-                    batch_count = batch_count or 0
+                    batch_count = self._resolve_batch_total(
+                        getattr(processor, "num_batches", None),
+                        layer_inputs,
+                    )
+                    forward_row_counts = list(self._collect_row_counts(layer_inputs))
+                    if not forward_row_counts and batch_count > 0:
+                        forward_row_counts = [1] * batch_count
+                    if len(forward_row_counts) > batch_count:
+                        forward_row_counts = forward_row_counts[:batch_count]
+                    forward_total_rows = sum(forward_row_counts) if forward_row_counts else batch_count
+                    forward_total_rows = max(forward_total_rows, 1)
+                    if len(forward_row_counts) < batch_count:
+                        forward_row_counts.extend([1] * (batch_count - len(forward_row_counts)))
 
                     subset_size = len(subset)
                     for idx, (name, m) in enumerate(subset.items()):
@@ -781,28 +945,44 @@ class ModuleLooper():
                     forward_msg = (
                         "Forward start "
                         f"(layer=`{layer_descriptor}`, subset={index + 1}/{subset_total}, "
-                        f"batches={batch_count})"
+                        f"batches={batch_count}, rows={forward_total_rows})"
                     )
-                    pb.title(forward_msg).draw()
+                    forward_pb = (
+                        log.pb(range(forward_total_rows))
+                           .manual()
+                           .set(show_left_steps=False)
+                    )
+                    forward_pb.title(forward_msg).subtitle(
+                        f"Forward rows 0/{forward_total_rows}"
+                    ).draw()
                     # Drain any background work so the forward spike does not race pooled tasks.
                     # DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
                     timed_gc_collect(2)
 
-                    forward_outputs = self._run_forward_batches(
-                        module=module,
-                        processor=processor,
-                        layer_inputs=layer_inputs,
-                        layer_input_kwargs=layer_input_kwargs,
-                        position_ids=position_ids,
-                        attention_masks=attention_masks,
-                        cur_layer_device=cur_layer_device,
-                        is_lm_head_module=is_lm_head_module,
-                        shared_kv_cache_dict=shared_kv_cache_dict,
-                        layer_index=layer_index,
-                        need_outputs=need_outputs,
-                        reuse_kv=reuse_kv,
-                    )
+                    try:
+                        forward_outputs = self._run_forward_batches(
+                            module=module,
+                            processor=processor,
+                            layer_inputs=layer_inputs,
+                            layer_input_kwargs=layer_input_kwargs,
+                            position_ids=position_ids,
+                            attention_masks=attention_masks,
+                            cur_layer_device=cur_layer_device,
+                            is_lm_head_module=is_lm_head_module,
+                            shared_kv_cache_dict=shared_kv_cache_dict,
+                            layer_index=layer_index,
+                            need_outputs=need_outputs,
+                            reuse_kv=reuse_kv,
+                            progress_pb=forward_pb,
+                            progress_title=forward_msg,
+                            progress_stage="Forward",
+                            progress_rows_per_batch=forward_row_counts,
+                            progress_total_rows=forward_total_rows,
+                        )
+                    finally:
+                        if forward_pb is not None:
+                            forward_pb.close()
                     if need_outputs:
                         processor.receive_layer_inputs(forward_outputs)
                         layer_inputs = processor.inputs_cache.layer_inputs
@@ -876,39 +1056,59 @@ class ModuleLooper():
                 layer_outputs: List[List[torch.Tensor]] = []
                 # second forward after process()
                 if not is_last_module and processor.fwd_after_process:
-                    replay_batch_count = getattr(processor, "num_batches", None)
-                    if not replay_batch_count:
-                        cached_inputs = getattr(processor.inputs_cache, "layer_inputs", None)
-                        if cached_inputs is not None:
-                            try:
-                                replay_batch_count = len(cached_inputs)
-                            except TypeError:
-                                replay_batch_count = 0
-                    replay_batch_count = replay_batch_count or 0
+                    replay_batch_count = self._resolve_batch_total(
+                        getattr(processor, "num_batches", None),
+                        layer_inputs,
+                    )
+                    replay_row_counts = list(self._collect_row_counts(layer_inputs))
+                    if not replay_row_counts and replay_batch_count > 0:
+                        replay_row_counts = [1] * replay_batch_count
+                    if len(replay_row_counts) > replay_batch_count:
+                        replay_row_counts = replay_row_counts[:replay_batch_count]
+                    replay_total_rows = sum(replay_row_counts) if replay_row_counts else replay_batch_count
+                    replay_total_rows = max(replay_total_rows, 1)
+                    if len(replay_row_counts) < replay_batch_count:
+                        replay_row_counts.extend([1] * (replay_batch_count - len(replay_row_counts)))
                     replay_msg = (
                         "Forward replay "
-                        f"(layer=`{layer_descriptor}`, batches={replay_batch_count})"
+                        f"(layer=`{layer_descriptor}`, batches={replay_batch_count}, rows={replay_total_rows})"
                     )
-                    pb.title(replay_msg).draw()
+                    replay_pb = (
+                        log.pb(range(replay_total_rows))
+                           .manual()
+                           .set(show_left_steps=False)
+                    )
+                    replay_pb.title(replay_msg).subtitle(
+                        f"Forward replay rows 0/{replay_total_rows}"
+                    ).draw()
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
                     # DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
                     timed_gc_collect(2)
 
-                    layer_outputs = self._run_forward_batches(
-                        module=module,
-                        processor=processor,
-                        layer_inputs=layer_inputs,
-                        layer_input_kwargs=layer_input_kwargs,
-                        position_ids=position_ids,
-                        attention_masks=attention_masks,
-                        cur_layer_device=cur_layer_device,
-                        is_lm_head_module=is_lm_head_module,
-                        shared_kv_cache_dict=shared_kv_cache_dict,
-                        layer_index=layer_index,
-                        need_outputs=True,
-                        reuse_kv=False,
-                    )
+                    try:
+                        layer_outputs = self._run_forward_batches(
+                            module=module,
+                            processor=processor,
+                            layer_inputs=layer_inputs,
+                            layer_input_kwargs=layer_input_kwargs,
+                            position_ids=position_ids,
+                            attention_masks=attention_masks,
+                            cur_layer_device=cur_layer_device,
+                            is_lm_head_module=is_lm_head_module,
+                            shared_kv_cache_dict=shared_kv_cache_dict,
+                            layer_index=layer_index,
+                            need_outputs=True,
+                            reuse_kv=False,
+                            progress_pb=replay_pb,
+                            progress_title=replay_msg,
+                            progress_stage="Forward replay",
+                            progress_rows_per_batch=replay_row_counts,
+                            progress_total_rows=replay_total_rows,
+                        )
+                    finally:
+                        if replay_pb is not None:
+                            replay_pb.close()
 
                 # Finalize module after last processor
                 if p_index == len(self.processors) - 1:
