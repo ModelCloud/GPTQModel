@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import json
-import queue
-import re
 import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -15,19 +13,34 @@ from random_word import RandomWords
 from torch import Tensor
 from torch.nn import Module
 
+from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
+from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
+                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS,
+                             QUANT_LOG_NSAMPLES)
 from ..quantization.config import QuantizeConfig
 from ..utils.logger import setup_logger
-from ..utils.torch import DEVICE_0, DEVICE_1
+from ..utils.torch import CPU, DEVICE_0, DEVICE_1
 
 log = setup_logger()
 
 # global level lock
 PROCESSOR_GLOBAL_LOCK = threading.Lock()
 
-ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+DEFAULT_LOG_COLUMNS: List[str] = [
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_NSAMPLES,
+    QUANT_LOG_DAMP,
+    PROCESS_LOG_TIME,
+    PROCESS_LOG_FWD_TIME,
+    PROCESS_USED_MEMORY,
+    "dynamic",
+]
 
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
@@ -90,12 +103,12 @@ class LoopProcessor:
         # logging
         self.log = []
         self.logger_board = logger_board
-        self.log_max_widths = {} # track maximum column widths
         self.log_call_count = 0
+        self._log_column_labels: List[str] = []
+        self._log_columns = None
+        self._log_header_interval = 20
         current_time = datetime.now().strftime("%m_%d_%Y_%Hh_%Mm_%Ss")
         self.log_tmp_log_file_name = f"{self.name()}_log_{RandomWords().get_random_word()}_time_{current_time}.log"
-        self.log_worker_queue = queue.Queue()
-        self.log_worker: threading.Thread = None
         self._device_smi_handles = self._init_device_smi_handles()
         self._cpu_device_smi = self._init_cpu_device_handle()
         self._device_metric_failures: Set[str] = set()
@@ -161,26 +174,30 @@ class LoopProcessor:
 
         self.calibration_dataset = calibration
 
+    def _async_log_writer(self, stat):
+        with open(self.log_tmp_log_file_name, 'a') as f:
+            json.dump(stat, f, indent=4)
+            f.write("\n")
+
     def log_save_async(self, stat):
-        # start log worker async writer
-        if self.log_worker is None:
-            log.info(f"Process: progress logs for `{self.name()}` will be streamed to file: `{self.log_tmp_log_file_name}`")
-            def _thread_log_worker():
-                while True:
-                    data = self.log_worker_queue.get()
-                    # false is special data packet to queue to stop worker
-                    if data == False:
-                        return
-                    with open(self.log_tmp_log_file_name, 'a') as f:  # append
-                        json.dump(data, f, indent=4)
-                        f.write("\n")
+        # Serialize writes on the CPU-bound worker to avoid interleaved JSON output.
+        DEVICE_THREAD_POOL.submit_serial(CPU, self._async_log_writer, stat)
 
-                    self.log_worker_queue.task_done()
+    def log_new_row(self, stat):
+        with self.lock:
+            self.log_call_count += 1
+            columns_rebuilt = self._ensure_log_columns(stat)
 
-            self.log_worker = threading.Thread(target=_thread_log_worker, daemon=True)
-            self.log_worker.start()
+            if self._log_columns is None:
+                return
 
-        self.log_worker_queue.put(stat)
+            if columns_rebuilt or self.log_call_count % self._log_header_interval == 1:
+                self._log_columns.info.header()
+
+            row_values = [self._format_log_value(column, stat.get(column, "")) for column in self._log_column_labels]
+            self._log_columns.info(*row_values)
+
+        self.log_save_async(stat)
 
     def loss_color(self, loss_value):
         if loss_value <= 0.1:
@@ -194,58 +211,36 @@ class LoopProcessor:
         else:
             return "\033[91m"  # Red
 
-    def _strip_ansi(self, text: Any) -> str:
-        return ANSI_ESCAPE_RE.sub("", str(text))
+    def _ensure_log_columns(self, stat: Dict[str, Any]) -> bool:
+        desired_labels = list(DEFAULT_LOG_COLUMNS)
+        for key in stat.keys():
+            if key not in desired_labels:
+                desired_labels.append(key)
 
-    def _visible_length(self, text: Any) -> int:
-        return len(self._strip_ansi(text))
+        if self._log_columns is not None and desired_labels == self._log_column_labels:
+            return False
 
-    def _ljust_visible(self, text: str, width: int) -> str:
-        padding = max(width - self._visible_length(text), 0)
-        if padding:
-            return f"{text}{' ' * padding}"
+        self._log_column_labels = desired_labels
+        column_specs = [{"label": label, "width": "fit"} for label in self._log_column_labels]
+        self._log_columns = log.columns(cols=column_specs, padding=1)
+        # simulate some data to snap columns on first print
+        self._log_columns.info.simulate(
+            "gptq", "13", "mlp.experts.110.down_proj", "0.0000158448",
+            "36616", "0.05000", "0.841", "7.984", "cuda:0=9.1GB","")
+        return True
+
+    def _format_log_value(self, key: str, value: Any) -> str:
+        text = "" if value is None else str(value)
+
+        if key == QUANT_LOG_LOSS and text:
+            try:
+                color_code = self.loss_color(float(text))
+            except (TypeError, ValueError):
+                return text
+            reset = "\033[0m"
+            return f"{color_code}{text}{reset}"
+
         return text
-
-    def log_new_row(self, stat):
-        self.log_call_count += 1
-        self.log_save_async(stat) # write to temp log file
-
-        # Update max_widths with the new row's column widths
-        for key, value in stat.items():
-            key_str = str(key)
-            value_str = str(value)
-            current_width = max(self._visible_length(key_str), self._visible_length(value_str)) + 4 # 4 is for padding
-            if key not in self.log_max_widths or current_width > self.log_max_widths[key]:
-                self.log_max_widths[key] = current_width
-
-        if self.log_call_count % 20 == 1:
-            # Format the header row
-            header_cells = [
-                self._ljust_visible(str(key), self.log_max_widths[key]) for key in self.log_max_widths.keys()
-            ]
-            header_row = "| " + " | ".join(header_cells) + " |"
-            header_separator = "-" * self._visible_length(header_row)
-
-            if self.log_call_count == 1:
-                log.info(header_separator)
-            log.info(header_row)
-            log.info(header_separator)
-
-        row_cells = []
-        for key in self.log_max_widths.keys():
-            value = stat.get(key, "")
-            value_str = str(value)
-            if key == "loss" and value_str:
-                color_code = self.loss_color(float(value_str))
-                formatted_value = f"{color_code}{value_str}\033[0m"
-            else:
-                formatted_value = value_str
-            row_cells.append(self._ljust_visible(formatted_value, self.log_max_widths[key]))
-
-        formatted_row = "| " + " | ".join(row_cells) + " |"
-        row_separator = "-" * self._visible_length(formatted_row)
-        log.info(formatted_row)
-        log.info(row_separator)
 
     def _init_device_smi_handles(self) -> Dict[str, Device]:
         handles: Dict[str, Device] = {}
@@ -353,10 +348,6 @@ class LoopProcessor:
             return self._results.pop(key, default)
 
     # Loop Procssor level scoped state data
-    def result_pop(self, key: str, default: Any = None) -> Any:
-        return self._results.pop(key, default)
-
-    # Loop Procssor level scoped state data
     def results(self):
         return self._results
 
@@ -441,12 +432,10 @@ class LoopProcessor:
         del self.inputs_cache
         del self._results
 
-        if self.log_worker is not None:
-            self.log_worker_queue.put(False)
-            # TODO make this file delete based on user toggle
-            # cleanup temp log file
-            # if os.path.exists(self.log_tmp_log_file_name):
-            #     os.remove(file_path)
+        # TODO make this file delete based on user toggle
+        # cleanup temp log file
+        # if os.path.exists(self.log_tmp_log_file_name):
+        #     os.remove(file_path)
 
     def release_calibration_dataset(self):
         del self.calibration_dataset

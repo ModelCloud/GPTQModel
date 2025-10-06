@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import copy
-import gc
 from typing import Callable
 
 import pytest
@@ -14,6 +13,7 @@ import torch
 from tabulate import tabulate
 from torch.nn.parallel import replicate as torch_replicate
 
+from gptqmodel.utils.torch import timed_gc_collect
 
 TIMED_TRIALS = 5
 WARMUP_TRIALS = 1
@@ -155,7 +155,7 @@ def test_replicate_from_gpu_to_multiple_gpu():
     _assert_replicas_match(replicas, devices, reference, input_tensor.to("cpu"))
 
     del replicas
-    gc.collect()
+    timed_gc_collect()
     torch.cuda.empty_cache()
 
 

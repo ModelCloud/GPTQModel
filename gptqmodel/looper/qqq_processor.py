@@ -137,10 +137,6 @@ class QQQProcessor(LoopProcessor):
         #         value=duration,
         #         iteration=name_index,
         #     )
-        self.durations.append(duration)
-        self.avg_losses.append(avg_loss)
-        self.module_names.append(f"layer-{module.layer_index}-{module.name}")
-
         stat = {
             PROCESS_LOG_NAME:  self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
@@ -155,13 +151,19 @@ class QQQProcessor(LoopProcessor):
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
-        self.log.append(stat)
+        with self.lock:
+            self.durations.append(duration)
+            self.avg_losses.append(avg_loss)
+            self.module_names.append(f"layer-{module.layer_index}-{module.name}")
+            self.log.append(stat)
+
         self.log_new_row(stat)
 
-        module.state.update({"q_scales": q_scales})
-        module.state.update({"q_zeros": q_zeros})
-        module.state.update({"q_g_idx": q_g_idx})
-        module.state.update({"q_scales_extra": q_scales_extra})
+        with self.lock:
+            module.state.update({"q_scales": q_scales})
+            module.state.update({"q_zeros": q_zeros})
+            module.state.update({"q_g_idx": q_g_idx})
+            module.state.update({"q_scales_extra": q_scales_extra})
 
         if self.calculate_w_wq_diff:
             if module.weight.data.dtype == torch.float16:
@@ -171,9 +173,10 @@ class QQQProcessor(LoopProcessor):
                 # diff in float32
                 w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
 
-            module.state.update({
-                "w_wq_diff": w_wq_diff,
-            })
+            with self.lock:
+                module.state.update({
+                    "w_wq_diff": w_wq_diff,
+                })
 
         # with torch_streamCtx(DEVICE_0_STREAM):
         #     wq = wq.to(device=DEVICE_0, non_blocking=True) # move to d0 for post quant inference

@@ -35,7 +35,7 @@ dependencies = [
     "numpy==2.2.6",
     "torch>=2.8.0",
     "safetensors>=0.6.2",
-    "transformers>=4.56.0",
+    "transformers>=4.57.0",
     "threadpoolctl>=3.6.0",
     "packaging>=24.2",
     "device-smi>=0.5.1",
@@ -45,7 +45,7 @@ dependencies = [
     "huggingface_hub>=0.34.4",
     "random_word>=1.0.13",
     "tokenicer>=0.0.5",
-    "logbar>=0.0.5",
+    "logbar>=0.0.7",
     "maturin>=1.9.4", # required by safetensors and hf_transfer
     "datasets>=3.6.0",
     "pyarrow>=21.0",

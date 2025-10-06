@@ -7,7 +7,7 @@ from __future__ import annotations
 import copy
 import time
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch.nn import parallel as torch_parallel
@@ -19,14 +19,35 @@ from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, nested_move_to
 from ..utils.safe import ThreadSafe
-from ..utils.torch import ALL_DEVICES, CPU
+from ..utils.torch import ALL_DEVICES, CPU, torch_sync
 
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
 
-def torch_replicate(*args, **kwargs):
-    with DEVICE_THREAD_POOL.lock():
-        return _THREAD_SAFE_PARALLEL.replicate(*args, **kwargs)
+def torch_replicate(
+    module: torch.nn.Module,
+    devices: Sequence[torch.device | str | int],
+    detach: bool = True,
+):
+    """Replicate a module across ``devices`` while coordinating device locks and syncs.
+
+    Clones default to ``detach=True`` because quantization workflows operate in inference-only
+    mode and do not need autograd edges.
+    """
+    normalized_devices: List[torch.device] = []
+    for candidate in devices:
+        normalized = normalize_device_like(candidate)
+        if normalized is None:
+            raise ValueError(f"Unsupported device spec: {candidate!r}")
+        normalized_devices.append(normalized)
+
+    lock_scope = normalized_devices or None
+
+    with DEVICE_THREAD_POOL.lock(lock_scope):
+        for dev in normalized_devices:
+            if dev.type in {"cuda", "xpu", "mps", "npu"}:
+                torch_sync(dev)
+        return _THREAD_SAFE_PARALLEL.replicate(module, normalized_devices, detach=detach)
 
 log = setup_logger()
 

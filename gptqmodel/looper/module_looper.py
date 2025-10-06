@@ -47,7 +47,7 @@ from ..utils.looper_helpers import (
 )
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
-from ..utils.torch import (CPU, META, torch_sync)
+from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync)
 from .. import DEVICE_THREAD_POOL
 from .awq_processor import AWQProcessor
 from .qqq_processor import QQQProcessor
@@ -477,9 +477,6 @@ class ModuleLooper():
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device
 
-        # make sure turtle is ready for lias
-        self.gptq_model.wait_for_turtle_reload()
-
         # TODO HookLinear add register_forward_pre_hook()
         def store_input_hook(module, args, kwargs):
             # Positional arguments.
@@ -535,6 +532,9 @@ class ModuleLooper():
                     target_submodule=module,
                     device=cur_layer_device,
                 )
+
+        # we need to gc modules
+        self.gptq_model.reload_turtle_model()
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
@@ -642,13 +642,13 @@ class ModuleLooper():
             layer_modules = [sum(layer_modules, [])]
 
         layer_count = len(layers)
-        quant_modules_pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
+        pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
                             .manual()
                             .set(left_steps_offset=1))
 
         for processor in self.processors:
             processor.layer_count = layer_count
-            processor.pb = quant_modules_pb
+            processor.pb = pb
 
         shared_kv_cache_dict = {}
 
@@ -664,7 +664,7 @@ class ModuleLooper():
                     parent = getattr(parent, part)
                 setattr(parent, module_path[-1], hooked_lm_head)
 
-        for layer_index in quant_modules_pb:
+        for layer_index in pb:
             is_lm_head_module = layer_index >= layer_count
 
             if is_lm_head_module:
@@ -674,15 +674,15 @@ class ModuleLooper():
                 layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
                 module = layers[layer_index]
 
-            quant_modules_pb.title(layer_title).subtitle("").draw()
-
-            self.gptq_model.wait_for_turtle_reload()
+            pb.title(layer_title).subtitle("").draw()
 
             if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
                 continue
 
             module = self.gptq_model.pre_quantize(module)
+            # we need to gc modules
+            self.gptq_model.reload_turtle_model()
 
             cur_layer_device = get_device(module)
             full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
@@ -783,9 +783,12 @@ class ModuleLooper():
                         f"(layer=`{layer_descriptor}`, subset={index + 1}/{subset_total}, "
                         f"batches={batch_count})"
                     )
-                    quant_modules_pb.title(forward_msg).draw()
+                    pb.title(forward_msg).draw()
                     # Drain any background work so the forward spike does not race pooled tasks.
-                    DEVICE_THREAD_POOL.wait()
+                    # DEVICE_THREAD_POOL.wait()
+                    # try to cleanup recent objects before forward
+                    timed_gc_collect(2)
+
                     forward_outputs = self._run_forward_batches(
                         module=module,
                         processor=processor,
@@ -808,7 +811,7 @@ class ModuleLooper():
                     fwd_time = time.time() - fwd_start
                     processor.set_fwd_time(fwd_time)
 
-                    quant_modules_pb.title(layer_title).subtitle("").draw()
+                    pb.title(layer_title).subtitle("").draw()
 
                     for h in handle:
                         h.remove()
@@ -870,7 +873,7 @@ class ModuleLooper():
                     #torch_sync()
                     # ---- End Process Hook ----
 
-                is_last_module = layer_index == len(quant_modules_pb) - 1
+                is_last_module = layer_index == len(pb) - 1
                 layer_outputs: List[List[torch.Tensor]] = []
                 # second forward after process()
                 if not is_last_module and processor.fwd_after_process:
@@ -887,9 +890,12 @@ class ModuleLooper():
                         "Forward replay "
                         f"(layer=`{layer_descriptor}`, batches={replay_batch_count})"
                     )
-                    quant_modules_pb.title(replay_msg).draw()
+                    pb.title(replay_msg).draw()
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
-                    DEVICE_THREAD_POOL.wait()
+                    # DEVICE_THREAD_POOL.wait()
+                    # try to cleanup recent objects before forward
+                    timed_gc_collect(2)
+
                     layer_outputs = self._run_forward_batches(
                         module=module,
                         processor=processor,
@@ -919,7 +925,7 @@ class ModuleLooper():
                     processor.receive_layer_inputs(layer_outputs)
                     layer_inputs = processor.inputs_cache.layer_inputs
 
-                    quant_modules_pb.title(layer_title).subtitle("").draw()
+                    pb.title(layer_title).subtitle("").draw()
 
                 if p_index == len(self.processors) - 1:
                     torch_sync()
@@ -931,56 +937,73 @@ class ModuleLooper():
                         for module in processed_subset.values():
                             target_dev = get_device_new(module, recursive=True, assert_mode=True, expected="cpu")
                             module_label = getattr(module, "full_name", getattr(module, "name", ""))
-                            finalize_tasks.append((reverse_p, module, module_label, target_dev))
+                            layer_idx = getattr(module, "layer_index", None)
+                            finalize_tasks.append((reverse_p, module, module_label, target_dev, layer_idx))
 
                     finalize_count = len(finalize_tasks)
                     if finalize_count:
-                        quant_modules_pb.subtitle(
+                        pb.subtitle(
                             f"Finalizing submodules ({finalize_count})"
                         ).draw()
 
                     finalize_futures = []
 
                     @torch.inference_mode()
-                    def _finalize_on_worker(process, module, idx, total, module_label):
-                        quant_modules_pb.subtitle(
-                            f"{process.name()}: finalizing {idx}/{total} ({module_label})"
-                        ).draw()
-
+                    def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
                         process.submodule_finalize(module, self.gptq_model)
 
                         # Disk offload (lifecycle TODO note preserved)
                         if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
-                            offload_to_disk(
-                                model=self.gptq_model.model,
-                                module=self.gptq_model.model.get_submodule(module.full_name),
-                                disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
-                            )
+                            quant_config = getattr(self.gptq_model, "quantize_config", None)
+                            if quant_config and getattr(quant_config, "offload_to_disk", False):
+                                offload_path = getattr(quant_config, "offload_to_disk_path", None)
+                                if offload_path:
+                                    module_full_name = getattr(module, "full_name", None)
+                                    target_module = (
+                                        self.gptq_model.model.get_submodule(module_full_name)
+                                        if module_full_name
+                                        else module
+                                    )
+                                    offload_to_disk(
+                                        model=self.gptq_model.model,
+                                        module=target_module,
+                                        disk_path=offload_path,
+                                    )
+                                else:
+                                    log.warning(
+                                        "Skipping disk offload for %s: no offload path configured",
+                                        module_label,
+                                    )
 
-                    for index, (process, module, module_label, target_dev) in enumerate(finalize_tasks, start=1):
-                        finalize_futures.append(
-                            DEVICE_THREAD_POOL.submit_serial(
-                                target_dev,
-                                _finalize_on_worker,
-                                process,
-                                module,
-                                index,
-                                finalize_count,
-                                module_label,
-                            )
+                        pb.subtitle(
+                            f"{process.name()}: layer:{layer_idx} Finalized {idx}/{total} {module_label}"
+                        ).draw()
+
+                    for index, (process, module, module_label, target_dev, layer_idx) in enumerate(finalize_tasks, start=1):
+                        future = DEVICE_THREAD_POOL.submit(
+                            target_dev,
+                            _finalize_on_worker,
+                            process,
+                            module,
+                            index,
+                            finalize_count,
+                            module_label,
+                            layer_idx,
                         )
+                        finalize_futures.append((future, index, module_label, process))
 
-                    for fut in finalize_futures:
-                        fut.result()
+                    # for future, idx, module_label, process in finalize_futures:
+                    #     future.result()
+                    #     pb.subtitle(
+                    #         f"{process.name()}: Finalized {idx}/{finalize_count} {module_label}"
+                    #     ).draw()
 
-                    if finalize_count:
-                        quant_modules_pb.subtitle("").draw()
+                    # if finalize_count:
+                    #     pb.subtitle("").draw()
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained
         DEVICE_THREAD_POOL.wait()  # same as wait('all')
-
-        self.gptq_model.wait_for_turtle_reload()
 
         # paranoid safety check
         # torch_sync()

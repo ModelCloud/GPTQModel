@@ -666,42 +666,41 @@ class GPTQModel:
 
             adapter.validate_path(local=True)
 
-            with threadpoolctl.threadpool_limits(limits=1):
-                log.info("Model: Quant Model Loading...")
-                quantized_model = GPTQModel.load(
-                    model_id_or_path=quantized_model_id_or_path,
-                    backend=BACKEND.TORCH,
-                    device=CPU,
-                    trust_remote_code=trust_remote_code,
-                    dtype=dtype,
-                )
+            log.info("Model: Quant Model Loading...")
+            quantized_model = GPTQModel.load(
+                model_id_or_path=quantized_model_id_or_path,
+                backend=BACKEND.TORCH,
+                device=CPU,
+                trust_remote_code=trust_remote_code,
+                dtype=dtype,
+            )
 
-                qcfg = quantized_model.quantize_config
-                qModules: Dict[str, TorchQuantLinear] = find_modules(module=quantized_model.model, layers=[TorchQuantLinear])
-                # for name, module in qModules.items():
-                #     quantized_weights[name] = module.dequantize_weight()
-                del quantized_model
-                torch_empty_cache()
+            qcfg = quantized_model.quantize_config
+            qModules: Dict[str, TorchQuantLinear] = find_modules(module=quantized_model.model, layers=[TorchQuantLinear])
+            # for name, module in qModules.items():
+            #     quantized_weights[name] = module.dequantize_weight()
+            del quantized_model
+            torch_empty_cache()
 
-                log.info("Model: Native Model Loading...")
-                model = GPTQModel.load(
-                    model_id_or_path=model_id_or_path,
-                    quantize_config=qcfg,
-                    backend=BACKEND.TORCH,
-                    trust_remote_code=trust_remote_code,
-                    dtype=dtype,
-                    device=CPU,
-                )
+            log.info("Model: Native Model Loading...")
+            model = GPTQModel.load(
+                model_id_or_path=model_id_or_path,
+                quantize_config=qcfg,
+                backend=BACKEND.TORCH,
+                trust_remote_code=trust_remote_code,
+                dtype=dtype,
+                device=CPU,
+            )
 
-                log.info("Model: Adapter generation started")
-                model._eora_generate(
-                    adapter=adapter,
-                    quantized_modules=qModules,
-                    calibration_dataset=calibration_dataset,
-                    calibration_dataset_concat_size=calibration_dataset_concat_size,
-                    calibration_dataset_sort=calibration_dataset_sort,
-                    batch_size=batch_size,
-                    tokenizer=tokenizer,
-                    logger_board=logger_board,
-                )
+            log.info("Model: Adapter generation started")
+            model._eora_generate(
+                adapter=adapter,
+                quantized_modules=qModules,
+                calibration_dataset=calibration_dataset,
+                calibration_dataset_concat_size=calibration_dataset_concat_size,
+                calibration_dataset_sort=calibration_dataset_sort,
+                batch_size=batch_size,
+                tokenizer=tokenizer,
+                logger_board=logger_board,
+            )
             return
