@@ -1439,7 +1439,9 @@ class BaseQModel(nn.Module):
             try:
                 # Re-loading constructs new Parameter objects; run outside inference mode
                 # so autograd metadata stays intact even on inference-optimised workers.
-                future = DEVICE_THREAD_POOL.submit_serial(CPU, _reload_task, _threadx_inference_mode=False)
+                future = DEVICE_THREAD_POOL.submit_serial(
+                    CPU, _reload_task, inference_mode=False
+                )
             except Exception as exc:
                 log.warning("Turtle reload scheduling failed; falling back to sync reload: %s", exc)
                 new_model = self._reload_turtle_model_sync()
@@ -1502,7 +1504,7 @@ class BaseQModel(nn.Module):
                 target_submodule=target_submodule,
                 device=device,
             )
-        self._schedule_turtle_reload()
+        # self._schedule_turtle_reload()
         return module
 
     ## overrides nn.module.train()

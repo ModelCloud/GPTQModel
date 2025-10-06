@@ -125,6 +125,14 @@ def _activate_thread_device(dev: torch.device):
     # mps/cpu: nothing to pin
 
 
+def _pop_public_kwarg(kwargs: Dict[str, Any], public_name: str, private_name: str):
+    if private_name in kwargs:
+        raise TypeError(f"'{private_name}' is no longer supported; use '{public_name}'")
+    if public_name in kwargs:
+        return kwargs.pop(public_name)
+    return None
+
+
 # --------------------------- Read-Write Lock (writer-preference) ---------------------------
 # We implement a writer-preference RWLock. Multiple readers may hold the lock,
 # but when a writer is waiting we block new readers, ensuring GC (writer) can
@@ -343,7 +351,7 @@ class _DeviceWorker:
         future to make stats() deterministic even under test interleavings.
 
         Workers default to inference mode for throughput but individual tasks
-        may override via `_threadx_inference_mode`.
+        may override via `inference_mode`.
         """
         _activate_thread_device(self.device)
         with tctl.threadpool_limits(limits=1):
@@ -362,8 +370,10 @@ class _DeviceWorker:
                         continue
                     if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
 
-                    stream = kwargs.pop("_cuda_stream", None)
-                    override_inference = kwargs.pop("_threadx_inference_mode", None)
+                    stream = kwargs.pop("cuda_stream", None)
+                    override_inference = _pop_public_kwarg(
+                        kwargs, "inference_mode", "_threadx_inference_mode"
+                    )
                     use_inference = self._inference_mode if override_inference is None else bool(override_inference)
 
                     # Tasks take a **read** lock so janitor's write lock can't interleave
@@ -416,11 +426,13 @@ class _SyncWorker:
         self._inference_mode = inference_mode
         self.name = f"DPWorker-{key}#sync"
 
-    def submit(self, fn: Callable[..., Any], /, *args, _cuda_stream=None, **kwargs) -> Future:
+    def submit(self, fn: Callable[..., Any], /, *args, cuda_stream=None, **kwargs) -> Future:
         fut = Future()
         try:
-            stream = _cuda_stream
-            override_inference = kwargs.pop("_threadx_inference_mode", None)
+            stream = cuda_stream
+            override_inference = _pop_public_kwarg(
+                kwargs, "inference_mode", "_threadx_inference_mode"
+            )
             use_inference = self._inference_mode if override_inference is None else bool(override_inference)
             with ctx(self.rwlock.reader(), _device_ctx(self.device)):
                 with tctl.threadpool_limits(limits=1):
@@ -460,7 +472,7 @@ class DeviceThreadPool:
       - Eager discovery/creation of workers and locks for CUDA/XPU/MPS/CPU.
       - Configurable worker counts per device (default 1).
       - Correct per-thread device context.
-      - submit()/do() for async/sync, with optional `_cuda_stream` (CUDA only).
+      - submit()/do() for async/sync, with optional `cuda_stream` (CUDA only).
       - Per-device RWLocks + global lock and family/all read-locks.
       - wait(scope, lock=False/True) to drain tasks (optionally with exclusive locks).
       - Per-device/global completed counters and in-flight counters.
@@ -649,24 +661,24 @@ class DeviceThreadPool:
         fn: Callable[..., Any],
         /,
         *args,
-        _cuda_stream: Optional[torch.cuda.Stream] = None,
+        cuda_stream: Optional[torch.cuda.Stream] = None,
         **kwargs,
     ) -> Future:
         """
         Asynchronously schedule work on the given device; returns a Future.
-        Optional (CUDA): pass `_cuda_stream=` to launch into a specific stream.
+        Optional (CUDA): pass `cuda_stream=` to launch into a specific stream.
         """
         dev = _coerce_device(device)
         key = self._key(dev)
         worker = self._pick_worker(key)
-        if _cuda_stream is not None and dev.type != "cuda":
-            raise ValueError("_cuda_stream is only valid for CUDA devices")
+        if cuda_stream is not None and dev.type != "cuda":
+            raise ValueError("cuda_stream is only valid for CUDA devices")
 
         if DEBUG_ON: log.debug(f"submit: device={key} fn={getattr(fn, '__name__', repr(fn))}")
         # Mark in-flight before enqueue to avoid races with wait().
         self._mark_scheduled(key)
         try:
-            return worker.submit(fn, *args, _cuda_stream=_cuda_stream, **kwargs)
+            return worker.submit(fn, *args, cuda_stream=cuda_stream, **kwargs)
         except BaseException:
             # Roll back inflight if enqueue fails (rare)
             self._mark_finished(key)
@@ -678,7 +690,7 @@ class DeviceThreadPool:
         fn: Callable[..., Any],
         /,
         *args,
-        _cuda_stream: Optional[torch.cuda.Stream] = None,
+        cuda_stream: Optional[torch.cuda.Stream] = None,
         **kwargs,
     ) -> Future:
         """
@@ -687,8 +699,8 @@ class DeviceThreadPool:
         """
         dev = _coerce_device(device)
         key = self._key(dev)
-        if _cuda_stream is not None and dev.type != "cuda":
-            raise ValueError("_cuda_stream is only valid for CUDA devices")
+        if cuda_stream is not None and dev.type != "cuda":
+            raise ValueError("cuda_stream is only valid for CUDA devices")
 
         with self._dispatch_lock:
             group = self._worker_groups.get(key)
@@ -710,7 +722,7 @@ class DeviceThreadPool:
         if DEBUG_ON: log.debug(f"submit_serial: device={key} fn={getattr(fn, '__name__', repr(fn))}")
         self._mark_scheduled(key)
         try:
-            return worker.submit(fn, *args, _cuda_stream=_cuda_stream, **kwargs)
+            return worker.submit(fn, *args, cuda_stream=cuda_stream, **kwargs)
         except BaseException:
             self._mark_finished(key)
             raise
@@ -721,13 +733,13 @@ class DeviceThreadPool:
         fn: Callable[..., Any],
         /,
         *args,
-        _cuda_stream: Optional[torch.cuda.Stream] = None,
+        cuda_stream: Optional[torch.cuda.Stream] = None,
         **kwargs,
     ) -> Any:
         """
         Synchronously schedule work and block for the result.
         """
-        fut = self.submit(device, fn, *args, _cuda_stream=_cuda_stream, **kwargs)
+        fut = self.submit(device, fn, *args, cuda_stream=cuda_stream, **kwargs)
         return fut.result()
 
     def shutdown(self, wait: bool = True):

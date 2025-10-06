@@ -142,7 +142,7 @@ def test_stream_context_is_honored(pool, devices_two):
         cur = torch.cuda.current_stream()
         return int(cur.cuda_stream == expected)
 
-    ok = pool.do(d0, check_stream, expected_ptr, _cuda_stream=stream)
+    ok = pool.do(d0, check_stream, expected_ptr, cuda_stream=stream)
     assert ok == 1
 
 
