@@ -538,7 +538,7 @@ class ModuleLooper():
                 )
 
         # we need to gc modules
-        self.gptq_model._schedule_turtle_reload()
+        self.gptq_model.reload_turtle_model()
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
@@ -688,7 +688,7 @@ class ModuleLooper():
 
             module = self.gptq_model.pre_quantize(module)
             # we need to gc modules
-            self.gptq_model._schedule_turtle_reload()
+            self.gptq_model.reload_turtle_model()
 
             cur_layer_device = get_device(module)
             full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")

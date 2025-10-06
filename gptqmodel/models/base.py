@@ -9,10 +9,8 @@ import json
 import os
 import random
 import threading
-import time
 from collections import defaultdict
 from collections.abc import Sequence
-from concurrent.futures import Future, TimeoutError
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
 
 import torch
@@ -36,7 +34,6 @@ except Exception:  # pragma: no cover - datasets may not be installed
     HFDataset = None
     HFIterableDataset = None
 
-from .. import DEVICE_THREAD_POOL
 from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -225,10 +222,7 @@ class BaseQModel(nn.Module):
         if isinstance(self.model, PreTrainedModel):
             autofix_hf_model_config(self.model, path=model_local_path)
 
-        self._turtle_reload_future: Optional[Future] = None
         self._turtle_lock = threading.RLock()
-        self._turtle_ready = threading.Event()
-        self._turtle_ready.set()
 
         # compat: state to assist in checkpoint_format gptq(v1) to gptq_v2 conversion
         # stores all per-layer quant stats such as avg loss and processing time
@@ -1318,47 +1312,13 @@ class BaseQModel(nn.Module):
         if self.turtle_model is None:
             return
 
-        deadline = None if timeout is None else time.monotonic() + timeout
-
-        while True:
-            if self._turtle_ready.is_set():
-                return
-
-            with self._turtle_lock:
-                future = self._turtle_reload_future
-
-            if future is not None:
-                try:
-                    fut_timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
-                    future.result(timeout=fut_timeout)
-                except TimeoutError:
-                    if deadline is not None:
-                        return
-                    continue
-                except Exception:
-                    # Exception handling deferred to _apply_completed_turtle_reload.
-                    pass
-
-                self._apply_completed_turtle_reload(wait=True)
-                continue
-
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            if self._turtle_ready.wait(timeout=remaining):
-                return
-            if deadline is not None and time.monotonic() >= deadline:
-                return
+        # Turtle reloads now run synchronously, so there is never background work to wait on.
 
     def _ensure_turtle_ready(self) -> None:
         if self.turtle_model is None:
             return
 
-        self._apply_completed_turtle_reload()
-
-        if self._turtle_ready.is_set():
-            return
-
-        self._wait_for_turtle_ready()
-        self._apply_completed_turtle_reload()
+        # Synchronous reloads guarantee the turtle model is ready immediately.
 
     def _clone_model_init_kwargs(self, source: PreTrainedModel) -> Dict[str, Any]:
         kwargs = getattr(source, "_model_init_kwargs", {}) or {}
@@ -1366,115 +1326,31 @@ class BaseQModel(nn.Module):
             return dict(kwargs)
         return copy.deepcopy(kwargs)
 
-    def _reload_turtle_model_sync(self) -> Optional[PreTrainedModel]:
-        if self.turtle_model is None or self.model_local_path is None:
-            return self.turtle_model
+    def reload_turtle_model(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            raise RuntimeError("Turtle reloads must run on the main thread")
 
-        reload_kwargs = self._clone_model_init_kwargs(self.turtle_model)
-        config = self.turtle_model.config
+        with self._turtle_lock:
+            turtle_model = self.turtle_model
+            model_local_path = self.model_local_path
+            loader = self.loader
 
-        new_model = self.loader.from_pretrained(
-            self.model_local_path,
+        if turtle_model is None or model_local_path is None:
+            return
+
+        reload_kwargs = self._clone_model_init_kwargs(turtle_model)
+        config = turtle_model.config
+
+        new_model = loader.from_pretrained(
+            model_local_path,
             config=config,
             low_cpu_mem_usage=True,
             **reload_kwargs,
         )
         new_model._model_init_kwargs = reload_kwargs
         new_model.eval()
-        return new_model
-
-    def _adopt_turtle_model(
-        self,
-        new_model: Optional[PreTrainedModel],
-        *,
-        future: Optional[Future] = None,
-    ) -> None:
-        """Install ``new_model`` as the active turtle model and release waiters."""
-
         with self._turtle_lock:
-            if future is not None and self._turtle_reload_future is not future:
-                return
-
-            self._turtle_reload_future = None
-
-            if new_model is not None:
-                new_model.eval()
-                self.turtle_model = new_model
-
-            self._turtle_ready.set()
-
-    def _schedule_turtle_reload(self) -> None:
-        self._apply_completed_turtle_reload()
-
-        with self._turtle_lock:
-            if self.turtle_model is None or self.model_local_path is None:
-                self._turtle_ready.set()
-                return
-
-            future = self._turtle_reload_future
-
-            if future is not None and not future.done():
-                return
-
-            reload_kwargs = self._clone_model_init_kwargs(self.turtle_model)
-            config = self.turtle_model.config
-            model_local_path = self.model_local_path
-            loader = self.loader
-
-            self._turtle_ready.clear()
-
-            def _reload_task() -> Optional[PreTrainedModel]:
-                model = loader.from_pretrained(
-                    model_local_path,
-                    config=config,
-                    low_cpu_mem_usage=True,
-                    **reload_kwargs,
-                )
-                model._model_init_kwargs = reload_kwargs
-                model.eval()
-                return model
-
-            try:
-                # Re-loading constructs new Parameter objects; run outside inference mode
-                # so autograd metadata stays intact even on inference-optimised workers.
-                future = DEVICE_THREAD_POOL.submit_serial(
-                    CPU, _reload_task, inference_mode=False
-                )
-            except Exception as exc:
-                log.warning("Turtle reload scheduling failed; falling back to sync reload: %s", exc)
-                new_model = self._reload_turtle_model_sync()
-                self._adopt_turtle_model(new_model)
-            else:
-                self._turtle_reload_future = future
-
-    def _apply_completed_turtle_reload(self, *, wait: bool = False) -> None:
-        """Adopt the result of any finished background turtle reload."""
-        future: Optional[Future]
-        with self._turtle_lock:
-            future = self._turtle_reload_future
-
-        if future is None:
-            return
-
-        if wait and not future.done():
-            try:
-                future.result()
-            except Exception:
-                # result() already logs in the calling path
-                pass
-
-        if not future.done():
-            return
-
-        try:
-            new_model = future.result()
-        except Exception as exc:
-            log.warning("Background turtle reload failed; retrying synchronously: %s", exc)
-            new_model = self._reload_turtle_model_sync()
-            self._adopt_turtle_model(new_model, future=future)
-            return
-
-        self._adopt_turtle_model(new_model, future=future)
+            self.turtle_model = new_model
 
     def wait_for_turtle_reload(self) -> None:
         self._ensure_turtle_ready()
@@ -1502,7 +1378,7 @@ class BaseQModel(nn.Module):
                 target_submodule=target_submodule,
                 device=device,
             )
-        # self._schedule_turtle_reload()
+        # self.reload_turtle_model()
         return module
 
     ## overrides nn.module.train()
