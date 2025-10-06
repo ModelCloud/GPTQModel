@@ -940,12 +940,22 @@ class ModuleLooper():
                             finalize_tasks.append((reverse_p, module, module_label, target_dev, layer_idx))
 
                     finalize_count = len(finalize_tasks)
+                    finalize_futures = []
+                    finalize_pb = None
+
                     if finalize_count:
                         pb.subtitle(
                             f"Finalizing submodules ({finalize_count})"
                         ).draw()
 
-                    finalize_futures = []
+                        finalize_pb = (
+                            log.pb(range(finalize_count))
+                               .manual()
+                               .set(show_left_steps=False)
+                               .title("Submodule finalization")
+                               .subtitle("")
+                        )
+                        finalize_pb.draw()
 
                     @torch.inference_mode()
                     def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
@@ -989,16 +999,23 @@ class ModuleLooper():
                             module_label,
                             layer_idx,
                         )
-                        finalize_futures.append((future, index, module_label, process))
+                        finalize_futures.append((future, index, module_label, process, layer_idx))
 
-                    # for future, idx, module_label, process in finalize_futures:
-                    #     future.result()
-                    #     pb.subtitle(
-                    #         f"{process.name()}: Finalized {idx}/{finalize_count} {module_label}"
-                    #     ).draw()
-
-                    # if finalize_count:
-                    #     pb.subtitle("").draw()
+                    try:
+                        for future, idx, module_label, process, layer_idx in finalize_futures:
+                            future.result()
+                            if finalize_pb is not None:
+                                layer_label = f"layer {layer_idx}" if layer_idx is not None else "layer ?"
+                                display_module = module_label or "<unnamed>"
+                                subtitle = f"{process.name()}: {layer_label} -> {display_module}"
+                                finalize_pb.title(
+                                    f"Submodule finalization {idx}/{finalize_count}"
+                                ).subtitle(subtitle).next().draw()
+                    finally:
+                        if finalize_pb is not None:
+                            finalize_pb.close()
+                        if finalize_count:
+                            pb.subtitle("").draw()
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained
@@ -1009,27 +1026,49 @@ class ModuleLooper():
         # torch_sync(device=CPU)
 
         total_log = {}
+        reversed_processors = list(reversed(self.processors))
+        process_finalize_pb = None
+        process_finalize_total = len(reversed_processors)
 
-        for reverse_p in reversed(self.processors):
-            if isinstance(reverse_p, GPTQProcessor):
-                pass
-            elif isinstance(reverse_p, EoraProcessor):
-                pass
-            elif isinstance(reverse_p, DequantizeProcessor):
-                pass
-            else:
-                log.info(f"{reverse_p.name()} summary:\n{reverse_p.log}")
+        if process_finalize_total:
+            process_finalize_pb = (
+                log.pb(range(process_finalize_total))
+                   .manual()
+                   .set(show_left_steps=False)
+                   .title("Processor finalization")
+                   .subtitle("")
+            )
+            process_finalize_pb.draw()
 
-            processor_name = reverse_p.name()
-            total_log[processor_name] = reverse_p.log
-            if processor_name in ["gptq", "gptq v2"]:
-                self.gptq_model.quant_log = reverse_p.log
+        try:
+            for index, reverse_p in enumerate(reversed_processors, start=1):
+                if isinstance(reverse_p, GPTQProcessor):
+                    pass
+                elif isinstance(reverse_p, EoraProcessor):
+                    pass
+                elif isinstance(reverse_p, DequantizeProcessor):
+                    pass
+                else:
+                    log.info(f"{reverse_p.name()} summary:\n{reverse_p.log}")
 
-            for module_log in reverse_p.log:
-                log.info(module_log)
-            reverse_p.log_plotly()
+                processor_name = reverse_p.name()
+                total_log[processor_name] = reverse_p.log
+                if processor_name in ["gptq", "gptq v2"]:
+                    self.gptq_model.quant_log = reverse_p.log
 
-            reverse_p.finalize(model=self.gptq_model, **kwargs)
+                for module_log in reverse_p.log:
+                    log.info(module_log)
+                reverse_p.log_plotly()
+
+                reverse_p.finalize(model=self.gptq_model, **kwargs)
+
+                if process_finalize_pb is not None:
+                    process_finalize_pb.title(
+                        f"Processor finalization {index}/{process_finalize_total}"
+                    ).subtitle(reverse_p.name()).next().draw()
+        finally:
+            if process_finalize_pb is not None:
+                process_finalize_pb.close()
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
