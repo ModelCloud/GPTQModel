@@ -956,7 +956,7 @@ class ModuleLooper():
                     @torch.inference_mode()
                     def _finalize_on_worker(process, module, idx, total, module_label):
                         quant_modules_pb.subtitle(
-                            f"{process.name()}: finalizing {idx}/{total} ({module_label})"
+                            f"{process.name()}: Finalizing {idx}/{total} {module_label}"
                         ).draw()
 
                         process.submodule_finalize(module, self.gptq_model)
