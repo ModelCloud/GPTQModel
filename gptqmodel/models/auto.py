@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import os
 
-import threadpoolctl
-
 from ..utils.logger import setup_logger
 
 

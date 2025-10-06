@@ -13,8 +13,8 @@ import time
 from concurrent.futures import Future
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
-import torch
 import threadpoolctl as tctl
+import torch
 
 from .. import DEBUG_ON
 from ..utils.ctx import ctx
