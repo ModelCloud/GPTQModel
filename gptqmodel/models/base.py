@@ -943,12 +943,10 @@ class BaseQModel(nn.Module):
         # prepare processor worker (looper)
         module_looper = ModuleLooper(self, processors=processors)
 
-        import threadpoolctl
-        with threadpoolctl.threadpool_limits(1):
-            return module_looper.loop(
-                backend=backend,
-                fail_safe=self.quantize_config.fail_safe,
-            )
+        return module_looper.loop(
+            backend=backend,
+            fail_safe=self.quantize_config.fail_safe,
+        )
 
     def _eora_generate(
         self,
