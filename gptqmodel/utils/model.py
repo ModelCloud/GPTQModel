@@ -681,7 +681,7 @@ def convert_gptq_v2_to_v1_format(
 
     return model
 
-
+@torch.inference_mode()
 def pack_module(
     name,
     qModules,
@@ -700,14 +700,19 @@ def pack_module(
         layer = layers[name]
         module = qModules[name]
 
-    module = module.to(CPU)
+    assert get_device(module) == CPU
+    assert get_device(layer) == CPU
+    assert get_device(q_scales) == CPU
+    assert get_device(q_zeros) == CPU
 
-    layer = layer.to(CPU)
-    q_scales = q_scales.to(CPU)
-    q_zeros = q_zeros.to(CPU)
+    # module = module.to(CPU)
+    # layer = layer.to(CPU)
+    # q_scales = q_scales.to(CPU)
+    # q_zeros = q_zeros.to(CPU)
 
     if q_g_idx is not None:
-        q_g_idx = q_g_idx.to(CPU)
+        assert get_device(q_g_idx) == CPU
+        #q_g_idx = q_g_idx.to(CPU)
 
     with lock:
         layers[name] = layer

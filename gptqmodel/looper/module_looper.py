@@ -938,7 +938,8 @@ class ModuleLooper():
                         for module in processed_subset.values():
                             target_dev = get_device_new(module, recursive=True, assert_mode=True, expected="cpu")
                             module_label = getattr(module, "full_name", getattr(module, "name", ""))
-                            finalize_tasks.append((reverse_p, module, module_label, target_dev))
+                            layer_idx = getattr(module, "layer_index", None)
+                            finalize_tasks.append((reverse_p, module, module_label, target_dev, layer_idx))
 
                     finalize_count = len(finalize_tasks)
                     if finalize_count:
@@ -949,7 +950,7 @@ class ModuleLooper():
                     finalize_futures = []
 
                     @torch.inference_mode()
-                    def _finalize_on_worker(process, module, idx, total, module_label):
+                    def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
                         process.submodule_finalize(module, self.gptq_model)
 
                         # Disk offload (lifecycle TODO note preserved)
@@ -976,10 +977,10 @@ class ModuleLooper():
                                     )
 
                         pb.subtitle(
-                            f"{process.name()}: Finalized {idx}/{total} {module_label}"
+                            f"{process.name()}: layer:{layer_idx} Finalized {idx}/{total} {module_label}"
                         ).draw()
 
-                    for index, (process, module, module_label, target_dev) in enumerate(finalize_tasks, start=1):
+                    for index, (process, module, module_label, target_dev, layer_idx) in enumerate(finalize_tasks, start=1):
                         future = DEVICE_THREAD_POOL.submit(
                             target_dev,
                             _finalize_on_worker,
@@ -988,6 +989,7 @@ class ModuleLooper():
                             index,
                             finalize_count,
                             module_label,
+                            layer_idx,
                         )
                         finalize_futures.append((future, index, module_label, process))
 
