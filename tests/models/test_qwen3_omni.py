@@ -20,9 +20,7 @@ class TestQwen3Omni(ModelTest):
     DESC_ACT = False
     DATASET_SIZE = 1024
     DATASET_SORT = "desc"
-    QUANT_BATCH_SIZE = 4
-    CALIB_NOISE_MODE = "unseen"
-    CALIB_NOISE_PERCENT = 0.10
+    QUANT_BATCH_SIZE = 1
 
     def test_omni(self):
         self.quant_lm_eval()
