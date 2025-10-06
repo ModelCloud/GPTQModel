@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import threading
 import time
-import gc
 from contextlib import nullcontext
 from typing import Dict, List, Optional
 
@@ -48,7 +47,7 @@ from ..utils.looper_helpers import (
 )
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
-from ..utils.torch import (CPU, META, torch_sync)
+from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync)
 from .. import DEVICE_THREAD_POOL
 from .awq_processor import AWQProcessor
 from .qqq_processor import QQQProcessor
@@ -788,7 +787,7 @@ class ModuleLooper():
                     # Drain any background work so the forward spike does not race pooled tasks.
                     # DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
-                    gc.collect(2)
+                    timed_gc_collect(2)
 
                     forward_outputs = self._run_forward_batches(
                         module=module,
@@ -895,7 +894,7 @@ class ModuleLooper():
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
                     # DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
-                    gc.collect(2)
+                    timed_gc_collect(2)
 
                     layer_outputs = self._run_forward_batches(
                         module=module,
