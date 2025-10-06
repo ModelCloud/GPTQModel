@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
+import gc
 from contextlib import nullcontext
 from typing import Dict, List, Optional
 
@@ -786,6 +787,9 @@ class ModuleLooper():
                     quant_modules_pb.title(forward_msg).draw()
                     # Drain any background work so the forward spike does not race pooled tasks.
                     DEVICE_THREAD_POOL.wait()
+                    # try to cleanup recent objects before forward
+                    gc.collect(0)
+
                     forward_outputs = self._run_forward_batches(
                         module=module,
                         processor=processor,
@@ -890,6 +894,9 @@ class ModuleLooper():
                     quant_modules_pb.title(replay_msg).draw()
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
                     DEVICE_THREAD_POOL.wait()
+                    # try to cleanup recent objects before forward
+                    gc.collect(0)
+
                     layer_outputs = self._run_forward_batches(
                         module=module,
                         processor=processor,
