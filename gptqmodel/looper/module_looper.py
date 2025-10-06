@@ -788,7 +788,7 @@ class ModuleLooper():
                     # Drain any background work so the forward spike does not race pooled tasks.
                     # DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
-                    gc.collect(1)
+                    gc.collect(2)
 
                     forward_outputs = self._run_forward_batches(
                         module=module,
@@ -895,7 +895,7 @@ class ModuleLooper():
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
                     # DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
-                    gc.collect(1)
+                    gc.collect(2)
 
                     layer_outputs = self._run_forward_batches(
                         module=module,
