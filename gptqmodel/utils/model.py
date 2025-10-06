@@ -590,20 +590,20 @@ def convert_gptq_v1_to_v2_format(
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
-    with tctl.threadpool_limits(limits=1):
-        t = time.time()
-        log.info(
-            f"Format: Converting `{FORMAT_FIELD_CHECKPOINT}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
+    # with tctl.threadpool_limits(limits=1):
+    t = time.time()
+    log.info(
+        f"Format: Converting `{FORMAT_FIELD_CHECKPOINT}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
 
-        for _, submodule in model.named_modules():
-            # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
-            # additions here do not overflow.
-            # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
-            # overflow ~<=13% based on testing
-            if isinstance(submodule, qlinear_kernel):
-                convert_gptq_v1_to_v2_format_module(module=submodule, bits=cfg.bits, pack_dtype=cfg.pack_dtype)
+    for _, submodule in model.named_modules():
+        # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
+        # additions here do not overflow.
+        # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
+        # overflow ~<=13% based on testing
+        if isinstance(submodule, qlinear_kernel):
+            convert_gptq_v1_to_v2_format_module(module=submodule, bits=cfg.bits, pack_dtype=cfg.pack_dtype)
 
-        log.info(f"Format: Conversion complete: {time.time() - t}s")
+        #log.info(f"Format: Conversion complete: {time.time() - t}s")
 
     return model
 
@@ -665,11 +665,11 @@ def convert_gptq_v2_to_v1_format(
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
-    with tctl.threadpool_limits(limits=1):
-        for _, submodule in model.named_modules():
-            # sym=False has underflow probability of ~<=13% during testing. No underflow possible for sym=True.
-            if isinstance(submodule, qlinear_kernel):
-                convert_gptq_v2_to_v1_format_module(module=submodule, quantize_config=quantize_config)
+    # with tctl.threadpool_limits(limits=1):
+    for _, submodule in model.named_modules():
+        # sym=False has underflow probability of ~<=13% during testing. No underflow possible for sym=True.
+        if isinstance(submodule, qlinear_kernel):
+            convert_gptq_v2_to_v1_format_module(module=submodule, quantize_config=quantize_config)
 
     return model
 
@@ -688,9 +688,9 @@ def pack_module(
     quant_result: Optional[Dict[str, Any]] = None,
 ):
     # Limit pack() thread usage to avoid auto-parallizataion regression
-    with ctx(tctl.threadpool_limits(limits=1), lock):
-        layer = layers[name]
-        module = qModules[name]
+    # with ctx(tctl.threadpool_limits(limits=1), lock):
+    layer = layers[name]
+    module = qModules[name]
 
     assert get_device(module) == CPU
     assert get_device(layer) == CPU

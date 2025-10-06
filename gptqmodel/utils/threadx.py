@@ -12,7 +12,6 @@ import time
 from concurrent.futures import Future
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
-import threadpoolctl as tctl
 import torch
 
 from .. import DEBUG_ON
@@ -426,14 +425,14 @@ class _SyncWorker:
             )
             use_inference = self._inference_mode if override_inference is None else bool(override_inference)
             with ctx(self.rwlock.reader(), _device_ctx(self.device)):
-                with tctl.threadpool_limits(limits=1):
-                    inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
-                    with inference_ctx:
-                        if stream is not None and self.device.type == "cuda":
-                            with torch.cuda.stream(stream):
-                                result = fn(*args, **kwargs)
-                        else:
+                # with tctl.threadpool_limits(limits=1):
+                inference_ctx = torch.inference_mode() if use_inference else contextlib.nullcontext()
+                with inference_ctx:
+                    if stream is not None and self.device.type == "cuda":
+                        with torch.cuda.stream(stream):
                             result = fn(*args, **kwargs)
+                    else:
+                        result = fn(*args, **kwargs)
             self._on_task_finished(self.key)
             if not fut.cancelled():
                 fut.set_result(result)
