@@ -117,8 +117,8 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
 
 
 def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
-    with _OFFLOAD_LOCK:
-        _offload_to_disk_impl(module=module, model=model, disk_path=disk_path)
+    #with _OFFLOAD_LOCK:
+    _offload_to_disk_impl(module=module, model=model, disk_path=disk_path)
 
 
 def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):

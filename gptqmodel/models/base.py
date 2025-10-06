@@ -1308,18 +1308,6 @@ class BaseQModel(nn.Module):
         # print("DEBUG AWQ NODES:", format_nodes(nodes))
         return nodes
 
-    def _wait_for_turtle_ready(self, timeout: Optional[float] = None) -> None:
-        if self.turtle_model is None:
-            return
-
-        # Turtle reloads now run synchronously, so there is never background work to wait on.
-
-    def _ensure_turtle_ready(self) -> None:
-        if self.turtle_model is None:
-            return
-
-        # Synchronous reloads guarantee the turtle model is ready immediately.
-
     def _clone_model_init_kwargs(self, source: PreTrainedModel) -> Dict[str, Any]:
         kwargs = getattr(source, "_model_init_kwargs", {}) or {}
         if isinstance(kwargs, dict):
@@ -1352,9 +1340,6 @@ class BaseQModel(nn.Module):
         with self._turtle_lock:
             self.turtle_model = new_model
 
-    def wait_for_turtle_reload(self) -> None:
-        self._ensure_turtle_ready()
-
     # transfer actually materizlied module from turtle (real) to shell
     def shell_module_materialize(
             self,
@@ -1362,7 +1347,6 @@ class BaseQModel(nn.Module):
             device: torch.device,
             non_blocking: bool = False,
     ) -> torch.nn.Module:
-        self._ensure_turtle_ready()
         with self._turtle_lock:
             turtle_model = self.turtle_model
 

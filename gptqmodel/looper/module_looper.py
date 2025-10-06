@@ -478,9 +478,6 @@ class ModuleLooper():
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device
 
-        # make sure turtle is ready for lias
-        self.gptq_model.wait_for_turtle_reload()
-
         # TODO HookLinear add register_forward_pre_hook()
         def store_input_hook(module, args, kwargs):
             # Positional arguments.
@@ -679,8 +676,6 @@ class ModuleLooper():
                 module = layers[layer_index]
 
             quant_modules_pb.title(layer_title).subtitle("").draw()
-
-            self.gptq_model.wait_for_turtle_reload()
 
             if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
                 # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
@@ -963,27 +958,48 @@ class ModuleLooper():
 
                         # Disk offload (lifecycle TODO note preserved)
                         if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
-                            offload_to_disk(
-                                model=self.gptq_model.model,
-                                module=self.gptq_model.model.get_submodule(module.full_name),
-                                disk_path=self.gptq_model.quantize_config.offload_to_disk_path,
-                            )
+                            quant_config = getattr(self.gptq_model, "quantize_config", None)
+                            if quant_config and getattr(quant_config, "offload_to_disk", False):
+                                offload_path = getattr(quant_config, "offload_to_disk_path", None)
+                                if offload_path:
+                                    module_full_name = getattr(module, "full_name", None)
+                                    target_module = (
+                                        self.gptq_model.model.get_submodule(module_full_name)
+                                        if module_full_name
+                                        else module
+                                    )
+                                    offload_to_disk(
+                                        model=self.gptq_model.model,
+                                        module=target_module,
+                                        disk_path=offload_path,
+                                    )
+                                else:
+                                    log.warning(
+                                        "Skipping disk offload for %s: no offload path configured",
+                                        module_label,
+                                    )
 
                     for index, (process, module, module_label, target_dev) in enumerate(finalize_tasks, start=1):
-                        finalize_futures.append(
-                            DEVICE_THREAD_POOL.submit_serial(
-                                target_dev,
-                                _finalize_on_worker,
-                                process,
-                                module,
-                                index,
-                                finalize_count,
-                                module_label,
-                            )
+                        future = DEVICE_THREAD_POOL.submit_serial(
+                            target_dev,
+                            _finalize_on_worker,
+                            process,
+                            module,
+                            index,
+                            finalize_count,
+                            module_label,
                         )
+                        finalize_futures.append((future, index, module_label, process))
 
-                    for fut in finalize_futures:
-                        fut.result()
+                    for future, idx, module_label, process in finalize_futures:
+                        future.result()
+                        log.info(
+                            "Finalized module %s/%s via %s: %s",
+                            idx,
+                            finalize_count,
+                            process.name(),
+                            module_label,
+                        )
 
                     if finalize_count:
                         quant_modules_pb.subtitle("").draw()
@@ -991,8 +1007,6 @@ class ModuleLooper():
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained
         DEVICE_THREAD_POOL.wait()  # same as wait('all')
-
-        self.gptq_model.wait_for_turtle_reload()
 
         # paranoid safety check
         # torch_sync()
