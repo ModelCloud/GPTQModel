@@ -950,10 +950,6 @@ class ModuleLooper():
 
                     @torch.inference_mode()
                     def _finalize_on_worker(process, module, idx, total, module_label):
-                        pb.subtitle(
-                            f"{process.name()}: Finalizing {idx}/{total} {module_label}"
-                        ).draw()
-
                         process.submodule_finalize(module, self.gptq_model)
 
                         # Disk offload (lifecycle TODO note preserved)
@@ -979,6 +975,10 @@ class ModuleLooper():
                                         module_label,
                                     )
 
+                        pb.subtitle(
+                            f"{process.name()}: Finalized {idx}/{total} {module_label}"
+                        ).draw()
+
                     for index, (process, module, module_label, target_dev) in enumerate(finalize_tasks, start=1):
                         future = DEVICE_THREAD_POOL.submit(
                             target_dev,
@@ -991,14 +991,14 @@ class ModuleLooper():
                         )
                         finalize_futures.append((future, index, module_label, process))
 
-                    for future, idx, module_label, process in finalize_futures:
-                        future.result()
-                        pb.subtitle(
-                            f"{process.name()}: Finalized {idx}/{finalize_count} {module_label}"
-                        ).draw()
+                    # for future, idx, module_label, process in finalize_futures:
+                    #     future.result()
+                    #     pb.subtitle(
+                    #         f"{process.name()}: Finalized {idx}/{finalize_count} {module_label}"
+                    #     ).draw()
 
-                    if finalize_count:
-                        pb.subtitle("").draw()
+                    # if finalize_count:
+                    #     pb.subtitle("").draw()
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained
