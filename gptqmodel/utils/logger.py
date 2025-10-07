@@ -32,4 +32,4 @@ def log_time_block(
         yield
     finally:
         duration = time.perf_counter() - start
-        logger.info(f"[time] {label} took {duration:.3f}s")
+        #logger.info(f"[time] {label} took {duration:.3f}s")

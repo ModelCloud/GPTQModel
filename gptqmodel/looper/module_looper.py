@@ -1256,9 +1256,9 @@ class ModuleLooper():
                                         module_label,
                                     )
 
-                        pb.subtitle(
-                            f"{process.name()}: layer:{layer_idx} Finalized {idx}/{total} {module_label}"
-                        ).draw()
+                        # pb.subtitle(
+                        #     f"{process.name()}: layer:{layer_idx} Finalized {idx}/{total} {module_label}"
+                        # ).draw()
 
                     for index, (process, module, module_label, target_dev, layer_idx) in enumerate(finalize_tasks, start=1):
                         future = DEVICE_THREAD_POOL.submit(
