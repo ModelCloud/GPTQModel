@@ -563,6 +563,7 @@ class PackableQuantLinear(BaseQuantLinear):
             shifts_pf64 = (t.arange(pack_factor, dtype=t.int64) * bits).view(1, pack_factor, 1)  # [1,pf,1]
 
         # ---------- pack helpers (int64 shifts -> mask -> int32) ----------
+        @t.inference_mode()
         def _pack_rows_2_4_8(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
             # int32_blk_32xN: [32, N]
             r64 = int32_blk_32xN.to(t.int64)  # [32,N]
@@ -571,6 +572,7 @@ class PackableQuantLinear(BaseQuantLinear):
             packed64 = (R << shifts_pf64).sum(dim=1, dtype=t.int64)  # [bits,N]
             dst[dst_rows_base:dst_rows_base + bits] = ((packed64 & MASK32).to(t.int32))
 
+        @t.inference_mode()
         def _pack_rows_3(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
             # Layout: 32 inputs -> 3 output rows with pattern 10 | 1 | 10 | 1 | 10 (=> 32 scalars * 3 bits = 96 bits)
             x = int32_blk_32xN.to(t.int64)  # [32,N]
@@ -627,7 +629,8 @@ class PackableQuantLinear(BaseQuantLinear):
         ranges = [(i0, min(i0 + block_in, in_features)) for i0 in starts]
         total_blocks = len(ranges)
 
-        workers_eff = max(1, min(workers, total_blocks))
+        # TODO FIX ME...threads safety issue with threaded block work
+        workers_eff = 1 # max(1, min(workers, total_blocks))
         if workers_eff == 1:
             for i0, i1 in ranges:
                 _process_block(i0, i1)
@@ -702,12 +705,13 @@ class PackableQuantLinear(BaseQuantLinear):
         MASK32 = (1 << 32) - 1
         mask_tensor = t.tensor(MASK32, dtype=t.int64, device=target_device)
 
-        weight = linear.weight.detach()
+        weight = linear.weight.detach().to(device=target_device, copy=True)
+        # weight = linear.weight.detach()
         if isinstance(linear, _ConvNd):
             weight = weight.flatten(1)
         if isinstance(linear, transformers.pytorch_utils.Conv1D):
             weight = weight.T
-        weight = weight.to(device=target_device, copy=True)
+        # weight = weight.to(device=target_device, copy=True)
         out_features, in_features = weight.shape
 
         if g_idx is None:
@@ -762,6 +766,7 @@ class PackableQuantLinear(BaseQuantLinear):
 
         range10 = t.arange(10, dtype=t.int64, device=target_device).view(-1, 1)
 
+        @t.inference_mode()
         def _pack_rows_2_4_8(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
             r64 = int32_blk_32xN.to(t.int64)
             reshaped = r64.view(bits, pack_factor, -1)
@@ -770,6 +775,7 @@ class PackableQuantLinear(BaseQuantLinear):
                 (packed64 & mask_tensor).to(self.pack_dtype)
             )
 
+        @t.inference_mode()
         def _pack_rows_3_values(int32_blk_32xN: t.Tensor) -> t.Tensor:
             x = int32_blk_32xN.to(t.int64)
             A = ((x[0:10] << (range10 * 3)).sum(dim=0, dtype=t.int64)) & mask_tensor

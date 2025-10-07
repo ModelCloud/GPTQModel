@@ -6,6 +6,7 @@
 import contextlib
 import os
 import time
+import types
 from typing import Callable, List, Tuple
 from unittest import mock
 
@@ -133,3 +134,38 @@ def test_cpu_thread_pinning_benchmark_vs_unpinned():
         f"Pinned duration: {pinned_duration:.4f}s (affinity {sorted(pinned_affinity)}); "
         f"Unpinned duration: {unpinned_duration:.4f}s (affinity {sorted(unpinned_affinity)})"
     )
+
+
+def test_plan_worker_affinity_skips_accelerators_when_not_pinned():
+    pool = DeviceThreadPool.__new__(DeviceThreadPool)
+    pool._resolve_workers_for_device = types.MethodType(lambda self, dev, table: 1, pool)
+
+    def _fake_key(self, dev):
+        suffix = f":{dev.index}" if dev.index is not None else ""
+        return f"{dev.type}{suffix}"
+
+    pool._key = types.MethodType(_fake_key, pool)
+
+    cuda_device = torch.device("cuda", 0)
+
+    plan_disabled = DeviceThreadPool._plan_worker_affinity(
+        pool,
+        devices=[cuda_device],
+        worker_table={},
+        pin_cpu_workers=False,
+        pin_accelerator_workers=False,
+    )
+    assert plan_disabled == {}
+
+    plan_enabled = DeviceThreadPool._plan_worker_affinity(
+        pool,
+        devices=[cuda_device],
+        worker_table={},
+        pin_cpu_workers=False,
+        pin_accelerator_workers=True,
+    )
+
+    key = pool._key(cuda_device)
+    assert (key, 0) in plan_enabled
+    assigned_core = plan_enabled[(key, 0)]
+    assert assigned_core is None or isinstance(assigned_core, int)
