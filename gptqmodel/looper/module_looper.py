@@ -36,7 +36,7 @@ from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
 from ..utils.disk import estimate_disk_io_speed
-from ..utils.logger import setup_logger
+from ..utils.logger import setup_logger, log_time_block
 from ..utils.looper_helpers import (
     clone_module_for_devices,
     device_ctx,
@@ -943,9 +943,9 @@ class ModuleLooper():
                     need_outputs = not processor.fwd_after_process
                     reuse_kv = bool(getattr(module, "reuse_kv", False))
                     forward_msg = (
-                        "Forward start "
-                        f"(layer=`{layer_descriptor}`, subset={index + 1}/{subset_total}, "
-                        f"batches={batch_count}, rows={forward_total_rows})"
+                        "Forward: "
+                        f"Layer=`{layer_descriptor}`, subset={index + 1}/{subset_total}, "
+                        f"batches={batch_count}"
                     )
                     forward_pb = (
                         log.pb(range(forward_total_rows))
@@ -953,12 +953,12 @@ class ModuleLooper():
                            .set(show_left_steps=False)
                     )
                     forward_pb.title(forward_msg).subtitle(
-                        f"Forward rows 0/{forward_total_rows}"
+                        f"Row 0/{forward_total_rows}"
                     ).draw()
                     # Drain any background work so the forward spike does not race pooled tasks.
                     # DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
-                    timed_gc_collect(2)
+                    #timed_gc_collect(1)
 
                     try:
                         forward_outputs = self._run_forward_batches(
@@ -1012,6 +1012,9 @@ class ModuleLooper():
                         if not fail_safe:
                             for name in moe_skip_modules:
                                 subset.pop(name)
+                                task_map = getattr(processor, "tasks", None)
+                                if task_map is not None:
+                                    task_map.pop(name, None)
 
                     # ---- Start Process Hook (via DeviceThreadPool) ----
                     quant_target_devices: Dict[str, torch.device] = {}
@@ -1035,7 +1038,22 @@ class ModuleLooper():
                     futures = []
 
                     @torch.inference_mode()
-                    def _process_on_worker(proc: LoopProcessor, nm: NamedModule):
+                    def _process_on_worker(
+                        proc: LoopProcessor,
+                        nm: NamedModule,
+                        expected_device: torch.device,
+                    ):
+                        module_ref = nm.module if isinstance(nm, NamedModule) else nm
+                        module_weight = getattr(module_ref, "weight", None)
+                        if module_weight is not None and expected_device is not None:
+                            target_device = expected_device if isinstance(expected_device, torch.device) else torch.device(expected_device)
+                            actual_device = get_device(module_weight)
+                            module_label = getattr(nm, "full_name", getattr(nm, "name", repr(nm)))
+                            assert actual_device == target_device, (
+                                f"Device mismatch for '{module_label}' process task: "
+                                f"module weight on {actual_device}, thread target {target_device}."
+                            )
+
                         # Run processor.process for this NamedModule
                         proc.process(module=nm)
                         return nm.name, nm
@@ -1043,7 +1061,7 @@ class ModuleLooper():
                     for name, m in subset.items():
                         tgt_dev = quant_target_devices.get(name, cur_layer_device)
                         futures.append(
-                            DEVICE_THREAD_POOL.submit(tgt_dev, _process_on_worker, processor, m)
+                            DEVICE_THREAD_POOL.submit(tgt_dev, _process_on_worker, processor, m, tgt_dev)
                         )
 
                     for fut in futures:
@@ -1079,12 +1097,12 @@ class ModuleLooper():
                            .set(show_left_steps=False)
                     )
                     replay_pb.title(replay_msg).subtitle(
-                        f"Forward replay rows 0/{replay_total_rows}"
+                        f"Forward replay Row 0/{replay_total_rows}"
                     ).draw()
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
                     # DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
-                    timed_gc_collect(2)
+                    #timed_gc_collect(1)
 
                     try:
                         layer_outputs = self._run_forward_batches(
@@ -1119,6 +1137,16 @@ class ModuleLooper():
                     else:
                         self.gptq_model.post_quantize(module)
 
+                    for finalized in processed_subset.values():
+                        if isinstance(finalized, NamedModule):
+                            setattr(finalized, "target_device", CPU)
+                            inner_module = getattr(finalized, "module", None)
+                        else:
+                            inner_module = finalized
+
+                        if inner_module is not None and hasattr(inner_module, "target_device"):
+                            setattr(inner_module, "target_device", CPU)
+
                 if processor.fwd_after_process:
                     processor.clear_cache_data()
                     processor.receive_layer_inputs(layer_outputs)
@@ -1134,32 +1162,37 @@ class ModuleLooper():
 
                     for reverse_p in reversed(self.processors):
                         for module in processed_subset.values():
-                            target_dev = get_device_new(module, recursive=True, assert_mode=True, expected="cpu")
+                            actual_module = module.module if isinstance(module, NamedModule) else module
+
+                            get_device_new(
+                                actual_module,
+                                recursive=True,
+                                assert_mode=True,
+                                expected=CPU,
+                            )
+                            with self._quant_device_lock:
+                                key = getattr(module, "full_name", getattr(module, "name", None))
+                                if key is not None:
+                                    self._module_device_map[key] = CPU
+
+                            target_dev = CPU
                             module_label = getattr(module, "full_name", getattr(module, "name", ""))
                             layer_idx = getattr(module, "layer_index", None)
                             finalize_tasks.append((reverse_p, module, module_label, target_dev, layer_idx))
 
                     finalize_count = len(finalize_tasks)
                     finalize_futures = []
-                    finalize_pb = None
-
-                    if finalize_count:
-                        pb.subtitle(
-                            f"Finalizing submodules ({finalize_count})"
-                        ).draw()
-
-                        finalize_pb = (
-                            log.pb(range(finalize_count))
-                               .manual()
-                               .set(show_left_steps=False)
-                               .title("Submodule finalization")
-                               .subtitle("")
-                        )
-                        finalize_pb.draw()
+                    finalize_pb = log.pb(range(finalize_count)).manual().set(show_left_steps=False)
 
                     @torch.inference_mode()
                     def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
-                        process.submodule_finalize(module, self.gptq_model)
+                        resolved_label = module_label or getattr(module, "full_name", getattr(module, "name", ""))
+                        with log_time_block(
+                            "submodule_finalize",
+                            logger=log,
+                            module_name=resolved_label,
+                        ):
+                            process.submodule_finalize(module, self.gptq_model)
 
                         # Disk offload (lifecycle TODO note preserved)
                         if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
@@ -1173,20 +1206,25 @@ class ModuleLooper():
                                         if module_full_name
                                         else module
                                     )
-                                    offload_to_disk(
-                                        model=self.gptq_model.model,
-                                        module=target_module,
-                                        disk_path=offload_path,
-                                    )
+                                    with log_time_block(
+                                        "disk_offload",
+                                        logger=log,
+                                        module_name=resolved_label,
+                                    ):
+                                        offload_to_disk(
+                                            model=self.gptq_model.model,
+                                            module=target_module,
+                                            disk_path=offload_path,
+                                        )
                                 else:
                                     log.warning(
                                         "Skipping disk offload for %s: no offload path configured",
                                         module_label,
                                     )
 
-                        pb.subtitle(
-                            f"{process.name()}: layer:{layer_idx} Finalized {idx}/{total} {module_label}"
-                        ).draw()
+                        # pb.subtitle(
+                        #     f"{process.name()}: layer:{layer_idx} Finalized {idx}/{total} {module_label}"
+                        # ).draw()
 
                     for index, (process, module, module_label, target_dev, layer_idx) in enumerate(finalize_tasks, start=1):
                         future = DEVICE_THREAD_POOL.submit(
@@ -1201,21 +1239,30 @@ class ModuleLooper():
                         )
                         finalize_futures.append((future, index, module_label, process, layer_idx))
 
-                    try:
-                        for future, idx, module_label, process, layer_idx in finalize_futures:
-                            future.result()
-                            if finalize_pb is not None:
-                                layer_label = f"layer {layer_idx}" if layer_idx is not None else "layer ?"
+                    finalize_futures_snapshot = list(finalize_futures)
+
+                    def _drain_finalize_futures(futures, finalize_pb_local, finalize_count_local, progress_bar):
+                        try:
+                            for future, idx, module_label, process, layer_idx in futures:
+                                future.result()
+
+                                layer_label = f"Layer {layer_idx}" if layer_idx is not None else "layer ?"
                                 display_module = module_label or "<unnamed>"
-                                subtitle = f"{process.name()}: {layer_label} -> {display_module}"
-                                finalize_pb.title(
-                                    f"Submodule finalization {idx}/{finalize_count}"
+                                subtitle = f"{process.name()}: {display_module}"
+                                finalize_pb_local.title(
+                                    f"{layer_label} Finalize {idx}/{finalize_count_local}"
                                 ).subtitle(subtitle).next().draw()
-                    finally:
-                        if finalize_pb is not None:
-                            finalize_pb.close()
-                        if finalize_count:
-                            pb.subtitle("").draw()
+                        finally:
+                            finalize_pb_local.close()
+
+                    if finalize_futures_snapshot:
+                        # Drain finalize futures asynchronously so the main loop can continue scheduling work.
+                        threading.Thread(
+                            target=_drain_finalize_futures,
+                            args=(finalize_futures_snapshot, finalize_pb, finalize_count, pb),
+                            name="SubmoduleFinalizeWatcher",
+                            daemon=True,
+                        ).start()
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained
@@ -1227,18 +1274,17 @@ class ModuleLooper():
 
         total_log = {}
         reversed_processors = list(reversed(self.processors))
-        process_finalize_pb = None
+
         process_finalize_total = len(reversed_processors)
 
-        if process_finalize_total:
-            process_finalize_pb = (
+        process_finalize_pb = (
                 log.pb(range(process_finalize_total))
                    .manual()
                    .set(show_left_steps=False)
                    .title("Processor finalization")
                    .subtitle("")
-            )
-            process_finalize_pb.draw()
+        )
+        process_finalize_pb.draw()
 
         try:
             for index, reverse_p in enumerate(reversed_processors, start=1):
@@ -1262,13 +1308,11 @@ class ModuleLooper():
 
                 reverse_p.finalize(model=self.gptq_model, **kwargs)
 
-                if process_finalize_pb is not None:
-                    process_finalize_pb.title(
-                        f"Processor finalization {index}/{process_finalize_total}"
-                    ).subtitle(reverse_p.name()).next().draw()
+                process_finalize_pb.title(
+                    f"Processor finalization {index}/{process_finalize_total}"
+                ).subtitle(reverse_p.name()).next().draw()
         finally:
-            if process_finalize_pb is not None:
-                process_finalize_pb.close()
+            process_finalize_pb.close()
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
@@ -1312,4 +1356,7 @@ class ModuleLooper():
         if not is_awq_quant:
             for name in skipped_modules:
                 subset.pop(name)
+                task_map = getattr(processor, "tasks", None)
+                if task_map is not None:
+                    task_map.pop(name, None)
         return subset

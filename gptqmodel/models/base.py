@@ -797,6 +797,14 @@ class BaseQModel(nn.Module):
             batch_size = 1
             log.warn("Batch quantization is not supported for this model. Setting batch_size to 1.")
 
+        requested_backend = backend
+        if isinstance(requested_backend, str):
+            requested_backend = BACKEND(requested_backend.lower())
+
+        preferred_backend = requested_backend
+        if preferred_backend in (None, BACKEND.AUTO):
+            preferred_backend = BACKEND.TORCH
+
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
             bits=self.quantize_config.bits,
@@ -804,7 +812,7 @@ class BaseQModel(nn.Module):
             group_size=self.quantize_config.group_size,
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
-            backend=backend,
+            backend=preferred_backend,
             format=self.quantize_config.format,
             quant_method=self.quantize_config.quant_method,
             device=DEVICE(self.quantize_config.device),
@@ -859,7 +867,7 @@ class BaseQModel(nn.Module):
                 device=self.quantize_config.device,
                 pack_dtype=self.quantize_config.pack_dtype,
                 multi_select=False,
-                backend=backend,
+                backend=preferred_backend,
                 format=self.quantize_config.format,
                 quant_method=self.quantize_config.quant_method,
             )

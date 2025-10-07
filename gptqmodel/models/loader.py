@@ -200,7 +200,6 @@ def ModelLoader(cls):
         from ..utils.hf import build_shell_model
 
         if quantize_config.offload_to_disk:
-            print("shell model-----------")
             model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)

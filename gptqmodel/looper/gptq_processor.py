@@ -11,7 +11,7 @@ from typing import Callable, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
@@ -20,7 +20,8 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
 from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import METHOD, QuantizeConfig
 from ..utils.importer import select_quant_linear
-from ..utils.logger import setup_logger
+from ..utils.logger import setup_logger, log_time_block
+from ..utils.device import get_device
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 from ..utils.torch import HAS_CUDA, tf32_disable_guard, torch_streamCtx, torch_sync
 
@@ -119,6 +120,51 @@ class GPTQProcessor(LoopProcessor):
         with self.lock:
             g = self.tasks[module.name]
 
+        expected_device = getattr(module, "target_device", None)
+        if expected_device is None:
+            expected_device = getattr(module.module, "target_device", None)
+        if expected_device is None:
+            expected_device = get_device(module.module)
+
+        if expected_device is not None:
+            expected_device = torch.device(expected_device)
+
+            module_weight = getattr(module.module, "weight", None)
+            if module_weight is not None:
+                assert module_weight.device == expected_device, (
+                    f"Module '{module.full_name}' weight device {module_weight.device} does not match "
+                    f"assigned target device {expected_device}."
+                )
+                assert module_weight.data.device == expected_device, (
+                    f"Module '{module.full_name}' weight.data device {module_weight.data.device} does not match "
+                    f"assigned target device {expected_device}."
+                )
+
+            g_module = getattr(g, "module", None)
+            g_weight = getattr(g_module, "weight", None) if g_module is not None else None
+            if g_weight is not None:
+                assert g_weight.device == expected_device, (
+                    f"GPTQ task for module '{module.full_name}' expected device {expected_device}, "
+                    f"but found weight on {g_weight.device}."
+                )
+                assert g_weight.data.device == expected_device, (
+                    f"GPTQ task for module '{module.full_name}' weight.data on {g_weight.data.device} "
+                    f"does not match target device {expected_device}."
+                )
+
+            g_h = getattr(g, "H", None)
+            if g_h is not None:
+                assert torch.device(g_h.device) == expected_device, (
+                    f"GPTQ Hessian tensor for '{module.full_name}' lives on {g_h.device}, expected {expected_device}."
+                )
+
+            if expected_device.type == "cuda" and torch.cuda.is_available():
+                current_cuda_device = torch.device("cuda", torch.cuda.current_device())
+                assert current_cuda_device == expected_device, (
+                    f"CUDA thread context {current_cuda_device} does not match expected device {expected_device} "
+                    f"while processing '{module.full_name}'."
+                )
+
         with tf32_disable_guard():
             wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 
@@ -161,6 +207,8 @@ class GPTQProcessor(LoopProcessor):
             PROCESS_LOG_NAME:  self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
+            MODULE_FEATURE_COLUMN: self.module_feature_summary(module),
+            DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(module),
             QUANT_LOG_LOSS: f"{avg_loss:.10f}",
             QUANT_LOG_NSAMPLES: f"{nsamples}",
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
@@ -217,37 +265,52 @@ class GPTQProcessor(LoopProcessor):
         assert q_g_idx.device == CPU
 
         layers = find_modules(model.model)
+        module_label = getattr(module, "full_name", getattr(module, "name", ""))
 
         # replace module with quantized module
-        create_quant_module(
-            name=module.full_name,
-            linear_cls=model.qlinear_kernel,
-            bits=self.qcfg.bits,
-            desc_act=self.qcfg.desc_act,
-            dynamic=self.qcfg.dynamic,
-            group_size=self.qcfg.group_size,
-            module=model.model,
-            submodule=module,
-            sym=self.qcfg.sym,
-            device=self.qcfg.device,
-            lm_head_name=model.lm_head,
-            pack_dtype=self.qcfg.pack_dtype,
-            register_buffers=False,
-        )
+        with log_time_block(
+            "create_quant_module",
+            logger=log,
+            module_name=module_label,
+        ):
+            create_quant_module(
+                name=module.full_name,
+                linear_cls=model.qlinear_kernel,
+                bits=self.qcfg.bits,
+                desc_act=self.qcfg.desc_act,
+                dynamic=self.qcfg.dynamic,
+                group_size=self.qcfg.group_size,
+                module=model.model,
+                submodule=module,
+                sym=self.qcfg.sym,
+                device=self.qcfg.device,
+                lm_head_name=model.lm_head,
+                pack_dtype=self.qcfg.pack_dtype,
+                register_buffers=False,
+            )
 
         # pack module
-        qModules = {name: submodule for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items() if name == module.full_name}
-        pack_module(
-            name=module.full_name,
-            qModules=qModules,
-            q_scales=q_scales,
-            q_zeros=q_zeros,
-            q_g_idx=q_g_idx,
-            layers=layers,
-            quant_linear_cls=model.qlinear_kernel,
-            lock=self.lock,
-            quantize_config=self.qcfg,
-        )
+        qModules = {
+            name: submodule
+            for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items()
+            if name == module.full_name
+        }
+        with log_time_block(
+            "pack",
+            logger=log,
+            module_name=module_label,
+        ):
+            pack_module(
+                name=module.full_name,
+                qModules=qModules,
+                q_scales=q_scales,
+                q_zeros=q_zeros,
+                q_g_idx=q_g_idx,
+                layers=layers,
+                quant_linear_cls=model.qlinear_kernel,
+                lock=self.lock,
+                quantize_config=self.qcfg,
+            )
 
         # TODO: store module quant results in module, not global processor result
         with self.lock:

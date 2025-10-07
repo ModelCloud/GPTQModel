@@ -57,8 +57,8 @@ from .backend import BACKEND
 from .ctx import ctx
 from .device import get_device
 from .importer import select_quant_linear
-from .logger import setup_logger
-from .torch import torch_empty_cache, torch_new_stream_ctx
+from .logger import setup_logger, log_time_block
+from .torch import HAS_CUDA, torch_empty_cache, torch_new_stream_ctx
 
 
 log = setup_logger()
@@ -353,6 +353,12 @@ def create_quant_module(
         ori_layer_device = next(submodule.parameters()).device
     else:
         ori_layer_device = submodule.list_buffers()[0].device
+
+    if ori_layer_device.type != CPU.type:
+        raise AssertionError(
+            f"Expected `{name}` to reside on CPU during quant module creation, "
+            f"but found tensors on `{ori_layer_device}`."
+        )
 
     if isinstance(submodule, NamedModule):
         in_features = submodule.state.get("in_features")
@@ -706,6 +712,21 @@ def pack_module(
         assert get_device(q_g_idx) == CPU
         #q_g_idx = q_g_idx.to(CPU)
 
+    pack_impl = "original"
+    target_device = None
+    if quantize_config is not None:
+        pack_impl = getattr(quantize_config, "pack_impl", "original") or "original"
+        cfg_device = getattr(quantize_config, "device", None)
+        if isinstance(cfg_device, DEVICE):
+            target_device = cfg_device.to_torch_device()
+        elif isinstance(cfg_device, torch.device):
+            target_device = cfg_device
+        elif isinstance(cfg_device, str):
+            try:
+                target_device = torch.device(cfg_device)
+            except (RuntimeError, ValueError):
+                log.warning(f"pack_module: unable to parse target device `{cfg_device}`; defaulting to CUDA auto-select.")
+
     with lock:
         layers[name] = layer
         qModules[name] = module
@@ -714,9 +735,56 @@ def pack_module(
         if quant_linear_cls.QUANT_TYPE == "qqq":
             if q_scales_extra is not None:
                 q_scales_extra = q_scales_extra.to(CPU)
-            module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
+            with log_time_block(
+                "module.pack",
+                logger=log,
+                module_name=name,
+            ):
+                module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
         else:
-            module.pack(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
+            effective_impl = (pack_impl or "original").lower()
+
+            if effective_impl in {"cpu", "block", "pack_block"}:
+                effective_impl = "block"
+            elif effective_impl in {"original", "pack_original"}:
+                effective_impl = "original"
+            elif effective_impl == "gpu":
+                if not HAS_CUDA:
+                    log.warning("pack_module: GPU packing requested but CUDA is unavailable; falling back to original pack.")
+                    effective_impl = "original"
+                elif not hasattr(module, "pack_gpu"):
+                    log.warning("pack_module: GPU packing requested but module lacks pack_gpu; falling back to original pack.")
+                    effective_impl = "original"
+            elif effective_impl != "original":
+                log.warning(
+                    "pack_module: Unknown pack_impl `%s`; defaulting to original pack.",
+                    pack_impl,
+                )
+                effective_impl = "original"
+
+            label_map = {
+                "gpu": "module.pack_gpu",
+                "block": "module.pack_block",
+                "original": "module.pack_original",
+            }
+
+            with log_time_block(
+                label_map[effective_impl],
+                logger=log,
+                module_name=name,
+            ):
+                if effective_impl == "gpu":
+                    module.pack_gpu(
+                        linear=layer,
+                        scales=q_scales,
+                        zeros=q_zeros,
+                        g_idx=q_g_idx,
+                        device=target_device,
+                    )
+                elif effective_impl == "block":
+                    module.pack_block(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
+                else:
+                    module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 
         if (
             quantize_config is not None
@@ -724,10 +792,15 @@ def pack_module(
             and quantize_config.format == FORMAT.GPTQ
             and getattr(quant_linear_cls, "REQUIRES_FORMAT_V2", False)
         ):
-            convert_gptq_v2_to_v1_format_module(
-                module=module,
-                quantize_config=quantize_config,
-            )
+            with log_time_block(
+                "convert_v2_to_v1",
+                logger=log,
+                module_name=name,
+            ):
+                convert_gptq_v2_to_v1_format_module(
+                    module=module,
+                    quantize_config=quantize_config,
+                )
 
         # TODO: why move it back to gpu?
         # start = time.time()

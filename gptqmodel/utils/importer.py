@@ -214,7 +214,9 @@ def select_quant_linear(
                 log.info(f"skip {k} for {str(err)}")
             if validate:
                 if pack:
-                    check_pack_func = issubclass(cls, PackableQuantLinear) or (hasattr(cls, "pack") and callable(getattr(cls, "pack")))
+                    check_pack_func = issubclass(cls, PackableQuantLinear) or (
+                        hasattr(cls, "pack_block") and callable(getattr(cls, "pack_block"))
+                    )
                     if check_pack_func:
                         #if not message_logged:
                         #    logger.info(f"Auto pick kernel based on compatibility: {cls}")

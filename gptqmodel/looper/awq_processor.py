@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from torch.nn import Module
 
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
@@ -713,6 +713,8 @@ class AWQProcessor(LoopProcessor):
                 PROCESS_LOG_NAME: self.name(),
                 PROCESS_LOG_LAYER: named_module.layer_index,
                 PROCESS_LOG_MODULE: named_module.name,
+                MODULE_FEATURE_COLUMN: self.module_feature_summary(named_module),
+                DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(named_module),
                 QUANT_LOG_LOSS: f"{avg_loss:.10f}",
                 QUANT_LOG_NSAMPLES: f"{self.nsamples}",
                 # QUANT_LOG_DAMP: f"{damp_percent:.5f}",

@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import queue
+import sys
 import threading
 import time
+import traceback
 from concurrent.futures import Future
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -301,6 +304,7 @@ class _DeviceWorker:
         on_worker_exit: Callable[[str, "_DeviceWorker"], None],
         name: Optional[str] = None,
         inference_mode: bool = False,
+        cpu_core: Optional[int] = None,
     ):
         self.device = device
         self.rwlock = rwlock
@@ -313,6 +317,8 @@ class _DeviceWorker:
         self._stop = threading.Event()
 
         self._inference_mode = inference_mode
+        self._target_cpu_core = cpu_core
+        self._affinity_applied = False
         self._thread = threading.Thread(target=self._run, name=self.name, daemon=True)
         self._thread.start()
         if DEBUG_ON: log.debug(f"Spawned worker '{self.name}' for {self.key}")
@@ -342,6 +348,38 @@ class _DeviceWorker:
         if DEBUG_ON: log.debug(f"{self.name}: joining thread")
         self._thread.join()
 
+    def _apply_cpu_affinity(self) -> None:
+        if self._affinity_applied or self._target_cpu_core is None:
+            return
+        if not hasattr(os, "sched_setaffinity"):
+            log.warn(
+                "Thread pinning unsupported on this platform; %s will use OS scheduling.",
+                self.name,
+            )
+            self._affinity_applied = True
+            return
+        try:
+            os.sched_setaffinity(0, {int(self._target_cpu_core)})
+            self._affinity_applied = True
+            #if DEBUG_ON:
+            log.debug(f"{self.name}: pinned to CPU core {self._target_cpu_core}")
+        except PermissionError as exc:
+            log.warn(
+                "Thread pinning permission denied for %s on core %s (%s); falling back to OS scheduling.",
+                self.name,
+                self._target_cpu_core,
+                exc,
+            )
+            self._affinity_applied = True
+        except OSError as exc:
+            log.warn(
+                "Thread pinning failed for %s on core %s (%s); falling back to OS scheduling.",
+                self.name,
+                self._target_cpu_core,
+                exc,
+            )
+            self._affinity_applied = True
+
     def _run(self):
         """
         Main loop: pull tasks, set device context, execute, mark completion, and
@@ -351,6 +389,7 @@ class _DeviceWorker:
         Workers default to inference mode for throughput but individual tasks
         may override via `inference_mode`.
         """
+        self._apply_cpu_affinity()
         _activate_thread_device(self.device)
         while not self._stop.is_set():
             is_task, fn, args, kwargs, fut = self._q.get()
@@ -387,12 +426,26 @@ class _DeviceWorker:
                 if not fut.cancelled():
                     fut.set_exception(exc)
                 if DEBUG_ON: log.debug(f"{self.name}: task exception: {exc!r}")
+                self._abort_process(exc)
             finally:
                 self._q.task_done()
         try:
             self._on_worker_exit(self.key, self)
         finally:
             if DEBUG_ON: log.debug(f"{self.name}: exited")
+
+    def _abort_process(self, exc: BaseException) -> None:
+        """Dump the stack trace and terminate the interpreter without cleanup."""
+        try:
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+            sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            os._exit(1)
+        except Exception:
+            # Last resort if os._exit is unavailable for some reason.
+            os.system("kill -9 %d" % os.getpid())
 
 
 class _SyncWorker:
@@ -482,6 +535,8 @@ class DeviceThreadPool:
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
+        pin_cpu_workers: bool = False,
+        pin_accelerator_workers: bool = False,
     ):
         """
         Args:
@@ -495,6 +550,12 @@ class DeviceThreadPool:
                 - 'xpu:<i>': N            -> override for specific XPU index
               Unspecified devices default to 1 worker each.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
+            pin_cpu_workers: bind CPU device workers to individual CPU cores when
+                affinity APIs are available. Defaults to False so CPU tasks may
+                float across cores unless explicitly opt-in.
+            pin_accelerator_workers: bind CUDA/XPU/MPS workers to dedicated CPU
+                cores when affinity APIs are available. Defaults to False so
+                accelerator workers inherit the process CPU affinity mask.
         """
         if devices is None:
             discovered: List[torch.device] = []
@@ -549,6 +610,16 @@ class DeviceThreadPool:
 
         workers = workers or {}
 
+        # Pre-compute CPU core assignments (when opted in) so GPU/XPU workers
+        # do not collide with CPU workers. When affinity APIs are not available
+        # we silently fall back to OS scheduling.
+        affinity_plan = self._plan_worker_affinity(
+            devices,
+            workers,
+            pin_cpu_workers=pin_cpu_workers,
+            pin_accelerator_workers=pin_accelerator_workers,
+        )
+
         # Eagerly build workers, locks, inflight tracking, and counters.
         for d in devices:
             dev = _coerce_device(d)
@@ -568,7 +639,8 @@ class DeviceThreadPool:
             n_workers = self._resolve_workers_for_device(dev, workers)
             group: List[_DeviceWorker] = []
             for wid in range(int(max(1, n_workers))):
-                worker = self._spawn_worker(dev, name=f"DPWorker-{key}#{wid}")
+                cpu_core = affinity_plan.get((key, wid))
+                worker = self._spawn_worker(dev, name=f"DPWorker-{key}#{wid}", cpu_core=cpu_core)
                 group.append(worker)
             self._worker_groups[key] = group
             self._dispatch_rr[key] = 0
@@ -598,7 +670,82 @@ class DeviceThreadPool:
 
     # --------------- Worker management ---------------
 
-    def _spawn_worker(self, dev: torch.device, name: Optional[str] = None) -> _DeviceWorker:
+    def _plan_worker_affinity(
+        self,
+        devices: Iterable[torch.device],
+        worker_table: Dict[str, int],
+        *,
+        pin_cpu_workers: bool,
+        pin_accelerator_workers: bool,
+    ) -> Dict[Tuple[str, int], Optional[int]]:
+        """Return per-worker CPU core targets to minimise contention."""
+        if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
+            return {}
+
+        try:
+            available_cores = sorted(os.sched_getaffinity(0))
+        except AttributeError:
+            return {}
+        except OSError as exc:
+            log.warn(
+                "Thread pinning disabled: unable to read CPU affinity mask (%s).",
+                exc,
+            )
+            return {}
+
+        if not available_cores:
+            return {}
+
+        worker_specs: List[Tuple[str, str, int]] = []
+        for raw_dev in devices:
+            dev = _coerce_device(raw_dev)
+            if dev.type not in ("cuda", "xpu", "mps", "cpu"):
+                continue
+            if dev.type == "cpu" and not pin_cpu_workers:
+                continue
+            if dev.type in ("cuda", "xpu", "mps") and not pin_accelerator_workers:
+                continue
+            key = self._key(dev)
+            n_workers = int(max(1, self._resolve_workers_for_device(dev, worker_table)))
+            for wid in range(n_workers):
+                worker_specs.append((dev.type, key, wid))
+
+        if not worker_specs:
+            return {}
+
+        def _priority(dev_type: str) -> int:
+            if dev_type in ("cuda", "xpu"):
+                return 0
+            if dev_type == "mps":
+                return 1
+            return 2  # cpu last so it yields remaining cores
+
+        worker_specs.sort(key=lambda spec: (_priority(spec[0]), spec[1], spec[2]))
+
+        core_iter = iter(available_cores)
+        plan: Dict[Tuple[str, int], Optional[int]] = {}
+        exhaustion_logged = False
+
+        for dev_type, key, wid in worker_specs:
+            try:
+                core = next(core_iter)
+            except StopIteration:
+                core = None
+
+            if core is None:
+                if not exhaustion_logged:
+                    log.warn(
+                        "Thread pinning: insufficient CPU cores for %d workers; remaining workers will use OS scheduling.",
+                        len(worker_specs) - len(plan),
+                    )
+                    exhaustion_logged = True
+                plan[(key, wid)] = None
+            else:
+                plan[(key, wid)] = core
+
+        return plan
+
+    def _spawn_worker(self, dev: torch.device, name: Optional[str] = None, cpu_core: Optional[int] = None) -> _DeviceWorker:
         """
         Create and start a worker bound to the provided device.
         """
@@ -610,6 +757,7 @@ class DeviceThreadPool:
             on_worker_exit=self._on_worker_exit,
             name=name,
             inference_mode=self._inference_mode,
+            cpu_core=cpu_core,
         )
         return w
 
