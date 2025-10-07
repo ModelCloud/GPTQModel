@@ -16,8 +16,8 @@ DEVICE_THREAD_POOL = DeviceThreadPool(
     workers={
         "cuda:per": 4,
         "xpu:per": 1,
-        "mps": 4,
-        "cpu": 4,
+        "mps": 8,
+        "cpu": 8,
     },
     empty_cache_every_n=1024,
 )

@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
 import numpy as np
+import threadpoolctl
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
@@ -851,110 +852,111 @@ class PackableQuantLinear(BaseQuantLinear):
         del weight, scales_dev, zeros_dev, scale_zeros_dev, qweight_dev, qzeros_dev
 
     def pack_original(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
-        # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
-        # W = linear.weight.data.clone()
-        W = linear.weight.data
-        if isinstance(linear, _ConvNd):
-            W = W.flatten(1)
-        if isinstance(linear, transformers.pytorch_utils.Conv1D):
-            W = W.T
+        with threadpoolctl.threadpool_limits(1):
+            # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
+            # W = linear.weight.data.clone()
+            W = linear.weight.data
+            if isinstance(linear, _ConvNd):
+                W = W.flatten(1)
+            if isinstance(linear, transformers.pytorch_utils.Conv1D):
+                W = W.T
 
-        # TODO why clone?
-        # self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
-        self.register_buffer("g_idx", g_idx if g_idx is not None else self.g_idx )
-
-        scales = scales.T.contiguous()
-        zeros = zeros.T.contiguous()
-        scale_zeros = zeros * scales
-
-        # TODO why clone?
-        # self.scales = scales.clone().to(dtype=t.float16)
-        self.register_buffer("scales", scales.to(dtype=t.float16))
-
-        if linear.bias is not None:
             # TODO why clone?
-            # self.bias = linear.bias.clone().to(dtype=t.float16)
-            self.register_buffer("bias", linear.bias.to(dtype=t.float16))
+            # self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
+            self.register_buffer("g_idx", g_idx if g_idx is not None else self.g_idx )
 
-        int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
-        int_weight = int_weight.T.contiguous()
-        int_weight = int_weight.numpy().astype(self.pack_np_math_dtype)
+            scales = scales.T.contiguous()
+            zeros = zeros.T.contiguous()
+            scale_zeros = zeros * scales
 
-        qweight = np.zeros((int_weight.shape[0] // self.pack_dtype_bits * self.bits, int_weight.shape[1]),
-                           dtype=self.pack_np_math_dtype)
-        if self.bits in [2, 4, 8]:
-            for row in range(qweight.shape[0]):
-                for j in range(self.pack_factor):
-                    qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
-        elif self.bits == 3:
-            i = 0
-            row = 0
-            while row < qweight.shape[0]:
-                for j in range(i, i + 10):
-                    qweight[row] |= int_weight[j] << (3 * (j - i))
-                i += 10
-                qweight[row] |= int_weight[i] << 30
-                row += 1
-                qweight[row] |= (int_weight[i] >> 2) & 1
-                i += 1
-                for j in range(i, i + 10):
-                    qweight[row] |= int_weight[j] << (3 * (j - i) + 1)
-                i += 10
-                qweight[row] |= int_weight[i] << 31
-                row += 1
-                qweight[row] |= (int_weight[i] >> 1) & 0x3
-                i += 1
-                for j in range(i, i + 10):
-                    qweight[row] |= int_weight[j] << (3 * (j - i) + 2)
-                i += 10
-                row += 1
+            # TODO why clone?
+            # self.scales = scales.clone().to(dtype=t.float16)
+            self.register_buffer("scales", scales.to(dtype=t.float16))
 
-        # self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
-        self.register_buffer("qweight", t.from_numpy(qweight.astype(self.pack_np_dtype)))
+            if linear.bias is not None:
+                # TODO why clone?
+                # self.bias = linear.bias.clone().to(dtype=t.float16)
+                self.register_buffer("bias", linear.bias.to(dtype=t.float16))
 
-        zeros = zeros.numpy().astype(self.pack_np_math_dtype)
-        qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_math_dtype)
-        if self.bits in [2, 4, 8]:
-            for col in range(qzeros.shape[1]):
-                for j in range(self.pack_factor):
-                    qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
-        elif self.bits == 3:
-            i = 0
-            col = 0
-            while col < qzeros.shape[1]:
-                for j in range(i, i + 10):
-                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i))
-                i += 10
-                qzeros[:, col] |= zeros[:, i] << 30
-                col += 1
-                qzeros[:, col] |= (zeros[:, i] >> 2) & 1
-                i += 1
-                for j in range(i, i + 10):
-                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 1)
-                i += 10
-                qzeros[:, col] |= zeros[:, i] << 31
-                col += 1
-                qzeros[:, col] |= (zeros[:, i] >> 1) & 0x3
-                i += 1
-                for j in range(i, i + 10):
-                    qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
-                i += 10
-                col += 1
+            int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T).to(t.int32)
+            int_weight = int_weight.T.contiguous()
+            int_weight = int_weight.numpy().astype(self.pack_np_math_dtype)
 
-        # self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
-        self.register_buffer("qzeros", t.from_numpy(qzeros.astype(self.pack_np_dtype)))
+            qweight = np.zeros((int_weight.shape[0] // self.pack_dtype_bits * self.bits, int_weight.shape[1]),
+                               dtype=self.pack_np_math_dtype)
+            if self.bits in [2, 4, 8]:
+                for row in range(qweight.shape[0]):
+                    for j in range(self.pack_factor):
+                        qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
+            elif self.bits == 3:
+                i = 0
+                row = 0
+                while row < qweight.shape[0]:
+                    for j in range(i, i + 10):
+                        qweight[row] |= int_weight[j] << (3 * (j - i))
+                    i += 10
+                    qweight[row] |= int_weight[i] << 30
+                    row += 1
+                    qweight[row] |= (int_weight[i] >> 2) & 1
+                    i += 1
+                    for j in range(i, i + 10):
+                        qweight[row] |= int_weight[j] << (3 * (j - i) + 1)
+                    i += 10
+                    qweight[row] |= int_weight[i] << 31
+                    row += 1
+                    qweight[row] |= (int_weight[i] >> 1) & 0x3
+                    i += 1
+                    for j in range(i, i + 10):
+                        qweight[row] |= int_weight[j] << (3 * (j - i) + 2)
+                    i += 10
+                    row += 1
 
-        # assert
-        # assert isinstance(self, TorchQuantLinear), f"type: {self.__class_}"
-        # wq = linear.weight.data
-        # wq_dequantized = self.dequantize_weight().T
-        # print(f"------ WQ -----")
-        # print(wq)
-        # print(f"------ WQ Dequantized -----")
-        # print(wq_dequantized)
-        # assert t.equal(wq, wq_dequantized)
+            # self.qweight = t.from_numpy(qweight.astype(self.pack_np_dtype))
+            self.register_buffer("qweight", t.from_numpy(qweight.astype(self.pack_np_dtype)))
 
-        # print("self qw", self.qweight, self.scales, self.qzeros)
+            zeros = zeros.numpy().astype(self.pack_np_math_dtype)
+            qzeros = np.zeros((zeros.shape[0], zeros.shape[1] // self.pack_dtype_bits * self.bits), dtype=self.pack_np_math_dtype)
+            if self.bits in [2, 4, 8]:
+                for col in range(qzeros.shape[1]):
+                    for j in range(self.pack_factor):
+                        qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
+            elif self.bits == 3:
+                i = 0
+                col = 0
+                while col < qzeros.shape[1]:
+                    for j in range(i, i + 10):
+                        qzeros[:, col] |= zeros[:, j] << (3 * (j - i))
+                    i += 10
+                    qzeros[:, col] |= zeros[:, i] << 30
+                    col += 1
+                    qzeros[:, col] |= (zeros[:, i] >> 2) & 1
+                    i += 1
+                    for j in range(i, i + 10):
+                        qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 1)
+                    i += 10
+                    qzeros[:, col] |= zeros[:, i] << 31
+                    col += 1
+                    qzeros[:, col] |= (zeros[:, i] >> 1) & 0x3
+                    i += 1
+                    for j in range(i, i + 10):
+                        qzeros[:, col] |= zeros[:, j] << (3 * (j - i) + 2)
+                    i += 10
+                    col += 1
+
+            # self.qzeros = t.from_numpy(qzeros.astype(self.pack_np_dtype))
+            self.register_buffer("qzeros", t.from_numpy(qzeros.astype(self.pack_np_dtype)))
+
+            # assert
+            # assert isinstance(self, TorchQuantLinear), f"type: {self.__class_}"
+            # wq = linear.weight.data
+            # wq_dequantized = self.dequantize_weight().T
+            # print(f"------ WQ -----")
+            # print(wq)
+            # print(f"------ WQ Dequantized -----")
+            # print(wq_dequantized)
+            # assert t.equal(wq, wq_dequantized)
+
+            # print("self qw", self.qweight, self.scales, self.qzeros)
 
 class AWQuantLinear(BaseQuantLinear):
     def __init__(self,

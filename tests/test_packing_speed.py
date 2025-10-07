@@ -32,13 +32,13 @@ def gen_quant4(k: int, n: int, groupsize: int):
     """
     Generate simple symmetric 4-bit grouped quantization tensors and a Linear layer
     whose weight equals the dequantized reference. Returns:
-      original_w: [k, n] (float16)
+      original_w: [k, n] (bfloat16)
       linear: nn.Linear with weight [n, k] = ref^T
       s: scales of shape [k//groupsize, n] (if groupsize != -1) or [1, n]
     """
     bits = 4
     maxq = (1 << bits) - 1
-    w = torch.randn((k, n), dtype=torch.float16, device="cpu")
+    w = torch.randn((k, n), dtype=torch.bfloat16, device="cpu")
     original_w = w.clone()
 
     if groupsize != -1:
@@ -57,7 +57,7 @@ def gen_quant4(k: int, n: int, groupsize: int):
     q = torch.clamp(q, 0, maxq)
 
     # Dequant reference
-    ref = (q - (maxq + 1) // 2).to(torch.float16) * s
+    ref = (q - (maxq + 1) // 2).to(torch.bfloat16) * s
 
     if groupsize != -1:
         def _reshape_back(x):
@@ -69,7 +69,7 @@ def gen_quant4(k: int, n: int, groupsize: int):
     s = s.reshape((-1, n)).contiguous()
 
     # Build Linear with ref^T as weight: PyTorch Linear wants [out_features, in_features] = [n, k]
-    linear = nn.Linear(k, n, bias=False)
+    linear = nn.Linear(k, n, bias=False, dtype=torch.bfloat16, device="cpu")
     linear.weight.data = ref.t().contiguous()
 
     return original_w, linear, s
@@ -78,8 +78,8 @@ def gen_quant4(k: int, n: int, groupsize: int):
 class TestPackingSpeed(unittest.TestCase):
     # Problem size
     group_size = 128
-    k = 7168
-    n = 7168
+    k = 2048
+    n = 512
 
     # Zeros midpoint for 4-bit (unsigned storage)
     zeros = torch.full((k // group_size, n), 8, dtype=torch.int32, device="cpu").contiguous()
@@ -166,7 +166,7 @@ class TestPackingSpeed(unittest.TestCase):
             for _ in range(30):
                 self.pack(qlinearCls, backend)
         time_usage = time.time() - start
-        speed = self.k * self.k / time_usage
+        speed = (self.k * self.n) / time_usage
         print(f"{qlinearCls.__name__} [1 thread], time={time_usage:.4f}s, speed={speed:.4f}")
 
         # Allow generous tolerance to absorb CI/GIL variance
@@ -185,7 +185,7 @@ class TestPackingSpeed(unittest.TestCase):
             for _ in range(30):
                 self.pack(qlinearCls, backend)
         time_usage = time.time() - start
-        speed = self.k * self.k / time_usage
+        speed = (self.k * self.n) / time_usage
         print(f"{qlinearCls.__name__} [2 threads], time={time_usage:.4f}s, speed={speed:.4f}")
 
         # within 2.5%

@@ -29,7 +29,7 @@ log = setup_logger()
 # global level lock
 PROCESSOR_GLOBAL_LOCK = threading.Lock()
 
-MODULE_FEATURE_COLUMN = "features: in, out"
+MODULE_FEATURE_COLUMN = "feat: in, out"
 DTYPE_SIZE_COLUMN = "dtype: size"
 
 DEFAULT_LOG_COLUMNS: List[str] = [
