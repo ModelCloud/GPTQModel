@@ -715,19 +715,20 @@ class PackableQuantLinear(BaseQuantLinear):
         if g_idx.numel() != in_features:
             raise ValueError(f"g_idx length {g_idx.numel()} != in_features {in_features}")
 
-        g_idx_cpu = g_idx.to(device="cpu", dtype=t.int32, copy=False)
+        g_idx_cpu = g_idx.to(device="cpu", dtype=t.long, copy=False)
         g_idx_dev = g_idx_cpu.to(device=target_device)
-        self.register_buffer("g_idx", g_idx_cpu)
+        self.register_buffer("g_idx", g_idx_cpu.to(dtype=t.int32))
 
-        scales_T = scales.T.contiguous()
-        zeros_T = zeros.T.contiguous()
-        scale_zeros_T = zeros_T * scales_T
+        # Align layout with CPU paths: expect [groups, out_features]
+        scales_g = scales.T.contiguous()
+        zeros_g = zeros.T.contiguous()
+        scale_zeros_g = zeros_g * scales_g
 
-        scales_dev = scales_T.to(device=target_device)
-        zeros_dev = zeros_T.to(device=target_device)
-        scale_zeros_dev = scale_zeros_T.to(device=target_device)
+        scales_dev = scales_g.to(device=target_device)
+        zeros_dev = zeros_g.to(device=target_device)
+        scale_zeros_dev = scale_zeros_g.to(device=target_device)
 
-        self.register_buffer("scales", scales_T.to(device="cpu", dtype=t.float16))
+        self.register_buffer("scales", scales_g.to(device="cpu", dtype=t.float16))
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.detach().to(device="cpu", dtype=t.float16))
         else:
@@ -812,7 +813,12 @@ class PackableQuantLinear(BaseQuantLinear):
         zeros_int = zeros_dev.to(dtype=t.int64)
         if bits in (2, 4, 8):
             pack_factor = word_bits // bits
-            zeros_view = zeros_int.view(zeros_int.shape[0], -1, pack_factor)
+            if zeros_int.shape[1] % pack_factor != 0:
+                raise ValueError(
+                    f"pack_gpu expected zeros second dimension divisible by pack_factor={pack_factor}, "
+                    f"got shape {zeros_int.shape}"
+                )
+            zeros_view = zeros_int.view(zeros_int.shape[0], zeros_int.shape[1] // pack_factor, pack_factor)
             shifts = (
                 t.arange(pack_factor, dtype=t.int64, device=target_device)
                 .view(1, 1, pack_factor)
