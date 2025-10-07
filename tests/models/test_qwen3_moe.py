@@ -9,8 +9,8 @@ from model_test import ModelTest
 class TestQwen3Moe(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
-    NATIVE_ARC_CHALLENGE_ACC = 0.2739
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3055
+    NATIVE_ARC_CHALLENGE_ACC = 0.3700
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3700
     # TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = True
     # EVAL_BATCH_SIZE = 6
@@ -20,9 +20,9 @@ class TestQwen3Moe(ModelTest):
     DESC_ACT = False
     DATASET_SIZE = 1024
     DATASET_SORT = "desc"
-    QUANT_BATCH_SIZE = 4
+    QUANT_BATCH_SIZE = 1
     CALIB_NOISE_MODE = "unseen"
-    CALIB_NOISE_PERCENT = 0.05
+    CALIB_NOISE_PERCENT = 0.025
 
     def test_mimo(self):
         self.quant_lm_eval()

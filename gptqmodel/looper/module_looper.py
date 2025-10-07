@@ -943,7 +943,7 @@ class ModuleLooper():
                     need_outputs = not processor.fwd_after_process
                     reuse_kv = bool(getattr(module, "reuse_kv", False))
                     forward_msg = (
-                        "Forward start "
+                        "Forward "
                         f"(layer=`{layer_descriptor}`, subset={index + 1}/{subset_total}, "
                         f"batches={batch_count}, rows={forward_total_rows})"
                     )
@@ -1253,21 +1253,30 @@ class ModuleLooper():
                         )
                         finalize_futures.append((future, index, module_label, process, layer_idx))
 
-                    try:
-                        for future, idx, module_label, process, layer_idx in finalize_futures:
-                            future.result()
-                            if finalize_pb is not None:
-                                layer_label = f"layer {layer_idx}" if layer_idx is not None else "layer ?"
+                    finalize_futures_snapshot = list(finalize_futures)
+
+                    def _drain_finalize_futures(futures, finalize_pb_local, finalize_count_local, progress_bar):
+                        try:
+                            for future, idx, module_label, process, layer_idx in futures:
+                                future.result()
+
+                                layer_label = f"Layer {layer_idx}" if layer_idx is not None else "layer ?"
                                 display_module = module_label or "<unnamed>"
-                                subtitle = f"{process.name()}: {layer_label} -> {display_module}"
-                                finalize_pb.title(
-                                    f"Submodule finalization {idx}/{finalize_count}"
+                                subtitle = f"{process.name()}: {display_module}"
+                                finalize_pb_local.title(
+                                    f"{layer_label} Finalize {idx}/{finalize_count_local}"
                                 ).subtitle(subtitle).next().draw()
-                    finally:
-                        if finalize_pb is not None:
-                            finalize_pb.close()
-                        if finalize_count:
-                            pb.subtitle("").draw()
+                        finally:
+                            finalize_pb_local.close()
+
+                    if finalize_futures_snapshot:
+                        # Drain finalize futures asynchronously so the main loop can continue scheduling work.
+                        threading.Thread(
+                            target=_drain_finalize_futures,
+                            args=(finalize_futures_snapshot, finalize_pb, finalize_count, pb),
+                            name="SubmoduleFinalizeWatcher",
+                            daemon=True,
+                        ).start()
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         # Ensure ANY remaining tasks the looper submitted have drained
