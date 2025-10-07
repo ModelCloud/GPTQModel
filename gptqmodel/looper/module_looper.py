@@ -980,7 +980,7 @@ class ModuleLooper():
                     # Drain any background work so the forward spike does not race pooled tasks.
                     # DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
-                    timed_gc_collect(2)
+                    #timed_gc_collect(1)
 
                     try:
                         forward_outputs = self._run_forward_batches(
@@ -1060,7 +1060,22 @@ class ModuleLooper():
                     futures = []
 
                     @torch.inference_mode()
-                    def _process_on_worker(proc: LoopProcessor, nm: NamedModule):
+                    def _process_on_worker(
+                        proc: LoopProcessor,
+                        nm: NamedModule,
+                        expected_device: torch.device,
+                    ):
+                        module_ref = nm.module if isinstance(nm, NamedModule) else nm
+                        module_weight = getattr(module_ref, "weight", None)
+                        if module_weight is not None and expected_device is not None:
+                            target_device = expected_device if isinstance(expected_device, torch.device) else torch.device(expected_device)
+                            actual_device = get_device(module_weight)
+                            module_label = getattr(nm, "full_name", getattr(nm, "name", repr(nm)))
+                            assert actual_device == target_device, (
+                                f"Device mismatch for '{module_label}' process task: "
+                                f"module weight on {actual_device}, thread target {target_device}."
+                            )
+
                         # Run processor.process for this NamedModule
                         proc.process(module=nm)
                         return nm.name, nm
@@ -1068,7 +1083,7 @@ class ModuleLooper():
                     for name, m in subset.items():
                         tgt_dev = quant_target_devices.get(name, cur_layer_device)
                         futures.append(
-                            DEVICE_THREAD_POOL.submit(tgt_dev, _process_on_worker, processor, m)
+                            DEVICE_THREAD_POOL.submit(tgt_dev, _process_on_worker, processor, m, tgt_dev)
                         )
 
                     for fut in futures:
@@ -1109,7 +1124,7 @@ class ModuleLooper():
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
                     # DEVICE_THREAD_POOL.wait()
                     # try to cleanup recent objects before forward
-                    timed_gc_collect(2)
+                    #timed_gc_collect(1)
 
                     try:
                         layer_outputs = self._run_forward_batches(
