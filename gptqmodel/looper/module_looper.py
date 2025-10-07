@@ -943,9 +943,9 @@ class ModuleLooper():
                     need_outputs = not processor.fwd_after_process
                     reuse_kv = bool(getattr(module, "reuse_kv", False))
                     forward_msg = (
-                        "Forward "
-                        f"(layer=`{layer_descriptor}`, subset={index + 1}/{subset_total}, "
-                        f"batches={batch_count}, rows={forward_total_rows})"
+                        "Forward: "
+                        f"Layer=`{layer_descriptor}`, subset={index + 1}/{subset_total}, "
+                        f"batches={batch_count}"
                     )
                     forward_pb = (
                         log.pb(range(forward_total_rows))
@@ -953,7 +953,7 @@ class ModuleLooper():
                            .set(show_left_steps=False)
                     )
                     forward_pb.title(forward_msg).subtitle(
-                        f"Forward rows 0/{forward_total_rows}"
+                        f"Row 0/{forward_total_rows}"
                     ).draw()
                     # Drain any background work so the forward spike does not race pooled tasks.
                     # DEVICE_THREAD_POOL.wait()
@@ -1097,7 +1097,7 @@ class ModuleLooper():
                            .set(show_left_steps=False)
                     )
                     replay_pb.title(replay_msg).subtitle(
-                        f"Forward replay rows 0/{replay_total_rows}"
+                        f"Forward replay Row 0/{replay_total_rows}"
                     ).draw()
                     # Forward replay shares the same VRAM spike; block until the pool drains first.
                     # DEVICE_THREAD_POOL.wait()
@@ -1182,21 +1182,7 @@ class ModuleLooper():
 
                     finalize_count = len(finalize_tasks)
                     finalize_futures = []
-                    finalize_pb = None
-
-                    if finalize_count:
-                        pb.subtitle(
-                            f"Finalizing submodules ({finalize_count})"
-                        ).draw()
-
-                        finalize_pb = (
-                            log.pb(range(finalize_count))
-                               .manual()
-                               .set(show_left_steps=False)
-                               .title("Submodule finalization")
-                               .subtitle("")
-                        )
-                        finalize_pb.draw()
+                    finalize_pb = log.pb(range(finalize_count)).manual().set(show_left_steps=False)
 
                     @torch.inference_mode()
                     def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
@@ -1288,18 +1274,17 @@ class ModuleLooper():
 
         total_log = {}
         reversed_processors = list(reversed(self.processors))
-        process_finalize_pb = None
+
         process_finalize_total = len(reversed_processors)
 
-        if process_finalize_total:
-            process_finalize_pb = (
+        process_finalize_pb = (
                 log.pb(range(process_finalize_total))
                    .manual()
                    .set(show_left_steps=False)
                    .title("Processor finalization")
                    .subtitle("")
-            )
-            process_finalize_pb.draw()
+        )
+        process_finalize_pb.draw()
 
         try:
             for index, reverse_p in enumerate(reversed_processors, start=1):
@@ -1323,13 +1308,11 @@ class ModuleLooper():
 
                 reverse_p.finalize(model=self.gptq_model, **kwargs)
 
-                if process_finalize_pb is not None:
-                    process_finalize_pb.title(
-                        f"Processor finalization {index}/{process_finalize_total}"
-                    ).subtitle(reverse_p.name()).next().draw()
+                process_finalize_pb.title(
+                    f"Processor finalization {index}/{process_finalize_total}"
+                ).subtitle(reverse_p.name()).next().draw()
         finally:
-            if process_finalize_pb is not None:
-                process_finalize_pb.close()
+            process_finalize_pb.close()
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
