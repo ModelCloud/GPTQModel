@@ -57,6 +57,18 @@ class NamedModule(torch.nn.Module):
             "out_features": out_features,
         })
 
+    def parameters(self, recurse: bool = True):
+        return self.module.parameters(recurse=recurse)
+
+    def named_parameters(self, prefix: str = "", recurse: bool = True):
+        return self.module.named_parameters(prefix=prefix, recurse=recurse)
+
+    def buffers(self, recurse: bool = True):
+        return self.module.buffers(recurse=recurse)
+
+    def named_buffers(self, prefix: str = "", recurse: bool = True):
+        return self.module.named_buffers(prefix=prefix, recurse=recurse)
+
     def register_buffer(
         self, name: str, tensor: Optional[Tensor], persistent: bool = True
     ) -> None:

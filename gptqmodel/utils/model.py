@@ -354,6 +354,12 @@ def create_quant_module(
     else:
         ori_layer_device = submodule.list_buffers()[0].device
 
+    if ori_layer_device.type != CPU.type:
+        raise AssertionError(
+            f"Expected `{name}` to reside on CPU during quant module creation, "
+            f"but found tensors on `{ori_layer_device}`."
+        )
+
     if isinstance(submodule, NamedModule):
         in_features = submodule.state.get("in_features")
         out_features = submodule.state.get("out_features")

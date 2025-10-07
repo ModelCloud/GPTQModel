@@ -14,6 +14,7 @@ class TestQwen3Next(ModelTest):
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = True
     EVAL_BATCH_SIZE = 6
+    #DATASET_SIZE = 1024
 
     def test_mimo(self):
         self.quant_lm_eval()

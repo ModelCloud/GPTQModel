@@ -1012,6 +1012,9 @@ class ModuleLooper():
                         if not fail_safe:
                             for name in moe_skip_modules:
                                 subset.pop(name)
+                                task_map = getattr(processor, "tasks", None)
+                                if task_map is not None:
+                                    task_map.pop(name, None)
 
                     # ---- Start Process Hook (via DeviceThreadPool) ----
                     quant_target_devices: Dict[str, torch.device] = {}
@@ -1119,6 +1122,16 @@ class ModuleLooper():
                     else:
                         self.gptq_model.post_quantize(module)
 
+                    for finalized in processed_subset.values():
+                        if isinstance(finalized, NamedModule):
+                            setattr(finalized, "target_device", CPU)
+                            inner_module = getattr(finalized, "module", None)
+                        else:
+                            inner_module = finalized
+
+                        if inner_module is not None and hasattr(inner_module, "target_device"):
+                            setattr(inner_module, "target_device", CPU)
+
                 if processor.fwd_after_process:
                     processor.clear_cache_data()
                     processor.receive_layer_inputs(layer_outputs)
@@ -1134,7 +1147,14 @@ class ModuleLooper():
 
                     for reverse_p in reversed(self.processors):
                         for module in processed_subset.values():
-                            target_dev = get_device_new(module, recursive=True, assert_mode=True, expected="cpu")
+                            actual_module = module.module if isinstance(module, NamedModule) else module
+
+                            target_dev = get_device_new(
+                                actual_module,
+                                recursive=True,
+                                assert_mode=True,
+                                expected=CPU,
+                            )
                             module_label = getattr(module, "full_name", getattr(module, "name", ""))
                             layer_idx = getattr(module, "layer_index", None)
                             finalize_tasks.append((reverse_p, module, module_label, target_dev, layer_idx))
@@ -1312,4 +1332,7 @@ class ModuleLooper():
         if not is_awq_quant:
             for name in skipped_modules:
                 subset.pop(name)
+                task_map = getattr(processor, "tasks", None)
+                if task_map is not None:
+                    task_map.pop(name, None)
         return subset
