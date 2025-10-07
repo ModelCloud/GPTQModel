@@ -29,10 +29,15 @@ log = setup_logger()
 # global level lock
 PROCESSOR_GLOBAL_LOCK = threading.Lock()
 
+MODULE_FEATURE_COLUMN = "features: in, out"
+DTYPE_SIZE_COLUMN = "dtype: size"
+
 DEFAULT_LOG_COLUMNS: List[str] = [
     PROCESS_LOG_NAME,
     PROCESS_LOG_LAYER,
     PROCESS_LOG_MODULE,
+    MODULE_FEATURE_COLUMN,
+    DTYPE_SIZE_COLUMN,
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
     QUANT_LOG_DAMP,
@@ -225,7 +230,8 @@ class LoopProcessor:
         self._log_columns = log.columns(cols=column_specs, padding=1)
         # simulate some data to snap columns on first print
         self._log_columns.info.simulate(
-            "gptq", "13", "mlp.experts.110.down_proj", "0.0000158448",
+            "gptq", "13", "mlp.experts.110.down_proj", "(4096, 11008)",
+            "int8: 11.5MB", "0.0000158448",
             "36616", "0.05000", "0.841", "7.984", "cuda:0=9.1GB","")
         return True
 
@@ -241,6 +247,89 @@ class LoopProcessor:
             return f"{color_code}{text}{reset}"
 
         return text
+
+    def module_feature_summary(self, module: NamedModule) -> str:
+        in_features = module.state.get("in_features")
+        out_features = module.state.get("out_features")
+
+        if isinstance(in_features, int) and isinstance(out_features, int):
+            return f"{in_features}, {out_features}"
+        return ""
+
+    def module_dtype_size_summary(self, module: NamedModule) -> str:
+        weight = getattr(module.module, "weight", None)
+        dtype = getattr(weight, "dtype", None)
+        total_bytes = 0
+
+        if isinstance(weight, torch.Tensor):
+            total_bytes += weight.numel() * weight.element_size()
+        else:
+            dtype = dtype or getattr(module, "module_dtype", None)
+            in_features = module.state.get("in_features")
+            out_features = module.state.get("out_features")
+            if dtype is not None and isinstance(in_features, int) and isinstance(out_features, int):
+                element_size = torch.empty((), dtype=dtype).element_size()
+                total_bytes += in_features * out_features * element_size
+
+        bias = getattr(module.module, "bias", None)
+        if isinstance(bias, torch.Tensor):
+            total_bytes += bias.numel() * bias.element_size()
+
+        # account for persistent tensors captured in module.state (e.g., q_scales, adapters)
+        total_bytes += self._state_tensor_bytes(module)
+
+        dtype = dtype or getattr(module, "module_dtype", None)
+        dtype_label = self._format_dtype(dtype)
+        size_mb = total_bytes / (1024 * 1024)
+        return f"{dtype_label}: {size_mb:.1f}MB"
+
+    def _state_tensor_bytes(self, module: NamedModule) -> int:
+        seen: Set[int] = set()
+        total = 0
+        for key, value in module.state.items():
+            if key in {"in_features", "out_features"}:
+                continue
+            total += self._collect_tensor_bytes(value, seen)
+        return total
+
+    def _collect_tensor_bytes(self, obj: Any, seen: Set[int]) -> int:
+        if isinstance(obj, torch.Tensor):
+            obj_id = id(obj)
+            if obj_id in seen:
+                return 0
+            seen.add(obj_id)
+            return obj.numel() * obj.element_size()
+
+        if isinstance(obj, (list, tuple, set)):
+            return sum(self._collect_tensor_bytes(item, seen) for item in obj)
+
+        if isinstance(obj, dict):
+            return sum(self._collect_tensor_bytes(item, seen) for item in obj.values())
+
+        # handle known adapter containers without traversing entire nn.Module graphs
+        if hasattr(obj, "lora_A") and hasattr(obj, "lora_B"):
+            return (
+                self._collect_tensor_bytes(obj.lora_A, seen)
+                + self._collect_tensor_bytes(obj.lora_B, seen)
+            )
+
+        return 0
+
+    def _format_dtype(self, dtype: Optional[torch.dtype]) -> str:
+        if dtype is None:
+            return "n/a"
+
+        dtype_str = str(dtype)
+        if dtype_str.startswith("torch."):
+            dtype_str = dtype_str.split(".", 1)[1]
+
+        dtype_alias = {
+            "bfloat16": "bf16",
+            "float16": "f16",
+            "float32": "f32",
+        }
+
+        return dtype_alias.get(dtype_str, dtype_str)
 
     def _init_device_smi_handles(self) -> Dict[str, Device]:
         handles: Dict[str, Device] = {}

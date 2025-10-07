@@ -282,28 +282,6 @@ class ModuleLooper():
 
         return target_device
 
-    def _resolve_finalize_device(
-        self,
-        module: NamedModule | torch.nn.Module,
-        fallback_device: torch.device,
-    ) -> torch.device:
-        key = getattr(module, "full_name", None) or getattr(module, "name", None)
-
-        with self._quant_device_lock:
-            device = self._module_device_map.get(key) if key is not None else None
-
-            if device is None or device.type == "cpu":
-                if self._quant_devices:
-                    device = self._quant_devices[self._quant_device_rr % len(self._quant_devices)]
-                    self._quant_device_rr += 1
-                else:
-                    device = fallback_device
-
-                if key is not None and key not in self._module_device_map:
-                    self._module_device_map[key] = device
-
-        return device
-
     def _run_forward_batches(
         self,
         *,
@@ -1186,16 +1164,18 @@ class ModuleLooper():
                         for module in processed_subset.values():
                             actual_module = module.module if isinstance(module, NamedModule) else module
 
-                            current_dev = get_device_new(
+                            get_device_new(
                                 actual_module,
                                 recursive=True,
                                 assert_mode=True,
                                 expected=CPU,
                             )
-                            target_dev = self._resolve_finalize_device(
-                                module,
-                                fallback_device=current_dev,
-                            )
+                            with self._quant_device_lock:
+                                key = getattr(module, "full_name", getattr(module, "name", None))
+                                if key is not None:
+                                    self._module_device_map[key] = CPU
+
+                            target_dev = CPU
                             module_label = getattr(module, "full_name", getattr(module, "name", ""))
                             layer_idx = getattr(module, "layer_index", None)
                             finalize_tasks.append((reverse_p, module, module_label, target_dev, layer_idx))

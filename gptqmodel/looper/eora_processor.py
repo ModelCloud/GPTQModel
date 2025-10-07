@@ -13,7 +13,7 @@ from torch.nn import Module
 
 from ..adapter.adapter import Lora
 from ..eora.eora import eora_compute_lora, eora_process_input
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
@@ -177,6 +177,8 @@ class EoraProcessor(LoopProcessor):
             PROCESS_LOG_NAME: self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
+            MODULE_FEATURE_COLUMN: self.module_feature_summary(module),
+            DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(module),
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
             PROCESS_USED_MEMORY: max_memory,
