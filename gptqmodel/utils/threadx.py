@@ -535,6 +535,7 @@ class DeviceThreadPool:
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
+        pin_cpu_workers: bool = False,
     ):
         """
         Args:
@@ -548,6 +549,9 @@ class DeviceThreadPool:
                 - 'xpu:<i>': N            -> override for specific XPU index
               Unspecified devices default to 1 worker each.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
+            pin_cpu_workers: bind CPU device workers to individual CPU cores when
+                affinity APIs are available. Defaults to False so CPU tasks may
+                float across cores unless explicitly opt-in.
         """
         if devices is None:
             discovered: List[torch.device] = []
@@ -605,7 +609,7 @@ class DeviceThreadPool:
         # Pre-compute CPU core assignments so GPU/XPU workers do not collide
         # with CPU workers when pinning threads. When affinity APIs are not
         # available we silently fall back to OS scheduling.
-        affinity_plan = self._plan_worker_affinity(devices, workers)
+        affinity_plan = self._plan_worker_affinity(devices, workers, pin_cpu_workers=pin_cpu_workers)
 
         # Eagerly build workers, locks, inflight tracking, and counters.
         for d in devices:
@@ -661,6 +665,8 @@ class DeviceThreadPool:
         self,
         devices: Iterable[torch.device],
         worker_table: Dict[str, int],
+        *,
+        pin_cpu_workers: bool,
     ) -> Dict[Tuple[str, int], Optional[int]]:
         """Return per-worker CPU core targets to minimise contention."""
         if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
@@ -684,6 +690,8 @@ class DeviceThreadPool:
         for raw_dev in devices:
             dev = _coerce_device(raw_dev)
             if dev.type not in ("cuda", "xpu", "mps", "cpu"):
+                continue
+            if dev.type == "cpu" and not pin_cpu_workers:
                 continue
             key = self._key(dev)
             n_workers = int(max(1, self._resolve_workers_for_device(dev, worker_table)))
