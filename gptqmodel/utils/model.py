@@ -57,7 +57,7 @@ from .backend import BACKEND
 from .ctx import ctx
 from .device import get_device
 from .importer import select_quant_linear
-from .logger import setup_logger
+from .logger import setup_logger, log_time_block
 from .torch import torch_empty_cache, torch_new_stream_ctx
 
 
@@ -720,9 +720,19 @@ def pack_module(
         if quant_linear_cls.QUANT_TYPE == "qqq":
             if q_scales_extra is not None:
                 q_scales_extra = q_scales_extra.to(CPU)
-            module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
+            with log_time_block(
+                "module.pack",
+                logger=log,
+                module_name=name,
+            ):
+                module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
         else:
-            module.pack(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
+            with log_time_block(
+                "module.pack",
+                logger=log,
+                module_name=name,
+            ):
+                module.pack(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 
         if (
             quantize_config is not None
@@ -730,10 +740,15 @@ def pack_module(
             and quantize_config.format == FORMAT.GPTQ
             and getattr(quant_linear_cls, "REQUIRES_FORMAT_V2", False)
         ):
-            convert_gptq_v2_to_v1_format_module(
-                module=module,
-                quantize_config=quantize_config,
-            )
+            with log_time_block(
+                "convert_v2_to_v1",
+                logger=log,
+                module_name=name,
+            ):
+                convert_gptq_v2_to_v1_format_module(
+                    module=module,
+                    quantize_config=quantize_config,
+                )
 
         # TODO: why move it back to gpu?
         # start = time.time()

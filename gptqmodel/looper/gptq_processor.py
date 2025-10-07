@@ -20,7 +20,7 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
 from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import METHOD, QuantizeConfig
 from ..utils.importer import select_quant_linear
-from ..utils.logger import setup_logger
+from ..utils.logger import setup_logger, log_time_block
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 from ..utils.torch import HAS_CUDA, tf32_disable_guard, torch_streamCtx, torch_sync
 
@@ -217,37 +217,52 @@ class GPTQProcessor(LoopProcessor):
         assert q_g_idx.device == CPU
 
         layers = find_modules(model.model)
+        module_label = getattr(module, "full_name", getattr(module, "name", ""))
 
         # replace module with quantized module
-        create_quant_module(
-            name=module.full_name,
-            linear_cls=model.qlinear_kernel,
-            bits=self.qcfg.bits,
-            desc_act=self.qcfg.desc_act,
-            dynamic=self.qcfg.dynamic,
-            group_size=self.qcfg.group_size,
-            module=model.model,
-            submodule=module,
-            sym=self.qcfg.sym,
-            device=self.qcfg.device,
-            lm_head_name=model.lm_head,
-            pack_dtype=self.qcfg.pack_dtype,
-            register_buffers=False,
-        )
+        with log_time_block(
+            "create_quant_module",
+            logger=log,
+            module_name=module_label,
+        ):
+            create_quant_module(
+                name=module.full_name,
+                linear_cls=model.qlinear_kernel,
+                bits=self.qcfg.bits,
+                desc_act=self.qcfg.desc_act,
+                dynamic=self.qcfg.dynamic,
+                group_size=self.qcfg.group_size,
+                module=model.model,
+                submodule=module,
+                sym=self.qcfg.sym,
+                device=self.qcfg.device,
+                lm_head_name=model.lm_head,
+                pack_dtype=self.qcfg.pack_dtype,
+                register_buffers=False,
+            )
 
         # pack module
-        qModules = {name: submodule for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items() if name == module.full_name}
-        pack_module(
-            name=module.full_name,
-            qModules=qModules,
-            q_scales=q_scales,
-            q_zeros=q_zeros,
-            q_g_idx=q_g_idx,
-            layers=layers,
-            quant_linear_cls=model.qlinear_kernel,
-            lock=self.lock,
-            quantize_config=self.qcfg,
-        )
+        qModules = {
+            name: submodule
+            for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items()
+            if name == module.full_name
+        }
+        with log_time_block(
+            "pack",
+            logger=log,
+            module_name=module_label,
+        ):
+            pack_module(
+                name=module.full_name,
+                qModules=qModules,
+                q_scales=q_scales,
+                q_zeros=q_zeros,
+                q_g_idx=q_g_idx,
+                layers=layers,
+                quant_linear_cls=model.qlinear_kernel,
+                lock=self.lock,
+                quantize_config=self.qcfg,
+            )
 
         # TODO: store module quant results in module, not global processor result
         with self.lock:

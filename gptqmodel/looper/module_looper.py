@@ -36,7 +36,7 @@ from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
 from ..utils.disk import estimate_disk_io_speed
-from ..utils.logger import setup_logger
+from ..utils.logger import setup_logger, log_time_block
 from ..utils.looper_helpers import (
     clone_module_for_devices,
     device_ctx,
@@ -1179,7 +1179,13 @@ class ModuleLooper():
 
                     @torch.inference_mode()
                     def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
-                        process.submodule_finalize(module, self.gptq_model)
+                        resolved_label = module_label or getattr(module, "full_name", getattr(module, "name", ""))
+                        with log_time_block(
+                            "submodule_finalize",
+                            logger=log,
+                            module_name=resolved_label,
+                        ):
+                            process.submodule_finalize(module, self.gptq_model)
 
                         # Disk offload (lifecycle TODO note preserved)
                         if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
@@ -1193,11 +1199,16 @@ class ModuleLooper():
                                         if module_full_name
                                         else module
                                     )
-                                    offload_to_disk(
-                                        model=self.gptq_model.model,
-                                        module=target_module,
-                                        disk_path=offload_path,
-                                    )
+                                    with log_time_block(
+                                        "disk_offload",
+                                        logger=log,
+                                        module_name=resolved_label,
+                                    ):
+                                        offload_to_disk(
+                                            model=self.gptq_model.model,
+                                            module=target_module,
+                                            disk_path=offload_path,
+                                        )
                                 else:
                                     log.warning(
                                         "Skipping disk offload for %s: no offload path configured",
