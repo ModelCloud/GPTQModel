@@ -103,7 +103,7 @@ class TestRepacking(unittest.TestCase):
             bias=False,
         )
         # Note: pack expects scales/zeros transposed in your code path
-        qlinear.pack(linear, s.T, zeros.T, g_idx=g_idx)
+        qlinear.pack_block(linear, s.T, zeros.T, g_idx=g_idx.to(torch.int32))
         return qlinear
 
     @parameterized.expand(TEST_GRID)

@@ -58,7 +58,7 @@ from .ctx import ctx
 from .device import get_device
 from .importer import select_quant_linear
 from .logger import setup_logger, log_time_block
-from .torch import torch_empty_cache, torch_new_stream_ctx
+from .torch import HAS_CUDA, torch_empty_cache, torch_new_stream_ctx
 
 
 log = setup_logger()
@@ -712,6 +712,21 @@ def pack_module(
         assert get_device(q_g_idx) == CPU
         #q_g_idx = q_g_idx.to(CPU)
 
+    pack_impl = "gpu"
+    target_device = None
+    if quantize_config is not None:
+        pack_impl = getattr(quantize_config, "pack_impl", "gpu") or "gpu"
+        cfg_device = getattr(quantize_config, "device", None)
+        if isinstance(cfg_device, DEVICE):
+            target_device = cfg_device.to_torch_device()
+        elif isinstance(cfg_device, torch.device):
+            target_device = cfg_device
+        elif isinstance(cfg_device, str):
+            try:
+                target_device = torch.device(cfg_device)
+            except (RuntimeError, ValueError):
+                log.warning(f"pack_module: unable to parse target device `{cfg_device}`; defaulting to CUDA auto-select.")
+
     with lock:
         layers[name] = layer
         qModules[name] = module
@@ -727,12 +742,31 @@ def pack_module(
             ):
                 module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
         else:
+            use_gpu_pack = False
+            if pack_impl.lower() == "gpu":
+                if not HAS_CUDA:
+                    log.warning("pack_module: GPU packing requested but CUDA is unavailable; falling back to CPU pack.")
+                elif not hasattr(module, "pack_gpu"):
+                    log.warning("pack_module: GPU packing requested but module lacks pack_gpu; falling back to CPU pack.")
+                else:
+                    use_gpu_pack = True
+
+            label = "module.pack_gpu" if use_gpu_pack else "module.pack_block"
             with log_time_block(
-                "module.pack",
+                label,
                 logger=log,
                 module_name=name,
             ):
-                module.pack(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
+                if use_gpu_pack:
+                    module.pack_gpu(
+                        linear=layer,
+                        scales=q_scales,
+                        zeros=q_zeros,
+                        g_idx=q_g_idx,
+                        device=target_device,
+                    )
+                else:
+                    module.pack_block(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 
         if (
             quantize_config is not None

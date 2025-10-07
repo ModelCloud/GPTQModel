@@ -483,7 +483,7 @@ class PackableQuantLinear(BaseQuantLinear):
         return weights
 
     @t.inference_mode()
-    def pack(
+    def pack_block(
             self,
             linear: nn.Module,
             scales: t.Tensor,
@@ -493,7 +493,7 @@ class PackableQuantLinear(BaseQuantLinear):
             workers: int = 8,
     ):
         """
-        Parallel qweight pack (threaded over input blocks). qzeros path = original logic.
+        Parallel qweight pack on CPU (threaded over input blocks). qzeros path = original logic.
 
         - qweight: streamed in 32-aligned blocks; each block packed by a worker into
           non-overlapping rows of the preallocated output tensor (no locks).
@@ -551,7 +551,7 @@ class PackableQuantLinear(BaseQuantLinear):
         # ---------- qweight allocation (storage dtype = int32) ----------
         OUT_DTYPE = self.pack_dtype  # should be torch.int32 per your dtype table
         if OUT_DTYPE != t.int32:
-            raise ValueError("This pack() expects self.pack_dtype == torch.int32 for 32-bit words.")
+            raise ValueError("pack_block() expects self.pack_dtype == torch.int32 for 32-bit words.")
 
         # rows = (in // 32) * ({2,4,8} -> bits rows ; 3 -> 3 rows)
         rows_per_group = (bits if bits != 3 else 3)
@@ -678,6 +678,165 @@ class PackableQuantLinear(BaseQuantLinear):
         # ---------- register buffers ----------
         self.register_buffer("qweight", qweight.to(dtype=self.pack_dtype))
         self.register_buffer("qzeros", t.from_numpy(qzeros_np.astype(self.pack_np_dtype, copy=False)))
+
+    @t.inference_mode()
+    def pack_gpu(
+        self,
+        linear: nn.Module,
+        scales: t.Tensor,
+        zeros: t.Tensor,
+        g_idx: t.Tensor,
+        *,
+        block_in: int = 8192,
+        device: Optional[t.device] = None,
+    ):
+        """Pack quantized weights using CUDA kernels."""
+
+        if not t.cuda.is_available():
+            raise RuntimeError("pack_gpu requires CUDA availability but none was detected.")
+
+        target_device = t.device(device) if device is not None else t.device("cuda")
+        if target_device.type != "cuda":
+            raise ValueError(f"pack_gpu expected a CUDA device, got `{target_device}`.")
+
+        MASK32 = (1 << 32) - 1
+        mask_tensor = t.tensor(MASK32, dtype=t.int64, device=target_device)
+
+        weight = linear.weight.detach()
+        if isinstance(linear, _ConvNd):
+            weight = weight.flatten(1)
+        if isinstance(linear, transformers.pytorch_utils.Conv1D):
+            weight = weight.T
+        weight = weight.to(device=target_device, copy=True)
+        out_features, in_features = weight.shape
+
+        if g_idx is None:
+            raise ValueError("pack_gpu requires non-null g_idx")
+        if g_idx.numel() != in_features:
+            raise ValueError(f"g_idx length {g_idx.numel()} != in_features {in_features}")
+
+        g_idx_cpu = g_idx.to(device="cpu", dtype=t.int32, copy=False)
+        g_idx_dev = g_idx_cpu.to(device=target_device)
+        self.register_buffer("g_idx", g_idx_cpu)
+
+        scales_T = scales.T.contiguous()
+        zeros_T = zeros.T.contiguous()
+        scale_zeros_T = zeros_T * scales_T
+
+        scales_dev = scales_T.to(device=target_device)
+        zeros_dev = zeros_T.to(device=target_device)
+        scale_zeros_dev = scale_zeros_T.to(device=target_device)
+
+        self.register_buffer("scales", scales_T.to(device="cpu", dtype=t.float16))
+        if linear.bias is not None:
+            self.register_buffer("bias", linear.bias.detach().to(device="cpu", dtype=t.float16))
+        else:
+            self.bias = None
+
+        bits = int(self.bits)
+        word_bits = int(self.pack_dtype_bits)
+        if word_bits != 32:
+            raise ValueError("pack_gpu currently supports 32-bit packing words only.")
+        if in_features % word_bits != 0:
+            raise ValueError("in_features must be divisible by 32 for pack_gpu")
+
+        if bits in (2, 4, 8):
+            pack_factor = word_bits // bits
+            shifts_pf64 = (
+                t.arange(pack_factor, dtype=t.int64, device=target_device)
+                .view(1, pack_factor, 1)
+                * bits
+            )
+        elif bits == 3:
+            shifts_pf64 = None
+        else:
+            raise NotImplementedError(f"Unsupported bits={bits}")
+
+        rows_per_group = (bits if bits != 3 else 3)
+        qweight_dev = t.empty(
+            (in_features // word_bits * rows_per_group, out_features),
+            dtype=self.pack_dtype,
+            device=target_device,
+        )
+
+        range10 = t.arange(10, dtype=t.int64, device=target_device).view(-1, 1)
+
+        def _pack_rows_2_4_8(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
+            r64 = int32_blk_32xN.to(t.int64)
+            reshaped = r64.view(bits, pack_factor, -1)
+            packed64 = (reshaped << shifts_pf64).sum(dim=1, dtype=t.int64)
+            dst[dst_rows_base:dst_rows_base + bits] = (
+                (packed64 & mask_tensor).to(self.pack_dtype)
+            )
+
+        def _pack_rows_3_values(int32_blk_32xN: t.Tensor) -> t.Tensor:
+            x = int32_blk_32xN.to(t.int64)
+            A = ((x[0:10] << (range10 * 3)).sum(dim=0, dtype=t.int64)) & mask_tensor
+            A = (A | ((x[10] << 30) & mask_tensor)) & mask_tensor
+
+            B = (((x[10] >> 2) & 1) & mask_tensor)
+            B = (B | ((x[11:21] << (range10 * 3 + 1)).sum(dim=0, dtype=t.int64))) & mask_tensor
+            B = (B | ((x[21] << 31) & mask_tensor)) & mask_tensor
+
+            C = (((x[21] >> 1) & 0x3) & mask_tensor)
+            C = (C | ((x[22:32] << (range10 * 3 + 2)).sum(dim=0, dtype=t.int64))) & mask_tensor
+
+            return t.stack([A, B, C], dim=0)
+
+        def _pack_rows_3(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
+            packed = _pack_rows_3_values(int32_blk_32xN)
+            dst[dst_rows_base:dst_rows_base + 3] = packed.to(self.pack_dtype)
+
+        block_in = max(word_bits, (block_in // word_bits) * word_bits)
+        for i0 in range(0, in_features, block_in):
+            i1 = min(i0 + block_in, in_features)
+            blk = i1 - i0
+            Wblk = weight[:, i0:i1]
+            gsel = g_idx_dev[i0:i1]
+            sz_blk_T = scale_zeros_dev.index_select(0, gsel).T
+            s_blk_T = scales_dev.index_select(0, gsel).T
+
+            int_block = t.round((Wblk + sz_blk_T) / s_blk_T).to(t.int32)
+            int_block = int_block.T.contiguous()
+
+            groups32 = blk // word_bits
+            base_group = (i0 // word_bits)
+            for g in range(groups32):
+                sub = int_block[g * word_bits:(g + 1) * word_bits]
+                dst_rows = (base_group + g) * rows_per_group
+                if bits in (2, 4, 8):
+                    _pack_rows_2_4_8(sub, qweight_dev, dst_rows)
+                else:
+                    _pack_rows_3(sub, qweight_dev, dst_rows)
+
+        zeros_int = zeros_dev.to(dtype=t.int64)
+        if bits in (2, 4, 8):
+            pack_factor = word_bits // bits
+            zeros_view = zeros_int.view(zeros_int.shape[0], -1, pack_factor)
+            shifts = (
+                t.arange(pack_factor, dtype=t.int64, device=target_device)
+                .view(1, 1, pack_factor)
+                * bits
+            )
+            packed = (zeros_view << shifts).sum(dim=-1, dtype=t.int64) & mask_tensor
+            qzeros_dev = packed.to(dtype=self.pack_dtype)
+        elif bits == 3:
+            groups = zeros_int.shape[1] // word_bits
+            qzeros_chunks: List[t.Tensor] = []
+            for g in range(groups):
+                block = zeros_int[:, g * word_bits:(g + 1) * word_bits]
+                packed = _pack_rows_3_values(block.T).transpose(0, 1)
+                qzeros_chunks.append(packed.to(dtype=self.pack_dtype))
+            qzeros_dev = t.cat(qzeros_chunks, dim=1)
+        else:
+            raise NotImplementedError(f"Unsupported bits={bits}")
+
+        t.cuda.synchronize(device=target_device)
+
+        self.register_buffer("qweight", qweight_dev.to(device="cpu", dtype=self.pack_dtype))
+        self.register_buffer("qzeros", qzeros_dev.to(device="cpu", dtype=self.pack_dtype))
+
+        del weight, scales_dev, zeros_dev, scale_zeros_dev, qweight_dev, qzeros_dev
 
     def pack_original(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
         # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?

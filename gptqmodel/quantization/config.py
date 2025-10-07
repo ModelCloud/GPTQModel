@@ -197,6 +197,9 @@ class QuantizeConfig():
     # affects [`qweights`, `qzeros`]
     pack_dtype: Optional[Union[str, torch.dtype]] = field(default=torch.int32)
 
+    # packing implementation hint (`gpu` = default auto CUDA, `cpu` forces CPU packing).
+    pack_impl: str = field(default="gpu")
+
     # pending used field
     adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
 
@@ -508,6 +511,9 @@ class QuantizeConfig():
             # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
+
+        if getattr(self, "pack_impl", "gpu") != "gpu":
+            out["pack_impl"] = self.pack_impl
 
         # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm
         if self.quant_method == METHOD.AWQ:

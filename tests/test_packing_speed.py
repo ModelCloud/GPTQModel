@@ -17,6 +17,7 @@ import unittest  # noqa: E402
 
 import threadpoolctl  # noqa: E402
 from parameterized import parameterized  # noqa: E402
+from tabulate import tabulate  # noqa: E402
 
 
 # isort: off
@@ -94,7 +95,7 @@ class TestPackingSpeed(unittest.TestCase):
     s = s.to("cpu").contiguous()
     print("gen_quant: start...end")
 
-    def pack(self, qlinearCls, backend):
+    def pack(self, qlinearCls, backend, impl: str = "cpu"):
         """
         Instantiate a QuantLinear and pack with:
           - linear: nn.Linear [n,k] weight
@@ -116,10 +117,41 @@ class TestPackingSpeed(unittest.TestCase):
 
         scales_T = self.s.t().contiguous()   # [n, k//group_size]
         zeros_T = self.zeros.t().contiguous()  # [n, k//group_size]
+        g_idx_i32 = self.g_idx.to(dtype=torch.int32)
 
-        qlinear.pack(self.linear, scales_T, zeros_T, g_idx=self.g_idx)
+        impl_lower = impl.lower()
+        if impl_lower == "gpu":
+            qlinear.pack_gpu(
+                self.linear,
+                scales_T,
+                zeros_T,
+                g_idx=g_idx_i32,
+            )
+        elif impl_lower == "original":
+            qlinear.pack_original(
+                self.linear,
+                scales_T,
+                zeros_T,
+                g_idx=self.g_idx,
+            )
+        else:
+            qlinear.pack_block(
+                self.linear,
+                scales_T,
+                zeros_T,
+                g_idx=g_idx_i32,
+            )
         # Keep pack-only timing; omit post_init() to avoid extra work in speed test
         return qlinear
+
+    def _time_pack_impl(self, qlinearCls, backend, impl: str, repeats: int, threads: int = 1) -> float:
+        start = time.time()
+        with threadpoolctl.threadpool_limits(limits=threads):
+            for _ in range(repeats):
+                self.pack(qlinearCls, backend, impl=impl)
+        if impl.lower() == "gpu" and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        return time.time() - start
 
     @parameterized.expand(
         [
@@ -158,3 +190,59 @@ class TestPackingSpeed(unittest.TestCase):
 
         # within 2.5%
         self.assertLess((time_usage - expect_time) / expect_time, 0.05, msg=f"time: {time_usage:.4f}s")
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA device required for GPU packing speed test")
+    def test_pack_speed_gpu_vs_cpu(self):
+        qlinearCls = TorchQuantLinear
+        backend = BACKEND.TORCH
+        repeats = 10
+
+        cpu_time = self._time_pack_impl(qlinearCls, backend, impl="cpu", repeats=repeats, threads=1)
+        gpu_time = self._time_pack_impl(qlinearCls, backend, impl="gpu", repeats=repeats, threads=1)
+
+        print(
+            f"{qlinearCls.__name__} [cpu vs gpu], cpu_time={cpu_time:.4f}s, "
+            f"gpu_time={gpu_time:.4f}s, speedup={cpu_time / gpu_time if gpu_time else float('inf'):.2f}x"
+        )
+
+        self.assertLess(
+            gpu_time,
+            cpu_time * 0.90,
+            msg=f"GPU pack slower than expected (cpu={cpu_time:.4f}s vs gpu={gpu_time:.4f}s)",
+        )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA device required for GPU packing summary test")
+    def test_pack_speed_summary(self):
+        qlinearCls = TorchQuantLinear
+        backend = BACKEND.TORCH
+        repeats = 5
+
+        timings = {}
+        for label, impl in [
+            ("pack_block", "cpu"),
+            ("pack_gpu", "gpu"),
+            ("pack_original", "original"),
+        ]:
+            timings[label] = self._time_pack_impl(qlinearCls, backend, impl=impl, repeats=repeats, threads=1)
+
+        base_cpu = timings["pack_block"]
+        rows = []
+        for label in ["pack_original", "pack_block", "pack_gpu"]:
+            time_usage = timings[label]
+            speedup = base_cpu / time_usage if time_usage else float("inf")
+            rows.append([label, f"{time_usage:.4f}", f"{speedup:.2f}x", repeats])
+
+        print(tabulate(rows, headers=["impl", "time (s)", "speedup vs pack_block", "repeats"], tablefmt="simple"))
+
+        self.assertLess(
+            timings["pack_block"],
+            timings["pack_original"] * 0.95,
+            msg=("Optimized CPU pack slower than original pack"
+                 f" (cpu={timings['pack_block']:.4f}s vs original={timings['pack_original']:.4f}s)"),
+        )
+        self.assertLess(
+            timings["pack_gpu"],
+            timings["pack_block"] * 0.90,
+            msg=("GPU pack slower than expected"
+                 f" (gpu={timings['pack_gpu']:.4f}s vs cpu={timings['pack_block']:.4f}s)"),
+        )

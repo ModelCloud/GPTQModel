@@ -124,7 +124,7 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
         pack_dtype=torch.int32,
         bias=False,
     )
-    torch_linear.pack(linear, scales.T, zeros.T, g_idx=g_idx)
+    torch_linear.pack_block(linear, scales.T, zeros.T, g_idx=g_idx.to(torch.int32))
     torch_linear.post_init()
 
     bitblas_linear = BitblasQuantLinear(
@@ -176,7 +176,7 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
     except ValueError as err:
         pytest.skip(f"triton unavailable: {err}")
 
-    triton_linear.pack(linear, scales.T, zeros.T, g_idx=g_idx)
+    triton_linear.pack_block(linear, scales.T, zeros.T, g_idx=g_idx.to(torch.int32))
     triton_linear.post_init()
     triton_linear = triton_linear.to(device=device, dtype=dtype).eval()
 
