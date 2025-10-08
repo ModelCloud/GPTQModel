@@ -164,16 +164,35 @@ def clear_non_picklable_state(module: torch.nn.Module) -> List[Tuple[str, int]]:
     return cleared
 
 
+def _canonical_device(device: torch.device) -> torch.device:
+    """Return a canonical form so indexless accelerators collapse to device:0."""
+    if device.type in {"cuda", "xpu", "npu"}:
+        index = device.index if device.index is not None else 0
+        return torch.device(f"{device.type}:{index}")
+    return device
+
+
 def select_forward_devices(base_device: Optional[torch.device]) -> List[torch.device]:
     if base_device is None:
         return [CPU]
 
-    devices = [base_device]
-    base_type = base_device.type
-    if base_type in ("cuda", "xpu", "mps"):
+    devices: List[torch.device] = []
+    seen: set[tuple[str, int | None]] = set()
+
+    def _add(device: torch.device) -> None:
+        canonical = _canonical_device(device)
+        key = (canonical.type, canonical.index)
+        if key in seen:
+            return
+        seen.add(key)
+        devices.append(canonical)
+
+    _add(base_device)
+    base_type = devices[0].type
+    if base_type in {"cuda", "xpu", "mps", "npu"}:
         for dev in ALL_DEVICES:
-            if dev.type == base_type and dev not in devices:
-                devices.append(dev)
+            if dev.type == base_type:
+                _add(dev)
     return devices
 
 
@@ -181,10 +200,13 @@ def normalize_device_like(device_like) -> Optional[torch.device]:
     if device_like is None:
         return None
     if isinstance(device_like, torch.device):
-        return device_like
-    if hasattr(device_like, "to_torch_device"):
-        return device_like.to_torch_device()
-    return torch.device(str(device_like))
+        device = device_like
+    elif hasattr(device_like, "to_torch_device"):
+        device = device_like.to_torch_device()
+    else:
+        device = torch.device(str(device_like))
+
+    return _canonical_device(device)
 
 
 def clone_module_for_devices(
