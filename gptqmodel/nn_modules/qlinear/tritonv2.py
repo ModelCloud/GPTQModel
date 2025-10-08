@@ -47,7 +47,7 @@ log = setup_logger()
 
 class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
     SUPPORTS_BITS = [2, 4, 8]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
@@ -206,5 +206,4 @@ def triton_xpu_available():
         return True
     except Exception:
         return False
-
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import as_completed
 from contextlib import nullcontext
 from typing import Dict, List, Optional, TYPE_CHECKING
 
@@ -1241,17 +1242,41 @@ class ModuleLooper():
 
                     finalize_futures_snapshot = list(finalize_futures)
 
-                    def _drain_finalize_futures(futures, finalize_pb_local, finalize_count_local, progress_bar):
+                    if finalize_futures_snapshot:
+                        finalize_pb.title(
+                            f"Submodule finalize 0/{finalize_count}"
+                        ).subtitle("Waiting for completions...").draw()
+
+                        future_metadata = {
+                            future: (module_label, process, layer_idx)
+                            for future, _, module_label, process, layer_idx in finalize_futures_snapshot
+                        }
+
+                    def _drain_finalize_futures(
+                        futures,
+                        finalize_pb_local,
+                        finalize_count_local,
+                        future_metadata_local,
+                    ):
+                        completed_local = 0
                         try:
-                            for future, idx, module_label, process, layer_idx in futures:
+                            for future in as_completed(futures):
+                                module_label, process, layer_idx = future_metadata_local.get(
+                                    future, (None, None, None)
+                                )
+
                                 future.result()
 
                                 layer_label = f"Layer {layer_idx}" if layer_idx is not None else "layer ?"
                                 display_module = module_label or "<unnamed>"
-                                subtitle = f"{process.name()}: {display_module}"
+                                processor_name = process.name() if process is not None else "<processor>"
+                                subtitle = f"{processor_name}: {display_module}"
+
+                                completed_local += 1
+                                finalize_pb_local.next()
                                 finalize_pb_local.title(
-                                    f"{layer_label} Finalize {idx}/{finalize_count_local}"
-                                ).subtitle(subtitle).next().draw()
+                                    f"{layer_label} Finalize {completed_local}/{finalize_count_local}"
+                                ).subtitle(subtitle).draw()
                         finally:
                             finalize_pb_local.close()
 
@@ -1259,7 +1284,12 @@ class ModuleLooper():
                         # Drain finalize futures asynchronously so the main loop can continue scheduling work.
                         threading.Thread(
                             target=_drain_finalize_futures,
-                            args=(finalize_futures_snapshot, finalize_pb, finalize_count, pb),
+                            args=(
+                                [future for future, *_ in finalize_futures_snapshot],
+                                finalize_pb,
+                                finalize_count,
+                                future_metadata,
+                            ),
                             name="SubmoduleFinalizeWatcher",
                             daemon=True,
                         ).start()
