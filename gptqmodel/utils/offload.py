@@ -26,6 +26,9 @@ from .device import get_device
 from .torch import CPU, META
 
 
+_SMALL_MODULE_OFFLOAD_BYTES = 4 * 1024  # Skip disk writes for <4KB payloads
+
+
 # Patch fix thread unsafe accelerate.utils.modeling.clear_device_cache
 def _fake_clear_device_cache(garbage_collection=False):
     pass
@@ -72,6 +75,14 @@ def _prepare_offload_directory(target_dir: str) -> None:
     if os.path.isdir(target_dir):
         shutil.rmtree(target_dir)
     os.makedirs(target_dir, exist_ok=True)
+
+
+def _tensor_nbytes(tensor: torch.Tensor) -> int:
+    try:
+        itemsize = tensor.element_size()
+    except RuntimeError:
+        itemsize = torch.empty((), dtype=tensor.dtype).element_size()
+    return tensor.numel() * itemsize
 
 
 def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
@@ -176,6 +187,18 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
         return
 
     module_offload_dir = os.path.join(disk_path, name)
+
+    total_bytes = 0
+    try:
+        state_items = module.state_dict().values()
+    except Exception:
+        state_items = []
+
+    for tensor in state_items:
+        total_bytes += _tensor_nbytes(tensor)
+
+    if total_bytes <= _SMALL_MODULE_OFFLOAD_BYTES:
+        return
 
     _prepare_offload_directory(module_offload_dir)
     _bundle_module_state_dict(module, module_offload_dir)
