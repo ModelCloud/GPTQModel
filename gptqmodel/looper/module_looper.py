@@ -1258,6 +1258,7 @@ class ModuleLooper():
                         finalize_count_local,
                         future_metadata_local,
                     ):
+                        completed_local = 0
                         try:
                             for future in as_completed(futures):
                                 module_label, process, layer_idx = future_metadata_local.get(
@@ -1271,10 +1272,10 @@ class ModuleLooper():
                                 processor_name = process.name() if process is not None else "<processor>"
                                 subtitle = f"{processor_name}: {display_module}"
 
+                                completed_local += 1
                                 finalize_pb_local.next()
-                                completed = finalize_pb_local.step()
                                 finalize_pb_local.title(
-                                    f"{layer_label} Finalize {completed}/{finalize_count_local}"
+                                    f"{layer_label} Finalize {completed_local}/{finalize_count_local}"
                                 ).subtitle(subtitle).draw()
                         finally:
                             finalize_pb_local.close()

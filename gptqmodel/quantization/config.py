@@ -293,10 +293,10 @@ class QuantizeConfig():
                     if key == "bits" and value not in fields_info[0].metadata["choices"]:
                         raise ValueError(f"QuantizeConfig: Layer `{layer}` only support quantization of  `{fields_info[0].metadata['choices']}` bits.")
                     elif key == "group_size" and value != -1 and value <= 0:
-                        raise ValueError("QuantizeConfig: `group_size` must in the value set of `[-1, 16, 32, 64, 128]`.")
+                        raise ValueError("QuantizeConfig: `group_size` must be one of `[-1, 16, 32, 64, 128, 256, 512, 1024]`.")
 
         if self.group_size != -1 and self.group_size <= 0:
-            raise ValueError("QuantizeConfig: `group_size` must in the value set of `[-1, 16, 32, 64, 128]`.")
+            raise ValueError("QuantizeConfig: `group_size` must be one of `[-1, 16, 32, 64, 128, 256, 512, 1024]`.")
 
         if not (0 < self.damp_percent < 1):
             raise ValueError("QuantizeConfig: `damp_percent` must between 0 and 1.")
