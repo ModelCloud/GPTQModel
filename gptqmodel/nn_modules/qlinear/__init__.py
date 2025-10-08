@@ -628,7 +628,7 @@ class PackableQuantLinear(BaseQuantLinear):
         # ---------- schedule blocks across a thread pool ----------
         starts = list(range(0, in_features, block_in))
         ranges = [(i0, min(i0 + block_in, in_features)) for i0 in starts]
-        total_blocks = len(ranges)
+        len(ranges)
 
         # TODO FIX ME...threads safety issue with threaded block work
         workers_eff = 1 # max(1, min(workers, total_blocks))

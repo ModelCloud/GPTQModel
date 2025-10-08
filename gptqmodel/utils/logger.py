@@ -26,10 +26,9 @@ def log_time_block(
     if logger is None:
         logger = setup_logger()
 
-    label = block_name if not module_name else f"{module_name}: {block_name}"
     start = time.perf_counter()
     try:
         yield
     finally:
-        duration = time.perf_counter() - start
+        time.perf_counter() - start
         #logger.info(f"[time] {label} took {duration:.3f}s")

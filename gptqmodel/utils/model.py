@@ -22,7 +22,6 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
-import threadpoolctl as tctl
 import torch
 import torch.nn as nn
 import transformers
@@ -57,7 +56,7 @@ from .backend import BACKEND
 from .ctx import ctx
 from .device import get_device
 from .importer import select_quant_linear
-from .logger import setup_logger, log_time_block
+from .logger import log_time_block, setup_logger
 from .torch import HAS_CUDA, torch_empty_cache, torch_new_stream_ctx
 
 
@@ -597,7 +596,7 @@ def convert_gptq_v1_to_v2_format(
 
     # Limit thread usage to avoid auto-parallizataion regression
     # with tctl.threadpool_limits(limits=1):
-    t = time.time()
+    time.time()
     log.info(
         f"Format: Converting `{FORMAT_FIELD_CHECKPOINT}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
 

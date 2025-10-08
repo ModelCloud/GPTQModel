@@ -47,6 +47,7 @@ from .ovis import OvisQModel
 from .phi import PhiQModel
 from .phi3 import Phi3QModel
 from .qwen import QwenQModel
+from .qwen2 import Qwen2QModel
 from .qwen2_5_vl import Qwen2_5_VLQModel
 from .qwen2_moe import Qwen2MoeQModel
 from .qwen2_vl import Qwen2VLQModel
