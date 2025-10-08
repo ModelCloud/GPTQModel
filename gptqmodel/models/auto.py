@@ -105,6 +105,7 @@ from .definitions.phi import PhiQModel  # noqa: E402
 from .definitions.phi3 import Phi3QModel, PhiMoEGPTQForCausalLM  # noqa: E402
 from .definitions.phi4 import Phi4MMGPTQ  # noqa: E402
 from .definitions.qwen import QwenQModel  # noqa: E402
+from .definitions.qwen2 import Qwen2QModel  # noqa: E402
 from .definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 from .definitions.qwen2_5_vl import Qwen2_5_VLQModel  # noqa: E402
 from .definitions.qwen2_moe import Qwen2MoeQModel  # noqa: E402
@@ -162,7 +163,7 @@ MODEL_MAP = {
     "stablelm": LlamaQModel, # 100% llama clone
     "starcoder2": Starcoder2QModel,
     "mixtral": MixtralQModel,
-    "qwen2": LlamaQModel, # 100% llama clone
+    "qwen2": Qwen2QModel,
     "qwen3": Qwen3QModel,
     "longllama": LlamaQModel,  # 100% llama clone
     "gemma": LlamaQModel, # 100% llama clone

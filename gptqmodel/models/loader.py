@@ -104,7 +104,7 @@ def check_versions(model_class, requirements: List[str]):
 def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
     if is_local:
-        return pretrained_model_id_or_path
+        return os.path.normpath(pretrained_model_id_or_path)
     else:
         # Clone kwargs before modifying
         download_kwargs = kwargs.copy()
