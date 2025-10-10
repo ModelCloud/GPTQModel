@@ -229,7 +229,7 @@ class BitblasQuantLinear(BaseQuantLinear):
             out_features,
             self.TORCH_DTYPE,
             enable_tuning,
-            bias,
+            False,
             layout,
             bits,
         )
