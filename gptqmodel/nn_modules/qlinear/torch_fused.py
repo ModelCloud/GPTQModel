@@ -192,7 +192,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     def transform(self, dtype, device):
         if device == "xpu":
             self.transform_xpu(dtype)
-        elif: device == "cpu":
+        elif device == "cpu":
             self.transform_cpu(dtype)
         else:
             raise NotImplementedError
