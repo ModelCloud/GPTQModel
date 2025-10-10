@@ -31,7 +31,6 @@ def pack_scales_and_zeros(scales, zeros):
             ],
             2,
         )
-        .transpose(0, 1)
         .contiguous()
     )
 
