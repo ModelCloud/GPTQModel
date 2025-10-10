@@ -21,7 +21,7 @@ from . import gte_python_3_13_3, gte_python_3_14, has_gil_disabled, log_gil_requ
 # pytorch 2.6.0 fixes many compilation errors
 TORCH_HAS_COMPILE = version.parse(torch.__version__).release >= version.Version('2.6').release
 TORCH_GTE_28 = version.parse(torch.__version__).release >= version.Version('2.8').release
-TORCH_HAS_XPU_FUSED_OPS = version.parse(torch.__version__).release >= version.Version('2.8').release
+TORCH_HAS_FUSED_OPS = version.parse(torch.__version__).release >= version.Version('2.8').release
 
 HAS_CUDA = False
 HAS_XPU = False
