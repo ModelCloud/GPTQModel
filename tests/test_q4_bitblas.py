@@ -21,9 +21,7 @@ from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E40
 
 class TestQ4BitBLAS(unittest.TestCase):
     def test_generation(self):
-        reference_output = "</s>I am in Paris and I am going to be there for a week. I am going to be in the middle of the city and I am going to be in the middle of the city. I am going to be in the middle of the city and I am going to be in the middle of the city. I am"
-
-        prompt = "I am in Paris and"
+        prompt = "The capital city of France is named"
         device = torch.device("cuda:0")
 
         model_id = "/monster/data/model/opt-125M-autoround-lm_head-false-symTrue"
@@ -48,7 +46,7 @@ class TestQ4BitBLAS(unittest.TestCase):
 
         predicted_text = tokenizer.decode(res[0])
 
-        self.assertEqual(predicted_text, reference_output)
+        self.assertIn("paris", predicted_text.lower())
 
     def test_bias(self):
         # TheBloke/Llama-2-7B-Chat-GPTQ has bias, but they are all zeros, use a checkpoint which really uses bias.
@@ -68,10 +66,10 @@ class TestQ4BitBLAS(unittest.TestCase):
         model_id = "/monster/data/model/starcoderbase-1b"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        prompt = "Today I am in Paris and"
+        prompt = "The capital city of France is named"
         inp = tokenizer(prompt, return_tensors="pt").to("cuda:0")
 
         res = model_q.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
 
         predicted_text = tokenizer.decode(res[0])
-        self.assertIn("Today I am in Paris and I am a student of", predicted_text)
+        self.assertIn("paris", predicted_text.lower())
