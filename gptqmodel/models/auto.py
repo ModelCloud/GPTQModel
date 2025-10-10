@@ -118,6 +118,8 @@ from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
+from .definitions.bailing_moe import BailingMoeQModel  # noqa: E402
+
 
 
 # make quants and inference more determinisitc
@@ -208,6 +210,7 @@ MODEL_MAP = {
     "longcat_flash": LongCatFlashQModel,
     "llava_qwen2": LlavaQwen2QModel,
     "nemotron_h": NemotronHQModel,
+    "bailing_moe": BailingMoeQModel,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
