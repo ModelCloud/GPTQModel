@@ -38,7 +38,7 @@ class TestGroupSize(unittest.TestCase):
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
 
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", split="train")
-        self.calibration_dataset = [self.tokenizer(example["text"]) for example in traindata.select(range(1024))]
+        self.calibration_dataset = traindata.select(range(1024))
 
     def test_load_group_128(self):
         model = GPTQModel.load(
@@ -85,7 +85,7 @@ class TestGroupSize(unittest.TestCase):
 
             self.assert_qqq_linear(model)
 
-            tokens = model.generate("Capital of France is", min_new_tokens=128, max_new_tokens=128)[0]
+            tokens = model.generate("The capital city of France is named", min_new_tokens=128, max_new_tokens=128)[0]
             result = model.tokenizer.decode(tokens)
             print(f"BACKEND: {BACKEND.QQQ}, Result: {result}")
             if "paris" not in result.lower() and "city" not in result.lower() and "country" not in result.lower():
