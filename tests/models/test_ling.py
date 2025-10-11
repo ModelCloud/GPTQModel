@@ -9,8 +9,8 @@ from model_test import ModelTest
 class TestLing(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ling-mini-2.0/"
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
-    NATIVE_ARC_CHALLENGE_ACC = 0.3700
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3700
+    NATIVE_ARC_CHALLENGE_ACC = 0.5009
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5137
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = True
     # EVAL_BATCH_SIZE = 6
