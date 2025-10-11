@@ -83,7 +83,7 @@ class NativeProcessor(LoopProcessor):
     def process(self, module: NamedModule):
         module.state[NATIVE_INPUTS_STATE_KEY] = self.native_inp_caches.pop(module.name)
 
-    def submodule_finalize(self, module: NamedModule):
+    def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         module.state.pop(NATIVE_INPUTS_STATE_KEY, None)
 
     def finalize(self, model: BaseQModel, **kwargs):
