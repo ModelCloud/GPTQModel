@@ -117,6 +117,11 @@ class QQQProcessor(LoopProcessor):
         q = qqq[module.name]
         with tf32_disable_guard():
             wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, q_scales_extra, nsamples = q.quantize()
+
+        q_scales = q_scales.to(CPU)
+        q_zeros = q_zeros.to(CPU)
+        q_g_idx = q_g_idx.to(CPU)
+
         ## Assign the quantized weight to the weight
         #gptq[name].layer.weight.data = q_full_weight.to(device=gptq[name].device)
 
