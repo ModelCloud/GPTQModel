@@ -212,7 +212,7 @@ class ModelTest(unittest.TestCase):
             task_results = self.lm_eval(
                 model=model,
                 apply_chat_template=self.APPLY_CHAT_TEMPLATE,
-                trust_remote_code=trust_remote_code,
+                trust_remote_code=self.TRUST_REMOTE_CODE,
                 delete_quantized_model=False,
             )
             log.info(f"[{backend.name}] ARC summary: {task_results}")
