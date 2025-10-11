@@ -922,7 +922,13 @@ class BaseQModel(nn.Module):
 
         if self.quantize_config.v2 is True:
             from ..looper.native_processor import NativeProcessor
-            args_clone = copy.deepcopy(args)
+
+            # During the deepcopy process, self.prepare_dataset will be deeply copied along with self. However,
+            # self has a threading.RLock() , which is not serializable.
+            args_to_copy = {k: v for k, v in args.items() if k != "prepare_dataset_func"}
+            args_clone = copy.deepcopy(args_to_copy)
+            args_clone["prepare_dataset_func"] = args["prepare_dataset_func"]
+
             args_clone.pop("calculate_w_wq_diff", None)
             quantize_processor.insert(0, NativeProcessor(**args_clone))
 
