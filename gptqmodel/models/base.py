@@ -1323,6 +1323,9 @@ class BaseQModel(nn.Module):
         return copy.deepcopy(kwargs)
 
     def reload_turtle_model(self) -> None:
+        if self.quantize_config.offload_to_disk is False:
+            return
+
         if threading.current_thread() is not threading.main_thread():
             raise RuntimeError("Turtle reloads must run on the main thread")
 
