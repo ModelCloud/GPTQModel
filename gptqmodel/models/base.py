@@ -37,6 +37,7 @@ except Exception:  # pragma: no cover - datasets may not be installed
 from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
@@ -250,6 +251,8 @@ class BaseQModel(nn.Module):
 
         # print kernel info:
         log.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
+
+        self._auto_configure_lookahead()
 
     @classmethod
     def extract_layers_node(cls):
@@ -1095,6 +1098,19 @@ class BaseQModel(nn.Module):
             loaded_kernels.add(v.__class__)
 
         return list(loaded_kernels)
+
+    def _auto_configure_lookahead(self) -> None:
+        if not isinstance(self.model, nn.Module):
+            return
+
+        quant_modules = [module for module in self.model.modules() if isinstance(module, TorchQuantLinear)]
+        if not quant_modules:
+            return
+
+        if not any(getattr(module, "_lookahead_enabled", False) for module in quant_modules):
+            return
+
+        configure_default_lookahead(self.model)
 
     def compile(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
         log.warn("Deprecation: `model.compile()` is deprecated. Please use `model.optimize()` instead.")
