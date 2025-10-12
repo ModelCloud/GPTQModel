@@ -6,6 +6,7 @@
 
 import math
 import os
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -394,10 +395,28 @@ class TorchQuantLinear(PackableQuantLinear):
         return self
 
     def set_lookahead_next(self, module: "TorchQuantLinear"):
-        self._lookahead_next = module
         if module is None:
+            self._lookahead_next = None
             self._reset_prefetch_state()
-        return self
+            return self
+
+        if isinstance(module, TorchQuantLinear):
+            self._lookahead_next = module
+            return self
+
+        if isinstance(module, Iterable):
+            targets = tuple(m for m in module if m is not None)
+            if not targets:
+                self._lookahead_next = None
+                self._reset_prefetch_state()
+                return self
+            for target in targets:
+                if not isinstance(target, TorchQuantLinear):
+                    raise TypeError("lookahead targets must be TorchQuantLinear modules or None")
+            self._lookahead_next = targets
+            return self
+
+        raise TypeError("lookahead target must be TorchQuantLinear, iterable of TorchQuantLinear, or None")
 
     def _reset_prefetch_state(self):
         for event in self._prefetch_events.values():
@@ -415,7 +434,11 @@ class TorchQuantLinear(PackableQuantLinear):
             return
         if self.qweight.device.type != "cuda":
             return
-        next_module._prefetch(dtype)
+        if isinstance(next_module, tuple):
+            for module in next_module:
+                module._prefetch(dtype)
+        else:
+            next_module._prefetch(dtype)
 
     def _prefetch(self, dtype: torch.dtype):
         if not self._lookahead_enabled or self.training:
