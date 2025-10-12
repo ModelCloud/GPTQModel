@@ -14,6 +14,11 @@ from types import ModuleType
 
 import torch
 
+try:
+    from triton.runtime import autotuner as _triton_autotuner
+except Exception:  # pragma: no cover - Triton optional
+    _triton_autotuner = None
+
 
 class ThreadSafe(ModuleType):
     """Generic proxy that exposes a module through a shared (non-reentrant) lock."""
@@ -94,9 +99,43 @@ class _ThreadSafeProxy:
     def __repr__(self):
         return repr(self._value)
 
+    def __call__(self, *args, **kwargs):
+        result = self.__getattr__("__call__")(*args, **kwargs)
+        if callable(result):
+            return _ThreadSafeProxy(result, self._lock)
+        return result
+
+    def __getitem__(self, item):
+        result = self.__getattr__("__getitem__")(item)
+        if callable(result):
+            return _ThreadSafeProxy(result, self._lock)
+        return result
+
 
 
 TORCH_LINALG = ThreadSafe(torch.linalg)
+
+if _triton_autotuner is not None:
+    _orig_autotune = _triton_autotuner.autotune
+    _orig_autotuner_cls = _triton_autotuner.Autotuner
+    _autotune_lock = threading.Lock()
+
+    class _ThreadSafeAutotuner(_orig_autotuner_cls):
+        def run(self, *args, **kwargs):
+            with _autotune_lock:
+                return super().run(*args, **kwargs)
+
+        def warmup(self, *args, **kwargs):
+            with _autotune_lock:
+                return super().warmup(*args, **kwargs)
+
+    _triton_autotuner.Autotuner = _ThreadSafeAutotuner
+
+    def _safe_triton_autotune(*args, **kwargs):
+        return _orig_autotune(*args, **kwargs)
+
+    _safe_triton_autotune.__wrapped__ = _orig_autotune
+    _triton_autotuner.autotune = _safe_triton_autotune
 
 __all__ = [
     "ThreadSafe",
