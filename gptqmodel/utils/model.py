@@ -11,7 +11,7 @@ import json
 import math
 import operator
 import os
-import re
+import pcre as re
 import shutil
 import struct
 import threading

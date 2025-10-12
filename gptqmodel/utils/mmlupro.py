@@ -7,7 +7,7 @@ import csv
 import json
 import os
 import random
-import re
+import pcre as re
 import time
 
 import torch

@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import random
-import re
+import pcre as re
 
 import datasets
 
