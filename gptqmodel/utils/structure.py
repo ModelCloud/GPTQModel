@@ -24,7 +24,7 @@ Notes:
 - Collapsing is generic: any numeric-indexed ModuleList whose qualified name matches `experts-regex`.
 """
 
-import re
+import pcre as re
 from typing import Dict, Iterable, Optional, Set, Tuple
 
 import torch

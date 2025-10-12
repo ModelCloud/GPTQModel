@@ -5,7 +5,7 @@
 
 import json
 import os.path
-import re
+import pcre as re
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from os.path import join

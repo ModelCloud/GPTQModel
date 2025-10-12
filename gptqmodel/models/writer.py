@@ -9,7 +9,7 @@ import copy
 import csv
 import json
 import os
-import re
+import pcre as re
 from os.path import isfile, join
 from typing import Any, Dict, Optional, Union
 
