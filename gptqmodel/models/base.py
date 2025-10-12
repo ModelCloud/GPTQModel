@@ -41,6 +41,7 @@ from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
+from .. import DEVICE_THREAD_POOL
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
 from ..utils.device import get_device
@@ -1348,29 +1349,29 @@ class BaseQModel(nn.Module):
         if self.quantize_config.offload_to_disk is False:
             return
 
-        if threading.current_thread() is not threading.main_thread():
-            raise RuntimeError("Turtle reloads must run on the main thread")
+        def _do_reload():
+            with self._turtle_lock:
+                turtle_model = self.turtle_model
+                model_local_path = self.model_local_path
+                loader = self.loader
 
-        with self._turtle_lock:
-            turtle_model = self.turtle_model
-            model_local_path = self.model_local_path
-            loader = self.loader
+                assert turtle_model is not None and model_local_path is not None
 
-            assert turtle_model is not None and  model_local_path is not None
+                reload_kwargs = self._clone_model_init_kwargs(turtle_model)
+                config = turtle_model.config
+                del turtle_model
 
-            reload_kwargs = self._clone_model_init_kwargs(turtle_model)
-            config = turtle_model.config
-            del turtle_model
+                new_model = loader.from_pretrained(
+                    model_local_path,
+                    config=config,
+                    low_cpu_mem_usage=True,
+                    **reload_kwargs,
+                )
+                new_model._model_init_kwargs = reload_kwargs
+                new_model.eval()
+                self.turtle_model = new_model
 
-            new_model = loader.from_pretrained(
-                model_local_path,
-                config=config,
-                low_cpu_mem_usage=True,
-                **reload_kwargs,
-            )
-            new_model._model_init_kwargs = reload_kwargs
-            new_model.eval()
-            self.turtle_model = new_model
+        DEVICE_THREAD_POOL.submit("model_loader:cpu", _do_reload).result()
 
     # transfer actually materizlied module from turtle (real) to shell
     def shell_module_materialize(
