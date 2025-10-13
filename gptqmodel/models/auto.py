@@ -119,6 +119,7 @@ from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
 from .definitions.bailing_moe import BailingMoeQModel  # noqa: E402
+from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
 
 
 
@@ -211,6 +212,7 @@ MODEL_MAP = {
     "llava_qwen2": LlavaQwen2QModel,
     "nemotron_h": NemotronHQModel,
     "bailing_moe": BailingMoeQModel,
+    "lfm2_moe": LFM2MoeQModel,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
