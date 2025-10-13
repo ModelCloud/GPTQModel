@@ -1278,6 +1278,7 @@ class ModuleLooper():
                                             if module_full_name
                                             else module
                                         )
+                                        offload_start = time.perf_counter() if region_timer is not None else None
                                         with log_time_block(
                                             "disk_offload",
                                             logger=log,
@@ -1287,6 +1288,12 @@ class ModuleLooper():
                                                 model=self.gptq_model.model,
                                                 module=target_module,
                                                 disk_path=offload_path,
+                                            )
+                                        if region_timer is not None and offload_start is not None:
+                                            region_timer.record(
+                                                "submodule_finalize_offload",
+                                                time.perf_counter() - offload_start,
+                                                source=resolved_label,
                                             )
                                     else:
                                         log.warning(

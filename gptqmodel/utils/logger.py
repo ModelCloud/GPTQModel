@@ -28,6 +28,9 @@ class QuantizationRegionTimer:
         ("process_quant", "Process quant"),
         ("post_quant_forward", "Post-quant replay"),
         ("submodule_finalize", "Submodule finalize"),
+        ("submodule_finalize_create", "Finalize create"),
+        ("submodule_finalize_pack", "Finalize pack"),
+        ("submodule_finalize_offload", "Finalize offload"),
         ("process_finalize", "Process finalize"),
         ("model_save", "Model save"),
     ]
