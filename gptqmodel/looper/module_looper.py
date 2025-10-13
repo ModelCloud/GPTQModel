@@ -579,9 +579,12 @@ class ModuleLooper():
 
         return ordered_outputs
 
-    def _masked_hook_wrapper(self, processor: LoopProcessor, inner_hook):
+    def _masked_hook_wrapper(self, processor: LoopProcessor, inner_hook, hook_source: str):
         def hook(module, inputs, output):
             keep = self._get_processor_mask(processor)
+
+            timer = getattr(self.gptq_model, "quant_region_timer", None)
+            start = time.perf_counter() if timer else None
 
             # Mask first tensor-like input if it's [B, S, ...]
             new_inputs = inputs
@@ -613,8 +616,15 @@ class ModuleLooper():
                     new_output = apply_keep_mask_bt(output, keep)
             except Exception:
                 new_output = output
-
-            return inner_hook(module, new_inputs, new_output)
+            try:
+                return inner_hook(module, new_inputs, new_output)
+            finally:
+                if timer is not None and start is not None:
+                    timer.record(
+                        "forward_hook",
+                        time.perf_counter() - start,
+                        source=hook_source,
+                    )
         return hook
 
     def cache_inputs(self, layers, calibration_data, use_cache):
@@ -622,6 +632,19 @@ class ModuleLooper():
         attention_masks = []
         position_ids = []
         layer_input_kwargs = []
+
+        timer = getattr(self.gptq_model, "quant_region_timer", None)
+        if layers:
+            first_layer = layers[0]
+            layer_label = getattr(first_layer, "full_name", None)
+            if layer_label is None:
+                layer_label = getattr(getattr(first_layer, "__class__", None), "__name__", None)
+            if layer_label is None:
+                layer_label = type(first_layer).__name__
+            capture_source = f"cache_inputs:{layer_label}"
+        else:
+            capture_source = "cache_inputs"
+        start_time = time.perf_counter() if timer else None
 
         try:
             calibration_batches = len(calibration_data)
@@ -694,9 +717,6 @@ class ModuleLooper():
                     device=cur_layer_device,
                 )
 
-        # we need to gc modules
-        self.gptq_model.reload_turtle_model()
-
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
         # TODO FIX ME.. remove hard coded Ovis code
@@ -741,8 +761,21 @@ class ModuleLooper():
         self.gptq_model.pre_quantize_generate_hook_end()
         handle.remove()
 
-        return InputCache(layer_inputs=layer_inputs, layer_input_kwargs=layer_input_kwargs, position_ids=position_ids,
-                          attention_masks=attention_masks)
+        result = InputCache(
+            layer_inputs=layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            position_ids=position_ids,
+            attention_masks=attention_masks,
+        )
+
+        if timer is not None and start_time is not None:
+            timer.record(
+                "capture_inputs",
+                time.perf_counter() - start_time,
+                source=capture_source,
+            )
+
+        return result
 
     @torch.inference_mode()
     def loop(self, fail_safe: bool = False, **kwargs):
@@ -770,6 +803,7 @@ class ModuleLooper():
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
         layers, layers_prefix = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.extract_layers_node())
+        region_timer = getattr(self.gptq_model, "quant_region_timer", None)
 
         for p_index, processor in enumerate(self.processors):
             if not processor.verify_calibration_dataset(p_index):
@@ -794,6 +828,9 @@ class ModuleLooper():
         # release calibration_dataset
         for processor in self.processors:
             processor.release_calibration_dataset()
+
+        if region_timer is not None:
+            region_timer.flush()
 
         layer_modules = self.gptq_model.simple_layer_modules(model_config=self.gptq_model.model.config, quantize_config=self.gptq_model.quantize_config)
 
@@ -842,11 +879,6 @@ class ModuleLooper():
                 continue
 
             module = self.gptq_model.pre_quantize(module)
-            # we need to gc modules
-            self.gptq_model.reload_turtle_model()
-
-            cur_layer_device = get_device(module)
-            full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
 
             if is_lm_head_module:
                 layer_descriptor = self.gptq_model.lm_head
@@ -854,6 +886,9 @@ class ModuleLooper():
                 layer_descriptor = f"{layers_prefix}.{layer_index}"
             else:
                 layer_descriptor = str(layer_index)
+
+            cur_layer_device = get_device(module)
+            full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
 
             for p_index, processor in enumerate(self.processors):
                 processor.log_call_count = 0  # reset
@@ -924,22 +959,28 @@ class ModuleLooper():
                     subset_size = len(subset)
                     for idx, (name, m) in enumerate(subset.items()):
                         is_last = (idx == subset_size - 1)
+                        hook_source = getattr(m, "full_name", None)
+                        if hook_source is None:
+                            hook_source = getattr(m, "name", name)
+                        if hook_source is None:
+                            hook_source = str(name)
 
                         # Wrap the processor hook with masking
                         if hasattr(subset[name], 'forward_hook'):
                             original_hook = processor.pre_process_fwd_hook(name)
-                            subset[name].forward_hook = self._masked_hook_wrapper(processor, original_hook)
+                            subset[name].forward_hook = self._masked_hook_wrapper(processor, original_hook, hook_source)
                             if is_last and processor.fwd_after_process:
                                 subset[name].forward_hook_last = True
                         else:
                             # Older registration path
                             original_hook = processor.pre_process_fwd_hook(name)
                             handle.append(subset[name].register_forward_hook(
-                                self._masked_hook_wrapper(processor, original_hook)
+                                self._masked_hook_wrapper(processor, original_hook, hook_source)
                             ))
 
                     # ---- Start Pre-Quantized Forward ----
-                    fwd_start = time.time()
+                    fwd_start = time.perf_counter()
+                    forward_source = f"{layer_descriptor}:subset{index + 1}/{subset_total}"
 
                     need_outputs = not processor.fwd_after_process
                     reuse_kv = bool(getattr(module, "reuse_kv", False))
@@ -989,8 +1030,14 @@ class ModuleLooper():
                         layer_inputs = processor.inputs_cache.layer_inputs
                         del forward_outputs
 
-                    fwd_time = time.time() - fwd_start
+                    fwd_time = time.perf_counter() - fwd_start
                     processor.set_fwd_time(fwd_time)
+                    if region_timer is not None:
+                        region_timer.record(
+                            "pre_quant_forward",
+                            fwd_time,
+                            source=forward_source,
+                        )
 
                     pb.title(layer_title).subtitle("").draw()
 
@@ -1044,19 +1091,29 @@ class ModuleLooper():
                         nm: NamedModule,
                         expected_device: torch.device,
                     ):
+                        module_label = getattr(nm, "full_name", getattr(nm, "name", repr(nm)))
                         module_ref = nm.module if isinstance(nm, NamedModule) else nm
                         module_weight = getattr(module_ref, "weight", None)
                         if module_weight is not None and expected_device is not None:
                             target_device = expected_device if isinstance(expected_device, torch.device) else torch.device(expected_device)
                             actual_device = get_device(module_weight)
-                            module_label = getattr(nm, "full_name", getattr(nm, "name", repr(nm)))
                             assert actual_device == target_device, (
                                 f"Device mismatch for '{module_label}' process task: "
                                 f"module weight on {actual_device}, thread target {target_device}."
                             )
 
                         # Run processor.process for this NamedModule
-                        proc.process(module=nm)
+                        timer = getattr(self.gptq_model, "quant_region_timer", None)
+                        start = time.perf_counter() if timer else None
+                        try:
+                            proc.process(module=nm)
+                        finally:
+                            if timer is not None and start is not None:
+                                timer.record(
+                                    "process_quant",
+                                    time.perf_counter() - start,
+                                    source=module_label,
+                                )
                         return nm.name, nm
 
                     for name, m in subset.items():
@@ -1105,6 +1162,9 @@ class ModuleLooper():
                     # try to cleanup recent objects before forward
                     #timed_gc_collect(1)
 
+                    replay_start = time.perf_counter()
+                    replay_source = f"{layer_descriptor}:subset{index + 1}/{subset_total}"
+
                     try:
                         layer_outputs = self._run_forward_batches(
                             module=module,
@@ -1128,6 +1188,12 @@ class ModuleLooper():
                     finally:
                         if replay_pb is not None:
                             replay_pb.close()
+                    if region_timer is not None:
+                        region_timer.record(
+                            "post_quant_forward",
+                            time.perf_counter() - replay_start,
+                            source=replay_source,
+                        )
 
                 # Finalize module after last processor
                 if p_index == len(self.processors) - 1:
@@ -1147,6 +1213,9 @@ class ModuleLooper():
 
                         if inner_module is not None and hasattr(inner_module, "target_device"):
                             setattr(inner_module, "target_device", CPU)
+
+                    if region_timer is not None:
+                        region_timer.flush()
 
                 if processor.fwd_after_process:
                     processor.clear_cache_data()
@@ -1188,40 +1257,49 @@ class ModuleLooper():
                     @torch.inference_mode()
                     def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
                         resolved_label = module_label or getattr(module, "full_name", getattr(module, "name", ""))
-                        with log_time_block(
-                            "submodule_finalize",
-                            logger=log,
-                            module_name=resolved_label,
-                        ):
-                            process.submodule_finalize(module, self.gptq_model)
+                        start = time.perf_counter() if region_timer is not None else None
+                        try:
+                            with log_time_block(
+                                "submodule_finalize",
+                                logger=log,
+                                module_name=resolved_label,
+                            ):
+                                process.submodule_finalize(module, self.gptq_model)
 
-                        # Disk offload (lifecycle TODO note preserved)
-                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
-                            quant_config = getattr(self.gptq_model, "quantize_config", None)
-                            if quant_config and getattr(quant_config, "offload_to_disk", False):
-                                offload_path = getattr(quant_config, "offload_to_disk_path", None)
-                                if offload_path:
-                                    module_full_name = getattr(module, "full_name", None)
-                                    target_module = (
-                                        self.gptq_model.model.get_submodule(module_full_name)
-                                        if module_full_name
-                                        else module
-                                    )
-                                    with log_time_block(
-                                        "disk_offload",
-                                        logger=log,
-                                        module_name=resolved_label,
-                                    ):
-                                        offload_to_disk(
-                                            model=self.gptq_model.model,
-                                            module=target_module,
-                                            disk_path=offload_path,
+                            # Disk offload (lifecycle TODO note preserved)
+                            if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
+                                quant_config = getattr(self.gptq_model, "quantize_config", None)
+                                if quant_config and getattr(quant_config, "offload_to_disk", False):
+                                    offload_path = getattr(quant_config, "offload_to_disk_path", None)
+                                    if offload_path:
+                                        module_full_name = getattr(module, "full_name", None)
+                                        target_module = (
+                                            self.gptq_model.model.get_submodule(module_full_name)
+                                            if module_full_name
+                                            else module
                                         )
-                                else:
-                                    log.warning(
-                                        "Skipping disk offload for %s: no offload path configured",
-                                        module_label,
-                                    )
+                                        with log_time_block(
+                                            "disk_offload",
+                                            logger=log,
+                                            module_name=resolved_label,
+                                        ):
+                                            offload_to_disk(
+                                                model=self.gptq_model.model,
+                                                module=target_module,
+                                                disk_path=offload_path,
+                                            )
+                                    else:
+                                        log.warning(
+                                            "Skipping disk offload for %s: no offload path configured",
+                                            module_label,
+                                        )
+                        finally:
+                            if region_timer is not None and start is not None:
+                                region_timer.record(
+                                    "submodule_finalize",
+                                    time.perf_counter() - start,
+                                    source=resolved_label,
+                                )
 
                         # pb.subtitle(
                         #     f"{process.name()}: layer:{layer_idx} Finalized {idx}/{total} {module_label}"
@@ -1336,13 +1414,25 @@ class ModuleLooper():
                     log.info(module_log)
                 reverse_p.log_plotly()
 
-                reverse_p.finalize(model=self.gptq_model, **kwargs)
+                finalize_start = time.perf_counter() if region_timer is not None else None
+                try:
+                    reverse_p.finalize(model=self.gptq_model, **kwargs)
+                finally:
+                    if region_timer is not None and finalize_start is not None:
+                        region_timer.record(
+                            "process_finalize",
+                            time.perf_counter() - finalize_start,
+                            source=processor_name,
+                        )
 
                 process_finalize_pb.title(
                     f"Processor finalization {index}/{process_finalize_total}"
                 ).subtitle(reverse_p.name()).next().draw()
         finally:
             process_finalize_pb.close()
+
+        if region_timer is not None:
+            region_timer.flush()
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
 

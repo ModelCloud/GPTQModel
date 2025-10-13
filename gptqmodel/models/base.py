@@ -8,10 +8,13 @@ import copy
 import json
 import os
 import random
+import re
 import threading
+import time
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
 
 import torch
 import torch._dynamo
@@ -47,7 +50,7 @@ from ..utils.data import collate_data
 from ..utils.device import get_device
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
-from ..utils.logger import setup_logger
+from ..utils.logger import QuantizationRegionTimer, setup_logger
 from ..utils.model import MODALITY, find_modules, get_module_by_name_prefix, move_to
 from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule
@@ -203,6 +206,10 @@ class BaseQModel(nn.Module):
         self.trust_remote_code = trust_remote_code
         self.model_local_path = model_local_path
         self.quantize_config = quantize_config
+        self.quant_region_timer = QuantizationRegionTimer(logger=log)
+        self._turtle_reload_threshold_bytes = self._resolve_turtle_reload_threshold()
+        self._turtle_reload_accum_bytes = 0
+        self._turtle_materialized_ids: Set[int] = set()
 
         self.processor: ProcessorMixin = None
 
@@ -773,6 +780,13 @@ class BaseQModel(nn.Module):
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
+        timer = getattr(self, "quant_region_timer", None)
+        if timer is not None:
+            timer.reset()
+
+        self._turtle_reload_accum_bytes = 0
+        self._turtle_materialized_ids = set()
+
         if self.quantize_config.quant_method in QUANTIZE_BLACK_LIST:
             raise ValueError(
                 f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
@@ -955,10 +969,16 @@ class BaseQModel(nn.Module):
         # prepare processor worker (looper)
         module_looper = ModuleLooper(self, processors=processors)
 
-        return module_looper.loop(
+        result = module_looper.loop(
             backend=backend,
             fail_safe=self.quantize_config.fail_safe,
         )
+
+        timer = getattr(self, "quant_region_timer", None)
+        if timer is not None:
+            timer.flush()
+
+        return result
 
     def _eora_generate(
         self,
@@ -1066,27 +1086,43 @@ class BaseQModel(nn.Module):
             eora_path: Optional[str] = None,
             **kwargs,
     ):
-        if self.quantized:
-            # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
-            #untie_weights(self.model)
+        timer = getattr(self, "quant_region_timer", None)
+        start_time = time.perf_counter() if timer else None
 
-            self.save_quantized(
-                save_dir=save_dir,
-                safetensors_metadata=safetensors_metadata,
-                max_shard_size=max_shard_size,
-                meta_quantizer=meta_quantizer,
-                eora_path=eora_path)
+        try:
+            if self.quantized:
+                # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
+                #untie_weights(self.model)
 
-            # overwrite quant_override_files
-            for name, value in self.quant_override_files.items():
-                json_path = os.path.join(save_dir, name)
-                with open(json_path, "w", encoding="utf-8") as f:
-                    if isinstance(value, str):
-                        f.write(value)
-                    else:
-                        f.write(json.dumps(value))
-        else:
-            self.save_pretrained(save_dir=save_dir, **kwargs)
+                self.save_quantized(
+                    save_dir=save_dir,
+                    safetensors_metadata=safetensors_metadata,
+                    max_shard_size=max_shard_size,
+                    meta_quantizer=meta_quantizer,
+                    eora_path=eora_path)
+
+                # overwrite quant_override_files
+                for name, value in self.quant_override_files.items():
+                    json_path = os.path.join(save_dir, name)
+                    with open(json_path, "w", encoding="utf-8") as f:
+                        if isinstance(value, str):
+                            f.write(value)
+                        else:
+                            f.write(json.dumps(value))
+            else:
+                self.save_pretrained(save_dir=save_dir, **kwargs)
+        finally:
+            if timer is not None and start_time is not None:
+                try:
+                    target = os.path.abspath(save_dir)
+                except (TypeError, ValueError, OSError):
+                    target = str(save_dir)
+                timer.record(
+                    "model_save",
+                    time.perf_counter() - start_time,
+                    source=target,
+                )
+                timer.flush()
 
 
     # returns all the loaded qlinear types, returns empty [] if non-found
@@ -1345,33 +1381,139 @@ class BaseQModel(nn.Module):
             return dict(kwargs)
         return copy.deepcopy(kwargs)
 
-    def reload_turtle_model(self) -> None:
+    def _resolve_turtle_reload_threshold(self) -> int:
+        if not getattr(self.quantize_config, "offload_to_disk", False):
+            return 0
+
+        default_bytes = 512 * 1024 ** 3 #512MB
+        raw = os.getenv("GPTQMODEL_RELOAD_THRESHOLD")
+        if raw is None or raw.strip() == "":
+            return default_bytes
+
+        value = raw.strip().lower()
+        if value in {"0", "off", "disable", "disabled", "none"}:
+            return 0
+
+        units = {
+            "b": 1,
+            "kb": 1024,
+            "mb": 1024 ** 2,
+            "gb": 1024 ** 3,
+            "tb": 1024 ** 4,
+        }
+
+        match = re.match(r"^([0-9]*\.?[0-9]+)\s*([a-z]*)$", value)
+        if match is None:
+            log.warn(
+                "GPTQMODEL_RELOAD_THRESHOLD value `%s` is invalid; defaulting to 512MB.",
+                raw,
+            )
+            return default_bytes
+
+        amount = float(match.group(1))
+        unit = match.group(2) or "b"
+        multiplier = units.get(unit, None)
+        if multiplier is None:
+            log.warn(
+                "GPTQMODEL_RELOAD_THRESHOLD unit `%s` is unsupported; defaulting to bytes.",
+                unit,
+            )
+            multiplier = 1
+
+        threshold = int(amount * multiplier)
+        if threshold < 0:
+            threshold = 0
+        return threshold
+
+    def _estimate_module_bytes(self, module: nn.Module) -> int:
+        if module is None:
+            return 0
+
+        total = 0
+        seen: Set[int] = set()
+        tensors = list(module.parameters(recurse=True)) + list(module.buffers(recurse=True))
+        for tensor in tensors:
+            if not isinstance(tensor, torch.Tensor):
+                continue
+            if tensor.device.type == "meta":
+                continue
+            try:
+                ptr = tensor.data_ptr()
+            except (RuntimeError, AssertionError):
+                ptr = None
+            if ptr is not None:
+                if ptr in seen:
+                    continue
+                seen.add(ptr)
+            total += tensor.numel() * tensor.element_size()
+        return total
+
+    def _maybe_auto_reload_after_alias(
+        self,
+        module: nn.Module,
+        target_submodule: nn.Module,
+    ) -> None:
+        if self.turtle_model is None:
+            return
+
+        threshold = self._turtle_reload_threshold_bytes
+        if threshold <= 0:
+            return
+
+        module_id = id(module)
+        if module_id in self._turtle_materialized_ids:
+            return
+
+        bytes_added = self._estimate_module_bytes(module)
+        self._turtle_materialized_ids.add(module_id)
+
+        if bytes_added <= 0:
+            return
+
+        self._turtle_reload_accum_bytes += bytes_added
+
+        if self._turtle_reload_accum_bytes >= threshold:
+            label = (
+                getattr(target_submodule, "full_name", None)
+                or getattr(target_submodule, "name", None)
+                or getattr(module, "full_name", None)
+                or module.__class__.__name__
+            )
+            self.reload_turtle_model(source=f"auto:{label}")
+            self._turtle_reload_accum_bytes = 0
+
+    def reload_turtle_model(self, *, source: Optional[str] = None) -> None:
         if self.quantize_config.offload_to_disk is False:
             return
 
-        def _do_reload():
-            with self._turtle_lock:
-                turtle_model = self.turtle_model
-                model_local_path = self.model_local_path
-                loader = self.loader
+        timer = getattr(self, "quant_region_timer", None)
+        timing_ctx = timer.measure("model_reload", source=source) if timer else nullcontext()
 
-                assert turtle_model is not None and model_local_path is not None
+        with timing_ctx:
+            def _do_reload():
+                with self._turtle_lock:
+                    turtle_model = self.turtle_model
+                    model_local_path = self.model_local_path
+                    loader = self.loader
 
-                reload_kwargs = self._clone_model_init_kwargs(turtle_model)
-                config = turtle_model.config
-                del turtle_model
+                    assert turtle_model is not None and model_local_path is not None
 
-                new_model = loader.from_pretrained(
-                    model_local_path,
-                    config=config,
-                    low_cpu_mem_usage=True,
-                    **reload_kwargs,
-                )
-                new_model._model_init_kwargs = reload_kwargs
-                new_model.eval()
-                self.turtle_model = new_model
+                    reload_kwargs = self._clone_model_init_kwargs(turtle_model)
+                    config = turtle_model.config
+                    del turtle_model
 
-        DEVICE_THREAD_POOL.submit("model_loader:cpu", _do_reload).result()
+                    new_model = loader.from_pretrained(
+                        model_local_path,
+                        config=config,
+                        low_cpu_mem_usage=True,
+                        **reload_kwargs,
+                    )
+                    new_model._model_init_kwargs = reload_kwargs
+                    new_model.eval()
+                    self.turtle_model = new_model
+                    self._turtle_reload_accum_bytes = 0
+
+            DEVICE_THREAD_POOL.submit("model_loader:cpu", _do_reload).result()
 
     # transfer actually materizlied module from turtle (real) to shell
     def shell_module_materialize(
@@ -1395,7 +1537,7 @@ class BaseQModel(nn.Module):
                 target_submodule=target_submodule,
                 device=device,
             )
-        # self.reload_turtle_model()
+        self._maybe_auto_reload_after_alias(module, target_submodule)
         return module
 
     ## overrides nn.module.train()
