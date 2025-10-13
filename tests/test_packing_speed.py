@@ -191,6 +191,32 @@ class TestPackingSpeed(unittest.TestCase):
         # within 2.5%
         self.assertLess((time_usage - expect_time) / expect_time, 0.05, msg=f"time: {time_usage:.4f}s")
 
+    def test_pack_block_thread_scaling(self):
+        qlinearCls = TorchQuantLinear
+        backend = BACKEND.TORCH
+        repeats = 10
+        thread_options = [1, 2, 4]
+        rows = []
+        reference_time = None
+
+        for threads in thread_options:
+            os.environ["GPTQMODEL_PACK_THREADS"] = str(threads)
+            try:
+                elapsed = self._time_pack_impl(qlinearCls, backend, impl="cpu", repeats=repeats, threads=1)
+            finally:
+                os.environ.pop("GPTQMODEL_PACK_THREADS", None)
+
+            if reference_time is None:
+                reference_time = elapsed
+            speedup = reference_time / elapsed if elapsed else float("inf")
+            rows.append((threads, elapsed, speedup))
+
+        print(tabulate(rows, headers=["threads", "time (s)", "speedup vs 1"], tablefmt="simple"))
+
+        # Expect at least non-regression: best timing must be <= 1-thread timing.
+        best_time = min(r[1] for r in rows)
+        self.assertLessEqual(best_time, reference_time, "Multi-threaded pack_block did not improve over single-thread baseline")
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA device required for GPU packing speed test")
     def test_pack_speed_gpu_vs_cpu(self):
         qlinearCls = TorchQuantLinear

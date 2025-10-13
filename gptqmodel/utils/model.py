@@ -781,7 +781,30 @@ def pack_module(
                         device=target_device,
                     )
                 elif effective_impl == "block":
-                    module.pack_block(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
+                    pack_block_threads = 2
+                    env_threads = os.getenv("GPTQMODEL_PACK_THREADS")
+                    if env_threads:
+                        try:
+                            pack_block_threads = max(int(env_threads), 1)
+                        except ValueError:
+                            log.warning(
+                                "pack_module: invalid GPTQMODEL_PACK_THREADS `%s`; defaulting to 1.",
+                                env_threads,
+                            )
+                    block_start = time.perf_counter()
+                    module.pack_block(
+                        linear=layer,
+                        scales=q_scales,
+                        zeros=q_zeros,
+                        g_idx=q_g_idx,
+                        workers=pack_block_threads,
+                    )
+                    log.info(
+                        "pack_block timing:%.6fs threads:%d module:%s",
+                        time.perf_counter() - block_start,
+                        pack_block_threads,
+                        name,
+                    )
                 else:
                     module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 
