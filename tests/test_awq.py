@@ -15,6 +15,9 @@ from parameterized import parameterized
 from transformers import AutoTokenizer
 
 from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
+from gptqmodel.nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
+from gptqmodel.nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.torch import torch_empty_cache
 
@@ -53,10 +56,10 @@ class TestGroupSize(unittest.TestCase):
     #     log.info(f"Output: {model.tokenizer.decode(result)}") # string output
 
     @parameterized.expand([
-        # (FORMAT.GEMM, BACKEND.AUTO, 128),
+        (FORMAT.GEMM, BACKEND.GEMM, 128),
         (FORMAT.GEMM, BACKEND.MARLIN, 128),
-        # (FORMAT.GEMV, BACKEND.AUTO, 128),
-        # (FORMAT.GEMV_FAST, BACKEND.AUTO, 128),
+        (FORMAT.GEMV, BACKEND.GEMV, 128),
+        (FORMAT.GEMV_FAST, BACKEND.GEMV_FAST, 128),
     ])
     def test_quant_and_inference(self, checkpoint_format, backend, group_size: int):
         quantize_config = QuantizeConfig(
@@ -90,7 +93,7 @@ class TestGroupSize(unittest.TestCase):
                 backend=backend,
             )
 
-            # self.assert_awq_linear(model)
+            self.assert_awq_linear(model, backend)
 
             tokens = model.generate("Capital of France is", max_new_tokens=100)[0]
             result = model.tokenizer.decode(tokens)
@@ -98,10 +101,19 @@ class TestGroupSize(unittest.TestCase):
             if "paris" not in result.lower() and "city" not in result.lower():
                 raise AssertionError(" `paris` not found in `result`")
 
-    def assert_awq_linear(self, model):
+    def assert_awq_linear(self, model, backend):
         has_qqq = False
         for _, module in model.named_modules():
-            linear = AwqGEMMQuantLinear
+            if backend == BACKEND.GEMM:
+                linear = AwqGEMMQuantLinear
+            elif backend == BACKEND.MARLIN:
+                linear = AwqMarlinQuantLinear
+            elif backend == BACKEND.GEMV:
+                linear = AwqGEMVQuantLinear
+            elif backend == BACKEND.GEMV_FAST:
+                linear = AwqGEMVFastQuantLinear
+            else:
+                raise Exception("unknown backend: " + backend)
             if isinstance(module, linear):
                 has_qqq = True
                 break
