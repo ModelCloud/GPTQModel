@@ -8,6 +8,9 @@ from ..base import BaseQModel
 
 class LFM2MoeQModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
+    
+    dynamic_expert_index = "num_experts"
+    layer_modules_strict = False
 
     module_tree= [
         "model",
