@@ -15,7 +15,7 @@ from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-class AwqGEMMQuantLinear(AWQuantLinear, PackableQuantLinear):
+class AwqGEMMQuantLinear(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
