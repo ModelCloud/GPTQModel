@@ -8,7 +8,7 @@ from ..base import BaseQModel
 
 class LFM2MoeQModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
-    
+
     dynamic_expert_index = "num_experts"
     layer_modules_strict = False
 
@@ -17,10 +17,17 @@ class LFM2MoeQModel(BaseQModel):
         "layers",
         "#",
         {
-            "input_layernorm": ("input_layernorm:!",),
+            "operator_norm": ("operator_norm:!",),
+            "conv": ("conv:0","in_proj:1", "out_proj:1"),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "mamba": ("in_proj:0", "out_proj:1"),
-            "feed_forward": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "ffn_norm": ("ffn_norm:!",),            
+            "feed_forward": {
+                "gate": ("gate:!",),
+                "": ("w1:0", "w3:0", "w2:1"),
+                "experts": {
+                    "#": ("w1:0", "w3:0", "w2:1"),
+                },
+            },
         }
     ]
 
