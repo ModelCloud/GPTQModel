@@ -14,19 +14,18 @@ from typing import Dict, Iterable, List, Tuple
 from unittest import mock
 
 import torch
+from model_test import ModelTest
 
 from gptqmodel import GPTQModel
+from gptqmodel.looper.module_looper import StopMainLoop
 from gptqmodel.models.writer import (
     PROCESS_LOG_LAYER,
     PROCESS_LOG_MODULE,
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
-from gptqmodel.looper.module_looper import StopMainLoop
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.torch import torch_empty_cache
-
-from model_test import ModelTest
 
 
 @dataclass(frozen=True)
@@ -112,7 +111,8 @@ class TestMultiVsSingleGPU(ModelTest):
         self, device_indices: Iterable[int]
     ) -> Tuple[Dict[str, LayerMetrics], Dict[str, List[Dict[str, float]]]]:
         target_devices = [torch.device(f"cuda:{idx}") for idx in device_indices]
-        selection = lambda _base_device: target_devices
+        def selection(_base_device):
+            return target_devices
 
         class _StopAfterLayer:
             def __init__(self, layer_idx: int):
@@ -235,10 +235,7 @@ class TestMultiVsSingleGPU(ModelTest):
                     info["samples"] += item["after"] - item["before"]
                     info["sum_hash"] += item["sum"]
                     info["primary"] = info["primary"] or bool(item.get("is_primary", False))
-                summary[name] = {
-                    handle: values
-                    for handle, values in sorted(per_handle.items(), key=lambda kv: kv[0])
-                }
+                summary[name] = dict(sorted(per_handle.items(), key=lambda kv: kv[0]))
             return summary
 
         single_summary = _summarize(single_batch_stats)

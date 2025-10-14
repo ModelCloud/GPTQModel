@@ -18,8 +18,8 @@ from torch.nn.modules.conv import _ConvNd
 from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
-from ...utils.logger import setup_logger
 from ...utils.env import env_flag
+from ...utils.logger import setup_logger
 from ...utils.safe import THREADPOOLCTL
 
 
