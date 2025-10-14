@@ -6,6 +6,7 @@
 import contextlib
 import copy
 import threading
+import time
 from typing import Callable, Optional, Tuple
 
 import torch
@@ -268,6 +269,9 @@ class GPTQProcessor(LoopProcessor):
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
 
         # replace module with quantized module
+        timer = getattr(model, "quant_region_timer", None)
+
+        create_start = time.perf_counter() if timer is not None else None
         with log_time_block(
             "create_quant_module",
             logger=log,
@@ -288,6 +292,12 @@ class GPTQProcessor(LoopProcessor):
                 pack_dtype=self.qcfg.pack_dtype,
                 register_buffers=False,
             )
+        if timer is not None and create_start is not None:
+            timer.record(
+                "submodule_finalize_create",
+                time.perf_counter() - create_start,
+                source=module_label,
+            )
 
         # pack module
         qModules = {
@@ -295,6 +305,7 @@ class GPTQProcessor(LoopProcessor):
             for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items()
             if name == module.full_name
         }
+        pack_start = time.perf_counter() if timer is not None else None
         with log_time_block(
             "pack",
             logger=log,
@@ -310,6 +321,12 @@ class GPTQProcessor(LoopProcessor):
                 quant_linear_cls=model.qlinear_kernel,
                 lock=self.lock,
                 quantize_config=self.qcfg,
+            )
+        if timer is not None and pack_start is not None:
+            timer.record(
+                "submodule_finalize_pack",
+                time.perf_counter() - pack_start,
+                source=module_label,
             )
 
         # TODO: store module quant results in module, not global processor result

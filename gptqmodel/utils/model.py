@@ -781,7 +781,12 @@ def pack_module(
                         device=target_device,
                     )
                 elif effective_impl == "block":
-                    module.pack_block(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
+                    module.pack_block(
+                        linear=layer,
+                        scales=q_scales,
+                        zeros=q_zeros,
+                        g_idx=q_g_idx,
+                    )
                 else:
                     module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 

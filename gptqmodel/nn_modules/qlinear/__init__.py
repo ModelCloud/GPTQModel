@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import copy
 import math
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
@@ -539,6 +540,43 @@ class PackableQuantLinear(BaseQuantLinear):
         assert word_bits == 32, "Only 32-bit packing words supported."
         if (in_features % word_bits) != 0:
             raise ValueError("in_features must be divisible by 32")
+
+        disable_ext = os.getenv("GPTQMODEL_DISABLE_PACK_EXT", "").lower() in {"1", "true", "yes"}
+        force_ext = os.getenv("GPTQMODEL_FORCE_PACK_EXT", "").lower() in {"1", "true", "yes"}
+        pack_block_threads = workers if workers and workers > 0 else 1
+        env_threads = os.getenv("GPTQMODEL_PACK_THREADS")
+        if env_threads:
+            try:
+                pack_block_threads = max(int(env_threads), 1)
+            except ValueError:
+                log.warning(
+                    "pack_block: invalid GPTQMODEL_PACK_THREADS `%s`; defaulting to %d.",
+                    env_threads,
+                    pack_block_threads,
+                )
+
+        if not disable_ext and bits in (2, 4, 8):
+            try:
+                from .pack_block_ext import pack_block_cpu as pack_block_cpu_ext
+
+                qweight_ext, qzeros_ext = pack_block_cpu_ext(
+                    W,
+                    scales,
+                    zeros,
+                    g_idx.to(dtype=t.int32),
+                    bits,
+                    word_bits,
+                    block_in,
+                    pack_block_threads,
+                )
+
+                self.register_buffer("qweight", qweight_ext.to(dtype=self.pack_dtype))
+                self.register_buffer("qzeros", qzeros_ext.to(dtype=self.pack_dtype))
+                return
+            except Exception as exc:
+                if force_ext:
+                    raise
+                log.debug("pack_block: native extension unavailable, falling back to Python path (%s)", exc)
 
         # NOTE: pack_factor is only meaningful for {2,4,8}. There is NO integer pack_factor for 3-bit.
         if bits in (2, 4, 8):

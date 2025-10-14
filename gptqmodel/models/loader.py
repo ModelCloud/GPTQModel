@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import time
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
@@ -130,6 +131,8 @@ def ModelLoader(cls):
         import torch._dynamo
         torch._dynamo.disable()
 
+        load_start = time.perf_counter()
+
         # non-quantized models are always loaded into cpu
         cpu_device_map = {"": "cpu"}
 
@@ -233,7 +236,7 @@ def ModelLoader(cls):
 
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
 
-        return cls(
+        instance = cls(
             model,
             turtle_model=turtle_model,
             quantized=False,
@@ -242,6 +245,13 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
         )
+
+        timer = getattr(instance, "quant_region_timer", None)
+        if timer is not None:
+            source_label = getattr(instance, "model_local_path", None) or str(pretrained_model_id_or_path)
+            timer.record("model_load", time.perf_counter() - load_start, source=source_label)
+
+        return instance
 
     cls.from_pretrained = from_pretrained
 

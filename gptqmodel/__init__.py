@@ -18,6 +18,7 @@ DEVICE_THREAD_POOL = DeviceThreadPool(
         "xpu:per": 1,
         "mps": 8,
         "cpu": 8,
+        "model_loader:cpu": 2,
     },
     empty_cache_every_n=1024,
 )

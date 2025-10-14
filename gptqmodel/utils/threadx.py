@@ -305,13 +305,18 @@ class _DeviceWorker:
         name: Optional[str] = None,
         inference_mode: bool = False,
         cpu_core: Optional[int] = None,
+        *,
+        key_override: Optional[str] = None,
     ):
         self.device = device
         self.rwlock = rwlock
         self._on_task_finished = on_task_finished
         self._on_worker_exit = on_worker_exit
 
-        self.key = f"{device.type}:{device.index}" if device.index is not None else device.type
+        if key_override is not None:
+            self.key = key_override
+        else:
+            self.key = f"{device.type}:{device.index}" if device.index is not None else device.type
         self.name = name or f"DPWorker-{self.key}"
         self._q: "queue.Queue[Tuple[bool, Callable[..., Any], tuple, dict, Future]]" = queue.Queue()
         self._stop = threading.Event()
@@ -548,6 +553,8 @@ class DeviceThreadPool:
                 - 'xpu:per': N            -> N workers per XPU index
                 - 'cuda:<i>': N           -> override for specific CUDA index
                 - 'xpu:<i>': N            -> override for specific XPU index
+                - '<alias>:<parent>': N   -> virtual pool sharing locks with parent device
+                  (CUDA parents must include an explicit index, e.g. 'alias:cuda:0')
               Unspecified devices default to 1 worker each.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
             pin_cpu_workers: bind CPU device workers to individual CPU cores when
@@ -608,14 +615,37 @@ class DeviceThreadPool:
 
         self._inference_mode = bool(inference_mode)
 
-        workers = workers or {}
+        workers_cfg = workers or {}
+        base_workers: Dict[str, int] = {}
+        virtual_workers: Dict[str, Tuple[str, int]] = {}
+        for raw_key, raw_count in workers_cfg.items():
+            alias_info = self._parse_virtual_worker_key(raw_key)
+            try:
+                count = int(raw_count)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Worker count for '{raw_key}' must be an integer (got {raw_count!r})") from exc
+            if alias_info is None:
+                base_workers[raw_key] = count
+            else:
+                _, parent_key = alias_info
+                if parent_key.startswith("cuda"):
+                    parts = parent_key.split(":")
+                    if len(parts) < 2 or not parts[1].isdigit():
+                        raise ValueError(
+                            f"Virtual pool '{raw_key}' must target a concrete CUDA index (e.g. 'alias:cuda:0'); got '{parent_key}'"
+                        )
+                virtual_workers[raw_key] = (parent_key, count)
+
+        self._virtual_to_parent: Dict[str, str] = {
+            v_key: parent for v_key, (parent, _) in virtual_workers.items()
+        }
 
         # Pre-compute CPU core assignments (when opted in) so GPU/XPU workers
         # do not collide with CPU workers. When affinity APIs are not available
         # we silently fall back to OS scheduling.
         affinity_plan = self._plan_worker_affinity(
             devices,
-            workers,
+            base_workers,
             pin_cpu_workers=pin_cpu_workers,
             pin_accelerator_workers=pin_accelerator_workers,
         )
@@ -636,19 +666,53 @@ class DeviceThreadPool:
             self._inflight_cv[key] = threading.Condition()
             self._last_gc_done_per_device[key] = 0
 
-            n_workers = self._resolve_workers_for_device(dev, workers)
+            n_workers = self._resolve_workers_for_device(dev, base_workers)
             group: List[_DeviceWorker] = []
             for wid in range(int(max(1, n_workers))):
                 cpu_core = affinity_plan.get((key, wid))
-                worker = self._spawn_worker(dev, name=f"DPWorker-{key}#{wid}", cpu_core=cpu_core)
+                worker = self._spawn_worker(dev, key, name=f"DPWorker-{key}#{wid}", cpu_core=cpu_core)
                 group.append(worker)
             self._worker_groups[key] = group
             self._dispatch_rr[key] = 0
             if group:
                 self._serial_workers[key] = group[0]
 
+        for v_key, (parent_key, limit) in virtual_workers.items():
+            if limit < 1:
+                raise ValueError(f"Virtual pool '{v_key}' requires at least one worker (got {limit})")
+            parent_dev = self._devices_by_key.get(parent_key)
+            if parent_dev is None:
+                raise ValueError(f"Virtual pool '{v_key}' references unknown parent '{parent_key}'")
+            if parent_dev.type == "cuda" and parent_dev.index is None:
+                raise ValueError(
+                    f"Virtual pool '{v_key}' requires an indexed CUDA parent device (e.g. '{v_key}:cuda:0'); got '{parent_key}'"
+                )
+            parent_group = self._worker_groups.get(parent_key, [])
+            parent_budget = len(parent_group)
+            if limit > parent_budget:
+                raise ValueError(
+                    f"Virtual pool '{v_key}' requests {limit} workers but parent '{parent_key}' only has {parent_budget}"
+                )
+
+            self._locks[v_key] = self._locks[parent_key]
+            self._devices_by_key[v_key] = parent_dev
+            self._per_device_done[v_key] = 0
+            self._inflight[v_key] = 0
+            self._inflight_cv[v_key] = threading.Condition()
+            self._last_gc_done_per_device[v_key] = 0
+
+            alias_group: List[_DeviceWorker] = []
+            for wid in range(limit):
+                worker = self._spawn_worker(parent_dev, v_key, name=f"DPWorker-{v_key}#{wid}")
+                alias_group.append(worker)
+            self._worker_groups[v_key] = alias_group
+            self._dispatch_rr[v_key] = 0
+            if alias_group:
+                self._serial_workers[v_key] = alias_group[0]
+
         # A canonical ordering for multi-device lock acquisitions.
         self._ordered_keys = sorted(self._locks.keys())
+        self._rebuild_family_keys()
 
         # GC diagnostics counters
         self._gc_passes = 0
@@ -669,6 +733,54 @@ class DeviceThreadPool:
                 log.debug("DP-Janitor disabled (no accelerators or threshold <= 0)")
 
     # --------------- Worker management ---------------
+
+    @staticmethod
+    def _parse_virtual_worker_key(key: str) -> Optional[Tuple[str, str]]:
+        if not isinstance(key, str) or ":" not in key:
+            return None
+        head, tail = key.split(":", 1)
+        if head in {"cuda", "xpu", "mps", "cpu"}:
+            return None
+        if not tail:
+            return None
+        return head, tail
+
+    def _rebuild_family_keys(self) -> None:
+        fam_map: Dict[str, List[str]] = {}
+        for key in sorted(self._locks.keys()):
+            fam = key.split(":", 1)[0]
+            fam_map.setdefault(fam, []).append(key)
+
+        for alias_key, parent_key in self._virtual_to_parent.items():
+            parent_fam = parent_key.split(":", 1)[0]
+            fam_map.setdefault(parent_fam, [])
+            if alias_key not in fam_map[parent_fam]:
+                fam_map[parent_fam].append(alias_key)
+
+        for fam, keys in fam_map.items():
+            keys.sort()
+
+        self._family_keys = fam_map
+
+    def _resolve_device_key(self, device: DeviceLike | str) -> str:
+        if isinstance(device, str):
+            if device == "all":
+                raise ValueError("'all' is not a valid concrete device specification")
+            if device in self._locks:
+                return device
+            fam_keys = self._family_keys.get(device)
+            if fam_keys is not None:
+                if len(fam_keys) == 1:
+                    return fam_keys[0]
+                raise ValueError(
+                    f"Device specification '{device}' is ambiguous; choose one of {fam_keys}"
+                )
+
+        dev = _coerce_device(device)
+        key = self._key(dev)
+        if key not in self._locks:
+            raise ValueError(f"Device not in pool: {device}")
+        return key
 
     def _plan_worker_affinity(
         self,
@@ -745,11 +857,16 @@ class DeviceThreadPool:
 
         return plan
 
-    def _spawn_worker(self, dev: torch.device, name: Optional[str] = None, cpu_core: Optional[int] = None) -> _DeviceWorker:
+    def _spawn_worker(
+        self,
+        dev: torch.device,
+        key: str,
+        name: Optional[str] = None,
+        cpu_core: Optional[int] = None,
+    ) -> _DeviceWorker:
         """
         Create and start a worker bound to the provided device.
         """
-        key = self._key(dev)
         w = _DeviceWorker(
             device=dev,
             rwlock=self._locks[key],
@@ -758,6 +875,7 @@ class DeviceThreadPool:
             name=name,
             inference_mode=self._inference_mode,
             cpu_core=cpu_core,
+            key_override=key,
         )
         return w
 
@@ -792,8 +910,8 @@ class DeviceThreadPool:
         Asynchronously schedule work on the given device; returns a Future.
         Optional (CUDA): pass `cuda_stream=` to launch into a specific stream.
         """
-        dev = _coerce_device(device)
-        key = self._key(dev)
+        key = self._resolve_device_key(device)
+        dev = self._devices_by_key[key]
         worker = self._pick_worker(key)
         if cuda_stream is not None and dev.type != "cuda":
             raise ValueError("cuda_stream is only valid for CUDA devices")
@@ -821,8 +939,8 @@ class DeviceThreadPool:
         Schedule work that must execute sequentially on a device. Tasks are
         enqueued onto a dedicated worker so they run in submission order.
         """
-        dev = _coerce_device(device)
-        key = self._key(dev)
+        key = self._resolve_device_key(device)
+        dev = self._devices_by_key[key]
         if cuda_stream is not None and dev.type != "cuda":
             raise ValueError("cuda_stream is only valid for CUDA devices")
 
@@ -834,7 +952,7 @@ class DeviceThreadPool:
             if key not in self._dispatch_rr:
                 self._dispatch_rr[key] = 0
             if not group:
-                fresh = self._spawn_worker(dev, name=f"DPWorker-{key}#0")
+                fresh = self._spawn_worker(dev, key, name=f"DPWorker-{key}#0")
                 group.append(fresh)
                 self._dispatch_rr[key] = 0
             self._refresh_serial_worker_locked(key)
@@ -928,11 +1046,10 @@ class DeviceThreadPool:
         """
         Obtain an exclusive lock for a single device (blocks all its workers).
         """
-        dev = _coerce_device(device)
-        key = self._key(dev)
+        key = self._resolve_device_key(device)
         lk = self._locks.get(key)
         if lk is None:
-            raise ValueError(f"Unknown device for pool: {dev}")
+            raise ValueError(f"Unknown device for pool: {device}")
         return lk.writer()
 
     def read_lock(self, device: DeviceLike | str):
@@ -948,12 +1065,13 @@ class DeviceThreadPool:
             if device == "all":
                 pairs = [(k, self._locks[k]) for k in self._ordered_keys]
                 return _ReadLockGroup(pairs)
-            if device in ("cuda", "xpu", "mps", "cpu"):
-                keys = [k for k in self._ordered_keys if k.startswith(device)]
-                if not keys:
-                    raise ValueError(f"No devices of type '{device}' in pool")
-                pairs = [(k, self._locks[k]) for k in keys]
+            fam_keys = self._family_keys.get(device)
+            if fam_keys is not None:
+                pairs = [(k, self._locks[k]) for k in fam_keys]
                 return _ReadLockGroup(pairs)
+            if device in self._locks:
+                return self._locks[device].reader()
+            raise ValueError(f"Unknown device for pool: {device}")
 
         # torch.device / int / 'cuda:0' etc.
         dev = _coerce_device(device)
@@ -961,11 +1079,10 @@ class DeviceThreadPool:
 
         # Family device with index=None -> all devices of that type
         if dev.index is None:
-            fam = dev.type
-            keys = [k for k in self._ordered_keys if k.startswith(fam)]
-            if not keys:
-                raise ValueError(f"No devices of type '{fam}' in pool")
-            pairs = [(k, self._locks[k]) for k in keys]
+            fam_keys = self._family_keys.get(key)
+            if not fam_keys:
+                raise ValueError(f"No devices of type '{dev.type}' in pool")
+            pairs = [(k, self._locks[k]) for k in fam_keys]
             return _ReadLockGroup(pairs)
 
         # Concrete device
@@ -1071,7 +1188,7 @@ class DeviceThreadPool:
         """
         Convenience accessor for per-device completed count (atomic snapshot).
         """
-        key = self._key(_coerce_device(device))
+        key = self._resolve_device_key(device)
         with self._stats_lock:
             return int(self._per_device_done.get(key, 0))
 
@@ -1098,7 +1215,7 @@ class DeviceThreadPool:
             group = self._worker_groups.get(key)
             if not group:
                 dev = self._devices_by_key[key]
-                w = self._spawn_worker(dev, name=f"DPWorker-{key}#0")
+                w = self._spawn_worker(dev, key, name=f"DPWorker-{key}#0")
                 group = [w]
                 self._worker_groups[key] = group
                 self._dispatch_rr[key] = 0
@@ -1152,26 +1269,46 @@ class DeviceThreadPool:
         and torch.device objects.
         """
         keys: List[str] = []
+        seen: set[str] = set()
         for s in scope:
             if isinstance(s, str):
-                if s in ("all",):
-                    keys.extend(self._ordered_keys)
-                elif ":" in s:
-                    if s not in self._locks:
-                        raise ValueError(f"Unknown device key in scope: {s}")
+                if s == "all":
+                    for key in self._ordered_keys:
+                        if key not in seen:
+                            keys.append(key)
+                            seen.add(key)
+                    continue
+
+                fam_keys = self._family_keys.get(s)
+                if fam_keys is not None:
+                    for key in fam_keys:
+                        if key not in seen:
+                            keys.append(key)
+                            seen.add(key)
+                    continue
+
+                if s not in self._locks:
+                    raise ValueError(f"Unknown device key in scope: {s}")
+                if s not in seen:
                     keys.append(s)
-                else:
-                    fam = s
-                    fam_keys = [k for k in self._ordered_keys if k.startswith(fam)]
-                    if not fam_keys:
-                        raise ValueError(f"No devices of type '{fam}' in pool")
-                    keys.extend(fam_keys)
+                    seen.add(s)
             else:
                 dev = _coerce_device(s)
                 k = self._key(dev)
-                if k not in self._locks:
-                    raise ValueError(f"Device not in pool: {dev}")
-                keys.append(k)
+                if dev.index is None:
+                    fam_keys = self._family_keys.get(k)
+                    if not fam_keys:
+                        raise ValueError(f"No devices of type '{dev.type}' in pool")
+                    for key in fam_keys:
+                        if key not in seen:
+                            keys.append(key)
+                            seen.add(key)
+                else:
+                    if k not in self._locks:
+                        raise ValueError(f"Device not in pool: {dev}")
+                    if k not in seen:
+                        keys.append(k)
+                        seen.add(k)
         return keys
 
     def _resolve_scope_to_keys(self, scope: Optional[Union[str, DeviceLike, Iterable[DeviceLike]]] = None) -> List[str]:
