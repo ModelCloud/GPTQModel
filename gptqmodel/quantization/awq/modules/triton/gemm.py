@@ -18,6 +18,7 @@ import torch
 import triton
 import triton.language as tl
 
+
 AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
 def get_same_device_cm(t):
@@ -282,10 +283,11 @@ def awq_dequantize_triton(
     Y = qweight.shape[0]  # num rows
     X = qweight.shape[1]  # num cols
 
-    grid = lambda META: (
-        triton.cdiv(X, META["BLOCK_SIZE_X"]),
-        triton.cdiv(Y, META["BLOCK_SIZE_Y"]),
-    )
+    def grid(META):
+        return (
+            triton.cdiv(X, META["BLOCK_SIZE_X"]),
+            triton.cdiv(Y, META["BLOCK_SIZE_Y"]),
+        )
     with get_same_device_cm(qweight):
         awq_dequantize_kernel[grid](
             qweight,
@@ -330,10 +332,11 @@ def awq_gemm_triton(
     assert group_size <= K
     assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
 
-    grid = lambda META: (
-        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-        split_k_iters,
-    )
+    def grid(META):
+        return (
+            triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+            split_k_iters,
+        )
 
     result = torch.zeros((M, N), dtype=scales.dtype, device=input.device)
 

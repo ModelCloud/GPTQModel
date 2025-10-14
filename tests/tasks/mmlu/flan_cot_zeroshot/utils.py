@@ -3,10 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import pcre as re
 import sys
 import unicodedata
 
+import pcre as re
 from lm_eval.filters.extraction import RegexFilter
 
 

@@ -179,17 +179,42 @@ def torch_new_stream_ctx():
     return contextlib.nullcontext()
 
 def torch_sync(device: torch.device = None):
-    # check all backends
+    """Synchronize accelerator queues.
+
+    When no device is provided we synchronize every detected accelerator index so
+    replication work staged on multiple GPUs/NPUs completes before issuing more
+    kernels.
+    """
+
     if device is None:
+        synchronized_any = False
+
         if HAS_CUDA:
-            torch.cuda.synchronize()
-        elif HAS_XPU:
-            torch.xpu.synchronize()
-        elif HAS_MPS:
+            dev_count = torch.cuda.device_count()
+            if dev_count:
+                synchronized_any = True
+                for idx in range(dev_count):
+                    torch.cuda.synchronize(idx)
+
+        if HAS_XPU and hasattr(torch.xpu, "device_count"):
+            dev_count = torch.xpu.device_count()
+            if dev_count:
+                synchronized_any = True
+                for idx in range(dev_count):
+                    torch.xpu.synchronize(idx)
+
+        if HAS_MPS:
+            synchronized_any = True
             torch.mps.synchronize()
-        elif HAS_NPU:
-            torch.npu.synchronize()
-        else:
+
+        if HAS_NPU and hasattr(torch.npu, "device_count"):
+            dev_count = torch.npu.device_count()
+            if dev_count:
+                synchronized_any = True
+                for idx in range(dev_count):
+                    torch.npu.synchronize(idx)
+
+        if not synchronized_any:
             torch.cpu.synchronize()
         return
 
@@ -200,7 +225,7 @@ def torch_sync(device: torch.device = None):
     elif device.type == "mps":
         torch.mps.synchronize()
     elif device.type == "npu":
-        torch.npu.synchronize()
+        torch.npu.synchronize(device=device)
     elif device.type == "cpu":
         torch.cpu.synchronize()
 

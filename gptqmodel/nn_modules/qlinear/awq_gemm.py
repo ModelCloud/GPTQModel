@@ -7,7 +7,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear, PackableQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.modules.linear.gemm import WQLinearMMFunction
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger

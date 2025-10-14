@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
 
 from gptqmodel.nn_modules.qlinear.lookahead import configure_default_lookahead
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear

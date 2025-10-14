@@ -7,9 +7,9 @@ import csv
 import json
 import os
 import random
-import pcre as re
 import time
 
+import pcre as re
 import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader

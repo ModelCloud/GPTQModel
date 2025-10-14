@@ -11,7 +11,6 @@ import json
 import math
 import operator
 import os
-import pcre as re
 import shutil
 import struct
 import threading
@@ -22,6 +21,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
+import pcre as re
 import torch
 import torch.nn as nn
 import transformers

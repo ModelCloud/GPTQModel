@@ -3,9 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import pcre as re
-
 import datasets
+import pcre as re
 
 
 def preprocess(text):

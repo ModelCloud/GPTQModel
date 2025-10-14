@@ -15,9 +15,9 @@ from parameterized import parameterized
 from transformers import AutoTokenizer
 
 from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
-from gptqmodel.nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
+from gptqmodel.nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.torch import torch_empty_cache
 

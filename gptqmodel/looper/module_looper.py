@@ -19,7 +19,7 @@ import threading
 import time
 from concurrent.futures import as_completed
 from contextlib import nullcontext
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING
 
 import torch
 
@@ -57,6 +57,12 @@ log = setup_logger()
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from logbar.progress import ProgressBar
+
+
+class FinalizeProgressInfo(NamedTuple):
+    module_label: Optional[str]
+    process_name: str
+    layer_idx: Optional[int]
 
 
 class ModuleLooper():
@@ -487,6 +493,9 @@ class ModuleLooper():
     ) -> List[List[torch.Tensor]]:
         """Fan batches across device clones and preserve result ordering."""
         module_replicas = clone_module_for_devices(module, devices)
+
+        # Ensure any async replication/memcpy ops are complete before threads start fanning out.
+        torch_sync()
 
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
 
@@ -1308,6 +1317,9 @@ class ModuleLooper():
                                     source=resolved_label,
                                 )
 
+                        process_name = process.name() if process is not None else "<processor>"
+                        return FinalizeProgressInfo(module_label, process_name, layer_idx)
+
                         # pb.subtitle(
                         #     f"{process.name()}: layer:{layer_idx} Finalized {idx}/{total} {module_label}"
                         # ).draw()
@@ -1328,34 +1340,57 @@ class ModuleLooper():
                     finalize_futures_snapshot = list(finalize_futures)
 
                     if finalize_futures_snapshot:
-                        finalize_pb.title(
-                            f"Submodule finalize 0/{finalize_count}"
-                        ).subtitle("Waiting for completions...").draw()
+                        known_layers = sorted(
+                            {
+                                layer_idx
+                                for _, _, _, _, layer_idx in finalize_futures_snapshot
+                                if layer_idx is not None
+                            }
+                        )
+                        includes_unknown = any(
+                            layer_idx is None
+                            for _, _, _, _, layer_idx in finalize_futures_snapshot
+                        )
 
-                        future_metadata = {
-                            future: (module_label, process, layer_idx)
-                            for future, _, module_label, process, layer_idx in finalize_futures_snapshot
-                        }
+                        layer_heading = "Layer ?"
+                        if known_layers:
+                            sample_layers = ", ".join(str(idx) for idx in known_layers[:3])
+                            if len(known_layers) > 3:
+                                sample_layers += ", …"
+                            suffix = ", ?" if includes_unknown else ""
+                            prefix = "Layer" if len(known_layers) == 1 else "Layers"
+                            layer_heading = f"{prefix} {sample_layers}{suffix}"
+                        elif includes_unknown:
+                            layer_heading = "Layer ?"
+
+                        finalize_pb.title(
+                            f"{layer_heading} Submodule finalize 0/{finalize_count}"
+                        ).subtitle("Waiting for completions...").draw()
 
                     def _drain_finalize_futures(
                         futures,
                         finalize_pb_local,
                         finalize_count_local,
-                        future_metadata_local,
                     ):
                         completed_local = 0
                         try:
                             for future in as_completed(futures):
-                                module_label, process, layer_idx = future_metadata_local.get(
-                                    future, (None, None, None)
-                                )
+                                result = future.result()
 
-                                future.result()
+                                if isinstance(result, FinalizeProgressInfo):
+                                    module_label = result.module_label
+                                    process_name = result.process_name
+                                    layer_idx = result.layer_idx
+                                elif isinstance(result, tuple) and len(result) == 3:
+                                    module_label, process_name, layer_idx = result
+                                else:
+                                    module_label = None
+                                    process_name = "<processor>"
+                                    layer_idx = None
 
-                                layer_label = f"Layer {layer_idx}" if layer_idx is not None else "layer ?"
+                                layer_label = f"Layer {layer_idx}" if layer_idx is not None else "Layer ?"
                                 display_module = module_label or "<unnamed>"
-                                processor_name = process.name() if process is not None else "<processor>"
-                                subtitle = f"{processor_name}: {display_module}"
+                                subtitle = f"{process_name}: {display_module}"
 
                                 completed_local += 1
                                 finalize_pb_local.next()
@@ -1373,7 +1408,6 @@ class ModuleLooper():
                                 [future for future, *_ in finalize_futures_snapshot],
                                 finalize_pb,
                                 finalize_count,
-                                future_metadata,
                             ),
                             name="SubmoduleFinalizeWatcher",
                             daemon=True,

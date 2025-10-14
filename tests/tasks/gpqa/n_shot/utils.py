@@ -4,9 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import random
-import pcre as re
 
 import datasets
+import pcre as re
 
 
 def preprocess(text):
