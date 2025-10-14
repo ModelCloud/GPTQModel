@@ -485,6 +485,18 @@ class PackableQuantLinear(BaseQuantLinear):
 
         return weights
 
+    # FIXME, optimum needs call pack(), we need to remove it
+    def pack(
+            self,
+            linear: nn.Module,
+            scales: t.Tensor,
+            zeros: t.Tensor,
+            g_idx: t.Tensor,
+            block_in: int = 8192,
+            workers: int = 8,
+    ):
+        self.pack_block(linear, scales, zeros, g_idx, block_in, workers)
+
     @t.inference_mode()
     def pack_block(
             self,
