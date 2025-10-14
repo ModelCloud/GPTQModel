@@ -494,6 +494,11 @@ class ModuleLooper():
         """Fan batches across device clones and preserve result ordering."""
         module_replicas = clone_module_for_devices(module, devices)
 
+        # Ensure any async replication/memcpy ops are complete before threads start fanning out.
+        for dev in devices:
+            if dev.type != "cpu":
+                torch_sync(dev)
+
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
 
         results: Dict[int, torch.Tensor | tuple | None] = {}
