@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+import threading
 import time
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -93,6 +94,7 @@ def device_ctx(dev: Optional[torch.device | "DEVICE"]):
     # cpu/mps/meta -> nothing special needed
     yield
 
+_rehome_lock = threading.Lock()
 
 @torch.inference_mode()
 def rehome_module_to_device(
@@ -105,47 +107,48 @@ def rehome_module_to_device(
     only_mismatched: bool = True,
 ) -> None:
     """Move registered tensors on ``module`` to ``device`` with defensive fallbacks."""
-    for sub in module.modules():
-        if move_buffers:
-            np_set = getattr(sub, "_non_persistent_buffers_set", set())
-            for name, buf in list(getattr(sub, "_buffers", {}).items()):
-                if buf is None or not isinstance(buf, torch.Tensor):
-                    continue
-                if not include_non_persistent_buffers and name in np_set:
-                    continue
-                if only_mismatched and buf.device == device:
-                    continue
-                try:
-                    sub._buffers[name] = buf.to(device, non_blocking=True)
-                except Exception:
+    with _rehome_lock:
+        for sub in module.modules():
+            if move_buffers:
+                np_set = getattr(sub, "_non_persistent_buffers_set", set())
+                for name, buf in list(getattr(sub, "_buffers", {}).items()):
+                    if buf is None or not isinstance(buf, torch.Tensor):
+                        continue
+                    if not include_non_persistent_buffers and name in np_set:
+                        continue
+                    if only_mismatched and buf.device == device:
+                        continue
                     try:
-                        sub._buffers[name] = buf.to(device)
+                        sub._buffers[name] = buf.to(device, non_blocking=True)
                     except Exception:
-                        pass
+                        try:
+                            sub._buffers[name] = buf.to(device)
+                        except Exception:
+                            pass
 
-        if move_parameters:
-            for pname, p in list(getattr(sub, "_parameters", {}).items()):
-                if p is None or not isinstance(p, torch.nn.Parameter):
-                    continue
-                if only_mismatched and p.device == device:
-                    continue
-                try:
-                    with torch.no_grad():
-                        new_p = torch.nn.Parameter(
-                            p.data.to(device, non_blocking=True),
-                            requires_grad=p.requires_grad,
-                        )
-                    sub._parameters[pname] = new_p
-                except Exception:
+            if move_parameters:
+                for pname, p in list(getattr(sub, "_parameters", {}).items()):
+                    if p is None or not isinstance(p, torch.nn.Parameter):
+                        continue
+                    if only_mismatched and p.device == device:
+                        continue
                     try:
                         with torch.no_grad():
                             new_p = torch.nn.Parameter(
-                                p.data.to(device),
+                                p.data.to(device, non_blocking=True),
                                 requires_grad=p.requires_grad,
                             )
                         sub._parameters[pname] = new_p
                     except Exception:
-                        pass
+                        try:
+                            with torch.no_grad():
+                                new_p = torch.nn.Parameter(
+                                    p.data.to(device),
+                                    requires_grad=p.requires_grad,
+                                )
+                            sub._parameters[pname] = new_p
+                        except Exception:
+                            pass
 
 
 def clear_non_picklable_state(module: torch.nn.Module) -> List[Tuple[str, int]]:

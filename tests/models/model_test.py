@@ -526,6 +526,7 @@ class ModelTest(unittest.TestCase):
             sym=self.SYM,
             v2=self.V2,
             adapter=self.EORA,
+            pack_impl="cpu",
         )
 
         log.info(f"Quant config: {quantize_config}")

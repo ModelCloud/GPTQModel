@@ -197,8 +197,8 @@ class QuantizeConfig():
     # affects [`qweights`, `qzeros`]
     pack_dtype: Optional[Union[str, torch.dtype]] = field(default=torch.int32)
 
-    # packing implementation hint (`original` = legacy CPU pack, `gpu` enables CUDA pack, `cpu` forces block CPU pack).
-    pack_impl: str = field(default="original")
+    # packing implementation hinpt (`original` = legacy CPU pack, `gpu` enables CUDA pack, `cpu` forces block CPU pack).
+    pack_impl: str = field(default="cpu")
 
     # pending used field
     adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
