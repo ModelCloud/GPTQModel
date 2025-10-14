@@ -269,12 +269,20 @@ class GPTQ:
             staging_view.copy_(chunk.to(dtype=stage_dtype))
 
             if stage_dtype == torch.float32:
-                yield staging_view
+                try:
+                    yield staging_view
+                finally:
+                    if device.type == "cuda":
+                        torch.cuda.current_stream(device).synchronize()
             else:
                 with _lease_workspace(device, torch.float32, self.columns, rows) as fp32_workspace:
-                    fp32_view = fp32_workspace[:rows, :]
-                    fp32_view.copy_(staging_view.to(torch.float32))
-                    yield fp32_view
+                    try:
+                        fp32_view = fp32_workspace[:rows, :]
+                        fp32_view.copy_(staging_view.to(torch.float32))
+                        yield fp32_view
+                    finally:
+                        if device.type == "cuda":
+                            torch.cuda.current_stream(device).synchronize()
 
     def _compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]

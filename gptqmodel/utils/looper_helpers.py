@@ -28,6 +28,7 @@ USE_TORCH_REPLICATE = env_flag("GPTQMODEL_USE_TORCH_REPLICATE")
 
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
+_DEEPCOPY_LOCK = threading.Lock()
 
 def torch_replicate(
     module: torch.nn.Module,
@@ -310,7 +311,8 @@ def clone_module_for_devices(
 
     for dev in devices:
         start_ts = time.perf_counter()
-        replica = copy.deepcopy(module)
+        with _DEEPCOPY_LOCK:
+            replica = copy.deepcopy(module)
         replica.eval()
         rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
         clear_state_fn(replica)

@@ -18,8 +18,8 @@ class TestLlama3_2(ModelTest):
     APPLY_CHAT_TEMPLATE = True
     V2 = False
     DEBUG = True
-    ACT_GROUP_AWARE = False
-    DESC_ACT = True
+    ACT_GROUP_AWARE = True
+    DESC_ACT = False
     DATASET_SIZE = 1024
     DATASET_SORT = "desc"
     QUANT_BATCH_SIZE = 4
