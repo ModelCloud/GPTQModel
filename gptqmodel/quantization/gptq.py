@@ -5,6 +5,7 @@
 
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
+import contextlib
 import math
 import os
 import sys
@@ -30,6 +31,74 @@ from .quantizer import HF_OPTIMUM, Quantizer
 log = setup_logger()
 
 lock = threading.Lock()
+
+# Shared workspaces are cached globally per (device, dtype, columns) so that
+# concurrent GPTQ instances reuse temporary buffers instead of repeatedly
+# allocating large tensors during Hessian accumulation.
+_WORKSPACE_CACHE: Dict[Tuple[str, Optional[int], torch.dtype, int], torch.Tensor] = {}
+_WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int], torch.dtype, int], threading.Lock] = {}
+_BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
+
+
+def _device_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
+    dev = torch.device(device)
+    return dev.type, dev.index
+
+
+def _workspace_cache_key(device: torch.device, dtype: torch.dtype, cols: int) -> Tuple[str, Optional[int], torch.dtype, int]:
+    dev = torch.device(device)
+    return dev.type, dev.index, dtype, cols
+
+
+def _needs_workspace_resize(workspace: Optional[torch.Tensor], required_rows: int, cols: int) -> bool:
+    if workspace is None:
+        return True
+    if workspace.ndim != 2:
+        return True
+    if workspace.shape[1] != cols:
+        return True
+    if workspace.shape[0] < required_rows:
+        return True
+    return False
+
+
+@contextlib.contextmanager
+def _lease_workspace(device: torch.device, dtype: torch.dtype, cols: int, required_rows: int):
+    key = _workspace_cache_key(device, dtype, cols)
+    lock = _WORKSPACE_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        workspace = _WORKSPACE_CACHE.pop(key, None)
+        if _needs_workspace_resize(workspace, required_rows, cols):
+            rows = max(required_rows, 1)
+            workspace = torch.empty((rows, cols), dtype=dtype, device=device)
+    try:
+        yield workspace
+    finally:
+        with lock:
+            _WORKSPACE_CACHE[key] = workspace
+
+
+def _device_supports_bfloat16(device: torch.device) -> bool:
+    cache_key = _device_cache_key(device)
+    cached = _BF16_SUPPORT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    dev = torch.device(device)
+    if dev.type == "meta":
+        _BF16_SUPPORT_CACHE[cache_key] = False
+        return False
+
+    try:
+        a = torch.zeros((1, 1), dtype=torch.bfloat16, device=dev)
+        b = torch.zeros((1, 1), dtype=torch.bfloat16, device=dev)
+        _ = torch.matmul(a, b)
+        support = True
+    except Exception:
+        support = False
+
+    _BF16_SUPPORT_CACHE[cache_key] = support
+    return support
 
 
 def get_number_of_rows_and_cols(layer: nn.Module):
@@ -149,6 +218,87 @@ class GPTQ:
             self._pending_updates[pending_index] = (batch_token_size, xtx, device)
             self._flush_pending_updates_locked()
 
+    def _preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
+        device = torch.device(device)
+
+        if not self.qcfg.hessian_use_bfloat16_staging:
+            return torch.float32
+
+        if input_dtype not in (torch.float16, torch.bfloat16):
+            return torch.float32
+
+        if not _device_supports_bfloat16(device):
+            return torch.float32
+
+        return torch.bfloat16
+
+    def _resolve_hessian_chunk_size(self, rows: int, stage_dtype: torch.dtype) -> Optional[int]:
+        if rows == 0:
+            return None
+
+        cfg_chunk = self.qcfg.hessian_chunk_size
+        if cfg_chunk is not None:
+            return max(1, min(cfg_chunk, rows))
+
+        bytes_budget = self.qcfg.hessian_chunk_bytes
+        if bytes_budget is not None:
+            bytes_per_row = self.columns * torch.tensor([], dtype=stage_dtype).element_size()
+            if bytes_per_row > 0:
+                chunk_rows = bytes_budget // bytes_per_row
+                if chunk_rows > 0:
+                    return max(1, min(int(chunk_rows), rows))
+            return 1
+
+        return None
+
+    @contextlib.contextmanager
+    def _borrow_materialized_chunk_fp32(
+        self,
+        chunk: torch.Tensor,
+        rows: int,
+    ) -> torch.Tensor:
+        if rows == 0:
+            yield chunk.new_zeros((0, self.columns), dtype=torch.float32)
+            return
+
+        device = chunk.device
+        stage_dtype = self._preferred_staging_dtype(chunk.dtype, device)
+
+        with _lease_workspace(device, stage_dtype, self.columns, rows) as staging_workspace:
+            staging_view = staging_workspace[:rows, :]
+            staging_view.copy_(chunk.to(dtype=stage_dtype))
+
+            if stage_dtype == torch.float32:
+                yield staging_view
+            else:
+                with _lease_workspace(device, torch.float32, self.columns, rows) as fp32_workspace:
+                    fp32_view = fp32_workspace[:rows, :]
+                    fp32_view.copy_(staging_view.to(torch.float32))
+                    yield fp32_view
+
+    def _compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
+        rows = matrix.shape[0]
+        if rows == 0:
+            return torch.zeros((self.columns, self.columns), dtype=torch.float64, device=matrix.device)
+
+        stage_dtype = self._preferred_staging_dtype(matrix.dtype, matrix.device)
+        chunk_size = self._resolve_hessian_chunk_size(rows, stage_dtype)
+
+        if chunk_size is None:
+            mat64 = matrix.to(dtype=torch.float64)
+            return torch.matmul(mat64.T, mat64)
+
+        xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float64, device=matrix.device)
+
+        for start in range(0, rows, chunk_size):
+            rows_this = min(chunk_size, rows - start)
+            source = matrix[start:start + rows_this]
+            with self._borrow_materialized_chunk_fp32(source, rows_this) as materialized:
+                materialized64 = materialized.to(dtype=torch.float64)
+                xtx_accum.add_(torch.matmul(materialized64.T, materialized64))
+
+        return xtx_accum
+
     def _resolve_hessian_device(self, batch_device: torch.device) -> torch.device:
         """Select a stable device for Hessian accumulation.
 
@@ -225,10 +375,9 @@ class GPTQ:
                 reshaped_inp = unfold(reshaped_inp)
             reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
 
-        # Delay float32 cast until after reshaping to avoid an extra temporary tensor
-        reshaped_inp = reshaped_inp.to(dtype=torch.float32)
+        # Delay dtype conversion until we materialize Hessian chunks to avoid unnecessary temporaries
+        reshaped_inp = reshaped_inp.contiguous()
         canonical_device = self._resolve_hessian_device(inp_device)
-        reshaped_inp = reshaped_inp.to(dtype=torch.float64)
 
         batch_token_size = reshaped_inp.shape[0]
 
@@ -236,7 +385,7 @@ class GPTQ:
             del reshaped_inp
             return 0, None, canonical_device
 
-        xtx = torch.matmul(reshaped_inp.T, reshaped_inp).to(dtype=torch.float32)
+        xtx = self._compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
         xtx = xtx.detach()
         del reshaped_inp
 
