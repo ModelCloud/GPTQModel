@@ -54,7 +54,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     REQUIRES_FORMAT_V2 = True
 
     # for transformers/optimum tests compat
-    QUANT_TYPE = "torch"
+    QUANT_TYPE = "torch_fused"
 
     def __init__(
         self,
