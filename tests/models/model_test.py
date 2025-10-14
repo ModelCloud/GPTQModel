@@ -618,11 +618,34 @@ class ModelTest(unittest.TestCase):
 
         active_backend = backend if backend is not None else self.LOAD_BACKEND
 
+        default_device_map = {"": "cpu"} if active_backend == BACKEND.TORCH_FUSED else "auto"
+        explicit_device = "device" in load_kwargs
+        inserted_device_map = False
+        if "device_map" not in load_kwargs and not explicit_device:
+            load_kwargs["device_map"] = default_device_map
+            inserted_device_map = True
+
+        # Post-quant CI runs may expose multiple GPUs; pin loading to the first one to avoid spread-out auto maps.
+        if (
+            (inserted_device_map or load_kwargs.get("device_map") == "auto")
+            and not explicit_device
+            and active_backend != BACKEND.TORCH_FUSED
+            and torch.cuda.is_available()
+        ):
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            candidates = [item.strip() for item in visible.split(",") if item.strip()]
+            try:
+                multi_device = len(candidates) > 1 if candidates else torch.cuda.device_count() > 1
+            except Exception:
+                multi_device = False
+
+            if multi_device:
+                load_kwargs["device_map"] = {"": "cuda:0"}
+
         model = GPTQModel.load(
             model_id_or_path,
             trust_remote_code=trust_remote_code,
             backend=active_backend,
-            device_map={"": "cpu"} if active_backend == BACKEND.TORCH_FUSED else "auto",
             debug=self.DEBUG,
             adapter=self.EORA,
             **load_kwargs

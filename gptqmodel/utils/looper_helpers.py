@@ -337,6 +337,7 @@ def forward_batch_worker(
     reuse_kv: bool,
     prev_kv,
 ):
+    processor._set_current_batch_index(batch_index)
     module_device = getattr(module, "_gptqmodule_device_hint", None) or get_device(module)
     rehome_module_to_device(module, module_device, move_parameters=True, move_buffers=True)
 
@@ -380,6 +381,7 @@ def forward_batch_worker(
     finally:
         if mask_tls is not None:
             mask_tls.value = None
+        processor._set_current_batch_index(None)
 
     if reuse_kv and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:
         kv_next = module_output[-1]

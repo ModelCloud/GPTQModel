@@ -106,8 +106,9 @@ class GPTQProcessor(LoopProcessor):
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             g = self.tasks[name]  # noqa: F821
+            batch_idx = self.current_batch_index()
             with tf32_disable_guard():
-                g.add_batch(inp[0].data, out.data)  # noqa: F821
+                g.add_batch(inp[0].data, out.data, batch_index=batch_idx)  # noqa: F821
             del inp, out
         return tmp
 

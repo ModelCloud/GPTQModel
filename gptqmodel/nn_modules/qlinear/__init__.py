@@ -493,7 +493,7 @@ class PackableQuantLinear(BaseQuantLinear):
             zeros: t.Tensor,
             g_idx: t.Tensor,
             block_in: int = 8192,
-            workers: int = 4,
+            workers: int = 1,
     ):
         """
         Parallel qweight pack on CPU (threaded over input blocks). qzeros path = original logic.

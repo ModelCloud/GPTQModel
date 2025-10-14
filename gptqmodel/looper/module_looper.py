@@ -483,72 +483,76 @@ class ModuleLooper():
         stage_label = progress_stage or "Forward"
 
         for batch_idx in range(total_batches):
-            layer_input = [move_to(inp, device=cur_layer_device, stream=False) for inp in layer_inputs[batch_idx]]
-
-            raw_mask = attention_masks[batch_idx]
-            attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device, stream=False)
-
-            keep_mask = None
-            if attn_tensor is not None:
-                seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
-                keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
-            self._set_processor_mask(processor, keep_mask)
-
-            additional_inputs: Dict[str, torch.Tensor] = {}
-            if self.support_batch_quantize and attn_tensor is not None:
-                additional_inputs["attention_mask"] = attn_tensor
-
-            if position_ids:
-                pos = position_ids[batch_idx]
-                if pos is not None:
-                    additional_inputs["position_ids"] = move_to(pos, device=cur_layer_device, stream=False)
-
-            for key, value in layer_input_kwargs[batch_idx].items():
-                additional_inputs[key] = nested_move_to(value, device=cur_layer_device, stream=False)
-
-            if reuse_kv and prev_kv is not None:
-                additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=cur_layer_device, stream=False)
-
-            rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
-
-            module_output = None
+            processor._set_current_batch_index(batch_idx)
             try:
-                if is_lm_head_module:
-                    module_output = module(*layer_input)
-                else:
-                    module_output = module(*layer_input, **additional_inputs)
-            except StopForward:
+                layer_input = [move_to(inp, device=cur_layer_device, stream=False) for inp in layer_inputs[batch_idx]]
+
+                raw_mask = attention_masks[batch_idx]
+                attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device, stream=False)
+
+                keep_mask = None
+                if attn_tensor is not None:
+                    seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
+                    keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
+                self._set_processor_mask(processor, keep_mask)
+
+                additional_inputs: Dict[str, torch.Tensor] = {}
+                if self.support_batch_quantize and attn_tensor is not None:
+                    additional_inputs["attention_mask"] = attn_tensor
+
+                if position_ids:
+                    pos = position_ids[batch_idx]
+                    if pos is not None:
+                        additional_inputs["position_ids"] = move_to(pos, device=cur_layer_device, stream=False)
+
+                for key, value in layer_input_kwargs[batch_idx].items():
+                    additional_inputs[key] = nested_move_to(value, device=cur_layer_device, stream=False)
+
+                if reuse_kv and prev_kv is not None:
+                    additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=cur_layer_device, stream=False)
+
+                rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
+
                 module_output = None
+                try:
+                    if is_lm_head_module:
+                        module_output = module(*layer_input)
+                    else:
+                        module_output = module(*layer_input, **additional_inputs)
+                except StopForward:
+                    module_output = None
+                finally:
+                    self._set_processor_mask(processor, None)
+
+                if (
+                    reuse_kv
+                    and module_output is not None
+                    and isinstance(module_output, tuple)
+                    and len(module_output) > 0
+                    and shared_kv_cache_dict.get(layer_index) is None
+                ):
+                    shared_kv_cache_dict[layer_index] = module_output[-1]
+
+                if need_outputs and module_output is not None:
+                    primary = module_output[0] if isinstance(module_output, tuple) else module_output
+                    primary = move_to(primary, device=cur_layer_device, stream=False)
+                    outputs.append([primary])
+
+                rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
+                if rows_for_batch <= 0:
+                    rows_for_batch = self._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
+                    rows_for_batch = max(rows_for_batch, 1)
+
+                processed_rows = min(processed_rows + rows_for_batch, total_rows)
+                if progress_pb is not None:
+                    if progress_title:
+                        progress_pb.title(progress_title)
+                    progress_pb.current_iter_step = processed_rows
+                    progress_pb.subtitle(
+                        f"{stage_label} rows {processed_rows}/{total_rows}"
+                    ).draw()
             finally:
-                self._set_processor_mask(processor, None)
-
-            if (
-                reuse_kv
-                and module_output is not None
-                and isinstance(module_output, tuple)
-                and len(module_output) > 0
-                and shared_kv_cache_dict.get(layer_index) is None
-            ):
-                shared_kv_cache_dict[layer_index] = module_output[-1]
-
-            if need_outputs and module_output is not None:
-                primary = module_output[0] if isinstance(module_output, tuple) else module_output
-                primary = move_to(primary, device=cur_layer_device, stream=False)
-                outputs.append([primary])
-
-            rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
-            if rows_for_batch <= 0:
-                rows_for_batch = self._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
-                rows_for_batch = max(rows_for_batch, 1)
-
-            processed_rows = min(processed_rows + rows_for_batch, total_rows)
-            if progress_pb is not None:
-                if progress_title:
-                    progress_pb.title(progress_title)
-                progress_pb.current_iter_step = processed_rows
-                progress_pb.subtitle(
-                    f"{stage_label} rows {processed_rows}/{total_rows}"
-                ).draw()
+                processor._set_current_batch_index(None)
 
         return outputs
 

@@ -175,9 +175,24 @@ class LoopProcessor:
                 log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
                                f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
-            self.num_batches = len(calibration)
+        self.num_batches = len(calibration)
 
         self.calibration_dataset = calibration
+
+        # Track the current calibration batch index on a per-thread basis so
+        # processors can retrieve deterministic ordering information (e.g.
+        # GPTQ's Hessian updates) even when forwards run on multiple threads.
+        self._batch_tls = threading.local()
+
+    def _set_current_batch_index(self, batch_index: Optional[int]) -> None:
+        if batch_index is None:
+            if hasattr(self._batch_tls, "index"):
+                delattr(self._batch_tls, "index")
+        else:
+            self._batch_tls.index = int(batch_index)
+
+    def current_batch_index(self) -> Optional[int]:
+        return getattr(self._batch_tls, "index", None)
 
     def _async_log_writer(self, stat):
         with open(self.log_tmp_log_file_name, 'a') as f:

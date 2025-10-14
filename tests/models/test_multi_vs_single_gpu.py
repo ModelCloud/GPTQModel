@@ -260,7 +260,7 @@ class TestMultiVsSingleGPU(ModelTest):
 
         original_add_batch = GPTQ.add_batch
 
-        def wrapped_add_batch(self, inp, out):  # type: ignore[override]
+        def wrapped_add_batch(self, inp, out, batch_index=None):  # type: ignore[override]
             module_name = getattr(self, "name", "<unknown>")
             before = getattr(self, "nsamples", 0)
             # Summaries calculated before running original implementation
@@ -270,7 +270,7 @@ class TestMultiVsSingleGPU(ModelTest):
                 sum_value = float("nan")
             device = str(getattr(inp, "device", "unknown"))
 
-            original_add_batch(self, inp, out)
+            original_add_batch(self, inp, out, batch_index=batch_index)
 
             after = getattr(self, "nsamples", 0)
             storage.setdefault(module_name, []).append(
@@ -281,6 +281,7 @@ class TestMultiVsSingleGPU(ModelTest):
                     "handle": hex(id(self)),
                     "device": device,
                     "is_primary": hex(id(self)) == primary_handles.get(module_name),
+                    "batch_index": None if batch_index is None else int(batch_index),
                 }
             )
 

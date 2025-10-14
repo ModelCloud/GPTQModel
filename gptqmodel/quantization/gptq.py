@@ -10,7 +10,7 @@ import os
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -70,6 +70,13 @@ class GPTQ:
         module_device = get_device(self.module)
         setattr(self.module, "target_device", module_device)
 
+        if module_device.type == "meta":
+            self._default_hessian_device = torch.device("cpu")
+        else:
+            self._default_hessian_device = torch.device(module_device)
+
+        self._hessian_device: Optional[torch.device] = None
+
         self._validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
@@ -88,6 +95,11 @@ class GPTQ:
 
         self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32)
+
+        # Track per-batch Hessian contributions so they can be applied in a
+        # deterministic order even when forwards execute in parallel.
+        self._pending_updates: Dict[int, Tuple[int, Optional[torch.Tensor], torch.device]] = {}
+        self._next_batch_index: int = 0
 
     @staticmethod
     def _validate_module(module):
@@ -127,20 +139,53 @@ class GPTQ:
 
         return clone.float()
 
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor):
+    def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
         with self.lock:
             self.fwd_counter += 1
 
-            # print(f"self.module.target_device = {self.module.target_device}")
+            batch_token_size, xtx, device = self.process_batch(inp)
 
-            self.process_batch(inp)
+            pending_index = batch_index if batch_index is not None else self._next_batch_index
+            self._pending_updates[pending_index] = (batch_token_size, xtx, device)
+            self._flush_pending_updates_locked()
 
-    def process_batch(self, inp: torch.Tensor):
+    def _resolve_hessian_device(self, batch_device: torch.device) -> torch.device:
+        """Select a stable device for Hessian accumulation.
+
+        The first non-meta device we observe (module target, default hint, or
+        batch input) becomes the canonical Hessian device for the lifetime of
+        this GPTQ instance. Subsequent batches keep using the same target to
+        avoid bouncing tensors across GPUs when calibration runs on multiple
+        devices concurrently.
+        """
+
+        if self._hessian_device is not None:
+            return self._hessian_device
+
+        module_target = getattr(self.module, "target_device", None)
+        canonical = None
+
+        if module_target is not None:
+            canonical = torch.device(module_target)
+            if canonical.type == "meta":
+                canonical = None
+
+        if canonical is None and hasattr(self, "_default_hessian_device"):
+            canonical = self._default_hessian_device
+
+        if canonical is None or canonical.type == "meta":
+            canonical = batch_device
+
+        if canonical.type == "meta":
+            canonical = torch.device("cpu")
+
+        self._hessian_device = canonical
+        return canonical
+
+    def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
         # print(f"inp = {inp}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
         inp_device = get_device(inp)
-        if inp_device.type == "cuda":
-            torch.cuda.set_device(inp_device)
 
         #inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
@@ -182,26 +227,48 @@ class GPTQ:
 
         # Delay float32 cast until after reshaping to avoid an extra temporary tensor
         reshaped_inp = reshaped_inp.to(dtype=torch.float32)
+        canonical_device = self._resolve_hessian_device(inp_device)
+        reshaped_inp = reshaped_inp.to(dtype=torch.float64)
 
         batch_token_size = reshaped_inp.shape[0]
 
-        self.H = self.H.to(device=reshaped_inp.device)
-
-        # moe model may receive an empty batch, return early
         if batch_token_size == 0:
-            return batch_token_size, reshaped_inp, 0, 0
+            del reshaped_inp
+            return 0, None, canonical_device
 
-        beta = self.nsamples / (self.nsamples + batch_token_size)
-        alpha = 2.0 / (self.nsamples + batch_token_size)
+        xtx = torch.matmul(reshaped_inp.T, reshaped_inp).to(dtype=torch.float32)
+        xtx = xtx.detach()
+        del reshaped_inp
 
-        self.H.addmm_(reshaped_inp.T, reshaped_inp, beta=beta, alpha=alpha)
+        return batch_token_size, xtx, canonical_device
 
-        # update number of collected samples
-        self.nsamples += batch_token_size
+    def _flush_pending_updates_locked(self) -> None:
+        while True:
+            update = self._pending_updates.pop(self._next_batch_index, None)
+            if update is None:
+                break
 
-        # inp returned here is flattened/reshaped original inp
-        # return batch_token_size, reshaped_inp, alpha, beta
-        del batch_token_size, reshaped_inp, alpha, beta
+            batch_token_size, xtx, device = update
+
+            if batch_token_size > 0 and xtx is not None:
+                target_device = device if device is not None else self.H.device
+                if target_device is None:
+                    target_device = self.H.device
+
+                self.H = self.H.to(device=target_device)
+                if xtx.device != target_device:
+                    xtx = xtx.to(device=target_device)
+
+                total = self.nsamples + batch_token_size
+                beta = self.nsamples / total
+                alpha = 2.0 / total
+                self.H.mul_(beta)
+                self.H.add_(xtx, alpha=alpha)
+                self.nsamples = total
+
+                del xtx
+
+            self._next_batch_index += 1
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
@@ -277,6 +344,13 @@ class GPTQ:
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
+
+        with self.lock:
+            self._flush_pending_updates_locked()
+            if self._pending_updates:
+                raise RuntimeError(
+                    f"Pending Hessian updates remain for module '{self.name}' before quantization."
+                )
 
         # Temporarily disable torch.compile due to compatibility issues with torch 2.8
         # Will re-enable once the issue is fixed
