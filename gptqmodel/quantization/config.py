@@ -197,8 +197,8 @@ class QuantizeConfig():
     # affects [`qweights`, `qzeros`]
     pack_dtype: Optional[Union[str, torch.dtype]] = field(default=torch.int32)
 
-    # packing implementation hint (`original` = legacy CPU pack, `gpu` enables CUDA pack, `cpu` forces block CPU pack).
-    pack_impl: str = field(default="original")
+    # packing implementation hinpt (`original` = legacy CPU pack, `gpu` enables CUDA pack, `cpu` forces block CPU pack).
+    pack_impl: str = field(default="cpu")
 
     # pending used field
     adapter: Optional[Union[Dict[str, Any], Lora]] = field(default=None)
@@ -228,6 +228,11 @@ class QuantizeConfig():
     # gptq only:
     # skip all heavy computations for testing model loading
     mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
+
+    # Hessian accumulation controls (GPTQ only)
+    hessian_chunk_size: Optional[int] = field(default=None, metadata={"help": "Maximum rows per Hessian chunk"})
+    hessian_chunk_bytes: Optional[int] = field(default=None, metadata={"help": "Memory budget (in bytes) for Hessian chunk staging"})
+    hessian_use_bfloat16_staging: bool = field(default=False, metadata={"help": "Stage Hessian chunks in bfloat16 when supported"})
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -303,6 +308,18 @@ class QuantizeConfig():
 
         if self.damp_auto_increment < 0:
             raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
+
+        if self.hessian_chunk_size is not None:
+            if not isinstance(self.hessian_chunk_size, int):
+                raise ValueError("QuantizeConfig: `hessian_chunk_size` must be an integer or None.")
+            if self.hessian_chunk_size <= 0:
+                raise ValueError("QuantizeConfig: `hessian_chunk_size` must be a positive integer.")
+
+        if self.hessian_chunk_bytes is not None:
+            if not isinstance(self.hessian_chunk_bytes, int):
+                raise ValueError("QuantizeConfig: `hessian_chunk_bytes` must be an integer or None.")
+            if self.hessian_chunk_bytes <= 0:
+                raise ValueError("QuantizeConfig: `hessian_chunk_bytes` must be a positive integer amount of bytes.")
 
         # validate hybrid act order
         if self.act_group_aware and self.desc_act:

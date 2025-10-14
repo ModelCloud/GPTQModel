@@ -726,6 +726,8 @@ def pack_module(
             except (RuntimeError, ValueError):
                 log.warning(f"pack_module: unable to parse target device `{cfg_device}`; defaulting to CUDA auto-select.")
 
+    packer_label = None
+
     with lock:
         layers[name] = layer
         qModules[name] = module
@@ -734,8 +736,9 @@ def pack_module(
         if quant_linear_cls.QUANT_TYPE == "qqq":
             if q_scales_extra is not None:
                 q_scales_extra = q_scales_extra.to(CPU)
+            packer_label = "module.pack"
             with log_time_block(
-                "module.pack",
+                packer_label,
                 logger=log,
                 module_name=name,
             ):
@@ -767,8 +770,10 @@ def pack_module(
                 "original": "module.pack_original",
             }
 
+            packer_label = label_map[effective_impl]
+
             with log_time_block(
-                label_map[effective_impl],
+                packer_label,
                 logger=log,
                 module_name=name,
             ):
@@ -810,6 +815,8 @@ def pack_module(
         # start = time.time()
         # qModules[name].to(layer_device)
         # log.info(f"Pack: moving module back to `{layer_device}` cost = {time.time()-start} seconds")
+
+    return packer_label
 
 def pack_model(
     model,

@@ -3,11 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import contextlib
 import math
 import statistics
 import time
 import tracemalloc
 import types
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, Iterable, List, Tuple
 
 import pytest
@@ -40,9 +42,11 @@ def _clone_module(module: torch.nn.Module) -> torch.nn.Module:
 def _instrument_chunks(gptq: GPTQ) -> None:
     original = gptq._borrow_materialized_chunk_fp32
 
+    @contextlib.contextmanager
     def wrapped(self, chunk, rows):
         self._chunk_invocations += 1
-        return original(chunk, rows)
+        with original(chunk, rows) as materialized:
+            yield materialized
 
     gptq._chunk_invocations = 0
     gptq._borrow_materialized_chunk_fp32 = types.MethodType(wrapped, gptq)
@@ -138,6 +142,55 @@ def test_hessian_chunk_bytes_budget():
     workspace = gptq_impl._WORKSPACE_CACHE[fp32_key]
     assert workspace.shape[0] == 16
     assert workspace.shape[1] == gptq.columns
+
+
+@pytest.mark.cuda
+def test_hessian_workspace_thread_safety_cuda():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for workspace stress test")
+
+    device = torch.device("cuda", 0)
+
+    base = torch.nn.Linear(128, 64, bias=False).to(device)
+    cfg = QuantizeConfig(
+        hessian_chunk_size=128,
+        hessian_use_bfloat16_staging=True,
+    )
+
+    gptq_workers = [GPTQ(_clone_module(base).to(device), cfg) for _ in range(3)]
+    rows = 512
+    iters_per_worker = 6
+
+    def worker(task_id: int) -> None:
+        gptq = gptq_workers[task_id % len(gptq_workers)]
+        torch.cuda.set_device(device.index or 0)
+        for i in range(iters_per_worker):
+            calib = torch.randn(rows, base.in_features, device=device, dtype=torch.float16)
+            batch_size, xtx, canonical_device = gptq.process_batch(calib)
+            assert batch_size == rows
+            assert xtx is not None
+            assert canonical_device == gptq._hessian_device
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(worker, idx) for idx in range(16)]
+        for fut in futures:
+            fut.result()
+
+    for gptq in gptq_workers:
+        assert gptq._hessian_device == device
+
+    cols = base.in_features
+    fp32_key = gptq_impl._workspace_cache_key(device, torch.float32, cols)
+    assert fp32_key in gptq_impl._WORKSPACE_CACHE
+    fp32_workspace = gptq_impl._WORKSPACE_CACHE[fp32_key]
+    expected_rows = cfg.hessian_chunk_size or rows
+    assert fp32_workspace.shape[0] >= expected_rows
+    assert fp32_workspace.shape[1] == cols
+
+    stage_dtype = gptq_workers[0]._preferred_staging_dtype(torch.float16, device)
+    if stage_dtype == torch.bfloat16:
+        bf16_key = gptq_impl._workspace_cache_key(device, torch.bfloat16, cols)
+        assert bf16_key in gptq_impl._WORKSPACE_CACHE
 
 
 def _benchmark_case(

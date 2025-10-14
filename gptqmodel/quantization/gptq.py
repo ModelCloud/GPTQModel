@@ -5,12 +5,13 @@
 
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
+import contextlib
 import math
 import os
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -30,6 +31,74 @@ from .quantizer import HF_OPTIMUM, Quantizer
 log = setup_logger()
 
 lock = threading.Lock()
+
+# Shared workspaces are cached globally per (device, dtype, columns) so that
+# concurrent GPTQ instances reuse temporary buffers instead of repeatedly
+# allocating large tensors during Hessian accumulation.
+_WORKSPACE_CACHE: Dict[Tuple[str, Optional[int], torch.dtype, int], torch.Tensor] = {}
+_WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int], torch.dtype, int], threading.Lock] = {}
+_BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
+
+
+def _device_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
+    dev = torch.device(device)
+    return dev.type, dev.index
+
+
+def _workspace_cache_key(device: torch.device, dtype: torch.dtype, cols: int) -> Tuple[str, Optional[int], torch.dtype, int]:
+    dev = torch.device(device)
+    return dev.type, dev.index, dtype, cols
+
+
+def _needs_workspace_resize(workspace: Optional[torch.Tensor], required_rows: int, cols: int) -> bool:
+    if workspace is None:
+        return True
+    if workspace.ndim != 2:
+        return True
+    if workspace.shape[1] != cols:
+        return True
+    if workspace.shape[0] < required_rows:
+        return True
+    return False
+
+
+@contextlib.contextmanager
+def _lease_workspace(device: torch.device, dtype: torch.dtype, cols: int, required_rows: int):
+    key = _workspace_cache_key(device, dtype, cols)
+    lock = _WORKSPACE_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        workspace = _WORKSPACE_CACHE.pop(key, None)
+        if _needs_workspace_resize(workspace, required_rows, cols):
+            rows = max(required_rows, 1)
+            workspace = torch.empty((rows, cols), dtype=dtype, device=device)
+    try:
+        yield workspace
+    finally:
+        with lock:
+            _WORKSPACE_CACHE[key] = workspace
+
+
+def _device_supports_bfloat16(device: torch.device) -> bool:
+    cache_key = _device_cache_key(device)
+    cached = _BF16_SUPPORT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    dev = torch.device(device)
+    if dev.type == "meta":
+        _BF16_SUPPORT_CACHE[cache_key] = False
+        return False
+
+    try:
+        a = torch.zeros((1, 1), dtype=torch.bfloat16, device=dev)
+        b = torch.zeros((1, 1), dtype=torch.bfloat16, device=dev)
+        _ = torch.matmul(a, b)
+        support = True
+    except Exception:
+        support = False
+
+    _BF16_SUPPORT_CACHE[cache_key] = support
+    return support
 
 
 def get_number_of_rows_and_cols(layer: nn.Module):
@@ -70,6 +139,13 @@ class GPTQ:
         module_device = get_device(self.module)
         setattr(self.module, "target_device", module_device)
 
+        if module_device.type == "meta":
+            self._default_hessian_device = torch.device("cpu")
+        else:
+            self._default_hessian_device = torch.device(module_device)
+
+        self._hessian_device: Optional[torch.device] = None
+
         self._validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
@@ -88,6 +164,11 @@ class GPTQ:
 
         self.H = torch.zeros((self.columns, self.columns),
                                  dtype=torch.float32)
+
+        # Track per-batch Hessian contributions so they can be applied in a
+        # deterministic order even when forwards execute in parallel.
+        self._pending_updates: Dict[int, Tuple[int, Optional[torch.Tensor], torch.device]] = {}
+        self._next_batch_index: int = 0
 
     @staticmethod
     def _validate_module(module):
@@ -127,20 +208,142 @@ class GPTQ:
 
         return clone.float()
 
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor):
+    def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
         with self.lock:
             self.fwd_counter += 1
 
-            # print(f"self.module.target_device = {self.module.target_device}")
+            batch_token_size, xtx, device = self.process_batch(inp)
 
-            self.process_batch(inp)
+            pending_index = batch_index if batch_index is not None else self._next_batch_index
+            self._pending_updates[pending_index] = (batch_token_size, xtx, device)
+            self._flush_pending_updates_locked()
 
-    def process_batch(self, inp: torch.Tensor):
+    def _preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
+        device = torch.device(device)
+
+        if not self.qcfg.hessian_use_bfloat16_staging:
+            return torch.float32
+
+        if input_dtype not in (torch.float16, torch.bfloat16):
+            return torch.float32
+
+        if not _device_supports_bfloat16(device):
+            return torch.float32
+
+        return torch.bfloat16
+
+    def _resolve_hessian_chunk_size(self, rows: int, stage_dtype: torch.dtype) -> Optional[int]:
+        if rows == 0:
+            return None
+
+        cfg_chunk = self.qcfg.hessian_chunk_size
+        if cfg_chunk is not None:
+            return max(1, min(cfg_chunk, rows))
+
+        bytes_budget = self.qcfg.hessian_chunk_bytes
+        if bytes_budget is not None:
+            bytes_per_row = self.columns * torch.tensor([], dtype=stage_dtype).element_size()
+            if bytes_per_row > 0:
+                chunk_rows = bytes_budget // bytes_per_row
+                if chunk_rows > 0:
+                    return max(1, min(int(chunk_rows), rows))
+            return 1
+
+        return None
+
+    @contextlib.contextmanager
+    def _borrow_materialized_chunk_fp32(
+        self,
+        chunk: torch.Tensor,
+        rows: int,
+    ) -> torch.Tensor:
+        if rows == 0:
+            yield chunk.new_zeros((0, self.columns), dtype=torch.float32)
+            return
+
+        device = chunk.device
+        stage_dtype = self._preferred_staging_dtype(chunk.dtype, device)
+
+        with _lease_workspace(device, stage_dtype, self.columns, rows) as staging_workspace:
+            staging_view = staging_workspace[:rows, :]
+            staging_view.copy_(chunk.to(dtype=stage_dtype))
+
+            if stage_dtype == torch.float32:
+                try:
+                    yield staging_view
+                finally:
+                    if device.type == "cuda":
+                        torch.cuda.current_stream(device).synchronize()
+            else:
+                with _lease_workspace(device, torch.float32, self.columns, rows) as fp32_workspace:
+                    try:
+                        fp32_view = fp32_workspace[:rows, :]
+                        fp32_view.copy_(staging_view.to(torch.float32))
+                        yield fp32_view
+                    finally:
+                        if device.type == "cuda":
+                            torch.cuda.current_stream(device).synchronize()
+
+    def _compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
+        rows = matrix.shape[0]
+        if rows == 0:
+            return torch.zeros((self.columns, self.columns), dtype=torch.float64, device=matrix.device)
+
+        stage_dtype = self._preferred_staging_dtype(matrix.dtype, matrix.device)
+        chunk_size = self._resolve_hessian_chunk_size(rows, stage_dtype)
+
+        if chunk_size is None:
+            mat64 = matrix.to(dtype=torch.float64)
+            return torch.matmul(mat64.T, mat64)
+
+        xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float64, device=matrix.device)
+
+        for start in range(0, rows, chunk_size):
+            rows_this = min(chunk_size, rows - start)
+            source = matrix[start:start + rows_this]
+            with self._borrow_materialized_chunk_fp32(source, rows_this) as materialized:
+                materialized64 = materialized.to(dtype=torch.float64)
+                xtx_accum.add_(torch.matmul(materialized64.T, materialized64))
+
+        return xtx_accum
+
+    def _resolve_hessian_device(self, batch_device: torch.device) -> torch.device:
+        """Select a stable device for Hessian accumulation.
+
+        The first non-meta device we observe (module target, default hint, or
+        batch input) becomes the canonical Hessian device for the lifetime of
+        this GPTQ instance. Subsequent batches keep using the same target to
+        avoid bouncing tensors across GPUs when calibration runs on multiple
+        devices concurrently.
+        """
+
+        if self._hessian_device is not None:
+            return self._hessian_device
+
+        module_target = getattr(self.module, "target_device", None)
+        canonical = None
+
+        if module_target is not None:
+            canonical = torch.device(module_target)
+            if canonical.type == "meta":
+                canonical = None
+
+        if canonical is None and hasattr(self, "_default_hessian_device"):
+            canonical = self._default_hessian_device
+
+        if canonical is None or canonical.type == "meta":
+            canonical = batch_device
+
+        if canonical.type == "meta":
+            canonical = torch.device("cpu")
+
+        self._hessian_device = canonical
+        return canonical
+
+    def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
         # print(f"inp = {inp}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
         inp_device = get_device(inp)
-        if inp_device.type == "cuda":
-            torch.cuda.set_device(inp_device)
 
         #inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
@@ -180,28 +383,49 @@ class GPTQ:
                 reshaped_inp = unfold(reshaped_inp)
             reshaped_inp = reshaped_inp.transpose(1, 2).flatten(0, 1)
 
-        # Delay float32 cast until after reshaping to avoid an extra temporary tensor
-        reshaped_inp = reshaped_inp.to(dtype=torch.float32)
+        # Delay dtype conversion until we materialize Hessian chunks to avoid unnecessary temporaries
+        reshaped_inp = reshaped_inp.contiguous()
+        canonical_device = self._resolve_hessian_device(inp_device)
 
         batch_token_size = reshaped_inp.shape[0]
 
-        self.H = self.H.to(device=reshaped_inp.device)
-
-        # moe model may receive an empty batch, return early
         if batch_token_size == 0:
-            return batch_token_size, reshaped_inp, 0, 0
+            del reshaped_inp
+            return 0, None, canonical_device
 
-        beta = self.nsamples / (self.nsamples + batch_token_size)
-        alpha = 2.0 / (self.nsamples + batch_token_size)
+        xtx = self._compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
+        xtx = xtx.detach()
+        del reshaped_inp
 
-        self.H.addmm_(reshaped_inp.T, reshaped_inp, beta=beta, alpha=alpha)
+        return batch_token_size, xtx, canonical_device
 
-        # update number of collected samples
-        self.nsamples += batch_token_size
+    def _flush_pending_updates_locked(self) -> None:
+        while True:
+            update = self._pending_updates.pop(self._next_batch_index, None)
+            if update is None:
+                break
 
-        # inp returned here is flattened/reshaped original inp
-        # return batch_token_size, reshaped_inp, alpha, beta
-        del batch_token_size, reshaped_inp, alpha, beta
+            batch_token_size, xtx, device = update
+
+            if batch_token_size > 0 and xtx is not None:
+                target_device = device if device is not None else self.H.device
+                if target_device is None:
+                    target_device = self.H.device
+
+                self.H = self.H.to(device=target_device)
+                if xtx.device != target_device:
+                    xtx = xtx.to(device=target_device)
+
+                total = self.nsamples + batch_token_size
+                beta = self.nsamples / total
+                alpha = 2.0 / total
+                self.H.mul_(beta)
+                self.H.add_(xtx, alpha=alpha)
+                self.nsamples = total
+
+                del xtx
+
+            self._next_batch_index += 1
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
@@ -277,6 +501,13 @@ class GPTQ:
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
+
+        with self.lock:
+            self._flush_pending_updates_locked()
+            if self._pending_updates:
+                raise RuntimeError(
+                    f"Pending Hessian updates remain for module '{self.name}' before quantization."
+                )
 
         # Temporarily disable torch.compile due to compatibility issues with torch 2.8
         # Will re-enable once the issue is fixed

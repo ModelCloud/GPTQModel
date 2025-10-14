@@ -106,8 +106,9 @@ class GPTQProcessor(LoopProcessor):
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             g = self.tasks[name]  # noqa: F821
+            batch_idx = self.current_batch_index()
             with tf32_disable_guard():
-                g.add_batch(inp[0].data, out.data)  # noqa: F821
+                g.add_batch(inp[0].data, out.data, batch_index=batch_idx)  # noqa: F821
             del inp, out
         return tmp
 
@@ -311,7 +312,7 @@ class GPTQProcessor(LoopProcessor):
             logger=log,
             module_name=module_label,
         ):
-            pack_module(
+            packer_label = pack_module(
                 name=module.full_name,
                 qModules=qModules,
                 q_scales=q_scales,
@@ -326,7 +327,7 @@ class GPTQProcessor(LoopProcessor):
             timer.record(
                 "submodule_finalize_pack",
                 time.perf_counter() - pack_start,
-                source=module_label,
+                source=f"{module_label} [{packer_label or 'module.pack_original'}]",
             )
 
         # TODO: store module quant results in module, not global processor result

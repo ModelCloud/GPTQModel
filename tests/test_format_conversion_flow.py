@@ -12,12 +12,13 @@ from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.utils.model import pack_module
 
 
-class _DummyLayer:
+class _DummyLayer(torch.nn.Module):
     def __init__(self):
+        super().__init__()
         self.weight = torch.nn.Parameter(torch.zeros(1, 1))
 
     def to(self, *_args, **_kwargs):
-        return self
+        return super().to(*_args, **_kwargs)
 
 
 class _DummyQuantModule:
@@ -31,6 +32,21 @@ class _DummyQuantModule:
         return self
 
     def pack(self, **_kwargs):
+        pass
+
+    def parameters(self):
+        return iter(())
+
+    def buffers(self):
+        return iter(())
+
+    def pack_block(self, **_kwargs):
+        pass
+
+    def pack_original(self, **_kwargs):
+        pass
+
+    def pack_gpu(self, **_kwargs):
         pass
 
     def qzero_format(self, format: int | None = None):
