@@ -20,7 +20,7 @@ class LFM2MoeQModel(BaseQModel):
             "operator_norm": ("operator_norm:!",),
             "conv": ("in_proj", "out_proj"),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "ffn_norm": ("ffn_norm:!",),            
+            "ffn_norm": ("ffn_norm:!",),
             "feed_forward": {
                 "gate": ("gate:!",),
                 "": ("w1:0", "w3:0", "w2:1"),

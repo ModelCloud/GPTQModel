@@ -19,6 +19,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import torch_compile
 
+
 try:
     from ..triton_utils.dequant import dequant as triton_dequant
 
@@ -259,7 +260,7 @@ class TorchQuantLinear(PackableQuantLinear):
             compute_stream.wait_stream(stream_dequant)
             width = widths[buffer_idx]
             start = tile_idx * tile
-            end = start + width
+            start + width
 
             out_slice = out.narrow(1, start, width)
             out_slice.zero_()

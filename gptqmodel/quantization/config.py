@@ -5,12 +5,12 @@
 
 import json
 import os.path
-import pcre as re
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import pcre as re
 import torch
 from packaging import version
 from random_word import random_word

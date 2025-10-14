@@ -56,6 +56,7 @@ from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
 from .base import BaseQModel, QuantizeConfig  # noqa: E402
 from .definitions.apertus import ApertusQModel  # noqa: E402
 from .definitions.baichuan import BaiChuanQModel  # noqa: E402
+from .definitions.bailing_moe import BailingMoeQModel  # noqa: E402
 from .definitions.bloom import BloomQModel  # noqa: E402
 from .definitions.chatglm import ChatGLMQModel  # noqa: E402
 from .definitions.codegen import CodeGenQModel  # noqa: E402
@@ -85,6 +86,7 @@ from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
+from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
 from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
@@ -118,9 +120,6 @@ from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
-from .definitions.bailing_moe import BailingMoeQModel  # noqa: E402
-from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
-
 
 
 # make quants and inference more determinisitc

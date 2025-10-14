@@ -12,6 +12,7 @@ import threading
 from functools import wraps
 from types import ModuleType
 
+import threadpoolctl as _threadpoolctl
 import torch
 
 
@@ -97,8 +98,10 @@ class _ThreadSafeProxy:
 
 
 TORCH_LINALG = ThreadSafe(torch.linalg)
+THREADPOOLCTL = ThreadSafe(_threadpoolctl)
 
 __all__ = [
     "ThreadSafe",
     "TORCH_LINALG",
+    "THREADPOOLCTL",
 ]

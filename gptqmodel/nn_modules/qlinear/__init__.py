@@ -10,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
 import numpy as np
-import threadpoolctl
 import torch as t  # conflict with torch.py
 import torch.nn as nn
 import transformers
@@ -20,6 +19,7 @@ from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.safe import THREADPOOLCTL
 
 
 log = setup_logger()
@@ -890,7 +890,7 @@ class PackableQuantLinear(BaseQuantLinear):
         del weight, scales_dev, zeros_dev, scale_zeros_dev, qweight_dev, qzeros_dev
 
     def pack_original(self, linear: nn.Module, scales: t.Tensor, zeros: t.Tensor, g_idx: t.Tensor=None):
-        with threadpoolctl.threadpool_limits(1):
+        with THREADPOOLCTL.threadpool_limits(1):
             # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
             # W = linear.weight.data.clone()
             W = linear.weight.data

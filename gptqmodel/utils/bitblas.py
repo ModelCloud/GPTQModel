@@ -4,14 +4,15 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
+from contextlib import nullcontext
 
-import threadpoolctl as tctl
 import torch
 
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..utils.logger import setup_logger
 from .model import load_checkpoint_in_model_then_tie_weights
+from .safe import THREADPOOLCTL
 from .torch import torch_empty_cache
 
 
@@ -76,7 +77,13 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
         message = "Overriding QuantLinear layers to use BitBLAS's QuantLinear..."
 
     # TODO: need to benchmark to see multiple threads help with bitblas/tvm compilation and runtime
-    with tctl.threadpool_limits(limits=1):
+    threadpool_limits = (
+        THREADPOOLCTL.threadpool_limits
+        if THREADPOOLCTL is not None
+        else (lambda *args, **kwargs: nullcontext())
+    )
+
+    with threadpool_limits(limits=1):
         os.environ["NUMEXPR_MAX_THREADS"] = "1"
 
         # Note that due to tvm compilation of per layer modules shapes, the first layer loop is
