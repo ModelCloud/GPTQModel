@@ -37,7 +37,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
     SUPPORTS_DTYPES = [torch.float16]
 
     # for transformers/optimum tests compat
-    QUANT_TYPE = "awq_gemm"
+    QUANT_TYPE = "awq_gemv_fast"
 
     def __init__(
         self,

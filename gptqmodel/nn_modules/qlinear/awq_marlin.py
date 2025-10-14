@@ -58,7 +58,7 @@ class AwqMarlinQuantLinear(AWQuantLinear):
     REQUIRES_FORMAT_V2 = False
 
     # for transformers/optimum tests compat
-    QUANT_TYPE = "marlin"
+    QUANT_TYPE = "awq_marlin"
 
     # num_bits -> type
     TYPE_MAP = {
