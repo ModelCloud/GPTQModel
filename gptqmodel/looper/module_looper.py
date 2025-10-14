@@ -65,6 +65,10 @@ class FinalizeProgressInfo(NamedTuple):
     layer_idx: Optional[int]
 
 
+class StopMainLoop(Exception):
+    """Signal that the module loop should abort immediately."""
+
+
 class ModuleLooper():
     """Drive the per-layer quantisation workflow over one or more devices.
 
@@ -77,6 +81,10 @@ class ModuleLooper():
         self.gptq_model = model
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
+        self._layer_callback = getattr(model, "layer_callback", None)
+        self._loop_stop_event = threading.Event()
+        self._loop_stop_exc: Optional[BaseException] = None
+        self._loop_stop_waited = False
 
         disk_speed = estimate_disk_io_speed()
         disk_speed_mb = disk_speed / (1024 * 1024)
@@ -104,6 +112,80 @@ class ModuleLooper():
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
+
+    def register_layer_callback(self, callback) -> None:
+        """Register or replace the layer-complete callback target."""
+        self._layer_callback = callback
+
+    def _resolve_layer_callback(self):
+        for candidate in (
+            getattr(self, "_layer_callback", None),
+            getattr(self, "layer_callback", None),
+            getattr(self.gptq_model, "layer_callback", None),
+            getattr(self.gptq_model, "callbackup", None),
+            getattr(self.gptq_model, "callback", None),
+        ):
+            if candidate is not None:
+                return candidate
+        return None
+
+    def callbackup(self, layer_idx: int, submodule_finalized: bool):
+        callback = self._resolve_layer_callback()
+        if callback is None:
+            return None
+
+        handler = getattr(callback, "layer_complete", None)
+        if handler is None and callable(callback):
+            handler = callback
+        if handler is None:
+            return None
+
+        try:
+            result = handler(layer_idx=layer_idx, submodule_finalized=submodule_finalized)
+        except StopMainLoop:
+            raise
+        if result is StopMainLoop:
+            raise StopMainLoop(f"Layer callback requested stop at layer {layer_idx}")
+        if isinstance(result, StopMainLoop):
+            raise result
+        return result
+
+    def _request_loop_stop(self, exc: BaseException) -> None:
+        with self.lock:
+            if self._loop_stop_exc is None:
+                self._loop_stop_exc = exc
+        self._loop_stop_event.set()
+
+    def _check_loop_stop(self) -> None:
+        if not self._loop_stop_event.is_set():
+            return
+        if not self._loop_stop_waited:
+            DEVICE_THREAD_POOL.wait()
+            self._loop_stop_waited = True
+        raise self._loop_stop_exc or StopMainLoop("Module loop stopped by callback")
+
+    def _emit_layer_complete(
+        self,
+        layer_idx: int,
+        submodule_finalized: bool,
+        *,
+        raise_in_place: bool,
+    ) -> None:
+        try:
+            self.callbackup(layer_idx=layer_idx, submodule_finalized=submodule_finalized)
+        except StopMainLoop as exc:
+            if raise_in_place:
+                raise
+            self._request_loop_stop(exc)
+        except BaseException as exc:
+            if raise_in_place:
+                raise
+            log.exception(
+                "Layer completion callback raised an exception (layer=%s, submodule_finalized=%s)",
+                layer_idx,
+                submodule_finalized,
+            )
+            self._request_loop_stop(exc)
 
     # Processors capture activations through hooks that need thread-local state
     # so masks survive the roundtrip to worker threads.
@@ -872,6 +954,7 @@ class ModuleLooper():
                 setattr(parent, module_path[-1], hooked_lm_head)
 
         for layer_index in pb:
+            self._check_loop_stop()
             is_lm_head_module = layer_index >= layer_count
 
             if is_lm_head_module:
@@ -928,6 +1011,17 @@ class ModuleLooper():
                         lock_ctx = DEVICE_THREAD_POOL.read_lock(cur_layer_device)
                     with ctx(lock_ctx, device_ctx(device_for_ctx)):
                         processor.layer_quantize(module, cur_layer_device, named_childs)
+                    if p_index == len(self.processors) - 1:
+                        self._emit_layer_complete(
+                            layer_idx=layer_index,
+                            submodule_finalized=False,
+                            raise_in_place=True,
+                        )
+                        self._emit_layer_complete(
+                            layer_idx=layer_index,
+                            submodule_finalized=True,
+                            raise_in_place=True,
+                        )
                     continue
 
                 layer_inputs = processor.inputs_cache.layer_inputs
@@ -1339,6 +1433,12 @@ class ModuleLooper():
 
                     finalize_futures_snapshot = list(finalize_futures)
 
+                    self._emit_layer_complete(
+                        layer_idx=layer_index,
+                        submodule_finalized=False,
+                        raise_in_place=True,
+                    )
+
                     if finalize_futures_snapshot:
                         known_layers = sorted(
                             {
@@ -1371,11 +1471,17 @@ class ModuleLooper():
                         futures,
                         finalize_pb_local,
                         finalize_count_local,
+                        layer_idx_for_callback,
                     ):
                         completed_local = 0
                         try:
                             for future in as_completed(futures):
-                                result = future.result()
+                                try:
+                                    result = future.result()
+                                except BaseException as exc:
+                                    log.exception("Submodule finalize task raised an exception")
+                                    self._request_loop_stop(exc)
+                                    return
 
                                 if isinstance(result, FinalizeProgressInfo):
                                     module_label = result.module_label
@@ -1399,6 +1505,11 @@ class ModuleLooper():
                                 ).subtitle(subtitle).draw()
                         finally:
                             finalize_pb_local.close()
+                            self._emit_layer_complete(
+                                layer_idx=layer_idx_for_callback,
+                                submodule_finalized=True,
+                                raise_in_place=False,
+                            )
 
                     if finalize_futures_snapshot:
                         # Drain finalize futures asynchronously so the main loop can continue scheduling work.
@@ -1408,14 +1519,23 @@ class ModuleLooper():
                                 [future for future, *_ in finalize_futures_snapshot],
                                 finalize_pb,
                                 finalize_count,
+                                layer_index,
                             ),
                             name="SubmoduleFinalizeWatcher",
                             daemon=True,
                         ).start()
+                    else:
+                        self._emit_layer_complete(
+                            layer_idx=layer_index,
+                            submodule_finalized=True,
+                            raise_in_place=True,
+                        )
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
+        self._check_loop_stop()
         # Ensure ANY remaining tasks the looper submitted have drained
         DEVICE_THREAD_POOL.wait()  # same as wait('all')
+        self._check_loop_stop()
 
         # paranoid safety check
         # torch_sync()
@@ -1437,6 +1557,7 @@ class ModuleLooper():
 
         try:
             for index, reverse_p in enumerate(reversed_processors, start=1):
+                self._check_loop_stop()
                 if isinstance(reverse_p, GPTQProcessor):
                     pass
                 elif isinstance(reverse_p, EoraProcessor):
