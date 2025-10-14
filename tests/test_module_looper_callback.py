@@ -99,3 +99,27 @@ def test_emit_layer_complete_propagates_when_requested():
         )
 
     assert exc.value is err
+
+
+def test_emit_layer_complete_stops_cleanly_on_stop_main_loop(monkeypatch):
+    class Stopper:
+        def layer_complete(self, *, layer_idx, submodule_finalized):
+            raise StopMainLoop()
+
+    looper = make_looper(layer_callback=Stopper())
+
+    looper._emit_layer_complete(
+        layer_idx=0,
+        submodule_finalized=True,
+        raise_in_place=True,
+    )
+
+    assert looper._loop_stop_exc is None
+    assert looper._loop_stop_event.is_set()
+
+    monkeypatch.setattr(
+        "gptqmodel.looper.module_looper.DEVICE_THREAD_POOL.wait",
+        lambda *_, **__: None,
+    )
+
+    assert looper._check_loop_stop() is True

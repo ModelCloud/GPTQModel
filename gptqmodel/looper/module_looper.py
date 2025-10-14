@@ -150,19 +150,21 @@ class ModuleLooper():
             raise result
         return result
 
-    def _request_loop_stop(self, exc: BaseException) -> None:
+    def _request_loop_stop(self, exc: Optional[BaseException]) -> None:
         with self.lock:
-            if self._loop_stop_exc is None:
+            if self._loop_stop_exc is None and exc is not None:
                 self._loop_stop_exc = exc
         self._loop_stop_event.set()
 
-    def _check_loop_stop(self) -> None:
+    def _check_loop_stop(self) -> bool:
         if not self._loop_stop_event.is_set():
-            return
+            return False
         if not self._loop_stop_waited:
             DEVICE_THREAD_POOL.wait()
             self._loop_stop_waited = True
-        raise self._loop_stop_exc or StopMainLoop("Module loop stopped by callback")
+        if self._loop_stop_exc is not None:
+            raise self._loop_stop_exc
+        return True
 
     def _emit_layer_complete(
         self,
@@ -173,10 +175,9 @@ class ModuleLooper():
     ) -> None:
         try:
             self.callbackup(layer_idx=layer_idx, submodule_finalized=submodule_finalized)
-        except StopMainLoop as exc:
-            if raise_in_place:
-                raise
-            self._request_loop_stop(exc)
+        except StopMainLoop:
+            self._request_loop_stop(None)
+            return
         except BaseException as exc:
             if raise_in_place:
                 raise
@@ -954,7 +955,8 @@ class ModuleLooper():
                 setattr(parent, module_path[-1], hooked_lm_head)
 
         for layer_index in pb:
-            self._check_loop_stop()
+            if self._check_loop_stop():
+                break
             is_lm_head_module = layer_index >= layer_count
 
             if is_lm_head_module:

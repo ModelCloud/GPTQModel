@@ -311,7 +311,7 @@ class GPTQProcessor(LoopProcessor):
             logger=log,
             module_name=module_label,
         ):
-            pack_module(
+            packer_label = pack_module(
                 name=module.full_name,
                 qModules=qModules,
                 q_scales=q_scales,
@@ -326,7 +326,7 @@ class GPTQProcessor(LoopProcessor):
             timer.record(
                 "submodule_finalize_pack",
                 time.perf_counter() - pack_start,
-                source=module_label,
+                source=f"{module_label} [{packer_label or 'module.pack_original'}]",
             )
 
         # TODO: store module quant results in module, not global processor result
