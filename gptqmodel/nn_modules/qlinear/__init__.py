@@ -19,6 +19,7 @@ from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.env import env_flag
 from ...utils.safe import THREADPOOLCTL
 
 
@@ -541,8 +542,8 @@ class PackableQuantLinear(BaseQuantLinear):
         if (in_features % word_bits) != 0:
             raise ValueError("in_features must be divisible by 32")
 
-        disable_ext = os.getenv("GPTQMODEL_DISABLE_PACK_EXT", "").lower() in {"1", "true", "yes"}
-        force_ext = os.getenv("GPTQMODEL_FORCE_PACK_EXT", "").lower() in {"1", "true", "yes"}
+        disable_ext = env_flag("GPTQMODEL_DISABLE_PACK_EXT")
+        force_ext = env_flag("GPTQMODEL_FORCE_PACK_EXT")
         pack_block_threads = workers if workers and workers > 0 else 1
         env_threads = os.getenv("GPTQMODEL_PACK_THREADS")
         if env_threads:

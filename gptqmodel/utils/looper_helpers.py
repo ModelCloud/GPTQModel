@@ -15,11 +15,14 @@ from torch.nn import parallel as torch_parallel
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..nn_modules.hooked_linear import StopForward
 from ..utils.attn_mask import normalize_seq_mask
+from ..utils.env import env_flag
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, nested_move_to
 from ..utils.safe import ThreadSafe
 from ..utils.torch import ALL_DEVICES, CPU, torch_sync
+
+USE_TORCH_REPLICATE = env_flag("GPTQMODEL_USE_TORCH_REPLICATE")
 
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
@@ -261,7 +264,8 @@ def clone_module_for_devices(
         _record(step_name, start_ts)
 
     use_replicate = (
-        homogeneous_type
+        USE_TORCH_REPLICATE
+        and homogeneous_type
         and backend_available(device_type)
         and device_type != "cpu"
     )

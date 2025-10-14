@@ -5,8 +5,10 @@
 
 import os
 
+from .utils.env import env_flag
 
-DEBUG_ON = str(os.environ.get("DEBUG", "")).lower() in ("1", "true", "yes", "on")
+
+DEBUG_ON = env_flag("DEBUG")
 
 from .utils.threadx import DeviceThreadPool
 
