@@ -143,3 +143,22 @@ class TestPackAccuracy(unittest.TestCase):
                 floatfmt=".3e",
             )
         )
+
+    def test_pack_negative_g_idx(self):
+        bits = 4
+        group_size = 32
+        self.current_bits = bits
+        self.current_group_size = group_size
+        linear, scales, zeros, g_idx = self._build_inputs(bits, group_size)
+
+        groups = int(g_idx.max().item() + 1)
+        g_idx_neg = g_idx.to(dtype=torch.int32)
+        g_idx_neg[::7] -= groups
+
+        baseline = self._run_impl("original", linear, scales, zeros, g_idx_neg)
+        pack_cpu = self._run_impl("pack_block", linear, scales, zeros, g_idx_neg)
+
+        self.assertTrue(torch.equal(pack_cpu["qweight"], baseline["qweight"]))
+        self.assertTrue(torch.equal(pack_cpu["qzeros"], baseline["qzeros"]))
+        self.assertTrue(torch.equal(pack_cpu["scales"], baseline["scales"]))
+        self.assertTrue(torch.equal(pack_cpu["g_idx"].to(dtype=baseline["g_idx"].dtype), baseline["g_idx"]))

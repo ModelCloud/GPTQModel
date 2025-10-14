@@ -529,6 +529,7 @@ class PackableQuantLinear(BaseQuantLinear):
         scales = scales.T.contiguous()  # [G, out]
         zeros = zeros.T.contiguous()  # [G, out]
         scale_zeros = zeros * scales  # [G, out]
+        num_groups = scales.shape[0]
 
         # small buffers
         self.register_buffer("scales", scales.to(dtype=t.float16))
@@ -641,7 +642,22 @@ class PackableQuantLinear(BaseQuantLinear):
             # [out, blk]
             Wblk = W[:, i0:i1]
             # select group rows for these inputs from [G, out] -> [blk, out], then T -> [out, blk]
-            gsel = g_idx[i0:i1]  # [blk]
+            gsel = g_idx[i0:i1].to(dtype=t.int64, copy=False)  # [blk]
+            if gsel.numel() == 0:
+                return
+
+            neg_mask = gsel < 0
+            if neg_mask.any():
+                gsel = gsel.clone()
+                gsel[neg_mask] += num_groups
+
+            gsel_max = int(gsel.max().item())
+            gsel_min = int(gsel.min().item())
+            if gsel_min < 0 or gsel_max >= num_groups:
+                raise IndexError(
+                    f"pack_block: g_idx values out of range after normalization (min={gsel_min}, max={gsel_max}, groups={num_groups})."
+                )
+
             sz_blk_T = scale_zeros.index_select(0, gsel).T  # [out, blk]
             s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
 

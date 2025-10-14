@@ -102,9 +102,22 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
             for (int out = 0; out < out_features; ++out) {
                 for (int lane = 0; lane < word_bits; ++lane) {
                     const int64_t input_idx = base_input + lane;
-                    const int32_t group = gidx_ptr[input_idx];
-                    float scale = scales_ptr[group * scales_stride + out];
-                    float offset = scale_zeros_ptr[group * scales_stride + out];
+                    const int32_t raw_group = gidx_ptr[input_idx];
+                    int32_t group = raw_group;
+                    if (group < 0) {
+                        group += static_cast<int32_t>(groups);
+                    }
+                    TORCH_CHECK(
+                        group >= 0 && group < groups,
+                        "pack_block_cpu: g_idx[",
+                        input_idx,
+                        "]=",
+                        raw_group,
+                        " is out of range for groups=",
+                        groups
+                    );
+                    float scale = scales_ptr[static_cast<int64_t>(group) * scales_stride + out];
+                    float offset = scale_zeros_ptr[static_cast<int64_t>(group) * scales_stride + out];
                     float w = weight_ptr[out * out_stride + input_idx];
                     if (scale == 0.0f) {
                         scale = 1e-6f;
