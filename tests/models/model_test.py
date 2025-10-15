@@ -48,6 +48,11 @@ except BaseException:
     pass
 
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
+try:  # noqa: E402
+    from transformers.utils import is_flash_attn_2_available  # noqa: E402
+except Exception:  # pragma: no cover - availability check
+    def is_flash_attn_2_available():  # type: ignore
+        return False
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
@@ -551,7 +556,10 @@ class ModelTest(unittest.TestCase):
         args = kwargs if kwargs else {}
 
         if self.USE_FLASH_ATTN:
-            args["attn_implementation"] = "flash_attention_2"
+            if is_flash_attn_2_available():
+                args["attn_implementation"] = "flash_attention_2"
+            else:
+                log.warn("flash-attn requested but not available; falling back to framework defaults")
 
 
         log.info(f"args: {args}")
@@ -639,7 +647,10 @@ class ModelTest(unittest.TestCase):
         load_kwargs = dict(args)
 
         if self.USE_FLASH_ATTN:
-            load_kwargs["attn_implementation"] = "flash_attention_2"
+            if is_flash_attn_2_available():
+                load_kwargs["attn_implementation"] = "flash_attention_2"
+            else:
+                log.warn("flash-attn requested but not available; falling back to framework defaults")
 
         active_backend = backend if backend is not None else self.LOAD_BACKEND
 
