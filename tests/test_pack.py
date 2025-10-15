@@ -3,6 +3,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+import time
 import unittest
 
 import torch
@@ -62,6 +63,8 @@ class TestPackAccuracy(unittest.TestCase):
         scales_T = scales.t().contiguous()
         zeros_T = zeros.t().contiguous()
 
+        start = time.perf_counter()
+
         if impl == "original":
             qlinear.pack_original(linear, scales_T, zeros_T, g_idx=g_idx)
         elif impl == "pack_block":
@@ -84,6 +87,9 @@ class TestPackAccuracy(unittest.TestCase):
         else:
             raise ValueError(f"Unknown impl `{impl}`")
 
+        end = time.perf_counter()
+        duration = end - start
+
         # Move buffers to CPU for comparisons
         result = {
             "qweight": qlinear.qweight.detach().cpu(),
@@ -93,7 +99,7 @@ class TestPackAccuracy(unittest.TestCase):
         }
         if hasattr(qlinear, "bias") and qlinear.bias is not None:
             result["bias"] = qlinear.bias.detach().cpu()
-        return result
+        return result, duration
 
     @parameterized.expand(
         [
@@ -109,16 +115,17 @@ class TestPackAccuracy(unittest.TestCase):
 
         linear, scales, zeros, g_idx = self._build_inputs(bits, group_size)
 
-        baseline = self._run_impl("original", linear, scales, zeros, g_idx)
-        pack_cpu = self._run_impl("pack_block", linear, scales, zeros, g_idx)
-        results = {"pack_block": pack_cpu}
+        baseline, baseline_time = self._run_impl("original", linear, scales, zeros, g_idx)
+        pack_cpu, pack_cpu_time = self._run_impl("pack_block", linear, scales, zeros, g_idx)
+        results = {"pack_block": (pack_cpu, pack_cpu_time)}
 
         if torch.cuda.is_available():
-            results["pack_gpu"] = self._run_impl("gpu", linear, scales, zeros, g_idx)
+            pack_gpu, pack_gpu_time = self._run_impl("gpu", linear, scales, zeros, g_idx)
+            results["pack_gpu"] = (pack_gpu, pack_gpu_time)
 
         rows = []
-        rows.append([f"pack_original (bits={bits}, g={group_size})", 0.0, 0.0, 0.0, 0.0])
-        for name, tensors in results.items():
+        rows.append([f"pack_original (bits={bits}, g={group_size})", 0.0, 0.0, 0.0, 0.0, baseline_time * 1e3])
+        for name, (tensors, duration) in results.items():
             diff_qweight = (tensors["qweight"].to(dtype=baseline["qweight"].dtype) - baseline["qweight"]).abs().max().item()
             diff_qzeros = (tensors["qzeros"].to(dtype=baseline["qzeros"].dtype) - baseline["qzeros"]).abs().max().item()
             diff_scales = (tensors["scales"].to(dtype=baseline["scales"].dtype) - baseline["scales"]).abs().max().item()
@@ -129,6 +136,7 @@ class TestPackAccuracy(unittest.TestCase):
                 diff_qzeros,
                 diff_scales,
                 diff_gidx,
+                duration * 1e3,
             ])
 
             self.assertTrue(torch.equal(tensors["qweight"], baseline["qweight"]))
@@ -139,7 +147,7 @@ class TestPackAccuracy(unittest.TestCase):
         print(
             tabulate(
                 rows,
-                headers=["impl", "max|Δ qweight|", "max|Δ qzeros|", "max|Δ scales|", "max|Δ g_idx|"],
+                headers=["impl", "max|Δ qweight|", "max|Δ qzeros|", "max|Δ scales|", "max|Δ g_idx|", "time [ms]"],
                 floatfmt=".3e",
             )
         )
@@ -155,8 +163,8 @@ class TestPackAccuracy(unittest.TestCase):
         g_idx_neg = g_idx.to(dtype=torch.int32)
         g_idx_neg[::7] -= groups
 
-        baseline = self._run_impl("original", linear, scales, zeros, g_idx_neg)
-        pack_cpu = self._run_impl("pack_block", linear, scales, zeros, g_idx_neg)
+        baseline, _ = self._run_impl("original", linear, scales, zeros, g_idx_neg)
+        pack_cpu, _ = self._run_impl("pack_block", linear, scales, zeros, g_idx_neg)
 
         self.assertTrue(torch.equal(pack_cpu["qweight"], baseline["qweight"]))
         self.assertTrue(torch.equal(pack_cpu["qzeros"], baseline["qzeros"]))
