@@ -249,9 +249,10 @@ class GPTQProcessor(LoopProcessor):
             self.tasks[module.name].free()
 
             # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-            module.state.update({
-                "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
-            })
+            if self.calculate_w_wq_diff:
+                module.state.update({
+                    "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
+                })
 
         # single largest deallocation of vram happens here
         module.weight.data = wq
@@ -262,8 +263,11 @@ class GPTQProcessor(LoopProcessor):
         # module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
 
         # cleanup all memory or states vars persistently added by this processor
-        with self.lock:
-            module.weight.data = module.state.pop("wq", None)
+        with (self.lock):
+            # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
+            if self.calculate_w_wq_diff:
+                module.weight.data = module.state.pop("wq").to(CPU)
+
             module.state.pop("w", None) #
             module.state.pop("w_wq_diff", None)
 
