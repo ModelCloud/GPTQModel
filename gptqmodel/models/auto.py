@@ -552,7 +552,7 @@ class GPTQModel:
 
         if format == "mlx":
             try:
-                from mlx_lm.utils import save_config, save_weights
+                from mlx_lm.utils import save_config, save_model
 
                 from ..utils.mlx import convert_gptq_to_mlx_weights
             except ImportError:
@@ -562,7 +562,7 @@ class GPTQModel:
             mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config,
                                                                   gptq_model.lm_head)
 
-            save_weights(target_path, mlx_weights, donate_weights=True)
+            save_model(target_path, mlx_weights, donate_model=True)
 
             save_config(mlx_config, config_path=target_path + "/config.json")
         elif format == "hf":
