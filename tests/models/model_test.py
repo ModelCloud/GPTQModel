@@ -40,6 +40,8 @@ from collections.abc import Iterable  # noqa: E402
 
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
+
+
 try:
     from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
 except BaseException:
@@ -73,7 +75,7 @@ class ModelTest(unittest.TestCase):
     TORCH_DTYPE = "auto"
     EVAL_BATCH_SIZE = "auto"
     QUANT_BATCH_SIZE = 1
-    LOAD_BACKEND = BACKEND.TORCH
+    LOAD_BACKEND = BACKEND.MARLIN
     QUANT_BACKEND = BACKEND.AUTO
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
@@ -230,7 +232,7 @@ class ModelTest(unittest.TestCase):
         arc_records = {}
         reuse_candidates = {}
 
-        compare_backends = (BACKEND.TORCH,) if self.FORMAT is FORMAT.GPTQ else (BACKEND.MARLIN, BACKEND.GEMM)
+        compare_backends = (BACKEND.MARLIN,) if self.FORMAT is FORMAT.GPTQ else (BACKEND.MARLIN, BACKEND.GEMM)
         target_backend = self.LOAD_BACKEND
         can_reuse = target_backend not in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE)
 

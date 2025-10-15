@@ -1,20 +1,11 @@
-# Copyright 2024-2025 NVIDIA CORPORATION
-# EoRA arXiv: https://arxiv.org/abs/2410.21271
+# SPDX-FileCopyrightText: 2024-2025 NVIDIA CORPORATION
+# SPDX-FileCopyrightText: 2025 ModelCloud.ai (qubitium@modelcloud.ai)
+# SPDX-License-Identifier: Apache-2.0
+# EoRA arXiv https://arxiv.org/abs/2410.21271
 # EoRA Official Repo: https://github.com/NVlabs/EoRA
+# This file has been modified by ModelCloud.AI team and qubitium@modelcloud.ai for adoption into GPT-QModel
 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-from typing import Dict, Tuple
+from typing import Tuple
 
 import torch
 from torch import Tensor
@@ -25,25 +16,41 @@ from ..utils.safe import TORCH_LINALG
 
 log = setup_logger()
 
-def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict[str, torch.dtype], sample_size: int, device: torch.device):
+def eora_process_input(
+        input: Tensor,
+        name: str,
+        sample_size: int,
+        device: torch.device,
+) -> Tuple[int, torch.Tensor, float]:
+    """Prepare the per-batch covariance contribution required for EoRA.
+
+    The contribution is computed on the target device for throughput, then
+    transferred to CPU so it can be safely aggregated across worker threads and
+    devices when the interpreter runs without the GIL.
+    """
+
     inp = input[0].to(device=device, dtype=torch.float32)
     if inp.dim() == 2:
         inp = inp.unsqueeze(0)
 
-    tmp = inp.shape[0]
+    batch = inp.shape[0]
     adds = torch.matmul(inp.transpose(1, 2), inp)
-    adds_sum = torch.sum(adds, dim=0)
+    adds_sum = torch.sum(adds, dim=0).detach()
 
-    ## Adding tmp to denominator is only for mathmatical stability
-    eigen_scaling_diag_matrix[name] *= sample_size / (sample_size + tmp)
-    eigen_scaling_diag_matrix[name] += adds_sum / sample_size
+    contribution = adds_sum.to(device=torch.device("cpu"), dtype=torch.float32)
+    contribution /= float(sample_size)
 
-    del inp, tmp, adds, adds_sum
+    # Adding batch to denominator is only for mathematical stability
+    scale = float(sample_size) / (float(sample_size) + float(batch))
+
+    del inp, adds, adds_sum
+
+    return batch, contribution, scale
 
 def eora_compute_lora(
         w_wq_delta: Tensor, # need the w (original weight) and wq (quantized qweight) delta in float32
         name: str,
-        eigen_scaling_diag_matrix: torch.dtype,
+        eigen_scaling_diag_matrix: torch.Tensor,
         rank: int,
         dtype: torch.dtype,
         device: torch.device,
