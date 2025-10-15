@@ -4,8 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
-import gc as py_gc
-import threading
 import time
 from contextlib import contextmanager
 from enum import Enum
@@ -16,6 +14,7 @@ from packaging import version
 from torch.cpu import StreamContext
 
 from ..utils.logger import setup_logger
+from ..utils.safe import GC
 from . import gte_python_3_13_3, gte_python_3_14, has_gil_disabled, log_gil_requirements_for
 
 
@@ -46,20 +45,16 @@ STREAM = None # cache
 
 log = setup_logger()
 
-GC_LOCK = threading.RLock()
-
 
 def timed_gc_collect() -> int:
     """Run ``gc.collect`` and log the elapsed time along with reclaimed object count."""
     start = time.perf_counter()
 
-    with GC_LOCK:
-        # TODO FIXME..lock to gen0 release for GIL=0 safety
-        # Python 3.14 removed gen1 so there is only gen0 and gen2
-        collected = py_gc.collect(0)
+    # Python 3.14 removed gen1 so there is only gen0 and gen2
+    collected = GC.collect()
 
     duration = time.perf_counter() - start
-    log.info(f"gc.collect(0) reclaimed {collected} objects in {duration:.3f}s")
+    log.info(f"gc.collect() reclaimed {collected} objects in {duration:.3f}s")
     return collected
 
 # reset dynamo cache on each model load since during ci loop model inference may exhuast cache

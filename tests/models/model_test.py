@@ -48,6 +48,8 @@ except BaseException:
     pass
 
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
+
+
 try:  # noqa: E402
     from transformers.utils import is_flash_attn_2_available  # noqa: E402
 except Exception:  # pragma: no cover - availability check
