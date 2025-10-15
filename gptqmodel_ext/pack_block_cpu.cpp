@@ -80,17 +80,21 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
     const int32_t* gidx_ptr = g_idx_i32.const_data_ptr<int32_t>();
     int32_t* qweight_ptr = qweight.data_ptr<int32_t>();
 
-    int old_threads = at::get_num_threads();
-    if (threads > 0) {
-        at::set_num_threads(static_cast<int>(threads));
-    }
-
     const int64_t out_stride = in_features;
     const int64_t scales_stride = out_features;
 
     int64_t grain_size = block_in / word_bits;
     if (grain_size <= 0) {
         grain_size = 1;
+    }
+    if (threads > 0) {
+        // Limit the number of parallel chunks to roughly `threads` without
+        // mutating the global ATen thread configuration, keeping the kernel reentrant.
+        int64_t target_chunk = (num_blocks + threads - 1) / threads;
+        if (target_chunk <= 0) {
+            target_chunk = 1;
+        }
+        grain_size = std::max<int64_t>(grain_size, target_chunk);
     }
 
     at::parallel_for(0, num_blocks, grain_size, [&](int64_t block_begin, int64_t block_end) {
@@ -162,10 +166,6 @@ std::tuple<at::Tensor, at::Tensor> pack_block_cpu(
             }
         }
     });
-
-    if (threads > 0) {
-        at::set_num_threads(old_threads);
-    }
 
     at::Tensor zeros_i32_contig = zeros_i32.contiguous();
     const int32_t* zeros_ptr = zeros_i32_contig.const_data_ptr<int32_t>();

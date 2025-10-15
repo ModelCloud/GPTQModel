@@ -65,11 +65,14 @@ def timed_gc_collect(*args, **kwargs) -> int:
     return collected
 
 # reset dynamo cache on each model load since during ci loop model inference may exhuast cache
-torch._dynamo.reset()
-
-# Increase the dynamo cache size limit, default of 8 is too low
-if torch._dynamo.config.cache_size_limit < 128:
-    torch._dynamo.config.cache_size_limit = 128
+try:
+    torch._dynamo.reset()
+    # Increase the dynamo cache size limit, default of 8 is too low
+    if torch._dynamo.config.cache_size_limit < 128:
+        torch._dynamo.config.cache_size_limit = 128
+except BaseException:
+    # triton built from source maybe incompatible with _dynamo private api
+    pass
 
 if hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available") and torch.cuda.is_available():
     HAS_CUDA = True
