@@ -664,6 +664,7 @@ print(f"gptqmodel_version={gptqmodel_version}")
 setup(
     version = gptqmodel_version,
     packages=find_packages(),
+    include_package_data=True,
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
         "quality": ["ruff==0.13.0", "isort==6.0.1"],
