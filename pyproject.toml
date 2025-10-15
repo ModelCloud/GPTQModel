@@ -81,11 +81,6 @@ bitblas = [
 hf = [
     "optimum>=1.21.2",
 ]
-logger = [
-    "clearml",
-    "random_word",
-    "plotly",
-]
 eval = [
     "lm_eval>=0.4.7",
     "evalplus>=0.3.1",

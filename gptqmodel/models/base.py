@@ -769,7 +769,6 @@ class BaseQModel(nn.Module):
         calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle
         batch_size: int = 1,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        logger_board: Optional[str] = None,
         backend: Optional[BACKEND] = BACKEND.AUTO,
         # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
         adapter: Adapter = None,
@@ -871,7 +870,6 @@ class BaseQModel(nn.Module):
             "calibration_concat_size": calibration_concat_size,
             "calibration_sort": calibration_sort,
             "batch_size": batch_size,
-            "logger_board": logger_board,
             "calculate_w_wq_diff": needs_lora,  # lora needs original w - wq delta
         }
 
@@ -962,7 +960,6 @@ class BaseQModel(nn.Module):
                     calibration_concat_size=calibration_concat_size,
                     calibration_sort=calibration_sort,
                     batch_size=batch_size,
-                    logger_board=logger_board,
                 )
             )
 
@@ -990,7 +987,6 @@ class BaseQModel(nn.Module):
         calibration_dataset_sort: Optional[str] = None,
         batch_size: int = 1,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
-        logger_board: Optional[str] = None,
     ):
         if self.quantized:
             raise EnvironmentError("eora_generate() is called a model that is already quantized")
@@ -1026,7 +1022,6 @@ class BaseQModel(nn.Module):
                 calibration_concat_size=calibration_dataset_concat_size,
                 calibration_sort=calibration_dataset_sort,
                 batch_size=batch_size,
-                logger_board=logger_board,
             ),
         ]
 

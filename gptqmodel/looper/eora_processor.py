@@ -29,13 +29,13 @@ log = setup_logger()
 class EoraProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration, prepare_dataset_func,
                  calibration_concat_size: Optional[int], calibration_sort: Optional[str], batch_size: int,
-                 logger_board: str = "", require_fwd: bool = True
+                 require_fwd: bool = True
                  ):
         super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration=calibration,
                          calibration_concat_size=calibration_concat_size,
                          calibration_sort=calibration_sort,
                          prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
-                         logger_board=logger_board, require_fwd=require_fwd)
+                         require_fwd=require_fwd)
 
         # dict: key is module name, value is the accumulated eigen_scaling_diag_matrix
         self.eigen_scaling_diag_matrix: Dict[str, torch.Tensor] = {}
@@ -54,18 +54,6 @@ class EoraProcessor(LoopProcessor):
 
         self.eora_compute_lora = eora_compute_lora
         self.eora_process_input = eora_process_input
-
-    def log_plotly(self):
-        task = self.logger_task
-        if task is not None:
-            from ..utils.plotly import create_plotly
-            x = list(range(self.layer_count))
-            gpu_fig = create_plotly(x=x, y=self.gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
-            cpu_fig = create_plotly(x=x, y=self.cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
-            time_fig = create_plotly(x=self.module_names, y=self.durations, xaxis_title="layer", yaxis_title="time")
-            task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
-            task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
-            task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
 
     def set_calibration_dataset(self, calibration_dataset):
         self.calibration_dataset = calibration_dataset
