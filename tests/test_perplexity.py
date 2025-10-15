@@ -115,7 +115,7 @@ class TestPerplexity(unittest.TestCase):
 
         length = 512 if format == FORMAT.MARLIN or format == FORMAT.BITBLAS else 2048
         traindata = load_dataset(dataset_path, dataset_name, split=dataset_split).filter(lambda x: len(x[dataset_column]) >= length)
-        calibration_dataset = [tokenizer(example[dataset_column]) for example in traindata.select(range(1024))]
+        calibration_dataset = traindata.select(range(1024))
         return calibration_dataset, native_ppl
 
     @parameterized.expand(
