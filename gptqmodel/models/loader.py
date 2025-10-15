@@ -675,7 +675,7 @@ def ModelLoader(cls):
             import tempfile
             try:
                 from mlx_lm import load
-                from mlx_lm.utils import save_config, save_weights
+                from mlx_lm.utils import save_config, save_model
 
                 from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
             except ModuleNotFoundError as exception:
@@ -687,7 +687,7 @@ def ModelLoader(cls):
             with tempfile.TemporaryDirectory() as temp_dir:
                 mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, qcfg.to_dict(), cls.lm_head)
 
-                save_weights(temp_dir, mlx_weights, donate_weights=True)
+                save_model(temp_dir, mlx_weights, donate_model=True)
                 save_config(mlx_config, config_path=temp_dir + "/config.json")
                 tokenizer.save_pretrained(temp_dir)
 
