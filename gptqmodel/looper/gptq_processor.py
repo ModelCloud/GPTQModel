@@ -238,6 +238,7 @@ class GPTQProcessor(LoopProcessor):
         if self.calculate_w_wq_diff:
             # diff in float32
             w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+            # assert module.weight.data.dtype in (torch.float16, torch.bfloat16)
 
             with self.lock:
                 module.state.update({
@@ -262,6 +263,7 @@ class GPTQProcessor(LoopProcessor):
 
         # cleanup all memory or states vars persistently added by this processor
         with self.lock:
+            module.weight.data = module.state.pop("wq", None)
             module.state.pop("w", None) #
             module.state.pop("w_wq_diff", None)
 
