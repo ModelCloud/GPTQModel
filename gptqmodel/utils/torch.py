@@ -5,6 +5,7 @@
 
 import contextlib
 import gc as py_gc
+import threading
 import time
 from contextlib import contextmanager
 from enum import Enum
@@ -45,23 +46,20 @@ STREAM = None # cache
 
 log = setup_logger()
 
-
-def _format_gc_call_suffix(args: tuple, kwargs: dict) -> str:
-    parts: list[str] = []
-    if args:
-        parts.extend(repr(arg) for arg in args)
-    if kwargs:
-        parts.extend(f"{key}={repr(val)}" for key, val in kwargs.items())
-    return f"({', '.join(parts)})" if parts else "()"
+GC_LOCK = threading.RLock()
 
 
 def timed_gc_collect() -> int:
     """Run ``gc.collect`` and log the elapsed time along with reclaimed object count."""
-    suffix = _format_gc_call_suffix(args, kwargs)
     start = time.perf_counter()
-    collected = py_gc.collect(1)
+
+    with GC_LOCK:
+        # TODO FIXME..lock to gen0 release for GIL=0 safety
+        # Python 3.14 removed gen1 so there is only gen0 and gen2
+        collected = py_gc.collect(0)
+
     duration = time.perf_counter() - start
-    log.info(f"gc.collect{suffix} reclaimed {collected} objects in {duration:.3f}s")
+    log.info(f"gc.collect(0) reclaimed {collected} objects in {duration:.3f}s")
     return collected
 
 # reset dynamo cache on each model load since during ci loop model inference may exhuast cache
