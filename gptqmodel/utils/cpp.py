@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 from pathlib import Path
@@ -22,6 +23,32 @@ _PACK_BLOCK_EXTENSION: Optional[bool] = None
 _PACK_BLOCK_EXTENSION_INITIALISED = False
 
 
+def _resolve_pack_block_source() -> Optional[Path]:
+    """Locate the pack_block_cpu.cpp source within the install tree."""
+
+    candidates: list[Path] = []
+
+    project_root = Path(__file__).resolve().parents[2]
+    candidates.append(project_root / "pack_block_cpu.cpp")
+    candidates.append(project_root / "gptqmodel_ext" / "pack_block_cpu.cpp")
+
+    spec = importlib.util.find_spec("gptqmodel_ext")
+    if spec is not None:
+        if spec.origin:
+            candidates.append(Path(spec.origin).resolve().parent / "pack_block_cpu.cpp")
+        if spec.submodule_search_locations:
+            for location in spec.submodule_search_locations:
+                candidates.append(Path(location) / "pack_block_cpu.cpp")
+
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
     """Ensure the pack_block CPU extension is built and loaded."""
 
@@ -35,12 +62,9 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
     if _PACK_BLOCK_EXTENSION_INITIALISED and _PACK_BLOCK_EXTENSION:
         return _PACK_BLOCK_EXTENSION
 
-    project_root = Path(__file__).resolve().parents[2]
-    source_path = project_root / "pack_block_cpu.cpp"
-    if not source_path.exists():
-        source_path = project_root / "gptqmodel_ext" / "pack_block_cpu.cpp"
-    if not source_path.exists():
-        log.debug("pack_block_cpu extension source not found at %s", source_path)
+    source_path = _resolve_pack_block_source()
+    if source_path is None:
+        log.debug("pack_block_cpu extension source not found in installed package")
         _PACK_BLOCK_EXTENSION = None
         _PACK_BLOCK_EXTENSION_INITIALISED = True
         return None
