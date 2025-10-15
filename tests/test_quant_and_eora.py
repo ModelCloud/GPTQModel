@@ -13,7 +13,6 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
-from datasets import load_dataset  # noqa: E402
 from lm_eval.utils import make_table  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
@@ -56,19 +55,6 @@ class Test(ModelTest):
         rank = 128
         calibration_dataset_concat_size = 0 # disable
         adapter_path = "eora"
-        dataset_id = "allenai/c4"
-        dataset_files = "en/c4-train.00001-of-01024.json.gz"
-
-
-        calibration_dataset = load_dataset(
-            dataset_id,
-            data_files=dataset_files,
-            split="train"
-        ).select(range(self.DATASET_SIZE))["text"]
-
-        # with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
-        #     data = [json.loads(line)["text"] for line in f]
-        #     calibration_dataset = data[:calibration_dataset_rows]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             eora = Lora(
@@ -93,6 +79,8 @@ class Test(ModelTest):
                 # apply_chat_template=True,
             )
 
+            calibration_dataset = self.load_dataset(model.tokenizer, self.DATASET_SIZE)
+
             model.quantize(
                 calibration=calibration_dataset,
                 #calibration_sort="desc",
@@ -109,7 +97,7 @@ class Test(ModelTest):
             torch_empty_cache()
 
             # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
-            for backend in [ BACKEND.MARLIN ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+            for backend in [ BACKEND.TORCH ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
                 base_bench = self.bench(path=tmpdir, backend=backend, adapter=None) # inference using qweights only
                 eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)
 
