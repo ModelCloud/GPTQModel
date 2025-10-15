@@ -35,12 +35,23 @@ from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
+# a100 gpu 7
 class Test(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
+    NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
 
-    NATIVE_ARC_CHALLENGE_ACC = 0.3567
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
+    NATIVE_ARC_CHALLENGE_ACC = 0.2901 # Eora: 0.3029
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3404 # Eora: 0.3302
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
+
+    APPLY_CHAT_TEMPLATE = True
+    V2 = False
+    DEBUG = True
+    ACT_GROUP_AWARE = True
+    DESC_ACT = False
+    DATASET_SIZE = 1024
+    DATASET_SORT = "desc"
+    QUANT_BATCH_SIZE = 4
+    USE_FLASH_ATTN = True
 
     @classmethod
     def setUpClass(cls):
@@ -52,13 +63,7 @@ class Test(ModelTest):
         ]
     )
     def test_quant_and_eora(self, quant_method: METHOD, format: FORMAT):
-        bits = 4
-        group_size = 128
-        desc_act = False
-        act_group_aware = True
         rank = 128
-        batch_size = 4
-        calibration_dataset_rows = 1024
         calibration_dataset_concat_size = 0 # disable
         adapter_path = "eora"
         dataset_id = "allenai/c4"
@@ -69,7 +74,7 @@ class Test(ModelTest):
             dataset_id,
             data_files=dataset_files,
             split="train"
-        ).select(range(calibration_dataset_rows))["text"]
+        ).select(range(self.DATASET_SIZE))["text"]
 
         # with gzip.open("/monster/data/model/dataset/c4-train.00000-of-01024.json.gz", 'rt', encoding='utf-8') as f:
         #     data = [json.loads(line)["text"] for line in f]
@@ -83,10 +88,10 @@ class Test(ModelTest):
             )
 
             quant_config = QuantizeConfig(
-                bits=bits,
-                group_size=group_size,
-                desc_act=desc_act,  # bitblas only supports DESC_ACT=False
-                act_group_aware=act_group_aware,
+                bits=self.BITS,
+                group_size=self.GROUP_SIZE,
+                desc_act=self.DESC_ACT,  # bitblas only supports DESC_ACT=False
+                act_group_aware=self.ACT_GROUP_AWARE,
                 adapter=eora,
                 format=format,
                 quant_method=quant_method,
@@ -100,8 +105,8 @@ class Test(ModelTest):
 
             model.quantize(
                 calibration=calibration_dataset,
-                calibration_sort="desc",
-                batch_size=batch_size,
+                #calibration_sort="desc",
+                batch_size=self.QUANT_BATCH_SIZE,
                 calibration_concat_size=calibration_dataset_concat_size,
             ) #
 
