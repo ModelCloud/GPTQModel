@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, Tuple
+import contextlib
+from typing import Dict, Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -25,25 +26,57 @@ from ..utils.safe import TORCH_LINALG
 
 log = setup_logger()
 
-def eora_process_input(input: Tensor, name: str, eigen_scaling_diag_matrix: Dict[str, torch.dtype], sample_size: int, device: torch.device):
+def eora_process_input(
+        input: Tensor,
+        name: str,
+        eigen_scaling_diag_matrix: Dict[str, torch.Tensor],
+        sample_size: int,
+        device: torch.device,
+        lock: Optional[contextlib.AbstractContextManager] = None,
+):
+    """Accumulate the covariance statistics required for EoRA.
+
+    We compute the per-batch contribution on the target device for throughput,
+    then move the reduced result to CPU so it can be safely aggregated across
+    worker threads and devices when the interpreter runs without the GIL.
+    """
+
     inp = input[0].to(device=device, dtype=torch.float32)
     if inp.dim() == 2:
         inp = inp.unsqueeze(0)
 
-    tmp = inp.shape[0]
+    batch = inp.shape[0]
     adds = torch.matmul(inp.transpose(1, 2), inp)
-    adds_sum = torch.sum(adds, dim=0)
+    adds_sum = torch.sum(adds, dim=0).detach()
 
-    ## Adding tmp to denominator is only for mathmatical stability
-    eigen_scaling_diag_matrix[name] *= sample_size / (sample_size + tmp)
-    eigen_scaling_diag_matrix[name] += adds_sum / sample_size
+    contribution = adds_sum.to(device=torch.device("cpu"), dtype=torch.float32)
+    contribution /= float(sample_size)
 
-    del inp, tmp, adds, adds_sum
+    ## Adding batch to denominator is only for mathematical stability
+    scale = float(sample_size) / (float(sample_size) + float(batch))
+
+    del inp, adds, adds_sum
+
+    ctx = lock if lock is not None else contextlib.nullcontext()
+    with ctx:
+        current = eigen_scaling_diag_matrix.get(name)
+
+        if isinstance(current, torch.Tensor):
+            if current.device != torch.device("cpu"):
+                current = current.to(device=torch.device("cpu"), dtype=torch.float32)
+
+            current.mul_(scale)
+            current.add_(contribution)
+            eigen_scaling_diag_matrix[name] = current
+        else:
+            eigen_scaling_diag_matrix[name] = contribution
+
+    del contribution
 
 def eora_compute_lora(
         w_wq_delta: Tensor, # need the w (original weight) and wq (quantized qweight) delta in float32
         name: str,
-        eigen_scaling_diag_matrix: torch.dtype,
+        eigen_scaling_diag_matrix: torch.Tensor,
         rank: int,
         dtype: torch.dtype,
         device: torch.device,

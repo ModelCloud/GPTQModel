@@ -39,7 +39,7 @@ class EoraProcessor(LoopProcessor):
                          logger_board=logger_board, require_fwd=require_fwd)
 
         # dict: key is module name, value is the accumulated eigen_scaling_diag_matrix
-        self.eigen_scaling_diag_matrix: Dict[str, torch.float32] = {}
+        self.eigen_scaling_diag_matrix: Dict[str, torch.Tensor] = {}
 
         # Increase the dynamo cache size limit, default of 8 is too low
         if torch._dynamo.config.cache_size_limit < 64:
@@ -88,7 +88,7 @@ class EoraProcessor(LoopProcessor):
         # hack store property inside module
         module.adapter_cfg = adapter_cfg
 
-        self.eigen_scaling_diag_matrix[module.name] = 0 # torch.tensor(0.0, dtype=torch.float32)
+        self.eigen_scaling_diag_matrix[module.name] = None
 
         return
 
@@ -105,6 +105,7 @@ class EoraProcessor(LoopProcessor):
                     eigen_scaling_diag_matrix=self.eigen_scaling_diag_matrix,
                     sample_size=self.num_batches,
                     device=module.weight.data.device,
+                    lock=self.lock,
                 )
         return tmp
 
@@ -118,8 +119,19 @@ class EoraProcessor(LoopProcessor):
         with self.lock:
             eigen_scaling_diag_matrix = self.eigen_scaling_diag_matrix.pop(module.name)
 
-        w_wq_delta: torch.Tensor = module.state.pop("w_wq_diff").to(dtype=torch.float32)
+        if not isinstance(eigen_scaling_diag_matrix, torch.Tensor):
+            raise RuntimeError(
+                f"EoRA statistics for module '{module.name}' were not collected before processing."
+            )
+
+        target_device = module.weight.data.device
+
+        w_wq_delta: torch.Tensor = module.state.pop("w_wq_diff").to(
+            dtype=torch.float32,
+            device=target_device,
+        )
         wq: torch.Tensor = module.state["wq"]
+        wq_device = wq.to(device=target_device, dtype=module.module_dtype)
 
         # print(f"types: w = `{w.dtype}`, device = `{w.device}`, wq = `{wq.dtype}`,  device = `{wq.device}`")
         assert w_wq_delta.dtype == torch.float32, f"w_wq_delta dtype: {w_wq_delta.dtype}"
@@ -138,14 +150,18 @@ class EoraProcessor(LoopProcessor):
             del eigen_scaling_diag_matrix
 
             # wq with A/B applied
-            computed_wq = wq + (B @ A)
+            computed_wq = (wq_device + (B @ A)).to(dtype=wq.dtype, device=target_device)
 
         module.state.update({
             "wq": move_to(wq, device=CPU, stream=self.stream),
         })
 
+        assert computed_wq.dtype in (torch.float16, torch.bfloat16)
+
         # override module weight with computed weight with B@A delta
-        module.weight.data = computed_wq.to(dtype=module.weight.data.dtype, device=module.weight.data.device)
+        module.weight.data = computed_wq
+
+        del wq_device, computed_wq
 
         # for assert weight
         # module.state.update({
