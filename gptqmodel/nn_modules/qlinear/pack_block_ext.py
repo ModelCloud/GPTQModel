@@ -52,7 +52,7 @@ def _load_extension() -> Optional[object]:
             extra_cflags=extra_cflags,
             extra_ldflags=extra_ldflags,
             build_directory=build_dir,
-            verbose=False,
+            verbose=True,
             is_python_module=False,
         )
         log.debug("pack_block_cpu extension loaded from %s", source_path)
