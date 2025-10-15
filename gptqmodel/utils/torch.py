@@ -55,11 +55,11 @@ def _format_gc_call_suffix(args: tuple, kwargs: dict) -> str:
     return f"({', '.join(parts)})" if parts else "()"
 
 
-def timed_gc_collect(*args, **kwargs) -> int:
+def timed_gc_collect() -> int:
     """Run ``gc.collect`` and log the elapsed time along with reclaimed object count."""
     suffix = _format_gc_call_suffix(args, kwargs)
     start = time.perf_counter()
-    collected = py_gc.collect(*args, **kwargs)
+    collected = py_gc.collect(1)
     duration = time.perf_counter() - start
     log.info(f"gc.collect{suffix} reclaimed {collected} objects in {duration:.3f}s")
     return collected
