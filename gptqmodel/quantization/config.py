@@ -163,8 +163,8 @@ class QuantizeConfig():
     damp_percent: float = field(default=None)
     damp_auto_increment: float = field(default=None)
 
-    desc_act: bool = field(default=True)
-    act_group_aware: bool = field(default=False)
+    desc_act: Optional[bool] = field(default=None)
+    act_group_aware: Optional[bool] = field(default=None)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
     true_sequential: bool = field(default=True)
@@ -321,6 +321,28 @@ class QuantizeConfig():
             if self.hessian_chunk_bytes <= 0:
                 raise ValueError("QuantizeConfig: `hessian_chunk_bytes` must be a positive integer amount of bytes.")
 
+        # resolve activation ordering compatibility and defaults
+        desc_act_user_value = self.desc_act
+        act_group_aware_user_value = self.act_group_aware
+
+        if desc_act_user_value is None:
+            # GPTQ defaults to higher quality ordering disabled, others retain legacy default
+            self.desc_act = False if self.quant_method == METHOD.GPTQ else True
+        elif isinstance(desc_act_user_value, bool):
+            self.desc_act = desc_act_user_value
+        else:
+            self.desc_act = bool(desc_act_user_value)
+
+        if act_group_aware_user_value is None:
+            # auto-enable for GPTQ unless user explicitly disables it
+            self.act_group_aware = self.quant_method == METHOD.GPTQ
+        elif isinstance(act_group_aware_user_value, bool):
+            self.act_group_aware = act_group_aware_user_value
+        else:
+            self.act_group_aware = bool(act_group_aware_user_value)
+
+        self._resolve_activation_ordering(desc_act_user_value, act_group_aware_user_value)
+
         # validate hybrid act order
         if self.act_group_aware and self.desc_act:
             raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
@@ -351,6 +373,30 @@ class QuantizeConfig():
             self.adapter = {}
 
         self.adapter[key.lower()] = value
+
+    def _resolve_activation_ordering(
+        self,
+        desc_act_user_value: Optional[bool],
+        act_group_aware_user_value: Optional[bool],
+    ) -> None:
+        """Normalize defaults and enforce compatibility between desc_act and act_group_aware."""
+
+        desc_act_enabled_by_user = bool(desc_act_user_value) if desc_act_user_value is not None else False
+        act_group_aware_enabled_by_user = (
+            bool(act_group_aware_user_value) if act_group_aware_user_value is not None else False
+        )
+
+        if desc_act_enabled_by_user and act_group_aware_user_value is not None and act_group_aware_enabled_by_user:
+            raise ValueError(
+                "QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False` when both are explicitly set."
+            )
+
+        if desc_act_enabled_by_user and act_group_aware_user_value is None and self.act_group_aware:
+            log.warn(
+                "QuantizeConfig: `desc_act=True` automatically disables `act_group_aware`. "
+                "Set `act_group_aware=False` explicitly to silence this warning."
+            )
+            self.act_group_aware = False
 
     def extension_get(self, key: str) -> Any:
             return self.adapter.get(key.lower()) if self.adapter else None
