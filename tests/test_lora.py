@@ -59,7 +59,7 @@ class Test(ModelTest):
         )
 
         # print(model)
-        tokens = model.generate("Capital of France is")[0]
+        tokens = model.generate("The capital city of France is named")[0]
         result = model.tokenizer.decode(tokens)
         print(f"Result: {result}")
         self.assertIn("paris", result.lower())
@@ -77,10 +77,12 @@ class Test(ModelTest):
             device_map="auto",
         )
 
-        tokens = model.generate("Capital of France is")[0]
+        tokens = model.generate("The capital city of France is named", min_new_tokens=128, max_new_tokens=128)[0]
         result = model.tokenizer.decode(tokens)
         print(f"Result: {result}")
         self.assertIn("paris", result.lower())
+        if "paris" not in result.lower() and "built" not in result.lower():
+            raise AssertionError(" `paris` not found in `result`")
 
     def test_lm_eval_from_path(self):
         adapter = Lora(path=self.lora_path, rank=128)
