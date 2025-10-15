@@ -61,6 +61,7 @@ Homepage = "https://github.com/ModelCloud/GPTQModel"
 [project.optional-dependencies]
 test = [
     "pytest>=8.3.5",
+    "pytest-timeout>=2.3.1",
     "parameterized",
 ]
 quality = [
