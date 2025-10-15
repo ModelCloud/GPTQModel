@@ -676,7 +676,7 @@ setup(
         "eval": ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
         "triton": ["triton>=3.4.0"],
         "openai": ["uvicorn", "fastapi", "pydantic"],
-        "mlx": ["mlx_lm>=0.24.0"],
+        "mlx": ["mlx_lm>=0.28.2"],
     },
     include_dirs=include_dirs,
     cmdclass=(
