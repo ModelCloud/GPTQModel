@@ -22,9 +22,38 @@ def normalize_seq_mask(mask: torch.Tensor | None, seq_len: int | None = None) ->
         return None
 
     m = mask
-    # Convert numeric to bool 'keep' (HF tends to use >0 for keep; extended masks use big negatives for masked)
-    if m.dtype != torch.bool:
-        m = (m > 0)
+    if m.dtype == torch.bool:
+        keep = m
+    else:
+        has_negative = torch.any(m < 0)
+        if has_negative:
+            keep = m >= 0
+        else:
+            maxv = torch.amax(m)
+            if m.is_floating_point():
+                minv = torch.amin(m)
+                approx_zero = torch.isclose(minv, torch.zeros((), device=m.device, dtype=m.dtype))
+                approx_one = torch.isclose(maxv, torch.ones((), device=m.device, dtype=m.dtype))
+                same_extreme = torch.isclose(maxv, minv)
+                has_mid = torch.any((m > minv) & (m < maxv))
+                is_binary = approx_zero and (approx_one or same_extreme) and not has_mid
+            else:
+                minv = torch.amin(m)
+                outside = torch.any((m != 0) & (m != 1))
+                is_binary = minv >= 0 and maxv <= 1 and not outside
+
+            has_positive = torch.any(m > 0)
+            if has_positive and not is_binary:
+                scaled_mismatch = torch.any((m > 0) & (m != maxv))
+                is_scaled_binary = not scaled_mismatch
+            else:
+                is_scaled_binary = False
+
+            if not has_positive:
+                keep = torch.zeros_like(m, dtype=torch.bool)
+            else:
+                keep = (m > 0) if (is_binary or is_scaled_binary) else (m >= 0)
+    m = keep
 
     # Squeeze broadcast dims to reach [B, S]
     if m.dim() == 4 and m.size(1) == 1 and m.size(2) == 1:
