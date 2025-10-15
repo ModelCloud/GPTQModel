@@ -132,9 +132,29 @@ class GPTQ:
         if isinstance(module, NamedModule):
             self.module = module.module
             self.name = module.name
+            self._named_module = module
         else:
             self.name = HF_OPTIMUM
             self.module = module
+            self._named_module = None
+
+        self._original_rows = self.rows
+        self._original_columns = self.columns
+        if self._named_module is not None:
+            pad_info = self._named_module.state.get("tp_pad_info")
+        else:
+            pad_info = getattr(self.module, "_tp_pad_info", None)
+        if isinstance(pad_info, dict):
+            pad_cols = int(pad_info.get("pad_cols", 0) or 0)
+            pad_cols = max(pad_cols, 0)
+        else:
+            pad_info = None
+            pad_cols = 0
+
+        self._tp_pad_info = pad_info
+        self._tp_pad_cols = pad_cols
+        if self._tp_pad_cols:
+            self.columns += self._tp_pad_cols
 
         module_device = get_device(self.module)
         setattr(self.module, "target_device", module_device)
@@ -206,7 +226,26 @@ class GPTQ:
         if isinstance(self.module, transformers.pytorch_utils.Conv1D):
             clone = clone.t()
 
+        if self._tp_pad_cols:
+            pad = torch.zeros(
+                (clone.shape[0], self._tp_pad_cols),
+                dtype=clone.dtype,
+                device=clone.device,
+            )
+            clone = torch.cat((clone, pad), dim=1)
+
         return clone.float()
+
+    @staticmethod
+    def _truncate_last_dim(tensor: torch.Tensor, length: int) -> torch.Tensor:
+        if tensor.dim() == 0:
+            return tensor
+
+        trim = min(length, tensor.shape[-1])
+        if trim == tensor.shape[-1]:
+            return tensor
+
+        return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
         with self.lock:
@@ -385,6 +424,9 @@ class GPTQ:
 
         # Delay dtype conversion until we materialize Hessian chunks to avoid unnecessary temporaries
         reshaped_inp = reshaped_inp.contiguous()
+        if self._tp_pad_cols:
+            pad = reshaped_inp.new_zeros((reshaped_inp.shape[0], self._tp_pad_cols))
+            reshaped_inp = torch.cat((reshaped_inp, pad), dim=1)
         canonical_device = self._resolve_hessian_device(inp_device)
 
         batch_token_size = reshaped_inp.shape[0]
@@ -783,6 +825,11 @@ class GPTQ:
             temp_zero = [zero[i] for i in inv_global_perm_list]
             zero = temp_zero
 
+        if self._tp_pad_cols:
+            valid_cols = self._original_columns
+            Q = Q[:, :valid_cols]
+            g_idx = g_idx[:valid_cols]
+
         if isinstance(self.module, transformers.Conv1D):
             Q = Q.t()
 
@@ -798,6 +845,11 @@ class GPTQ:
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
 
+        if self._tp_pad_cols:
+            valid_cols = self._original_columns
+            scale = self._truncate_last_dim(scale, valid_cols)
+            zero = self._truncate_last_dim(zero, valid_cols)
+
         Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
 
         duration = time.time() - start
@@ -810,7 +862,13 @@ class GPTQ:
         del self.quantizer
         if hasattr(self, "module_copy"):
             del self.module_copy
-        del self.module
+
+        if self._named_module is not None:
+            self._named_module.state.pop("tp_pad_info", None)
+
+        target = getattr(self, "module", None)
+        if target is not None:
+            del self.module
 
         # torch_empty_cache(self.device)
 

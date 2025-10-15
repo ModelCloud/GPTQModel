@@ -118,8 +118,20 @@ class EoraProcessor(LoopProcessor):
         with self.lock:
             eigen_scaling_diag_matrix = self.eigen_scaling_diag_matrix.pop(module.name)
 
+        tp_info = module.state.get("tp_pad_info")
+        pad_cols = 0
+        original_cols = module.weight.data.shape[1]
+        if isinstance(tp_info, dict):
+            pad_cols = int(tp_info.get("pad_cols", 0) or 0)
+            original_cols = int(tp_info.get("original_columns", original_cols))
+
         w_wq_delta: torch.Tensor = module.state.pop("w_wq_diff").to(dtype=torch.float32)
         wq: torch.Tensor = module.state["wq"]
+
+        if pad_cols:
+            valid_cols = original_cols + pad_cols
+            w_wq_delta = w_wq_delta[:, :valid_cols]
+            wq = wq[:, :valid_cols]
 
         # print(f"types: w = `{w.dtype}`, device = `{w.device}`, wq = `{wq.dtype}`,  device = `{wq.device}`")
         assert w_wq_delta.dtype == torch.float32, f"w_wq_delta dtype: {w_wq_delta.dtype}"
@@ -140,12 +152,19 @@ class EoraProcessor(LoopProcessor):
             # wq with A/B applied
             computed_wq = wq + (B @ A)
 
+        if pad_cols:
+            computed_wq_trim = computed_wq[:, :original_cols]
+            wq_trim = wq[:, :original_cols]
+        else:
+            computed_wq_trim = computed_wq
+            wq_trim = wq
+
         module.state.update({
-            "wq": move_to(wq, device=CPU, stream=self.stream),
+            "wq": move_to(wq_trim, device=CPU, stream=self.stream),
         })
 
         # override module weight with computed weight with B@A delta
-        module.weight.data = computed_wq.to(dtype=module.weight.data.dtype, device=module.weight.data.device)
+        module.weight.data = computed_wq_trim.to(dtype=module.weight.data.dtype, device=module.weight.data.device)
 
         # for assert weight
         # module.state.update({
@@ -202,6 +221,8 @@ class EoraProcessor(LoopProcessor):
         module.state.update({
             "adapter": eora
         })
+
+        module.state.pop("tp_pad_info", None)
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
