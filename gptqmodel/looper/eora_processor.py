@@ -174,13 +174,27 @@ class EoraProcessor(LoopProcessor):
                 f"EoRA statistics for module '{module.name}' were not collected before processing."
             )
 
+        tp_info = module.state.get("tp_pad_info")
+        pad_cols = 0
+        original_cols = module.weight.data.shape[1]
+        if isinstance(tp_info, dict):
+            pad_cols = int(tp_info.get("pad_cols", 0) or 0)
+            original_cols = int(tp_info.get("original_columns", original_cols))
+
         target_device = module.weight.data.device
 
         w_wq_delta: torch.Tensor = module.state.pop("w_wq_diff").to(
             dtype=torch.float32,
             device=target_device,
         )
+        if pad_cols:
+            valid_cols = original_cols + pad_cols
+            w_wq_delta = w_wq_delta[:, :valid_cols]
+
         wq: torch.Tensor = module.state["wq"]
+        if pad_cols:
+            wq = wq[:, :valid_cols]
+
         wq_device = wq.to(device=target_device, dtype=module.module_dtype)
 
         # print(f"types: w = `{w.dtype}`, device = `{w.device}`, wq = `{wq.dtype}`,  device = `{wq.device}`")
@@ -202,14 +216,21 @@ class EoraProcessor(LoopProcessor):
             # wq with A/B applied
             computed_wq = (wq_device + (B @ A)).to(dtype=wq.dtype, device=target_device)
 
+        if pad_cols:
+            computed_wq_trim = computed_wq[:, :original_cols]
+            wq_trim = wq[:, :original_cols]
+        else:
+            computed_wq_trim = computed_wq
+            wq_trim = wq
+
         module.state.update({
-            "wq": move_to(wq, device=CPU, stream=self.stream),
+            "wq": move_to(wq_trim, device=CPU, stream=self.stream),
         })
 
         assert computed_wq.dtype in (torch.float16, torch.bfloat16)
 
         # override module weight with computed weight with B@A delta
-        module.weight.data = computed_wq
+        module.weight.data = computed_wq_trim.to(dtype=module.weight.data.dtype, device=target_device)
 
         del wq_device, computed_wq
 
@@ -268,6 +289,8 @@ class EoraProcessor(LoopProcessor):
         module.state.update({
             "adapter": eora
         })
+
+        module.state.pop("tp_pad_info", None)
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")

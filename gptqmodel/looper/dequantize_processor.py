@@ -38,10 +38,23 @@ class DequantizeProcessor(LoopProcessor):
         # log.info(f"Dequantize: `{m.name}`")
 
         # TODO: we can optimize this and dequant + w - wq on cpu
+        tp_info = module.state.get("tp_pad_info")
+        pad_cols = 0
+        if isinstance(tp_info, dict):
+            pad_cols = int(tp_info.get("pad_cols", 0) or 0)
+
         wq = m.dequantize_weight().T.to(device=device)
+        if pad_cols:
+            pad = wq.new_zeros((wq.shape[0], pad_cols))
+            wq = torch.cat((wq, pad), dim=1)
+
+        module_weight = module.weight.data
+        if pad_cols:
+            pad = module_weight.new_zeros((module_weight.shape[0], pad_cols))
+            module_weight = torch.cat((module_weight, pad), dim=1)
 
         # diff in float32
-        w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+        w_wq_diff = module_weight.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
 
         module.state.update({
             "w_wq_diff": w_wq_diff,

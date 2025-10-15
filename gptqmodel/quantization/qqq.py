@@ -197,9 +197,11 @@ class QQQ:
         if isinstance(module, NamedModule):
             self.layer = module.module
             self.name = module.name
+            self._named_module = module
         else:
             self.name = HF_OPTIMUM
             self.layer = module
+            self._named_module = None
 
         layer_device = self.layer.weight.device
         setattr(self.layer, "target_device", layer_device)
@@ -209,6 +211,22 @@ class QQQ:
         self._validate_module(self.layer)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
+
+        self._original_rows = self.rows
+        self._original_columns = self.columns
+        if self._named_module is not None:
+            pad_info = self._named_module.state.get("tp_pad_info")
+        else:
+            pad_info = getattr(self.layer, "_tp_pad_info", None)
+
+        if isinstance(pad_info, dict):
+            pad_cols = int(pad_info.get("pad_cols", 0) or 0)
+            pad_cols = max(pad_cols, 0)
+        else:
+            pad_cols = 0
+        self._tp_pad_cols = pad_cols
+        if self._tp_pad_cols:
+            self.columns += self._tp_pad_cols
 
         self.module_copy = None
 
@@ -229,6 +247,17 @@ class QQQ:
     def _validate_module(module):
         assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
                                    transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
+
+    @staticmethod
+    def _truncate_last_dim(tensor: torch.Tensor, length: int) -> torch.Tensor:
+        if tensor.dim() == 0:
+            return tensor
+
+        trim = min(length, tensor.shape[-1])
+        if trim == tensor.shape[-1]:
+            return tensor
+
+        return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
     def add_batch(self, inp, out):
         if DEBUG:
@@ -255,9 +284,10 @@ class QQQ:
             inp = inp.flatten(1)
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
-        # inp = inp.float()
         inp = math.sqrt(2 / self.nsamples) * inp.float()
-        # self.H += 2 / self.nsamples * inp.matmul(inp.t())
+        if self._tp_pad_cols:
+            pad = inp.new_zeros((self._tp_pad_cols, inp.shape[1]))
+            inp = torch.cat((inp, pad), dim=0)
         self.H += inp.matmul(inp.t())
 
     @torch.inference_mode()
@@ -278,6 +308,14 @@ class QQQ:
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
         W = W.float()
+
+        if self._tp_pad_cols:
+            pad = torch.zeros(
+                (W.shape[0], self._tp_pad_cols),
+                dtype=W.dtype,
+                device=W.device,
+            )
+            W = torch.cat((W, pad), dim=1)
 
         tick = time.time()
 
@@ -417,6 +455,11 @@ class QQQ:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
 
+        if self._tp_pad_cols:
+            valid_cols = self._original_columns
+            Q = Q[:, :valid_cols]
+            g_idx = g_idx[:valid_cols]
+
         if isinstance(self.layer, transformers.Conv1D):
             Q = Q.t()
         if Q.shape != self.layer.weight.shape:
@@ -431,6 +474,11 @@ class QQQ:
             zero.append(self.quantizer.zero)
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
+
+        if self._tp_pad_cols:
+            valid_cols = self._original_columns
+            scale = self._truncate_last_dim(scale, valid_cols)
+            zero = self._truncate_last_dim(zero, valid_cols)
 
         Q = Q.to(device=self.layer.weight.data.device, non_blocking=False)
 
@@ -459,4 +507,10 @@ class QQQ:
         self.H = None
         self.Losses = None
         self.Trace = None
+        if hasattr(self, "quantizer"):
+            del self.quantizer
+        if hasattr(self, "module_copy"):
+            del self.module_copy
+        if self._named_module is not None:
+            self._named_module.state.pop("tp_pad_info", None)
         torch.cuda.empty_cache()

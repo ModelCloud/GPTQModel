@@ -916,9 +916,15 @@ class BaseQModel(nn.Module):
                                             device=rotation_device, **module_name_args)
 
         # init processor with default GPTQ processor
+        from ..looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
+
         if self.quantize_config.quant_method == METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
-            quantize_processor = [QQQProcessor(**args)]
+
+            quantize_processor = [
+                TensorParallelWeightProcessor(**args),
+                QQQProcessor(**args),
+            ]
         elif self.quantize_config.quant_method == METHOD.AWQ:
             from ..looper.awq_processor import AWQProcessor
 
@@ -927,14 +933,22 @@ class BaseQModel(nn.Module):
             # if self.model.config.model_type not in AWQ_CAUSAL_LM_MODEL_MAP.keys():
             #     raise TypeError(f"{self.model.config.model_type} isn't supported yet.")
 
-            args["gptq_model"] = self
-            args["model"] = self.model
-            args["batch_size"] = batch_size
-            awq_processor = AWQProcessor(**args)
-            quantize_processor = [awq_processor]
+            awq_args = dict(args)
+            awq_args["gptq_model"] = self
+            awq_args["model"] = self.model
+            awq_args["batch_size"] = batch_size
+
+            quantize_processor = [
+                TensorParallelWeightProcessor(**args),
+                AWQProcessor(**awq_args),
+            ]
         else:
             from ..looper.gptq_processor import GPTQProcessor
-            quantize_processor = [GPTQProcessor(**args)]
+
+            quantize_processor = [
+                TensorParallelWeightProcessor(**args),
+                GPTQProcessor(**args),
+            ]
 
         if self.quantize_config.v2 is True:
             from ..looper.native_processor import NativeProcessor
@@ -1004,6 +1018,7 @@ class BaseQModel(nn.Module):
         from ..looper.dequantize_processor import DequantizeProcessor
         from ..looper.eora_processor import EoraProcessor
         from ..looper.module_looper import ModuleLooper
+        from ..looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
 
         self.quantize_config.adapter = adapter
 
@@ -1011,6 +1026,15 @@ class BaseQModel(nn.Module):
 
         # init processor with EoRA processor
         processors = [
+            TensorParallelWeightProcessor(
+                tokenizer=self.tokenizer,
+                qcfg=self.quantize_config,
+                calibration=calibration_dataset,
+                prepare_dataset_func=self.prepare_dataset,
+                calibration_concat_size=calibration_dataset_concat_size,
+                calibration_sort=calibration_dataset_sort,
+                batch_size=batch_size,
+            ),
             DequantizeProcessor(
                 quantized_modules=quantized_modules,
             ),

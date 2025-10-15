@@ -5,6 +5,7 @@
 
 import functools
 import inspect
+import math
 import time
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Tuple
@@ -633,9 +634,33 @@ class AWQProcessor(LoopProcessor):
             # NOTE: small regression in perplexity if linear layer uses .cpu().float()
             linear_layer = linear_layer.to(get_best_device()).half()
 
+            tp_info = named_module.state.get("tp_pad_info")
+            pad_cols = 0
+            original_cols = linear_layer.weight.data.shape[1]
+            if isinstance(tp_info, dict):
+                pad_cols = int(tp_info.get("pad_cols", 0) or 0)
+                original_cols = int(tp_info.get("original_columns", original_cols))
+
+            weight_for_quant = linear_layer.weight.data
+            if pad_cols:
+                pad = weight_for_quant.new_zeros(weight_for_quant.shape[0], pad_cols)
+                weight_for_quant = torch.cat((weight_for_quant, pad), dim=1)
+
             wq, scales, zeros = self.pseudo_quantize_tensor(
-                linear_layer.weight.data
+                weight_for_quant
             )
+
+            if pad_cols:
+                wq = wq[:, :original_cols]
+                if self.qcfg.group_size > 0:
+                    valid_groups = max(1, math.ceil(original_cols / self.qcfg.group_size))
+                    scales = scales[:, :valid_groups]
+                    if zeros is not None:
+                        zeros = zeros[:, :valid_groups]
+                else:
+                    scales = scales[:, :original_cols]
+                    if zeros is not None:
+                        zeros = zeros[:, :original_cols]
             if self.calculate_w_wq_diff:
                 if named_module.weight.data.dtype == torch.float16:
                     # diff in float16
@@ -651,6 +676,9 @@ class AWQProcessor(LoopProcessor):
             named_module.state.update({
                 "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
             })
+
+            if isinstance(tp_info, dict):
+                named_module.state.pop("tp_pad_info", None)
 
             linear_layer.weight.data = wq
 
