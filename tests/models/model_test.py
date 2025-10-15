@@ -238,11 +238,21 @@ class ModelTest(unittest.TestCase):
 
         for backend in compare_backends:
             log.info(f"Loading post-quant model with backend `{backend.name}`")
-            model = self.loadQuantModel(
-                model_path,
-                trust_remote_code=trust_remote_code,
-                backend=backend,
-            )
+            # Pin post-quant loads to the first CUDA device to avoid auto sharding across GPUs.
+            use_cuda_map = torch.cuda.is_available() and backend != BACKEND.TORCH_FUSED
+            if use_cuda_map:
+                model = self.loadQuantModel(
+                    model_path,
+                    trust_remote_code=trust_remote_code,
+                    backend=backend,
+                    device_map={"": "cuda:0"},
+                )
+            else:
+                model = self.loadQuantModel(
+                    model_path,
+                    trust_remote_code=trust_remote_code,
+                    backend=backend,
+                )
             tokenizer = model.tokenizer or self.load_tokenizer(model_path, trust_remote_code=trust_remote_code)
             inference_records[backend] = self.run_generic_inference_checks(model, tokenizer, backend)
 
@@ -591,7 +601,16 @@ class ModelTest(unittest.TestCase):
 
                 q_model = reuse_candidates.pop(target_backend, None)
                 if q_model is None:
-                    q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
+                    # Ensure the post-quant reload stays on a single CUDA device when available.
+                    use_cuda_map = torch.cuda.is_available() and self.LOAD_BACKEND != BACKEND.TORCH_FUSED
+                    if use_cuda_map:
+                        q_model = self.loadQuantModel(
+                            path,
+                            trust_remote_code=trust_remote_code,
+                            device_map={"": "cuda:0"},
+                        )
+                    else:
+                        q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
                 else:
                     log.info(f"Reusing post-quant validation model for backend `{target_backend.name}`")
 
