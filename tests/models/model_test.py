@@ -40,7 +40,11 @@ from collections.abc import Iterable  # noqa: E402
 
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
-from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
+try:
+    from ovis.image_to_test_dataset import get_calib_dataset  # noqa: E402
+except BaseException:
+    pass
+
 from transformers import AutoProcessor, AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
