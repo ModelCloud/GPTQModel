@@ -448,13 +448,15 @@ class GPTQ:
             group_size=-1,
             actorder=False,
             static_groups=False,
-            act_group_aware=False,
+            act_group_aware: Optional[bool] = None,
     ):
         self.qcfg.group_size = group_size
         self.qcfg.damp_percent = percdamp
         self.qcfg.damp_auto_increment = damp_auto_increment
         self.qcfg.desc_act = actorder
-        self.qcfg.act_group_aware = act_group_aware
+        if act_group_aware is not None:
+            self.qcfg.act_group_aware = act_group_aware
+        self.qcfg._resolve_activation_ordering(actorder, act_group_aware)
         self.qcfg.static_groups = static_groups
         (Q, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples) = self.quantize(blocksize=blocksize)
         self.module.weight.data = Q

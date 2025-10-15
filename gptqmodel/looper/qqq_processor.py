@@ -69,9 +69,16 @@ class QQQProcessor(LoopProcessor):
             qcfg_clone.mse = self.qcfg.dynamic_get(module.full_name, "mse", qcfg_clone.mse)
 
             qcfg_clone.group_size = self.qcfg.dynamic_get(module.full_name, "group_size", qcfg_clone.group_size)
-            qcfg_clone.desc_act = self.qcfg.dynamic_get(module.full_name, "desc_act", qcfg_clone.desc_act)
+            desc_act_override = self.qcfg.dynamic_get(module.full_name, "desc_act", None)
+            if desc_act_override is not None:
+                qcfg_clone.desc_act = desc_act_override
+            act_group_aware_override = self.qcfg.dynamic_get(module.full_name, "act_group_aware", None)
+            if act_group_aware_override is not None:
+                qcfg_clone.act_group_aware = act_group_aware_override
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
+
+            qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
 
         tmp = QQQ(module=module, qcfg=qcfg_clone)
 
