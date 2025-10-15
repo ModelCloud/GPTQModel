@@ -11,7 +11,7 @@ from transformers import PreTrainedModel
 from ..models import BaseQModel
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from .log import setup_logger
+from .logger import setup_logger
 from .torch import torch_empty_cache
 
 
@@ -54,7 +54,7 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
     # Convert weights
     weights = {}
     n = 1
-    pb = log.pb(model.named_modules()).title("Format: Converting to mlx ->").manual()
+    pb = log.pb(list(model.named_modules())).title("Format: Converting to mlx ->").manual()
     for name, module in pb:
         pb.subtitle(f"{name}").draw()
         if isinstance(module, TorchQuantLinear):
