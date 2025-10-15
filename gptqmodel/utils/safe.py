@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import gc
 import threading
 from functools import wraps
 from types import ModuleType
@@ -99,9 +100,10 @@ class _ThreadSafeProxy:
 
 TORCH_LINALG = ThreadSafe(torch.linalg)
 THREADPOOLCTL = ThreadSafe(_threadpoolctl)
-
+GC = ThreadSafe(gc)
 __all__ = [
     "ThreadSafe",
     "TORCH_LINALG",
     "THREADPOOLCTL",
+    "GC",
 ]

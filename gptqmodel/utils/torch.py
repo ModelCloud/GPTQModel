@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
-import gc as py_gc
 import time
 from contextlib import contextmanager
 from enum import Enum
@@ -15,6 +14,7 @@ from packaging import version
 from torch.cpu import StreamContext
 
 from ..utils.logger import setup_logger
+from ..utils.safe import GC
 from . import gte_python_3_13_3, gte_python_3_14, has_gil_disabled, log_gil_requirements_for
 
 
@@ -46,22 +46,15 @@ STREAM = None # cache
 log = setup_logger()
 
 
-def _format_gc_call_suffix(args: tuple, kwargs: dict) -> str:
-    parts: list[str] = []
-    if args:
-        parts.extend(repr(arg) for arg in args)
-    if kwargs:
-        parts.extend(f"{key}={repr(val)}" for key, val in kwargs.items())
-    return f"({', '.join(parts)})" if parts else "()"
-
-
-def timed_gc_collect(*args, **kwargs) -> int:
+def timed_gc_collect() -> int:
     """Run ``gc.collect`` and log the elapsed time along with reclaimed object count."""
-    suffix = _format_gc_call_suffix(args, kwargs)
     start = time.perf_counter()
-    collected = py_gc.collect(*args, **kwargs)
+
+    # Python 3.14 removed gen1 so there is only gen0 and gen2
+    collected = GC.collect()
+
     duration = time.perf_counter() - start
-    log.info(f"gc.collect{suffix} reclaimed {collected} objects in {duration:.3f}s")
+    log.info(f"gc.collect() reclaimed {collected} objects in {duration:.3f}s")
     return collected
 
 # reset dynamo cache on each model load since during ci loop model inference may exhuast cache
