@@ -81,7 +81,7 @@ from lm_eval.utils import make_table
 with tempfile.TemporaryDirectory() as tmp_dir:
     results = GPTQModel.eval(
         QUANT_SAVE_PATH,
-        tasks=[EVAL.LM_EVAL.GSM8K_PLATINUM_COT], #, EVAL.LM_EVAL.GSM8K_PLATINUM_COT],
+        tasks=[EVAL.LM_EVAL.GSM8K_COT], #, EVAL.LM_EVAL.GSM8K_PLATINUM_COT],
         apply_chat_template=True,
         random_seed=898,
         output_path= tmp_dir,
