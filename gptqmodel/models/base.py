@@ -1034,7 +1034,6 @@ class BaseQModel(nn.Module):
                 calibration_concat_size=calibration_dataset_concat_size,
                 calibration_sort=calibration_dataset_sort,
                 batch_size=batch_size,
-                logger_board=logger_board,
             ),
             DequantizeProcessor(
                 quantized_modules=quantized_modules,

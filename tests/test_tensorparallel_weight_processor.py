@@ -5,8 +5,8 @@
 
 import torch
 
-from gptqmodel.looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
 
