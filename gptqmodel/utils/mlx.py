@@ -10,7 +10,7 @@ from transformers import PreTrainedModel
 
 from ..models import BaseQModel
 from ..nn_modules.qlinear.torch import TorchQuantLinear
-from ..quantization import FORMAT, QuantizeConfig
+from ..quantization import FORMAT
 from .logger import setup_logger
 from .torch import torch_empty_cache
 
@@ -113,7 +113,7 @@ def mlx_generate(model, tokenizer, **kwargs,):
         raise ValueError("MLX requires prompts to be provided")
 
     verbose = kwargs.pop("verbose", False)
-    formatter = kwargs.pop("formatter", None)
+    kwargs.pop("formatter", None)
 
     sampling_params = {}
     sampling_params["max_tokens"] = kwargs.pop("max_tokens", 256)
