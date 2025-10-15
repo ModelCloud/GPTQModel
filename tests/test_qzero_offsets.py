@@ -80,17 +80,18 @@ def test_qzero_offsets_scalar_patterns():
         convert_gptq_v1_to_v2_format_module(module=module, bits=bits, pack_dtype=pack_dtype)
         assert torch.equal(module.qzeros.data, expected)
 
-
 @torch.inference_mode()
 def test_qzero_offsets_triangular_patterns():
     cases = [
         (
             torch.int8,
-            torch.tensor([[0x24, 0x92, 0x49]], dtype=torch.int8),
+            # 0x92 == -110 in int8 (two's complement)
+            torch.tensor([[0x24, -0x6E, 0x49]], dtype=torch.int8),
         ),
         (
             torch.int32,
-            torch.tensor([[0x2492_4924, 0x9249_2492, 0x4924_9249]], dtype=torch.int32),
+            # 0x9249_2492 exceeds int32 max; use its 32-bit two's complement: -0x6DB6_DB6E
+            torch.tensor([[0x2492_4924, -0x6DB6_DB6E, 0x4924_9249]], dtype=torch.int32),
         ),
     ]
 
