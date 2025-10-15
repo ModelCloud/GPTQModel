@@ -53,11 +53,10 @@ class LoopProcessor:
             self,
             tokenizer, qcfg: QuantizeConfig,
             calibration,
-            prepare_dataset_func,
-            calibration_concat_size: Optional[int],
-            calibration_sort: Optional[str],
+            prepare_dataset_func: Optional[Callable] = None,
+            calibration_concat_size: Optional[int] = None,
+            calibration_sort: Optional[str] = None,
             batch_size: int = 1,
-            logger_board: str = "",
             require_fwd: bool = True,
             fwd_after_process: bool = True,
             fwd_all_modules_in_single_pass: bool = False,
@@ -95,7 +94,6 @@ class LoopProcessor:
         self.tasks = {}
 
         self.pb = None
-        self.logger_task = None
         self.fwd_time = None
         self.layer_count = None
 
@@ -107,7 +105,6 @@ class LoopProcessor:
 
         # logging
         self.log = []
-        self.logger_board = logger_board
         self.log_call_count = 0
         self._log_column_labels: List[str] = []
         self._log_columns = None
@@ -117,22 +114,6 @@ class LoopProcessor:
         self._device_smi_handles = self._init_device_smi_handles()
         self._cpu_device_smi = self._init_cpu_device_handle()
         self._device_metric_failures: Set[str] = set()
-
-        if self.logger_board == "clearml":
-            try:
-                from clearml import Task
-
-                from ..utils.plotly import create_plotly
-            except ImportError as _:
-                raise ImportError(
-                    "The logger_board is set to 'clearml', but required dependencies are missing. "
-                    "Please install them by running: pip install gptqmodel[logger]"
-                )
-            self.logger_task = Task.init(project_name='GPTQModel',
-                                         task_name=f'{self.__class__.__name__}-{RandomWords().get_random_word()}',
-                                         task_type=Task.TaskTypes.optimizer)
-        else:
-            self.logger_task = None
 
 
         # prepare dataset
@@ -145,6 +126,9 @@ class LoopProcessor:
             if len(calibration) < min_calibration_dataset_size:
                 log.warn(f"Calibration dataset size should be more than {min_calibration_dataset_size}. "
                                f"Current: {len(calibration)}.")
+
+            if prepare_dataset_func is None:
+                raise ValueError("prepare_dataset_func must be provided when calibration data is supplied.")
 
             calibration = prepare_dataset_func(calibration_dataset=calibration,
                                                calibration_dataset_concat_size=calibration_concat_size,
@@ -175,9 +159,11 @@ class LoopProcessor:
                 log.warn(f"The average length of input_ids of calibration_dataset should be greater than "
                                f"{min_calibration_dataset_input_ids_avg_length}: actual avg: {avg}.")
 
-        self.num_batches = len(calibration)
-
-        self.calibration_dataset = calibration
+            self.num_batches = len(calibration)
+            self.calibration_dataset = calibration
+        else:
+            self.num_batches = 0
+            self.calibration_dataset = []
 
         # Track the current calibration batch index on a per-thread basis so
         # processors can retrieve deterministic ordering information (e.g.
@@ -456,26 +442,13 @@ class LoopProcessor:
         return self._results
 
     def collect_memory_info(self, layer_index: int):
-        if self.logger_task is not None:
-            device_snapshot = self._snapshot_device_memory_gib()
-            total_gpu_memory = sum(device_snapshot.values()) if device_snapshot else 0.0
-
-            self.logger_task.get_logger().report_scalar(
-                title='GPU Memory',
-                series='GPU Memory',
-                value=total_gpu_memory,
-                iteration=layer_index,
-            )
-
-            cpu_memory = self._snapshot_cpu_memory_gib() or 0.0
-
-            self.logger_task.get_logger().report_scalar(
-                title='CPU Memory',
-                series='CPU Memory',
-                value=cpu_memory,
-                iteration=layer_index,
-            )
+        device_snapshot = self._snapshot_device_memory_gib()
+        if device_snapshot:
+            total_gpu_memory = sum(device_snapshot.values())
             self.gpu_memorys.append(total_gpu_memory)
+
+        cpu_memory = self._snapshot_cpu_memory_gib()
+        if cpu_memory is not None:
             self.cpu_memorys.append(cpu_memory)
 
     def log_plotly(self):

@@ -672,7 +672,6 @@ setup(
         "sglang": ["sglang[srt]>=0.4.6", "flashinfer-python>=0.2.1"],
         "bitblas": ["bitblas==0.0.1-dev13"],
         "hf": ["optimum>=1.21.2"],
-        "logger": ["clearml", "random_word", "plotly"],
         "eval": ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
         "triton": ["triton>=3.4.0"],
         "openai": ["uvicorn", "fastapi", "pydantic"],
