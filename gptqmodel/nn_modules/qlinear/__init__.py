@@ -554,6 +554,10 @@ class PackableQuantLinear(BaseQuantLinear):
         assert word_bits == 32, "Only 32-bit packing words supported."
         if (in_features % word_bits) != 0:
             raise ValueError("in_features must be divisible by 32")
+        if (out_features % word_bits) != 0:
+            raise ValueError(
+                "pack_block extension requires out_features to be divisible by 32"
+            )
 
         disable_ext = env_flag("GPTQMODEL_DISABLE_PACK_EXT")
         force_ext = env_flag("GPTQMODEL_FORCE_PACK_EXT")
