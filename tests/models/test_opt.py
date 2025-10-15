@@ -6,10 +6,11 @@
 from model_test import ModelTest
 
 
+# gpu:7, a100
 class TestOpt(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/opt-125m"  # "facebook/opt-125m"
-    NATIVE_ARC_CHALLENGE_ACC = 0.1894
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2278
+    NATIVE_ARC_CHALLENGE_ACC = 0.1920
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2253
     INPUTS_MAX_LENGTH = 2048 # opt embedding is max 2048
 
     def test_opt(self):
