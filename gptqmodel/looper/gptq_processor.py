@@ -32,31 +32,16 @@ lock = threading.Lock()
 class GPTQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration, prepare_dataset_func,
                  calibration_concat_size: Optional[int], calibration_sort: Optional[str], batch_size: int,
-                 logger_board: str = "", require_fwd: bool = True, calculate_w_wq_diff: bool = False):
+                 require_fwd: bool = True, calculate_w_wq_diff: bool = False):
 
         super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration=calibration,
                          calibration_concat_size=calibration_concat_size,
                          calibration_sort=calibration_sort,
                          prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
-                         logger_board=logger_board, require_fwd=require_fwd)
+                         require_fwd=require_fwd)
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
-
-
-    def log_plotly(self):
-        task = self.logger_task
-        if task is not None:
-            from ..utils.plotly import create_plotly
-            x = list(range(self.layer_count))
-            gpu_fig = create_plotly(x=x, y=self.gpu_memorys, xaxis_title="layer", yaxis_title="GPU usage (GB)")
-            cpu_fig = create_plotly(x=x, y=self.cpu_memorys, xaxis_title="layer", yaxis_title="CPU usage (GB)")
-            loss_fig = create_plotly(x=self.module_names, y=self.avg_losses, xaxis_title="layer", yaxis_title="loss")
-            time_fig = create_plotly(x=self.module_names, y=self.durations, xaxis_title="layer", yaxis_title="time")
-            task.get_logger().report_plotly('GPU Memory', 'GPU Memory', gpu_fig)
-            task.get_logger().report_plotly('CPU Memory', 'CPU Memory', cpu_fig)
-            task.get_logger().report_plotly('avg_loss', 'avg_loss', loss_fig)
-            task.get_logger().report_plotly('quant_time', 'quant_time', time_fig)
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
@@ -238,6 +223,7 @@ class GPTQProcessor(LoopProcessor):
         if self.calculate_w_wq_diff:
             # diff in float32
             w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+            # assert module.weight.data.dtype in (torch.float16, torch.bfloat16)
 
             with self.lock:
                 module.state.update({
@@ -248,9 +234,10 @@ class GPTQProcessor(LoopProcessor):
             self.tasks[module.name].free()
 
             # logger.info(f"Quantizing module END: {name}, {gptq[name].shape()}")
-            module.state.update({
-                "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
-            })
+            if self.calculate_w_wq_diff:
+                module.state.update({
+                    "wq": wq,  # fp16, quantized weight but not int4 (packed qweight)
+                })
 
         # single largest deallocation of vram happens here
         module.weight.data = wq
@@ -261,7 +248,11 @@ class GPTQProcessor(LoopProcessor):
         # module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
 
         # cleanup all memory or states vars persistently added by this processor
-        with self.lock:
+        with (self.lock):
+            # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
+            if self.calculate_w_wq_diff:
+                module.weight.data = module.state.pop("wq").to(CPU)
+
             module.state.pop("w", None) #
             module.state.pop("w_wq_diff", None)
 

@@ -51,7 +51,6 @@ def _run_quant_on_device(device_index: int) -> torch.device:
         calibration_concat_size=None,
         calibration_sort=None,
         batch_size=1,
-        logger_board="",
         require_fwd=False,
         calculate_w_wq_diff=False,
     )

@@ -105,10 +105,12 @@ def _device_ctx(dev: torch.device):
     do not require pinning here.
     """
     if dev.type == "cuda":
-        with torch.cuda.device(dev.index):
+        target = dev if dev.index is not None else "cuda"
+        with torch.cuda.device(target):
             yield
     elif dev.type == "xpu" and hasattr(torch, "xpu"):
-        with torch.xpu.device(dev.index):
+        target = dev if dev.index is not None else "xpu"
+        with torch.xpu.device(target):
             yield
     else:
         yield
@@ -120,9 +122,11 @@ def _activate_thread_device(dev: torch.device):
     CUDA/XPU require per-thread device activation for correct handle usage.
     """
     if dev.type == "cuda":
-        torch.cuda.set_device(dev.index)
+        target = dev if dev.index is not None else "cuda"
+        torch.cuda.set_device(target)
     elif dev.type == "xpu" and hasattr(torch, "xpu"):
-        torch.xpu.set_device(dev.index)
+        target = dev if dev.index is not None else "xpu"
+        torch.xpu.set_device(target)
     # mps/cpu: nothing to pin
 
 

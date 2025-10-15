@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 from pathlib import Path
@@ -34,6 +35,22 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
 
     if _PACK_BLOCK_EXTENSION_INITIALISED and _PACK_BLOCK_EXTENSION:
         return _PACK_BLOCK_EXTENSION
+
+    try:
+        spec = importlib.util.find_spec("gptqmodel_pack_block_cpu")
+    except (ModuleNotFoundError, AttributeError):
+        spec = None
+
+    if spec and spec.origin:
+        try:
+            torch.ops.load_library(spec.origin)
+            if hasattr(torch.ops.gptqmodel, "pack_block_cpu"):
+                log.debug("pack_block_cpu extension loaded from %s", spec.origin)
+                _PACK_BLOCK_EXTENSION = True
+                _PACK_BLOCK_EXTENSION_INITIALISED = True
+                return _PACK_BLOCK_EXTENSION
+        except Exception as exc:  # pragma: no cover - environment-specific
+            log.debug("pack_block_cpu prebuilt load failed: %s", exc)
 
     project_root = Path(__file__).resolve().parents[2]
     source_path = project_root / "pack_block_cpu.cpp"

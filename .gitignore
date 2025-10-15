@@ -181,3 +181,4 @@ example.py
 /gptqmodel_ext/marlin/kernel_fp16_ku4.cu
 /gptqmodel_ext/marlin/kernel_fp16_ku4b8.cu
 /gptqmodel_ext/marlin/kernel_fp16_ku8b128.cu
+/gptqmodel_offload/
