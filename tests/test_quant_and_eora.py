@@ -28,8 +28,8 @@ from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
 
-    NATIVE_ARC_CHALLENGE_ACC = 0.2901 # Eora: 0.3029
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3404 # Eora: 0.3302
+    NATIVE_ARC_CHALLENGE_ACC = 0.3183 # Eora: 0.3234 -> A100 GPU 6 MARLIN KERNEL
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3404 # Eora: 0.3609 -> A100 GPU 6 MARLIN KERNEL
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
 
     APPLY_CHAT_TEMPLATE = True

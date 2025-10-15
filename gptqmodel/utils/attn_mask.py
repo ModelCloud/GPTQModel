@@ -24,11 +24,23 @@ def normalize_seq_mask(mask: torch.Tensor | None, seq_len: int | None = None) ->
     m = mask
     # Convert numeric to bool 'keep' (HF tends to use >0 for keep; extended masks use big negatives for masked)
     if m.dtype != torch.bool:
-        m = (m > 0)
+        if torch.any(m < 0):
+            m = (m >= 0)
+        else:
+            m = (m > 0)
 
     # Squeeze broadcast dims to reach [B, S]
-    if m.dim() == 4 and m.size(1) == 1 and m.size(2) == 1:
-        m = m[:, 0, 0, :]  # [B, S]
+    if m.dim() == 4 and m.size(1) == 1:
+        if m.size(2) == 1:
+            # Common HF format: [B, 1, 1, S]
+            m = m[:, 0, 0, :]
+        elif m.size(2) == m.size(3):
+            # Causal mask expanded to [B, 1, S, S]; collapse query axis so any
+            # attended position is marked for retention.
+            m = m[:, 0].any(dim=1)
+        else:
+            # Fallback: collapse singleton dim, leave seq axis for later handling
+            m = m[:, 0, 0, :]
     elif m.dim() == 3 and m.size(1) == 1:
         m = m[:, 0, :]  # [B, S]
     elif m.dim() == 2:

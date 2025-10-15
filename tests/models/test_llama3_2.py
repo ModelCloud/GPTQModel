@@ -6,15 +6,15 @@
 from model_test import ModelTest
 
 
-# a100:7
-# desc_act = False, act_group_aware = False 0.2918/0.3422
-# desc_act = False, act_group_aware = True 0.3311/0.3549
-# desc_act = True, 0.3191/0.3567
+# a100:7, MARLIN kernel
+# desc_act = False, act_group_aware = False 0.3114/0.3413
+# desc_act = False, act_group_aware = True 0.3268/0.3558
+# desc_act = True, 0.3157/0.3498
 class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
-    NATIVE_ARC_CHALLENGE_ACC = 0.3311
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3549
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.05
+    NATIVE_ARC_CHALLENGE_ACC = 0.3268
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3558
+    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.04
     APPLY_CHAT_TEMPLATE = True
     V2 = False
     DEBUG = True
