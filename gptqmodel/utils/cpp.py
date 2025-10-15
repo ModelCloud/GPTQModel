@@ -23,11 +23,7 @@ _PACK_BLOCK_EXTENSION_INITIALISED = False
 
 
 def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
-    """Ensure the pack_block CPU extension is built and loaded.
-
-    Returns ``True`` when the extension is available, ``None`` otherwise.
-    The function is idempotent and caches its result to avoid repeated builds.
-    """
+    """Ensure the pack_block CPU extension is built and loaded."""
 
     global _PACK_BLOCK_EXTENSION, _PACK_BLOCK_EXTENSION_INITIALISED
 
@@ -36,7 +32,7 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
         _PACK_BLOCK_EXTENSION = True
         return _PACK_BLOCK_EXTENSION
 
-    if _PACK_BLOCK_EXTENSION_INITIALISED and _PACK_BLOCK_EXTENSION is not None:
+    if _PACK_BLOCK_EXTENSION_INITIALISED and _PACK_BLOCK_EXTENSION:
         return _PACK_BLOCK_EXTENSION
 
     project_root = Path(__file__).resolve().parents[2]
