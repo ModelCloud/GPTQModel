@@ -106,6 +106,8 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
         # self.in_features_padding_size = in_features - self.original_in_features
         # self.in_features_padding_shape = (0, self.in_features_padding_size)
 
+        kwargs.pop("register_buffers")
+
         super().__init__(
             bits=bits,
             group_size=group_size,
