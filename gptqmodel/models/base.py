@@ -735,29 +735,31 @@ class BaseQModel(nn.Module):
                 collate_data(sorted_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
                 for start in range(0, len(sorted_dataset), batch_size)
             ]
+
+            # total tokens counters
+            total_padded = 0
+            total_non_padded = 0
+
+            for batch in new_calibration_dataset_batched:
+                # attention_mask is shape [batch_size, seq_len]
+                mask = batch["attention_mask"]
+
+                # count where mask == 0 (padded tokens)
+                total_padded += (mask == 0).sum().item()
+
+                # count where mask == 1 (non-padded tokens)
+                total_non_padded += (mask == 1).sum().item()
+
+            log.info(f"Calibration: Total padded tokens: {total_padded}")
+            log.info(f"Calibration: Total non-padded tokens: {total_non_padded}")
+            log.info(f"Calibration: Total tokens: {total_non_padded + total_padded}")
         else:
             new_calibration_dataset_batched = [
-                {"input_ids": torch.tensor(block["input_ids"], dtype=torch.long)}
+                {
+                    "input_ids": torch.tensor(block["input_ids"], dtype=torch.long),
+                }
                 for block in sorted_dataset
             ]
-
-        # total tokens counters
-        total_padded = 0
-        total_non_padded = 0
-
-        for batch in new_calibration_dataset_batched:
-            # attention_mask is shape [batch_size, seq_len]
-            mask = batch["attention_mask"]
-
-            # count where mask == 0 (padded tokens)
-            total_padded += (mask == 0).sum().item()
-
-            # count where mask == 1 (non-padded tokens)
-            total_non_padded += (mask == 1).sum().item()
-
-        log.info(f"Calibration: Total padded tokens: {total_padded}")
-        log.info(f"Calibration: Total non-padded tokens: {total_non_padded}")
-        log.info(f"Calibration: Total tokens: {total_non_padded + total_padded}")
 
         return new_calibration_dataset_batched
 
