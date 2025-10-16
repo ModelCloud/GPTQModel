@@ -23,6 +23,7 @@ class TestQwen3Next(ModelTest):
     QUANT_BATCH_SIZE = 4
     CALIB_NOISE_MODE = "unseen"
     CALIB_NOISE_PERCENT = 0.025
+    USE_FLASH_ATTN = False
 
     def test_mimo(self):
         self.quant_lm_eval()
