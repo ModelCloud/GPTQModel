@@ -174,6 +174,7 @@ class GPTQ:
             self._default_hessian_device = torch.device(module_device)
 
         self._hessian_device: Optional[torch.device] = None
+        self._hessian_streams: Dict[Tuple[str, Optional[int]], torch.cuda.Stream] = {}
 
         self._validate_module(self.module)
 
@@ -262,7 +263,21 @@ class GPTQ:
 
             batch_token_size, xtx, device = self.process_batch(inp)
 
-            pending_index = batch_index if batch_index is not None else self._next_batch_index
+            expected_index = self._next_batch_index
+            pending_index = batch_index if batch_index is not None else expected_index
+
+            if (
+                xtx is not None
+                and hasattr(xtx, "device")
+                and xtx.device.type != "cpu"
+                and pending_index != expected_index
+            ):
+                xtx = xtx.to(device="cpu")
+                device = torch.device("cpu")
+
+            if xtx is not None and hasattr(xtx, "device") and xtx.device.type == "cpu":
+                device = torch.device("cpu")
+
             heapq.heappush(self._pending_updates, (pending_index, batch_token_size, xtx, device))
             self._flush_pending_updates_locked()
 
@@ -332,6 +347,17 @@ class GPTQ:
                         if device.type == "cuda":
                             torch.cuda.current_stream(device).synchronize()
 
+    def _get_hessian_stream(self, device: torch.device) -> Optional[torch.cuda.Stream]:
+        dev = torch.device(device)
+        if dev.type != "cuda" or not torch.cuda.is_available():
+            return None
+
+        key = _device_cache_key(dev)
+        stream = self._hessian_streams.get(key)
+        if stream is None:
+            stream = torch.cuda.Stream(device=dev.index)
+            self._hessian_streams[key] = stream
+        return stream
     def _compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]
         if rows == 0:
@@ -496,16 +522,36 @@ class GPTQ:
                 if target_device is None:
                     target_device = self.H.device
 
-                self.H = self.H.to(device=target_device)
-                if xtx.device != target_device:
-                    xtx = xtx.to(device=target_device)
+                torch_device = torch.device(target_device)
 
-                total = self.nsamples + batch_token_size
-                beta = self.nsamples / total
-                alpha = 2.0 / total
-                self.H.mul_(beta)
-                self.H.add_(xtx, alpha=alpha)
-                self.nsamples = total
+                stream = self._get_hessian_stream(torch_device)
+
+                if stream is not None:
+                    with torch.cuda.stream(stream):
+                        self.H = self.H.to(device=torch_device, non_blocking=True)
+                        if xtx.device != torch_device:
+                            xtx = xtx.to(device=torch_device, non_blocking=True)
+
+                        total = self.nsamples + batch_token_size
+                        beta = self.nsamples / total
+                        alpha = 2.0 / total
+                        self.H.mul_(beta)
+                        self.H.add_(xtx, alpha=alpha)
+                        self.nsamples = total
+
+                        self.H.record_stream(stream)
+                        xtx.record_stream(stream)
+                else:
+                    self.H = self.H.to(device=torch_device)
+                    if xtx.device != torch_device:
+                        xtx = xtx.to(device=torch_device)
+
+                    total = self.nsamples + batch_token_size
+                    beta = self.nsamples / total
+                    alpha = 2.0 / total
+                    self.H.mul_(beta)
+                    self.H.add_(xtx, alpha=alpha)
+                    self.nsamples = total
 
                 del xtx
 
