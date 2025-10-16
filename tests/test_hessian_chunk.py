@@ -103,21 +103,21 @@ def test_hessian_chunk_invocations_and_workspace_shape():
     assert small_gptq._chunk_invocations == expected_chunks
 
     device = torch.device(base.weight.device)
-    cols = base.in_features
-    fp32_key = gptq_impl._workspace_cache_key(device, torch.float32, cols)
+    cache_key = gptq_impl._workspace_cache_key(device)
 
-    assert fp32_key in gptq_impl._WORKSPACE_CACHE
-    large_workspace = gptq_impl._WORKSPACE_CACHE[fp32_key]
+    assert cache_key in gptq_impl._WORKSPACE_CACHE
+    large_workspace = gptq_impl._WORKSPACE_CACHE[cache_key]
     assert large_workspace.shape[0] >= calib.shape[0]
     assert large_workspace.shape[1] == large_gptq.columns
+    assert large_workspace.dtype == torch.float32
 
-    small_workspace = gptq_impl._WORKSPACE_CACHE[fp32_key]
+    small_workspace = gptq_impl._WORKSPACE_CACHE[cache_key]
     assert small_workspace is large_workspace
 
     staging_dtype = small_gptq._preferred_staging_dtype(calib.dtype, device)
     if staging_dtype == torch.bfloat16:
-        staging_key = gptq_impl._workspace_cache_key(device, staging_dtype, cols)
-        assert staging_key in gptq_impl._WORKSPACE_CACHE
+        staged_workspace = gptq_impl._WORKSPACE_CACHE[cache_key]
+        assert staged_workspace.dtype == torch.bfloat16
 
 
 def test_hessian_chunk_bytes_budget():
@@ -137,9 +137,8 @@ def test_hessian_chunk_bytes_budget():
     assert gptq._chunk_invocations == math.ceil(calib.shape[0] / 16)
 
     device = torch.device(module.weight.device)
-    cols = base.in_features
-    fp32_key = gptq_impl._workspace_cache_key(device, torch.float32, cols)
-    workspace = gptq_impl._WORKSPACE_CACHE[fp32_key]
+    cache_key = gptq_impl._workspace_cache_key(device)
+    workspace = gptq_impl._WORKSPACE_CACHE[cache_key]
     assert workspace.shape[0] == 16
     assert workspace.shape[1] == gptq.columns
 
@@ -180,17 +179,18 @@ def test_hessian_workspace_thread_safety_cuda():
         assert gptq._hessian_device == device
 
     cols = base.in_features
-    fp32_key = gptq_impl._workspace_cache_key(device, torch.float32, cols)
-    assert fp32_key in gptq_impl._WORKSPACE_CACHE
-    fp32_workspace = gptq_impl._WORKSPACE_CACHE[fp32_key]
+    cache_key = gptq_impl._workspace_cache_key(device)
+    assert cache_key in gptq_impl._WORKSPACE_CACHE
+    cached_workspace = gptq_impl._WORKSPACE_CACHE[cache_key]
     expected_rows = cfg.hessian_chunk_size or rows
-    assert fp32_workspace.shape[0] >= expected_rows
-    assert fp32_workspace.shape[1] == cols
+    assert cached_workspace.shape[0] >= expected_rows
+    assert cached_workspace.shape[1] == cols
 
     stage_dtype = gptq_workers[0]._preferred_staging_dtype(torch.float16, device)
     if stage_dtype == torch.bfloat16:
-        bf16_key = gptq_impl._workspace_cache_key(device, torch.bfloat16, cols)
-        assert bf16_key in gptq_impl._WORKSPACE_CACHE
+        assert cached_workspace.dtype == torch.bfloat16
+    else:
+        assert cached_workspace.dtype == torch.float32
 
 
 def _benchmark_case(

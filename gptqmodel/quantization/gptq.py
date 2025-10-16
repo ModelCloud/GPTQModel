@@ -32,11 +32,13 @@ log = setup_logger()
 
 lock = threading.Lock()
 
-# Shared workspaces are cached globally per (device, dtype, columns) so that
-# concurrent GPTQ instances reuse temporary buffers instead of repeatedly
-# allocating large tensors during Hessian accumulation.
-_WORKSPACE_CACHE: Dict[Tuple[str, Optional[int], torch.dtype, int], torch.Tensor] = {}
-_WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int], torch.dtype, int], threading.Lock] = {}
+# Shared workspaces are cached globally per device so that concurrent GPTQ
+# instances reuse temporary buffers instead of repeatedly allocating large
+# tensors during Hessian accumulation. Each device retains at most a single
+# workspace; when size or dtype requirements change, the prior buffer is
+# discarded to avoid unbounded cache growth.
+_WORKSPACE_CACHE: Dict[Tuple[str, Optional[int]], torch.Tensor] = {}
+_WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int]], threading.Lock] = {}
 _BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
 
 
@@ -45,15 +47,21 @@ def _device_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
     return dev.type, dev.index
 
 
-def _workspace_cache_key(device: torch.device, dtype: torch.dtype, cols: int) -> Tuple[str, Optional[int], torch.dtype, int]:
-    dev = torch.device(device)
-    return dev.type, dev.index, dtype, cols
+def _workspace_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
+    return _device_cache_key(device)
 
 
-def _needs_workspace_resize(workspace: Optional[torch.Tensor], required_rows: int, cols: int) -> bool:
+def _needs_workspace_resize(
+    workspace: Optional[torch.Tensor],
+    dtype: torch.dtype,
+    required_rows: int,
+    cols: int,
+) -> bool:
     if workspace is None:
         return True
     if workspace.ndim != 2:
+        return True
+    if workspace.dtype != dtype:
         return True
     if workspace.shape[1] != cols:
         return True
@@ -64,11 +72,11 @@ def _needs_workspace_resize(workspace: Optional[torch.Tensor], required_rows: in
 
 @contextlib.contextmanager
 def _lease_workspace(device: torch.device, dtype: torch.dtype, cols: int, required_rows: int):
-    key = _workspace_cache_key(device, dtype, cols)
+    key = _workspace_cache_key(device)
     lock = _WORKSPACE_LOCKS.setdefault(key, threading.Lock())
     with lock:
         workspace = _WORKSPACE_CACHE.pop(key, None)
-        if _needs_workspace_resize(workspace, required_rows, cols):
+        if _needs_workspace_resize(workspace, dtype, required_rows, cols):
             rows = max(required_rows, 1)
             workspace = torch.empty((rows, cols), dtype=dtype, device=device)
     try:
