@@ -6,7 +6,6 @@
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
 import contextlib
-import heapq
 import math
 import os
 import sys
@@ -169,11 +168,9 @@ class GPTQ:
         setattr(self.module, "target_device", module_device)
 
         if module_device.type == "meta":
-            self._default_hessian_device = torch.device("cpu")
+            self._final_hessian_device_hint = torch.device("cpu")
         else:
-            self._default_hessian_device = torch.device(module_device)
-
-        self._hessian_device: Optional[torch.device] = None
+            self._final_hessian_device_hint = torch.device(module_device)
 
         self._validate_module(self.module)
 
@@ -191,13 +188,13 @@ class GPTQ:
 
         self.fail_safe = False
 
-        self.H = torch.zeros((self.columns, self.columns),
-                                 dtype=torch.float32)
+        self.H: Optional[torch.Tensor] = None
 
-        # Track per-batch Hessian contributions so they can be applied in a
-        # deterministic order even when forwards execute in parallel.
-        self._pending_updates: List[Tuple[int, int, Optional[torch.Tensor], Optional[torch.device]]] = []
-        self._next_batch_index: int = 0
+        # Store per-device Hessian contributions so multi-GPU calibration can
+        # keep local accumulators and merge only once when quantization begins.
+        self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
+        self._device_sample_counts: Dict[torch.device, int] = {}
+        self._hessian_dirty: bool = False
 
     @staticmethod
     def _validate_module(module):
@@ -257,14 +254,25 @@ class GPTQ:
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
+        batch_token_size, xtx, device = self.process_batch(inp)
+        if batch_token_size == 0 or xtx is None:
+            return
+
+        dev = torch.device(device)
+
         with self.lock:
             self.fwd_counter += 1
 
-            batch_token_size, xtx, device = self.process_batch(inp)
+            existing = self._device_hessian_partials.get(dev)
+            if existing is None:
+                self._device_hessian_partials[dev] = xtx
+            else:
+                existing.add_(xtx)
+                del xtx
 
-            pending_index = batch_index if batch_index is not None else self._next_batch_index
-            heapq.heappush(self._pending_updates, (pending_index, batch_token_size, xtx, device))
-            self._flush_pending_updates_locked()
+            self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
+            self.nsamples += batch_token_size
+            self._hessian_dirty = True
 
     def _preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
         device = torch.device(device)
@@ -355,39 +363,6 @@ class GPTQ:
 
         return xtx_accum
 
-    def _resolve_hessian_device(self, batch_device: torch.device) -> torch.device:
-        """Select a stable device for Hessian accumulation.
-
-        The first non-meta device we observe (module target, default hint, or
-        batch input) becomes the canonical Hessian device for the lifetime of
-        this GPTQ instance. Subsequent batches keep using the same target to
-        avoid bouncing tensors across GPUs when calibration runs on multiple
-        devices concurrently.
-        """
-
-        if self._hessian_device is not None:
-            return self._hessian_device
-
-        module_target = getattr(self.module, "target_device", None)
-        canonical = None
-
-        if module_target is not None:
-            canonical = torch.device(module_target)
-            if canonical.type == "meta":
-                canonical = None
-
-        if canonical is None and hasattr(self, "_default_hessian_device"):
-            canonical = self._default_hessian_device
-
-        if canonical is None or canonical.type == "meta":
-            canonical = batch_device
-
-        if canonical.type == "meta":
-            canonical = torch.device("cpu")
-
-        self._hessian_device = canonical
-        return canonical
-
     def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
         # print(f"inp = {inp}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
@@ -436,7 +411,7 @@ class GPTQ:
         if self._tp_pad_cols:
             pad = reshaped_inp.new_zeros((reshaped_inp.shape[0], self._tp_pad_cols))
             reshaped_inp = torch.cat((reshaped_inp, pad), dim=1)
-        canonical_device = self._resolve_hessian_device(inp_device)
+        canonical_device = torch.device(inp_device)
 
         batch_token_size = reshaped_inp.shape[0]
 
@@ -460,7 +435,6 @@ class GPTQ:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 canonical_device = torch.device("cpu")
-                self._hessian_device = canonical_device
                 xtx = self._compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
                 xtx = xtx.detach()
                 del reshaped_inp_cpu
@@ -473,45 +447,63 @@ class GPTQ:
 
         return batch_token_size, xtx, canonical_device
 
-    def _flush_pending_updates_locked(self, *, allow_gaps: bool = False) -> None:
-        expected = self._next_batch_index
+    def _select_hessian_target_device(self, requested: Optional[torch.device]) -> torch.device:
+        if requested is not None:
+            return torch.device(requested)
 
-        while self._pending_updates:
-            index, batch_token_size, xtx, device = self._pending_updates[0]
+        hint = getattr(self, "_final_hessian_device_hint", None)
+        if hint is not None:
+            return torch.device(hint)
 
-            if index < expected:
-                heapq.heappop(self._pending_updates)
-                continue
+        if self._device_hessian_partials:
+            partial_device = next(iter(self._device_hessian_partials.keys()))
+            return torch.device(partial_device)
 
-            if not allow_gaps and index != expected:
-                break
+        return torch.device("cpu")
 
-            heapq.heappop(self._pending_updates)
+    def _materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
+        device = self._select_hessian_target_device(target_device)
 
-            if allow_gaps and index > expected:
-                expected = index
+        with self.lock:
+            if not self._hessian_dirty and self.H is not None:
+                if self.H.device != device:
+                    self.H = self.H.to(device=device)
+                return
 
-            if batch_token_size > 0 and xtx is not None:
-                target_device = device if device is not None else self.H.device
-                if target_device is None:
-                    target_device = self.H.device
+            total_samples = sum(self._device_sample_counts.values())
+            result = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=device)
 
-                self.H = self.H.to(device=target_device)
-                if xtx.device != target_device:
-                    xtx = xtx.to(device=target_device)
+            if total_samples == 0:
+                self.H = result
+                self.nsamples = 0
+                self._hessian_dirty = False
+                self._final_hessian_device_hint = device
+                self._device_hessian_partials.clear()
+                self._device_sample_counts.clear()
+                return
 
-                total = self.nsamples + batch_token_size
-                beta = self.nsamples / total
-                alpha = 2.0 / total
-                self.H.mul_(beta)
-                self.H.add_(xtx, alpha=alpha)
-                self.nsamples = total
+            for partial_device, partial in self._device_hessian_partials.items():
+                if partial.device != result.device:
+                    tmp = partial.to(result.device)
+                    result.add_(tmp)
+                    del tmp
+                else:
+                    result.add_(partial)
 
-                del xtx
+            result.mul_(2.0 / float(total_samples))
 
-            expected = index + 1
+            self.H = result
+            self.nsamples = total_samples
+            self._hessian_dirty = False
+            self._final_hessian_device_hint = result.device
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
 
-        self._next_batch_index = expected
+    def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
+        self._materialize_global_hessian(target_device=target_device)
+        if self.H is None:
+            self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self._select_hessian_target_device(target_device))
+        return self.H
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
@@ -590,12 +582,8 @@ class GPTQ:
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
 
-        with self.lock:
-            self._flush_pending_updates_locked(allow_gaps=True)
-            if self._pending_updates:
-                raise RuntimeError(
-                    f"Pending Hessian updates remain for module '{self.name}' before quantization."
-                )
+        target_device = getattr(self.module, "target_device", None)
+        self.finalize_hessian(target_device=target_device)
 
         # Temporarily disable torch.compile due to compatibility issues with torch 2.8
         # Will re-enable once the issue is fixed
