@@ -44,7 +44,7 @@ class TestMultiGPUInference(unittest.TestCase):
         )
 
         outputs = model.generate(
-            input_ids=input_tensor.to(model.device),
+            inputs=input_tensor.to(model.device),
             max_length=512
         )
 
