@@ -221,7 +221,7 @@ class BaseQModel(nn.Module):
 
         quant_method = quantize_config.quant_method
         # override module_tree if need
-        if self.module_tree_overrides.get(quant_method) is not None:
+        if self.module_tree_overrides is not None and self.module_tree_overrides.get(quant_method) is not None:
             log.info(f'Module Tree: overridden by METHOD.{quant_method.upper()}')
             # setting cls.module_tree
             type(self).module_tree = apply_module_tree_override(self.module_tree, self.module_tree_overrides[quant_method])
