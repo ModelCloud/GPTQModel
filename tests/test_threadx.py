@@ -133,16 +133,21 @@ def test_p2p_copy_between_devices(pool, devices_two):
     torch.testing.assert_close(b.to(d0), a, atol=1e-3, rtol=1e-3)
 
 
-def test_stream_context_is_honored(pool, devices_two):
+def test_cuda_event_wait_is_honored(pool, devices_two):
     d0 = devices_two[0]
+    flag = torch.zeros(1, device=d0, dtype=torch.int32)
     stream = torch.cuda.Stream(device=d0)
-    expected_ptr = stream.cuda_stream
+    event = torch.cuda.Event(enable_timing=False, blocking=False)
 
-    def check_stream(expected):
-        cur = torch.cuda.current_stream()
-        return int(cur.cuda_stream == expected)
+    with torch.cuda.stream(stream):
+        _sleep_kernel_ms(10)
+        flag.fill_(1)
+        event.record()
 
-    ok = pool.do(d0, check_stream, expected_ptr, cuda_stream=stream)
+    def read_flag(tensor):
+        return int(tensor.item())
+
+    ok = pool.do(d0, read_flag, flag, cuda_event=event)
     assert ok == 1
 
 

@@ -13,7 +13,7 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
-from ...models._const import DEVICE, PLATFORM
+from ...models._const import DEVICE, HAS_CUDA, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -99,7 +99,6 @@ class TorchQuantLinear(PackableQuantLinear):
         self._cached_weights = {}
         self._lookahead_enabled = bool(int(os.environ.get("GPTQ_TORCH_LOOKAHEAD", "0")))
         self._lookahead_next = None
-        self._prefetch_stream = None
         self._prefetched_weights = {}
         self._prefetch_events = {}
 
@@ -311,8 +310,8 @@ class TorchQuantLinear(PackableQuantLinear):
         if tensor is None:
             return None
         event = self._prefetch_events.pop(dtype, None)
-        if event is not None and torch.cuda.is_available():
-            torch.cuda.current_stream(device=tensor.device).wait_event(event)
+        if event is not None and HAS_CUDA:
+            event.synchronize()
         return tensor
 
     def _stream_dequantize_tile(
@@ -366,7 +365,7 @@ class TorchQuantLinear(PackableQuantLinear):
             return False
         if x.device.type != "cuda":
             return False
-        if not torch.cuda.is_available():
+        if not HAS_CUDA:
             return False
         # Torch kernels with num_itr > 1 already tiled differently.
         if self.g_idx.shape[0] // x.shape[-1] != 1:
@@ -425,7 +424,6 @@ class TorchQuantLinear(PackableQuantLinear):
                 event.destroy()
         self._prefetch_events.clear()
         self._prefetched_weights.clear()
-        self._prefetch_stream = None
 
     def _maybe_schedule_lookahead(self, dtype: torch.dtype):
         if not self._lookahead_enabled or self.training:
@@ -449,9 +447,7 @@ class TorchQuantLinear(PackableQuantLinear):
         device = self.list_buffers()[0].device
         if device.type != "cuda":
             return
-        if self._prefetch_stream is None:
-            self._prefetch_stream = torch.cuda.Stream(device=device)
-        stream = self._prefetch_stream
+        stream = torch.cuda.Stream(device=device)
         with torch.cuda.stream(stream):
             num_itr = max(1, self.g_idx.shape[0] // self.in_features)
             weights = self.dequantize_weight(num_itr=num_itr).to(dtype)

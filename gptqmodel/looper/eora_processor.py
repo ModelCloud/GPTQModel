@@ -255,7 +255,7 @@ class EoraProcessor(LoopProcessor):
             wq_trim = wq
 
         module.state.update({
-            "wq": move_to(wq_trim, device=CPU, stream=self.stream),
+            "wq": move_to(wq_trim, device=CPU),
         })
 
         assert computed_wq.dtype in (torch.float16, torch.bfloat16)
@@ -267,7 +267,7 @@ class EoraProcessor(LoopProcessor):
 
         # for assert weight
         # module.state.update({
-        #     "wq_ab": move_to(computed_wq.to(dtype=module.weight.data.dtype), device=CPU, stream=self.stream),
+        #     "wq_ab": move_to(computed_wq.to(dtype=module.weight.data.dtype), device=CPU),
         # })
 
         # lowrank_dict[f'{layer_name}.lora_A.weight'] = A.cpu().to(dtype=torch.float16)
@@ -313,8 +313,8 @@ class EoraProcessor(LoopProcessor):
 
         eora = Lora(
                 rank=module.adapter_cfg.rank,
-                lora_A=move_to(A.to(dtype=module.module_dtype), device=CPU, stream=self.stream),
-                lora_B=move_to(B.to(dtype=module.module_dtype), device=CPU, stream=self.stream),
+                lora_A=move_to(A.to(dtype=module.module_dtype), device=CPU),
+                lora_B=move_to(B.to(dtype=module.module_dtype), device=CPU),
             )
 
         module.state.update({
@@ -328,10 +328,6 @@ class EoraProcessor(LoopProcessor):
         self.result_save(module.full_name, module.state.pop("adapter"))
 
     def finalize(self, model: BaseQModel, **kwargs):
-        # block for streams
-        if self.stream:
-            torch_sync()
-
         del self._segment_accumulators
         del self._module_target_devices
 

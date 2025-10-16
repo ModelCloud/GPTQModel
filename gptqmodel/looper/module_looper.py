@@ -328,13 +328,13 @@ class ModuleLooper():
 
         module_attr = getattr(task, "module", None)
         if isinstance(module_attr, torch.nn.Module):
-            move_to(module_attr, device=target_device, stream=False)
+            move_to(module_attr, device=target_device)
             rehome_module_to_device(module_attr, target_device, move_parameters=True, move_buffers=True)
             setattr(module_attr, "target_device", target_device)
 
         layer_attr = getattr(task, "layer", None)
         if isinstance(layer_attr, torch.nn.Module):
-            move_to(layer_attr, device=target_device, stream=False)
+            move_to(layer_attr, device=target_device)
             rehome_module_to_device(layer_attr, target_device, move_parameters=True, move_buffers=True)
             setattr(layer_attr, "target_device", target_device)
 
@@ -362,7 +362,7 @@ class ModuleLooper():
     ) -> torch.device:
         target_device = self._assign_quant_device_for_module(named_module, fallback_device=fallback_device)
 
-        move_to(named_module.module, device=target_device, stream=False)
+        move_to(named_module.module, device=target_device)
         rehome_module_to_device(named_module.module, target_device, move_parameters=True, move_buffers=True)
 
         setattr(named_module, "target_device", target_device)
@@ -485,10 +485,10 @@ class ModuleLooper():
         for batch_idx in range(total_batches):
             processor._set_current_batch_index(batch_idx)
             try:
-                layer_input = [move_to(inp, device=cur_layer_device, stream=False) for inp in layer_inputs[batch_idx]]
+                layer_input = [move_to(inp, device=cur_layer_device) for inp in layer_inputs[batch_idx]]
 
                 raw_mask = attention_masks[batch_idx]
-                attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device, stream=False)
+                attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device)
 
                 keep_mask = None
                 if attn_tensor is not None:
@@ -503,13 +503,13 @@ class ModuleLooper():
                 if position_ids:
                     pos = position_ids[batch_idx]
                     if pos is not None:
-                        additional_inputs["position_ids"] = move_to(pos, device=cur_layer_device, stream=False)
+                        additional_inputs["position_ids"] = move_to(pos, device=cur_layer_device)
 
                 for key, value in layer_input_kwargs[batch_idx].items():
-                    additional_inputs[key] = nested_move_to(value, device=cur_layer_device, stream=False)
+                    additional_inputs[key] = nested_move_to(value, device=cur_layer_device)
 
                 if reuse_kv and prev_kv is not None:
-                    additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=cur_layer_device, stream=False)
+                    additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=cur_layer_device)
 
                 rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
@@ -535,7 +535,7 @@ class ModuleLooper():
 
                 if need_outputs and module_output is not None:
                     primary = module_output[0] if isinstance(module_output, tuple) else module_output
-                    primary = move_to(primary, device=cur_layer_device, stream=False)
+                    primary = move_to(primary, device=cur_layer_device)
                     outputs.append([primary])
 
                 rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
@@ -664,7 +664,7 @@ class ModuleLooper():
                 if need_outputs and module_output is not None:
                     results[batch_idx] = module_output
                 if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
-                    shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device, stream=False)
+                    shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)
 
                 rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
                 if rows_for_batch <= 0:
@@ -696,7 +696,7 @@ class ModuleLooper():
                 primary = module_output[0]
             else:
                 primary = module_output
-            primary = move_to(primary, device=cur_layer_device, stream=False)
+            primary = move_to(primary, device=cur_layer_device)
             ordered_outputs.append([primary])
 
         return ordered_outputs

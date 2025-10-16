@@ -245,7 +245,7 @@ class GPTQProcessor(LoopProcessor):
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         # generate complete, safe to move to cpu
-        # module.weight.data = move_to(module.state.pop("wq"), device=CPU, stream=self.stream) # large weights is slow to init on cpu
+        # module.weight.data = move_to(module.state.pop("wq"), device=CPU) # large weights is slow to init on cpu
 
         # cleanup all memory or states vars persistently added by this processor
         with (self.lock):
@@ -335,10 +335,6 @@ class GPTQProcessor(LoopProcessor):
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
-        # block for streams
-        if self.stream:
-            torch_sync()
-
         # print("finalize")
         # print_module_tree(model.model)
 

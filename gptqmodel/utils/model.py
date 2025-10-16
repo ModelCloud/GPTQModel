@@ -57,7 +57,7 @@ from .ctx import ctx
 from .device import get_device
 from .importer import select_quant_linear
 from .logger import log_time_block, setup_logger
-from .torch import HAS_CUDA, torch_empty_cache, torch_new_stream_ctx
+from .torch import HAS_CUDA, torch_empty_cache
 
 
 log = setup_logger()
@@ -167,41 +167,18 @@ def recurse_setattr(module, name, value):
         recurse_setattr(getattr(module, name), rest, value)
 
 
-def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None, stream: bool = False):
-    if get_device(obj) != device:
-        if stream:
-            # we cannot support changing dtype and stream at the same time
-            assert dtype is None, f"streaming does not support changing dtype: actual = `{dtype}"
-            if not isinstance(obj, torch.Tensor):
-                raise NotImplementedError(
-                    f"Streaming `move_to` is not supported for non-Tensors: actual = `{obj.__class__.__name__}`")
-
-            if device == CPU:
-                # print(f" streaming from non-CPU to CPU...nonblocking")
-                obj_copy = torch.zeros_like(obj, device=CPU, pin_memory=True)
-                streamCtx = torch_new_stream_ctx()
-                if streamCtx:
-                    # use streaming context with pinned cpu memory
-                    with streamCtx:
-                        obj_copy.copy_(obj, non_blocking=True)
-                    return obj_copy
-                else:
-                    # does not support streaming context
-                    obj = obj.to(device=device, non_blocking=True)
-            else:
-                # cpu to non-cpu or non-cpu to non-cpu  uses normal .to() api
-                obj = obj.to(device=device, non_blocking=True)
-        else:
-            obj = obj.to(device=device, dtype=dtype, non_blocking=False)
+def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None):
+    if get_device(obj) != device or dtype is not None:
+        obj = obj.to(device=device, dtype=dtype, non_blocking=False)
 
     return obj
 
 
-def nested_move_to(v, device, dtype: torch.dtype = None, stream: bool = False):
+def nested_move_to(v, device, dtype: torch.dtype = None):
     if isinstance(v, torch.Tensor):
-        return move_to(v, device=device, dtype=dtype, stream=stream)
+        return move_to(v, device=device, dtype=dtype)
     elif isinstance(v, (list, tuple)):
-        return type(v)([nested_move_to(e, device=device, dtype=dtype, stream=stream) for e in v])
+        return type(v)([nested_move_to(e, device=device, dtype=dtype) for e in v])
     else:
         return v
 
