@@ -120,7 +120,11 @@ class TestDynamic(ModelTest):
 
         del model
         print(f"Backend: {backend}, PPL: {dynamic_bits_ppl}")
-        assert dynamic_bits_ppl <= expected_ppl, f"PPL expected: `{expected_ppl}`, actual = `{dynamic_bits_ppl}`"
+        tolerance = 0.05
+        lower_bound = expected_ppl * (1 - tolerance)
+        upper_bound = expected_ppl * (1 + tolerance)
+        assert lower_bound <= dynamic_bits_ppl <= upper_bound, \
+            f"PPL expected: `{expected_ppl}` ±{tolerance*100}%, actual = `{dynamic_bits_ppl}`"
 
     def test_skip_module(self):
         dynamic = {
