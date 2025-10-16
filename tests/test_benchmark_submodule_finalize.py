@@ -1,5 +1,6 @@
 import os
 
+
 # force pytest runs to target GPU 7 (becomes cuda:0 after masking)
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "7")
 
@@ -11,9 +12,9 @@ from unittest import mock
 import pytest
 import torch
 
+from gptqmodel.looper import gptq_processor as gptq_processor_module
 from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.looper import gptq_processor as gptq_processor_module
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.threadx import DeviceThreadPool
@@ -265,7 +266,7 @@ def test_submodule_finalize_timing():
     for label, duration in events:
         print(f"  {label:<32} {duration * 1000:.3f}")
 
-    print(f"\nSummary:")
+    print("\nSummary:")
     print(f"  total_elapsed_ms              = {total_elapsed * 1000:.3f}")
     print(f"  create_quant_module_ms        = {create_time * 1000:.3f}")
     print(f"  pack_module_ms                = {pack_time * 1000:.3f}")

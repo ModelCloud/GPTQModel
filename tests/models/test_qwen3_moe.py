@@ -6,7 +6,6 @@
 from model_test import ModelTest
 
 
-
 class TestQwen3Moe(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.04

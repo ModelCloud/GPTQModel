@@ -4,7 +4,6 @@
 import time
 from typing import Dict, List
 
-import pytest
 import torch
 
 from gptqmodel.utils.safe import THREADPOOLCTL

@@ -9,9 +9,9 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel.quantization import gptq as gptq_mod
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.quantization import gptq as gptq_mod
 
 
 pytestmark = pytest.mark.skipif(
