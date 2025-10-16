@@ -441,11 +441,20 @@ class GPTQ:
 
         return batch_token_size, xtx, canonical_device
 
-    def _flush_pending_updates_locked(self) -> None:
-        while True:
+    def _flush_pending_updates_locked(self, *, allow_gaps: bool = False) -> None:
+        while self._pending_updates:
             update = self._pending_updates.pop(self._next_batch_index, None)
             if update is None:
-                break
+                if not allow_gaps:
+                    break
+
+                next_index = min(self._pending_updates.keys())
+                if next_index != self._next_batch_index:
+                    self._next_batch_index = next_index
+
+                update = self._pending_updates.pop(self._next_batch_index, None)
+                if update is None:
+                    break
 
             batch_token_size, xtx, device = update
 
@@ -547,7 +556,7 @@ class GPTQ:
         start = time.time()
 
         with self.lock:
-            self._flush_pending_updates_locked()
+            self._flush_pending_updates_locked(allow_gaps=True)
             if self._pending_updates:
                 raise RuntimeError(
                     f"Pending Hessian updates remain for module '{self.name}' before quantization."
