@@ -471,7 +471,23 @@ class GPTQ:
                 return
 
             total_samples = sum(self._device_sample_counts.values())
-            result = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=device)
+
+            reuse_buffer = (
+                self.H is not None
+                and self.H.shape == (self.columns, self.columns)
+                and self.H.dtype == torch.float32
+                and self.H.device == device
+            )
+
+            if reuse_buffer:
+                result = self.H
+                result.zero_()
+            else:
+                result = torch.zeros(
+                    (self.columns, self.columns),
+                    dtype=torch.float32,
+                    device=device,
+                )
 
             if total_samples == 0:
                 self.H = result
