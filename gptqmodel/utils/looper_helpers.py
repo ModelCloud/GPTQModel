@@ -52,7 +52,10 @@ def torch_replicate(
     with DEVICE_THREAD_POOL.lock(lock_scope):
         for dev in normalized_devices:
             if dev.type in {"cuda", "xpu", "mps", "npu"}:
-                torch_sync(dev)
+                try:
+                    torch_sync(dev)
+                except BaseException:
+                    pass
         return _THREAD_SAFE_PARALLEL.replicate(module, normalized_devices, detach=detach)
 
 log = setup_logger()

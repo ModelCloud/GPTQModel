@@ -4,8 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import heapq
 import time
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch.nn import Module
@@ -39,7 +40,7 @@ class EoraProcessor(LoopProcessor):
 
         # dict: key is module name, value is the accumulated eigen_scaling_diag_matrix
         self.eigen_scaling_diag_matrix: Dict[str, torch.Tensor] = {}
-        self._pending_contributions: Dict[str, Dict[int, Tuple[int, torch.Tensor, float]]] = {}
+        self._pending_contributions: Dict[str, List[Tuple[int, int, torch.Tensor, float]]] = {}
         self._next_batch_index: Dict[str, int] = {}
 
         # Increase the dynamo cache size limit, default of 8 is too low
@@ -78,7 +79,7 @@ class EoraProcessor(LoopProcessor):
         module.adapter_cfg = adapter_cfg
 
         self.eigen_scaling_diag_matrix[module.name] = None
-        self._pending_contributions[module.name] = {}
+        self._pending_contributions[module.name] = []
         self._next_batch_index[module.name] = 0
 
         return
@@ -120,26 +121,31 @@ class EoraProcessor(LoopProcessor):
             return
 
         with self.lock:
-            if name not in self._pending_contributions:
-                self._pending_contributions[name] = {}
-                self._next_batch_index.setdefault(name, 0)
+            queue = self._pending_contributions.setdefault(name, [])
+            self._next_batch_index.setdefault(name, 0)
 
             pending_index = batch_index if batch_index is not None else self._next_batch_index[name]
-            self._pending_contributions[name][pending_index] = (batch, contribution, scale)
+            heapq.heappush(queue, (pending_index, batch, contribution, scale))
             self._flush_eora_pending_locked(name)
 
     def _flush_eora_pending_locked(self, name: str) -> None:
-        pending = self._pending_contributions.get(name)
-        if pending is None:
+        queue = self._pending_contributions.get(name)
+        if not queue:
             return
 
-        while True:
-            next_index = self._next_batch_index.get(name, 0)
-            update = pending.pop(next_index, None)
-            if update is None:
+        expected = self._next_batch_index.get(name, 0)
+
+        while queue:
+            index, _batch, contribution, scale = queue[0]
+
+            if index < expected:
+                heapq.heappop(queue)
+                continue
+
+            if index != expected:
                 break
 
-            _batch, contribution, scale = update
+            heapq.heappop(queue)
 
             current = self.eigen_scaling_diag_matrix.get(name)
 
@@ -154,7 +160,9 @@ class EoraProcessor(LoopProcessor):
             else:
                 self.eigen_scaling_diag_matrix[name] = contribution
 
-            self._next_batch_index[name] = next_index + 1
+            expected = index + 1
+
+        self._next_batch_index[name] = expected
 
     def process(self, module: NamedModule):
         assert isinstance(module.adapter_cfg, Lora)
