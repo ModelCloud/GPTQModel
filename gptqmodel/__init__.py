@@ -22,7 +22,7 @@ DEVICE_THREAD_POOL = DeviceThreadPool(
         "cpu": 8,
         "model_loader:cpu": 2,
     },
-    empty_cache_every_n=1024,
+    empty_cache_every_n=256,
 )
 
 from .models import GPTQModel, get_best_device
