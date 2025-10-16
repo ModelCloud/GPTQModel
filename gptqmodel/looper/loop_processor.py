@@ -487,11 +487,6 @@ class LoopProcessor:
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         pass
 
-    # only called when more than 1 gpu devices are active
-    # do work right before process starts and after all fwd_hook ends where stream async/weight copies may happen
-    def pre_process_streaming(self, module: NamedModule):
-        pass
-
     # do work and return processor.self state which will updated/merged
     def process(self, module: NamedModule, device: torch.device = None):
         pass
