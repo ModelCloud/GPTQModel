@@ -1541,8 +1541,21 @@ class DeviceThreadPool:
         Record 'done' counters as of a GC pass to require fresh progress
         before a subsequent pass is allowed.
         """
+        threshold = int(self._empty_cache_every_n)
         for k in snap_after["devices"]:
-            self._last_gc_done_per_device[k] = snap_after["per_done"].get(k, 0)
+            done = snap_after["per_done"].get(k, 0)
+            if threshold <= 0:
+                self._last_gc_done_per_device[k] = done
+                continue
+
+            meta = snap_after.get("meta", {}).get(k, {})
+            dev_type = meta.get("type")
+            if dev_type in ("cuda", "xpu", "mps"):
+                # Reset to the last completed threshold bucket so GC triggers
+                # again after another `threshold` tasks on this accelerator.
+                self._last_gc_done_per_device[k] = done - (done % threshold)
+            else:
+                self._last_gc_done_per_device[k] = done
 
     def _janitor_loop(self):
         """
