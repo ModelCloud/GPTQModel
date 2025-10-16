@@ -1531,8 +1531,11 @@ class BaseQModel(nn.Module):
                     new_model.eval()
                     self.turtle_model = new_model
                     self._turtle_reload_accum_bytes = 0
-
-            DEVICE_THREAD_POOL.submit("model_loader:cpu", _do_reload).result()
+            reload_spinner = log.spinner(title="Turtle model reloading...", interval=0.1)
+            try:
+                DEVICE_THREAD_POOL.submit("model_loader:cpu", _do_reload).result()
+            finally:
+                reload_spinner.close()
 
     # transfer actually materizlied module from turtle (real) to shell
     def shell_module_materialize(

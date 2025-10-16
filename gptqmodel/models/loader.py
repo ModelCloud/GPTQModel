@@ -208,7 +208,16 @@ def ModelLoader(cls):
             print_module_tree(model=model)
 
             # enable mmap with low_cpu_mem_usage
-            turtle_model = cls.loader.from_pretrained(model_local_path, config=config, low_cpu_mem_usage=True, **model_init_kwargs)
+            turtle_spinner = log.spinner(title="Turtle model loading...", interval=0.1)
+            try:
+                turtle_model = cls.loader.from_pretrained(
+                    model_local_path,
+                    config=config,
+                    low_cpu_mem_usage=True,
+                    **model_init_kwargs,
+                )
+            finally:
+                turtle_spinner.close()
 
             # TODO FIX ME...temp store model_init args
             turtle_model._model_init_kwargs = model_init_kwargs

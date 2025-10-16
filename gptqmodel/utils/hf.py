@@ -164,12 +164,16 @@ def build_shell_model(
     # All nn.Parameters and buffers are created
 
     # All nn.Parameters and buffers are created on 'meta' and initializers are skipped.
-    with init_empty_weights(include_buffers=True):
-        shell = loader.from_config(
-            config,
-            dtype=dtype,
-            trust_remote_code=trust_remote_code,
-            **init_kwargs
-        )
+    pb = log.spinner(title="Model loading...", interval=0.1)
+    try:
+        with init_empty_weights(include_buffers=True):
+            shell = loader.from_config(
+                config,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+                **init_kwargs
+            )
+    finally:
+        pb.close()
 
     return shell
