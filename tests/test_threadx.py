@@ -323,3 +323,55 @@ def test_janitor_triggers_empty_cache_every_n(pool, devices_two, monkeypatch):
 
     # Restore
     monkeypatch.setattr(torch.cuda, "empty_cache", orig_empty)
+
+
+def test_janitor_resets_device_watermark(pool, devices_two, monkeypatch):
+    """
+    Ensure devices that only partially progressed before a GC pass still trigger
+    the next pass after completing their own threshold of work.
+    """
+    d0, d1 = devices_two
+
+    calls: list[int] = []
+    lock = threading.Lock()
+    first_pass = threading.Event()
+    second_pass = threading.Event()
+
+    orig_empty = torch.cuda.empty_cache
+
+    def spy_empty_cache():
+        cur = torch.cuda.current_device()
+        with lock:
+            calls.append(cur)
+            if len(calls) >= 2:
+                first_pass.set()
+            if len(calls) >= 4:
+                second_pass.set()
+        time.sleep(0.02)
+
+    monkeypatch.setattr(torch.cuda, "empty_cache", spy_empty_cache)
+
+    def noop():
+        return 1
+
+    # Device 1 records a single completion before the first GC pass.
+    pool.do(d1, noop)
+
+    # Device 0 hits the threshold and triggers the first GC.
+    for _ in range(3):
+        pool.do(d0, noop)
+
+    assert first_pass.wait(timeout=2.0)
+
+    # Device 1 finishes two more tasks (total=3) and should trigger another GC.
+    for _ in range(2):
+        pool.do(d1, noop)
+
+    assert second_pass.wait(timeout=2.0)
+
+    assert len(calls) >= 4
+
+    pool.wait('all')
+
+    # Restore immediately so later tests see the original implementation.
+    monkeypatch.setattr(torch.cuda, "empty_cache", orig_empty)

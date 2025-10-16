@@ -6,12 +6,13 @@
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
 import contextlib
+import heapq
 import math
 import os
 import sys
 import threading
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -32,11 +33,13 @@ log = setup_logger()
 
 lock = threading.Lock()
 
-# Shared workspaces are cached globally per (device, dtype, columns) so that
-# concurrent GPTQ instances reuse temporary buffers instead of repeatedly
-# allocating large tensors during Hessian accumulation.
-_WORKSPACE_CACHE: Dict[Tuple[str, Optional[int], torch.dtype, int], torch.Tensor] = {}
-_WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int], torch.dtype, int], threading.Lock] = {}
+# Shared workspaces are cached globally per device so that concurrent GPTQ
+# instances reuse temporary buffers instead of repeatedly allocating large
+# tensors during Hessian accumulation. Each device retains at most a single
+# workspace; when size or dtype requirements change, the prior buffer is
+# discarded to avoid unbounded cache growth.
+_WORKSPACE_CACHE: Dict[Tuple[str, Optional[int]], torch.Tensor] = {}
+_WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int]], threading.Lock] = {}
 _BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
 
 
@@ -45,15 +48,21 @@ def _device_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
     return dev.type, dev.index
 
 
-def _workspace_cache_key(device: torch.device, dtype: torch.dtype, cols: int) -> Tuple[str, Optional[int], torch.dtype, int]:
-    dev = torch.device(device)
-    return dev.type, dev.index, dtype, cols
+def _workspace_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
+    return _device_cache_key(device)
 
 
-def _needs_workspace_resize(workspace: Optional[torch.Tensor], required_rows: int, cols: int) -> bool:
+def _needs_workspace_resize(
+    workspace: Optional[torch.Tensor],
+    dtype: torch.dtype,
+    required_rows: int,
+    cols: int,
+) -> bool:
     if workspace is None:
         return True
     if workspace.ndim != 2:
+        return True
+    if workspace.dtype != dtype:
         return True
     if workspace.shape[1] != cols:
         return True
@@ -64,11 +73,11 @@ def _needs_workspace_resize(workspace: Optional[torch.Tensor], required_rows: in
 
 @contextlib.contextmanager
 def _lease_workspace(device: torch.device, dtype: torch.dtype, cols: int, required_rows: int):
-    key = _workspace_cache_key(device, dtype, cols)
+    key = _workspace_cache_key(device)
     lock = _WORKSPACE_LOCKS.setdefault(key, threading.Lock())
     with lock:
         workspace = _WORKSPACE_CACHE.pop(key, None)
-        if _needs_workspace_resize(workspace, required_rows, cols):
+        if _needs_workspace_resize(workspace, dtype, required_rows, cols):
             rows = max(required_rows, 1)
             workspace = torch.empty((rows, cols), dtype=dtype, device=device)
     try:
@@ -187,7 +196,7 @@ class GPTQ:
 
         # Track per-batch Hessian contributions so they can be applied in a
         # deterministic order even when forwards execute in parallel.
-        self._pending_updates: Dict[int, Tuple[int, Optional[torch.Tensor], torch.device]] = {}
+        self._pending_updates: List[Tuple[int, int, Optional[torch.Tensor], Optional[torch.device]]] = []
         self._next_batch_index: int = 0
 
     @staticmethod
@@ -254,7 +263,7 @@ class GPTQ:
             batch_token_size, xtx, device = self.process_batch(inp)
 
             pending_index = batch_index if batch_index is not None else self._next_batch_index
-            self._pending_updates[pending_index] = (batch_token_size, xtx, device)
+            heapq.heappush(self._pending_updates, (pending_index, batch_token_size, xtx, device))
             self._flush_pending_updates_locked()
 
     def _preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
@@ -326,23 +335,23 @@ class GPTQ:
     def _compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]
         if rows == 0:
-            return torch.zeros((self.columns, self.columns), dtype=torch.float64, device=matrix.device)
+            return torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
         stage_dtype = self._preferred_staging_dtype(matrix.dtype, matrix.device)
         chunk_size = self._resolve_hessian_chunk_size(rows, stage_dtype)
 
         if chunk_size is None:
-            mat64 = matrix.to(dtype=torch.float64)
-            return torch.matmul(mat64.T, mat64)
+            mat32 = matrix.to(dtype=torch.float32)
+            return torch.matmul(mat32.T, mat32)
 
-        xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float64, device=matrix.device)
+        xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
         for start in range(0, rows, chunk_size):
             rows_this = min(chunk_size, rows - start)
             source = matrix[start:start + rows_this]
             with self._borrow_materialized_chunk_fp32(source, rows_this) as materialized:
-                materialized64 = materialized.to(dtype=torch.float64)
-                xtx_accum.add_(torch.matmul(materialized64.T, materialized64))
+                materialized32 = materialized
+                xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
 
         return xtx_accum
 
@@ -435,28 +444,52 @@ class GPTQ:
             del reshaped_inp
             return 0, None, canonical_device
 
-        xtx = self._compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
-        xtx = xtx.detach()
-        del reshaped_inp
+        try:
+            xtx = self._compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
+        except RuntimeError as exc:
+            if (
+                torch.device(inp_device).type == "cuda"
+                and "out of memory" in str(exc).lower()
+            ):
+                log.warn(
+                    "GPTQ module '%s' fell back to CPU Hessian accumulation due to GPU OOM during batch processing.",
+                    getattr(self, "name", "<unknown>"),
+                )
+                reshaped_inp_cpu = reshaped_inp.to(device=torch.device("cpu"))
+                del reshaped_inp
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                canonical_device = torch.device("cpu")
+                self._hessian_device = canonical_device
+                xtx = self._compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
+                xtx = xtx.detach()
+                del reshaped_inp_cpu
+            else:
+                del reshaped_inp
+                raise
+        else:
+            xtx = xtx.detach()
+            del reshaped_inp
 
         return batch_token_size, xtx, canonical_device
 
     def _flush_pending_updates_locked(self, *, allow_gaps: bool = False) -> None:
+        expected = self._next_batch_index
+
         while self._pending_updates:
-            update = self._pending_updates.pop(self._next_batch_index, None)
-            if update is None:
-                if not allow_gaps:
-                    break
+            index, batch_token_size, xtx, device = self._pending_updates[0]
 
-                next_index = min(self._pending_updates.keys())
-                if next_index != self._next_batch_index:
-                    self._next_batch_index = next_index
+            if index < expected:
+                heapq.heappop(self._pending_updates)
+                continue
 
-                update = self._pending_updates.pop(self._next_batch_index, None)
-                if update is None:
-                    break
+            if not allow_gaps and index != expected:
+                break
 
-            batch_token_size, xtx, device = update
+            heapq.heappop(self._pending_updates)
+
+            if allow_gaps and index > expected:
+                expected = index
 
             if batch_token_size > 0 and xtx is not None:
                 target_device = device if device is not None else self.H.device
@@ -476,7 +509,9 @@ class GPTQ:
 
                 del xtx
 
-            self._next_batch_index += 1
+            expected = index + 1
+
+        self._next_batch_index = expected
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(

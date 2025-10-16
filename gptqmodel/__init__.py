@@ -16,13 +16,13 @@ from .utils.threadx import DeviceThreadPool
 DEVICE_THREAD_POOL = DeviceThreadPool(
     inference_mode=True,
     workers={
-        "cuda:per": 4,
+        "cuda:per": 2,
         "xpu:per": 1,
         "mps": 8,
         "cpu": 8,
         "model_loader:cpu": 2,
     },
-    empty_cache_every_n=1024,
+    empty_cache_every_n=512,
 )
 
 from .models import GPTQModel, get_best_device
