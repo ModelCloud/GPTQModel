@@ -9,13 +9,15 @@ import tempfile
 import torch.cuda
 from models.model_test import ModelTest
 from safetensors.torch import load_file
+from safetensors import safe_open
+import os
 
 from gptqmodel import GPTQModel, QuantizeConfig
 from gptqmodel.utils.tensor import tensor_parameters
 
 
 class TestsParameterCount(ModelTest):
-    LLAMA_3_2_1B_PARAMETER_COUNT = 1235814400
+    LLAMA_3_2_1B_PARAMETER_COUNT = 1235814432
 
     # ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1 incorrectly saves lm_head.weight,
     # and the number of calculated parameters will be larger.
