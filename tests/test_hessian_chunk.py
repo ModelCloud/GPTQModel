@@ -74,10 +74,12 @@ def test_hessian_chunk_consistency_matches_full_precision():
 
     calib = torch.randn(128, 32, dtype=torch.float16)
 
-    gptq_full.process_batch(calib.clone())
-    gptq_chunked.process_batch(calib.clone())
+    _, full_xtx, full_device = gptq_full.process_batch(calib.clone())
+    _, chunked_xtx, chunked_device = gptq_chunked.process_batch(calib.clone())
 
-    assert torch.allclose(gptq_full.H, gptq_chunked.H, atol=1e-5, rtol=1e-5)
+    assert full_device == chunked_device
+    assert full_xtx is not None and chunked_xtx is not None
+    assert torch.allclose(full_xtx, chunked_xtx, atol=5e-6, rtol=5e-6)
 
 
 def test_hessian_chunk_invocations_and_workspace_shape():
@@ -168,7 +170,7 @@ def test_hessian_workspace_thread_safety_cuda():
             batch_size, xtx, canonical_device = gptq.process_batch(calib)
             assert batch_size == rows
             assert xtx is not None
-            assert canonical_device == gptq._hessian_device
+            assert canonical_device == device
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = [pool.submit(worker, idx) for idx in range(16)]
@@ -176,7 +178,7 @@ def test_hessian_workspace_thread_safety_cuda():
             fut.result()
 
     for gptq in gptq_workers:
-        assert gptq._hessian_device == device
+        assert getattr(gptq, "_final_hessian_device_hint", None) == device
 
     cols = base.in_features
     cache_key = gptq_impl._workspace_cache_key(device)

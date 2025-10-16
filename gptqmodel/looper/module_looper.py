@@ -588,7 +588,6 @@ class ModuleLooper():
 
         results: Dict[int, torch.Tensor | tuple | None] = {}
 
-        chunk = len(devices)
         total_batches = self._resolve_batch_total(processor.num_batches, layer_inputs)
         batch_row_counts = progress_rows_per_batch or self._collect_row_counts(layer_inputs)
         batch_row_counts = list(batch_row_counts)
@@ -602,11 +601,38 @@ class ModuleLooper():
         total_rows = max(total_rows, 1)
         processed_rows = 0
         stage_label = progress_stage or "Forward"
-        for start in range(0, total_batches, chunk):
+        device_segments: Dict[torch.device, List[int]] = {}
+        segment_start = 0
+        num_devices = len(devices)
+
+        for index, device in enumerate(devices):
+            remaining_batches = max(total_batches - segment_start, 0)
+            remaining_devices = max(num_devices - index, 1)
+            segment_length = remaining_batches // remaining_devices
+            remainder = remaining_batches % remaining_devices
+            if remainder > 0:
+                segment_length += 1
+
+            if segment_length <= 0:
+                device_segments[device] = []
+                continue
+
+            segment_end = min(segment_start + segment_length, total_batches)
+            device_segments[device] = list(range(segment_start, segment_end))
+            segment_start = segment_end
+
+        max_segment_length = 0
+        for indices in device_segments.values():
+            if len(indices) > max_segment_length:
+                max_segment_length = len(indices)
+
+        for position in range(max_segment_length):
             futures = []
-            end = min(start + chunk, total_batches)
-            for offset, batch_idx in enumerate(range(start, end)):
-                device = devices[offset]
+            for device in devices:
+                segment_indices = device_segments.get(device, [])
+                if position >= len(segment_indices):
+                    continue
+                batch_idx = segment_indices[position]
                 replica = module_replicas[device]
                 submitter = (
                     DEVICE_THREAD_POOL.submit_serial
