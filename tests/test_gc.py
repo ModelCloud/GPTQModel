@@ -5,7 +5,9 @@ import traceback
 from queue import Queue
 
 import pytest
+
 from gptqmodel.utils.safe import gc as safe_gc
+
 
 torch = pytest.importorskip("torch", reason="requires PyTorch")
 
@@ -27,7 +29,7 @@ def _worker(barrier: threading.Barrier, safe: bool, errors: Queue) -> None:
                 safe_gc.collect()
             else:
                 gc.collect()
-    except Exception as exc:  # pragma: no cover - stress test safeguard
+    except Exception:  # pragma: no cover - stress test safeguard
         # Preserve the traceback so the failing test shows context from worker threads.
         errors.put(traceback.format_exc())
 

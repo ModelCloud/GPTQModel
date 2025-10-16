@@ -5,7 +5,7 @@
 # EoRA Official Repo: https://github.com/NVlabs/EoRA
 # This file has been modified by ModelCloud.AI team and qubitium@modelcloud.ai for adoption into GPT-QModel
 
-from typing import Tuple
+from typing import Sequence, Tuple
 
 import torch
 from torch import Tensor
@@ -24,9 +24,8 @@ def eora_process_input(
 ) -> Tuple[int, torch.Tensor, float]:
     """Prepare the per-batch covariance contribution required for EoRA.
 
-    The contribution is computed on the target device for throughput, then
-    transferred to CPU so it can be safely aggregated across worker threads and
-    devices when the interpreter runs without the GIL.
+    The contribution remains on the originating device so multi-GPU execution
+    can accumulate locally before a single merge step.
     """
 
     inp = input[0].to(device=device, dtype=torch.float32)
@@ -37,7 +36,7 @@ def eora_process_input(
     adds = torch.matmul(inp.transpose(1, 2), inp)
     adds_sum = torch.sum(adds, dim=0).detach()
 
-    contribution = adds_sum.to(device=torch.device("cpu"), dtype=torch.float32)
+    contribution = adds_sum.to(dtype=torch.float32)
     contribution /= float(sample_size)
 
     # Adding batch to denominator is only for mathematical stability
@@ -46,6 +45,30 @@ def eora_process_input(
     del inp, adds, adds_sum
 
     return batch, contribution, scale
+
+
+def merge_eora_segments(segments: Sequence[Tuple[torch.Tensor, float]]) -> torch.Tensor:
+    """Combine pre-aggregated EoRA segments using their scale products.
+
+    Each segment entry is a tuple ``(total, scale_product)`` where ``total`` is
+    the sequential accumulation result for that segment starting from zero, and
+    ``scale_product`` is the product of per-batch scale factors encountered in
+    the same segment.  The function mutates the first segment tensor in place
+    and returns it as the merged result.
+    """
+    if not segments:
+        raise ValueError("EoRA merge requires at least one segment.")
+
+    result: torch.Tensor | None = None
+    for total, scale_product in segments:
+        if result is None:
+            result = total
+        else:
+            result.mul_(float(scale_product))
+            result.add_(total)
+
+    assert result is not None
+    return result
 
 def eora_compute_lora(
         w_wq_delta: Tensor, # need the w (original weight) and wq (quantized qweight) delta in float32
