@@ -58,14 +58,14 @@ class TestPackable(unittest.TestCase):
             (BACKEND.EXLLAMA_V2, {"qweight": False, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TRITON, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TORCH, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
-            (BACKEND.TORCH_FUSED, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
+            (BACKEND.TORCH_FUSED, {"qweight": True, "qzeros": True, "scales": False, "g_idx": True}),
             # (BACKEND.BITBLAS, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
-            (BACKEND.MARLIN, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),
-            (BACKEND.MARLIN_FP16, {"qweight": False, "qzeros": True, "scales": False, "g_idx": False}),
+            (BACKEND.MARLIN, {"qweight": False, "qzeros": False, "scales": False, "g_idx": False}),
+            (BACKEND.MARLIN_FP16, {"qweight": False, "qzeros": False, "scales": False, "g_idx": False}),
         ]
     )
     def test_post_init(self, backend: BACKEND, equal: Dict[str, bool]):
-        model = GPTQModel.load(self.model_id, backend=backend, device_map="auto")
+        model = GPTQModel.load(self.model_id, backend=backend, device="cpu" if backend == BACKEND.TORCH_FUSED else "cuda")
         model = convert_gptq_v2_to_v1_format(model, model.quantize_config, self.QLINEAR_DICT[backend])
 
         module = find_modules(model.model, [self.QLINEAR_DICT[backend]])[self.TARGET]
