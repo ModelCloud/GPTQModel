@@ -3,6 +3,7 @@ import os
 # force pytest runs to target GPU 7 (becomes cuda:0 after masking)
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "7")
 
+import threading
 import time
 from types import SimpleNamespace
 from unittest import mock
@@ -15,6 +16,7 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper import gptq_processor as gptq_processor_module
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.utils.threadx import DeviceThreadPool
 
 
 def _dummy_prepare_dataset(*, calibration_dataset, calibration_dataset_concat_size, calibration_dataset_sort, batch_size):
@@ -41,6 +43,61 @@ class _TinyLinearModel(torch.nn.Module):
     def __init__(self, features: int = 8):
         super().__init__()
         self.linear = torch.nn.Linear(features, features, bias=False)
+
+
+class _LockTracker:
+    def __init__(self):
+        self._state_lock = threading.Lock()
+        self._entries = []
+        self._active = 0
+        self.max_active = 0
+
+    def enter(self):
+        start = time.perf_counter()
+        with self._state_lock:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        return start
+
+    def exit(self, start_time: float):
+        end = time.perf_counter()
+        with self._state_lock:
+            self._active -= 1
+            self._entries.append((start_time, end - start_time))
+
+    def total_duration(self) -> float:
+        with self._state_lock:
+            return sum(duration for _, duration in self._entries)
+
+    def window_duration(self) -> float:
+        with self._state_lock:
+            if not self._entries:
+                return 0.0
+            start_min = min(start for start, _ in self._entries)
+            end_max = max(start + duration for start, duration in self._entries)
+            return end_max - start_min
+
+    def entry_count(self) -> int:
+        with self._state_lock:
+            return len(self._entries)
+
+
+class _CountingLock:
+    def __init__(self, base_lock, tracker: _LockTracker):
+        self._base_lock = base_lock
+        self._tracker = tracker
+        self._start_time = None
+
+    def __enter__(self):
+        self._base_lock.acquire()
+        self._start_time = self._tracker.enter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._tracker.exit(self._start_time)
+        self._start_time = None
+        self._base_lock.release()
+        return False
 
 
 @pytest.mark.cuda
@@ -222,3 +279,123 @@ def test_submodule_finalize_timing():
             duration_ms = entry["duration"] * 1000
             source = entry.get("source")
             print(f"  {name:<32} {duration_ms:.3f} (source={source})")
+
+
+def _prepare_modules(processor, qcfg, device, module_count):
+    modules = []
+    for idx in range(module_count):
+        base_model = _TinyLinearModel().to(device=device, dtype=torch.float16)
+        named_module = NamedModule(
+            base_model.linear,
+            name=f"linear_{idx}",
+            full_name="linear",
+            layer_index=idx,
+        )
+        named_module.target_device = device
+        named_module.module.target_device = device
+
+        processor.preprocess(named_module, fail_safe=False)
+        processor.process(named_module)
+
+        base_model.to("cpu")
+        named_module.module.to("cpu")
+        named_module.target_device = torch.device("cpu")
+        named_module.module.target_device = torch.device("cpu")
+
+        quant_model = SimpleNamespace(
+            model=base_model,
+            quantize_config=qcfg,
+            qlinear_kernel=TorchQuantLinear,
+            lm_head="lm_head",
+            quant_region_timer=_DummyTimer(),
+            quantized=False,
+        )
+        modules.append((named_module, quant_model))
+    return modules
+
+
+def _finalize_worker(processor, module, quant_model):
+    start = time.perf_counter()
+    processor.submodule_finalize(module, quant_model)
+    end = time.perf_counter()
+    thread_name = threading.current_thread().name
+    return thread_name, start, end
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("cpu_workers", [8, 32])
+def test_submodule_finalize_threadpool_serialization(cpu_workers):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for GPTQ finalize pool benchmark")
+
+    if torch.cuda.device_count() == 0:
+        pytest.skip("No CUDA devices visible after masking; cannot benchmark finalize")
+
+    torch.cuda.set_device(0)
+    device = torch.device("cuda", 0)
+
+    qcfg = QuantizeConfig(
+        group_size=8,
+        desc_act=False,
+        sym=True,
+        mock_quantization=True,
+        pack_impl="original",
+        offload_to_disk=False,
+    )
+
+    processor = GPTQProcessor(
+        tokenizer=None,
+        qcfg=qcfg,
+        calibration=None,
+        prepare_dataset_func=_dummy_prepare_dataset,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        batch_size=1,
+        require_fwd=False,
+        calculate_w_wq_diff=False,
+    )
+    processor.pb = _DummyProgressBar()
+
+    module_count = min(cpu_workers * 2, 32)
+    modules = _prepare_modules(processor, qcfg, device, module_count)
+
+    lock_tracker = _LockTracker()
+    original_pack_module = gptq_processor_module.pack_module
+
+    def instrumented_pack_module(*args, **kwargs):
+        args_list = list(args)
+
+        if "lock" in kwargs and kwargs["lock"] is not None:
+            kwargs = dict(kwargs)
+            kwargs["lock"] = _CountingLock(kwargs["lock"], lock_tracker)
+        elif len(args_list) > 7:
+            args_list[7] = _CountingLock(args_list[7], lock_tracker)
+        else:
+            raise AssertionError("Expected lock argument in pack_module")
+
+        return original_pack_module(*tuple(args_list), **kwargs)
+
+    pool = DeviceThreadPool(include_cuda=False, include_cpu=True, workers={"cpu": cpu_workers}, inference_mode=True)
+
+    try:
+        with mock.patch.object(gptq_processor_module, "pack_module", new=instrumented_pack_module):
+            futures = [
+                pool.submit(torch.device("cpu"), _finalize_worker, processor, module, quant_model)
+                for module, quant_model in modules
+            ]
+            results = [future.result() for future in futures]
+    finally:
+        pool.shutdown()
+
+    thread_names = {name for name, _, _ in results}
+    lock_total = lock_tracker.total_duration()
+    lock_window = lock_tracker.window_duration()
+
+    assert lock_tracker.entry_count() == len(modules)
+    assert lock_tracker.max_active == 1, f"Expected serialized pack_module, saw max_active={lock_tracker.max_active}"
+
+    if lock_total > 0 and lock_window > 0:
+        ratio = lock_total / lock_window
+        assert ratio <= 1.05, f"Expected serialized execution; total/window ratio={ratio:.3f}"
+
+    assert len(thread_names) >= min(cpu_workers, len(modules), 2), "Thread pool failed to utilize multiple workers"
