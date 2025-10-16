@@ -26,7 +26,7 @@ class Qwen3MoeQModel(BaseQModel):
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0",  "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": {
-                "gate": ("gate:!",), # <-- 0.5MB per layer. Not worth quantizing
+                "gate": ("gate",),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
