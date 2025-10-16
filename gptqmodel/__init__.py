@@ -16,7 +16,7 @@ from .utils.threadx import DeviceThreadPool
 DEVICE_THREAD_POOL = DeviceThreadPool(
     inference_mode=True,
     workers={
-        "cuda:per": 4,
+        "cuda:per": 1,
         "xpu:per": 1,
         "mps": 8,
         "cpu": 8,
