@@ -68,9 +68,6 @@ class LoopProcessor:
         self._results: Dict[str, Any] = {}
         self._results_lock = threading.Lock()
 
-        # toggle to enable stream from gpu to cpu
-        self.stream = False
-
         self.tokenizer = tokenizer
         self.qcfg = qcfg
         self.qcfg_dynamic = None # cloned and dynamic filtered

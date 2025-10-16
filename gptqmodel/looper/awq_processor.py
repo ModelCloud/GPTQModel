@@ -787,14 +787,10 @@ class AWQProcessor(LoopProcessor):
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, **kwargs):
         # generate complete, safe to move to cpu
-        module.weight.data = move_to(module.weight.data, device=CPU, stream=self.stream) # large weights is slow to init on cpu
+        module.weight.data = move_to(module.weight.data, device=CPU) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
 
     def finalize(self, model: BaseQModel, **kwargs):
-        # block for streams
-        if self.stream:
-            torch_sync()
-
         if model.quantize_config.format == FORMAT.GEMM:
             model.qlinear_kernel = AwqGEMMQuantLinear
         elif model.quantize_config.format == FORMAT.GEMV:

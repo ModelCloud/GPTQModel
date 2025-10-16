@@ -188,7 +188,7 @@ class QQQProcessor(LoopProcessor):
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         # generate complete, safe to move to cpu
-        module.weight.data = move_to(module.weight.data, device=CPU, stream=self.stream) # large weights is slow to init on cpu
+        module.weight.data = move_to(module.weight.data, device=CPU) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
 
         # cleanup all memory or states vars persistently added by this processor
@@ -257,10 +257,6 @@ class QQQProcessor(LoopProcessor):
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
-        # block for streams
-        if self.stream:
-            torch_sync()
-
         # set quantized state
         model.quantized = True
 

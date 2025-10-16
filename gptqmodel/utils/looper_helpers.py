@@ -348,21 +348,21 @@ def forward_batch_worker(
     rehome_module_to_device(module, module_device, move_parameters=True, move_buffers=True)
 
     torch_sync() # try to avoid torch.AcceleratorError: CUDA error: unspecified launch failure
-    inputs = [move_to(inp, device=module_device, stream=False) for inp in layer_input]
+    inputs = [move_to(inp, device=module_device) for inp in layer_input]
 
     attn_tensor = None
     if attention_mask is not None:
-        attn_tensor = move_to(attention_mask, device=module_device, stream=False)
+        attn_tensor = move_to(attention_mask, device=module_device)
 
     additional_inputs: Dict[str, torch.Tensor] = {}
     if support_batch_quantize and attn_tensor is not None:
         additional_inputs["attention_mask"] = attn_tensor
 
     if position_ids is not None:
-        additional_inputs["position_ids"] = move_to(position_ids, device=module_device, stream=False)
+        additional_inputs["position_ids"] = move_to(position_ids, device=module_device)
 
     for key, value in layer_input_kwargs.items():
-        additional_inputs[key] = nested_move_to(value, device=module_device, stream=False)
+        additional_inputs[key] = nested_move_to(value, device=module_device)
 
     keep_mask = None
     if attn_tensor is not None:
@@ -374,7 +374,7 @@ def forward_batch_worker(
         mask_tls.value = keep_mask
 
     if reuse_kv and prev_kv is not None:
-        additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=module_device, stream=False)
+        additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=module_device)
 
     module_output = None
     kv_next = None
