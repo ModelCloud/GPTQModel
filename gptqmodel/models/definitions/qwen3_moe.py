@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ...quantization import METHOD
 
 
 class Qwen3MoeQModel(BaseQModel):
@@ -33,3 +34,13 @@ class Qwen3MoeQModel(BaseQModel):
             },
         }
     ]
+
+    module_tree_overrides = {
+        METHOD.AWQ: [
+            {
+                "mlp": {
+                    "gate": ("gate",),
+                }
+            }
+        ]
+    }
