@@ -4,15 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
-import heapq
 import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch.nn import Module
 
 from ..adapter.adapter import Lora
-from ..eora.eora import eora_compute_lora, eora_process_input
+from ..eora.eora import eora_compute_lora, eora_process_input, merge_eora_segments
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -20,6 +19,7 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
                              PROCESS_LOG_NAME, PROCESS_LOG_TIME, PROCESS_USED_MEMORY)
 from ..quantization.config import QuantizeConfig
 from ..utils.logger import setup_logger
+from ..utils.device import get_device
 from ..utils.model import move_to
 from ..utils.torch import CPU, DEVICE_0, DEVICE_1, torch_streamCtx, torch_sync
 from ..utils.torch import HAS_CUDA, tf32_disable_guard, torch_streamCtx, torch_sync
@@ -38,10 +38,10 @@ class EoraProcessor(LoopProcessor):
                          prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
                          require_fwd=require_fwd)
 
-        # dict: key is module name, value is the accumulated eigen_scaling_diag_matrix
-        self.eigen_scaling_diag_matrix: Dict[str, torch.Tensor] = {}
-        self._pending_contributions: Dict[str, List[Tuple[int, int, torch.Tensor, float]]] = {}
-        self._next_batch_index: Dict[str, int] = {}
+        # Track per-module segment accumulators keyed by device so we can merge
+        # contributions without repeatedly moving data through the CPU.
+        self._segment_accumulators: Dict[str, Dict[torch.device, Dict[str, Any]]] = {}
+        self._module_target_devices: Dict[str, torch.device] = {}
 
         # Increase the dynamo cache size limit, default of 8 is too low
         if torch._dynamo.config.cache_size_limit < 64:
@@ -78,9 +78,12 @@ class EoraProcessor(LoopProcessor):
         # hack store property inside module
         module.adapter_cfg = adapter_cfg
 
-        self.eigen_scaling_diag_matrix[module.name] = None
-        self._pending_contributions[module.name] = []
-        self._next_batch_index[module.name] = 0
+        target_device = get_device(module.module)
+        if target_device.type == "meta":
+            target_device = torch.device("cpu")
+
+        self._module_target_devices[module.name] = torch.device(target_device)
+        self._segment_accumulators[module.name] = {}
 
         return
 
@@ -99,7 +102,7 @@ class EoraProcessor(LoopProcessor):
                     device=module.weight.data.device,
                 )
 
-            self._stage_eora_contribution(
+            self._accumulate_eora_contribution(
                 name=name,
                 batch_index=batch_index,
                 batch=batch,
@@ -108,7 +111,7 @@ class EoraProcessor(LoopProcessor):
             )
         return tmp
 
-    def _stage_eora_contribution(
+    def _accumulate_eora_contribution(
         self,
         *,
         name: str,
@@ -120,49 +123,78 @@ class EoraProcessor(LoopProcessor):
         if batch <= 0:
             return
 
+        contribution = contribution.detach()
+        device = torch.device(contribution.device)
+        scale_value = float(scale)
+
         with self.lock:
-            queue = self._pending_contributions.setdefault(name, [])
-            self._next_batch_index.setdefault(name, 0)
+            accumulators = self._segment_accumulators.setdefault(name, {})
+            record = accumulators.get(device)
 
-            pending_index = batch_index if batch_index is not None else self._next_batch_index[name]
-            heapq.heappush(queue, (pending_index, batch, contribution, scale))
-            self._flush_eora_pending_locked(name)
+            index_value = int(batch_index) if batch_index is not None else 0
 
-    def _flush_eora_pending_locked(self, name: str) -> None:
-        queue = self._pending_contributions.get(name)
-        if not queue:
-            return
+            if record is None:
+                record = {
+                    "total": contribution,
+                    "scale_product": scale_value,
+                    "start_index": index_value,
+                    "end_index": index_value,
+                    "count": 1,
+                }
+                accumulators[device] = record
+                return
 
-        expected = self._next_batch_index.get(name, 0)
+            total = record["total"]
+            if total.device != contribution.device:
+                total = total.to(device=contribution.device)
 
-        while queue:
-            index, _batch, contribution, scale = queue[0]
+            total.mul_(scale_value)
+            total.add_(contribution)
 
-            if index < expected:
-                heapq.heappop(queue)
-                continue
+            record["total"] = total
+            record["scale_product"] *= scale_value
+            record["count"] += 1
 
-            if index != expected:
-                break
-
-            heapq.heappop(queue)
-
-            current = self.eigen_scaling_diag_matrix.get(name)
-
-            if isinstance(current, torch.Tensor):
-                if current.device != torch.device("cpu"):
-                    current = current.to(device=torch.device("cpu"), dtype=torch.float32)
-
-                current.mul_(scale)
-                current.add_(contribution)
-                self.eigen_scaling_diag_matrix[name] = current
-                del contribution
+            if batch_index is not None:
+                batch_value = int(batch_index)
+                if record["start_index"] is None or batch_value < record["start_index"]:
+                    record["start_index"] = batch_value
+                if record["end_index"] is None or batch_value > record["end_index"]:
+                    record["end_index"] = batch_value
             else:
-                self.eigen_scaling_diag_matrix[name] = contribution
+                if record.get("start_index") is None:
+                    record["start_index"] = record["count"] - 1
+                record["end_index"] = record["count"] - 1
 
-            expected = index + 1
+            del contribution
 
-        self._next_batch_index[name] = expected
+    def _finalize_eigen_scaling_matrix(self, name: str) -> torch.Tensor:
+        with self.lock:
+            segments = self._segment_accumulators.pop(name, {})
+            target_device = self._module_target_devices.pop(name, None)
+
+        if not segments:
+            raise RuntimeError(
+                f"EoRA statistics for module '{name}' were not collected before processing."
+            )
+
+        ordered_segments = sorted(
+            segments.values(),
+            key=lambda record: record.get("start_index", 0),
+        )
+
+        if target_device is None:
+            first_total = ordered_segments[0]["total"]
+            target_device = torch.device(first_total.device)
+
+        segment_pairs = []
+        for record in ordered_segments:
+            total = record["total"]
+            if total.device != target_device:
+                total = total.to(device=target_device, dtype=torch.float32)
+            segment_pairs.append((total, float(record["scale_product"])))
+
+        return merge_eora_segments(segment_pairs)
 
     def process(self, module: NamedModule):
         assert isinstance(module.adapter_cfg, Lora)
@@ -171,16 +203,7 @@ class EoraProcessor(LoopProcessor):
 
         start = time.time()
 
-        with self.lock:
-            self._flush_eora_pending_locked(module.name)
-            eigen_scaling_diag_matrix = self.eigen_scaling_diag_matrix.pop(module.name)
-            self._pending_contributions.pop(module.name, None)
-            self._next_batch_index.pop(module.name, None)
-
-        if not isinstance(eigen_scaling_diag_matrix, torch.Tensor):
-            raise RuntimeError(
-                f"EoRA statistics for module '{module.name}' were not collected before processing."
-            )
+        eigen_scaling_diag_matrix = self._finalize_eigen_scaling_matrix(module.name)
 
         tp_info = module.state.get("tp_pad_info")
         pad_cols = 0
@@ -309,9 +332,8 @@ class EoraProcessor(LoopProcessor):
         if self.stream:
             torch_sync()
 
-        del self.eigen_scaling_diag_matrix
-        del self._pending_contributions
-        del self._next_batch_index
+        del self._segment_accumulators
+        del self._module_target_devices
 
         # hack: store loras into model until `save()` is called
         model.lora_results = self.results()

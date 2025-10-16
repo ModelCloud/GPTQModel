@@ -1,7 +1,7 @@
 import copy
 
-import torch
 import pytest
+import torch
 
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ

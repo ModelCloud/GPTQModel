@@ -79,7 +79,7 @@ def test_hessian_chunk_consistency_matches_full_precision():
 
     assert full_device == chunked_device
     assert full_xtx is not None and chunked_xtx is not None
-    assert torch.allclose(full_xtx, chunked_xtx, atol=5e-6, rtol=5e-6)
+    assert torch.allclose(full_xtx, chunked_xtx, atol=3e-6, rtol=3e-6)
 
 
 def test_hessian_chunk_invocations_and_workspace_shape():

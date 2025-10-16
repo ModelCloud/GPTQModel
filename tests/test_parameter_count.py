@@ -3,14 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
 import os.path
 import tempfile
 
 import torch.cuda
 from models.model_test import ModelTest
 from safetensors.torch import load_file
-from safetensors import safe_open
-import os
 
 from gptqmodel import GPTQModel, QuantizeConfig
 from gptqmodel.utils.tensor import tensor_parameters
