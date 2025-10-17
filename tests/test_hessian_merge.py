@@ -64,6 +64,14 @@ def test_hessian_merge_multi_gpu_matches_serial():
     merged_hessian = gptq_multi.H.detach().cpu()
     assert gptq_multi.nsamples == batch_count
 
+    max_abs_diff = (merged_hessian - serial_hessian).abs().max().item()
+    print(
+        "[hessian-no-mask] "
+        f"serial_nsamples={gptq_serial.nsamples} "
+        f"multi_nsamples={gptq_multi.nsamples} "
+        f"max_abs_diff={max_abs_diff:.6e}"
+    )
+
     total_samples = sum(sample_counts_snapshot.values())
     assert total_samples == batch_count
 
@@ -163,6 +171,15 @@ def test_hessian_merge_multi_gpu_with_attention_mask():
 
     gptq_multi.finalize_hessian()
     merged_hessian = gptq_multi.H.detach().cpu()
+
+    max_abs_diff = (merged_hessian - serial_hessian).abs().max().item()
+    print(
+        "[hessian-mask] "
+        f"serial_tokens={total_kept_tokens} "
+        f"multi_tokens={gptq_multi.nsamples} "
+        f"per_device={{{', '.join(f'{str(dev)}:{count}' for dev, count in device_token_counts.items())}}} "
+        f"max_abs_diff={max_abs_diff:.6e}"
+    )
 
     assert gptq_multi.nsamples == total_kept_tokens
     torch.testing.assert_close(merged_hessian, serial_hessian, atol=5e-7, rtol=5e-7)
