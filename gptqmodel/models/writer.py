@@ -226,7 +226,7 @@ def ModelWriter(cls):
             )
 
         if self.load_quantized_model:
-            model = self.get_model_with_quantize(
+            self.model = self.get_model_with_quantize(
                 qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,
             )
@@ -274,10 +274,10 @@ def ModelWriter(cls):
 
         # Due to shell/turtle state, we need to sync the modules from turtle to shell
         if not self.load_quantized_model:
-            alias_all_from_turtle_if_meta(shell_model=model, turtle_model=self.turtle_model)
+            alias_all_from_turtle_if_meta(shell_model=self.model, turtle_model=self.turtle_model)
 
         offload_root = self.quantize_config.offload_to_disk_path if getattr(self.quantize_config, "offload_to_disk", False) else None
-        state_dict = get_state_dict_for_save(model, offload_root=offload_root)
+        state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
 
         model_base_name = "model"
         model_save_name = model_base_name + ".safetensors"
