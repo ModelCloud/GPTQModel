@@ -13,7 +13,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import Future
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 
@@ -309,6 +309,7 @@ class _DeviceWorker:
         name: Optional[str] = None,
         inference_mode: bool = False,
         cpu_core: Optional[int] = None,
+        warmup_fn: Optional[Callable[[torch.device], None]] = None,
         *,
         key_override: Optional[str] = None,
     ):
@@ -316,6 +317,7 @@ class _DeviceWorker:
         self.rwlock = rwlock
         self._on_task_finished = on_task_finished
         self._on_worker_exit = on_worker_exit
+        self._warmup_fn = warmup_fn
 
         if key_override is not None:
             self.key = key_override
@@ -389,6 +391,16 @@ class _DeviceWorker:
             )
             self._affinity_applied = True
 
+    def _run_warmup(self) -> None:
+        warmup_fn = self._warmup_fn
+        if warmup_fn is None:
+            return
+        try:
+            with ctx(self.rwlock.reader(), _device_ctx(self.device)):
+                warmup_fn(self.device)
+        finally:
+            self._warmup_fn = None
+
     def _run(self):
         """
         Main loop: pull tasks, set device context, execute, mark completion, and
@@ -400,6 +412,11 @@ class _DeviceWorker:
         """
         self._apply_cpu_affinity()
         _activate_thread_device(self.device)
+        try:
+            self._run_warmup()
+        except BaseException as exc:
+            self._abort_process(exc)
+            return
         while not self._stop.is_set():
             is_task, fn, args, kwargs, fut = self._q.get()
             try:
@@ -537,6 +554,7 @@ class DeviceThreadPool:
         include_mps: bool = True,
         include_cpu: bool = True,
         inference_mode: bool = False,
+        warmups: Optional[Dict[str, Callable[[torch.device], None]]] = None,
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
@@ -557,6 +575,9 @@ class DeviceThreadPool:
                   (CUDA parents must include an explicit index, e.g. 'alias:cuda:0')
               Unspecified devices default to 1 worker each.
             gc_debounce_seconds: short wait to coalesce multiple triggers.
+            warmups: optional mapping from device family (e.g. 'cuda') to a callable
+                run once after the worker activates its device. A special key
+                'default' applies when no family-specific warmup is found.
             pin_cpu_workers: bind CPU device workers to individual CPU cores when
                 affinity APIs are available. Defaults to False so CPU tasks may
                 float across cores unless explicitly opt-in.
@@ -614,6 +635,11 @@ class DeviceThreadPool:
         self._last_gc_done_per_device: Dict[str, int] = {}
 
         self._inference_mode = bool(inference_mode)
+        self._worker_warmups = (
+            {str(k).lower(): fn for k, fn in warmups.items()} if warmups else None
+        )
+        self._warmup_lock = threading.Lock()
+        self._warmup_ran_keys: Set[str] = set()
 
         workers_cfg = workers or {}
         base_workers: Dict[str, int] = {}
@@ -857,6 +883,28 @@ class DeviceThreadPool:
 
         return plan
 
+    def _resolve_worker_warmup(self, dev: torch.device, key: str) -> Optional[Callable[[torch.device], None]]:
+        mapping = self._worker_warmups
+        if not mapping:
+            return None
+        family = dev.type.lower()
+        warmup = mapping.get(family)
+        primary_key = key.split(":", 1)[0].lower()
+        if warmup is None and primary_key in mapping:
+            warmup = mapping[primary_key]
+        if warmup is None:
+            warmup = mapping.get("default")
+        if warmup is None:
+            return None
+
+        # Map virtual workers back to their parent key so warmup runs once per physical device.
+        physical_key = self._virtual_to_parent.get(key, key)
+        with self._warmup_lock:
+            if physical_key in self._warmup_ran_keys:
+                return None
+            self._warmup_ran_keys.add(physical_key)
+        return warmup
+
     def _spawn_worker(
         self,
         dev: torch.device,
@@ -867,6 +915,7 @@ class DeviceThreadPool:
         """
         Create and start a worker bound to the provided device.
         """
+        warmup_fn = self._resolve_worker_warmup(dev, key)
         w = _DeviceWorker(
             device=dev,
             rwlock=self._locks[key],
@@ -875,6 +924,7 @@ class DeviceThreadPool:
             name=name,
             inference_mode=self._inference_mode,
             cpu_core=cpu_core,
+            warmup_fn=warmup_fn,
             key_override=key,
         )
         return w

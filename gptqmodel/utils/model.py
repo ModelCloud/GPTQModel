@@ -705,72 +705,76 @@ def pack_module(
 
     packer_label = None
 
-    with lock:
+    if lock is not None:
+        with lock:
+            layers[name] = layer
+            qModules[name] = module
+    else:
         layers[name] = layer
         qModules[name] = module
 
-        # TODO FIX ME..remove hard coded qqq pack
-        if quant_linear_cls.QUANT_TYPE == "qqq":
-            if q_scales_extra is not None:
-                q_scales_extra = q_scales_extra.to(CPU)
-            packer_label = "module.pack"
-            with log_time_block(
-                packer_label,
-                logger=log,
-                module_name=name,
-            ):
-                module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
-        else:
-            effective_impl = (pack_impl or "original").lower()
+    # TODO FIX ME..remove hard coded qqq pack
+    if quant_linear_cls.QUANT_TYPE == "qqq":
+        if q_scales_extra is not None:
+            q_scales_extra = q_scales_extra.to(CPU)
+        packer_label = "module.pack"
+        with log_time_block(
+            packer_label,
+            logger=log,
+            module_name=name,
+        ):
+            module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
+    else:
+        effective_impl = (pack_impl or "original").lower()
 
-            if effective_impl in {"cpu", "block", "pack_block"}:
-                effective_impl = "block"
-            elif effective_impl in {"original", "pack_original"}:
+        if effective_impl in {"cpu", "block", "pack_block"}:
+            effective_impl = "block"
+        elif effective_impl in {"original", "pack_original"}:
+            effective_impl = "original"
+        elif effective_impl == "gpu":
+            if not HAS_CUDA:
+                log.warning("pack_module: GPU packing requested but CUDA is unavailable; falling back to original pack.")
                 effective_impl = "original"
-            elif effective_impl == "gpu":
-                if not HAS_CUDA:
-                    log.warning("pack_module: GPU packing requested but CUDA is unavailable; falling back to original pack.")
-                    effective_impl = "original"
-                elif not hasattr(module, "pack_gpu"):
-                    log.warning("pack_module: GPU packing requested but module lacks pack_gpu; falling back to original pack.")
-                    effective_impl = "original"
-            elif effective_impl != "original":
-                log.warning(
-                    "pack_module: Unknown pack_impl `%s`; defaulting to original pack.",
-                    pack_impl,
+            elif not hasattr(module, "pack_gpu"):
+                log.warning("pack_module: GPU packing requested but module lacks pack_gpu; falling back to original pack.")
+                effective_impl = "original"
+        elif effective_impl != "original":
+            log.warning(
+                "pack_module: Unknown pack_impl `%s`; defaulting to original pack.",
+                pack_impl,
+            )
+            effective_impl = "original"
+
+        label_map = {
+            "gpu": "module.pack_gpu",
+            "block": "module.pack_block",
+            "original": "module.pack_original",
+        }
+
+        packer_label = label_map[effective_impl]
+
+        with log_time_block(
+            packer_label,
+            logger=log,
+            module_name=name,
+        ):
+            if effective_impl == "gpu":
+                module.pack_gpu(
+                    linear=layer,
+                    scales=q_scales,
+                    zeros=q_zeros,
+                    g_idx=q_g_idx,
+                    device=target_device,
                 )
-                effective_impl = "original"
-
-            label_map = {
-                "gpu": "module.pack_gpu",
-                "block": "module.pack_block",
-                "original": "module.pack_original",
-            }
-
-            packer_label = label_map[effective_impl]
-
-            with log_time_block(
-                packer_label,
-                logger=log,
-                module_name=name,
-            ):
-                if effective_impl == "gpu":
-                    module.pack_gpu(
-                        linear=layer,
-                        scales=q_scales,
-                        zeros=q_zeros,
-                        g_idx=q_g_idx,
-                        device=target_device,
-                    )
-                elif effective_impl == "block":
-                    module.pack_block(
-                        linear=layer,
-                        scales=q_scales,
-                        zeros=q_zeros,
-                        g_idx=q_g_idx,
-                    )
-                else:
-                    module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
+            elif effective_impl == "block":
+                module.pack_block(
+                    linear=layer,
+                    scales=q_scales,
+                    zeros=q_zeros,
+                    g_idx=q_g_idx,
+                )
+            else:
+                module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 
         if (
             quantize_config is not None
