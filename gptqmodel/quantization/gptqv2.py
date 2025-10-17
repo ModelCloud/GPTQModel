@@ -33,6 +33,11 @@ class GPTQv2(GPTQ):
 
         self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
 
+    def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
+        with self.lock:
+            self.fwd_counter += 1
+            self.process_batch(inp)
+
     # TODO FIXME: using v1 new process_batch kills v2 quantization quality, use original process_batch
     # sample counter based on batch request # instead of batched token #.
     #  def process_batch(self, inp):
