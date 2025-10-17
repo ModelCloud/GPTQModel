@@ -202,6 +202,10 @@ def ModelLoader(cls):
         cls.before_model_load(cls, load_quantized_model=False)
         from ..utils.hf import build_shell_model
 
+        # XIELUActivation will use some weights when activation init, so can't use init_empty_weights
+        if hasattr(config, "hidden_act") and config.hidden_act == "xielu":
+            quantize_config.offload_to_disk = False
+
         if quantize_config.offload_to_disk:
             model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
             model._model_init_kwargs = model_init_kwargs
