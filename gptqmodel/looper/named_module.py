@@ -189,12 +189,22 @@ class NamedModule(torch.nn.Module):
 
         host_map: Dict[str, torch.Tensor] = {}
 
-        for name, tensor in filtered.items():
-            src = tensor.detach()
-            host = host_pool.acquire(src.shape, src.dtype, src.layout)
-            host.copy_(src, non_blocking=False)
-            host_map[name] = host
+        copy_device = first.device
+        compute_stream = torch.cuda.current_stream(device=copy_device)
+        copy_stream = torch.cuda.Stream(device=copy_device)
+        done_event = torch.cuda.Event(enable_timing=False, blocking=False)
+
+        with torch.cuda.stream(copy_stream):
+            copy_stream.wait_stream(compute_stream)
+            for name, tensor in filtered.items():
+                src = tensor.detach()
+                host = host_pool.acquire(src.shape, src.dtype, src.layout)
+                host.copy_(src, non_blocking=True)
+                host_map[name] = host
+        done_event.record(copy_stream)
 
         with self._state_lock:
+            events = self.state.setdefault("streaming_events", [])
+            events.append({"event": done_event, "stream": copy_stream})
             store_callback(host_map)
         return host_map
