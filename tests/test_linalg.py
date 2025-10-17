@@ -15,8 +15,6 @@ import torch  # noqa: E402
 from logbar import LogBar  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
-from gptqmodel.utils.safe import TORCH_LINALG  # noqa: E402
-
 
 log = LogBar.shared()
 
@@ -35,7 +33,7 @@ class Test(unittest.TestCase):
     )
     def test_linalg_eigh(self, dtype: torch.dtype, size: int):
         matrix = torch.randn([size, size], device=ROCM, dtype=dtype)
-        TORCH_LINALG.eigh(matrix)
+        torch.linalg.eigh(matrix)
 
     @parameterized.expand(
         [
@@ -51,6 +49,6 @@ class Test(unittest.TestCase):
         torch.backends.cuda.preferred_linalg_library(backend="magma")
 
         matrix = torch.randn([size, size], device=ROCM, dtype=dtype)
-        TORCH_LINALG.eigh(matrix)
+        torch.linalg.eigh(matrix)
 
         torch.backends.cuda.preferred_linalg_library(backend=original_backend)

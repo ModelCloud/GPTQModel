@@ -11,7 +11,6 @@ from transformers import PreTrainedModel
 
 from ...utils.logger import setup_logger
 from ...utils.model import get_module_by_name_prefix
-from ...utils.safe import TORCH_LINALG
 from ...utils.torch import torch_empty_cache
 from .hadamard_utils import apply_exact_had_to_linear, random_hadamard_matrix
 
@@ -91,7 +90,7 @@ def random_orthogonal_matrix(size, device):
     """
     torch.cuda.empty_cache()
     random_matrix = torch.randn(size, size, dtype=torch.float64).to(device)
-    q, r = TORCH_LINALG.qr(random_matrix)
+    q, r = torch.linalg.qr(random_matrix)
     q *= torch.sign(torch.diag(r)).unsqueeze(0)
     return q
 

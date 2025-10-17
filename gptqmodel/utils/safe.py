@@ -14,7 +14,6 @@ from functools import wraps
 from types import ModuleType
 
 import threadpoolctl as _threadpoolctl
-import torch
 
 
 class ThreadSafe(ModuleType):
@@ -96,14 +95,10 @@ class _ThreadSafeProxy:
     def __repr__(self):
         return repr(self._value)
 
-
-
-TORCH_LINALG = ThreadSafe(torch.linalg)
 THREADPOOLCTL = ThreadSafe(_threadpoolctl)
 GC = ThreadSafe(gc)
 __all__ = [
     "ThreadSafe",
-    "TORCH_LINALG",
     "THREADPOOLCTL",
     "GC",
 ]

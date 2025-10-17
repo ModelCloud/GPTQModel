@@ -10,11 +10,18 @@ from .utils.env import env_flag
 
 DEBUG_ON = env_flag("DEBUG")
 
+from .utils.linalg_warmup import run_torch_linalg_warmup
 from .utils.threadx import DeviceThreadPool
 
 
 DEVICE_THREAD_POOL = DeviceThreadPool(
     inference_mode=True,
+    warmups={
+        "cuda": run_torch_linalg_warmup,
+        "xpu": run_torch_linalg_warmup,
+        "mps": run_torch_linalg_warmup,
+        "cpu": run_torch_linalg_warmup,
+    },
     workers={
         "cuda:per": 4,
         "xpu:per": 1,
