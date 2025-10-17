@@ -471,25 +471,30 @@ class GPTQ:
 
             total_samples = sum(self._device_sample_counts.values())
 
+            # Reuse the existing tensor when possible to avoid an extra allocation,
+            # but always accumulate in float64 for deterministic ordering across devices.
             reuse_buffer = (
                 self.H is not None
                 and self.H.shape == (self.columns, self.columns)
-                and self.H.dtype == torch.float32
                 and self.H.device == device
             )
 
-            if reuse_buffer:
-                result = self.H
-                result.zero_()
+            result_fp64: torch.Tensor
+            # Accumulating in float64 eliminates device-order drift at the cost of
+            # temporarily holding an FP64 buffer. The extra footprint is roughly
+            # columns^2 * 4 bytes; for an 8,192-column Llama MLP this is ~268 MB.
+            if reuse_buffer and self.H.dtype == torch.float64:
+                result_fp64 = self.H
+                result_fp64.zero_()
             else:
-                result = torch.zeros(
+                result_fp64 = torch.zeros(
                     (self.columns, self.columns),
-                    dtype=torch.float32,
+                    dtype=torch.float64,
                     device=device,
                 )
 
             if total_samples == 0:
-                self.H = result
+                self.H = result_fp64.to(dtype=torch.float32)
                 self.nsamples = 0
                 self._hessian_dirty = False
                 self._final_hessian_device_hint = device
@@ -498,21 +503,23 @@ class GPTQ:
                 return
 
             for partial_device, partial in self._device_hessian_partials.items():
-                if partial.device != result.device:
-                    tmp = partial.to(result.device)
-                    result.add_(tmp)
+                if partial.device != result_fp64.device or partial.dtype != torch.float64:
+                    tmp = partial.to(device=result_fp64.device, dtype=torch.float64)
+                    result_fp64.add_(tmp)
                     del tmp
                 else:
-                    result.add_(partial)
+                    result_fp64.add_(partial)
 
-            result.mul_(2.0 / float(total_samples))
+            result_fp64.mul_(2.0 / float(total_samples))
 
-            self.H = result
+            result_fp32 = result_fp64.to(dtype=torch.float32)
+            self.H = result_fp32
             self.nsamples = total_samples
             self._hessian_dirty = False
-            self._final_hessian_device_hint = result.device
+            self._final_hessian_device_hint = result_fp32.device
             self._device_hessian_partials.clear()
             self._device_sample_counts.clear()
+            del result_fp64
 
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
         self._materialize_global_hessian(target_device=target_device)
