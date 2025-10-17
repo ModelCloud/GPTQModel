@@ -232,7 +232,7 @@ class TestMultiVsSingleGPU(ModelTest):
                         },
                     )
                     info["batches"] += 1.0
-                    info["samples"] += item["after"] - item["before"]
+                    info["samples"] += item.get("tokens", 0.0)
                     info["sum_hash"] += item["sum"]
                     info["primary"] = info["primary"] or bool(item.get("is_primary", False))
                 summary[name] = dict(sorted(per_handle.items(), key=lambda kv: kv[0]))
@@ -259,7 +259,6 @@ class TestMultiVsSingleGPU(ModelTest):
 
         def wrapped_add_batch(self, inp, out, batch_index=None):  # type: ignore[override]
             module_name = getattr(self, "name", "<unknown>")
-            before = getattr(self, "nsamples", 0)
             # Summaries calculated before running original implementation
             try:
                 sum_value = inp.detach().to(dtype=torch.float64).sum().item()
@@ -267,13 +266,13 @@ class TestMultiVsSingleGPU(ModelTest):
                 sum_value = float("nan")
             device = str(getattr(inp, "device", "unknown"))
 
+            token_count = float(inp.numel() // max(inp.shape[-1], 1))
+
             original_add_batch(self, inp, out, batch_index=batch_index)
 
-            after = getattr(self, "nsamples", 0)
             storage.setdefault(module_name, []).append(
                 {
-                    "before": float(before),
-                    "after": float(after),
+                    "tokens": token_count,
                     "sum": float(sum_value),
                     "handle": hex(id(self)),
                     "device": device,
