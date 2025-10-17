@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import threading
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import transformers
@@ -16,7 +16,6 @@ from ..utils.logger import setup_logger
 log = setup_logger()
 
 class NamedModule(torch.nn.Module):
-    _lock = threading.Lock()
 
     def __init__(self, module: torch.nn.Module, name: str, full_name:str, layer_index: int) -> None:
         super().__init__()
@@ -30,6 +29,7 @@ class NamedModule(torch.nn.Module):
         # persistent work state for named module (used by some LoopProcessors)
         # store all `processed()` work state/data/result here
         self.state = {}
+        self._state_lock = threading.RLock()
 
         # print(f"NamedModule init: name: `{name}, full-name: `{full_name}`")
 
@@ -72,34 +72,26 @@ class NamedModule(torch.nn.Module):
     def register_buffer(
         self, name: str, tensor: Optional[Tensor], persistent: bool = True
     ) -> None:
-        with self._lock:
+        with self._state_lock:
             return self.module.register_buffer(name, tensor, persistent)
 
     def unregister_buffer(self, name: str):
-        with self._lock:
+        with self._state_lock:
             if name in self.module._buffers:
                 del self.module._buffers[name]
                 if hasattr(self.module, name):
                     delattr(self.module, name)
-                # else:
-                #    log.debug(f"{self.full_name} has no attribute: {name}")
-            # else:
-            #    log.debug(f"{self.full_name} has no buffer: {name}")
 
     def register_parameter(self, name: str, param: Optional[Parameter]) -> None:
-        with self._lock:
+        with self._state_lock:
             return self.module.register_parameter(name, param)
 
     def unregister_parameter(self, name: str) -> None:
-        with self._lock:
+        with self._state_lock:
             if name in self.module._parameters:
                 del self.module._parameters[name]
                 if hasattr(self.module, name):
                     delattr(self.module, name)
-                # else:
-                #    log.debug(f"{self.full_name} has no attribute: {name}")
-            # else:
-            #    log.debug(f"{self.full_name} has no parameter: {name}")
     # return stats for mo
     # def stats(self) -> Dict[str, float]:
     #     # -1 means no stats have yet to gathered for the stat property
@@ -112,13 +104,103 @@ class NamedModule(torch.nn.Module):
 
     # getattr is only called if python cannot find attr for `self`
     def __getattr__(self, name: str):
-        with self._lock:
+        with self._state_lock:
             return getattr(self.module, name)
 
     # setattr is always called by python even if attr exists in `self`
     def __setattr__(self, name: str, value: Any) -> None:
-        with self._lock:
-            if name in ["module", "module_dtype", "name", "full_name", "layer_index", "state", "target_device", "register_buffer", "unregister_buffer", "register_parameter", "unregister_parameter"]:
-                self.__dict__[name] = value
-            else:
-                self.module.__dict__[name] = value
+        if name in [
+            "module",
+            "module_dtype",
+            "name",
+            "full_name",
+            "layer_index",
+            "state",
+            "target_device",
+            "register_buffer",
+            "unregister_buffer",
+            "register_parameter",
+            "unregister_parameter",
+            "_state_lock",
+        ]:
+            object.__setattr__(self, name, value)
+            return
+
+        with self._state_lock:
+            setattr(self.module, name, value)
+
+    def stream_state_payload_to_cpu(
+        self,
+        tensors: Dict[str, torch.Tensor],
+        *,
+        host_pool,
+    ) -> Dict[str, torch.Tensor]:
+        return self._stream_tensor_dict(
+            tensors,
+            host_pool=host_pool,
+            store_callback=lambda host_map: self.state.update(host_map),
+        )
+
+    def stream_parameters_to_cpu(self, *, host_pool) -> Dict[str, torch.Tensor]:
+        tensor_map = {name: param for name, param in self.module.named_parameters(recurse=False)}
+        return self._stream_tensor_dict(
+            tensor_map,
+            host_pool=host_pool,
+            store_callback=lambda host_map: self.state.setdefault("parameters_cpu", {}).update(host_map),
+        )
+
+    def stream_buffers_to_cpu(self, *, host_pool) -> Dict[str, torch.Tensor]:
+        tensor_map = {name: buf for name, buf in self.module.named_buffers(recurse=False)}
+        return self._stream_tensor_dict(
+            tensor_map,
+            host_pool=host_pool,
+            store_callback=lambda host_map: self.state.setdefault("buffers_cpu", {}).update(host_map),
+        )
+
+    def stream_all_to_cpu(self, *, host_pool) -> Dict[str, Dict[str, torch.Tensor]]:
+        params = self.stream_parameters_to_cpu(host_pool=host_pool)
+        buffers = self.stream_buffers_to_cpu(host_pool=host_pool)
+        return {"parameters": params, "buffers": buffers}
+
+    def stream_sync(self) -> None:
+        with self._state_lock:
+            pending = self.state.pop("streaming_events", [])
+        for entry in pending:
+            entry["event"].synchronize()
+
+    def _stream_tensor_dict(
+        self,
+        tensors: Dict[str, torch.Tensor],
+        *,
+        host_pool,
+        store_callback,
+    ) -> Dict[str, torch.Tensor]:
+        filtered = {name: tensor for name, tensor in tensors.items() if isinstance(tensor, torch.Tensor)}
+        if not filtered:
+            return {}
+
+        first = next(iter(filtered.values()))
+
+        if first.device.type != "cuda" or not torch.cuda.is_available():
+            host_map = {name: tensor.detach().to("cpu") for name, tensor in filtered.items()}
+            with self._state_lock:
+                store_callback(host_map)
+            return host_map
+
+        stream = torch.cuda.Stream(device=first.device)
+        done_event = torch.cuda.Event(enable_timing=False)
+        host_map: Dict[str, torch.Tensor] = {}
+
+        with torch.cuda.stream(stream):
+            for name, tensor in filtered.items():
+                src = tensor.detach()
+                host = host_pool.acquire(src.shape, src.dtype, src.layout)
+                host.copy_(src, non_blocking=True)
+                host_map[name] = host
+        done_event.record(stream)
+
+        with self._state_lock:
+            events = self.state.setdefault("streaming_events", [])
+            events.append({"event": done_event, "stream": stream})
+            store_callback(host_map)
+        return host_map
