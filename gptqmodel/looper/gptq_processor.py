@@ -24,10 +24,23 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.device import get_device
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
-from ..utils.torch import HAS_CUDA, tf32_disable_guard, torch_streamCtx, torch_sync
+from ..utils.torch import tf32_disable_guard
 
 log = setup_logger()
 lock = threading.Lock()
+
+
+class _PinnedHostPool:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def acquire(self, shape: torch.Size, dtype: torch.dtype, layout: torch.layout) -> torch.Tensor:
+        return torch.empty(shape, dtype=dtype, layout=layout, device="cpu", pin_memory=True)
+
+    def release(self, tensor: torch.Tensor) -> None:
+        # No pooling to avoid cross-thread pinned storage reuse issues.
+        return None
+
 
 class GPTQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration, prepare_dataset_func,
@@ -42,6 +55,7 @@ class GPTQProcessor(LoopProcessor):
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
+        self._host_pool = _PinnedHostPool()
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
@@ -162,15 +176,17 @@ class GPTQProcessor(LoopProcessor):
         with tf32_disable_guard():
             wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 
-        q_scales = q_scales.to(CPU)
-        q_zeros = q_zeros.to(CPU)
-        q_g_idx = q_g_idx.to(CPU)
+        module.stream_state_payload_to_cpu(
+            {
+                "q_scales": q_scales,
+                "q_zeros": q_zeros,
+                "q_g_idx": q_g_idx,
+            },
+            host_pool=self._host_pool,
+        )
+        del q_scales, q_zeros, q_g_idx
 
         with self.lock:
-            module.state.update({"q_scales": q_scales})
-            module.state.update({"q_zeros": q_zeros})
-            module.state.update({"q_g_idx": q_g_idx})
-
             self.durations.append(duration)
             self.avg_losses.append(avg_loss)
             self.module_names.append(f"layer-{module.layer_index}-{module.name}")
@@ -248,6 +264,7 @@ class GPTQProcessor(LoopProcessor):
         # module.weight.data = move_to(module.state.pop("wq"), device=CPU) # large weights is slow to init on cpu
 
         # cleanup all memory or states vars persistently added by this processor
+        module.stream_sync()
         with (self.lock):
             # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
             if self.calculate_w_wq_diff:
@@ -256,9 +273,10 @@ class GPTQProcessor(LoopProcessor):
             module.state.pop("w", None) #
             module.state.pop("w_wq_diff", None)
 
-            q_zeros = module.state.pop("q_zeros")
-            q_scales = module.state.pop("q_scales")
-            q_g_idx = module.state.pop("q_g_idx")
+            # need to clone to due to steamed pinned memory and access on diff thread
+            q_zeros = module.state.pop("q_zeros").clone()
+            q_scales = module.state.pop("q_scales").clone()
+            q_g_idx = module.state.pop("q_g_idx").clone()
 
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
@@ -332,6 +350,7 @@ class GPTQProcessor(LoopProcessor):
         with self.lock:
             self.result_pop(module.full_name)
 
+        self._release_host_buffers(q_scales, q_zeros, q_g_idx)
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
@@ -354,3 +373,8 @@ class GPTQProcessor(LoopProcessor):
         # TODO fix me..this hacks inherited base class logic, why not override name in gptqv2?
         qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
         return "gptq v2" if qcfg.v2 else "gptq"
+
+    def _release_host_buffers(self, *tensors: torch.Tensor) -> None:
+        for tensor in tensors:
+            if isinstance(tensor, torch.Tensor):
+                self._host_pool.release(tensor)
