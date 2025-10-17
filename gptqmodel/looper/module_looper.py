@@ -48,7 +48,7 @@ from ..utils.looper_helpers import (
 )
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.offload import offload_to_disk
-from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync)
+from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
 from .. import DEVICE_THREAD_POOL
 from .awq_processor import AWQProcessor
 from .qqq_processor import QQQProcessor
@@ -899,8 +899,12 @@ class ModuleLooper():
 
         return result
 
-    @torch.inference_mode()
     def loop(self, fail_safe: bool = False, **kwargs):
+        with tf32_high_precision_guard():
+            return self._loop_impl(fail_safe=fail_safe, **kwargs)
+
+    @torch.inference_mode()
+    def _loop_impl(self, fail_safe: bool = False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
                 tied_keys = self.gptq_model.model._tied_weights_keys
