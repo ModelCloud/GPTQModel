@@ -10,7 +10,6 @@ import transformers
 from torch import nn
 
 from ..utils.logger import setup_logger
-from ..utils.torch import tf32_enable_guard
 
 
 log = setup_logger()
@@ -42,8 +41,7 @@ class HookedConv1D(transformers.Conv1D):
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = input.to(device=self.weight.data.device)
-        with tf32_enable_guard():
-            output = super().forward(input)
+        output = super().forward(input)
 
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
@@ -101,8 +99,7 @@ class HookedConv1d(torch.nn.Conv1d):
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = input.to(device=self.weight.data.device)
-        with tf32_enable_guard():
-            output = super().forward(input)
+        output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
@@ -160,8 +157,7 @@ class HookedConv2d(torch.nn.Conv2d):
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = input.to(device=self.weight.data.device)
-        with tf32_enable_guard():
-            output = super().forward(input)
+        output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
@@ -187,8 +183,7 @@ class HookedTransformerConv1D(transformers.Conv1D):
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = input.to(device=self.weight.data.device)
-        with tf32_enable_guard():
-            output = super().forward(input)
+        output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
@@ -215,8 +210,7 @@ class HookedLinear(torch.nn.Linear):
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input = input.to(device=self.weight.data.device)
-        with tf32_enable_guard():
-            output = super().forward(input)
+        output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:

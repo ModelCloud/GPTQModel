@@ -132,6 +132,7 @@ def _restore_tf32_state(state) -> None:
     torch.backends.cuda.matmul.allow_tf32 = state[0]
     torch.backends.cudnn.allow_tf32 = state[1]
 
+
 def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="inductor", mode: str = None, fullgraph=False):
     # requires torch >2.8 for proper torch.compile + Python 3.13.3t (freethreading)
     if has_gil_disabled() and not gte_python_3_13_3():
@@ -331,32 +332,13 @@ def torch_streamCtx(stream: Union[torch.cuda.Stream, torch.xpu.Stream]) -> Strea
 
 
 @contextmanager
-def tf32_enable_guard():
+def tf32_high_precision_guard():
     if not HAS_CUDA:
         yield
         return
 
-    if BACKENDS_HAS_FP32_PRECISION:
-        if torch.backends.fp32_precision == "tf32":
-            yield
-            return
-
-        previous_state = _snapshot_tf32_state()
-        _set_tf32_state(True)
-
-        try:
-            yield
-        finally:
-            _restore_tf32_state(previous_state)
-        return
-
     previous_state = _snapshot_tf32_state()
-    if previous_state[0] and previous_state[1]:
-        yield
-        return
-
-    _set_tf32_state(True)
-
+    _set_tf32_state(False)
     try:
         yield
     finally:
@@ -369,27 +351,22 @@ def tf32_disable_guard():
         yield
         return
 
-    if BACKENDS_HAS_FP32_PRECISION:
-        if torch.backends.fp32_precision == "ieee":
-            yield
-            return
-
-        previous_state = _snapshot_tf32_state()
-        _set_tf32_state(False)
-
-        try:
-            yield
-        finally:
-            _restore_tf32_state(previous_state)
-        return
-
     previous_state = _snapshot_tf32_state()
-    if not previous_state[0] and not previous_state[1]:
+    _set_tf32_state(False)
+    try:
+        yield
+    finally:
+        _restore_tf32_state(previous_state)
+
+
+@contextmanager
+def tf32_enable_guard():
+    if not HAS_CUDA:
         yield
         return
 
-    _set_tf32_state(False)
-
+    previous_state = _snapshot_tf32_state()
+    _set_tf32_state(True)
     try:
         yield
     finally:

@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from ..base import BaseQModel
 from ...quantization import METHOD
+from ..base import BaseQModel
 
 
 class Qwen3MoeQModel(BaseQModel):

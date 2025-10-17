@@ -97,8 +97,7 @@ class QQQProcessor(LoopProcessor):
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             # gptq is mutable.
             q = self.tasks[name]  # noqa: F821
-            with tf32_disable_guard():
-                q.add_batch(inp[0].data, out.data)  # noqa: F821
+            q.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
 
     def process(self, module: NamedModule):
@@ -108,8 +107,7 @@ class QQQProcessor(LoopProcessor):
         # logger.info(f"Quantizing module START: {name}, {gptq[name].shape()}")
         ## Need to return the quantized_weight for offloading
         q = qqq[module.name]
-        with tf32_disable_guard():
-            wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, q_scales_extra, nsamples = q.quantize()
+        wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, q_scales_extra, nsamples = q.quantize()
 
         q_scales = q_scales.to(CPU)
         q_zeros = q_zeros.to(CPU)

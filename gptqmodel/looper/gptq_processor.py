@@ -113,8 +113,7 @@ class GPTQProcessor(LoopProcessor):
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             g = self.tasks[name]  # noqa: F821
             batch_idx = self.current_batch_index()
-            with tf32_disable_guard():
-                g.add_batch(inp[0].data, out.data, batch_index=batch_idx)  # noqa: F821
+            g.add_batch(inp[0].data, out.data, batch_index=batch_idx)  # noqa: F821
             del inp, out
         return tmp
 
@@ -173,8 +172,7 @@ class GPTQProcessor(LoopProcessor):
                     f"while processing '{module.full_name}'."
                 )
 
-        with tf32_disable_guard():
-            wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 
         module.stream_state_payload_to_cpu(
             {

@@ -67,49 +67,80 @@ class TestMultiVsSingleGPU(ModelTest):
             self.skipTest("Requires at least two CUDA devices")
 
         if sys.version_info < (3, 13):
-            self.skipTest("Requires Python 3.13 free-threaded runtime")
+            self.skipTest("Requires Python 3.13 runtime for multi-GPU regression test")
 
-        if not _is_free_threaded():
-            self.skipTest("PYTHON_GIL must be disabled (set PYTHON_GIL=0) for multi-threaded quantization")
+        primary_idx, secondary_idx = self._select_preferred_devices(visible_devices)
 
-        single_layer_metrics, single_batch_stats = self._quantize_first_layer(device_indices=[0])
-        multi_layer_metrics, multi_batch_stats = self._quantize_first_layer(device_indices=[0, 1])
+        single_layer_metrics, single_batch_stats = self._quantize_layers(
+            device_indices=[primary_idx],
+            max_layer_index=1,
+        )
+        multi_layer_metrics, multi_batch_stats = self._quantize_layers(
+            device_indices=[primary_idx, secondary_idx],
+            max_layer_index=1,
+        )
 
-        self.assertTrue(single_layer_metrics, "Single-GPU quantization produced no layer-0 metrics")
-        self.assertTrue(multi_layer_metrics, "Multi-GPU quantization produced no layer-0 metrics")
+        self.assertTrue(single_layer_metrics, "Single-GPU quantization produced no layer metrics")
+        self.assertTrue(multi_layer_metrics, "Multi-GPU quantization produced no layer metrics")
         self.assertEqual(
             set(single_layer_metrics.keys()),
             set(multi_layer_metrics.keys()),
-            "Layer-0 module set differs between single-GPU and multi-GPU quantization",
+            "Layer set differs between single-GPU and multi-GPU quantization",
         )
 
-        mismatches: Dict[str, Dict[str, str]] = {}
-        for module_name in single_layer_metrics:
-            single = single_layer_metrics[module_name]
-            multi = multi_layer_metrics[module_name]
-            if single.samples != multi.samples or single.loss != multi.loss:
-                mismatches[module_name] = {
-                    "single_samples": str(single.samples),
-                    "multi_samples": str(multi.samples),
-                    "single_loss": str(single.loss),
-                    "multi_loss": str(multi.loss),
-                }
+        print("[multi-vs-single] layer metrics summary:")
+        for layer_idx in sorted(single_layer_metrics):
+            single_layer = single_layer_metrics[layer_idx]
+            multi_layer = multi_layer_metrics[layer_idx]
+            print(f"  layer={layer_idx}")
+            for module_name in sorted(single_layer):
+                single_val = single_layer[module_name]
+                multi_val = multi_layer[module_name]
+                print(
+                    f"    {module_name}: "
+                    f"single_loss={single_val.loss} multi_loss={multi_val.loss} "
+                    f"single_samples={single_val.samples} multi_samples={multi_val.samples}"
+                )
+
+        mismatches: Dict[Tuple[int, str], Dict[str, str]] = {}
+        for layer_idx in single_layer_metrics:
+            single_layer = single_layer_metrics[layer_idx]
+            multi_layer = multi_layer_metrics[layer_idx]
+            self.assertEqual(
+                set(single_layer.keys()),
+                set(multi_layer.keys()),
+                f"Layer-{layer_idx} module set differs between single-GPU and multi-GPU quantization",
+            )
+
+            for module_name in single_layer:
+                single = single_layer[module_name]
+                multi = multi_layer[module_name]
+                if single.samples != multi.samples or single.loss != multi.loss:
+                    mismatches[(layer_idx, module_name)] = {
+                        "single_samples": str(single.samples),
+                        "multi_samples": str(multi.samples),
+                        "single_loss": str(single.loss),
+                        "multi_loss": str(multi.loss),
+                    }
 
         if mismatches:
             debug_details = self._format_batch_debug(single_batch_stats, multi_batch_stats)
             details = "; ".join(
-                f"{module}: loss {info['single_loss']} vs {info['multi_loss']}, "
+                f"layer {layer}: {module}: loss {info['single_loss']} vs {info['multi_loss']}, "
                 f"samples {info['single_samples']} vs {info['multi_samples']}"
-                for module, info in mismatches.items()
+                for (layer, module), info in mismatches.items()
             )
             self.fail(
-                "Layer-0 quantization metrics diverged between device configurations: "
+                "Quantization metrics diverged between device configurations: "
                 f"{details}; batch-debug: {debug_details}"
             )
 
-    def _quantize_first_layer(
-        self, device_indices: Iterable[int]
-    ) -> Tuple[Dict[str, LayerMetrics], Dict[str, List[Dict[str, float]]]]:
+    def _quantize_layers(
+        self,
+        *,
+        device_indices: Iterable[int],
+        max_layer_index: int,
+    ) -> Tuple[Dict[int, Dict[str, LayerMetrics]], Dict[str, List[Dict[str, float]]]]:
         target_devices = [torch.device(f"cuda:{idx}") for idx in device_indices]
         def selection(_base_device):
             return target_devices
@@ -122,7 +153,7 @@ class TestMultiVsSingleGPU(ModelTest):
             def layer_complete(self, *, layer_idx: int, submodule_finalized: bool):
                 if self._triggered:
                     return None
-                if submodule_finalized and layer_idx >= self._layer_idx:
+                if layer_idx > self._layer_idx or (submodule_finalized and layer_idx >= self._layer_idx):
                     self._triggered = True
                     raise StopMainLoop
 
@@ -138,6 +169,7 @@ class TestMultiVsSingleGPU(ModelTest):
             v2=self.V2,
             adapter=self.EORA,
             device=target_devices[0],
+            mock_quantization=True,
         )
 
         load_kwargs = {}
@@ -154,7 +186,7 @@ class TestMultiVsSingleGPU(ModelTest):
         )
 
         dataset = self.load_dataset(model.tokenizer, self.DATASET_SIZE)
-        model.layer_callback = _StopAfterLayer(layer_idx=0)
+        model.layer_callback = _StopAfterLayer(layer_idx=max_layer_index)
 
         batch_debug: Dict[str, List[Dict[str, float]]] = {}
         primary_handles: Dict[str, str] = {}
@@ -175,24 +207,47 @@ class TestMultiVsSingleGPU(ModelTest):
                 batch_size=self.QUANT_BATCH_SIZE,
             )
 
-        first_layer_stats = self._extract_first_layer_metrics(model.quant_log)
+        layer_stats = self._extract_layer_metrics(
+            model.quant_log,
+            max_layer_index=max_layer_index,
+        )
 
         # Clear GPU memory before the next run
         del dataset
         del model
         torch_empty_cache()
 
-        return first_layer_stats, batch_debug
+        return layer_stats, batch_debug
 
-    def _extract_first_layer_metrics(self, quant_log: List[Dict[str, str]]) -> Dict[str, LayerMetrics]:
-        layer_metrics: Dict[str, LayerMetrics] = {}
+    @staticmethod
+    def _select_preferred_devices(visible_devices: int) -> Tuple[int, int]:
+        primary = 6 if visible_devices > 6 else 0
+        secondary_preferences = [7, 1, 0]
+        secondary = None
+        for candidate in secondary_preferences:
+            if candidate >= visible_devices:
+                continue
+            if candidate == primary:
+                continue
+            secondary = candidate
+            break
+        if secondary is None:
+            raise RuntimeError("Could not determine a secondary CUDA device for regression test")
+        return primary, secondary
+
+    def _extract_layer_metrics(
+        self,
+        quant_log: List[Dict[str, str]],
+        *,
+        max_layer_index: int,
+    ) -> Dict[int, Dict[str, LayerMetrics]]:
+        layer_metrics: Dict[int, Dict[str, LayerMetrics]] = {}
         for entry in quant_log:
             try:
                 layer_index = int(entry.get(PROCESS_LOG_LAYER))
             except (TypeError, ValueError):
                 continue
-
-            if layer_index != 0:
+            if layer_index < 0 or layer_index > max_layer_index:
                 continue
 
             module_name = entry.get(PROCESS_LOG_MODULE)
@@ -204,7 +259,8 @@ class TestMultiVsSingleGPU(ModelTest):
             if loss_value is None or sample_value is None:
                 continue
 
-            layer_metrics[module_name] = LayerMetrics(
+            per_layer = layer_metrics.setdefault(layer_index, {})
+            per_layer[module_name] = LayerMetrics(
                 loss=Decimal(loss_value),
                 samples=int(sample_value),
             )
@@ -232,7 +288,7 @@ class TestMultiVsSingleGPU(ModelTest):
                         },
                     )
                     info["batches"] += 1.0
-                    info["samples"] += item["after"] - item["before"]
+                    info["samples"] += item.get("tokens", 0.0)
                     info["sum_hash"] += item["sum"]
                     info["primary"] = info["primary"] or bool(item.get("is_primary", False))
                 summary[name] = dict(sorted(per_handle.items(), key=lambda kv: kv[0]))
@@ -259,7 +315,6 @@ class TestMultiVsSingleGPU(ModelTest):
 
         def wrapped_add_batch(self, inp, out, batch_index=None):  # type: ignore[override]
             module_name = getattr(self, "name", "<unknown>")
-            before = getattr(self, "nsamples", 0)
             # Summaries calculated before running original implementation
             try:
                 sum_value = inp.detach().to(dtype=torch.float64).sum().item()
@@ -267,13 +322,13 @@ class TestMultiVsSingleGPU(ModelTest):
                 sum_value = float("nan")
             device = str(getattr(inp, "device", "unknown"))
 
+            token_count = float(inp.numel() // max(inp.shape[-1], 1))
+
             original_add_batch(self, inp, out, batch_index=batch_index)
 
-            after = getattr(self, "nsamples", 0)
             storage.setdefault(module_name, []).append(
                 {
-                    "before": float(before),
-                    "after": float(after),
+                    "tokens": token_count,
                     "sum": float(sum_value),
                     "handle": hex(id(self)),
                     "device": device,
