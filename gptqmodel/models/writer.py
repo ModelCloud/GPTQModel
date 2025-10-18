@@ -37,14 +37,12 @@ from ..quantization.config import (
     META_FIELD_V2_ENABLED,
     META_QUANTIZER_GPTQMODEL,
     META_VALUE_URI,
-    METHOD,
     MIN_VERSION_WITH_V2,
 )
 from ..utils.backend import BACKEND
 from ..utils.hf import sanitize_generation_config_file
 from ..utils.logger import setup_logger
 from ..utils.model import (
-    convert_gptq_v2_to_v1_format,
     copy_py_files,
     find_modules,
     get_model_files_size,

@@ -5,6 +5,14 @@
 
 import os
 
+
+# isort: off
+from .utils.nogil_patcher import patch_safetensors_save_file, patch_triton_autotuner  # noqa: E402
+# isort: on
+
+patch_safetensors_save_file()
+patch_triton_autotuner()
+
 from .utils.env import env_flag
 
 
