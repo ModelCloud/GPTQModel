@@ -10,26 +10,6 @@ import torch
 from gptqmodel.utils.stream import stream_sync, stream_tensor_dict_to_cpu
 
 
-class _CpuHostPool:
-    def __init__(self):
-        self.requests = []
-
-    def acquire(self, shape, dtype, layout):
-        self.requests.append((shape, dtype, layout))
-        return torch.empty(shape, dtype=dtype, layout=layout, device="cpu")
-
-    def release(self, tensor):
-        pass
-
-
-class _PinnedHostPool:
-    def acquire(self, shape, dtype, layout):
-        return torch.empty(shape, dtype=dtype, layout=layout, device="cpu", pin_memory=True)
-
-    def release(self, tensor):
-        pass
-
-
 def _wait_until(predicate, timeout_s: float = 5.0, interval_s: float = 0.01) -> bool:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -41,14 +21,12 @@ def _wait_until(predicate, timeout_s: float = 5.0, interval_s: float = 0.01) -> 
 
 def test_stream_tensor_dict_to_cpu_cpu_path():
     src = torch.randn(4, 4, dtype=torch.float32)
-    host_pool = _CpuHostPool()
     state: dict[str, object] = {}
     state_lock = threading.RLock()
     stored: dict[str, torch.Tensor] = {}
 
     result = stream_tensor_dict_to_cpu(
         {"payload": src},
-        host_pool=host_pool,
         store_callback=lambda items: stored.update(items),
         state=state,
         state_lock=state_lock,
@@ -57,7 +35,6 @@ def test_stream_tensor_dict_to_cpu_cpu_path():
     assert "payload" in result
     assert result["payload"].device.type == "cpu"
     torch.testing.assert_close(result["payload"], src)
-    assert not host_pool.requests, "CPU tensors should be copied without borrowing pinned host buffers"
 
     with state_lock:
         assert not state.get("streaming_events")
@@ -71,14 +48,12 @@ def test_stream_tensor_dict_to_cpu_cuda_background_release_preserves_events():
     torch.cuda.set_device(device)
 
     payload = {"tensor": torch.randn(16, 16, device=device, dtype=torch.float16)}
-    host_pool = _PinnedHostPool()
     state: dict[str, object] = {}
     state_lock = threading.RLock()
     stored: dict[str, torch.Tensor] = {}
 
     result = stream_tensor_dict_to_cpu(
         payload,
-        host_pool=host_pool,
         store_callback=lambda items: stored.update(items),
         state=state,
         state_lock=state_lock,
@@ -86,6 +61,7 @@ def test_stream_tensor_dict_to_cpu_cuda_background_release_preserves_events():
 
     with state_lock:
         assert "tensor" in stored and stored["tensor"] is result["tensor"]
+        assert result["tensor"].is_pinned()
         assert "streaming_event_map" in state
         assert "streaming_events" in state
         event_map = state["streaming_event_map"]

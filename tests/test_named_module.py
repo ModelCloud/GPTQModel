@@ -61,36 +61,27 @@ def test_named_module_streaming_apis():
         "tensor": torch.randn(8, 8, device=device, dtype=torch.float16),
     }
 
-    class _HostPool:
-        def acquire(self, shape, dtype, layout):
-            return torch.empty(shape, dtype=dtype, layout=layout, device="cpu", pin_memory=True)
-
-        def release(self, tensor):
-            pass
-
-    host_pool = _HostPool()
-
-    named.stream_state_payload_to_cpu(payload, host_pool=host_pool)
+    named.stream_state_payload_to_cpu(payload)
     assert "tensor" in named.state
     assert named.state["tensor"].is_pinned()
 
     named.stream_sync()
     torch.testing.assert_close(named.state["tensor"].cpu(), payload["tensor"].cpu())
 
-    params = named.stream_parameters_to_cpu(host_pool=host_pool)
+    params = named.stream_parameters_to_cpu()
     assert params
     named.stream_sync()
     param_lookup = {name: tensor.detach().cpu() for name, tensor in named.module.named_parameters(recurse=False)}
     for name, cpu_tensor in params.items():
         torch.testing.assert_close(cpu_tensor.cpu(), param_lookup[name])
 
-    buffers = named.stream_buffers_to_cpu(host_pool=host_pool)
+    buffers = named.stream_buffers_to_cpu()
     named.stream_sync()
     buffer_lookup = {name: tensor.detach().cpu() for name, tensor in named.module.named_buffers(recurse=False)}
     for name, cpu_tensor in buffers.items():
         torch.testing.assert_close(cpu_tensor.cpu(), buffer_lookup[name])
 
-    combined = named.stream_all_to_cpu(host_pool=host_pool)
+    combined = named.stream_all_to_cpu()
     named.stream_sync()
     assert set(combined.keys()) == {"parameters", "buffers"}
 
@@ -110,15 +101,7 @@ def test_named_module_streaming_subprocess_roundtrip():
 
         payload = {'x': torch.randn(4, 4, device='cuda', dtype=torch.float16)}
 
-        class _Pool:
-            def acquire(self, shape, dtype, layout):
-                return torch.empty(shape, dtype=dtype, layout=layout, device='cpu', pin_memory=True)
-
-            def release(self, tensor):
-                pass
-
-        pool = _Pool()
-        named.stream_state_payload_to_cpu(payload, host_pool=pool)
+        named.stream_state_payload_to_cpu(payload)
         named.stream_sync()
         torch.testing.assert_close(named.state['x'].cpu(), payload['x'].cpu(), atol=0, rtol=0)
         """
@@ -148,34 +131,10 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
     devices = [torch.device("cuda", idx) for idx in range(4)]
     bf16_bytes = torch.tensor([], dtype=torch.bfloat16).element_size()
 
-    class _PinnedHostPool:
-        def __init__(self):
-            self._lock = threading.Lock()
-            self._active = 0
-            self._max_active = 0
-
-        def acquire(self, shape, dtype, layout):
-            with self._lock:
-                self._active += 1
-                if self._active > self._max_active:
-                    self._max_active = self._active
-            return torch.empty(shape, dtype=dtype, layout=layout, device="cpu", pin_memory=True)
-
-        def release(self, tensor):
-            del tensor
-            with self._lock:
-                self._active -= 1
-
-        @property
-        def max_active(self):
-            with self._lock:
-                return self._max_active
-
     @dataclass(frozen=True)
     class _ModuleContext:
         named: NamedModule
         device: torch.device
-        host_pool: _PinnedHostPool
 
     @dataclass(frozen=True)
     class _ExpectedTensor:
@@ -186,7 +145,7 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
     for idx, device in enumerate(devices):
         layer = _make_linear(2048).to(device=device, dtype=torch.bfloat16)
         named = NamedModule(layer, name=f"stress_proj_{idx}", full_name=f"stress.layers.{idx}.proj", layer_index=idx)
-        module_contexts.append(_ModuleContext(named=named, device=device, host_pool=_PinnedHostPool()))
+        module_contexts.append(_ModuleContext(named=named, device=device))
 
     pending_jobs: queue.Queue = queue.Queue()
     stop_event = threading.Event()
@@ -253,7 +212,6 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
                 else:
                     retry_val = None
                     retry_sum = None
-                ctx.host_pool.release(host_tensor)
                 del host_tensor
                 with named._state_lock:
                     named.state.pop(key, None)
@@ -265,7 +223,6 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
                 )
                 stop_event.set()
                 return False
-            ctx.host_pool.release(host_tensor)
             del host_tensor
             with named._state_lock:
                 named.state.pop(key, None)
@@ -332,7 +289,7 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
         _update_largest_tensor(max(tensor_sizes))
         _record_stat("payloads_issued")
         _maybe_empty_cache(device, rng, probability=0.35)
-        ctx.named.stream_state_payload_to_cpu(payload, host_pool=ctx.host_pool)
+        ctx.named.stream_state_payload_to_cpu(payload)
         if rng.random() < 0.35:
             gc.collect()
             _record_stat("gc_collect_calls")
@@ -405,9 +362,6 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
             "largest_tensor_mb": stats["largest_tensor_mb"],
         }
 
-    pool_usage = ", ".join(
-        f"gpu{ctx.device.index}:max_pinned={ctx.host_pool.max_active}" for ctx in module_contexts
-    )
     print(
         f"NamedModule multi-thread stress summary: "
         f"payloads={summary['payloads_issued']}, pending={summary['pending_enqueues']}, "
@@ -415,5 +369,5 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
         f"verified_cross_thread={summary['verified_cross_thread']}, "
         f"empty_cache_calls={summary['empty_cache_calls']}, "
         f"gc_collect_calls={summary['gc_collect_calls']}, "
-        f"largest_tensor_mb={summary['largest_tensor_mb']}; pool_usage={pool_usage}"
+        f"largest_tensor_mb={summary['largest_tensor_mb']}"
     )

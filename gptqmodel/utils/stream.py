@@ -143,7 +143,7 @@ def _schedule_ticket(
 ) -> None:
     queue_key = _queue_key_for_device(ticket.device)
     try:
-        future = STREAM_DEVICE_POOL.submit_serial(
+        future = STREAM_DEVICE_POOL.submit(
             queue_key,
             _wait_and_release_ticket,
             ticket,
@@ -160,7 +160,6 @@ def _schedule_ticket(
 def stream_tensor_dict_to_cpu(
     tensors: Dict[str, torch.Tensor],
     *,
-    host_pool: Any,
     store_callback: Callable[[Dict[str, torch.Tensor]], None],
     state: Dict[str, Any],
     state_lock: threading.RLock,
@@ -191,7 +190,13 @@ def stream_tensor_dict_to_cpu(
             src = tensor.detach()
             src.record_stream(copy_stream)
             pending_sources.append(src)
-            host = host_pool.acquire(src.shape, src.dtype, src.layout)
+            host = torch.empty(
+                src.shape,
+                dtype=src.dtype,
+                layout=src.layout,
+                device="cpu",
+                pin_memory=True,
+            )
             host.copy_(src, non_blocking=True)
             host_map[name] = host
     done_event.record(copy_stream)

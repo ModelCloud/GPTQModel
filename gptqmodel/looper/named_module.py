@@ -135,40 +135,35 @@ class NamedModule(torch.nn.Module):
     def stream_state_payload_to_cpu(
         self,
         tensors: Dict[str, torch.Tensor],
-        *,
-        host_pool,
     ) -> Dict[str, torch.Tensor]:
         return stream_tensor_dict_to_cpu(
             tensors,
-            host_pool=host_pool,
             store_callback=lambda host_map: self.state.update(host_map),
             state=self.state,
             state_lock=self._state_lock,
         )
 
-    def stream_parameters_to_cpu(self, *, host_pool) -> Dict[str, torch.Tensor]:
+    def stream_parameters_to_cpu(self) -> Dict[str, torch.Tensor]:
         tensor_map = {name: param for name, param in self.module.named_parameters(recurse=False)}
         return stream_tensor_dict_to_cpu(
             tensor_map,
-            host_pool=host_pool,
             store_callback=lambda host_map: self.state.setdefault("parameters_cpu", {}).update(host_map),
             state=self.state,
             state_lock=self._state_lock,
         )
 
-    def stream_buffers_to_cpu(self, *, host_pool) -> Dict[str, torch.Tensor]:
+    def stream_buffers_to_cpu(self) -> Dict[str, torch.Tensor]:
         tensor_map = {name: buf for name, buf in self.module.named_buffers(recurse=False)}
         return stream_tensor_dict_to_cpu(
             tensor_map,
-            host_pool=host_pool,
             store_callback=lambda host_map: self.state.setdefault("buffers_cpu", {}).update(host_map),
             state=self.state,
             state_lock=self._state_lock,
         )
 
-    def stream_all_to_cpu(self, *, host_pool) -> Dict[str, Dict[str, torch.Tensor]]:
-        params = self.stream_parameters_to_cpu(host_pool=host_pool)
-        buffers = self.stream_buffers_to_cpu(host_pool=host_pool)
+    def stream_all_to_cpu(self) -> Dict[str, Dict[str, torch.Tensor]]:
+        params = self.stream_parameters_to_cpu()
+        buffers = self.stream_buffers_to_cpu()
         return {"parameters": params, "buffers": buffers}
 
     def stream_sync(self) -> None:
