@@ -1,8 +1,8 @@
 accelerate>=1.10.1
 numpy==2.2.6
-torch>=2.8.0
+torch>=2.9.0
 safetensors>=0.6.2
-transformers>=4.57.0
+transformers>=4.57.1
 threadpoolctl>=3.6.0
 packaging>=24.2
 device-smi>=0.5.1
