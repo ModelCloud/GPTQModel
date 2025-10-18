@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
+from gptqmodel.utils.eval import EVAL
 
 
 # a100:7, MARLIN kernel
@@ -14,9 +15,27 @@ from model_test import ModelTest
 # desc_act = False, act_group_aware = True 0.3217/0.3643
 class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
-    NATIVE_ARC_CHALLENGE_ACC = 0.3268
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3558
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.04
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {
+                "value": 0.3183,
+                "floor_pct": 0.04,
+                "ceil_pct": 0.10,
+            },
+            "acc_norm": {
+                "value": 0.3490,
+                "floor_pct": 0.04,
+                "ceil_pct": 0.10,
+            },
+        },
+        EVAL.LM_EVAL.MMLU: {
+            "acc": {
+                "value": 0.3099,
+                "floor_pct": 0.04,
+                "ceil_pct": 0.10,
+            },
+        },
+    }
     APPLY_CHAT_TEMPLATE = True
     V2 = False
     DEBUG = True
