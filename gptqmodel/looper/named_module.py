@@ -167,6 +167,16 @@ class NamedModule(torch.nn.Module):
             pending = self.state.pop("streaming_events", [])
         for entry in pending:
             entry["event"].synchronize()
+            keys = entry.get("keys")
+            if keys:
+                with self._state_lock:
+                    event_map = self.state.get("streaming_event_map")
+                    if event_map is not None:
+                        for key in keys:
+                            event_map.pop(key, None)
+            sources = entry.get("sources")
+            if sources is not None:
+                sources.clear()
 
     def _stream_tensor_dict(
         self,
@@ -194,17 +204,30 @@ class NamedModule(torch.nn.Module):
         copy_stream = torch.cuda.Stream(device=copy_device)
         done_event = torch.cuda.Event(enable_timing=False, blocking=False)
 
+        pending_sources = []
         with torch.cuda.stream(copy_stream):
             copy_stream.wait_stream(compute_stream)
             for name, tensor in filtered.items():
                 src = tensor.detach()
+                src.record_stream(copy_stream)
+                pending_sources.append(src)
                 host = host_pool.acquire(src.shape, src.dtype, src.layout)
                 host.copy_(src, non_blocking=True)
                 host_map[name] = host
         done_event.record(copy_stream)
 
         with self._state_lock:
-            events = self.state.setdefault("streaming_events", [])
-            events.append({"event": done_event, "stream": copy_stream})
             store_callback(host_map)
+            event_map = self.state.setdefault("streaming_event_map", {})
+            for key in host_map.keys():
+                event_map[key] = done_event
+            events = self.state.setdefault("streaming_events", [])
+            events.append(
+                {
+                    "event": done_event,
+                    "stream": copy_stream,
+                    "sources": pending_sources,
+                    "keys": tuple(host_map.keys()),
+                }
+            )
         return host_map
