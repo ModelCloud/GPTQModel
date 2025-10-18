@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+
 import threading
 from typing import Any, Dict, Optional
 
@@ -12,6 +13,8 @@ from torch.nn import Parameter
 from torch.nn.modules.conv import _ConvNd
 
 from ..utils.logger import setup_logger
+from ..utils.stream import stream_sync as stream_sync_events
+from ..utils.stream import stream_tensor_dict_to_cpu
 
 log = setup_logger()
 
@@ -135,26 +138,32 @@ class NamedModule(torch.nn.Module):
         *,
         host_pool,
     ) -> Dict[str, torch.Tensor]:
-        return self._stream_tensor_dict(
+        return stream_tensor_dict_to_cpu(
             tensors,
             host_pool=host_pool,
             store_callback=lambda host_map: self.state.update(host_map),
+            state=self.state,
+            state_lock=self._state_lock,
         )
 
     def stream_parameters_to_cpu(self, *, host_pool) -> Dict[str, torch.Tensor]:
         tensor_map = {name: param for name, param in self.module.named_parameters(recurse=False)}
-        return self._stream_tensor_dict(
+        return stream_tensor_dict_to_cpu(
             tensor_map,
             host_pool=host_pool,
             store_callback=lambda host_map: self.state.setdefault("parameters_cpu", {}).update(host_map),
+            state=self.state,
+            state_lock=self._state_lock,
         )
 
     def stream_buffers_to_cpu(self, *, host_pool) -> Dict[str, torch.Tensor]:
         tensor_map = {name: buf for name, buf in self.module.named_buffers(recurse=False)}
-        return self._stream_tensor_dict(
+        return stream_tensor_dict_to_cpu(
             tensor_map,
             host_pool=host_pool,
             store_callback=lambda host_map: self.state.setdefault("buffers_cpu", {}).update(host_map),
+            state=self.state,
+            state_lock=self._state_lock,
         )
 
     def stream_all_to_cpu(self, *, host_pool) -> Dict[str, Dict[str, torch.Tensor]]:
@@ -163,73 +172,4 @@ class NamedModule(torch.nn.Module):
         return {"parameters": params, "buffers": buffers}
 
     def stream_sync(self) -> None:
-        with self._state_lock:
-            pending = self.state.pop("streaming_events", [])
-        for entry in pending:
-            event = entry.get("event")
-            if event is not None and not event.query():
-                event.synchronize()
-            keys = entry.get("keys")
-            if keys:
-                with self._state_lock:
-                    event_map = self.state.get("streaming_event_map")
-                    if event_map is not None:
-                        for key in keys:
-                            event_map.pop(key, None)
-            sources = entry.get("sources")
-            if sources is not None:
-                sources.clear()
-
-    def _stream_tensor_dict(
-        self,
-        tensors: Dict[str, torch.Tensor],
-        *,
-        host_pool,
-        store_callback,
-    ) -> Dict[str, torch.Tensor]:
-        filtered = {name: tensor for name, tensor in tensors.items() if isinstance(tensor, torch.Tensor)}
-        if not filtered:
-            return {}
-
-        first = next(iter(filtered.values()))
-
-        if first.device.type != "cuda" or not torch.cuda.is_available():
-            host_map = {name: tensor.detach().to("cpu") for name, tensor in filtered.items()}
-            with self._state_lock:
-                store_callback(host_map)
-            return host_map
-
-        host_map: Dict[str, torch.Tensor] = {}
-
-        copy_device = first.device
-        compute_stream = torch.cuda.current_stream(device=copy_device)
-        copy_stream = torch.cuda.Stream(device=copy_device)
-        done_event = torch.cuda.Event(enable_timing=False, blocking=False)
-
-        pending_sources = []
-        with torch.cuda.stream(copy_stream):
-            copy_stream.wait_stream(compute_stream)
-            for name, tensor in filtered.items():
-                src = tensor.detach()
-                src.record_stream(copy_stream)
-                pending_sources.append(src)
-                host = host_pool.acquire(src.shape, src.dtype, src.layout)
-                host.copy_(src, non_blocking=True)
-                host_map[name] = host
-        done_event.record(copy_stream)
-
-        with self._state_lock:
-            store_callback(host_map)
-            event_map = self.state.setdefault("streaming_event_map", {})
-            for key in host_map.keys():
-                event_map[key] = done_event
-            events = self.state.setdefault("streaming_events", [])
-            events.append(
-                {
-                    "event": done_event,
-                    "stream": copy_stream,
-                    "sources": pending_sources,
-                    "keys": tuple(host_map.keys()),
-                }
-            )
-        return host_map
+        stream_sync_events(self.state, self._state_lock)
