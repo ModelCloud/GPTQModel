@@ -35,7 +35,7 @@ def test_gptq_processor_async_d2h_streaming_roundtrip():
 
         sys.modules.setdefault("random_word", SimpleNamespace(RandomWords=lambda: _RandomWords()))
 
-        from gptqmodel.looper.gptq_processor import GPTQProcessor, _PinnedHostPool
+        from gptqmodel.looper.gptq_processor import GPTQProcessor
         from gptqmodel.looper.named_module import NamedModule
 
         device = torch.device("cuda", 0)
@@ -43,7 +43,6 @@ def test_gptq_processor_async_d2h_streaming_roundtrip():
 
         processor = object.__new__(GPTQProcessor)
         processor.lock = threading.Lock()
-        processor._host_pool = _PinnedHostPool()
 
         linear = torch.nn.Linear(8, 8, bias=False).to(device=device, dtype=torch.float16)
         named_module = NamedModule(linear, name="proj", full_name="model.layers.0.proj", layer_index=0)
@@ -54,7 +53,7 @@ def test_gptq_processor_async_d2h_streaming_roundtrip():
             "q_g_idx": torch.arange(64, device=device, dtype=torch.int32).reshape(8, 8),
         }
 
-        named_module.stream_state_payload_to_cpu(payload, host_pool=processor._host_pool)
+        named_module.stream_state_payload_to_cpu(payload)
 
         host_scales = named_module.state["q_scales"]
         host_zeros = named_module.state["q_zeros"]

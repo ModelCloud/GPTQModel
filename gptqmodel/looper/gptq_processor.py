@@ -29,19 +29,6 @@ from ..utils.torch import tf32_disable_guard
 log = setup_logger()
 lock = threading.Lock()
 
-
-class _PinnedHostPool:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-
-    def acquire(self, shape: torch.Size, dtype: torch.dtype, layout: torch.layout) -> torch.Tensor:
-        return torch.empty(shape, dtype=dtype, layout=layout, device="cpu", pin_memory=True)
-
-    def release(self, tensor: torch.Tensor) -> None:
-        # No pooling to avoid cross-thread pinned storage reuse issues.
-        return None
-
-
 class GPTQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration, prepare_dataset_func,
                  calibration_concat_size: Optional[int], calibration_sort: Optional[str], batch_size: int,
@@ -55,7 +42,6 @@ class GPTQProcessor(LoopProcessor):
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
-        self._host_pool = _PinnedHostPool()
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
@@ -180,7 +166,6 @@ class GPTQProcessor(LoopProcessor):
                 "q_zeros": q_zeros,
                 "q_g_idx": q_g_idx,
             },
-            host_pool=self._host_pool,
         )
         del q_scales, q_zeros, q_g_idx
 
@@ -348,7 +333,7 @@ class GPTQProcessor(LoopProcessor):
         with self.lock:
             self.result_pop(module.full_name)
 
-        self._release_host_buffers(q_scales, q_zeros, q_g_idx)
+        del q_scales, q_zeros, q_g_idx
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
@@ -371,8 +356,3 @@ class GPTQProcessor(LoopProcessor):
         # TODO fix me..this hacks inherited base class logic, why not override name in gptqv2?
         qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
         return "gptq v2" if qcfg.v2 else "gptq"
-
-    def _release_host_buffers(self, *tensors: torch.Tensor) -> None:
-        for tensor in tensors:
-            if isinstance(tensor, torch.Tensor):
-                self._host_pool.release(tensor)
