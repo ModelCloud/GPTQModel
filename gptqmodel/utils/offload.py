@@ -68,6 +68,7 @@ def is_meta_module(m: nn.Module) -> bool:
             return True
     return False
 
+# Serialize access to module.state_dict(), which is not thread-safe under concurrent calls.
 _OFFLOAD_LOCK = Lock()
 
 
@@ -91,7 +92,10 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
     tensors: dict[str, torch.Tensor] = {}
 
     with torch.inference_mode():
-        for key, tensor in module.state_dict().items():
+        with _OFFLOAD_LOCK:
+            state_items = list(module.state_dict().items())
+
+        for key, tensor in state_items:
             cpu_tensor = tensor.detach().to("cpu")
             tensors[key] = cpu_tensor.contiguous()
             entry = {
@@ -190,7 +194,8 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
 
     total_bytes = 0
     try:
-        state_items = module.state_dict().values()
+        with _OFFLOAD_LOCK:
+            state_items = list(module.state_dict().values())
     except Exception:
         state_items = []
 

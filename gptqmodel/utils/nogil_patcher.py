@@ -6,6 +6,7 @@
 """Straightforward monkey patch helpers for nogil runtimes."""
 
 import time
+import threading
 
 from .safe import ThreadSafe
 
@@ -33,7 +34,12 @@ __all__ = ["patch_safetensors_save_file", "patch_triton_autotuner"]
 def patch_triton_autotuner() -> None:
     try:
         from triton.runtime import autotuner as module
+        import triton
     except ImportError:
+        return
+
+    version = getattr(triton, "__version__", None)
+    if version is None or tuple(int(part) for part in version.split(".")[:3]) < (3, 5, 0):
         return
 
     autotuner_cls = module.Autotuner
@@ -50,13 +56,11 @@ def patch_triton_autotuner() -> None:
     JITFunction = module.JITFunction
     hashlib_mod = module.hashlib
     json_mod = module.json
-    threading_mod = module.threading
-
     class CacheFuture:
         __slots__ = ("event", "config", "error", "used_cached_result", "bench_time")
 
         def __init__(self):
-            self.event = threading_mod.Event()
+            self.event = threading.Event()
             self.config = None
             self.error = None
             self.used_cached_result = True
@@ -71,7 +75,7 @@ def patch_triton_autotuner() -> None:
         cache_map = getattr(self, "cache", {})
         self._cache = dict(cache_map)
         self.cache = self._cache
-        self._cache_lock = getattr(self, "_cache_lock", threading_mod.RLock())
+        self._cache_lock = getattr(self, "_cache_lock", threading.RLock())
         self._cache_futures = {}
 
     def patched_check_disk_cache(self, tuning_key, configs, bench_fn):
