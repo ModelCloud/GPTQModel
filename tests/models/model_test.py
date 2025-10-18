@@ -277,7 +277,7 @@ class ModelTest(unittest.TestCase):
         self.render_inference_summary(inference_records)
         self.render_arc_summary(arc_records)
 
-        return reuse_candidates
+        return reuse_candidates, arc_records
 
     @staticmethod
     def _human_size(num_bytes: int) -> str:
@@ -576,6 +576,7 @@ class ModelTest(unittest.TestCase):
         )
 
         tokenizer = model.tokenizer
+        self._post_quant_arc_records = {}
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
@@ -607,7 +608,8 @@ class ModelTest(unittest.TestCase):
                 log.info(f"Quantized Model saved to tmp dir: {path}")
 
                 target_backend = self.LOAD_BACKEND
-                reuse_candidates = self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
+                reuse_candidates, arc_records = self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
+                self._post_quant_arc_records = arc_records
 
                 q_model = reuse_candidates.pop(target_backend, None)
                 if q_model is None:
@@ -808,10 +810,18 @@ class ModelTest(unittest.TestCase):
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
-        task_results = self.lm_eval(model=self.SAVE_PATH if self.SAVE_PATH else self.model,
-                                    apply_chat_template=self.APPLY_CHAT_TEMPLATE,
-                                    trust_remote_code=self.TRUST_REMOTE_CODE,
-                                    delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
+        arc_records = getattr(self, "_post_quant_arc_records", {})
+        target_backend = self.LOAD_BACKEND
+        if arc_records and len(arc_records) == 1 and target_backend in arc_records:
+            log.info("Reusing ARC results for backend `%s`; skipping duplicate lm_eval run", target_backend.name)
+            task_results = arc_records[target_backend]
+        else:
+            task_results = self.lm_eval(
+                model=self.SAVE_PATH if self.SAVE_PATH else self.model,
+                apply_chat_template=self.APPLY_CHAT_TEMPLATE,
+                trust_remote_code=self.TRUST_REMOTE_CODE,
+                delete_quantized_model=self.DELETE_QUANTIZED_MODEL,
+            )
         self.check_results(task_results)
 
     def check_results(self, task_results):

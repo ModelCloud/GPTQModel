@@ -400,8 +400,35 @@ class LoopProcessor:
         snapshot = self._snapshot_device_memory_gib()
         if not snapshot:
             return "n/a"
-        parts = [f"{device_id}={value:.1f}GB" for device_id, value in snapshot.items()]
-        return ", ".join(parts)
+
+        def _format_gib(value: float) -> str:
+            text = f"{value:.1f}"
+            if text.endswith(".0"):
+                text = text[:-2]
+            return f"{text}G"
+
+        grouped: Dict[str, List[Tuple[str, float, int]]] = {}
+        for order, (device_id, value) in enumerate(snapshot.items()):
+            family, _, index = device_id.partition(":")
+            grouped.setdefault(family, []).append((index, value, order))
+
+        segments: List[str] = []
+        for family, entries in grouped.items():
+            if not entries:
+                continue
+
+            def sort_key(item: Tuple[str, float, int]) -> Tuple[int, int]:
+                index, _, order = item
+                try:
+                    return 0, int(index)
+                except (TypeError, ValueError):
+                    return 1, order
+
+            values = [_format_gib(value) for _, value, _ in sorted(entries, key=sort_key)]
+            segment = f"{family} " + ", ".join(values)
+            segments.append(segment)
+
+        return " | ".join(segments)
 
     def _close_device_smi_handles(self) -> None:
         for handle in self._device_smi_handles.values():

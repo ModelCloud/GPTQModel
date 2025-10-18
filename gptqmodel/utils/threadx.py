@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import traceback
+from datetime import datetime, timezone
 from concurrent.futures import Future
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
@@ -743,6 +744,8 @@ class DeviceThreadPool:
         # GC diagnostics counters
         self._gc_passes = 0
         self._last_gc_ts: Optional[float] = None
+        self._gc_generation: int = 0
+        self._last_consumed_gc_generation: int = 0
 
         # Start janitor if enabled and there exists at least one accelerator.
         if self._empty_cache_every_n > 0 and any(
@@ -1414,6 +1417,7 @@ class DeviceThreadPool:
                 n = self._per_device_done[key]
                 if n % self._empty_cache_every_n == 0:
                     trigger_gc = True
+                    self._gc_generation += 1
                     if DEBUG_ON:
                         log.debug(f"GC trigger set by {key}: per_device_done={n} threshold={self._empty_cache_every_n} total_done={self._total_done}")
         if trigger_gc:
@@ -1490,6 +1494,8 @@ class DeviceThreadPool:
             "total_inflight": sum(inflight.values()),
             "total_workers": sum(workers.values()),
             "gc_passes": int(self._gc_passes),
+            "gc_generation": int(self._gc_generation),
+            "gc_generation_consumed": int(self._last_consumed_gc_generation),
             "last_gc_ts": self._last_gc_ts,
             "now": time.time(),
         }
@@ -1646,6 +1652,15 @@ class DeviceThreadPool:
                     if DEBUG_ON: log.debug("DP-Janitor: stop event set during auto-GC wait; exiting")
                     break
 
+            with self._stats_lock:
+                current_generation = self._gc_generation
+                last_generation = self._last_consumed_gc_generation
+
+            if current_generation == last_generation:
+                if DEBUG_ON:
+                    log.debug("DP-Janitor: trigger generation already consumed; skipping")
+                continue
+
             # Snapshot & decision
             try:
                 pre = self._collect_state_snapshot()
@@ -1675,6 +1690,8 @@ class DeviceThreadPool:
 
             if not self._should_run_gc_from_snapshot(pre):
                 if DEBUG_ON: log.debug("DP-Janitor: skip GC (no device progressed by threshold since last pass)")
+                with self._stats_lock:
+                    self._last_consumed_gc_generation = current_generation
                 continue
 
             t0 = time.time()
@@ -1722,20 +1739,32 @@ class DeviceThreadPool:
                             use_fn()
 
             t1 = time.time()
+            prev_gc_ts = self._last_gc_ts
             self._gc_passes += 1
             self._last_gc_ts = t1
+            gc_timestamp = datetime.fromtimestamp(t1, tz=timezone.utc).isoformat()
+            if prev_gc_ts is None:
+                since_last_gc = "since last GC: n/a"
+            else:
+                delta_s = t1 - prev_gc_ts
+                since_last_gc = f"since last GC: {delta_s:.3f}s ({delta_s * 1000:.1f}ms)"
 
             # Post-pass accounting & watermarks.
             try:
                 post = self._collect_state_snapshot()
                 self._update_gc_watermarks(post)
-                log.info(f"GC completed in {t1 - t0:.3f}s (pass #{self._gc_passes}).")
+                log.info(
+                    f"GC completed in {t1 - t0:.3f}s (pass #{self._gc_passes}) at {gc_timestamp}; {since_last_gc}."
+                )
                 if DEBUG_ON: log.debug(f"DP-Janitor: post-snapshot: inflight={post['inflight']} per_done={post['per_done']}")
             except Exception as e:
                 try:
                     log.warn(f"Failed to render GC post-snapshot: {e!r}")
                 except Exception:
                     pass
+            finally:
+                with self._stats_lock:
+                    self._last_consumed_gc_generation = self._gc_generation
 
     # Legacy helper (not used by janitor). Kept for compatibility with any
     # external callers that previously expected a "clear everything" helper.
