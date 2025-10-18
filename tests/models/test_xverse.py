@@ -4,13 +4,17 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
+from gptqmodel.utils.eval import EVAL
 
 
 class TestXVerse(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/XVERSE-7B-Chat" # "xverse/XVERSE-7B-Chat"
-    NATIVE_ARC_CHALLENGE_ACC = 0.4198
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4044
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.4198, "floor_pct": 0.2},
+            "acc_norm": {"value": 0.4044, "floor_pct": 0.2},
+        },
+    }
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = True
     EVAL_BATCH_SIZE = 6

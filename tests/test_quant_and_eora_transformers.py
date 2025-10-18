@@ -48,9 +48,12 @@ class Test(ModelTest):
     # NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
 
-    NATIVE_ARC_CHALLENGE_ACC = 0.3567
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.3567, "floor_pct": 0.36},
+            "acc_norm": {"value": 0.3805, "floor_pct": 0.36},
+        },
+    }
 
     @classmethod
     def setUpClass(cls):

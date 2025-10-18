@@ -4,13 +4,17 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
+from gptqmodel.utils.eval import EVAL
 
 
 class TestQwen3Moe(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.04
-    NATIVE_ARC_CHALLENGE_ACC = 0.3788 # a100 4,5,6,7
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3899 # a100 4,5,6,7
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.3788, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.3899, "floor_pct": 0.04},
+        },
+    }
     # TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = True
     # EVAL_BATCH_SIZE = 6

@@ -5,16 +5,20 @@
 
 import torch  # noqa: E402from tests.model_test import ModelTest
 from model_test import ModelTest
+from gptqmodel.utils.eval import EVAL
 
 
 class TestFalcon(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/falcon-7b-instruct" # "tiiuae/falcon-7b-instruct"
-    NATIVE_ARC_CHALLENGE_ACC = 0.3993
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4292
     APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = False
     TORCH_DTYPE = torch.float16
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.52
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.3993, "floor_pct": 0.52},
+            "acc_norm": {"value": 0.4292, "floor_pct": 0.52},
+        },
+    }
     EVAL_BATCH_SIZE = 6
     USE_VLLM = False
 
