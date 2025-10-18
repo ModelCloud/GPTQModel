@@ -7,9 +7,11 @@ from model_test import ModelTest
 
 
 # a100:7, MARLIN kernel
-# desc_act = False, act_group_aware = False 0.3114/0.3413
-# desc_act = False, act_group_aware = True 0.3268/0.3558
-# desc_act = True, 0.3157/0.3498
+# desc_act = False, act_group_aware = False 0.3200/0.3447
+# desc_act = False, act_group_aware = True 0.3181/0.3481
+# desc_act = True, REGRESSION 0.3191/0.3601
+# a100:6+7: MARLIN kernel
+# desc_act = False, act_group_aware = True 0.3217/0.3643
 class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.3268

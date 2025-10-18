@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import traceback
+from datetime import datetime, timezone
 from concurrent.futures import Future
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
@@ -1738,14 +1739,23 @@ class DeviceThreadPool:
                             use_fn()
 
             t1 = time.time()
+            prev_gc_ts = self._last_gc_ts
             self._gc_passes += 1
             self._last_gc_ts = t1
+            gc_timestamp = datetime.fromtimestamp(t1, tz=timezone.utc).isoformat()
+            if prev_gc_ts is None:
+                since_last_gc = "since last GC: n/a"
+            else:
+                delta_s = t1 - prev_gc_ts
+                since_last_gc = f"since last GC: {delta_s:.3f}s ({delta_s * 1000:.1f}ms)"
 
             # Post-pass accounting & watermarks.
             try:
                 post = self._collect_state_snapshot()
                 self._update_gc_watermarks(post)
-                log.info(f"GC completed in {t1 - t0:.3f}s (pass #{self._gc_passes}).")
+                log.info(
+                    f"GC completed in {t1 - t0:.3f}s (pass #{self._gc_passes}) at {gc_timestamp}; {since_last_gc}."
+                )
                 if DEBUG_ON: log.debug(f"DP-Janitor: post-snapshot: inflight={post['inflight']} per_done={post['per_done']}")
             except Exception as e:
                 try:
