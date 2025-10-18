@@ -89,8 +89,8 @@ class ModelTest(unittest.TestCase):
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
-    DATASET_SIZE = 256
-    DATASET_SORT = "asc"
+    DATASET_SIZE = 512
+    DATASET_SORT = "desc"
     DELETE_QUANTIZED_MODEL = True
     EVAL_TASKS = None
 
