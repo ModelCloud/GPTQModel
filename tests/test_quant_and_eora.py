@@ -24,26 +24,36 @@ from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
-# a100 gpu 7
+# --------Eval METHOD.GPTQ Result---------
+# |    Tasks    |Version|Filter|n-shot| Metric |   |Value |   |Stderr|
+# |-------------|------:|------|-----:|--------|---|-----:|---|-----:|
+# |arc_challenge|      1|none  |     0|acc     |↑  |0.3131|±  |0.0136|
+# |             |       |none  |     0|acc_norm|↑  |0.3473|±  |0.0139|
+#
+# --------Eval METHOD.GPTQ + EoRA Result---------
+# |    Tasks    |Version|Filter|n-shot| Metric |   |Value |   |Stderr|
+# |-------------|------:|------|-----:|--------|---|-----:|---|-----:|
+# |arc_challenge|      1|none  |     0|acc     |↑  |0.3140|±  |0.0136|
+# |             |       |none  |     0|acc_norm|↑  |0.3567|±  |0.0140|
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
 
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
-            "acc": {"value": 0.3183, "floor_pct": 0.36},
-            "acc_norm": {"value": 0.3404, "floor_pct": 0.36},
+            "acc": {"value": 0.3183, "floor_pct": 0.05},
+            "acc_norm": {"value": 0.3404, "floor_pct": 0.05},
         },
     }
 
     APPLY_CHAT_TEMPLATE = True
-    V2 = False
-    DEBUG = True
-    ACT_GROUP_AWARE = True
-    DESC_ACT = False
-    DATASET_SIZE = 1024
-    DATASET_SORT = "desc"
     QUANT_BATCH_SIZE = 4
-    USE_FLASH_ATTN = True
+    # V2 = False
+    # DEBUG = True
+    # ACT_GROUP_AWARE = True
+    # DESC_ACT = False
+    # DATASET_SIZE = 512
+    # DATASET_SORT = "desc"
+    # USE_FLASH_ATTN = True
 
     @classmethod
     def setUpClass(cls):
