@@ -13,38 +13,37 @@ from gptqmodel.utils.eval import EVAL
 # desc_act = True, REGRESSION 0.3191/0.3601
 # a100:6+7: MARLIN kernel
 # desc_act = False, act_group_aware = True 0.3217/0.3643
+# | Metric                         |   MARLIN |
+# |--------------------------------|----------|
+# | arc_challenge :: acc,none      |   0.3174 |
+# | arc_challenge :: acc_norm,none |   0.3601 |
+# | mmlu :: acc,none               |   0.3186 |
 class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {
-                "value": 0.3183,
+                "value": 0.3174,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.10,
             },
             "acc_norm": {
-                "value": 0.3490,
+                "value": 0.3601,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.10,
             },
         },
         EVAL.LM_EVAL.MMLU: {
             "acc": {
-                "value": 0.3099,
+                "value": 0.3186,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.10,
             },
         },
     }
     APPLY_CHAT_TEMPLATE = True
-    V2 = False
-    DEBUG = True
-    ACT_GROUP_AWARE = True
-    DESC_ACT = False
-    DATASET_SIZE = 1024
-    DATASET_SORT = "desc"
     QUANT_BATCH_SIZE = 4
-    USE_FLASH_ATTN = True
+
     # EORA = Lora(
     #     # for quant, path is save path. for load, it is loading path
     #     path="./eora_test",
