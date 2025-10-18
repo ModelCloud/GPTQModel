@@ -166,7 +166,9 @@ class NamedModule(torch.nn.Module):
         with self._state_lock:
             pending = self.state.pop("streaming_events", [])
         for entry in pending:
-            entry["event"].synchronize()
+            event = entry.get("event")
+            if event is not None and not event.query():
+                event.synchronize()
             keys = entry.get("keys")
             if keys:
                 with self._state_lock:
