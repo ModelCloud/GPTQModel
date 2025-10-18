@@ -11,8 +11,11 @@ class TestQwen2_5(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
-            "acc": {"value": 0.2705, "floor_pct": 0.05},
-            "acc_norm": {"value": 0.3063, "floor_pct": 0.05},
+            "acc": {"value": 0.2722, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.3072, "floor_pct": 0.04},
+        },
+        EVAL.LM_EVAL.MMLU: {
+            "acc": {"value": 0.4029, "floor_pct": 0.04},
         },
     }
     TRUST_REMOTE_CODE = False
