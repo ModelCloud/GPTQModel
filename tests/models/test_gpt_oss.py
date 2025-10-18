@@ -4,13 +4,17 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
+from gptqmodel.utils.eval import EVAL
 
 
 class TestGPTOSS(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gpt-oss-20b-BF16/"
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
-    NATIVE_ARC_CHALLENGE_ACC = 0.4411
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4718
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.4411, "floor_pct": 0.2},
+            "acc_norm": {"value": 0.4718, "floor_pct": 0.2},
+        },
+    }
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     EVAL_BATCH_SIZE = 6

@@ -23,6 +23,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:2
 # -- end do not touch
 
 from pathlib import Path  # noqa: E402
+from enum import Enum  # noqa: E402
 from typing import Dict, List  # noqa: E402
 
 from logbar import LogBar  # noqa: E402
@@ -70,13 +71,14 @@ RAND_SEED = 898
 
 log = LogBar.shared()
 
+DEFAULT_FLOOR_PCT = 0.05
+DEFAULT_CEIL_PCT = 0.10
+DEFAULT_TASK_NAMES = (EVAL.LM_EVAL.ARC_CHALLENGE,)
+
+
 class ModelTest(unittest.TestCase):
     DEBUG = True # enable extra debug output
 
-    TASK_NAME = EVAL.LM_EVAL.ARC_CHALLENGE
-    # sub test can modify
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15  # -15%
-    QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT = 1.0  # 200%
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
@@ -87,9 +89,10 @@ class ModelTest(unittest.TestCase):
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
-    DATASET_SIZE = 256
-    DATASET_SORT = "asc"
+    DATASET_SIZE = 512
+    DATASET_SORT = "desc"
     DELETE_QUANTIZED_MODEL = True
+    EVAL_TASKS = None
 
     KERNEL_QUANT = {}  # kernel sets
     KERNEL_INFERENCE = {}  # kernel sets
@@ -125,6 +128,125 @@ class ModelTest(unittest.TestCase):
         {"prompt": "What gas do plants primarily absorb from the atmosphere during photosynthesis?", "keywords": ["carbon dioxide"]},
         {"prompt": "Name the largest ocean on Earth.", "keywords": ["pacific"]},
     ]
+
+    def _normalize_task_identifier(self, task):
+        if isinstance(task, Enum):
+            return task.value
+        if task is None:
+            raise ValueError("Evaluation task identifier cannot be None")
+        return str(task)
+
+    def _normalize_task_list(self):
+        task_specs = self.get_eval_tasks()
+        task_lookup = getattr(self, "_resolved_task_lookup", {})
+        resolved_tasks = []
+        if task_specs:
+            for normalized_name in task_specs.keys():
+                original = task_lookup.get(normalized_name)
+                if original is None:
+                    original = self._resolve_task_enum(normalized_name)
+                    if isinstance(task_lookup, dict):
+                        task_lookup[normalized_name] = original
+                resolved_tasks.append(original)
+        else:
+            resolved_tasks = list(DEFAULT_TASK_NAMES)
+            self._resolved_task_lookup = {
+                self._normalize_task_identifier(task): task for task in resolved_tasks
+            }
+
+        normalized = [self._normalize_task_identifier(task) for task in resolved_tasks if task is not None]
+        if not normalized:
+            raise ValueError("No evaluation tasks configured")
+        return normalized
+
+    def _resolve_task_enum(self, task):
+        if isinstance(task, Enum):
+            return task
+        if isinstance(task, str):
+            for enum_member in EVAL.get_task_enums():
+                if task == enum_member.value or task == enum_member.name:
+                    return enum_member
+        raise ValueError(f"Unknown evaluation task identifier: {task}")
+
+    def _legacy_arc_tasks(self):
+        baselines = {}
+        arc_metrics = {}
+        if hasattr(self, "NATIVE_ARC_CHALLENGE_ACC"):
+            arc_metrics["acc"] = {
+                "value": self.NATIVE_ARC_CHALLENGE_ACC,
+                "floor_pct": DEFAULT_FLOOR_PCT,
+                "ceil_pct": DEFAULT_CEIL_PCT,
+            }
+        if hasattr(self, "NATIVE_ARC_CHALLENGE_ACC_NORM"):
+            arc_metrics["acc_norm"] = {
+                "value": self.NATIVE_ARC_CHALLENGE_ACC_NORM,
+                "floor_pct": DEFAULT_FLOOR_PCT,
+                "ceil_pct": DEFAULT_CEIL_PCT,
+            }
+        if arc_metrics:
+            normalized = self._normalize_task_identifier(EVAL.LM_EVAL.ARC_CHALLENGE)
+            baselines[normalized] = arc_metrics
+            lookup = getattr(self, "_resolved_task_lookup", None)
+            if isinstance(lookup, dict):
+                lookup[normalized] = EVAL.LM_EVAL.ARC_CHALLENGE
+        return baselines
+
+    def _normalize_metric_spec(self, spec):
+        default_floor = DEFAULT_FLOOR_PCT
+        default_ceil = DEFAULT_CEIL_PCT
+
+        if isinstance(spec, dict):
+            if "value" not in spec:
+                raise ValueError("Baseline metric dictionaries must include a `value` key.")
+            value = spec["value"]
+            floor_pct = spec.get("floor_pct", spec.get("max_delta_floor_percent", default_floor))
+            ceil_pct = spec.get("ceil_pct", spec.get("max_delta_ceil_percent", default_ceil))
+            metric_key = spec.get("metric_key")
+        else:
+            value = spec
+            floor_pct = default_floor
+            ceil_pct = default_ceil
+            metric_key = None
+
+        if not isinstance(value, (int, float)):
+            raise TypeError(f"Baseline metric value must be numeric, got {type(value).__name__}")
+        if not isinstance(floor_pct, (int, float)):
+            raise TypeError(f"`floor_pct` must be numeric, got {type(floor_pct).__name__}")
+        if not isinstance(ceil_pct, (int, float)):
+            raise TypeError(f"`ceil_pct` must be numeric, got {type(ceil_pct).__name__}")
+
+        return {
+            "value": float(value),
+            "floor_pct": float(floor_pct),
+            "ceil_pct": float(ceil_pct),
+            "metric_key": metric_key,
+        }
+
+    def get_eval_tasks(self):
+        self._resolved_task_lookup = {}
+        if self.EVAL_TASKS:
+            baselines = {}
+            for task, metrics in self.EVAL_TASKS.items():
+                resolved_task = self._resolve_task_enum(task)
+                normalized_task = self._normalize_task_identifier(resolved_task)
+                self._resolved_task_lookup[normalized_task] = resolved_task
+                baselines[normalized_task] = {
+                    metric_name: self._normalize_metric_spec(spec)
+                    for metric_name, spec in metrics.items()
+                }
+            return baselines
+        return self._legacy_arc_tasks()
+
+    @staticmethod
+    def _flatten_task_metrics(task_results):
+        flat = {}
+        for task_name, metrics in task_results.items():
+            if isinstance(metrics, dict):
+                for metric_name, value in metrics.items():
+                    flat[f"{task_name}:{metric_name}"] = value
+            else:
+                flat[task_name] = metrics
+        return flat
 
 
     def assertInference(self, model, tokenizer=None, keywords=None, prompt=INFERENCE_PROMPT):
@@ -219,7 +341,7 @@ class ModelTest(unittest.TestCase):
                 )
         return results
 
-    def run_arc_challenge_eval(self, model, backend, trust_remote_code=False):
+    def run_eval_tasks(self, model, backend, trust_remote_code=False):
         previous_backend = self.LOAD_BACKEND
         self.LOAD_BACKEND = backend
         try:
@@ -229,14 +351,14 @@ class ModelTest(unittest.TestCase):
                 trust_remote_code=self.TRUST_REMOTE_CODE,
                 delete_quantized_model=False,
             )
-            log.info(f"[{backend.name}] ARC summary: {task_results}")
+            log.info(f"[{backend.name}] Evaluation summary: {task_results}")
         finally:
             self.LOAD_BACKEND = previous_backend
         return task_results
 
     def perform_post_quant_validation(self, model_path, trust_remote_code=False):
         inference_records = {}
-        arc_records = {}
+        eval_records = {}
         reuse_candidates = {}
 
         compare_backends = (BACKEND.MARLIN,) if self.FORMAT is FORMAT.GPTQ else (BACKEND.MARLIN, BACKEND.GEMM)
@@ -266,7 +388,7 @@ class ModelTest(unittest.TestCase):
             should_reuse = can_reuse and backend == target_backend and not self.USE_VLLM
 
             try:
-                arc_records[backend] = self.run_arc_challenge_eval(model, backend, trust_remote_code=trust_remote_code)
+                eval_records[backend] = self.run_eval_tasks(model, backend, trust_remote_code=trust_remote_code)
             finally:
                 if should_reuse:
                     reuse_candidates[backend] = model
@@ -275,9 +397,9 @@ class ModelTest(unittest.TestCase):
                 torch_empty_cache()
 
         self.render_inference_summary(inference_records)
-        self.render_arc_summary(arc_records)
+        self.render_eval_summary(eval_records)
 
-        return reuse_candidates, arc_records
+        return reuse_candidates, eval_records
 
     @staticmethod
     def _human_size(num_bytes: int) -> str:
@@ -420,27 +542,30 @@ class ModelTest(unittest.TestCase):
         cell = f"{status} | {snippet}" if snippet else status
         return self._colorize(cell, matched)
 
-    def render_arc_summary(self, arc_records):
-        if not arc_records:
+    def render_eval_summary(self, eval_records):
+        if not eval_records:
             return
-        ordered_backends = [backend for backend in (BACKEND.MARLIN, BACKEND.TORCH) if backend in arc_records]
+        ordered_backends = [backend for backend in (BACKEND.MARLIN, BACKEND.TORCH) if backend in eval_records]
         if not ordered_backends:
             return
 
-        metrics = set()
-        for results in arc_records.values():
-            metrics.update(results.keys())
-        metrics = sorted(metrics)
+        flattened_records = {
+            backend: self._flatten_task_metrics(results) for backend, results in eval_records.items()
+        }
+
+        metrics = sorted({metric for results in flattened_records.values() for metric in results.keys()})
 
         table_rows = []
         tolerance = 0.01
-        torch_reference = arc_records.get(BACKEND.TORCH, {})
+        torch_reference = flattened_records.get(BACKEND.TORCH, {})
 
         for metric in metrics:
-            row = [metric]
-            reference_value = torch_reference.get(metric)
+            display_metric = metric.replace(":", " :: ")
+            row = [display_metric]
+            reference_value = None if torch_reference is None else torch_reference.get(metric)
             for backend in ordered_backends:
-                value = arc_records[backend].get(metric)
+                backend_values = flattened_records.get(backend, {})
+                value = backend_values.get(metric)
                 if value is None:
                     row.append(self._colorize("N/A", False))
                     continue
@@ -452,7 +577,7 @@ class ModelTest(unittest.TestCase):
             table_rows.append(row)
 
         headers = ["Metric"] + [backend.name for backend in ordered_backends]
-        log.info("ARC challenge comparison:\n%s", tabulate(table_rows, headers=headers, tablefmt="github"))
+        log.info("Evaluation comparison:\n%s", tabulate(table_rows, headers=headers, tablefmt="github"))
 
     def load_tokenizer(self, model_id_or_path, trust_remote_code=False):
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
@@ -576,7 +701,7 @@ class ModelTest(unittest.TestCase):
         )
 
         tokenizer = model.tokenizer
-        self._post_quant_arc_records = {}
+        self._post_quant_eval_records = {}
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
@@ -608,8 +733,8 @@ class ModelTest(unittest.TestCase):
                 log.info(f"Quantized Model saved to tmp dir: {path}")
 
                 target_backend = self.LOAD_BACKEND
-                reuse_candidates, arc_records = self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
-                self._post_quant_arc_records = arc_records
+                reuse_candidates, eval_records = self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
+                self._post_quant_eval_records = eval_records
 
                 q_model = reuse_candidates.pop(target_backend, None)
                 if q_model is None:
@@ -695,6 +820,8 @@ class ModelTest(unittest.TestCase):
 
     def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
         try:
+            task_names = self._normalize_task_list()
+            aggregated_results = {}
             with tempfile.TemporaryDirectory() as tmp_dir:
                 model_path = getattr(model, "model_local_path", None)
                 if isinstance(model, str):
@@ -717,7 +844,7 @@ class ModelTest(unittest.TestCase):
                 from lm_eval.tasks import TaskManager
                 from lm_eval.utils import make_table
 
-                task_groups = EVAL.get_task_groups_from_tasks(self.TASK_NAME)
+                task_groups = EVAL.get_task_groups_from_tasks(task_names)
 
                 for framework, tasks in task_groups.items():
                     log.info(f"TEST: EVAL starting: backend = {self.LOAD_BACKEND}")
@@ -732,6 +859,17 @@ class ModelTest(unittest.TestCase):
                     if eval_target is None:
                         raise ValueError("Model evaluation target could not be determined.")
 
+                    resolved_lookup = getattr(self, "_resolved_task_lookup", {})
+                    eval_tasks = []
+                    for task in tasks:
+                        original_task = resolved_lookup.get(task)
+                        if original_task is None:
+                            original_task = self._resolve_task_enum(task)
+                            if isinstance(resolved_lookup, dict):
+                                normalized_task = self._normalize_task_identifier(original_task)
+                                resolved_lookup[normalized_task] = original_task
+                        eval_tasks.append(original_task)
+
                     results = GPTQModel.eval(
                         model_or_id_or_path=eval_target,
                         llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
@@ -739,7 +877,7 @@ class ModelTest(unittest.TestCase):
                         output_path=tmp_dir,
                         backend=self.LOAD_BACKEND,
                         framework=framework,
-                        tasks=tasks,
+                        tasks=eval_tasks,
                         apply_chat_template=apply_chat_template,
                         trust_remote_code=trust_remote_code,
                         batch_size=self.EVAL_BATCH_SIZE,
@@ -753,18 +891,28 @@ class ModelTest(unittest.TestCase):
                     if "groups" in results:
                         print(make_table(results, "groups"))
                     print('--------Eval Result End---------')
-                    task_results = {
-                        metric: value for metric, value in results['results'].get(self.TASK_NAME.value, {}).items()
-                        if metric != 'alias' and 'stderr' not in metric
-                    }
-                    print(task_results)
+                    for task_name in eval_tasks:
+                        normalized_task_name = self._normalize_task_identifier(task_name)
+                        metrics = results["results"].get(normalized_task_name, {})
+                        filtered_metrics = {
+                            metric: value
+                            for metric, value in metrics.items()
+                            if metric != "alias" and "stderr" not in metric
+                        }
+                        aggregated_results[normalized_task_name] = filtered_metrics
+                        print({normalized_task_name: filtered_metrics})
 
                 # only delete tmp folders
-                if delete_quantized_model and model.model_local_path.startswith("/tmp") and os.path.exists(
-                        model.model_local_path):
-                    log.info(f"Deleting temp model: {model.model_local_path}")
-                    shutil.rmtree(model.model_local_path)
-                return task_results
+                model_local_path = getattr(model, "model_local_path", "")
+                if (
+                    delete_quantized_model
+                    and isinstance(model_local_path, str)
+                    and model_local_path.startswith("/tmp")
+                    and os.path.exists(model_local_path)
+                ):
+                    log.info(f"Deleting temp model: {model_local_path}")
+                    shutil.rmtree(model_local_path)
+                return aggregated_results
         except BaseException as e:
             if isinstance(e, torch.OutOfMemoryError):
                 old_batch = self.EVAL_BATCH_SIZE
@@ -788,15 +936,9 @@ class ModelTest(unittest.TestCase):
             else:
                 raise e
 
-    def calculatorPer(self, filter, value):
-        if "norm" in filter:
-            expected = self.NATIVE_ARC_CHALLENGE_ACC_NORM
-        else:
-            expected = self.NATIVE_ARC_CHALLENGE_ACC
-
+    def calculatorPer(self, task_name, metric_name, value, expected):
         diff_pct = (value / expected) * 100
-        log.info(f"{filter}: `{value}` vs `{expected}` diff {diff_pct:.2f}%")
-
+        log.info(f"{task_name}:{metric_name}: `{value}` vs `{expected}` diff {diff_pct:.2f}%")
         return diff_pct, expected
 
     def quant_lm_eval(self):
@@ -810,11 +952,11 @@ class ModelTest(unittest.TestCase):
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
-        arc_records = getattr(self, "_post_quant_arc_records", {})
+        eval_records = getattr(self, "_post_quant_eval_records", {})
         target_backend = self.LOAD_BACKEND
-        if arc_records and len(arc_records) == 1 and target_backend in arc_records:
-            log.info("Reusing ARC results for backend `%s`; skipping duplicate lm_eval run", target_backend.name)
-            task_results = arc_records[target_backend]
+        if eval_records and len(eval_records) == 1 and target_backend in eval_records:
+            log.info("Reusing evaluation results for backend `%s`; skipping duplicate lm_eval run", target_backend.name)
+            task_results = eval_records[target_backend]
         else:
             task_results = self.lm_eval(
                 model=self.SAVE_PATH if self.SAVE_PATH else self.model,
@@ -825,11 +967,53 @@ class ModelTest(unittest.TestCase):
         self.check_results(task_results)
 
     def check_results(self, task_results):
-        for filter, value in task_results.items():
-            diff_pct, expected = self.calculatorPer(filter=filter, value=value)
-            negative_pct = 100 * (1 - self.QUANT_ARC_MAX_DELTA_FLOOR_PERCENT)
-            positive_pct = 100 * (1 + self.QUANT_ARC_MAX_POSITIVE_DELTA_CEIL_PERCENT)
-            self.assertTrue(negative_pct <= diff_pct <= positive_pct, f"{filter}: `{value}` vs expected `{expected}`, diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]")
+        baselines = self.get_eval_tasks()
+        if not baselines:
+            raise AssertionError("No evaluation baselines configured for result validation.")
+
+        for task_name, expected_metrics in baselines.items():
+            metrics = task_results.get(task_name)
+            if metrics is None:
+                self.fail(f"No evaluation results returned for task `{task_name}`")
+            if not isinstance(metrics, dict):
+                raise TypeError(f"Expected metrics for task `{task_name}` to be a dictionary, got {type(metrics).__name__}")
+
+            for metric_name, baseline_spec in expected_metrics.items():
+                metric_key = baseline_spec.get("metric_key") or metric_name
+                metric_key = self._resolve_metric_key(metric_key, metrics)
+                if metric_key is None:
+                    self.fail(f"Metric `{metric_name}` missing from results for task `{task_name}`")
+
+                value = metrics[metric_key]
+                expected_value = baseline_spec["value"]
+                diff_pct, expected_value = self.calculatorPer(
+                    task_name=task_name,
+                    metric_name=metric_name,
+                    value=value,
+                    expected=expected_value,
+                )
+                floor_pct = baseline_spec["floor_pct"]
+                ceil_pct = baseline_spec["ceil_pct"]
+                negative_pct = 100 * (1 - floor_pct)
+                positive_pct = 100 * (1 + ceil_pct)
+                self.assertTrue(
+                    negative_pct <= diff_pct <= positive_pct,
+                    f"{task_name}:{metric_name}: `{value}` vs expected `{expected_value}`, "
+                    f"diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]",
+                )
+
+    @staticmethod
+    def _resolve_metric_key(metric_name, metrics):
+        if metric_name in metrics:
+            return metric_name
+        if metric_name is None:
+            return None
+        # if baseline uses canonical name without suffix, look for variants like acc,none
+        prefix = f"{metric_name},"
+        for key in metrics.keys():
+            if key.startswith(prefix):
+                return key
+        return None
 
     def check_lm_head_loss(self, quant_log: List[Dict[str, any]]):
         final_log = quant_log[-1]

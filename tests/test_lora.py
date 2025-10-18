@@ -25,15 +25,19 @@ from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
 
 
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128"
     lora_path = "/monster/data/model/sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc/blob/main/adapter_model.safetensors" #"sliuau/llama3.2-1b-4bit-group128-eora_test-rank128-arc"
 
-    NATIVE_ARC_CHALLENGE_ACC = 0.3567
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.3567, "floor_pct": 0.36},
+            "acc_norm": {"value": 0.3805, "floor_pct": 0.36},
+        },
+    }
 
     @classmethod
     def setUpClass(cls):

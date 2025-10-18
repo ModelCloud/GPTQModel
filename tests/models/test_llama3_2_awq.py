@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
+from gptqmodel.utils.eval import EVAL
 
 from gptqmodel.quantization import FORMAT, METHOD
 
@@ -14,9 +15,12 @@ from gptqmodel.quantization import FORMAT, METHOD
 # desc_act = True, 0.3089/0.3328
 class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
-    NATIVE_ARC_CHALLENGE_ACC = 0.3234
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3524
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.3234, "floor_pct": 0.36},
+            "acc_norm": {"value": 0.3524, "floor_pct": 0.36},
+        },
+    }
     APPLY_CHAT_TEMPLATE = True
     V2 = False
     DEBUG = True

@@ -12,13 +12,17 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel.quantization import FORMAT  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
 
 
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"  # "meta-llama/Llama-3.2-1B-Instruct"
-    NATIVE_ARC_CHALLENGE_ACC = 0.3567
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3805
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.36
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.3567, "floor_pct": 0.36},
+            "acc_norm": {"value": 0.3805, "floor_pct": 0.36},
+        },
+    }
     FORMAT = FORMAT.GPTQ
     SYM = False
 

@@ -4,16 +4,25 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
+from gptqmodel.utils.eval import EVAL
 
-
+# | Metric                         |   MARLIN |
+# |--------------------------------|----------|
+# | arc_challenge :: acc,none      |   0.5026 |
+# | arc_challenge :: acc_norm,none |   0.5171 |
+# | mmlu :: acc,none               |   0.6362 |
 class TestGlm(ModelTest):
     # real: THUDM/glm-4-9b-chat-hf
     NATIVE_MODEL_ID = "/monster/data/model/glm-4-9b-chat-hf"
-    NATIVE_ARC_CHALLENGE_ACC = 0.5154
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5316
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
-    USE_VLLM = False
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.5026, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.5171, "floor_pct": 0.04},
+        },
+        EVAL.LM_EVAL.MMLU: {
+            "acc": {"value": 0.6362, "floor_pct": 0.04},
+        },
+    }
 
     def test_glm(self):
         self.quant_lm_eval()
-

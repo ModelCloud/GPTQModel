@@ -4,15 +4,19 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
+from gptqmodel.utils.eval import EVAL
 
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 
 
 class TestQwen2_VL(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2-VL-2B-Instruct"
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
-    NATIVE_ARC_CHALLENGE_ACC = 0.2329
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2765
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.2329, "floor_pct": 0.2},
+            "acc_norm": {"value": 0.2765, "floor_pct": 0.2},
+        },
+    }
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = True
     EVAL_BATCH_SIZE = 6

@@ -6,15 +6,19 @@ import os
 
 import soundfile as sf
 from model_test import ModelTest
+from gptqmodel.utils.eval import EVAL
 
 from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 
 
 class TestQwen2_5_Omni(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-Omni-3B"
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
-    NATIVE_ARC_CHALLENGE_ACC = 0.2329
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2765
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.2329, "floor_pct": 0.2},
+            "acc_norm": {"value": 0.2765, "floor_pct": 0.2},
+        },
+    }
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = True
     EVAL_BATCH_SIZE = 6
@@ -86,4 +90,3 @@ class TestQwen2_5_Omni(ModelTest):
 
         # delete audio file
         os.remove(audio_file_name)
-

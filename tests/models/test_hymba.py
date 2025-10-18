@@ -4,13 +4,17 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
+from gptqmodel.utils.eval import EVAL
 
 
 class TestHymba(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Hymba-1.5B-Instruct/"  # "baichuan-inc/Baichuan2-7B-Chat"
-    NATIVE_ARC_CHALLENGE_ACC = 0.2073
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2713
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.75
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.2073, "floor_pct": 0.75},
+            "acc_norm": {"value": 0.2713, "floor_pct": 0.75},
+        },
+    }
     MODEL_MAX_LEN = 8192
     TRUST_REMOTE_CODE = True
     APPLY_CHAT_TEMPLATE = True

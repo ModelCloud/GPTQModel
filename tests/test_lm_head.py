@@ -13,6 +13,7 @@ from datasets import load_dataset
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 from models.model_test import ModelTest  # noqa: E402
+from gptqmodel.utils.eval import EVAL  # noqa: E402
 
 from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
@@ -21,9 +22,12 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 class TestLmHeadLoad(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"  # "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"
     DEVICE = "cuda:0"
-    NATIVE_ARC_CHALLENGE_ACC = 0.2799
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3046
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.2799, "floor_pct": 0.2},
+            "acc_norm": {"value": 0.3046, "floor_pct": 0.2},
+        },
+    }
 
     def test_load(self):
         model = GPTQModel.load(self.NATIVE_MODEL_ID, device=self.DEVICE)
@@ -51,8 +55,12 @@ class TestLmHeadQuant(ModelTest):
         cls.calibration_dataset = [c[:cls.sample_length] for c in calibration_dataset]
 
     def test_quant_lm_head(self):
-        self.NATIVE_ARC_CHALLENGE_ACC = 0.3148464163822526
-        self.NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3310580204778157
+        self.EVAL_TASKS = {
+            EVAL.LM_EVAL.ARC_CHALLENGE: {
+                "acc": {"value": 0.3148464163822526, "floor_pct": 0.2},
+                "acc_norm": {"value": 0.3310580204778157, "floor_pct": 0.2},
+            },
+        }
 
         quant_config = QuantizeConfig(bits=4, group_size=32, lm_head=True)
 

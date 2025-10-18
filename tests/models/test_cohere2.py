@@ -4,13 +4,17 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
+from gptqmodel.utils.eval import EVAL
 
 
 class TestCohere2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/c4ai-command-r7b-12-2024"
-    NATIVE_ARC_CHALLENGE_ACC = 0.4680
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4693
-    QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.15
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.4680, "floor_pct": 0.15},
+            "acc_norm": {"value": 0.4693, "floor_pct": 0.15},
+        },
+    }
     EVAL_BATCH_SIZE = 4
     USE_FLASH_ATTN = False
 
