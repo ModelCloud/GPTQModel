@@ -65,6 +65,26 @@ def _build_stream_pool() -> Tuple[DeviceThreadPool, Dict[str, str]]:
 
 STREAM_DEVICE_POOL, _ACCELERATOR_ALIAS_MAP = _build_stream_pool()
 
+_STREAM_CACHE_LOCK = threading.RLock()
+_CUDA_COPY_STREAMS: Dict[int, torch.cuda.Stream] = {}
+
+
+def _resolve_device_index(device: torch.device) -> int:
+    index = device.index
+    if index is not None:
+        return index
+    return torch.cuda.current_device()
+
+# reuse streams instead of creating tons of new streams
+def _get_cached_copy_stream(device: torch.device) -> torch.cuda.Stream:
+    idx = _resolve_device_index(device)
+    with _STREAM_CACHE_LOCK:
+        stream = _CUDA_COPY_STREAMS.get(idx)
+        if stream is None:
+            stream = torch.cuda.Stream(device=torch.device("cuda", idx))
+            _CUDA_COPY_STREAMS[idx] = stream
+        return stream
+
 
 def _queue_key_for_device(device: Optional[torch.device]) -> str:
     if device is None:
@@ -168,6 +188,12 @@ def stream_tensor_dict_to_cpu(
     if not filtered:
         return {}
 
+    # sync copy
+    # host_map = {name: tensor.detach().to("cpu") for name, tensor in filtered.items()}
+    # with state_lock:
+    #     store_callback(host_map)
+    # return host_map
+
     first = next(iter(filtered.values()))
 
     if first.device.type != "cuda" or not torch.cuda.is_available():
@@ -180,7 +206,7 @@ def stream_tensor_dict_to_cpu(
 
     copy_device = first.device
     compute_stream = torch.cuda.current_stream(device=copy_device)
-    copy_stream = torch.cuda.Stream(device=copy_device)
+    copy_stream = _get_cached_copy_stream(copy_device)
     done_event = torch.cuda.Event(enable_timing=False, blocking=False)
 
     pending_sources: List[torch.Tensor] = []
