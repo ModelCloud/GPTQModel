@@ -559,6 +559,7 @@ class DeviceThreadPool:
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
+        gc_min_interval_seconds: float = 1.0,  # throttle janitor passes
         pin_cpu_workers: bool = False,
         pin_accelerator_workers: bool = False,
     ):
@@ -579,6 +580,7 @@ class DeviceThreadPool:
             warmups: optional mapping from device family (e.g. 'cuda') to a callable
                 run once after the worker activates its device. A special key
                 'default' applies when no family-specific warmup is found.
+            gc_min_interval_seconds: minimum interval between GC passes. Values <= 0 disable throttling.
             pin_cpu_workers: bind CPU device workers to individual CPU cores when
                 affinity APIs are available. Defaults to False so CPU tasks may
                 float across cores unless explicitly opt-in.
@@ -633,6 +635,7 @@ class DeviceThreadPool:
         # GC dedupe/coalesce: debounce window to absorb bursty triggers;
         # per-device "done" watermark to skip redundant GC passes.
         self._gc_debounce_s = float(gc_debounce_seconds)
+        self._gc_min_interval_s = max(0.0, float(gc_min_interval_seconds))
         self._last_gc_done_per_device: Dict[str, int] = {}
 
         self._inference_mode = bool(inference_mode)
@@ -756,7 +759,10 @@ class DeviceThreadPool:
             )
             self._janitor.start()
             if DEBUG_ON:
-                log.debug(f"DP-Janitor thread started (debounce={self._gc_debounce_s:.3f}s, threshold={self._empty_cache_every_n})")
+                log.debug(
+                    f"DP-Janitor thread started (debounce={self._gc_debounce_s:.3f}s, "
+                    f"min_interval={self._gc_min_interval_s:.3f}s, threshold={self._empty_cache_every_n})"
+                )
         else:
             if DEBUG_ON:
                 log.debug("DP-Janitor disabled (no accelerators or threshold <= 0)")
@@ -1655,11 +1661,37 @@ class DeviceThreadPool:
             with self._stats_lock:
                 current_generation = self._gc_generation
                 last_generation = self._last_consumed_gc_generation
+                last_gc_ts = self._last_gc_ts
 
             if current_generation == last_generation:
                 if DEBUG_ON:
                     log.debug("DP-Janitor: trigger generation already consumed; skipping")
                 continue
+
+            min_interval = self._gc_min_interval_s
+            if min_interval > 0.0 and last_gc_ts is not None:
+                elapsed = time.time() - last_gc_ts
+                if elapsed < min_interval:
+                    wait_for = min_interval - elapsed
+                    if DEBUG_ON:
+                        log.debug(
+                            f"DP-Janitor: last pass {elapsed * 1000:.1f}ms ago; waiting {wait_for * 1000:.1f}ms to honor min interval"
+                        )
+                    if self._stop_event.wait(timeout=wait_for):
+                        if DEBUG_ON:
+                            log.debug("DP-Janitor: stop event set during min-interval wait; exiting")
+                        break
+                    if self._stop_event.is_set():
+                        if DEBUG_ON:
+                            log.debug("DP-Janitor: stop event observed after min-interval wait; exiting")
+                        break
+                    with self._stats_lock:
+                        current_generation = self._gc_generation
+                        last_generation = self._last_consumed_gc_generation
+                    if current_generation == last_generation:
+                        if DEBUG_ON:
+                            log.debug("DP-Janitor: no pending GC generation after min-interval wait; skipping")
+                        continue
 
             # Snapshot & decision
             try:
