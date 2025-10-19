@@ -8,6 +8,9 @@ from gptqmodel.utils.eval import EVAL
 
 class TestGlm4Moe(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/GLM-4.6/"
+    DELETE_QUANTIZED_MODEL = False
+    DATASET_SIZE = 512
+    GROUP_SIZE = 32
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {"value": 0.5026, "floor_pct": 0.04},
