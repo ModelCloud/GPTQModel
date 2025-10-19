@@ -579,14 +579,7 @@ class ModuleLooper():
         progress_total_rows: Optional[int] = None,
     ) -> List[List[torch.Tensor]]:
         """Fan batches across device clones and preserve result ordering."""
-        module_replicas = clone_module_for_devices(module, devices)
-
-        # Ensure any async replication/memcpy ops are complete before threads start fanning out.
-        torch_sync()
-
-        prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
-
-        results: Dict[int, torch.Tensor | tuple | None] = {}
+        effective_title = progress_title or (progress_stage or "Forward")
 
         total_batches = self._resolve_batch_total(processor.num_batches, layer_inputs)
         batch_row_counts = progress_rows_per_batch or self._collect_row_counts(layer_inputs)
@@ -599,8 +592,74 @@ class ModuleLooper():
         if total_rows <= 0 and total_batches > 0:
             total_rows = total_batches
         total_rows = max(total_rows, 1)
-        processed_rows = 0
         stage_label = progress_stage or "Forward"
+
+        replica_pb: "ProgressBar" | None = None
+        replica_title = ""
+        replica_completed = 0
+
+        if progress_pb is not None:
+            progress_pb.title(effective_title)
+            if len(devices) > 1:
+                replica_title = f"{stage_label}: replicate to {len(devices)} devices"
+                replica_pb = (
+                    log.pb(range(len(devices)))
+                       .manual()
+                       .set(show_left_steps=False)
+                )
+                replica_pb.title(replica_title).subtitle("Staging module...").draw()
+            else:
+                device_label = str(devices[0]) if devices else "<device>"
+                progress_pb.subtitle(f"{stage_label}: staging on {device_label}").draw()
+
+        def _replica_progress(idx: int, total: int, device: torch.device, step: str) -> None:
+            nonlocal replica_completed
+            device_label = str(device)
+            if replica_pb is not None:
+                if step == "stage":
+                    replica_pb.title(replica_title).subtitle(f"Stage {device_label}").draw()
+                    return
+                if idx > replica_completed:
+                    replica_completed = idx
+                    replica_pb.title(replica_title).subtitle(
+                        f"{device_label} {idx}/{total}"
+                    ).next().draw()
+                else:
+                    replica_pb.title(replica_title).subtitle(
+                        f"{device_label} {idx}/{total}"
+                    ).draw()
+            elif progress_pb is not None:
+                stage_msg = (
+                    f"{stage_label}: staging on {device_label}"
+                    if step == "stage"
+                    else f"{stage_label}: {step} {idx}/{total} on {device_label}"
+                )
+                progress_pb.title(effective_title).subtitle(stage_msg).draw()
+
+        progress_cb = _replica_progress if progress_pb is not None else None
+
+        # Ensure any async replication/memcpy ops are complete before threads start fanning out.
+        torch_sync()
+
+        try:
+            module_replicas = clone_module_for_devices(
+                module,
+                devices,
+                progress_callback=progress_cb,
+            )
+        finally:
+            if replica_pb is not None:
+                replica_pb.close()
+            if progress_pb is not None:
+                progress_pb.title(effective_title).subtitle(
+                    f"{stage_label} rows 0/{total_rows}"
+                ).draw()
+
+        prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
+
+        results: Dict[int, torch.Tensor | tuple | None] = {}
+
+        processed_rows = 0
         device_segments: Dict[torch.device, List[int]] = {}
         segment_start = 0
         num_devices = len(devices)

@@ -172,12 +172,6 @@ Native support support some of the most popular multi-modal models:
 
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
-## Experimental GPTQ v2 quantization: Users have reported this mode of quantization may or may not match original GPTQ v1 implementation in terms of quality recovery. 
-
-<div align=center>
-<img src=https://github.com/user-attachments/assets/8e627922-0b73-4e44-b3e2-c01def5301f9 width=300>
-</div>
-
 ## Model Support  
 | Model             |   |                   |   |                |   |                |   |                     |   |
 |-------------------|---|-------------------|---|----------------|---|----------------|---|---------------------|---|
