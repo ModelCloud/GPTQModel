@@ -13,11 +13,12 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime, timezone
 from concurrent.futures import Future
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
+
 
 try:
     from device_smi import Device  # type: ignore

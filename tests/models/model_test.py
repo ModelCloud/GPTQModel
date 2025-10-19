@@ -22,8 +22,8 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:2
 
 # -- end do not touch
 
-from pathlib import Path  # noqa: E402
 from enum import Enum  # noqa: E402
+from pathlib import Path  # noqa: E402
 from typing import Dict, List  # noqa: E402
 
 from logbar import LogBar  # noqa: E402

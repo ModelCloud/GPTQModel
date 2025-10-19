@@ -4,9 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
-from gptqmodel.utils.eval import EVAL
 
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
+from gptqmodel.utils.eval import EVAL
 
 
 class TestQwen2_VL(ModelTest):

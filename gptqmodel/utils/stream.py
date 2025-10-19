@@ -6,14 +6,15 @@
 from __future__ import annotations
 
 import threading
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import torch
-from concurrent.futures import Future
 
 from .logger import setup_logger
 from .threadx import DeviceThreadPool
+
 
 log = setup_logger()
 
