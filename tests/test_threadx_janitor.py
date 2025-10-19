@@ -24,6 +24,7 @@ def _make_pool():
     pool._auto_gc_disable_cv = threading.Condition()
     pool._auto_gc_disable_count = 0
     pool._gc_debounce_s = 0.0
+    pool._gc_min_interval_s = 0.0
     pool._stats_lock = threading.Lock()
     pool._per_device_done = {}
     pool._total_done = 0

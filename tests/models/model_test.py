@@ -356,13 +356,55 @@ class ModelTest(unittest.TestCase):
             self.LOAD_BACKEND = previous_backend
         return task_results
 
+    def _current_load_backend(self):
+        effective = getattr(self, "_effective_load_backend", None)
+        if effective is not None and self.LOAD_BACKEND == BACKEND.MARLIN:
+            return effective
+        return self.LOAD_BACKEND
+
     def perform_post_quant_validation(self, model_path, trust_remote_code=False):
         inference_records = {}
         eval_records = {}
         reuse_candidates = {}
 
         compare_backends = (BACKEND.MARLIN,) if self.FORMAT is FORMAT.GPTQ else (BACKEND.MARLIN, BACKEND.GEMM)
-        target_backend = self.LOAD_BACKEND
+        fallback_backend = None
+        if BACKEND.MARLIN in compare_backends:
+            try:
+                from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # type: ignore
+            except Exception:  # pragma: no cover - fallback if module unavailable
+                marlin_group_sizes = ()
+                marlin_sym = ()
+            else:
+                marlin_group_sizes = tuple(getattr(MarlinQuantLinear, "SUPPORTS_GROUP_SIZE", ()))
+                marlin_sym = tuple(getattr(MarlinQuantLinear, "SUPPORTS_SYM", ()))
+
+            requested_group_size = getattr(self, "GROUP_SIZE", None)
+            requested_sym = getattr(self, "SYM", None)
+
+            marlin_supported = True
+            if marlin_group_sizes and requested_group_size not in marlin_group_sizes:
+                marlin_supported = False
+            if marlin_sym and requested_sym not in marlin_sym:
+                marlin_supported = False
+
+            if not marlin_supported:
+                fallback_backend = BACKEND.TORCH
+                compare_backends = tuple(
+                    BACKEND.TORCH if backend == BACKEND.MARLIN else backend
+                    for backend in compare_backends
+                )
+                log.info(
+                    f"Marlin backend unsupported for current quant config (group_size={requested_group_size}, sym={requested_sym}); "
+                    "falling back to BACKEND.TORCH for validation."
+                )
+
+        if fallback_backend is not None and self.LOAD_BACKEND == BACKEND.MARLIN:
+            self._effective_load_backend = fallback_backend
+        else:
+            self._effective_load_backend = None
+
+        target_backend = self._current_load_backend()
         can_reuse = target_backend not in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE)
 
         for backend in compare_backends:
@@ -702,6 +744,7 @@ class ModelTest(unittest.TestCase):
 
         tokenizer = model.tokenizer
         self._post_quant_eval_records = {}
+        self._effective_load_backend = None
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
@@ -732,22 +775,23 @@ class ModelTest(unittest.TestCase):
                 self._print_post_quant_artifacts(path)
                 log.info(f"Quantized Model saved to tmp dir: {path}")
 
-                target_backend = self.LOAD_BACKEND
                 reuse_candidates, eval_records = self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
                 self._post_quant_eval_records = eval_records
+                target_backend = self._current_load_backend()
 
                 q_model = reuse_candidates.pop(target_backend, None)
                 if q_model is None:
                     # Ensure the post-quant reload stays on a single CUDA device when available.
-                    use_cuda_map = torch.cuda.is_available() and self.LOAD_BACKEND != BACKEND.TORCH_FUSED
+                    use_cuda_map = torch.cuda.is_available() and target_backend != BACKEND.TORCH_FUSED
                     if use_cuda_map:
                         q_model = self.loadQuantModel(
                             path,
                             trust_remote_code=trust_remote_code,
+                            backend=target_backend,
                             device_map={"": "cuda:0"},
                         )
                     else:
-                        q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code)
+                        q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code, backend=target_backend)
                 else:
                     log.info(f"Reusing post-quant validation model for backend `{target_backend.name}`")
 
@@ -781,7 +825,7 @@ class ModelTest(unittest.TestCase):
             else:
                 log.warn("flash-attn requested but not available; falling back to framework defaults")
 
-        active_backend = backend if backend is not None else self.LOAD_BACKEND
+        active_backend = backend if backend is not None else self._current_load_backend()
 
         default_device_map = {"": "cpu"} if active_backend == BACKEND.TORCH_FUSED else "auto"
         explicit_device = "device" in load_kwargs
@@ -847,7 +891,8 @@ class ModelTest(unittest.TestCase):
                 task_groups = EVAL.get_task_groups_from_tasks(task_names)
 
                 for framework, tasks in task_groups.items():
-                    log.info(f"TEST: EVAL starting: backend = {self.LOAD_BACKEND}")
+                    active_backend = self._current_load_backend()
+                    log.info(f"TEST: EVAL starting: backend = {active_backend.name}")
                     if model_path:
                         log.info(f"Inference from model path: {model_path}")
 
@@ -875,7 +920,7 @@ class ModelTest(unittest.TestCase):
                         llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
                         model_args=model_args,
                         output_path=tmp_dir,
-                        backend=self.LOAD_BACKEND,
+                        backend=active_backend,
                         framework=framework,
                         tasks=eval_tasks,
                         apply_chat_template=apply_chat_template,
@@ -953,7 +998,7 @@ class ModelTest(unittest.TestCase):
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
         eval_records = getattr(self, "_post_quant_eval_records", {})
-        target_backend = self.LOAD_BACKEND
+        target_backend = self._current_load_backend()
         if eval_records and len(eval_records) == 1 and target_backend in eval_records:
             log.info("Reusing evaluation results for backend `%s`; skipping duplicate lm_eval run", target_backend.name)
             task_results = eval_records[target_backend]

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import os
 import queue
 import sys
@@ -17,6 +18,11 @@ from concurrent.futures import Future
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
+
+try:
+    from device_smi import Device  # type: ignore
+except Exception:  # pragma: no cover - defensive: optional dependency may be unavailable
+    Device = None
 
 from .. import DEBUG_ON
 from ..utils.ctx import ctx
@@ -78,6 +84,42 @@ except Exception:
 
 
 # --------------------------- Device coercion & context helpers ---------------------------
+
+_EMPTY_CACHE_SIGNATURE_CACHE: Dict[int, Tuple[bool, bool]] = {}
+
+
+def _analyze_empty_cache_callable(fn: Callable[..., Any]) -> Tuple[bool, bool]:
+    """
+    Inspect an empty_cache callable and determine whether it accepts a `device`
+    keyword argument or at least one positional argument. Results are memoized.
+    """
+    cache_key = id(fn)
+    cached = _EMPTY_CACHE_SIGNATURE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    supports_kw = False
+    supports_pos = False
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        _EMPTY_CACHE_SIGNATURE_CACHE[cache_key] = (supports_kw, supports_pos)
+        return supports_kw, supports_pos
+
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            supports_kw = True
+        elif param.kind == inspect.Parameter.VAR_POSITIONAL:
+            supports_pos = True
+        elif param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+            supports_pos = True
+            if param.name == "device":
+                supports_kw = True
+        elif param.kind == inspect.Parameter.KEYWORD_ONLY and param.name == "device":
+            supports_kw = True
+
+    _EMPTY_CACHE_SIGNATURE_CACHE[cache_key] = (supports_kw, supports_pos)
+    return supports_kw, supports_pos
 
 def _coerce_device(d: DeviceLike) -> torch.device:
     """
@@ -559,6 +601,7 @@ class DeviceThreadPool:
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
+        gc_min_interval_seconds: float = 1.0,  # throttle janitor passes
         pin_cpu_workers: bool = False,
         pin_accelerator_workers: bool = False,
     ):
@@ -579,6 +622,7 @@ class DeviceThreadPool:
             warmups: optional mapping from device family (e.g. 'cuda') to a callable
                 run once after the worker activates its device. A special key
                 'default' applies when no family-specific warmup is found.
+            gc_min_interval_seconds: minimum interval between GC passes. Values <= 0 disable throttling.
             pin_cpu_workers: bind CPU device workers to individual CPU cores when
                 affinity APIs are available. Defaults to False so CPU tasks may
                 float across cores unless explicitly opt-in.
@@ -633,7 +677,18 @@ class DeviceThreadPool:
         # GC dedupe/coalesce: debounce window to absorb bursty triggers;
         # per-device "done" watermark to skip redundant GC passes.
         self._gc_debounce_s = float(gc_debounce_seconds)
+        self._gc_min_interval_s = max(0.0, float(gc_min_interval_seconds))
         self._last_gc_done_per_device: Dict[str, int] = {}
+        # Physical-device GC bookkeeping (per accelerator index).
+        self._gc_done_physical: Dict[str, int] = {}
+        self._last_gc_done_physical: Dict[str, int] = {}
+        self._gc_pending_physical: Set[str] = set()
+        self._physical_children: Dict[str, Set[str]] = {}
+
+        # Device-SMI handles are created lazily for GC logging.
+        self._device_smi_lock = threading.Lock()
+        self._device_smi_handles: Dict[str, Any] = {}
+        self._device_smi_failures: Set[str] = set()
 
         self._inference_mode = bool(inference_mode)
         self._worker_warmups = (
@@ -692,6 +747,10 @@ class DeviceThreadPool:
             self._inflight[key] = 0
             self._inflight_cv[key] = threading.Condition()
             self._last_gc_done_per_device[key] = 0
+            self._physical_children[key] = {key}
+            if dev.type in ("cuda", "xpu", "mps"):
+                self._gc_done_physical[key] = 0
+                self._last_gc_done_physical[key] = 0
 
             n_workers = self._resolve_workers_for_device(dev, base_workers)
             group: List[_DeviceWorker] = []
@@ -727,6 +786,7 @@ class DeviceThreadPool:
             self._inflight[v_key] = 0
             self._inflight_cv[v_key] = threading.Condition()
             self._last_gc_done_per_device[v_key] = 0
+            self._physical_children.setdefault(parent_key, set()).add(v_key)
 
             alias_group: List[_DeviceWorker] = []
             for wid in range(limit):
@@ -756,7 +816,10 @@ class DeviceThreadPool:
             )
             self._janitor.start()
             if DEBUG_ON:
-                log.debug(f"DP-Janitor thread started (debounce={self._gc_debounce_s:.3f}s, threshold={self._empty_cache_every_n})")
+                log.debug(
+                    f"DP-Janitor thread started (debounce={self._gc_debounce_s:.3f}s, "
+                    f"min_interval={self._gc_min_interval_s:.3f}s, threshold={self._empty_cache_every_n})"
+                )
         else:
             if DEBUG_ON:
                 log.debug("DP-Janitor disabled (no accelerators or threshold <= 0)")
@@ -1069,6 +1132,15 @@ class DeviceThreadPool:
                 for w in snapshot:
                     w.join()
 
+        if hasattr(self, "_device_smi_handles"):
+            with self._device_smi_lock:
+                for handle in list(self._device_smi_handles.values()):
+                    try:
+                        handle.close()
+                    except Exception:
+                        pass
+                self._device_smi_handles.clear()
+
         if DEBUG_ON: log.debug("DeviceThreadPool shutdown complete")
 
     @contextlib.contextmanager
@@ -1374,6 +1446,153 @@ class DeviceThreadPool:
             return self._normalize_scope_to_keys([scope])
         return self._normalize_scope_to_keys(scope)
 
+    def _physical_key(self, key: str) -> str:
+        """
+        Map a logical worker/alias key back to its physical device key.
+        """
+        return getattr(self, "_virtual_to_parent", {}).get(key, key)
+
+    def _invoke_empty_cache(self, fn: Callable[..., Any], dev: torch.device) -> None:
+        """
+        Call an empty_cache-like callable, preferring a `device` argument when
+        supported and falling back to positional or zero-arg variants.
+        """
+        supports_kw, supports_pos = _analyze_empty_cache_callable(fn)
+        if supports_kw:
+            try:
+                fn(device=dev)
+                return
+            except TypeError:
+                if DEBUG_ON:
+                    log.debug("empty_cache callable rejected keyword arg; retrying positional (%s)", fn)
+        if supports_pos:
+            try:
+                fn(dev)
+                return
+            except TypeError:
+                if DEBUG_ON:
+                    log.debug("empty_cache callable rejected positional arg; retrying no-arg (%s)", fn)
+        fn()
+
+    def _run_empty_cache_for_device(self, key: str, dev: torch.device) -> Optional[float]:
+        """
+        Execute an empty_cache call for the given device. Returns execution time in seconds.
+        """
+        start = time.time()
+        if dev.type == "cuda":
+            live = getattr(torch.cuda, "empty_cache", None) if hasattr(torch, "cuda") else None
+            use_fn = live if callable(live) else TORCH_CUDA_EMPTY_CACHE
+            if use_fn is None:
+                if DEBUG_ON:
+                    log.debug("DP-Janitor: no empty_cache callable available for %s", key)
+                return None
+            target = dev if dev.index is not None else "cuda"
+            with torch.cuda.device(target):
+                self._invoke_empty_cache(use_fn, dev)
+            return time.time() - start
+
+        if dev.type == "xpu" and hasattr(torch, "xpu"):
+            live = getattr(torch.xpu, "empty_cache", None)
+            use_fn = live if callable(live) else TORCH_XPU_EMPTY_CACHE
+            if use_fn is None:
+                if DEBUG_ON:
+                    log.debug("DP-Janitor: no empty_cache callable available for %s", key)
+                return None
+            target = dev if dev.index is not None else "xpu"
+            with torch.xpu.device(target):
+                self._invoke_empty_cache(use_fn, dev)
+            return time.time() - start
+
+        if dev.type == "mps" and hasattr(torch, "mps"):
+            live = getattr(torch.mps, "empty_cache", None)
+            use_fn = live if callable(live) else TORCH_MPS_EMPTY_CACHE
+            if use_fn is None:
+                if DEBUG_ON:
+                    log.debug("DP-Janitor: no empty_cache callable available for %s", key)
+                return None
+            self._invoke_empty_cache(use_fn, dev)
+            return time.time() - start
+
+        if DEBUG_ON:
+            log.debug("DP-Janitor: unsupported device type '%s' for key %s", dev.type, key)
+        return None
+
+    @staticmethod
+    def _format_gib_value(value: float) -> str:
+        text = f"{value:.1f}"
+        if text.endswith(".0"):
+            text = text[:-2]
+        return f"{text}G"
+
+    def _device_smi_identifier(self, dev: torch.device) -> Optional[str]:
+        if Device is None:
+            return None
+        if dev.type == "cuda":
+            idx = dev.index
+            if idx is None:
+                return None
+            prefix = "rocm" if getattr(torch.version, "hip", None) else "cuda"
+            return f"{prefix}:{idx}"
+        if dev.type == "xpu":
+            idx = dev.index
+            if idx is None:
+                return None
+            return f"xpu:{idx}"
+        return None
+
+    def _query_device_vram_gib(self, key: str) -> Optional[float]:
+        if Device is None:
+            return None
+        if not hasattr(self, "_device_smi_lock"):
+            self._device_smi_lock = threading.Lock()
+            self._device_smi_handles = {}
+            self._device_smi_failures = set()
+        dev = self._devices_by_key.get(key)
+        if dev is None:
+            return None
+        identifier = self._device_smi_identifier(dev)
+        if identifier is None:
+            return None
+
+        with self._device_smi_lock:
+            if identifier in self._device_smi_failures:
+                return None
+            handle = self._device_smi_handles.get(identifier)
+            if handle is None:
+                try:
+                    handle = Device(identifier)
+                except Exception:
+                    self._device_smi_failures.add(identifier)
+                    return None
+                self._device_smi_handles[identifier] = handle
+
+        try:
+            metrics = handle.metrics(fast=True)
+        except Exception:
+            with self._device_smi_lock:
+                self._device_smi_failures.add(identifier)
+                stored = self._device_smi_handles.pop(identifier, None)
+                if stored is not None:
+                    try:
+                        stored.close()
+                    except Exception:
+                        pass
+            return None
+
+        memory_used = getattr(metrics, "memory_used", None)
+        if memory_used is None:
+            return None
+        return float(memory_used) / (1024 ** 3)
+
+    def _format_vram_summary(self, physical_keys: Iterable[str]) -> str:
+        readings: List[str] = []
+        for key in physical_keys:
+            value = self._query_device_vram_gib(key)
+            if value is None:
+                continue
+            readings.append(f"{key}={self._format_gib_value(value)}")
+        return ", ".join(readings) if readings else "n/a"
+
     # ---- inflight & completion accounting ----
 
     def _mark_scheduled(self, key: str) -> None:
@@ -1406,20 +1625,45 @@ class DeviceThreadPool:
         Called at the end of every task (success or failure). Updates counters
         and signals the janitor if the per-device threshold is reached.
         """
+        if not hasattr(self, "_gc_done_physical"):
+            self._gc_done_physical = {}
+        if not hasattr(self, "_gc_pending_physical"):
+            self._gc_pending_physical = set()
+        if not hasattr(self, "_last_gc_done_physical"):
+            self._last_gc_done_physical = {}
+        if not hasattr(self, "_physical_children"):
+            self._physical_children = {}
+
         self._mark_finished(key)
 
         trigger_gc = False
         with self._stats_lock:
             self._per_device_done[key] = self._per_device_done.get(key, 0) + 1
             self._total_done += 1
-            dev_type = self._devices_by_key[key].type
-            if self._empty_cache_every_n > 0 and dev_type in ("cuda", "xpu", "mps"):
-                n = self._per_device_done[key]
-                if n % self._empty_cache_every_n == 0:
+            dev = self._devices_by_key.get(key)
+            if (
+                dev is not None
+                and self._empty_cache_every_n > 0
+                and dev.type in ("cuda", "xpu", "mps")
+            ):
+                physical_key = self._physical_key(key)
+                current = self._gc_done_physical.get(physical_key, 0) + 1
+                self._gc_done_physical[physical_key] = current
+                if current % self._empty_cache_every_n == 0:
+                    if physical_key not in self._gc_pending_physical:
+                        self._gc_pending_physical.add(physical_key)
+                        self._gc_generation += 1
                     trigger_gc = True
-                    self._gc_generation += 1
                     if DEBUG_ON:
-                        log.debug(f"GC trigger set by {key}: per_device_done={n} threshold={self._empty_cache_every_n} total_done={self._total_done}")
+                        log.debug(
+                            "GC trigger set by %s (physical=%s): per_physical_done=%d threshold=%d total_done=%d pending=%s",
+                            key,
+                            physical_key,
+                            current,
+                            self._empty_cache_every_n,
+                            self._total_done,
+                            sorted(self._gc_pending_physical),
+                        )
         if trigger_gc:
             self._gc_event.set()
 
@@ -1483,9 +1727,17 @@ class DeviceThreadPool:
             idx = "" if dev.index is None else str(dev.index)
             meta[k] = {"type": dev.type, "index": idx}
 
+        physical_children = getattr(self, "_physical_children", {})
+        per_done_physical: Dict[str, int] = {}
+        for phys_key, members in physical_children.items():
+            per_done_physical[phys_key] = sum(per_done.get(member, 0) for member in members)
+
+        pending_gc = sorted(getattr(self, "_gc_pending_physical", set()))
+
         snap: Dict[str, Any] = {
             "devices": sorted(self._devices_by_key.keys()),
             "per_done": per_done,
+            "per_done_physical": per_done_physical,
             "total_done": total_done,
             "threshold": threshold,
             "inflight": inflight,
@@ -1498,6 +1750,7 @@ class DeviceThreadPool:
             "gc_generation_consumed": int(self._last_consumed_gc_generation),
             "last_gc_ts": self._last_gc_ts,
             "now": time.time(),
+            "pending_gc": pending_gc,
         }
         return snap
 
@@ -1578,12 +1831,13 @@ class DeviceThreadPool:
         thr = snap["threshold"]
         if thr <= 0:
             return False
-        for k in snap["devices"]:
-            dev_type = snap["meta"][k]["type"]
-            if dev_type not in ("cuda", "xpu", "mps"):
-                continue
-            done_now = snap["per_done"].get(k, 0)
-            done_prev = self._last_gc_done_per_device.get(k, 0)
+        pending = snap.get("pending_gc") or []
+        if pending:
+            return True
+        per_done_physical = snap.get("per_done_physical") or {}
+        last_done_physical = getattr(self, "_last_gc_done_physical", {})
+        for phys_key, done_now in per_done_physical.items():
+            done_prev = last_done_physical.get(phys_key, 0)
             if done_now - done_prev >= thr:
                 return True
         return False
@@ -1594,20 +1848,34 @@ class DeviceThreadPool:
         before a subsequent pass is allowed.
         """
         threshold = int(self._empty_cache_every_n)
-        for k in snap_after["devices"]:
-            done = snap_after["per_done"].get(k, 0)
-            if threshold <= 0:
-                self._last_gc_done_per_device[k] = done
-                continue
+        per_done_physical = snap_after.get("per_done_physical") or {}
+        per_done = snap_after.get("per_done") or {}
+        meta = snap_after.get("meta") or {}
+        processed = snap_after.get("_gc_processed_devices")
+        if processed is None:
+            processed_iter = per_done_physical.keys()
+        else:
+            processed_iter = processed
 
-            meta = snap_after.get("meta", {}).get(k, {})
-            dev_type = meta.get("type")
-            if dev_type in ("cuda", "xpu", "mps"):
-                # Reset to the last completed threshold bucket so GC triggers
-                # again after another `threshold` tasks on this accelerator.
-                self._last_gc_done_per_device[k] = done - (done % threshold)
+        for phys_key in processed_iter:
+            done_phys = per_done_physical.get(phys_key)
+            if done_phys is None:
+                continue
+            if threshold <= 0:
+                self._last_gc_done_physical[phys_key] = done_phys
             else:
-                self._last_gc_done_per_device[k] = done
+                self._last_gc_done_physical[phys_key] = done_phys - (done_phys % threshold)
+
+            members = self._physical_children.get(phys_key, {phys_key})
+            for member in members:
+                done_member = per_done.get(member)
+                if done_member is None:
+                    continue
+                dev_type = meta.get(member, {}).get("type")
+                if threshold <= 0 or dev_type not in ("cuda", "xpu", "mps"):
+                    self._last_gc_done_per_device[member] = done_member
+                else:
+                    self._last_gc_done_per_device[member] = done_member - (done_member % threshold)
 
     def _janitor_loop(self):
         """
@@ -1655,11 +1923,37 @@ class DeviceThreadPool:
             with self._stats_lock:
                 current_generation = self._gc_generation
                 last_generation = self._last_consumed_gc_generation
+                last_gc_ts = self._last_gc_ts
 
             if current_generation == last_generation:
                 if DEBUG_ON:
                     log.debug("DP-Janitor: trigger generation already consumed; skipping")
                 continue
+
+            min_interval = self._gc_min_interval_s
+            if min_interval > 0.0 and last_gc_ts is not None:
+                elapsed = time.time() - last_gc_ts
+                if elapsed < min_interval:
+                    wait_for = min_interval - elapsed
+                    if DEBUG_ON:
+                        log.debug(
+                            f"DP-Janitor: last pass {elapsed * 1000:.1f}ms ago; waiting {wait_for * 1000:.1f}ms to honor min interval"
+                        )
+                    if self._stop_event.wait(timeout=wait_for):
+                        if DEBUG_ON:
+                            log.debug("DP-Janitor: stop event set during min-interval wait; exiting")
+                        break
+                    if self._stop_event.is_set():
+                        if DEBUG_ON:
+                            log.debug("DP-Janitor: stop event observed after min-interval wait; exiting")
+                        break
+                    with self._stats_lock:
+                        current_generation = self._gc_generation
+                        last_generation = self._last_consumed_gc_generation
+                    if current_generation == last_generation:
+                        if DEBUG_ON:
+                            log.debug("DP-Janitor: no pending GC generation after min-interval wait; skipping")
+                        continue
 
             # Snapshot & decision
             try:
@@ -1695,53 +1989,64 @@ class DeviceThreadPool:
                 continue
 
             t0 = time.time()
-            # Optionally synchronize devices; often too slow to be worthwhile:
-            # self._synchronize_all()
 
-            # Per-device exclusive: acquire write lock, then call empty_cache().
-            for key in sorted(self._ordered_keys):
-                dev = self._devices_by_key[key]
-                if dev.type not in ("cuda", "xpu", "mps"):
+            try:
+                pre = self._collect_state_snapshot()
+                if DEBUG_ON:
+                    log.debug(
+                        "DP-Janitor: pre-snapshot taken: total_done=%s threshold=%s inflight=%s pending=%s",
+                        pre["total_done"],
+                        pre["threshold"],
+                        pre["inflight"],
+                        pre.get("pending_gc"),
+                    )
+                    log.debug("GC trigger received; evaluating whether to run…")
+                pending_targets = [k for k in pre.get("pending_gc", []) if k in self._locks]
+            except Exception as e:
+                try:
+                    log.warn(f"Failed to render GC pre-snapshot: {e!r}")
+                except Exception:
+                    pass
+                pending_targets = sorted(getattr(self, "_gc_pending_physical", set()))
+
+            if not pending_targets:
+                if DEBUG_ON:
+                    log.debug("DP-Janitor: no pending devices after snapshot; marking generation %d consumed", current_generation)
+                with self._stats_lock:
+                    self._last_consumed_gc_generation = max(self._last_consumed_gc_generation, current_generation)
+                continue
+
+            processed_devices: List[str] = []
+            skipped_devices: List[str] = []
+            per_device_durations: Dict[str, float] = {}
+
+            for key in pending_targets:
+                dev = self._devices_by_key.get(key)
+                if dev is None or dev.type not in ("cuda", "xpu", "mps"):
+                    skipped_devices.append(key)
                     continue
-
-                lk = self._locks[key]
-                if DEBUG_ON: log.debug(f"DP-Janitor: attempting writer lock for {key}")
+                lk = self._locks.get(key)
+                if lk is None:
+                    skipped_devices.append(key)
+                    continue
+                if DEBUG_ON:
+                    log.debug("DP-Janitor: attempting writer lock for %s", key)
                 with lk.writer():
-                    if DEBUG_ON: log.debug(f"DP-Janitor: acquired writer lock for {key}")
+                    if DEBUG_ON:
+                        log.debug("DP-Janitor: acquired writer lock for %s", key)
+                    duration = self._run_empty_cache_for_device(key, dev)
+                    if duration is not None:
+                        per_device_durations[key] = duration
+                processed_devices.append(key)
 
-                    if dev.type == "cuda":
-                        live = getattr(torch.cuda, "empty_cache", None) if hasattr(torch, "cuda") else None
-                        use_fn = live if callable(live) else TORCH_CUDA_EMPTY_CACHE
-                        if DEBUG_ON:
-                            src = "live" if use_fn is live else "hardcopy"
-                            log.debug(f"DP-Janitor: empty_cache(cuda) using {src} on {key}")
-                        if use_fn is not None:
-                            with torch.cuda.device(dev.index):
-                                use_fn()
-
-                    elif dev.type == "xpu":
-                        live = getattr(torch.xpu, "empty_cache", None) if hasattr(torch, "xpu") else None
-                        use_fn = live if callable(live) else TORCH_XPU_EMPTY_CACHE
-                        if DEBUG_ON:
-                            src = "live" if use_fn is live else "hardcopy"
-                            log.debug(f"DP-Janitor: empty_cache(xpu) using {src} on {key}")
-                        if use_fn is not None:
-                            with torch.xpu.device(dev.index):
-                                use_fn()
-
-                    elif dev.type == "mps":
-                        live = getattr(torch.mps, "empty_cache", None) if hasattr(torch, "mps") else None
-                        use_fn = live if callable(live) else TORCH_MPS_EMPTY_CACHE
-                        if DEBUG_ON:
-                            src = "live" if use_fn is live else "hardcopy"
-                            log.debug(f"DP-Janitor: empty_cache(mps) using {src}")
-                        if use_fn is not None:
-                            use_fn()
+            if not processed_devices and DEBUG_ON:
+                log.debug("DP-Janitor: no eligible accelerator devices found in pending=%s", pending_targets)
 
             t1 = time.time()
             prev_gc_ts = self._last_gc_ts
-            self._gc_passes += 1
-            self._last_gc_ts = t1
+            if processed_devices:
+                self._gc_passes += 1
+                self._last_gc_ts = t1
             gc_timestamp = datetime.fromtimestamp(t1, tz=timezone.utc).isoformat()
             if prev_gc_ts is None:
                 since_last_gc = "since last GC: n/a"
@@ -1749,22 +2054,39 @@ class DeviceThreadPool:
                 delta_s = t1 - prev_gc_ts
                 since_last_gc = f"since last GC: {delta_s:.3f}s ({delta_s * 1000:.1f}ms)"
 
-            # Post-pass accounting & watermarks.
-            try:
-                post = self._collect_state_snapshot()
-                self._update_gc_watermarks(post)
-                log.info(
-                    f"GC completed in {t1 - t0:.3f}s (pass #{self._gc_passes}) at {gc_timestamp}; {since_last_gc}."
-                )
-                if DEBUG_ON: log.debug(f"DP-Janitor: post-snapshot: inflight={post['inflight']} per_done={post['per_done']}")
-            except Exception as e:
+            if processed_devices:
+                vram_summary = self._format_vram_summary(processed_devices)
                 try:
-                    log.warn(f"Failed to render GC post-snapshot: {e!r}")
-                except Exception:
-                    pass
-            finally:
-                with self._stats_lock:
-                    self._last_consumed_gc_generation = self._gc_generation
+                    post = self._collect_state_snapshot()
+                    post["_gc_processed_devices"] = processed_devices
+                    self._update_gc_watermarks(post)
+                    devices_clause = ", ".join(processed_devices)
+                    log.info(
+                        f"GC completed in {t1 - t0:.3f}s (pass #{self._gc_passes}) at {gc_timestamp}; devices={devices_clause}; VRAM {vram_summary}; {since_last_gc}."
+                    )
+                    if DEBUG_ON:
+                        log.debug(
+                            "DP-Janitor: post-snapshot inflight=%s per_done=%s per_done_physical=%s durations=%s",
+                            post["inflight"],
+                            post["per_done"],
+                            post.get("per_done_physical"),
+                            per_device_durations,
+                        )
+                except Exception as e:
+                    try:
+                        log.warn(f"Failed to render GC post-snapshot: {e!r}")
+                    except Exception:
+                        pass
+
+            with self._stats_lock:
+                for key in processed_devices:
+                    self._gc_pending_physical.discard(key)
+                    self._last_gc_done_physical[key] = self._gc_done_physical.get(key, 0)
+                for key in skipped_devices:
+                    self._gc_pending_physical.discard(key)
+                self._last_consumed_gc_generation = max(self._last_consumed_gc_generation, current_generation)
+                if self._gc_pending_physical:
+                    self._gc_event.set()
 
     # Legacy helper (not used by janitor). Kept for compatibility with any
     # external callers that previously expected a "clear everything" helper.

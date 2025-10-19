@@ -8,7 +8,7 @@ import copy
 import threading
 import time
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch.nn import parallel as torch_parallel
@@ -225,6 +225,7 @@ def clone_module_for_devices(
     devices: List[torch.device],
     *,
     clear_state_fn=clear_non_picklable_state,
+    progress_callback: Optional[Callable[[int, int, torch.device, str], None]] = None,
 ) -> Dict[torch.device, torch.nn.Module]:
     clones: Dict[torch.device, torch.nn.Module] = {}
     if not devices:
@@ -233,6 +234,21 @@ def clone_module_for_devices(
     module_label = getattr(module, "full_name", module.__class__.__name__)
     clone_timings: List[Tuple[str, float]] = []
     overall_start = time.perf_counter()
+
+    total_targets = len(devices)
+
+    def _notify(idx: int, device: torch.device, step: str) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(idx, total_targets, device, step)
+        except Exception:
+            if DEBUG_ON:
+                log.debug(
+                    "clone_module_for_devices: progress callback failed (device=%s, step=%s)",
+                    device,
+                    step,
+                )
 
     def _record(name: str, start_ts: Optional[float]) -> None:
         if not DEBUG_ON or start_ts is None:
@@ -283,17 +299,19 @@ def clone_module_for_devices(
     if use_replicate:
         try:
             _prepare_module(base_device, f"stage_{base_device}")
+            _notify(0, base_device, "stage")
 
             replicate_start = time.perf_counter()
             replicas = torch_replicate(module, devices)
             _record("replicate", replicate_start)
 
-            for dev, replica in zip(devices, replicas):
+            for idx, (dev, replica) in enumerate(zip(devices, replicas), start=1):
                 replica.eval()
                 rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
                 clear_state_fn(replica)
                 setattr(replica, "_gptqmodule_device_hint", dev)
                 clones[dev] = replica
+                _notify(idx, dev, "replica")
 
             _emit_clone_log("replicate")
             return clones
@@ -305,14 +323,17 @@ def clone_module_for_devices(
 
     if len(devices) == 1 and devices[0].type == "cpu":
         _prepare_module(CPU, "stage_cpu")
+        _notify(0, CPU, "stage")
         clones[devices[0]] = module
+        _notify(1, devices[0], "reuse")
         _emit_clone_log("reuse")
         return clones
 
     if not use_replicate:
         _prepare_module(stage_device, f"stage_{stage_device}")
+        _notify(0, stage_device, "stage")
 
-    for dev in devices:
+    for idx, dev in enumerate(devices, start=1):
         start_ts = time.perf_counter()
         with _DEEPCOPY_LOCK:
             replica = copy.deepcopy(module)
@@ -322,6 +343,7 @@ def clone_module_for_devices(
         setattr(replica, "_gptqmodule_device_hint", dev)
         clones[dev] = replica
         _record(str(dev), start_ts)
+        _notify(idx, dev, "clone")
 
     _emit_clone_log("deepcopy")
     return clones
