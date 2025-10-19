@@ -7,7 +7,7 @@ from model_test import ModelTest
 from gptqmodel.utils.eval import EVAL
 
 class TestGlm4Moe(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/_ci_/GLM-4.5-Air/"
+    NATIVE_MODEL_ID = "/monster/data/model/GLM-4.6/"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {"value": 0.5026, "floor_pct": 0.04},
