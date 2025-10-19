@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from setuptools import find_packages, find_namespace_packages, setup
+from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
 

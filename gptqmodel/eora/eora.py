@@ -5,6 +5,14 @@
 # EoRA Official Repo: https://github.com/NVlabs/EoRA
 # This file has been modified by ModelCloud.AI team and qubitium@modelcloud.ai for adoption into GPT-QModel
 
+# EoRA
+# @article{liu2024eora,
+#   title={EoRA: Training-free Compensation for Compressed LLM with Eigenspace Low-Rank Approximation},
+#   author={Liu, Shih-Yang and Yang, Huck and Wang, Chien-Yi and Fung, Nai Chit and Yin, Hongxu and Sakr, Charbel and Muralidharan, Saurav and Cheng, Kwang-Ting and Kautz, Jan and Wang, Yu-Chiang Frank and others},
+#   journal={arXiv preprint arXiv:2410.21271},
+#   year={2024}
+# }
+
 from typing import Sequence, Tuple
 
 import torch

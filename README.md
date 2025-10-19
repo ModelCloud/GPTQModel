@@ -131,15 +131,15 @@ GPT-QModel not only supports GPTQ but also QQQ, GPTQv2, Eora with more quantizat
 
 GPT-QModel is a modular design supporting multiple quantization methods and feature extensions.
 
-| Quantization Feature | GPT-QModel | Transformers | vLLM  | SGLang | Lora Training |
-|----------------------|------------|---|---|---|---------------|
-| GPTQ                 | ✅          | ✅ | ✅ | ✅ | ✅             | 
-| EoRA                 | ✅          | ✅ | ✅ | ✅ | x             | 
-| AWQ                 | ✅          | ✅* | ✅* | ✅* | ✅*             | 
-| GPTQ v2              | ✅          | ✅ | ✅ | ✅ | ✅             | 
-| QQQ                  | ✅          | x | x | x | x             | 
-| Rotation             | ✅          | x | x | x | x             |  
-| Group Aware Activitation Reordering (GPTQ) | ✅          | ✅ | ✅ | ✅ | ✅             |  
+| Quantization Feature       | GPT-QModel | Transformers | vLLM  | SGLang | Lora Training |
+|----------------------------|------------|---|---|---|---------------|
+| GPTQ                       | ✅          | ✅ | ✅ | ✅ | ✅             | 
+| EoRA                       | ✅          | ✅ | ✅ | ✅ | x             | 
+| Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
+| AWQ                        | ✅          | ✅* | ✅* | ✅* | ✅*             | 
+| QQQ                        | ✅          | x | x | x | x             | 
+| Rotation                   | ✅          | x | x | x | x             |  
+| GPTQ v2*                   | ✅          | ✅ | ✅ | ✅ | ✅             | 
 
 ## Multi-Modal
 
