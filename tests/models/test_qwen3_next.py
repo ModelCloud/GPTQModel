@@ -4,7 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
+
 from gptqmodel.utils.eval import EVAL
+
 
 # | Metric                         |   MARLIN |
 # |--------------------------------|----------|

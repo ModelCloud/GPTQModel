@@ -6,9 +6,9 @@ import os
 
 import soundfile as sf
 from model_test import ModelTest
-from gptqmodel.utils.eval import EVAL
 
 from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
+from gptqmodel.utils.eval import EVAL
 
 
 class TestQwen2_5_Omni(ModelTest):

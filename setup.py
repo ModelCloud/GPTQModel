@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
-import pcre as re
 from setuptools import find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 

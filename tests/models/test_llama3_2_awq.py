@@ -4,9 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from model_test import ModelTest
-from gptqmodel.utils.eval import EVAL
 
 from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.utils.eval import EVAL
 
 
 # a100:0
