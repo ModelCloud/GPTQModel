@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from setuptools import find_packages, setup
+from setuptools import find_packages, find_namespace_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
@@ -661,9 +661,15 @@ print(f"HAS_CUDA_V8 {HAS_CUDA_V8}")
 print(f"SETUP_KWARGS {additional_setup_kwargs}")
 print(f"gptqmodel_version={gptqmodel_version}")
 
+_namespace_packages = find_namespace_packages(include=["gptqmodel_ext.*"])
+_packages = find_packages()
+for _pkg in _namespace_packages:
+    if _pkg not in _packages:
+        _packages.append(_pkg)
+
 setup(
     version = gptqmodel_version,
-    packages=find_packages(),
+    packages=_packages,
     include_package_data=True,
     extras_require={
         "test": ["pytest>=8.2.2", "parameterized"],
