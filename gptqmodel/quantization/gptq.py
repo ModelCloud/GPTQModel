@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-# adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
+# Based on original gptq algorithm and code from https://github.com/IST-DASLab/gptq
 
 import contextlib
 import math
@@ -559,33 +559,32 @@ class GPTQ:
 
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
-
         damp = self.qcfg.damp_percent
-        diag = torch.arange(self.columns, device=H.device)
         mean = torch.mean(torch.diag(H))
+
+        orig_diag = H.diag().clone()
         while 0 < damp < 1:
             try:
-                H2 = H.clone()
-                H2[diag, diag] += damp * mean
-                # TODO call to torch.linalg is not threadsafe? Porque no? Esta muy mal.
-                H2 = torch.linalg.cholesky(H2)
+                H.diagonal().add_(damp * mean)
+                H2 = torch.linalg.cholesky(H)
                 Hinv = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
-                del H, H2
+                H.diagonal().copy_(orig_diag)
+                del H2
                 break
             except torch._C._LinAlgError as e:
+                H.diagonal().copy_(orig_diag)
                 if self.qcfg.damp_auto_increment != 0:
                     log.warn(
                         f"Quantization: Module `{self.name}` -> Current `damp_percent = {damp:.5f}` is too low, auto-incrementing by `{self.qcfg.damp_auto_increment:.5f}`")
                     damp += self.qcfg.damp_auto_increment
                 else:
                     log.warn(
-                        "Quantization: Module `{self.name}` -> Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp_percent:.5f}`")
+                        "Quantization: Module `{self.name}` -> Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp:.5f}`")
                     raise e
 
         if not (0 < damp < 1):
             log.error(
                 f"Quantization: Module `{self.name}` -> `damp_percent` must between 0 and 1. current is {damp}. Module cannot be correctly processed.")
-            # raise ValueError(f"Quantization: `damp_percent` must between 0 and 1. current is {damp}")
             return None, 1.0
 
         return Hinv, damp
