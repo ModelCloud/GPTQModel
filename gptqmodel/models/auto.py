@@ -28,6 +28,10 @@ if not os.environ.get("CUDA_DEVICE_ORDER", None):
 if 'CUDA_VISIBLE_DEVICES' in os.environ and 'ROCR_VISIBLE_DEVICES' in os.environ:
     del os.environ['ROCR_VISIBLE_DEVICES']
 
+if not os.environ.get("NCCL_SHM_DISABLE", None):
+    os.environ["NCCL_SHM_DISABLE"] = '1'
+    log.info("ENV: Auto setting NCCL_SHM_DISABLE=1 for multi-gpu memory safety.")
+
 import sys  # noqa: E402
 
 
