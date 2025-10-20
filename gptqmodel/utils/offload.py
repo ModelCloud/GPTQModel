@@ -8,8 +8,7 @@ import json
 import os
 import shutil
 import struct
-from threading import Lock, RLock
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import accelerate
 import torch
@@ -23,6 +22,7 @@ from torch import nn
 
 from ..looper.named_module import NamedModule
 from .device import get_device
+from .module_locks import parent_module_lock
 from .torch import CPU, META
 
 
@@ -70,35 +70,6 @@ def is_meta_module(m: nn.Module) -> bool:
 
 # Serialize access to module.state_dict(), which is not thread-safe under
 # concurrent calls that mutate the same parent module.
-_PARENT_LOCKS: Dict[str, RLock] = {}
-_PARENT_LOCKS_GUARD = Lock()
-_ROOT_PARENT_KEY = "<root>"
-
-
-def _parent_lock_key(module_name: str) -> str:
-    if not module_name:
-        return _ROOT_PARENT_KEY
-    parts = module_name.split(".")
-    if len(parts) <= 1:
-        return parts[0]
-    return ".".join(parts[:-1])
-
-
-@contextlib.contextmanager
-def parent_module_lock(module_name: str):
-    key = _parent_lock_key(module_name)
-    with _PARENT_LOCKS_GUARD:
-        lock = _PARENT_LOCKS.get(key)
-        if lock is None:
-            lock = RLock()
-            _PARENT_LOCKS[key] = lock
-    lock.acquire()
-    try:
-        yield
-    finally:
-        lock.release()
-
-
 def _prepare_offload_directory(target_dir: str) -> None:
     if os.path.isdir(target_dir):
         shutil.rmtree(target_dir)
