@@ -114,6 +114,15 @@ jobs:
           max_p="{\"size\": ${max_p:-10}}"
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
+  env:
+    runs-on: [ self-hosted, xeon5 ]
+    steps:
+      - name: Check nvidia
+        run: |
+          nvidia-smi
+          echo "==========="
+          dpkg -l | grep nvidia
+
   release:
     strategy:
       fail-fast: false
@@ -236,7 +245,6 @@ jobs:
           - cuda: 126
             torch: 2.8.0
             python: 310
-
 
     runs-on: [ self-hosted, xeon5 ]
     needs:
