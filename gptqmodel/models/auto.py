@@ -385,7 +385,7 @@ class GPTQModel:
         if tasks is None:
             if framework == EVAL.LM_EVAL:
                 tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
-            if framework == EVAL.MMLU_PRO:
+            elif framework == EVAL.MMLU_PRO:
                 tasks = [EVAL.MMLU_PRO.MATH]
             else:
                 tasks = [EVAL.EVALPLUS.HUMAN]
