@@ -3,7 +3,7 @@ requires = [
     "setuptools>=80.9",
     "ninja>=1.13.0", # required for faster compilataion
 ]
-build-backend = "setuptools.build_meta:__legacy__"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "GPTQModel"
@@ -33,7 +33,7 @@ classifiers = [
 dependencies = [
     "accelerate>=1.10.1",
     "numpy==2.2.6",
-    "torch>=2.9.0",
+    "torch>=2.8.0",
     "safetensors>=0.6.2",
     "transformers>=4.57.1",
     "threadpoolctl>=3.6.0",
