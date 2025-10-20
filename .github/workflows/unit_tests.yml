@@ -480,7 +480,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install -U transformers 
+          uv pip install -U transformers tabulate
           if [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
              [ "${{ matrix.test_script }}" == "test_inference_speed" ] || \
              [ "${{ matrix.test_script }}" == "test_q4_bitblas" ] || \
