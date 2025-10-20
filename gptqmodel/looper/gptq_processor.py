@@ -24,7 +24,7 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.device import get_device
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
-from ..utils.offload import parent_module_lock
+from ..utils.module_locks import parent_module_lock
 from ..utils.torch import tf32_disable_guard
 
 log = setup_logger()
@@ -268,6 +268,7 @@ class GPTQProcessor(LoopProcessor):
 
         layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
+        parent_key = getattr(module, "full_name", getattr(module, "name", None))
 
         # replace module with quantized module
         timer = getattr(model, "quant_region_timer", None)
@@ -278,7 +279,6 @@ class GPTQProcessor(LoopProcessor):
             logger=log,
             module_name=module_label,
         ):
-            parent_key = getattr(module, "full_name", getattr(module, "name", ""))
             with parent_module_lock(parent_key):
                 create_quant_module(
                     name=module.full_name,
@@ -314,7 +314,6 @@ class GPTQProcessor(LoopProcessor):
             logger=log,
             module_name=module_label,
         ):
-            parent_key = getattr(module, "full_name", getattr(module, "name", ""))
             with parent_module_lock(parent_key):
                 packer_label = pack_module(
                     name=module.full_name,
