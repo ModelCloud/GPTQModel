@@ -235,6 +235,10 @@ jobs:
 
       - name: Print Env
         run: |
+          echo "::group::pyenv versions"
+          pyenv versions
+          echo "::endgroup::"
+
           python_version=${{ env.PYTHON_VERSION }}
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
