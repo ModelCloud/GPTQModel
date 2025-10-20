@@ -92,8 +92,7 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
     tensors: dict[str, torch.Tensor] = {}
 
     with torch.inference_mode():
-        with _OFFLOAD_LOCK:
-            state_items = list(module.state_dict().items())
+        state_items = list(module.state_dict().items())
 
         for key, tensor in state_items:
             cpu_tensor = tensor.detach().to("cpu")
@@ -132,8 +131,8 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
 
 
 def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
-    #with _OFFLOAD_LOCK:
-    _offload_to_disk_impl(module=module, model=model, disk_path=disk_path)
+    with _OFFLOAD_LOCK:
+        _offload_to_disk_impl(module=module, model=model, disk_path=disk_path)
 
 
 def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
@@ -193,11 +192,8 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
     module_offload_dir = os.path.join(disk_path, name)
 
     total_bytes = 0
-    try:
-        with _OFFLOAD_LOCK:
-            state_items = list(module.state_dict().values())
-    except Exception:
-        state_items = []
+
+    state_items = list(module.state_dict().values())
 
     for tensor in state_items:
         total_bytes += _tensor_nbytes(tensor)
