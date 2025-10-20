@@ -127,9 +127,6 @@ jobs:
             python: 314
           - cuda: 130
             torch: 2.9.0
-            python: 314t
-          - cuda: 130
-            torch: 2.9.0
             python: 313t
           - cuda: 130
             torch: 2.9.0
@@ -149,9 +146,6 @@ jobs:
             python: 314
           - cuda: 128
             torch: 2.9.0
-            python: 314t
-          - cuda: 128
-            torch: 2.9.0
             python: 313t
           - cuda: 128
             torch: 2.9.0
@@ -169,9 +163,6 @@ jobs:
           - cuda: 126
             torch: 2.9.0
             python: 314
-          - cuda: 126
-            torch: 2.9.0
-            python: 314t
           - cuda: 126
             torch: 2.9.0
             python: 313t
@@ -195,9 +186,6 @@ jobs:
             python: 314
           - cuda: 130
             torch: 2.8.0
-            python: 314t
-          - cuda: 130
-            torch: 2.8.0
             python: 313t
           - cuda: 130
             torch: 2.8.0
@@ -217,9 +205,6 @@ jobs:
             python: 314
           - cuda: 128
             torch: 2.8.0
-            python: 314t
-          - cuda: 128
-            torch: 2.8.0
             python: 313t
           - cuda: 128
             torch: 2.8.0
@@ -233,13 +218,9 @@ jobs:
           - cuda: 128
             torch: 2.8.0
             python: 310
-          # cuda 126
           - cuda: 126
             torch: 2.8.0
             python: 314
-          - cuda: 126
-            torch: 2.8.0
-            python: 314t
           - cuda: 126
             torch: 2.8.0
             python: 313t

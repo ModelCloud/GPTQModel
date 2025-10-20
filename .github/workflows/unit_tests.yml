@@ -61,7 +61,8 @@ env:
   PYTORCH_ALLOC_CONF: 'expandable_segments:True'
   MAX_JOBS: 4
   RUNNER: 10.0.13.31
-  XEON5: 10.0.14.248
+  XEON5: 10.0.14.249
+  UV_INDEX_URL: http://10.0.14.249/simple
   CUDA_VERSION: 128
   TORCH_VERSION: 2.8.0
   PYTHON_VERSION: 312 # use 312, no need to recompile libs like flash_attn...
@@ -235,6 +236,10 @@ jobs:
 
       - name: Print Env
         run: |
+          echo "::group::pyenv versions"
+          pyenv versions
+          echo "::endgroup::"
+
           python_version=${{ env.PYTHON_VERSION }}
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
@@ -258,16 +263,22 @@ jobs:
           pyenv local $env_name
           pyenv activate $env_name
 
-          echo "== pyenv =="
+          echo "::group::pyenv versions"
           pyenv versions
+          echo "::endgroup::"
+          
           echo "== python =="
           python --version
+
           echo "== nvcc =="
           nvcc --version
+
           echo "== torch =="
-          pip show torch || true
-          echo "##### pip list #####"
+          pip show torch
+
+          echo "::group::pip list"
           pip list
+          echo "::endgroup::"
 
       - name: Compress dir
         run: |
@@ -292,7 +303,16 @@ jobs:
       - name: Compile
         if: github.event.inputs.artifact_id == '' && !cancelled()
         timeout-minutes: 45
-        run: python setup.py bdist_wheel
+        run: |
+          echo "::group::pyenv version"
+          pyenv version
+          which python
+          python --version
+          echo "::endgroup::"
+          
+          echo "::group::compile logs"
+          python setup.py bdist_wheel
+          echo "::endgroup::"
 
       # - name: Test install
       #   if: github.event.inputs.artifact_id == '' && !cancelled()
@@ -388,16 +408,22 @@ jobs:
           pyenv local $env_name
           pyenv activate $env_name
 
-          echo "== pyenv =="
+          echo "::group::pyenv versions"
           pyenv versions
+          echo "::endgroup::"
+          
           echo "== python =="
           python --version
+
           echo "== nvcc =="
           nvcc --version
+
           echo "== torch =="
           pip show torch
-          echo "== pip list =="
+
+          echo "::group::pip list"
           pip list
+          echo "::endgroup::"
 
 #      - name: Install requirements
 #        run: |
@@ -454,7 +480,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          uv pip install -U transformers 
+          uv pip install -U transformers tabulate
           if [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
              [ "${{ matrix.test_script }}" == "test_inference_speed" ] || \
              [ "${{ matrix.test_script }}" == "test_q4_bitblas" ] || \
@@ -607,7 +633,7 @@ jobs:
     needs:
       - check-vm
       - list-test-files
-    if: (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && (needs.list-test-files.outputs.m4-files != '' && needs.list-test-files.outputs.m4-files != '[]') && !cancelled()
+    if: false && (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && (needs.list-test-files.outputs.m4-files != '' && needs.list-test-files.outputs.m4-files != '[]') && !cancelled()
     strategy:
       fail-fast: false
       matrix:

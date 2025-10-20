@@ -8,7 +8,6 @@ import json
 import os
 import shutil
 import struct
-from threading import Lock
 from typing import Iterable, List, Optional, Set, Tuple
 
 import accelerate
@@ -23,6 +22,7 @@ from torch import nn
 
 from ..looper.named_module import NamedModule
 from .device import get_device
+from .module_locks import parent_module_lock
 from .torch import CPU, META
 
 
@@ -68,10 +68,8 @@ def is_meta_module(m: nn.Module) -> bool:
             return True
     return False
 
-# Serialize access to module.state_dict(), which is not thread-safe under concurrent calls.
-_OFFLOAD_LOCK = Lock()
-
-
+# Serialize access to module.state_dict(), which is not thread-safe under
+# concurrent calls that mutate the same parent module.
 def _prepare_offload_directory(target_dir: str) -> None:
     if os.path.isdir(target_dir):
         shutil.rmtree(target_dir)
@@ -131,8 +129,7 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
 
 
 def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
-    with _OFFLOAD_LOCK:
-        _offload_to_disk_impl(module=module, model=model, disk_path=disk_path)
+    _offload_to_disk_impl(module=module, model=model, disk_path=disk_path)
 
 
 def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
@@ -173,6 +170,11 @@ def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_
 #offload_to_disk = _OFFLOAD_SAFE.offload_to_disk
 
 def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
+    with parent_module_lock(name):
+        _offload_disk_locked(module=module, name=name, disk_path=disk_path)
+
+
+def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = "."):
     if is_meta_module(module):
         # print(f"[skip] '{name}' is on meta; leaving as-is")
         return

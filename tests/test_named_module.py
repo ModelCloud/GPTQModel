@@ -17,6 +17,7 @@ import pytest
 import torch
 
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.utils.module_locks import parent_module_lock
 
 
 def _make_linear(features: int = 8, device: torch.device | None = None) -> torch.nn.Linear:
@@ -181,16 +182,16 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
     def _verify_expected(ctx: _ModuleContext, expected_items: tuple[tuple[str, _ExpectedTensor], ...]) -> bool:
         named = ctx.named
         for key, expected in expected_items:
-            with named._state_lock:
+            with parent_module_lock(named.full_name):
                 host_tensor = named.state.get(key)
                 event_map = named.state.get("streaming_event_map", {})
                 pending_event = event_map.get(key)
             if host_tensor is None:
                 ctx.named.stream_sync()
-                with named._state_lock:
+                with parent_module_lock(named.full_name):
                     host_tensor = named.state.get(key)
                 if host_tensor is None:
-                    with named._state_lock:
+                    with parent_module_lock(named.full_name):
                         available = sorted(str(k) for k in named.state.keys())
                     error_queue.put(f"Missing host tensor for key {key}; available={available}")
                     stop_event.set()
@@ -204,7 +205,7 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
                 or not math.isclose(actual_sum, expected.checksum, rel_tol=0.0, abs_tol=1e-2)
             ):
                 ctx.named.stream_sync()
-                with named._state_lock:
+                with parent_module_lock(named.full_name):
                     retry_tensor = named.state.get(key)
                 if retry_tensor is not None:
                     retry_val = _fingerprint_last_value(retry_tensor)
@@ -213,7 +214,7 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
                     retry_val = None
                     retry_sum = None
                 del host_tensor
-                with named._state_lock:
+                with parent_module_lock(named.full_name):
                     named.state.pop(key, None)
                 error_queue.put(
                     "Mismatch for "
@@ -224,7 +225,7 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
                 stop_event.set()
                 return False
             del host_tensor
-            with named._state_lock:
+            with parent_module_lock(named.full_name):
                 named.state.pop(key, None)
                 named.state.get("streaming_event_map", {}).pop(key, None)
         return True
@@ -340,7 +341,7 @@ def test_named_module_multithreaded_streaming_free_thread_stress():
     for device in devices:
         torch.cuda.synchronize(device=device)
     for ctx in module_contexts:
-        with ctx.named._state_lock:
+        with parent_module_lock(ctx.named.full_name):
             keys_to_remove = [key for key in ctx.named.state.keys() if key.startswith("thread")]
             for key in keys_to_remove:
                 ctx.named.state.pop(key, None)

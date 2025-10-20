@@ -24,6 +24,7 @@ from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.device import get_device
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
+from ..utils.module_locks import parent_module_lock
 from ..utils.torch import tf32_disable_guard
 
 log = setup_logger()
@@ -267,6 +268,7 @@ class GPTQProcessor(LoopProcessor):
 
         layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
+        parent_key = getattr(module, "full_name", getattr(module, "name", None))
 
         # replace module with quantized module
         timer = getattr(model, "quant_region_timer", None)
@@ -277,21 +279,22 @@ class GPTQProcessor(LoopProcessor):
             logger=log,
             module_name=module_label,
         ):
-            create_quant_module(
-                name=module.full_name,
-                linear_cls=model.qlinear_kernel,
-                bits=self.qcfg.bits,
-                desc_act=self.qcfg.desc_act,
-                dynamic=self.qcfg.dynamic,
-                group_size=self.qcfg.group_size,
-                module=model.model,
-                submodule=module,
-                sym=self.qcfg.sym,
-                device=self.qcfg.device,
-                lm_head_name=model.lm_head,
-                pack_dtype=self.qcfg.pack_dtype,
-                register_buffers=False,
-            )
+            with parent_module_lock(parent_key):
+                create_quant_module(
+                    name=module.full_name,
+                    linear_cls=model.qlinear_kernel,
+                    bits=self.qcfg.bits,
+                    desc_act=self.qcfg.desc_act,
+                    dynamic=self.qcfg.dynamic,
+                    group_size=self.qcfg.group_size,
+                    module=model.model,
+                    submodule=module,
+                    sym=self.qcfg.sym,
+                    device=self.qcfg.device,
+                    lm_head_name=model.lm_head,
+                    pack_dtype=self.qcfg.pack_dtype,
+                    register_buffers=False,
+                )
         if timer is not None and create_start is not None:
             timer.record(
                 "submodule_finalize_create",
@@ -311,17 +314,18 @@ class GPTQProcessor(LoopProcessor):
             logger=log,
             module_name=module_label,
         ):
-            packer_label = pack_module(
-                name=module.full_name,
-                qModules=qModules,
-                q_scales=q_scales,
-                q_zeros=q_zeros,
-                q_g_idx=q_g_idx,
-                layers=layers,
-                quant_linear_cls=model.qlinear_kernel,
-                lock=self.lock,
-                quantize_config=self.qcfg,
-            )
+            with parent_module_lock(parent_key):
+                packer_label = pack_module(
+                    name=module.full_name,
+                    qModules=qModules,
+                    q_scales=q_scales,
+                    q_zeros=q_zeros,
+                    q_g_idx=q_g_idx,
+                    layers=layers,
+                    quant_linear_cls=model.qlinear_kernel,
+                    lock=self.lock,
+                    quantize_config=self.qcfg,
+                )
         if timer is not None and pack_start is not None:
             timer.record(
                 "submodule_finalize_pack",

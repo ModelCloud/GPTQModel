@@ -1505,7 +1505,6 @@ class ModuleLooper():
                                     time.perf_counter() - start,
                                     source=resolved_label,
                                 )
-
                         process_name = process.name() if process is not None else "<processor>"
                         return FinalizeProgressInfo(module_label, process_name, layer_idx)
 
