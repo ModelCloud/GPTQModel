@@ -297,16 +297,22 @@ jobs:
             bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
           fi
 
-          echo "== pyenv =="
-          pyenv version
-          echo "== python path =="
-          which python
+          echo "::group::pyenv versions"
+          pyenv versions
+          echo "::endgroup::"
+          
           echo "== python =="
           python --version
+
           echo "== nvcc =="
           nvcc --version
+
           echo "== torch =="
           pip show torch
+
+          echo "::group::pip list"
+          pip list
+          echo "::endgroup::"
 
       - name: Compile
         if: env.SHOULD_RUN == 1
