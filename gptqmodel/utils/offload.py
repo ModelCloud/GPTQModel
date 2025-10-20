@@ -8,8 +8,8 @@ import json
 import os
 import shutil
 import struct
-from threading import Lock
-from typing import Iterable, List, Optional, Set, Tuple
+from threading import Lock, RLock
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import accelerate
 import torch
@@ -68,8 +68,35 @@ def is_meta_module(m: nn.Module) -> bool:
             return True
     return False
 
-# Serialize access to module.state_dict(), which is not thread-safe under concurrent calls.
-_OFFLOAD_LOCK = Lock()
+# Serialize access to module.state_dict(), which is not thread-safe under
+# concurrent calls that mutate the same parent module.
+_PARENT_LOCKS: Dict[str, RLock] = {}
+_PARENT_LOCKS_GUARD = Lock()
+_ROOT_PARENT_KEY = "<root>"
+
+
+def _parent_lock_key(module_name: str) -> str:
+    if not module_name:
+        return _ROOT_PARENT_KEY
+    parts = module_name.split(".")
+    if len(parts) <= 1:
+        return parts[0]
+    return ".".join(parts[:-1])
+
+
+@contextlib.contextmanager
+def parent_module_lock(module_name: str):
+    key = _parent_lock_key(module_name)
+    with _PARENT_LOCKS_GUARD:
+        lock = _PARENT_LOCKS.get(key)
+        if lock is None:
+            lock = RLock()
+            _PARENT_LOCKS[key] = lock
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _prepare_offload_directory(target_dir: str) -> None:
@@ -131,8 +158,7 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
 
 
 def offload_to_disk(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
-    with _OFFLOAD_LOCK:
-        _offload_to_disk_impl(module=module, model=model, disk_path=disk_path)
+    _offload_to_disk_impl(module=module, model=model, disk_path=disk_path)
 
 
 def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_path: str = "."):
@@ -173,6 +199,11 @@ def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_
 #offload_to_disk = _OFFLOAD_SAFE.offload_to_disk
 
 def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
+    with parent_module_lock(name):
+        _offload_disk_locked(module=module, name=name, disk_path=disk_path)
+
+
+def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = "."):
     if is_meta_module(module):
         # print(f"[skip] '{name}' is on meta; leaving as-is")
         return
