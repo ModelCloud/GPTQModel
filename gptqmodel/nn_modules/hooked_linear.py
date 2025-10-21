@@ -241,8 +241,8 @@ def _replace_module(module, child, name, level: int = 0, debug: bool = False) ->
 
 
 def replace_module_with_hooked_legacy(module, level: int = 0, quant_lm_head: bool = False):
-    if level == 0:
-        log.info("Hooked Modules: Using legacy based config for targeting of modules")
+    # if level == 0:
+    #     log.info("Hooked Modules: Using legacy based config for targeting of modules")
 
     for name, child in module.named_children():
         if not quant_lm_head and hasattr(module, "get_output_embeddings") and child == module.get_output_embeddings():
