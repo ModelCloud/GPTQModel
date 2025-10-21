@@ -751,6 +751,12 @@ if BUILD_CUDA_EXT == "1":
                     )
                 ]
 
+        # Ensure machete kernels are compiled before other extensions
+        machete_exts = [ext for ext in extensions if getattr(ext, "name", "") == "gptqmodel_machete_kernels"]
+        if machete_exts:
+            other_exts = [ext for ext in extensions if getattr(ext, "name", "") != "gptqmodel_machete_kernels"]
+            extensions[:] = machete_exts + other_exts
+
         additional_setup_kwargs = {
             "ext_modules": extensions,
             "cmdclass": {"build_ext": cpp_ext.BuildExtension},

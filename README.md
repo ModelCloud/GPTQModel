@@ -17,8 +17,9 @@
 </p>
 
 ## Latest News
-* 10/20/2025 [5.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.0.0): 🎉 Data-parallel quant support for `MoE` models on multi-gpu using `nogil` Python. `offload_to_disk` support enabled by 
+* 10/21/2025 [5.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.0.0): 🎉 Data-parallel quant support for `MoE` models on multi-gpu using `nogil` Python. `offload_to_disk` support enabled by 
 default to massively reduce `cpu` ram usage. New `Intel` and `AMD` cpu hw accelerated `TorchFused` kernel. Packing stage is now 4x faster and now inlined with quantization. `Vram` pressure for large models reduced during quantization. 
+`Machete` kernel added for Hopper+/Blackwell acceleration for gptq and awq models.
 `act_group_aware` is  16k+ times faster and now the default when `desc_act=False` for higher quality recovery without inference penalty of `desc_act=True`. New beta quality `AWQ` support with full `gemm`, 
 `gemm_fast`, `marlin` kernel support. `LFM`, `Ling`, `Qwen3 Omni` model support. Quantization is now faster with reduced vram usage. Enhanced logging support with `LogBar`.
 * 09/16/2025 [4.2.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.5): `hyb_act` renamed to `act_group_aware`. Removed finicky `torch` import within `setup.py`. Packing bug fix and prebuilt Pytorch 2.8 whls. 
@@ -196,14 +197,14 @@ Native support support some of the most popular multi-modal models:
 
 GPT-QModel is validated for Linux, MacOS, and Windows 11:
 
-| Platform        | Device        |     |  Optimized Arch              | Kernels                                       |
-|-----------------|---------------| --- | -------------- |-----------------------------------------------| 
-| 🐧 Linux           | Nvidia GPU    | ✅       | `Ampere+` | Marlin, Exllama V2, Exallma V1, Triton, Torch |
-| 🐧 Linux | AMD GPU     | ✅             |   `7900XT+`,  `ROCm 6.2+` | Exllama V2, Exallma V1, Torch                 |
-| 🐧 Linux | Intel XPU     | ✅             |   `Arc`, `Datacenter Max` | Torch Fused (Python 2.8+), Torch              |
-| 🐧 Linux           | Intel/AMD CPU | ✅          | `avx`, `amx`, `xmx` | Torch Fused, Torch                            |
-| 🍎 MacOS | GPU (Metal) / CPU          | ✅             |   `Apple Silicon`, `M1+` | Torch, MLX via conversion                     |
-| 🪟 Windows | GPU (Nvidia) / CPU       | ✅             |   `Nvidia`  | Torch                                         |
+| Platform        | Device        |     |  Optimized Arch              | Kernels                                                |
+|-----------------|---------------| --- | -------------- |--------------------------------------------------------| 
+| 🐧 Linux           | Nvidia GPU    | ✅       | `Ampere+` | Machete, Marlin, Exllama V2, Exallma V1, Triton, Torch |
+| 🐧 Linux | AMD GPU     | ✅             |   `7900XT+`,  `ROCm 6.2+` | Exllama V2, Exallma V1, Torch                          |
+| 🐧 Linux | Intel XPU     | ✅             |   `Arc`, `Datacenter Max` | Torch Fused (Python 2.8+), Torch                       |
+| 🐧 Linux           | Intel/AMD CPU | ✅          | `avx`, `amx`, `xmx` | Torch Fused (Python 2.8+), Torch                       |
+| 🍎 MacOS | GPU (Metal) / CPU          | ✅             |   `Apple Silicon`, `M1+` | Torch, MLX via conversion                              |
+| 🪟 Windows | GPU (Nvidia) / CPU       | ✅             |   `Nvidia`  | Torch                                                  |
 
 
 ## Install
