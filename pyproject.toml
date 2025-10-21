@@ -10,7 +10,7 @@ name = "GPTQModel"
 dynamic = ["version"]
 description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license-files = ["licenses/LICENSE.apache"]
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
@@ -18,6 +18,7 @@ authors = [
 keywords = ["gptq", "awq", "qqq", "autogptq", "autoawq", "eora", "gar", "quantization", "large-language-models", "transformers", "llm", "moe", "compression"]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -46,7 +47,7 @@ dependencies = [
     "huggingface_hub>=0.34.4",
     "random_word>=1.0.13",
     "tokenicer>=0.0.5",
-    "logbar>=0.1.5",
+    "logbar>=0.1.6",
     "maturin>=1.9.4", # required by safetensors and hf_transfer
     "datasets>=3.6.0",
     "pyarrow>=21.0",
