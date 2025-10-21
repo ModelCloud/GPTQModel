@@ -39,7 +39,10 @@ def _ensure_cutlass_source() -> Path:
         rmtree(cutlass_root)
 
     with tarfile.open(archive_path, "r:gz") as tar:
-        tar.extractall(path=deps_dir)
+        extract_kwargs = {"path": deps_dir}
+        if sys.version_info >= (3, 12):
+            extract_kwargs["filter"] = "data"
+        tar.extractall(**extract_kwargs)
 
     extracted_dir = deps_dir / f"cutlass-{CUTLASS_VERSION}"
     if not extracted_dir.exists():
@@ -241,16 +244,40 @@ def _version_geq(version: str | None, major: int, minor: int = 0) -> bool:
 
 
 def _nvcc_release_version() -> str | None:
-    out = _probe_cmd(["nvcc", "--version"])
-    if not out:
-        print(
-            "NVCC not found: For Ubuntu, run `sudo update-alternatives --config cuda` to fix path for already installed Cuda."
-        )
-        return None
+    # Search for nvcc in common locations before giving up.
+    candidates: list[str] = []
+    nvcc_env = _read_env("NVCC")
+    if nvcc_env:
+        candidates.append(nvcc_env)
 
-    match = re.search(r"release\s+(\d+)\.(\d+)", out)
-    if match:
-        return f"{match.group(1)}.{match.group(2)}"
+    cuda_home = _read_env("CUDA_HOME")
+    cuda_path = _read_env("CUDA_PATH")
+
+    candidates.extend(
+        [
+            "nvcc",
+            str(Path(cuda_home).joinpath("bin", "nvcc")) if cuda_home else None,
+            str(Path(cuda_path).joinpath("bin", "nvcc")) if cuda_path else None,
+            "/usr/local/cuda/bin/nvcc",
+        ]
+    )
+
+    seen = set()
+    for cmd in candidates:
+        if not cmd or cmd in seen:
+            continue
+        seen.add(cmd)
+        out = _probe_cmd([cmd, "--version"])
+        if not out:
+            continue
+        match = re.search(r"release\s+(\d+)\.(\d+)", out)
+        if match:
+            return f"{match.group(1)}.{match.group(2)}"
+
+    print(
+        "NVCC not found (checked PATH, $CUDA_HOME/bin, $CUDA_PATH/bin, /usr/local/cuda/bin). "
+        "For Ubuntu, run `sudo update-alternatives --config cuda` to fix path for already installed Cuda."
+    )
     return None
 
 
