@@ -29,6 +29,7 @@ from gptqmodel.utils.machete import (
 log = LogBar.shared()
 
 DEVICE = torch.device("cuda:0")
+ONLY_MACHETE = os.getenv("GPTQMODEL_ONLY_MACHETE", "0") == "1"
 
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -47,18 +48,21 @@ class TestKernelOutput(unittest.TestCase):
     # model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
     model_path = "sliuau/Llama-3.2-3B_4bits_128group_size"
     target_qliner_map = {
-        # BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
-        # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
-        BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
-        BACKEND.TRITON: TritonV2QuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
-        # BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
-        BACKEND.BITBLAS: BitblasQuantLinear,
-        # BACKEND.IPEX: IPEXQuantLinear,
         BACKEND.MACHETE: MacheteQuantLinear,
-        BACKEND.MARLIN: MarlinQuantLinear,
-        # BACKEND.MARLIN_FP16: MarlinQuantLinear,
     }
+    if not ONLY_MACHETE:
+        target_qliner_map.update({
+            # BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
+            # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
+            BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
+            BACKEND.TRITON: TritonV2QuantLinear,
+            # BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
+            BACKEND.BITBLAS: BitblasQuantLinear,
+            # BACKEND.IPEX: IPEXQuantLinear,
+            BACKEND.MARLIN: MarlinQuantLinear,
+            # BACKEND.MARLIN_FP16: MarlinQuantLinear,
+        })
 
     target = 'model.layers.6.self_attn.v_proj'
     m = [   # tuple is dim_0 size and num_sampes for each dim_0
@@ -210,18 +214,19 @@ class TestKernelOutput(unittest.TestCase):
             if not _validate_machete_device_support():
                 self.skipTest("Machete requires NVIDIA Hopper or newer (SM90+)")
 
-    @parameterized.expand([
+    _float16_cases = [
         (BACKEND.TORCH, torch.float16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
-        (BACKEND.TRITON, torch.float16, 0.00001),
-        # (BACKEND.EXLLAMA_V1, torch.float16, 0.0050),
-        (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
         (BACKEND.MACHETE, torch.float16, 0.00040),
-        (BACKEND.MARLIN, torch.float16, 0.00035),
-        (BACKEND.BITBLAS, torch.float16, 0.0035),
-        # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0025),
-    ])
+    ]
+    if not ONLY_MACHETE:
+        _float16_cases.extend([
+            (BACKEND.TRITON, torch.float16, 0.00001),
+            (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
+            (BACKEND.MARLIN, torch.float16, 0.00035),
+            (BACKEND.BITBLAS, torch.float16, 0.0035),
+        ])
+
+    @parameterized.expand(_float16_cases)
     def test_kernel_float16(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
         self._maybe_skip_backend(backend)
 
@@ -238,18 +243,19 @@ class TestKernelOutput(unittest.TestCase):
             reference_label="Torch output",
         )
 
-    @parameterized.expand([
+    _bfloat16_cases = [
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
-        (BACKEND.TRITON, torch.bfloat16, 0.00001),
-        # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0064),
-        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
         (BACKEND.MACHETE, torch.bfloat16, 0.0033),
-        (BACKEND.MARLIN, torch.bfloat16, 0.0031),
-        (BACKEND.BITBLAS, torch.bfloat16, 0.0031),
-        # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.012),
-        # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0031), TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
-    ])
+    ]
+    if not ONLY_MACHETE:
+        _bfloat16_cases.extend([
+            (BACKEND.TRITON, torch.bfloat16, 0.00001),
+            (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
+            (BACKEND.MARLIN, torch.bfloat16, 0.0031),
+            (BACKEND.BITBLAS, torch.bfloat16, 0.0031),
+        ])
+
+    @parameterized.expand(_bfloat16_cases)
     def test_kernel_bfloat16(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
         self._maybe_skip_backend(backend)
 
@@ -266,18 +272,19 @@ class TestKernelOutput(unittest.TestCase):
             reference_label="Torch output",
         )
 
-    @parameterized.expand([
+    _float16_lora_cases = [
         (BACKEND.TORCH, torch.float16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
-        (BACKEND.TRITON, torch.float16, 0.00001),
-        # (BACKEND.EXLLAMA_V1, torch.float16, 0.0054),
-        (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
         (BACKEND.MACHETE, torch.float16, 0.00040),
-        (BACKEND.MARLIN, torch.float16, 0.00035),
-        (BACKEND.BITBLAS, torch.float16, 0.00035),
-        # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0020)
-    ])
+    ]
+    if not ONLY_MACHETE:
+        _float16_lora_cases.extend([
+            (BACKEND.TRITON, torch.float16, 0.00001),
+            (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
+            (BACKEND.MARLIN, torch.float16, 0.00035),
+            (BACKEND.BITBLAS, torch.float16, 0.00035),
+        ])
+
+    @parameterized.expand(_float16_lora_cases)
     def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
         self._maybe_skip_backend(backend)
 
@@ -294,18 +301,19 @@ class TestKernelOutput(unittest.TestCase):
         )
 
 
-    @parameterized.expand([
+    _bfloat16_lora_cases = [
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
-        (BACKEND.TRITON, torch.bfloat16, 0.00001),
-        # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0062),
-        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
         (BACKEND.MACHETE, torch.bfloat16, 0.0033),
-        (BACKEND.MARLIN, torch.bfloat16, 0.0033),
-        (BACKEND.BITBLAS, torch.bfloat16, 0.0033),
-        # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.011),
-        # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0014)  TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
-    ])
+    ]
+    if not ONLY_MACHETE:
+        _bfloat16_lora_cases.extend([
+            (BACKEND.TRITON, torch.bfloat16, 0.00001),
+            (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
+            (BACKEND.MARLIN, torch.bfloat16, 0.0033),
+            (BACKEND.BITBLAS, torch.bfloat16, 0.0033),
+        ])
+
+    @parameterized.expand(_bfloat16_lora_cases)
     def test_kernel_bfloat16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
         self._maybe_skip_backend(backend)
 

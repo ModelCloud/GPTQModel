@@ -6,10 +6,47 @@ import os
 import re
 import subprocess
 import sys
+import tarfile
+import urllib.request
 from pathlib import Path
+from shutil import rmtree
 
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
+
+CUTLASS_VERSION = "3.5.0"
+CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{CUTLASS_VERSION}.tar.gz"
+
+
+def _ensure_cutlass_source() -> Path:
+    deps_dir = Path("build") / "_deps"
+    deps_dir.mkdir(parents=True, exist_ok=True)
+
+    cutlass_root = deps_dir / f"cutlass-v{CUTLASS_VERSION}"
+    marker = cutlass_root / ".gptqmodel_complete"
+    if marker.exists():
+        return cutlass_root
+
+    archive_path = deps_dir / f"cutlass-v{CUTLASS_VERSION}.tar.gz"
+    if not archive_path.exists():
+        print(f"Downloading CUTLASS v{CUTLASS_VERSION} ...")
+        with urllib.request.urlopen(CUTLASS_RELEASE_URL) as response:
+            data = response.read()
+        archive_path.write_bytes(data)
+
+    if cutlass_root.exists():
+        rmtree(cutlass_root)
+
+    with tarfile.open(archive_path, "r:gz") as tar:
+        tar.extractall(path=deps_dir)
+
+    extracted_dir = deps_dir / f"cutlass-{CUTLASS_VERSION}"
+    if not extracted_dir.exists():
+        raise RuntimeError("Failed to extract CUTLASS archive")
+
+    extracted_dir.rename(cutlass_root)
+    marker.touch()
+    return cutlass_root.resolve()
 
 
 # ---------------------------
@@ -416,6 +453,8 @@ BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
 BUILD_EORA = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EORA", "0"))
 BUILD_EXLLAMA_V1 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V1", "0"))
 
+ONLY_MACHETE = _bool_env("GPTQMODEL_ONLY_MACHETE", False)
+
 if BUILD_CUDA_EXT == "1":
     # Import torch's cpp_extension only if we're truly building GPU extensions
     try:
@@ -453,11 +492,12 @@ if BUILD_CUDA_EXT == "1":
             ],
         }
 
+        cutlass_root = _ensure_cutlass_source()
         cutlass_include_paths = [
             Path("gptqmodel_ext/cutlass_extensions").resolve(),
-            Path("cutlass/include").resolve(),
-            Path("cutlass/examples/common/include").resolve(),
-            Path("cutlass/tools/library/include").resolve(),
+            cutlass_root / "include",
+            cutlass_root / "examples/common/include",
+            cutlass_root / "tools/library/include",
         ]
         cutlass_include_flags = [f"-I{path}" for path in cutlass_include_paths]
         extra_compile_args["cxx"] += cutlass_include_flags
@@ -516,7 +556,7 @@ if BUILD_CUDA_EXT == "1":
         # Extensions (gate marlin/qqq/eora/exllamav2 on CUDA sm_80+ and non-ROCm)
         if sys.platform != "win32":
             if not ROCM_VERSION and HAS_CUDA_V8:
-                if BUILD_MARLIN:
+                if BUILD_MARLIN and not ONLY_MACHETE:
                     marlin_kernel_dir = Path("gptqmodel_ext/marlin")
                     marlin_kernel_files = sorted(marlin_kernel_dir.glob("kernel_*.cu"))
 
@@ -555,15 +595,9 @@ if BUILD_CUDA_EXT == "1":
                     machete_generated_sources = sorted(machete_generated_dir.glob("*.cu"))
 
                     if not machete_generated_sources:
-                        generator_script = machete_dir / "generate.py"
-                        if generator_script.exists():
-                            print("Generating machete kernel instantiations...")
-                            subprocess.check_call([sys.executable, str(generator_script)])
-                            machete_generated_sources = sorted(machete_generated_dir.glob("*.cu"))
-
-                    if not machete_generated_sources:
                         raise RuntimeError(
-                            "No generated machete kernel templates detected. Run generate.py before building."
+                            "No generated machete kernel templates detected. Run gptqmodel_ext/machete/generate.py"
+                            " with CUTLASS checkout before building."
                         )
 
                     machete_sources += [str(path) for path in machete_generated_sources]
@@ -580,7 +614,34 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if BUILD_QQQ:
+                if BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
+                    machete_dir = Path("gptqmodel_ext/machete")
+                    machete_generated_dir = machete_dir / "generated"
+
+                    machete_sources = [str(machete_dir / "machete_pytorch.cu")]
+                    machete_generated_sources = sorted(machete_generated_dir.glob("*.cu"))
+
+                    if not machete_generated_sources:
+                        raise RuntimeError(
+                            "No generated machete kernel templates detected. Run gptqmodel_ext/machete/generate.py"
+                            " with CUTLASS checkout before building."
+                        )
+
+                    machete_sources += [str(path) for path in machete_generated_sources]
+
+                    machete_include_dirs = [str(Path("gptqmodel_ext").resolve())] + [str(path) for path in cutlass_include_paths]
+
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_machete_kernels",
+                            machete_sources,
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                            include_dirs=machete_include_dirs,
+                        )
+                    ]
+
+                if BUILD_QQQ and not ONLY_MACHETE:
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_qqq_kernels",
@@ -593,7 +654,7 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if BUILD_EORA:
+                if BUILD_EORA and not ONLY_MACHETE:
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_exllama_eora",
@@ -605,7 +666,7 @@ if BUILD_CUDA_EXT == "1":
                             extra_compile_args=extra_compile_args,
                         )
                     ]
-                if BUILD_EXLLAMA_V2:
+                if BUILD_EXLLAMA_V2 and not ONLY_MACHETE:
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_exllamav2_kernels",
@@ -636,11 +697,11 @@ if BUILD_CUDA_EXT == "1":
                     )
                 ]
 
-            if BUILD_AWQ:
-                extensions += [
-                    # contain un-hipifiable inline PTX
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_awq_kernels",
+                if BUILD_AWQ and not ONLY_MACHETE:
+                    extensions += [
+                        # contain un-hipifiable inline PTX
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_awq_kernels",
                         [
                             "gptqmodel_ext/awq/pybind_awq.cpp",
                             "gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu",

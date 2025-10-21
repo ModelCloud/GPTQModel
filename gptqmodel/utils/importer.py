@@ -46,7 +46,7 @@ log = setup_logger()
 
 AUTO_SELECT_BACKEND_ORDER_MAP = {
     METHOD.GPTQ: OrderedDict({
-        BACKEND.MACHETE: MacheteQuantLinear,
+        BACKEND.MACHETE: MacheteQuantLinear, # optimized for sm90+
         BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
         # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear, #
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
