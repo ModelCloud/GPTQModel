@@ -18,11 +18,13 @@ from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
+from ..nn_modules.qlinear.awq_machete import AwqMacheteQuantLinear
 from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.machete import MacheteQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -45,6 +47,7 @@ log = setup_logger()
 
 AUTO_SELECT_BACKEND_ORDER_MAP = {
     METHOD.GPTQ: OrderedDict({
+        BACKEND.MACHETE: MacheteQuantLinear, # optimized for sm90+
         BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
         # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear, #
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
@@ -59,6 +62,7 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
     }),
     METHOD.AWQ: OrderedDict({
+        BACKEND.MACHETE: AwqMacheteQuantLinear,
         BACKEND.MARLIN: AwqMarlinQuantLinear,
         BACKEND.EXLLAMA_V2: AwqExllamaV2QuantLinear,
         BACKEND.EXLLAMA_V1: AwqExllamaQuantLinear,
@@ -70,7 +74,7 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
 
 SUPPORTS_BACKEND_MAP = {
     METHOD.GPTQ: {
-        FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH_FUSED, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
+        FORMAT.GPTQ: [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH_FUSED, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
         FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
         FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
         FORMAT.BITBLAS: [BACKEND.BITBLAS],
@@ -79,10 +83,10 @@ SUPPORTS_BACKEND_MAP = {
         FORMAT.QQQ: [BACKEND.QQQ],
     },
     METHOD.AWQ: {
-        FORMAT.GEMM: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.GEMM],
+        FORMAT.GEMM: [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.GEMM],
         FORMAT.GEMV: [BACKEND.GEMV],
         FORMAT.GEMV_FAST: [BACKEND.GEMV_FAST],
-        FORMAT.MARLIN: [BACKEND.MARLIN],
+        FORMAT.MARLIN: [BACKEND.MACHETE, BACKEND.MARLIN],
     }
 }
 
@@ -280,6 +284,11 @@ def select_quant_linear(
         qlinear = TritonV2QuantLinear
     elif backend == BACKEND.BITBLAS:
         qlinear = BitBLASQuantLinear
+    elif backend == BACKEND.MACHETE:
+        if quant_method == METHOD.AWQ:
+            qlinear = AwqMacheteQuantLinear
+        else:
+            qlinear = MacheteQuantLinear
     elif backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16]:
         if quant_method == METHOD.AWQ:
             qlinear = AwqMarlinQuantLinear

@@ -5,6 +5,7 @@
 
 import os
 import unittest
+from typing import List, Tuple
 
 import torch
 from logbar import LogBar
@@ -15,9 +16,14 @@ from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Adapter, AdapterCache, Lora
 from gptqmodel.nn_modules.qlinear.bitblas import BitblasQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from gptqmodel.nn_modules.qlinear.machete import MacheteQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
+from gptqmodel.utils.machete import (
+    _validate_machete_device_support,
+    machete_import_exception,
+)
 from gptqmodel.utils.model import find_modules
 
 
@@ -42,29 +48,17 @@ class TestKernelOutput(unittest.TestCase):
     # model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
     model_path = "sliuau/Llama-3.2-3B_4bits_128group_size"
     target_qliner_map = {
-        # BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
-        # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
+        BACKEND.TORCH: TorchQuantLinear,
+        BACKEND.MACHETE: MacheteQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
-        BACKEND.TORCH: TorchQuantLinear,
-        # BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
         BACKEND.BITBLAS: BitblasQuantLinear,
-        # BACKEND.IPEX: IPEXQuantLinear,
         BACKEND.MARLIN: MarlinQuantLinear,
-        # BACKEND.MARLIN_FP16: MarlinQuantLinear,
     }
 
     target = 'model.layers.6.self_attn.v_proj'
-    m = [   # tuple is dim_0 size and num_sampes for each dim_0
-            (1, 256),
-            (16, 128),
-            (32, 64),
-            (64, 32),
-            (128, 16),
-        ]
-
-    # sum all the second tuple value for total sample size
-    random_input_sample_size = sum(t[1] for t in m)
+    m: List[Tuple[int, int]] = []
+    random_input_sample_size = 0
 
 
     @classmethod
@@ -75,6 +69,45 @@ class TestKernelOutput(unittest.TestCase):
 
         test_dtypes = [torch.float16, torch.bfloat16]
         cls.data = {} # key is dtype, v is Data()
+
+        def _parse_shapes(expr: str) -> List[Tuple[int, int]]:
+            shapes: List[Tuple[int, int]] = []
+            for part in expr.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                dim_str, samples_str = part.split(":", 1)
+                shapes.append((int(dim_str), int(samples_str)))
+            return shapes
+
+        large_shapes = [(1, 256), (16, 128), (32, 64), (64, 32), (128, 16)]
+        medium_shapes = [(1, 128), (16, 64), (32, 32), (64, 16)]
+        small_shapes = [(1, 64), (8, 32), (16, 16)]
+
+        env_shapes = os.getenv("GPTQMODEL_KERNEL_TEST_SHAPES")
+        if env_shapes:
+            cls.m = _parse_shapes(env_shapes)
+        else:
+            total_mem_gb = 0.0
+            if torch.cuda.is_available():
+                device_index = DEVICE.index if DEVICE.index is not None else 0
+                try:
+                    if torch.cuda.device_count() > device_index:
+                        props = torch.cuda.get_device_properties(device_index)
+                        total_mem_gb = props.total_memory / (1024 ** 3)
+                except Exception:
+                    total_mem_gb = 0.0
+
+            if os.getenv("GPTQMODEL_FAST_TESTS", "0") == "1":
+                cls.m = small_shapes
+            elif total_mem_gb >= 80:
+                cls.m = large_shapes
+            elif total_mem_gb >= 48:
+                cls.m = medium_shapes
+            else:
+                cls.m = small_shapes
+
+        cls.random_input_sample_size = sum(t[1] for t in cls.m)
 
         for dtype in test_dtypes:
             data = Data()
@@ -187,20 +220,28 @@ class TestKernelOutput(unittest.TestCase):
                 f"{len(failures)} mismatched outputs for backend `{backend}` and dtype `{dtype}`"
             )
 
-    @parameterized.expand([
+    def _maybe_skip_backend(self, backend: BACKEND):
+        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
+            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+
+        if backend == BACKEND.MACHETE:
+            if machete_import_exception is not None:
+                self.skipTest(f"Machete kernel unavailable: {machete_import_exception}")
+            if not _validate_machete_device_support():
+                self.skipTest("Machete requires NVIDIA Hopper or newer (SM90+)")
+
+    float16_cases = [
         (BACKEND.TORCH, torch.float16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
         (BACKEND.TRITON, torch.float16, 0.00001),
-        # (BACKEND.EXLLAMA_V1, torch.float16, 0.0050),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
+        (BACKEND.MACHETE, torch.float16, 0.00040),
         (BACKEND.MARLIN, torch.float16, 0.00035),
         (BACKEND.BITBLAS, torch.float16, 0.0035),
-        # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0025),
-    ])
+    ]
+
+    @parameterized.expand(float16_cases)
     def test_kernel_float16(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
-        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
-            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+        self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype)
@@ -215,20 +256,18 @@ class TestKernelOutput(unittest.TestCase):
             reference_label="Torch output",
         )
 
-    @parameterized.expand([
+    bfloat16_cases = [
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
-        # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0064),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
+        (BACKEND.MACHETE, torch.bfloat16, 0.0033),
         (BACKEND.MARLIN, torch.bfloat16, 0.0031),
         (BACKEND.BITBLAS, torch.bfloat16, 0.0031),
-        # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.012),
-        # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0031), TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
-    ])
+    ]
+
+    @parameterized.expand(bfloat16_cases)
     def test_kernel_bfloat16(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
-        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
-            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+        self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype)
@@ -243,20 +282,18 @@ class TestKernelOutput(unittest.TestCase):
             reference_label="Torch output",
         )
 
-    @parameterized.expand([
+    float16_lora_cases = [
         (BACKEND.TORCH, torch.float16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
         (BACKEND.TRITON, torch.float16, 0.00001),
-        # (BACKEND.EXLLAMA_V1, torch.float16, 0.0054),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
+        (BACKEND.MACHETE, torch.float16, 0.00040),
         (BACKEND.MARLIN, torch.float16, 0.00035),
         (BACKEND.BITBLAS, torch.float16, 0.00035),
-        # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
-        # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0020)
-    ])
+    ]
+
+    @parameterized.expand(float16_lora_cases)
     def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
-        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
-            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+        self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
@@ -270,21 +307,18 @@ class TestKernelOutput(unittest.TestCase):
             reference_label="Torch with Lora output",
         )
 
-
-    @parameterized.expand([
+    bfloat16_lora_cases = [
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        # (BACKEND.TORCH_FUSED, torch.bfloat16, 0.0001),
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
-        # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0062),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
-        (BACKEND.MARLIN, torch.bfloat16, 0.0033),
+        (BACKEND.MACHETE, torch.bfloat16, 0.0033),
+        (BACKEND.MARLIN, torch.bfloat16, 0.0050),
         (BACKEND.BITBLAS, torch.bfloat16, 0.0033),
-        # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.011),
-        # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0014)  TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
-    ])
+    ]
+
+    @parameterized.expand(bfloat16_lora_cases)
     def test_kernel_bfloat16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
-        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
-            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+        self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)

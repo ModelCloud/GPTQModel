@@ -10,7 +10,6 @@ import time
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
-import accelerate
 import torch
 import transformers
 
@@ -38,6 +37,7 @@ from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
+from ..utils.machete import _validate_machete_device_support
 from ..utils.marlin import _validate_marlin_device_support
 from ..utils.model import (
     auto_dtype,
@@ -478,7 +478,6 @@ def ModelLoader(cls):
 
         init_contexts = [no_init_weights()]
 
-        layer_type = ""
         with (ContextManagers(init_contexts)):
             cls.before_model_load(cls, load_quantized_model=True)
 
@@ -507,8 +506,7 @@ def ModelLoader(cls):
             # Get the first layer to determine layer type
             layers, _ = get_module_by_name_prefix(model, cls.extract_layers_node())
 
-            layer0 = layers[0]
-            layer_type = layer0.__class__.__name__
+            layers[0]
 
             modules = find_modules(model)
             ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
@@ -535,7 +533,6 @@ def ModelLoader(cls):
                 device=device,
             )
 
-        log.debug(f"Loader1: device_map {device_map}")
         if isinstance(device_map, str) and device_map not in [
                 "auto",
                 "balanced",
@@ -548,8 +545,8 @@ def ModelLoader(cls):
                 )
 
 
+
         import torch
-        from typing import Dict, List, Optional
 
         def build_layerwise_device_map(
                 model,
@@ -643,7 +640,7 @@ def ModelLoader(cls):
                     if owner:
                         device_map.setdefault(owner, fallback_device)
                     else:
-                        log.debug(f"Loader: unable to map param '{param_name}' to a module; skipping fallback assignment.")
+                        log.info(f"Loader: unable to map param '{param_name}' to a module; skipping fallback assignment.")
 
             # -------------------------------------------------------------
             # 6. Prune parent assignments that would override child devices
@@ -657,11 +654,11 @@ def ModelLoader(cls):
                     if child_name != name and child_name.startswith(f"{name}.")
                 }
                 if child_devices and (len(child_devices) > 1 or device_id not in child_devices):
-                    log.debug(f"Loader: dropping parent '{name}' from device_map to preserve child placements.")
+                    log.info(f"Loader: dropping parent '{name}' from device_map to preserve child placements.")
                     device_map.pop(name, None)
 
             # optional logging for debug
-            log.debug(f"Loader: Built map across {num_gpus} GPU(s), "
+            log.info(f"Loader: Built map across {num_gpus} GPU(s), "
                   f"{len(device_map)} entries. First 8: {list(device_map.items())[:8]}")
 
             return device_map
@@ -707,6 +704,16 @@ def ModelLoader(cls):
 
                     qcfg.runtime_format = FORMAT.GPTQ_V2
 
+        if backend == BACKEND.MACHETE:
+            if is_sharded:
+                raise ValueError(
+                    "Format: The loading of sharded checkpoints with Machete is currently not supported."
+                )
+            if not _validate_machete_device_support():
+                raise ValueError(
+                    f"Kernel: Machete kernel requires compute capability >= 9.0. Detected capability: {torch.cuda.get_device_capability()}"
+                )
+
         if backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and (
                 preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
             if is_sharded:
@@ -742,7 +749,7 @@ def ModelLoader(cls):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
+        if load_checkpoint_in_model and backend not in [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,

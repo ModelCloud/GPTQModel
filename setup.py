@@ -6,10 +6,51 @@ import os
 import re
 import subprocess
 import sys
+import tarfile
+import urllib.request
 from pathlib import Path
+from shutil import rmtree
 
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
+
+
+CUTLASS_VERSION = "3.5.0"
+CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{CUTLASS_VERSION}.tar.gz"
+
+
+def _ensure_cutlass_source() -> Path:
+    deps_dir = Path("build") / "_deps"
+    deps_dir.mkdir(parents=True, exist_ok=True)
+
+    cutlass_root = deps_dir / f"cutlass-v{CUTLASS_VERSION}"
+    marker = cutlass_root / ".gptqmodel_complete"
+    if marker.exists():
+        return cutlass_root.resolve()
+
+    archive_path = deps_dir / f"cutlass-v{CUTLASS_VERSION}.tar.gz"
+    if not archive_path.exists():
+        print(f"Downloading CUTLASS v{CUTLASS_VERSION} ...")
+        with urllib.request.urlopen(CUTLASS_RELEASE_URL) as response:
+            data = response.read()
+        archive_path.write_bytes(data)
+
+    if cutlass_root.exists():
+        rmtree(cutlass_root)
+
+    with tarfile.open(archive_path, "r:gz") as tar:
+        extract_kwargs = {"path": deps_dir}
+        if sys.version_info >= (3, 12):
+            extract_kwargs["filter"] = "data"
+        tar.extractall(**extract_kwargs)
+
+    extracted_dir = deps_dir / f"cutlass-{CUTLASS_VERSION}"
+    if not extracted_dir.exists():
+        raise RuntimeError("Failed to extract CUTLASS archive")
+
+    extracted_dir.rename(cutlass_root)
+    marker.touch()
+    return cutlass_root.resolve()
 
 
 # ---------------------------
@@ -203,16 +244,40 @@ def _version_geq(version: str | None, major: int, minor: int = 0) -> bool:
 
 
 def _nvcc_release_version() -> str | None:
-    out = _probe_cmd(["nvcc", "--version"])
-    if not out:
-        print(
-            "NVCC not found: For Ubuntu, run `sudo update-alternatives --config cuda` to fix path for already installed Cuda."
-        )
-        return None
+    # Search for nvcc in common locations before giving up.
+    candidates: list[str] = []
+    nvcc_env = _read_env("NVCC")
+    if nvcc_env:
+        candidates.append(nvcc_env)
 
-    match = re.search(r"release\s+(\d+)\.(\d+)", out)
-    if match:
-        return f"{match.group(1)}.{match.group(2)}"
+    cuda_home = _read_env("CUDA_HOME")
+    cuda_path = _read_env("CUDA_PATH")
+
+    candidates.extend(
+        [
+            "nvcc",
+            str(Path(cuda_home).joinpath("bin", "nvcc")) if cuda_home else None,
+            str(Path(cuda_path).joinpath("bin", "nvcc")) if cuda_path else None,
+            "/usr/local/cuda/bin/nvcc",
+        ]
+    )
+
+    seen = set()
+    for cmd in candidates:
+        if not cmd or cmd in seen:
+            continue
+        seen.add(cmd)
+        out = _probe_cmd([cmd, "--version"])
+        if not out:
+            continue
+        match = re.search(r"release\s+(\d+)\.(\d+)", out)
+        if match:
+            return f"{match.group(1)}.{match.group(2)}"
+
+    print(
+        "NVCC not found (checked PATH, $CUDA_HOME/bin, $CUDA_PATH/bin, /usr/local/cuda/bin). "
+        "For Ubuntu, run `sudo update-alternatives --config cuda` to fix path for already installed Cuda."
+    )
     return None
 
 
@@ -355,18 +420,28 @@ def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
     # Fallback: default GitHub template
     return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
 
-# Decide HAS_CUDA_V8 without torch
+# Decide HAS_CUDA_V8 / HAS_CUDA_V9 without torch
 HAS_CUDA_V8 = False
+HAS_CUDA_V9 = False
 if CUDA_ARCH_LIST:
-    HAS_CUDA_V8 = not ROCM_VERSION and _has_cuda_v8_from_arch_list(_parse_arch_list(CUDA_ARCH_LIST))
+    arch_list = _parse_arch_list(CUDA_ARCH_LIST)
+    try:
+        caps = [float(tok.split("+", 1)[0]) for tok in arch_list]
+    except Exception:
+        caps = []
+    if not ROCM_VERSION:
+        HAS_CUDA_V8 = any(cap >= 8.0 for cap in caps)
+        HAS_CUDA_V9 = any(cap >= 9.0 for cap in caps)
 else:
     smi = _probe_cmd(["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"])
     if smi:
         try:
             caps = [float(x.strip()) for x in smi.splitlines() if x.strip()]
             HAS_CUDA_V8 = any(cap >= 8.0 for cap in caps)
+            HAS_CUDA_V9 = any(cap >= 9.0 for cap in caps)
         except Exception:
             HAS_CUDA_V8 = False
+            HAS_CUDA_V9 = False
 
 if RELEASE_MODE == "1":
     gptqmodel_version = f"{gptqmodel_version}+{get_version_tag()}"
@@ -397,6 +472,7 @@ def _env_enabled_any(names, default="1") -> bool:
 
 
 BUILD_MARLIN = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
+BUILD_MACHETE = _env_enabled(os.environ.get("GPTQMODEL_BUILD_MACHETE", "1"))
 BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
 BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
 BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
@@ -442,6 +518,17 @@ if BUILD_CUDA_EXT == "1":
             ],
         }
 
+        cutlass_root = _ensure_cutlass_source()
+        cutlass_include_paths = [
+            Path("gptqmodel_ext/cutlass_extensions").resolve(),
+            cutlass_root / "include",
+            cutlass_root / "examples/common/include",
+            cutlass_root / "tools/library/include",
+        ]
+        cutlass_include_flags = [f"-I{path}" for path in cutlass_include_paths]
+        extra_compile_args["cxx"] += cutlass_include_flags
+        extra_compile_args["nvcc"] += cutlass_include_flags
+
         # Windows/OpenMP note: adjust flags as needed for MSVC if you add native Windows wheels
         if sys.platform == "win32":
             extra_compile_args["cxx"] = ["/O2", "/std:c++17", "/openmp", "/DNDEBUG", "/DENABLE_BF16"]
@@ -453,10 +540,7 @@ if BUILD_CUDA_EXT == "1":
         if not ROCM_VERSION:
             # if _version_geq(NVCC_VERSION, 13, 0):
             #     extra_compile_args["nvcc"].append("--device-entity-has-hidden-visibility=false")
-            extra_compile_args["nvcc"] += [
-                # Allow instantiations of __global__ templates to live in different
-                # translation units (we split marlin kernels for Ninja parallelism).
-                "-static-global-template-stub=false",
+            nvcc_extra_flags = [
                 "--threads", "8",  # NVCC parallelism
                 "--optimize=3",  # alias for -O3
                 # "-rdc=true",  # enable relocatable device code, required for future cuda > 13.x <-- TODO FIX ME broken loading
@@ -472,6 +556,10 @@ if BUILD_CUDA_EXT == "1":
                 # "--expt-extended-lambda",  # allow device lambdas <-- not used
                 "-diag-suppress=179,39,177",  # silence some template warnings
             ]
+            if _version_geq(NVCC_VERSION, 12, 8):
+                # Allow instantiations of __global__ templates to live in different TUs; only supported in newer NVCC.
+                nvcc_extra_flags.insert(0, "-static-global-template-stub=false")
+            extra_compile_args["nvcc"] += nvcc_extra_flags
         else:
             # hipify CUDA-like flags
             def _hipify_compile_flags(flags):
@@ -523,6 +611,60 @@ if BUILD_CUDA_EXT == "1":
                             ] + marlin_template_kernel_srcs,
                             extra_link_args=extra_link_args,
                             extra_compile_args=extra_compile_args,
+                        )
+                    ]
+
+                if BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
+                    machete_dir = Path("gptqmodel_ext/machete")
+                    machete_generated_dir = machete_dir / "generated"
+
+                    machete_sources = [str(machete_dir / "machete_pytorch.cu")]
+                    machete_generated_sources = sorted(machete_generated_dir.glob("*.cu"))
+
+                    if not machete_generated_sources:
+                        raise RuntimeError(
+                            "No generated machete kernel templates detected. Run gptqmodel_ext/machete/generate.py"
+                            " with CUTLASS checkout before building."
+                        )
+
+                    machete_sources += [str(path) for path in machete_generated_sources]
+
+                    machete_include_dirs = [str(Path("gptqmodel_ext").resolve())] + [str(path) for path in cutlass_include_paths]
+
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_machete_kernels",
+                            machete_sources,
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                            include_dirs=machete_include_dirs,
+                        )
+                    ]
+
+                if BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
+                    machete_dir = Path("gptqmodel_ext/machete")
+                    machete_generated_dir = machete_dir / "generated"
+
+                    machete_sources = [str(machete_dir / "machete_pytorch.cu")]
+                    machete_generated_sources = sorted(machete_generated_dir.glob("*.cu"))
+
+                    if not machete_generated_sources:
+                        raise RuntimeError(
+                            "No generated machete kernel templates detected. Run gptqmodel_ext/machete/generate.py"
+                            " with CUTLASS checkout before building."
+                        )
+
+                    machete_sources += [str(path) for path in machete_generated_sources]
+
+                    machete_include_dirs = [str(Path("gptqmodel_ext").resolve())] + [str(path) for path in cutlass_include_paths]
+
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_machete_kernels",
+                            machete_sources,
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                            include_dirs=machete_include_dirs,
                         )
                     ]
 
@@ -583,37 +725,58 @@ if BUILD_CUDA_EXT == "1":
                 ]
 
             if BUILD_AWQ:
-                extensions += [
-                    # contain un-hipifiable inline PTX
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_awq_kernels",
-                        [
-                            "gptqmodel_ext/awq/pybind_awq.cpp",
-                            "gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu",
-                            "gptqmodel_ext/awq/quantization/gemv_cuda.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    ),
-                    # TODO only compatible with ampere?
-                    # arch_flags = get_compute_capabilities({80, 86, 89, 90})
-                    # extra_compile_args_v2 = get_extra_compile_args(arch_flags, generator_flags)
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_awq_v2_kernels",
-                        [
-                            "gptqmodel_ext/awq/pybind_awq_v2.cpp",
-                            "gptqmodel_ext/awq/quantization_new/gemv/gemv_cuda.cu",
-                            "gptqmodel_ext/awq/quantization_new/gemm/gemm_cuda.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    )
-                ]
+                if ROCM_VERSION:
+                    print("Skipping AWQ kernels on ROCm: inline PTX is CUDA-only.")
+                else:
+                    extensions += [
+                        # contain un-hipifiable inline PTX
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_awq_kernels",
+                            [
+                                "gptqmodel_ext/awq/pybind_awq.cpp",
+                                "gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu",
+                                "gptqmodel_ext/awq/quantization/gemv_cuda.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        ),
+                        # TODO only compatible with ampere?
+                        # arch_flags = get_compute_capabilities({80, 86, 89, 90})
+                        # extra_compile_args_v2 = get_extra_compile_args(arch_flags, generator_flags)
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_awq_v2_kernels",
+                            [
+                                "gptqmodel_ext/awq/pybind_awq_v2.cpp",
+                                "gptqmodel_ext/awq/quantization_new/gemv/gemv_cuda.cu",
+                                "gptqmodel_ext/awq/quantization_new/gemm/gemm_cuda.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        ),
+                    ]
+
+        # Ensure machete kernels are compiled before other extensions
+        machete_exts = [ext for ext in extensions if getattr(ext, "name", "") == "gptqmodel_machete_kernels"]
+        if machete_exts:
+            other_exts = [ext for ext in extensions if getattr(ext, "name", "") != "gptqmodel_machete_kernels"]
+            extensions[:] = machete_exts + other_exts
+
+        # additional_setup_kwargs = {
+        #     "ext_modules": extensions,
+        #     "cmdclass": {"build_ext": cpp_ext.BuildExtension},
+        # }
 
         additional_setup_kwargs = {
             "ext_modules": extensions,
-            "cmdclass": {"build_ext": cpp_ext.BuildExtension},
+            "cmdclass": {"build_ext": cpp_ext.BuildExtension.with_options(
+                use_ninja=True,
+                no_python_abi_suffix=True,
+                build_temp="build/temp",
+                build_lib="build/lib",
+                clean_first=False  # keep intermediates for reuse
+            )},
         }
+
 
 # ---------------------------
 # Cached wheel fetcher
@@ -658,6 +821,7 @@ class CachedWheelsCommand(_bdist_wheel):
 # ---------------------------
 print(f"CUDA {CUDA_ARCH_LIST}")
 print(f"HAS_CUDA_V8 {HAS_CUDA_V8}")
+print(f"HAS_CUDA_V9 {HAS_CUDA_V9}")
 print(f"SETUP_KWARGS {additional_setup_kwargs}")
 print(f"gptqmodel_version={gptqmodel_version}")
 
