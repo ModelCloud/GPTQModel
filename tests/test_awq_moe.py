@@ -62,7 +62,6 @@ class TestGroupSize(unittest.TestCase):
         model = GPTQModel.load(
             self.pretrained_model_id,
             quantize_config=quantize_config,
-            debug=True,
         )
         model.quantize(self.calibration_dataset, batch_size=1, calibration_concat_size=2048)
         with tempfile.TemporaryDirectory() as tmp_dir_name:

@@ -738,7 +738,6 @@ class ModelTest(unittest.TestCase):
             trust_remote_code=trust_remote_code,
             dtype=dtype,
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.TORCH_FUSED else "auto",
-            debug=self.DEBUG,
             **args,
         )
 
@@ -855,7 +854,6 @@ class ModelTest(unittest.TestCase):
             model_id_or_path,
             trust_remote_code=trust_remote_code,
             backend=active_backend,
-            debug=self.DEBUG,
             adapter=self.EORA,
             **load_kwargs
         )
