@@ -26,7 +26,7 @@ def _ensure_cutlass_source() -> Path:
     cutlass_root = deps_dir / f"cutlass-v{CUTLASS_VERSION}"
     marker = cutlass_root / ".gptqmodel_complete"
     if marker.exists():
-        return cutlass_root
+        return cutlass_root.resolve()
 
     archive_path = deps_dir / f"cutlass-v{CUTLASS_VERSION}.tar.gz"
     if not archive_path.exists():
