@@ -178,33 +178,30 @@ jobs:
           - cuda: 126
             torch: 2.9.0
             python: 310
-
+          # not support yet, maybe later
           # pytorch 2.8
           # cuda 13
-          - cuda: 130
-            torch: 2.8.0
-            python: 314
-          - cuda: 130
-            torch: 2.8.0
-            python: 313t
-          - cuda: 130
-            torch: 2.8.0
-            python: 313
-          - cuda: 130
-            torch: 2.8.0
-            python: 312
-          - cuda: 130
-            torch: 2.8.0
-            python: 311
-          - cuda: 130
-            torch: 2.8.0
-            python: 310
+          # - cuda: 130
+          #   torch: 2.8.0
+          #   python: 314
+          # - cuda: 130
+          #   torch: 2.8.0
+          #   python: 313t
+          # - cuda: 130
+          #   torch: 2.8.0
+          #   python: 313
+          # - cuda: 130
+          #   torch: 2.8.0
+          #   python: 312
+          # - cuda: 130
+          #   torch: 2.8.0
+          #   python: 311
+          # - cuda: 130
+          #   torch: 2.8.0
+          #   python: 310
           # cuda 128
           - cuda: 128
             torch: 2.8.0
-            python: 314
-          - cuda: 128
-            torch: 2.8.0
             python: 313t
           - cuda: 128
             torch: 2.8.0
@@ -218,9 +215,6 @@ jobs:
           - cuda: 128
             torch: 2.8.0
             python: 310
-          - cuda: 126
-            torch: 2.8.0
-            python: 314
           - cuda: 126
             torch: 2.8.0
             python: 313t
@@ -493,7 +487,7 @@ jobs:
       - name: Install requirements
         run: |
           pip install build setuptools uv -U
-          uv pip install torch twine --system
+          uv pip install torch twine ninja --system
       - name: Compile
         run: python -m build --no-isolation --sdist
 
