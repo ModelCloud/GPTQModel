@@ -26,7 +26,6 @@ from gptqmodel.utils.torch import torch_empty_cache
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "8")
 # -- end do not touch
 from logbar import LogBar
 

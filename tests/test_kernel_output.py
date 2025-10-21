@@ -30,7 +30,6 @@ from gptqmodel.utils.model import find_modules
 log = LogBar.shared()
 
 DEVICE = torch.device("cuda:0")
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "8")
 
 GREEN = "\033[32m"
 RED = "\033[31m"
