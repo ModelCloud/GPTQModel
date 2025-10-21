@@ -533,7 +533,6 @@ def ModelLoader(cls):
                 device=device,
             )
 
-        log.debug(f"Loader1: device_map {device_map}")
         if isinstance(device_map, str) and device_map not in [
                 "auto",
                 "balanced",
@@ -641,7 +640,7 @@ def ModelLoader(cls):
                     if owner:
                         device_map.setdefault(owner, fallback_device)
                     else:
-                        log.debug(f"Loader: unable to map param '{param_name}' to a module; skipping fallback assignment.")
+                        log.info(f"Loader: unable to map param '{param_name}' to a module; skipping fallback assignment.")
 
             # -------------------------------------------------------------
             # 6. Prune parent assignments that would override child devices
@@ -655,11 +654,11 @@ def ModelLoader(cls):
                     if child_name != name and child_name.startswith(f"{name}.")
                 }
                 if child_devices and (len(child_devices) > 1 or device_id not in child_devices):
-                    log.debug(f"Loader: dropping parent '{name}' from device_map to preserve child placements.")
+                    log.info(f"Loader: dropping parent '{name}' from device_map to preserve child placements.")
                     device_map.pop(name, None)
 
             # optional logging for debug
-            log.debug(f"Loader: Built map across {num_gpus} GPU(s), "
+            log.info(f"Loader: Built map across {num_gpus} GPU(s), "
                   f"{len(device_map)} entries. First 8: {list(device_map.items())[:8]}")
 
             return device_map
