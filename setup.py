@@ -540,10 +540,7 @@ if BUILD_CUDA_EXT == "1":
         if not ROCM_VERSION:
             # if _version_geq(NVCC_VERSION, 13, 0):
             #     extra_compile_args["nvcc"].append("--device-entity-has-hidden-visibility=false")
-            extra_compile_args["nvcc"] += [
-                # Allow instantiations of __global__ templates to live in different
-                # translation units (we split marlin kernels for Ninja parallelism).
-                "-static-global-template-stub=false",
+            nvcc_extra_flags = [
                 "--threads", "8",  # NVCC parallelism
                 "--optimize=3",  # alias for -O3
                 # "-rdc=true",  # enable relocatable device code, required for future cuda > 13.x <-- TODO FIX ME broken loading
@@ -559,6 +556,10 @@ if BUILD_CUDA_EXT == "1":
                 # "--expt-extended-lambda",  # allow device lambdas <-- not used
                 "-diag-suppress=179,39,177",  # silence some template warnings
             ]
+            if _version_geq(NVCC_VERSION, 12, 8):
+                # Allow instantiations of __global__ templates to live in different TUs; only supported in newer NVCC.
+                nvcc_extra_flags.insert(0, "-static-global-template-stub=false")
+            extra_compile_args["nvcc"] += nvcc_extra_flags
         else:
             # hipify CUDA-like flags
             def _hipify_compile_flags(flags):
