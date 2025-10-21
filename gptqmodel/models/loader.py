@@ -627,12 +627,13 @@ def ModelLoader(cls):
                 n for n, _ in model.named_parameters()
                 if not any(n == k or n.startswith(k + ".") for k in device_map)
             ]
+            module_names = set(mod2name.values())
             if missing:
                 # map any leftover params (rare) to last GPU
                 fallback_device = device_ids[-1]
                 for param_name in missing:
                     owner = param_name
-                    while owner and owner not in set(mod2name.values()):
+                    while owner and owner not in module_names:
                         if "." not in owner:
                             owner = ""
                         else:
