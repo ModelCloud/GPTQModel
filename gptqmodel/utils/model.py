@@ -877,12 +877,15 @@ def pack_model(
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
-    if "" in device_map:
+    device_map = dict(device_map)
+    if "" in device_map and len(device_map) == 1:
         d = device_map[""]
         model = model.to(torch.device(d))
         model.hf_device_map = device_map
         return model
 
+    # Avoid eagerly materialising the full model on a single device when the map
+    # provides finer-grained placements; rely on accelerate hooks instead.
     tied_params = accelerate.utils.modeling.find_tied_parameters(model)
     if set(device_map.values()) == {"cpu"} or set(device_map.values()) == {
         "cpu",
@@ -902,12 +905,15 @@ def simple_dispatch_model(model, device_map):
         get_module_by_name_suffix(model, cpu_offload_group[0][0])._hf_hook.prev_module_hook = prev_hook
 
     for n, d in device_map.items():
+        if n == "":
+            continue
         m = get_module_by_name_suffix(model, n)
         if d != "cpu":
             d = torch.device(d)
             hook = AlignDevicesHook(d, io_same_device=True, place_submodules=True)
             add_hook_to_module(m, hook)
     accelerate.utils.modeling.retie_parameters(model, tied_params)
+
     model.hf_device_map = device_map
 
     return model

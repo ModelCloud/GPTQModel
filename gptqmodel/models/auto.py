@@ -28,9 +28,9 @@ if not os.environ.get("CUDA_DEVICE_ORDER", None):
 if 'CUDA_VISIBLE_DEVICES' in os.environ and 'ROCR_VISIBLE_DEVICES' in os.environ:
     del os.environ['ROCR_VISIBLE_DEVICES']
 
-if not os.environ.get("NCCL_SHM_DISABLE", None):
-    os.environ["NCCL_SHM_DISABLE"] = '1'
-    log.info("ENV: Auto setting NCCL_SHM_DISABLE=1 for multi-gpu memory safety.")
+# if not os.environ.get("NCCL_SHM_DISABLE", None):
+#     os.environ["NCCL_SHM_DISABLE"] = '1'
+#     log.info("ENV: Auto setting NCCL_SHM_DISABLE=1 for multi-gpu memory safety.")
 
 import sys  # noqa: E402
 
@@ -247,7 +247,6 @@ class GPTQModel:
             device: Optional[Union[str, torch.device]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             trust_remote_code: bool = False,
-            debug: Optional[bool] = False,
             **kwargs,
     ):
         if isinstance(model_id_or_path, str):
@@ -404,9 +403,34 @@ class GPTQModel:
         if llm_backend not in ['gptqmodel', 'vllm']:
             raise ValueError('Eval framework support llm_backend: [gptqmodel, vllm]')
 
+        if llm_backend == "vllm":
+            if "tensor_parallel_size" not in model_args:
+                try:
+                    cuda_devices = torch.cuda.device_count() if torch.cuda.is_available() else 0
+                except Exception:
+                    cuda_devices = 0
+                if cuda_devices:
+                    model_args["tensor_parallel_size"] = cuda_devices
+            if "gpu_memory_utilization" not in model_args:
+                model_args["gpu_memory_utilization"] = 0.90
+
         if isinstance(model_or_id_or_path, str):
-            log.info(f"Eval: loading using backend = `{backend}`")
-            model = GPTQModel.load(model_id_or_path=model_or_id_or_path, backend=backend)
+            load_backend = backend
+            load_kwargs = {}
+
+            if llm_backend == "vllm":
+                load_backend = BACKEND.VLLM
+                disallowed_keys = {"pretrained", "tokenizer", "gptqmodel", "trust_remote_code", "backend", "model_id_or_path"}
+                load_kwargs = {k: v for k, v in model_args.items() if k not in disallowed_keys}
+
+            backend_name = load_backend.value if isinstance(load_backend, BACKEND) else str(load_backend)
+            log.info(f"Eval: loading using backend = `{backend_name}`")
+            model = GPTQModel.load(
+                model_id_or_path=model_or_id_or_path,
+                backend=load_backend,
+                trust_remote_code=trust_remote_code,
+                **load_kwargs,
+            )
             model_id_or_path = model_or_id_or_path
         elif isinstance(model_or_id_or_path, BaseQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
             model = model_or_id_or_path
@@ -418,11 +442,10 @@ class GPTQModel:
             if isinstance(model, BaseQModel):
                 tokenizer = model.tokenizer
             elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
-                tokenizer = Tokenicer.load(model_id_or_path)
+                tokenizer = Tokenicer.load(model_id_or_path.strip())
 
         if tokenizer is None:
             raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
-
 
         if llm_backend == "gptqmodel": # vllm loads tokenizer
             model_args["tokenizer"] = tokenizer
