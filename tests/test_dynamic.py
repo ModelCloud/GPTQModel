@@ -145,4 +145,4 @@ class TestDynamic(ModelTest):
             del model
 
             q_model = GPTQModel.load(tmp_dir)
-            self.assertInference(model=q_model,tokenizer=self.tokenizer)
+            self.assertInference(model=q_model,tokenizer=self.tokenizer,keywords=["paris", "king"])
