@@ -7,6 +7,7 @@ import torch
 from tabulate import tabulate
 
 from gptqmodel.quantization import gar
+from gptqmodel.quantization import gar_ref
 
 
 def _benchmark_fn(label, fn, device, warmup_runs=3, measured_runs=10):
@@ -137,9 +138,9 @@ def test_gar_accuracy_randomized(seed):
     )
     opt_final = gar.compose_final_perm(opt_local, opt_global, groupsize)
 
-    orig_local = gar.compute_local_perms_original(diag_H, groupsize)
-    orig_global = gar.compute_global_perm_original(diag_H, groupsize)
-    orig_final = gar.compose_final_perm_original(orig_local, orig_global, groupsize)
+    orig_local = gar_ref.compute_local_perms_original(diag_H, groupsize)
+    orig_global = gar_ref.compute_global_perm_original(diag_H, groupsize)
+    orig_final = gar_ref.compose_final_perm_original(orig_local, orig_global, groupsize)
 
     opt_perm_values = diag_H[opt_final]
     orig_perm_values = diag_H[orig_final]
