@@ -18,8 +18,10 @@ from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.awq_machete import AwqMacheteQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.torch import torch_empty_cache
+from gptqmodel.utils.machete import machete_import_exception, _validate_machete_device_support
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -57,6 +59,7 @@ class TestGroupSize(unittest.TestCase):
 
     @parameterized.expand([
         (FORMAT.GEMM, BACKEND.GEMM, 128),
+        (FORMAT.GEMM, BACKEND.MACHETE, 128),
         (FORMAT.GEMM, BACKEND.MARLIN, 128),
         (FORMAT.GEMV, BACKEND.GEMV, 128),
         (FORMAT.GEMV_FAST, BACKEND.GEMV_FAST, 128),
@@ -68,6 +71,12 @@ class TestGroupSize(unittest.TestCase):
             quant_method=METHOD.AWQ,
             format=checkpoint_format,
         )
+
+        if backend == BACKEND.MACHETE:
+            if machete_import_exception is not None:
+                self.skipTest(f"machete unavailable: {machete_import_exception}")
+            if not _validate_machete_device_support():
+                self.skipTest("Machete requires NVIDIA Hopper or newer (SM90+)")
 
         model = GPTQModel.load(
             self.pretrained_model_id,
@@ -105,6 +114,8 @@ class TestGroupSize(unittest.TestCase):
         for _, module in model.named_modules():
             if backend == BACKEND.GEMM:
                 linear = AwqGEMMQuantLinear
+            elif backend == BACKEND.MACHETE:
+                linear = AwqMacheteQuantLinear
             elif backend == BACKEND.MARLIN:
                 linear = AwqMarlinQuantLinear
             elif backend == BACKEND.GEMV:
