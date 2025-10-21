@@ -5,6 +5,7 @@
 
 import os
 import unittest
+from typing import Tuple, List
 
 import torch
 from logbar import LogBar
@@ -30,6 +31,7 @@ log = LogBar.shared()
 
 DEVICE = torch.device("cuda:0")
 ONLY_MACHETE = os.getenv("GPTQMODEL_ONLY_MACHETE", "0") == "1"
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "8")
 
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -65,23 +67,8 @@ class TestKernelOutput(unittest.TestCase):
         })
 
     target = 'model.layers.6.self_attn.v_proj'
-    m = [   # tuple is dim_0 size and num_sampes for each dim_0
-            (1, 256),
-            (16, 128),
-            (32, 64),
-            (64, 32),
-            (128, 16),
-        ]
-
-    if os.getenv("GPTQMODEL_FAST_TESTS", "0") == "1":
-        m = [
-            (1, 32),
-            (16, 16),
-            (32, 8),
-        ]
-
-    # sum all the second tuple value for total sample size
-    random_input_sample_size = sum(t[1] for t in m)
+    m: List[Tuple[int, int]] = []
+    random_input_sample_size = 0
 
 
     @classmethod
@@ -92,6 +79,45 @@ class TestKernelOutput(unittest.TestCase):
 
         test_dtypes = [torch.float16, torch.bfloat16]
         cls.data = {} # key is dtype, v is Data()
+
+        def _parse_shapes(expr: str) -> List[Tuple[int, int]]:
+            shapes: List[Tuple[int, int]] = []
+            for part in expr.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                dim_str, samples_str = part.split(":", 1)
+                shapes.append((int(dim_str), int(samples_str)))
+            return shapes
+
+        large_shapes = [(1, 256), (16, 128), (32, 64), (64, 32), (128, 16)]
+        medium_shapes = [(1, 128), (16, 64), (32, 32), (64, 16)]
+        small_shapes = [(1, 64), (8, 32), (16, 16)]
+
+        env_shapes = os.getenv("GPTQMODEL_KERNEL_TEST_SHAPES")
+        if env_shapes:
+            cls.m = _parse_shapes(env_shapes)
+        else:
+            total_mem_gb = 0.0
+            if torch.cuda.is_available():
+                device_index = DEVICE.index if DEVICE.index is not None else 0
+                try:
+                    if torch.cuda.device_count() > device_index:
+                        props = torch.cuda.get_device_properties(device_index)
+                        total_mem_gb = props.total_memory / (1024 ** 3)
+                except Exception:
+                    total_mem_gb = 0.0
+
+            if os.getenv("GPTQMODEL_FAST_TESTS", "0") == "1":
+                cls.m = small_shapes
+            elif total_mem_gb >= 80:
+                cls.m = large_shapes
+            elif total_mem_gb >= 48:
+                cls.m = medium_shapes
+            else:
+                cls.m = small_shapes
+
+        cls.random_input_sample_size = sum(t[1] for t in cls.m)
 
         for dtype in test_dtypes:
             data = Data()

@@ -13,6 +13,7 @@ import unittest
 from datasets import load_dataset
 from parameterized import parameterized
 from transformers import AutoTokenizer
+import torch
 
 from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
@@ -25,6 +26,7 @@ from gptqmodel.utils.machete import machete_import_exception, _validate_machete_
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "8")
 # -- end do not touch
 from logbar import LogBar
 
@@ -43,9 +45,30 @@ class TestGroupSize(unittest.TestCase):
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
 
+        requested_samples = os.getenv("GPTQMODEL_AWQ_CALIB_SAMPLES")
+        if requested_samples is not None:
+            sample_count = max(1, int(requested_samples))
+        else:
+            total_mem_gb = 0
+            if torch.cuda.is_available():
+                try:
+                    total_mem_gb = (
+                        torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
+                        / (1024 ** 3)
+                    )
+                except Exception:
+                    total_mem_gb = 0
+
+            if total_mem_gb >= 80:
+                sample_count = 1024
+            elif total_mem_gb >= 48:
+                sample_count = 512
+            else:
+                sample_count = 192
+
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
                                  split="train")
-        self.calibration_dataset = traindata.select(range(1024))
+        self.calibration_dataset = traindata.select(range(sample_count))
 
     # def test_load_group_128(self):
     #     model = GPTQModel.load(
@@ -105,7 +128,7 @@ class TestGroupSize(unittest.TestCase):
 
             tokens = model.generate("Capital of France is", max_new_tokens=100)[0]
             result = model.tokenizer.decode(tokens)
-            print(f"BACKEND: {BACKEND.GEMM}, Result: {result}")
+            print(f"BACKEND: {backend}, Result: {result}")
             if "paris" not in result.lower() and "city" not in result.lower():
                 raise AssertionError(" `paris` not found in `result`")
 
