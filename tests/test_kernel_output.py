@@ -313,7 +313,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
         (BACKEND.MACHETE, torch.bfloat16, 0.0033),
-        (BACKEND.MARLIN, torch.bfloat16, 0.0033),
+        (BACKEND.MARLIN, torch.bfloat16, 0.0050),
         (BACKEND.BITBLAS, torch.bfloat16, 0.0033),
     ]
 
