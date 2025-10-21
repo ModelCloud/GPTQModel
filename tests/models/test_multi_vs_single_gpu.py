@@ -185,7 +185,6 @@ class TestMultiVsSingleGPU(ModelTest):
             quantize_config=quant_config,
             trust_remote_code=self.TRUST_REMOTE_CODE,
             dtype=self.TORCH_DTYPE,
-            debug=self.DEBUG,
             **load_kwargs,
         )
 
