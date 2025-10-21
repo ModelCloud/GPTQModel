@@ -614,9 +614,11 @@ def ModelLoader(cls):
 
             if head is not None:
                 assign(head, device_ids[-1])
+                # If weight-tied, co-locate on GPU 0
+                tie_cfg = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
                 if (
                     in_emb is not None
-                    and getattr(in_emb, "weight", None) is getattr(head, "weight", None)
+                    and tie_cfg
                 ):
                     assign(head, device_ids[0])
 
