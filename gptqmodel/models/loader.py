@@ -577,8 +577,7 @@ def ModelLoader(cls):
 
             device_ids = list(range(num_gpus))
             device_map: Dict[str, int] = {}
-            module_names = {name for name, _ in model.named_modules()}
-
+            mod2name = {m: n for n, m in model.named_modules()}
             def assign(mod, device_id):
                 if mod is None:
                     return
@@ -608,28 +607,18 @@ def ModelLoader(cls):
             # Look for lm_head or similar projection
             head = getattr(model, "lm_head", None)
             if head is None:
-                # fallbacks for alternative names
-                for cand in ["embed_out", "output_projection", "output_head"]:
+                for cand in ("embed_out", "output_projection", "output_head"):
                     if hasattr(model, cand):
                         head = getattr(model, cand)
                         break
-                    
-            if head is not None:
-                # default → last GPU
-                for name, mod in model.named_modules():
-                    if mod is head:
-                        device_map[name] = device_ids[-1]
-                        break
 
-                # If weight-tied, co-locate on GPU 0
+            if head is not None:
+                assign(head, device_ids[-1])
                 if (
-                        in_emb is not None
-                        and getattr(in_emb, "weight", None) is getattr(head, "weight", None)
+                    in_emb is not None
+                    and getattr(in_emb, "weight", None) is getattr(head, "weight", None)
                 ):
-                    for name, mod in model.named_modules():
-                        if mod is head:
-                            device_map[name] = device_ids[0]
-                            break
+                    assign(head, device_ids[0])
 
             # -------------------------------------------------------------
             # 5. Safety check: ensure all params are covered
@@ -643,7 +632,7 @@ def ModelLoader(cls):
                 fallback_device = device_ids[-1]
                 for param_name in missing:
                     owner = param_name
-                    while owner and owner not in module_names:
+                    while owner and owner not in set(mod2name.values()):
                         if "." not in owner:
                             owner = ""
                         else:
