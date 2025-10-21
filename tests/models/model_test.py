@@ -261,7 +261,7 @@ class ModelTest(unittest.TestCase):
             if k.lower() in generated:
                 self.assertTrue(True)
                 return
-        self.assertTrue(False, f"none of keywords were found in generated: `{generated}`")
+        raise AssertionError(f"none of keywords were found in generated: `{generated}`")
 
     # note that sampling is disabled for help with deterministic generation for ci tests
     def generate(self, model, tokenizer, prompt=None):
