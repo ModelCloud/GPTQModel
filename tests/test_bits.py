@@ -82,8 +82,7 @@ class TestBits(unittest.TestCase):
         # quantize
         model_id = "/monster/data/model/Qwen2.5-0.5B-Instruct"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        dataset = ["gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
-        calibration_dataset = [tokenizer(example) for example in dataset]
+        calibration_dataset = ["gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
 
         for quant_backend in self.pack_backends:
             supports_bits = self.QLINEAR_DICT[quant_backend].SUPPORTS_BITS
