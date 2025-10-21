@@ -30,7 +30,6 @@ from gptqmodel.utils.model import find_modules
 log = LogBar.shared()
 
 DEVICE = torch.device("cuda:0")
-ONLY_MACHETE = os.getenv("GPTQMODEL_ONLY_MACHETE", "0") == "1"
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "8")
 
 GREEN = "\033[32m"
@@ -52,19 +51,11 @@ class TestKernelOutput(unittest.TestCase):
     target_qliner_map = {
         BACKEND.TORCH: TorchQuantLinear,
         BACKEND.MACHETE: MacheteQuantLinear,
+        BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
+        BACKEND.TRITON: TritonV2QuantLinear,
+        BACKEND.BITBLAS: BitblasQuantLinear,
+        BACKEND.MARLIN: MarlinQuantLinear,
     }
-    if not ONLY_MACHETE:
-        target_qliner_map.update({
-            # BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
-            # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
-            BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
-            BACKEND.TRITON: TritonV2QuantLinear,
-            # BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
-            BACKEND.BITBLAS: BitblasQuantLinear,
-            # BACKEND.IPEX: IPEXQuantLinear,
-            BACKEND.MARLIN: MarlinQuantLinear,
-            # BACKEND.MARLIN_FP16: MarlinQuantLinear,
-        })
 
     target = 'model.layers.6.self_attn.v_proj'
     m: List[Tuple[int, int]] = []
@@ -240,19 +231,16 @@ class TestKernelOutput(unittest.TestCase):
             if not _validate_machete_device_support():
                 self.skipTest("Machete requires NVIDIA Hopper or newer (SM90+)")
 
-    _float16_cases = [
+    float16_cases = [
         (BACKEND.TORCH, torch.float16, 0.0000),
+        (BACKEND.TRITON, torch.float16, 0.00001),
+        (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
         (BACKEND.MACHETE, torch.float16, 0.00040),
+        (BACKEND.MARLIN, torch.float16, 0.00035),
+        (BACKEND.BITBLAS, torch.float16, 0.0035),
     ]
-    if not ONLY_MACHETE:
-        _float16_cases.extend([
-            (BACKEND.TRITON, torch.float16, 0.00001),
-            (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
-            (BACKEND.MARLIN, torch.float16, 0.00035),
-            (BACKEND.BITBLAS, torch.float16, 0.0035),
-        ])
 
-    @parameterized.expand(_float16_cases)
+    @parameterized.expand(float16_cases)
     def test_kernel_float16(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
         self._maybe_skip_backend(backend)
 
@@ -269,19 +257,16 @@ class TestKernelOutput(unittest.TestCase):
             reference_label="Torch output",
         )
 
-    _bfloat16_cases = [
+    bfloat16_cases = [
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
+        (BACKEND.TRITON, torch.bfloat16, 0.00001),
+        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
         (BACKEND.MACHETE, torch.bfloat16, 0.0033),
+        (BACKEND.MARLIN, torch.bfloat16, 0.0031),
+        (BACKEND.BITBLAS, torch.bfloat16, 0.0031),
     ]
-    if not ONLY_MACHETE:
-        _bfloat16_cases.extend([
-            (BACKEND.TRITON, torch.bfloat16, 0.00001),
-            (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
-            (BACKEND.MARLIN, torch.bfloat16, 0.0031),
-            (BACKEND.BITBLAS, torch.bfloat16, 0.0031),
-        ])
 
-    @parameterized.expand(_bfloat16_cases)
+    @parameterized.expand(bfloat16_cases)
     def test_kernel_bfloat16(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
         self._maybe_skip_backend(backend)
 
@@ -298,19 +283,16 @@ class TestKernelOutput(unittest.TestCase):
             reference_label="Torch output",
         )
 
-    _float16_lora_cases = [
+    float16_lora_cases = [
         (BACKEND.TORCH, torch.float16, 0.0000),
+        (BACKEND.TRITON, torch.float16, 0.00001),
+        (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
         (BACKEND.MACHETE, torch.float16, 0.00040),
+        (BACKEND.MARLIN, torch.float16, 0.00035),
+        (BACKEND.BITBLAS, torch.float16, 0.00035),
     ]
-    if not ONLY_MACHETE:
-        _float16_lora_cases.extend([
-            (BACKEND.TRITON, torch.float16, 0.00001),
-            (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
-            (BACKEND.MARLIN, torch.float16, 0.00035),
-            (BACKEND.BITBLAS, torch.float16, 0.00035),
-        ])
 
-    @parameterized.expand(_float16_lora_cases)
+    @parameterized.expand(float16_lora_cases)
     def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
         self._maybe_skip_backend(backend)
 
@@ -326,20 +308,16 @@ class TestKernelOutput(unittest.TestCase):
             reference_label="Torch with Lora output",
         )
 
-
-    _bfloat16_lora_cases = [
+    bfloat16_lora_cases = [
         (BACKEND.TORCH, torch.bfloat16, 0.0000),
+        (BACKEND.TRITON, torch.bfloat16, 0.00001),
+        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
         (BACKEND.MACHETE, torch.bfloat16, 0.0033),
+        (BACKEND.MARLIN, torch.bfloat16, 0.0033),
+        (BACKEND.BITBLAS, torch.bfloat16, 0.0033),
     ]
-    if not ONLY_MACHETE:
-        _bfloat16_lora_cases.extend([
-            (BACKEND.TRITON, torch.bfloat16, 0.00001),
-            (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
-            (BACKEND.MARLIN, torch.bfloat16, 0.0033),
-            (BACKEND.BITBLAS, torch.bfloat16, 0.0033),
-        ])
 
-    @parameterized.expand(_bfloat16_lora_cases)
+    @parameterized.expand(bfloat16_lora_cases)
     def test_kernel_bfloat16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
         self._maybe_skip_backend(backend)
 
