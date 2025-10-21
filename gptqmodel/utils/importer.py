@@ -24,6 +24,7 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.machete import MacheteQuantLinear
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
@@ -45,6 +46,7 @@ log = setup_logger()
 
 AUTO_SELECT_BACKEND_ORDER_MAP = {
     METHOD.GPTQ: OrderedDict({
+        BACKEND.MACHETE: MacheteQuantLinear,
         BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
         # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear, #
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
@@ -70,7 +72,7 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
 
 SUPPORTS_BACKEND_MAP = {
     METHOD.GPTQ: {
-        FORMAT.GPTQ: [BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH_FUSED, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
+        FORMAT.GPTQ: [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH_FUSED, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
         FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
         FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
         FORMAT.BITBLAS: [BACKEND.BITBLAS],
@@ -280,6 +282,8 @@ def select_quant_linear(
         qlinear = TritonV2QuantLinear
     elif backend == BACKEND.BITBLAS:
         qlinear = BitBLASQuantLinear
+    elif backend == BACKEND.MACHETE:
+        qlinear = MacheteQuantLinear
     elif backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16]:
         if quant_method == METHOD.AWQ:
             qlinear = AwqMarlinQuantLinear

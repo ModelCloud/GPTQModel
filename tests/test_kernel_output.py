@@ -15,10 +15,15 @@ from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Adapter, AdapterCache, Lora
 from gptqmodel.nn_modules.qlinear.bitblas import BitblasQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from gptqmodel.nn_modules.qlinear.machete import MacheteQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from gptqmodel.utils.model import find_modules
+from gptqmodel.utils.machete import (
+    _validate_machete_device_support,
+    machete_import_exception,
+)
 
 
 log = LogBar.shared()
@@ -50,6 +55,7 @@ class TestKernelOutput(unittest.TestCase):
         # BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
         BACKEND.BITBLAS: BitblasQuantLinear,
         # BACKEND.IPEX: IPEXQuantLinear,
+        BACKEND.MACHETE: MacheteQuantLinear,
         BACKEND.MARLIN: MarlinQuantLinear,
         # BACKEND.MARLIN_FP16: MarlinQuantLinear,
     }
@@ -61,6 +67,13 @@ class TestKernelOutput(unittest.TestCase):
             (32, 64),
             (64, 32),
             (128, 16),
+        ]
+
+    if os.getenv("GPTQMODEL_FAST_TESTS", "0") == "1":
+        m = [
+            (1, 32),
+            (16, 16),
+            (32, 8),
         ]
 
     # sum all the second tuple value for total sample size
@@ -187,20 +200,30 @@ class TestKernelOutput(unittest.TestCase):
                 f"{len(failures)} mismatched outputs for backend `{backend}` and dtype `{dtype}`"
             )
 
+    def _maybe_skip_backend(self, backend: BACKEND):
+        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
+            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+
+        if backend == BACKEND.MACHETE:
+            if machete_import_exception is not None:
+                self.skipTest(f"Machete kernel unavailable: {machete_import_exception}")
+            if not _validate_machete_device_support():
+                self.skipTest("Machete requires NVIDIA Hopper or newer (SM90+)")
+
     @parameterized.expand([
         (BACKEND.TORCH, torch.float16, 0.0000),
         # (BACKEND.TORCH_FUSED, torch.float16, 0.0001),
         (BACKEND.TRITON, torch.float16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.float16, 0.0050),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
+        (BACKEND.MACHETE, torch.float16, 0.00040),
         (BACKEND.MARLIN, torch.float16, 0.00035),
         (BACKEND.BITBLAS, torch.float16, 0.0035),
         # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
         # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0025),
     ])
     def test_kernel_float16(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
-        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
-            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+        self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype)
@@ -221,14 +244,14 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0064),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
+        (BACKEND.MACHETE, torch.bfloat16, 0.0033),
         (BACKEND.MARLIN, torch.bfloat16, 0.0031),
         (BACKEND.BITBLAS, torch.bfloat16, 0.0031),
         # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.012),
         # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0031), TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
     ])
     def test_kernel_bfloat16(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
-        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
-            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+        self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype)
@@ -249,14 +272,14 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TRITON, torch.float16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.float16, 0.0054),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
+        (BACKEND.MACHETE, torch.float16, 0.00040),
         (BACKEND.MARLIN, torch.float16, 0.00035),
         (BACKEND.BITBLAS, torch.float16, 0.00035),
         # (BACKEND.MARLIN_FP16, torch.float16, 0.0035),
         # (BACKEND.EXLLAMA_EORA, torch.float16, 0.0020)
     ])
     def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
-        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
-            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+        self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
@@ -277,14 +300,14 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TRITON, torch.bfloat16, 0.00001),
         # (BACKEND.EXLLAMA_V1, torch.bfloat16, 0.0062),
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
+        (BACKEND.MACHETE, torch.bfloat16, 0.0033),
         (BACKEND.MARLIN, torch.bfloat16, 0.0033),
         (BACKEND.BITBLAS, torch.bfloat16, 0.0033),
         # (BACKEND.MARLIN_FP16, torch.bfloat16, 0.011),
         # (BACKEND.EXLLAMA_EORA, torch.bfloat16, 0.0014)  TODO FIX, abnormal output when Exllama Eora kernel is using bfloat16
     ])
     def test_kernel_bfloat16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
-        if backend == BACKEND.BITBLAS and os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
-            self.skipTest("BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)")
+        self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)

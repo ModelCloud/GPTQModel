@@ -39,6 +39,7 @@ from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
 from ..utils.marlin import _validate_marlin_device_support
+from ..utils.machete import _validate_machete_device_support
 from ..utils.model import (
     auto_dtype,
     convert_gptq_v1_to_v2_format,
@@ -707,6 +708,16 @@ def ModelLoader(cls):
 
                     qcfg.runtime_format = FORMAT.GPTQ_V2
 
+        if backend == BACKEND.MACHETE:
+            if is_sharded:
+                raise ValueError(
+                    "Format: The loading of sharded checkpoints with Machete is currently not supported."
+                )
+            if not _validate_machete_device_support():
+                raise ValueError(
+                    f"Kernel: Machete kernel requires compute capability >= 9.0. Detected capability: {torch.cuda.get_device_capability()}"
+                )
+
         if backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and (
                 preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
             if is_sharded:
@@ -742,7 +753,7 @@ def ModelLoader(cls):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if load_checkpoint_in_model and backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
+        if load_checkpoint_in_model and backend not in [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,

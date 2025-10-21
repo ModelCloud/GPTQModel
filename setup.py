@@ -355,18 +355,28 @@ def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
     # Fallback: default GitHub template
     return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
 
-# Decide HAS_CUDA_V8 without torch
+# Decide HAS_CUDA_V8 / HAS_CUDA_V9 without torch
 HAS_CUDA_V8 = False
+HAS_CUDA_V9 = False
 if CUDA_ARCH_LIST:
-    HAS_CUDA_V8 = not ROCM_VERSION and _has_cuda_v8_from_arch_list(_parse_arch_list(CUDA_ARCH_LIST))
+    arch_list = _parse_arch_list(CUDA_ARCH_LIST)
+    try:
+        caps = [float(tok.split("+", 1)[0]) for tok in arch_list]
+    except Exception:
+        caps = []
+    if not ROCM_VERSION:
+        HAS_CUDA_V8 = any(cap >= 8.0 for cap in caps)
+        HAS_CUDA_V9 = any(cap >= 9.0 for cap in caps)
 else:
     smi = _probe_cmd(["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"])
     if smi:
         try:
             caps = [float(x.strip()) for x in smi.splitlines() if x.strip()]
             HAS_CUDA_V8 = any(cap >= 8.0 for cap in caps)
+            HAS_CUDA_V9 = any(cap >= 9.0 for cap in caps)
         except Exception:
             HAS_CUDA_V8 = False
+            HAS_CUDA_V9 = False
 
 if RELEASE_MODE == "1":
     gptqmodel_version = f"{gptqmodel_version}+{get_version_tag()}"
@@ -397,6 +407,7 @@ def _env_enabled_any(names, default="1") -> bool:
 
 
 BUILD_MARLIN = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
+BUILD_MACHETE = _env_enabled(os.environ.get("GPTQMODEL_BUILD_MACHETE", "1"))
 BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
 BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
 BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
@@ -441,6 +452,16 @@ if BUILD_CUDA_EXT == "1":
                 "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
             ],
         }
+
+        cutlass_include_paths = [
+            Path("gptqmodel_ext/cutlass_extensions").resolve(),
+            Path("cutlass/include").resolve(),
+            Path("cutlass/examples/common/include").resolve(),
+            Path("cutlass/tools/library/include").resolve(),
+        ]
+        cutlass_include_flags = [f"-I{path}" for path in cutlass_include_paths]
+        extra_compile_args["cxx"] += cutlass_include_flags
+        extra_compile_args["nvcc"] += cutlass_include_flags
 
         # Windows/OpenMP note: adjust flags as needed for MSVC if you add native Windows wheels
         if sys.platform == "win32":
@@ -523,6 +544,39 @@ if BUILD_CUDA_EXT == "1":
                             ] + marlin_template_kernel_srcs,
                             extra_link_args=extra_link_args,
                             extra_compile_args=extra_compile_args,
+                        )
+                    ]
+
+                if BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
+                    machete_dir = Path("gptqmodel_ext/machete")
+                    machete_generated_dir = machete_dir / "generated"
+
+                    machete_sources = [str(machete_dir / "machete_pytorch.cu")]
+                    machete_generated_sources = sorted(machete_generated_dir.glob("*.cu"))
+
+                    if not machete_generated_sources:
+                        generator_script = machete_dir / "generate.py"
+                        if generator_script.exists():
+                            print("Generating machete kernel instantiations...")
+                            subprocess.check_call([sys.executable, str(generator_script)])
+                            machete_generated_sources = sorted(machete_generated_dir.glob("*.cu"))
+
+                    if not machete_generated_sources:
+                        raise RuntimeError(
+                            "No generated machete kernel templates detected. Run generate.py before building."
+                        )
+
+                    machete_sources += [str(path) for path in machete_generated_sources]
+
+                    machete_include_dirs = [str(Path("gptqmodel_ext").resolve())] + [str(path) for path in cutlass_include_paths]
+
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_machete_kernels",
+                            machete_sources,
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                            include_dirs=machete_include_dirs,
                         )
                     ]
 
@@ -658,6 +712,7 @@ class CachedWheelsCommand(_bdist_wheel):
 # ---------------------------
 print(f"CUDA {CUDA_ARCH_LIST}")
 print(f"HAS_CUDA_V8 {HAS_CUDA_V8}")
+print(f"HAS_CUDA_V9 {HAS_CUDA_V9}")
 print(f"SETUP_KWARGS {additional_setup_kwargs}")
 print(f"gptqmodel_version={gptqmodel_version}")
 
