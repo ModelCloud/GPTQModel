@@ -107,13 +107,13 @@ class TestGroupSize(unittest.TestCase):
             cls.quantize_config_dicts[(checkpoint_format, group_size)] = file_dict
 
             del model
-            torch_empty_cache()
+            # torch_empty_cache()
 
     @classmethod
     def tearDownClass(cls):
         for tmp_dir in getattr(cls, "quantized_tempdirs", {}).values():
             tmp_dir.cleanup()
-        torch_empty_cache()
+        # torch_empty_cache()
 
     # def test_load_group_128(self):
     #     model = GPTQModel.load(
@@ -159,7 +159,7 @@ class TestGroupSize(unittest.TestCase):
             raise AssertionError(" `paris` not found in `result`")
 
         del model
-        torch_empty_cache()
+        # torch_empty_cache()
 
     def assert_awq_linear(self, model, backend):
         has_qqq = False
