@@ -579,34 +579,28 @@ def ModelLoader(cls):
             device_map: Dict[str, int] = {}
             module_names = {name for name, _ in model.named_modules()}
 
-            # -------------------------------------------------------------
-            # 1. Input embeddings → GPU 0
-            # -------------------------------------------------------------
-            if hasattr(model, "get_input_embeddings"):
-                in_emb = model.get_input_embeddings()
-                if in_emb is not None:
-                    for name, mod in model.named_modules():
-                        if mod is in_emb:
-                            device_map[name] = device_ids[0]
-                            break
+            def assign(mod, device_id):
+                if mod is None:
+                    return
+                name = mod2name.get(mod)
+                if name is not None:
+                    device_map[name] = device_id
 
             # -------------------------------------------------------------
-            # 2. Alternating assignment for repeating layers
+            # 1–3. Assign input embeddings, layers, and ignored modules
             # -------------------------------------------------------------
+            # Input embeddings → GPU 0
+            in_emb = model.get_input_embeddings() if hasattr(model, "get_input_embeddings") else None
+            assign(in_emb, device_ids[0])
+
+            # Alternating layers
             for i, layer in enumerate(layers):
                 gpu = device_ids[i % num_gpus]
-                for name, mod in model.named_modules():
-                    if mod is layer:
-                        device_map[name] = gpu
-                        break
+                assign(layer, gpu)
 
-            # -------------------------------------------------------------
-            # 3. Handle extra/ignored modules (norms, adapters, etc.)
-            # -------------------------------------------------------------
+            # Ignored modules
             for mod in ignore_modules:
-                for name, m in model.named_modules():
-                    if m is mod:
-                        device_map[name] = device_ids[-1]
+                assign(mod, device_ids[-1])
 
             # -------------------------------------------------------------
             # 4. Handle lm_head / output projection explicitly
@@ -619,10 +613,7 @@ def ModelLoader(cls):
                     if hasattr(model, cand):
                         head = getattr(model, cand)
                         break
-
-            # Input embedding for tying check
-            in_emb = model.get_input_embeddings() if hasattr(model, "get_input_embeddings") else None
-
+                    
             if head is not None:
                 # default → last GPU
                 for name, mod in model.named_modules():
