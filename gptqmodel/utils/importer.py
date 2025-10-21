@@ -35,6 +35,11 @@ from .rocm import IS_ROCM
 from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
 
+ACCELERATE_DEVICE_MAP_KEYWORDS = {"auto", "balanced", "sequential"}
+ACCELERATE_DEVICE_MAP_PREFIXES = ("balanced_low_",)
+ACCELERATE_OFFLOAD_TARGETS = {"disk", "meta"}
+
+
 message_logged = False
 log = setup_logger()
 
@@ -81,16 +86,40 @@ SUPPORTS_BACKEND_MAP = {
     }
 }
 
+
+def _is_accelerate_device_map_keyword(value: str) -> bool:
+    lowered = value.strip().lower()
+    if lowered in ACCELERATE_DEVICE_MAP_KEYWORDS:
+        return True
+    return any(lowered.startswith(prefix) for prefix in ACCELERATE_DEVICE_MAP_PREFIXES)
+
+
+def _is_accelerate_offload_target(value: str) -> bool:
+    return value.strip().lower() in ACCELERATE_OFFLOAD_TARGETS
+
+
 def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> Optional[DEVICE]:
     normalized_device = None
     if device is None:
         if device_map is not None:
-            devices = {device_map} if isinstance(device_map, str) else set(device_map.values())
+            if isinstance(device_map, str):
+                if _is_accelerate_device_map_keyword(device_map):
+                    return None
+                devices = {device_map}
+            else:
+                devices = set(device_map.values())
             normalized_devices = set()
             for device in devices:
                 # Returning None means quant linear will be automatically selected.
-                if isinstance(device, str) and device == "auto":
-                    return None
+                if device is None:
+                    continue
+                if isinstance(device, str):
+                    if _is_accelerate_device_map_keyword(device):
+                        return None
+                    if _is_accelerate_offload_target(device):
+                        continue
+                    if device == "auto":
+                        return None
                 normalized_devices.add(normalize_device(device))
             if len(normalized_devices) == 1:
                 d = normalized_devices.pop()

@@ -109,7 +109,6 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     else:
         # Clone kwargs before modifying
         download_kwargs = kwargs.copy()
-        download_kwargs.pop("max_memory", None)
         download_kwargs.pop("attn_implementation", None)
         download_kwargs.pop("use_flash_attention_2", None)
         return snapshot_download(pretrained_model_id_or_path, **download_kwargs)
@@ -278,7 +277,6 @@ def ModelLoader(cls):
             adapter: Optional[Adapter] = None,
             dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
-            max_memory: Optional[dict] = None,
             **kwargs,
     ):
 
@@ -288,7 +286,8 @@ def ModelLoader(cls):
         torch._dynamo.reset()
 
         # normalized device + device_map into single device
-        device = normalize_device_device_map(device, device_map)
+        normalized_device = device if device_map is None else None  # let device_map dictate placement when present
+        device = normalize_device_device_map(normalized_device, device_map)
 
         # TODO need to normalize backend and others in a unified api
         if isinstance(backend, str):
@@ -536,6 +535,7 @@ def ModelLoader(cls):
                 device=device,
             )
 
+        log.debug(f"Loader1: device_map {device_map}")
         if isinstance(device_map, str) and device_map not in [
                 "auto",
                 "balanced",
@@ -547,32 +547,151 @@ def ModelLoader(cls):
                     "'sequential'."
                 )
 
-        if isinstance(device_map, dict):
-            max_memory = None
-        else:
-            if device is None and not device_map and not max_memory:
-                device_map = "auto"
-            if device is not None:
-                if not max_memory and not device_map:
-                    torch_device = torch.device(device)
-                    if torch_device.type in ["cuda", "xpu"] and torch_device.index is not None:
-                        device_map = {"": torch_device.index}
-                    else:
-                        device_map = {"": torch_device.type}
-            if not isinstance(device_map, dict) and device_map != "sequential":
-                max_memory = accelerate.utils.get_balanced_memory(
-                    model=model,
-                    max_memory=max_memory,
-                    no_split_module_classes=[layer_type],
-                    low_zero=(device_map == "balanced_low_0"),
-                )
 
-        if not isinstance(device_map, dict):
-            device_map = accelerate.infer_auto_device_map(
+        import torch
+        from typing import Dict, List, Optional
+
+        def build_layerwise_device_map(
                 model,
-                max_memory=max_memory,
-                no_split_module_classes=[layer_type],
-            )
+                layers: List[torch.nn.Module],
+                ignore_modules: List[torch.nn.Module],
+                num_gpus: Optional[int] = None,
+        ) -> Dict[str, int]:
+            """
+            Build a deterministic alternating device_map for multi-GPU loading.
+            Designed for quantized GPTQ models.
+
+            Rules:
+              • Input embedding(s) → GPU 0
+              • Each repeating layer → alternate across GPUs (round-robin)
+              • Output head (lm_head / embed_out):
+                  – If weight-tied with input embedding → GPU 0
+                  – Else → last GPU
+              • Ignore modules (e.g., norms, projections) → co-located with last layer’s GPU
+            """
+
+            if num_gpus is None:
+                num_gpus = torch.cuda.device_count()
+            if num_gpus < 1:
+                raise RuntimeError("No CUDA devices detected")
+
+            device_ids = list(range(num_gpus))
+            device_map: Dict[str, int] = {}
+            module_names = {name for name, _ in model.named_modules()}
+
+            # -------------------------------------------------------------
+            # 1. Input embeddings → GPU 0
+            # -------------------------------------------------------------
+            if hasattr(model, "get_input_embeddings"):
+                in_emb = model.get_input_embeddings()
+                if in_emb is not None:
+                    for name, mod in model.named_modules():
+                        if mod is in_emb:
+                            device_map[name] = device_ids[0]
+                            break
+
+            # -------------------------------------------------------------
+            # 2. Alternating assignment for repeating layers
+            # -------------------------------------------------------------
+            for i, layer in enumerate(layers):
+                gpu = device_ids[i % num_gpus]
+                for name, mod in model.named_modules():
+                    if mod is layer:
+                        device_map[name] = gpu
+                        break
+
+            # -------------------------------------------------------------
+            # 3. Handle extra/ignored modules (norms, adapters, etc.)
+            # -------------------------------------------------------------
+            for mod in ignore_modules:
+                for name, m in model.named_modules():
+                    if m is mod:
+                        device_map[name] = device_ids[-1]
+
+            # -------------------------------------------------------------
+            # 4. Handle lm_head / output projection explicitly
+            # -------------------------------------------------------------
+            # Look for lm_head or similar projection
+            head = getattr(model, "lm_head", None)
+            if head is None:
+                # fallbacks for alternative names
+                for cand in ["embed_out", "output_projection", "output_head"]:
+                    if hasattr(model, cand):
+                        head = getattr(model, cand)
+                        break
+
+            # Input embedding for tying check
+            in_emb = model.get_input_embeddings() if hasattr(model, "get_input_embeddings") else None
+
+            if head is not None:
+                # default → last GPU
+                for name, mod in model.named_modules():
+                    if mod is head:
+                        device_map[name] = device_ids[-1]
+                        break
+
+                # If weight-tied, co-locate on GPU 0
+                if (
+                        in_emb is not None
+                        and getattr(in_emb, "weight", None) is getattr(head, "weight", None)
+                ):
+                    for name, mod in model.named_modules():
+                        if mod is head:
+                            device_map[name] = device_ids[0]
+                            break
+
+            # -------------------------------------------------------------
+            # 5. Safety check: ensure all params are covered
+            # -------------------------------------------------------------
+            missing = [
+                n for n, _ in model.named_parameters()
+                if not any(n == k or n.startswith(k + ".") for k in device_map)
+            ]
+            if missing:
+                # map any leftover params (rare) to last GPU
+                fallback_device = device_ids[-1]
+                for param_name in missing:
+                    owner = param_name
+                    while owner and owner not in module_names:
+                        if "." not in owner:
+                            owner = ""
+                        else:
+                            owner = owner.rsplit(".", 1)[0]
+                    if owner:
+                        device_map.setdefault(owner, fallback_device)
+                    else:
+                        log.debug(f"Loader: unable to map param '{param_name}' to a module; skipping fallback assignment.")
+
+            # -------------------------------------------------------------
+            # 6. Prune parent assignments that would override child devices
+            # -------------------------------------------------------------
+            for name, device_id in list(device_map.items()):
+                if not name:
+                    continue
+                child_devices = {
+                    device_map[child_name]
+                    for child_name in device_map
+                    if child_name != name and child_name.startswith(f"{name}.")
+                }
+                if child_devices and (len(child_devices) > 1 or device_id not in child_devices):
+                    log.debug(f"Loader: dropping parent '{name}' from device_map to preserve child placements.")
+                    device_map.pop(name, None)
+
+            # optional logging for debug
+            log.debug(f"Loader: Built map across {num_gpus} GPU(s), "
+                  f"{len(device_map)} entries. First 8: {list(device_map.items())[:8]}")
+
+            return device_map
+
+        log.info(f"Loader: device = {device}")
+        layers, _ = get_module_by_name_prefix(model, cls.extract_layers_node())
+        num_gpus = 1
+        if device is DEVICE.CUDA:
+            num_gpus = torch.cuda.device_count()
+        elif device is DEVICE.XPU:
+            num_gpus = torch.xpu.device_count()
+        device_map = build_layerwise_device_map(model, layers, ignore_modules, num_gpus)
+        log.info(f"Loader: device_map = {device_map}")
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
