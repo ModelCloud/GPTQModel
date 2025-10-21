@@ -22,12 +22,12 @@ from ...utils.machete import (
     machete_prepack_B,
     pack_quantized_values_into_int32,
     query_machete_supported_group_sizes,
-    query_machete_supported_quant_types,
     unpack_quantized_values_into_int32,
 )
 from ...utils.marlin import replace_parameter
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
+
 
 log = setup_logger()
 

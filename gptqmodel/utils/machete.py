@@ -12,6 +12,7 @@ from ._extension_loader import load_extension_module
 from .logger import setup_logger
 from .marlin_scalar_type import ScalarType, scalar_types
 
+
 log = setup_logger()
 
 machete_import_exception: Optional[str] = None

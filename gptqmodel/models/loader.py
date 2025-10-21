@@ -10,7 +10,6 @@ import time
 from importlib.metadata import PackageNotFoundError, version
 from typing import Dict, List, Optional, Union
 
-import accelerate
 import torch
 import transformers
 
@@ -38,8 +37,8 @@ from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.logger import setup_logger
-from ..utils.marlin import _validate_marlin_device_support
 from ..utils.machete import _validate_machete_device_support
+from ..utils.marlin import _validate_marlin_device_support
 from ..utils.model import (
     auto_dtype,
     convert_gptq_v1_to_v2_format,
@@ -479,7 +478,6 @@ def ModelLoader(cls):
 
         init_contexts = [no_init_weights()]
 
-        layer_type = ""
         with (ContextManagers(init_contexts)):
             cls.before_model_load(cls, load_quantized_model=True)
 
@@ -508,8 +506,7 @@ def ModelLoader(cls):
             # Get the first layer to determine layer type
             layers, _ = get_module_by_name_prefix(model, cls.extract_layers_node())
 
-            layer0 = layers[0]
-            layer_type = layer0.__class__.__name__
+            layers[0]
 
             modules = find_modules(model)
             ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
@@ -549,8 +546,8 @@ def ModelLoader(cls):
                 )
 
 
+
         import torch
-        from typing import Dict, List, Optional
 
         def build_layerwise_device_map(
                 model,

@@ -18,14 +18,14 @@ from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
-from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from ..nn_modules.qlinear.awq_machete import AwqMacheteQuantLinear
+from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
-from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.machete import MacheteQuantLinear
+from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear

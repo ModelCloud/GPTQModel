@@ -5,7 +5,7 @@
 
 import os
 import unittest
-from typing import Tuple, List
+from typing import List, Tuple
 
 import torch
 from logbar import LogBar
@@ -20,11 +20,11 @@ from gptqmodel.nn_modules.qlinear.machete import MacheteQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
-from gptqmodel.utils.model import find_modules
 from gptqmodel.utils.machete import (
     _validate_machete_device_support,
     machete_import_exception,
 )
+from gptqmodel.utils.model import find_modules
 
 
 log = LogBar.shared()

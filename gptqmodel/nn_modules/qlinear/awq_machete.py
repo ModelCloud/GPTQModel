@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -14,15 +14,16 @@ from ...nn_modules.qlinear import AWQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.machete import (
+    _validate_machete_device_support,
+    machete_import_exception,
     machete_mm,
     machete_prepack_B,
     pack_quantized_values_into_int32,
 )
 from ...utils.marlin import replace_parameter, unpack_cols
-from ...utils.machete import machete_import_exception
-from ...utils.machete import _validate_machete_device_support
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
+
 
 log = setup_logger()
 
