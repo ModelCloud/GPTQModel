@@ -236,7 +236,7 @@ jobs:
     needs:
       - check-vm
     container:
-      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_0919
+      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_1021
       volumes:
         - /home/ci/models/pyenv:/opt/pyenv
     steps:
@@ -358,7 +358,7 @@ jobs:
     needs:
       - check-vm
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_0919
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_1021
       volumes:
         - /home/ci/models/pyenv:/opt/pyenv
     env:
