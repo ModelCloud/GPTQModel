@@ -760,10 +760,22 @@ if BUILD_CUDA_EXT == "1":
             other_exts = [ext for ext in extensions if getattr(ext, "name", "") != "gptqmodel_machete_kernels"]
             extensions[:] = machete_exts + other_exts
 
+        # additional_setup_kwargs = {
+        #     "ext_modules": extensions,
+        #     "cmdclass": {"build_ext": cpp_ext.BuildExtension},
+        # }
+
         additional_setup_kwargs = {
             "ext_modules": extensions,
-            "cmdclass": {"build_ext": cpp_ext.BuildExtension},
+            "cmdclass": {"build_ext": cpp_ext.BuildExtension.with_options(
+                use_ninja=True,
+                no_python_abi_suffix=True,
+                build_temp="build/temp",
+                build_lib="build/lib",
+                clean_first=False  # keep intermediates for reuse
+            )},
         }
+
 
 # ---------------------------
 # Cached wheel fetcher
