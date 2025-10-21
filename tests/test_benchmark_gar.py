@@ -55,9 +55,9 @@ def test_benchmark_gar_cuda():
         return result
 
     def original_call():
-        local = gar.compute_local_perms_original(diag_H, groupsize)
-        global_perm = gar.compute_global_perm_original(diag_H, groupsize)
-        return gar.compose_final_perm_original(local, global_perm, groupsize)
+        local = gar_ref.compute_local_perms_original(diag_H, groupsize)
+        global_perm = gar_ref.compute_global_perm_original(diag_H, groupsize)
+        return gar_ref.compose_final_perm_original(local, global_perm, groupsize)
 
     # Ensure both implementations agree before timing to detect accuracy regressions.
     optimized_result = optimized_call()
