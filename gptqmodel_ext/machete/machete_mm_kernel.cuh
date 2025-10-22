@@ -298,8 +298,14 @@ struct MacheteKernelTemplate {
     Gemm gemm_op;
 
     cutlass::Status status = gemm_op.initialize(args, workspace, stream);
-    TORCH_CHECK(status == cutlass::Status::kSuccess,
-                "Machete kernel failed to initialize workspace");
+    if (status != cutlass::Status::kSuccess) {
+      cudaError_t last_error = cudaGetLastError();
+      TORCH_CHECK(
+          false,
+          "Machete kernel failed to initialize workspace (status=", int(status),
+          ", cudaError=", static_cast<int>(last_error), ": ",
+          cudaGetErrorString(last_error), ")");
+    }
 
     status = gemm_op.run(stream);
     TORCH_CHECK(status == cutlass::Status::kSuccess, "Machete kernel failed");
