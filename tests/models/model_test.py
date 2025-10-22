@@ -84,7 +84,7 @@ class ModelTest(unittest.TestCase):
     TORCH_DTYPE = "auto"
     EVAL_BATCH_SIZE = "auto"
     QUANT_BATCH_SIZE = 1
-    LOAD_BACKEND = BACKEND.MARLIN
+    LOAD_BACKEND = BACKEND.AUTO
     QUANT_BACKEND = BACKEND.AUTO
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
@@ -357,86 +357,131 @@ class ModelTest(unittest.TestCase):
         return task_results
 
     def _current_load_backend(self):
-        effective = getattr(self, "_effective_load_backend", None)
-        if effective is not None and self.LOAD_BACKEND == BACKEND.MARLIN:
-            return effective
+        resolved = getattr(self, "_resolved_load_backend", None)
+        if self.LOAD_BACKEND == BACKEND.AUTO and resolved is not None:
+            return resolved
         return self.LOAD_BACKEND
+
+    def _detect_model_backend(self, model):
+        for _, module in model.named_modules():
+            if isinstance(module, BaseQuantLinear):
+                backend = getattr(module, "backend", None)
+                if backend is None:
+                    continue
+                if isinstance(backend, BACKEND):
+                    return backend
+                try:
+                    return BACKEND(str(backend))
+                except Exception:
+                    return None
+        return None
+
+    def _is_machete_supported(self) -> bool:
+        try:
+            from gptqmodel.nn_modules.qlinear.machete import MacheteQuantLinear  # type: ignore
+        except Exception:
+            return False
+
+        try:
+            from gptqmodel.utils.machete import (  # type: ignore
+                _validate_machete_device_support,
+                machete_import_exception,
+            )
+        except Exception:
+            return False
+
+        if machete_import_exception:
+            return False
+
+        if not _validate_machete_device_support():
+            return False
+
+        requested_bits = getattr(self, "BITS", None)
+        if requested_bits is not None:
+            machete_bits = tuple(getattr(MacheteQuantLinear, "SUPPORTS_BITS", ()))
+            if machete_bits and requested_bits not in machete_bits:
+                return False
+
+        requested_group_size = getattr(self, "GROUP_SIZE", None)
+        if requested_group_size is not None:
+            machete_group_sizes = tuple(getattr(MacheteQuantLinear, "SUPPORTS_GROUP_SIZE", ()))
+            if machete_group_sizes and requested_group_size not in machete_group_sizes:
+                return False
+
+        requested_sym = getattr(self, "SYM", None)
+        if requested_sym is not None:
+            machete_sym = tuple(getattr(MacheteQuantLinear, "SUPPORTS_SYM", ()))
+            if machete_sym and requested_sym not in machete_sym:
+                return False
+
+        return True
 
     def perform_post_quant_validation(self, model_path, trust_remote_code=False):
         inference_records = {}
         eval_records = {}
         reuse_candidates = {}
 
-        compare_backends = (BACKEND.MARLIN,) if self.FORMAT is FORMAT.GPTQ else (BACKEND.MARLIN, BACKEND.GEMM)
-        fallback_backend = None
-        if BACKEND.MARLIN in compare_backends:
-            try:
-                from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # type: ignore
-            except Exception:  # pragma: no cover - fallback if module unavailable
-                marlin_group_sizes = ()
-                marlin_sym = ()
-            else:
-                marlin_group_sizes = tuple(getattr(MarlinQuantLinear, "SUPPORTS_GROUP_SIZE", ()))
-                marlin_sym = tuple(getattr(MarlinQuantLinear, "SUPPORTS_SYM", ()))
+        self._resolved_load_backend = None
 
-            requested_group_size = getattr(self, "GROUP_SIZE", None)
-            requested_sym = getattr(self, "SYM", None)
-
-            marlin_supported = True
-            if marlin_group_sizes and requested_group_size not in marlin_group_sizes:
-                marlin_supported = False
-            if marlin_sym and requested_sym not in marlin_sym:
-                marlin_supported = False
-
-            if not marlin_supported:
-                fallback_backend = BACKEND.TORCH
-                compare_backends = tuple(
-                    BACKEND.TORCH if backend == BACKEND.MARLIN else backend
-                    for backend in compare_backends
-                )
-                log.info(
-                    f"Marlin backend unsupported for current quant config (group_size={requested_group_size}, sym={requested_sym}); "
-                    "falling back to BACKEND.TORCH for validation."
-                )
-
-        if fallback_backend is not None and self.LOAD_BACKEND == BACKEND.MARLIN:
-            self._effective_load_backend = fallback_backend
-        else:
-            self._effective_load_backend = None
-
-        target_backend = self._current_load_backend()
-        can_reuse = target_backend not in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE)
-
-        for backend in compare_backends:
-            log.info(f"Loading post-quant model with backend `{backend.name}`")
-            # Pin post-quant loads to the first CUDA device to avoid auto sharding across GPUs.
-            use_cuda_map = torch.cuda.is_available() and backend != BACKEND.TORCH_FUSED
+        def _load_and_evaluate_backend(requested_backend: BACKEND, retain_model: bool = False):
+            log.info(f"Loading post-quant model with backend `{requested_backend.name}`")
+            use_cuda_map = torch.cuda.is_available() and requested_backend != BACKEND.TORCH_FUSED
             if use_cuda_map:
                 model = self.loadQuantModel(
                     model_path,
                     trust_remote_code=trust_remote_code,
-                    backend=backend,
+                    backend=requested_backend,
                     device_map={"": "cuda:0"},
                 )
             else:
                 model = self.loadQuantModel(
                     model_path,
                     trust_remote_code=trust_remote_code,
-                    backend=backend,
+                    backend=requested_backend,
                 )
-            tokenizer = model.tokenizer or self.load_tokenizer(model_path, trust_remote_code=trust_remote_code)
-            inference_records[backend] = self.run_generic_inference_checks(model, tokenizer, backend)
 
-            should_reuse = can_reuse and backend == target_backend and not self.USE_VLLM
+            resolved_backend = self._detect_model_backend(model) or requested_backend
+            if resolved_backend != requested_backend:
+                log.info(
+                    f"Backend `{requested_backend.name}` resolved to `{resolved_backend.name}` during load"
+                )
+
+            tokenizer = model.tokenizer or self.load_tokenizer(model_path, trust_remote_code=trust_remote_code)
+            inference_summary = self.run_generic_inference_checks(model, tokenizer, resolved_backend)
 
             try:
-                eval_records[backend] = self.run_eval_tasks(model, backend, trust_remote_code=trust_remote_code)
-            finally:
-                if should_reuse:
-                    reuse_candidates[backend] = model
-                else:
-                    del model
+                eval_summary = self.run_eval_tasks(model, resolved_backend, trust_remote_code=trust_remote_code)
+            except Exception:
+                del model
                 torch_empty_cache()
+                raise
+
+            if retain_model:
+                reuse_candidates[resolved_backend] = model
+            else:
+                del model
+                torch_empty_cache()
+
+            return resolved_backend, inference_summary, eval_summary
+
+        requested_backend = self.LOAD_BACKEND
+        retain_target = not self.USE_VLLM
+        target_backend, target_inference, target_eval = _load_and_evaluate_backend(
+            requested_backend, retain_model=retain_target
+        )
+        inference_records[target_backend] = target_inference
+        eval_records[target_backend] = target_eval
+        self._resolved_load_backend = target_backend
+
+        if target_backend == BACKEND.TORCH:
+            log.info("Target backend resolved to BACKEND.TORCH; skipping separate baseline comparison.")
+        else:
+            baseline_requested = BACKEND.TORCH
+            baseline_resolved, baseline_inference, baseline_eval = _load_and_evaluate_backend(
+                baseline_requested, retain_model=False
+            )
+            inference_records[baseline_resolved] = baseline_inference
+            eval_records[baseline_resolved] = baseline_eval
 
         self.render_inference_summary(inference_records)
         self.render_eval_summary(eval_records)
@@ -526,7 +571,14 @@ class ModelTest(unittest.TestCase):
     def render_inference_summary(self, inference_records):
         if not inference_records:
             return
-        ordered_backends = [backend for backend in (BACKEND.MARLIN, BACKEND.TORCH) if backend in inference_records]
+        backend_priority = (
+            BACKEND.AUTO,
+            BACKEND.MACHETE,
+            BACKEND.MARLIN,
+            BACKEND.GEMM,
+            BACKEND.TORCH,
+        )
+        ordered_backends = [backend for backend in backend_priority if backend in inference_records]
         if not ordered_backends:
             return
 
@@ -587,7 +639,14 @@ class ModelTest(unittest.TestCase):
     def render_eval_summary(self, eval_records):
         if not eval_records:
             return
-        ordered_backends = [backend for backend in (BACKEND.MARLIN, BACKEND.TORCH) if backend in eval_records]
+        backend_priority = (
+            BACKEND.AUTO,
+            BACKEND.MACHETE,
+            BACKEND.MARLIN,
+            BACKEND.GEMM,
+            BACKEND.TORCH,
+        )
+        ordered_backends = [backend for backend in backend_priority if backend in eval_records]
         if not ordered_backends:
             return
 
@@ -743,7 +802,7 @@ class ModelTest(unittest.TestCase):
 
         tokenizer = model.tokenizer
         self._post_quant_eval_records = {}
-        self._effective_load_backend = None
+        self._resolved_load_backend = None
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
