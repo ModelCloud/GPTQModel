@@ -472,7 +472,7 @@ def _env_enabled_any(names, default="1") -> bool:
 
 
 BUILD_MARLIN = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
-BUILD_MACHETE = _env_enabled(os.environ.get("GPTQMODEL_BUILD_MACHETE", "1"))
+BUILD_MACHETE = _env_enabled(os.environ.get("GPTQMODEL_BUILD_MACHETE", "0"))
 BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
 BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
 BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
@@ -547,18 +547,20 @@ if BUILD_CUDA_EXT == "1":
             ],
         }
 
-        cutlass_root = _ensure_cutlass_source()
-        cutlass_include_paths = [
-            Path("gptqmodel_ext/cutlass_extensions").resolve(),
-            cutlass_root / "include",
-            cutlass_root / "examples/common/include",
-            cutlass_root / "tools/library/include",
-        ]
-        if "GPTQMODEL_CUTLASS_DIR" not in os.environ:
-            os.environ["GPTQMODEL_CUTLASS_DIR"] = str(cutlass_root)
-        cutlass_include_flags = [f"-I{path}" for path in cutlass_include_paths]
-        extra_compile_args["cxx"] += cutlass_include_flags
-        extra_compile_args["nvcc"] += cutlass_include_flags
+        cutlass_include_paths = []
+        if BUILD_MACHETE:
+            cutlass_root = _ensure_cutlass_source()
+            cutlass_include_paths = [
+                Path("gptqmodel_ext/cutlass_extensions").resolve(),
+                cutlass_root / "include",
+                cutlass_root / "examples/common/include",
+                cutlass_root / "tools/library/include",
+            ]
+            if "GPTQMODEL_CUTLASS_DIR" not in os.environ:
+                os.environ["GPTQMODEL_CUTLASS_DIR"] = str(cutlass_root)
+            cutlass_include_flags = [f"-I{path}" for path in cutlass_include_paths]
+            extra_compile_args["cxx"] += cutlass_include_flags
+            extra_compile_args["nvcc"] += cutlass_include_flags
 
         # Windows/OpenMP note: adjust flags as needed for MSVC if you add native Windows wheels
         if sys.platform == "win32":
