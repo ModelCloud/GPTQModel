@@ -329,6 +329,7 @@ jobs:
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
           if [ "${{ matrix.python }}" != "313t" ]; then # twine doesn't support python 3.13 yet
+            pip install twine
             twine check dist/$whl
           fi
 
