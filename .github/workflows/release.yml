@@ -320,6 +320,7 @@ jobs:
       - name: Compile
         if: env.SHOULD_RUN == 1
         run: |
+          pip install nvidia-cutlass
           python setup.py bdist_wheel
 
       - name: Test install
