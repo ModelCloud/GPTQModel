@@ -614,7 +614,7 @@ if BUILD_CUDA_EXT == "1":
         # Extensions (gate marlin/qqq/eora/exllamav2 on CUDA sm_80+ and non-ROCm)
         if sys.platform != "win32":
             if not ROCM_VERSION and HAS_CUDA_V8:
-                if BUILD_MARLIN:
+                if False and BUILD_MARLIN:
                     marlin_kernel_dir = Path("gptqmodel_ext/marlin")
                     marlin_kernel_files = sorted(marlin_kernel_dir.glob("kernel_*.cu"))
 
@@ -645,7 +645,7 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
+                if False and BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
                     try:
                         result = subprocess.run(
                             [sys.executable, "gptqmodel_ext/machete/generate.py"],
@@ -686,7 +686,7 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if BUILD_QQQ:
+                if False and BUILD_QQQ:
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_qqq_kernels",
@@ -699,7 +699,7 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if BUILD_EORA:
+                if False and BUILD_EORA:
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_exllama_eora",
@@ -711,7 +711,7 @@ if BUILD_CUDA_EXT == "1":
                             extra_compile_args=extra_compile_args,
                         )
                     ]
-                if BUILD_EXLLAMA_V2:
+                if False and BUILD_EXLLAMA_V2:
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_exllamav2_kernels",
@@ -726,7 +726,7 @@ if BUILD_CUDA_EXT == "1":
                     ]
 
             # both CUDA and ROCm compatible
-            if BUILD_EXLLAMA_V1:
+            if True:
                 extensions += [
                     cpp_ext.CUDAExtension(
                         "gptqmodel_exllama_kernels",
@@ -742,7 +742,7 @@ if BUILD_CUDA_EXT == "1":
                     )
                 ]
 
-            if BUILD_AWQ:
+            if False and BUILD_AWQ:
                 if ROCM_VERSION:
                     print("Skipping AWQ kernels on ROCm: inline PTX is CUDA-only.")
                 else:
@@ -786,13 +786,13 @@ if BUILD_CUDA_EXT == "1":
 
         additional_setup_kwargs = {
             "ext_modules": extensions,
-            "include_package_data": True,
-            "package_data": {"": ["build/lib/*.so"]},
+            # "include_package_data": True,
+            # "package_data": {"": ["build/lib/*.so"]},
             "cmdclass": {"build_ext": cpp_ext.BuildExtension.with_options(
                 use_ninja=True,
                 no_python_abi_suffix=True,
                 build_temp="build/temp",
-                build_lib="build/lib",
+                # build_lib="build/lib", TODO FIX ME why package_data doesn't work..
                 clean_first=False  # keep intermediates for reuse
             )},
         }
