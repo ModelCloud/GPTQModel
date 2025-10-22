@@ -127,6 +127,9 @@ jobs:
             python: 314
           - cuda: 130
             torch: 2.9.0
+            python: 314t
+          - cuda: 130
+            torch: 2.9.0
             python: 313t
           - cuda: 130
             torch: 2.9.0
@@ -141,6 +144,9 @@ jobs:
             torch: 2.9.0
             python: 310
           # cuda 128
+          - cuda: 128
+            torch: 2.9.0
+            python: 314t
           - cuda: 128
             torch: 2.9.0
             python: 314
@@ -160,6 +166,9 @@ jobs:
             torch: 2.9.0
             python: 310
           # cuda 126
+          - cuda: 126
+            torch: 2.9.0
+            python: 314t
           - cuda: 126
             torch: 2.9.0
             python: 314
@@ -311,6 +320,7 @@ jobs:
       - name: Compile
         if: env.SHOULD_RUN == 1
         run: |
+          pip install nvidia-cutlass
           python setup.py bdist_wheel
 
       - name: Test install
@@ -320,6 +330,7 @@ jobs:
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
           if [ "${{ matrix.python }}" != "313t" ]; then # twine doesn't support python 3.13 yet
+            pip install twine
             twine check dist/$whl
           fi
 
