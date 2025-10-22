@@ -6,51 +6,46 @@ import os
 import re
 import subprocess
 import sys
-import tarfile
-import urllib.request
+from importlib import metadata as importlib_metadata
 from pathlib import Path
-from shutil import rmtree
 
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
-CUTLASS_VERSION = "3.5.0"
-CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{CUTLASS_VERSION}.tar.gz"
+CUTLASS_PYPI_PACKAGE = "nvidia-cutlass"
+CUTLASS_REQUIRED_VERSION_PREFIX = "4.2."
 
 
 def _ensure_cutlass_source() -> Path:
-    deps_dir = Path("build") / "_deps"
-    deps_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        installed_version = importlib_metadata.version(CUTLASS_PYPI_PACKAGE)
+    except importlib_metadata.PackageNotFoundError as exc:
+        raise RuntimeError(
+            f"{CUTLASS_PYPI_PACKAGE} {CUTLASS_REQUIRED_VERSION_PREFIX} is required. "
+            "Install it via `pip install -U nvidia-cutlass`."
+        ) from exc
 
-    cutlass_root = deps_dir / f"cutlass-v{CUTLASS_VERSION}"
-    marker = cutlass_root / ".gptqmodel_complete"
-    if marker.exists():
-        return cutlass_root.resolve()
+    if not installed_version.startswith(CUTLASS_REQUIRED_VERSION_PREFIX):
+        raise RuntimeError(
+            f"Detected {CUTLASS_PYPI_PACKAGE}=={installed_version}, but "
+            f"{CUTLASS_REQUIRED_VERSION_PREFIX.rstrip('.')}.* is required."
+        )
 
-    archive_path = deps_dir / f"cutlass-v{CUTLASS_VERSION}.tar.gz"
-    if not archive_path.exists():
-        print(f"Downloading CUTLASS v{CUTLASS_VERSION} ...")
-        with urllib.request.urlopen(CUTLASS_RELEASE_URL) as response:
-            data = response.read()
-        archive_path.write_bytes(data)
+    try:
+        import cutlass_library
+    except ImportError as exc:
+        raise RuntimeError(
+            "nvidia-cutlass package is installed but cutlass_library module is unavailable. "
+            "Please reinstall `pip install nvidia-cutlass==4.2.0`."
+        ) from exc
 
-    if cutlass_root.exists():
-        rmtree(cutlass_root)
-
-    with tarfile.open(archive_path, "r:gz") as tar:
-        extract_kwargs = {"path": deps_dir}
-        if sys.version_info >= (3, 12):
-            extract_kwargs["filter"] = "data"
-        tar.extractall(**extract_kwargs)
-
-    extracted_dir = deps_dir / f"cutlass-{CUTLASS_VERSION}"
-    if not extracted_dir.exists():
-        raise RuntimeError("Failed to extract CUTLASS archive")
-
-    extracted_dir.rename(cutlass_root)
-    marker.touch()
-    return cutlass_root.resolve()
+    cutlass_root = Path(cutlass_library.__file__).resolve().parent / "source"
+    if not cutlass_root.exists():
+        raise RuntimeError(
+            f"nvidia-cutlass installation at {cutlass_root.parent} is missing CUTLASS sources."
+        )
+    return cutlass_root
 
 
 # ---------------------------
@@ -551,9 +546,16 @@ if BUILD_CUDA_EXT == "1":
         cutlass_include_paths = [
             Path("gptqmodel_ext/cutlass_extensions").resolve(),
             cutlass_root / "include",
+        ]
+        optional_cutlass_includes = [
             cutlass_root / "examples/common/include",
             cutlass_root / "tools/library/include",
+            cutlass_root / "tools/util/include",
+            cutlass_root / "tools/profiler/include",
         ]
+        for path in optional_cutlass_includes:
+            if path.exists():
+                cutlass_include_paths.append(path)
         if "GPTQMODEL_CUTLASS_DIR" not in os.environ:
             os.environ["GPTQMODEL_CUTLASS_DIR"] = str(cutlass_root)
         cutlass_include_flags = [f"-I{path}" for path in cutlass_include_paths]

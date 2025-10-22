@@ -1,6 +1,7 @@
 accelerate>=1.10.1
 numpy==2.2.6
 torch>=2.8.0
+nvidia-cutlass>=4.2.0
 safetensors>=0.6.2
 transformers>=4.57.1
 threadpoolctl>=3.6.0
@@ -19,4 +20,3 @@ datasets>=3.6.0
 pyarrow>=21.0
 dill>=0.3.8
 pypcre>=0.2.4
-
