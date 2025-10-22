@@ -628,7 +628,7 @@ class ModelTest(unittest.TestCase):
     @classmethod
     def load_dataset(cls, tokenizer=None, rows: int = 0):
         try:
-            dataset = load_dataset(path="/monster/data/_ci_/nm-calibration", name="LLM", split="train")
+            dataset = load_dataset(path="/monster/data/model/dataset/nm-calibration", name="LLM", split="train")
         except Exception as exc:  # pragma: no cover - exercised in fallbacks
             log.warning("load_dataset failed; falling back to local parquet: %s", exc)
             dataset = cls._load_calibration_parquet()
@@ -639,7 +639,7 @@ class ModelTest(unittest.TestCase):
 
     @staticmethod
     def _load_calibration_parquet():
-        parquet_path = Path("/monster/data/_ci_/nm-calibration/llm.parquet").expanduser()
+        parquet_path = Path("/monster/data/model/dataset/nm-calibration/llm.parquet").expanduser()
         if not parquet_path.exists():
             raise FileNotFoundError(f"Calibration parquet not found at {parquet_path}")
 
