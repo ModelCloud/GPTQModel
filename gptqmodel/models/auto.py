@@ -419,7 +419,6 @@ class GPTQModel:
             load_kwargs = {}
 
             if llm_backend == "vllm":
-                load_backend = BACKEND.VLLM
                 disallowed_keys = {"pretrained", "tokenizer", "gptqmodel", "trust_remote_code", "backend", "model_id_or_path"}
                 load_kwargs = {k: v for k, v in model_args.items() if k not in disallowed_keys}
 
