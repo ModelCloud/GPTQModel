@@ -789,10 +789,10 @@ if BUILD_CUDA_EXT == "1":
             "ext_modules": extensions,
             "cmdclass": {"build_ext": cpp_ext.BuildExtension.with_options(
                 use_ninja=True,
-                no_python_abi_suffix=True,
-                build_temp="build/temp",
-                build_lib="build/lib",
-                clean_first=False  # keep intermediates for reuse
+                no_python_abi_suffix=False,
+                # build_temp="build/temp",
+                # build_lib="build/lib",
+                clean_first=True  # keep intermediates for reuse
             )},
         }
 
