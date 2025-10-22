@@ -207,7 +207,7 @@ class TorchQuantLinear(PackableQuantLinear):
         return out
 
     def _forward_eager(self, x: torch.Tensor, out_shape):
-        num_itr = self.g_idx.shape[0] // x.shape[-1]
+        num_itr = max(1, self.g_idx.shape[0] // x.shape[-1])
         weights = self._consume_prefetched_weights(x.dtype)
         if weights is None:
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)

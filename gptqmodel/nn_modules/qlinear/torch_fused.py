@@ -203,7 +203,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         return out
 
     def _forward(self, x, out_shape):
-        num_itr = self.g_idx.shape[0] // x.shape[-1]
+        num_itr = max(1, self.g_idx.shape[0] // x.shape[-1])
 
         if not self.training and not self.transformed and TORCH_HAS_FUSED_OPS:
             # one-time transform per module for xpu aten fused ops
