@@ -19,4 +19,5 @@ datasets>=3.6.0
 pyarrow>=21.0
 dill>=0.3.8
 pypcre>=0.2.4
+ninja>=1.13.0
 
