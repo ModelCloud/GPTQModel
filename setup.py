@@ -7,10 +7,12 @@ import os
 import re
 import subprocess
 import sys
+import sysconfig
 import tarfile
+import urllib.error
 import urllib.request
 from pathlib import Path
-from shutil import rmtree
+from shutil import copy2, rmtree
 
 from packaging.version import InvalidVersion, Version
 from setuptools import find_namespace_packages, find_packages, setup
@@ -19,6 +21,129 @@ from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
 CUTLASS_VERSION = "3.5.1"
 CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{CUTLASS_VERSION}.tar.gz"
+
+
+def _python_version_string() -> str:
+    info = sys.version_info
+    suffix = ""
+    if info.releaselevel and info.releaselevel != "final":
+        suffix_map = {"alpha": "a", "beta": "b", "candidate": "rc"}
+        suffix = suffix_map.get(info.releaselevel, info.releaselevel) + str(info.serial)
+    return f"{info.major}.{info.minor}.{info.micro}{suffix}"
+
+
+def _python_include_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(path_value):
+        if not path_value:
+            return
+        path_str = os.fspath(path_value)
+        if path_str in seen:
+            return
+        seen.add(path_str)
+        candidates.append(Path(path_str))
+
+    for key in ("include", "platinclude"):
+        _add(sysconfig.get_path(key))
+
+    _add(sysconfig.get_config_var("INCLUDEPY"))
+
+    prefixes = {
+        getattr(sys, attr, None)
+        for attr in ("prefix", "base_prefix", "exec_prefix", "base_exec_prefix")
+    }
+    ver_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    for prefix in prefixes:
+        if not prefix:
+            continue
+        _add(Path(prefix) / "include")
+        _add(Path(prefix) / "include" / ver_dir)
+
+    multiarch = sysconfig.get_config_var("MULTIARCH")
+    if multiarch:
+        multi_include = Path("/usr/include") / multiarch / ver_dir
+        _add(multi_include)
+    return candidates
+
+
+def _download_python_headers(version: str) -> Path:
+    deps_root = Path("build") / "_deps"
+    deps_root.mkdir(parents=True, exist_ok=True)
+
+    archive_url = f"https://www.python.org/ftp/python/{version}/Python-{version}.tgz"
+    archive_path = deps_root / f"Python-{version}.tgz"
+
+    if not archive_path.exists():
+        print(f"Downloading Python headers for {version} from {archive_url}")
+        with urllib.request.urlopen(archive_url) as response:
+            archive_path.write_bytes(response.read())
+
+    target_root = deps_root / f"python-{version}"
+    target_include = target_root / "Include"
+    marker = target_root / ".gptqmodel_python_headers"
+
+    if marker.exists() and (target_include / "Python.h").exists():
+        return target_include.resolve()
+
+    if target_root.exists():
+        rmtree(target_root)
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    with tarfile.open(archive_path, "r:gz") as tar:
+        prefix = f"Python-{version}/"
+        include_members = [member for member in tar.getmembers() if member.name.startswith(f"{prefix}Include/")]
+        if not include_members:
+            raise RuntimeError(f"Include directory not found while extracting Python headers for {version}")
+        extract_kwargs = {"path": target_root}
+        if sys.version_info >= (3, 12):
+            extract_kwargs["filter"] = "data"
+        tar.extractall(members=include_members, **extract_kwargs)
+
+    extracted_root = target_root / f"Python-{version}"
+    extracted_include = extracted_root / "Include"
+
+    if not extracted_include.exists():
+        raise RuntimeError(f"Extracted Python include directory missing for version {version}")
+
+    if target_include.exists():
+        rmtree(target_include)
+    extracted_include.rename(target_include)
+    if extracted_root.exists():
+        rmtree(extracted_root)
+
+    marker.touch()
+    return target_include.resolve()
+
+
+def _ensure_python_headers() -> Path | None:
+    for candidate in _python_include_candidates():
+        header = candidate / "Python.h"
+        if header.exists():
+            return candidate.resolve()
+
+    version = _python_version_string()
+    try:
+        downloaded_include = _download_python_headers(version)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Failed to download Python headers for {version} from python.org: {exc}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Network error while downloading Python headers for {version}: {exc}") from exc
+
+    get_config_h = getattr(sysconfig, "get_config_h_filename", None)
+    if callable(get_config_h):
+        pyconfig_candidate = get_config_h()
+    else:
+        pyconfig_candidate = None
+    if pyconfig_candidate:
+        pyconfig_path = Path(pyconfig_candidate)
+        target_pyconfig = downloaded_include / "pyconfig.h"
+        if not target_pyconfig.exists() and pyconfig_path.exists():
+            target_pyconfig.parent.mkdir(parents=True, exist_ok=True)
+            copy2(pyconfig_path, target_pyconfig)
+
+    return downloaded_include
 
 
 def _ensure_cutlass_source() -> Path:
@@ -449,6 +574,12 @@ if RELEASE_MODE == "1":
     gptqmodel_version = f"{gptqmodel_version}+{get_version_tag()}"
 
 include_dirs = ["gptqmodel_ext"]
+
+python_include_dir = _ensure_python_headers()
+if python_include_dir:
+    resolved_python_include = str(python_include_dir)
+    if resolved_python_include not in include_dirs:
+        include_dirs.append(resolved_python_include)
 
 extensions = []
 additional_setup_kwargs = {}
