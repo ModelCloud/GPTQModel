@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Tuple
-
 import torch
 
 from ...adapter.adapter import Adapter, Lora
@@ -130,14 +130,16 @@ class MacheteQuantLinear(BaseQuantLinear):
             ),
         )
 
-        # Zero points unused for symmetric GPTQ
-        self.register_parameter(
-            "qzeros",
-            torch.nn.Parameter(
-                torch.empty(0, dtype=torch.float16),
-                requires_grad=False,
-            ),
-        )
+        # Zero points (unused for symmetric GPTQ but required for checkpoint loading)
+        qzeros_rows = math.ceil(self.in_features / self.group_size) if self.group_size > 0 else 0
+        qzeros_cols = self.out_features // self.pack_factor if self.pack_factor > 0 else 0
+        if qzeros_rows <= 0 or qzeros_cols <= 0:
+            raise ValueError(
+                f"Invalid qzeros shape derived for machete layer: rows={qzeros_rows}, cols={qzeros_cols}."
+            )
+        qzeros = torch.empty((qzeros_rows, qzeros_cols), dtype=torch.int32)
+
+        self.register_parameter("qzeros", torch.nn.Parameter(qzeros, requires_grad=False))
 
         if bias:
             self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
@@ -235,7 +237,10 @@ class MacheteQuantLinear(BaseQuantLinear):
         replace_parameter(
             self,
             "qzeros",
-            torch.nn.Parameter(torch.empty(0, dtype=self.scales.dtype, device=device), requires_grad=False),
+            torch.nn.Parameter(
+                torch.empty(0, dtype=self.qzeros.dtype, device=device),
+                requires_grad=False,
+            ),
         )
         self.has_zero_points = False
 
