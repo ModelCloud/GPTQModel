@@ -98,7 +98,16 @@ class AwqMacheteQuantLinear(AWQuantLinear):
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         if machete_import_exception is not None:
             return False, ImportError(machete_import_exception)
-        return cls._validate(**args)
+        ok, err = cls._validate(**args)
+        if not ok:
+            return ok, err
+
+        device = args.get("device")
+        if device is None:
+            if not _validate_machete_device_support():
+                return False, NotImplementedError("Machete kernel currently supports Hopper GPUs (SM 90) only.")
+
+        return True, None
 
     @classmethod
     def validate_device(cls, device: DEVICE):
@@ -107,7 +116,7 @@ class AwqMacheteQuantLinear(AWQuantLinear):
             if IS_ROCM:
                 raise NotImplementedError("Machete kernel is not supported on ROCm.")
             if not _validate_machete_device_support():
-                raise NotImplementedError("Machete kernel requires compute capability >= 9.0.")
+                raise NotImplementedError("Machete kernel currently supports Hopper GPUs (SM 90) only.")
 
     def post_init(self):
         device = self.qweight.device

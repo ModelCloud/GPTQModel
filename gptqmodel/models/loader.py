@@ -726,7 +726,7 @@ def ModelLoader(cls):
                 )
             if not _validate_machete_device_support():
                 raise ValueError(
-                    f"Kernel: Machete kernel requires compute capability >= 9.0. Detected capability: {torch.cuda.get_device_capability()}"
+                    f"Kernel: Machete kernel currently supports Hopper GPUs (SM 90). Detected capability: {torch.cuda.get_device_capability()}."
                 )
 
         if backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and (

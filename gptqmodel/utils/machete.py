@@ -26,8 +26,12 @@ MACHETE_PREPACKED_BLOCK_SHAPE = (64, 128)
 
 
 def _validate_machete_device_support() -> bool:
-    return (torch.cuda.is_available()
-            and torch.cuda.get_device_capability()[0] >= 9)
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability()
+    # Machete currently targets Hopper (SM90) WGMMA kernels only.
+    # Blackwell GPUs (SM120) require tcgen05 kernels which are not yet implemented.
+    return major == 9
 
 
 def query_machete_supported_quant_types(zero_points: bool) -> List[ScalarType]:

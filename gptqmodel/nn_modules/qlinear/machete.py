@@ -161,6 +161,11 @@ class MacheteQuantLinear(BaseQuantLinear):
         if not ok:
             return ok, err
 
+        device = args.get("device")
+        if device is None:
+            if not _validate_machete_device_support():
+                return False, NotImplementedError("Machete kernel currently supports Hopper GPUs (SM 90) only.")
+
         in_features = args.get("in_features")
         out_features = args.get("out_features")
         if in_features is not None and out_features is not None:
@@ -190,7 +195,7 @@ class MacheteQuantLinear(BaseQuantLinear):
             if IS_ROCM:
                 raise NotImplementedError("Machete kernel is not supported on ROCm.")
             if not _validate_machete_device_support():
-                raise NotImplementedError("Machete kernel requires compute capability >= 9.0.")
+                raise NotImplementedError("Machete kernel currently supports Hopper GPUs (SM 90) only.")
 
     def post_init(self):
         device = self.qweight.device
