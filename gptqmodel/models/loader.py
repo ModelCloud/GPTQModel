@@ -553,7 +553,7 @@ def ModelLoader(cls):
                 layers: List[torch.nn.Module],
                 ignore_modules: List[torch.nn.Module],
                 num_gpus: Optional[int] = None,
-        ) -> Dict[str, int]:
+        ) -> Dict[str, str]:
             """
             Build a deterministic alternating device_map for multi-GPU loading.
             Designed for quantized GPTQ models.
@@ -573,14 +573,22 @@ def ModelLoader(cls):
                 raise RuntimeError("No CUDA devices detected")
 
             device_ids = list(range(num_gpus))
-            device_map: Dict[str, int] = {}
+            device_map: Dict[str, str] = {}
             mod2name = {m: n for n, m in model.named_modules()}
+            
+            if torch.cuda.is_available():
+                device_strs = [f"cuda:{i}" for i in range(num_gpus)]
+            elif hasattr(torch, "xpu") and torch.xpu.is_available():
+                device_strs = [f"xpu:{i}" for i in range(num_gpus)]
+            else:
+                device_strs = ["cpu"] * num_gpus
+            
             def assign(mod, device_id):
                 if mod is None:
                     return
                 name = mod2name.get(mod)
                 if name is not None:
-                    device_map[name] = device_id
+                    device_map[name] = device_strs[device_id]
 
             # -------------------------------------------------------------
             # 1–3. Assign input embeddings, layers, and ignored modules
@@ -594,8 +602,10 @@ def ModelLoader(cls):
                 gpu = device_ids[i % num_gpus]
                 assign(layer, gpu)
 
-            # Ignored modules
+            # Ignored modules - skip input embeddings to avoid overriding GPU 0 assignment
             for mod in ignore_modules:
+                if in_emb is not None and mod is in_emb:
+                    continue  # Skip input embedding to preserve GPU 0 assignment
                 assign(mod, device_ids[-1])
 
             # -------------------------------------------------------------
@@ -645,7 +655,7 @@ def ModelLoader(cls):
             # -------------------------------------------------------------
             # 6. Prune parent assignments that would override child devices
             # -------------------------------------------------------------
-            for name, device_id in list(device_map.items()):
+            for name, device_str in list(device_map.items()):
                 if not name:
                     continue
                 child_devices = {
@@ -653,7 +663,7 @@ def ModelLoader(cls):
                     for child_name in device_map
                     if child_name != name and child_name.startswith(f"{name}.")
                 }
-                if child_devices and (len(child_devices) > 1 or device_id not in child_devices):
+                if child_devices and (len(child_devices) > 1 or device_str not in child_devices):
                     log.info(f"Loader: dropping parent '{name}' from device_map to preserve child placements.")
                     device_map.pop(name, None)
 
