@@ -137,7 +137,7 @@ class MacheteQuantLinear(BaseQuantLinear):
             raise ValueError(
                 f"Invalid qzeros shape derived for machete layer: rows={qzeros_rows}, cols={qzeros_cols}."
             )
-        qzeros = torch.empty((qzeros_rows, qzeros_cols), dtype=torch.int32)
+        qzeros = torch.zeros((qzeros_rows, qzeros_cols), dtype=torch.int32)
 
         self.register_parameter("qzeros", torch.nn.Parameter(qzeros, requires_grad=False))
 
@@ -196,9 +196,12 @@ class MacheteQuantLinear(BaseQuantLinear):
         device = self.qweight.device
 
         perm = None
+        orig_g_idx = self.g_idx.data
+        scale_dtype = self.scales.dtype
+
         if self.desc_act:
-            perm = torch.argsort(self.g_idx).to(torch.int32)
-            sorted_g_idx = self.g_idx[perm]
+            perm = torch.argsort(orig_g_idx).to(torch.int32)
+            sorted_g_idx = orig_g_idx[perm]
             replace_parameter(
                 self,
                 "g_idx",
@@ -218,9 +221,9 @@ class MacheteQuantLinear(BaseQuantLinear):
         qweight_packed = qweight_packed.t().contiguous().t()
         prepacked = machete_prepack_B(
             qweight_packed,
-            a_type=self.scales.dtype,
+            a_type=scale_dtype,
             b_type=self.weight_type,
-            group_scales_type=self.scales.dtype,
+            group_scales_type=scale_dtype,
         )
         replace_parameter(
             self,
@@ -228,21 +231,34 @@ class MacheteQuantLinear(BaseQuantLinear):
             torch.nn.Parameter(prepacked.contiguous(), requires_grad=False),
         )
 
-        replace_parameter(
-            self,
-            "scales",
-            torch.nn.Parameter(self.scales.data.contiguous(), requires_grad=False),
+        scales_param = torch.nn.Parameter(
+            self.scales.data.contiguous().to(device=device, dtype=scale_dtype),
+            requires_grad=False,
         )
+        replace_parameter(self, "scales", scales_param)
 
-        replace_parameter(
-            self,
-            "qzeros",
-            torch.nn.Parameter(
-                torch.empty(0, dtype=self.qzeros.dtype, device=device),
-                requires_grad=False,
-            ),
-        )
-        self.has_zero_points = False
+        has_zero_points = bool(self.has_zero_points and self.qzeros.data.numel() > 0)
+        if has_zero_points:
+            qzeros_unpacked = unpack_quantized_values_into_int32(
+                self.qzeros.data, self.weight_type, packed_dim=1
+            )
+            qzeros_fp = -scales_param.data * qzeros_unpacked.to(scales_param.dtype)
+            replace_parameter(
+                self,
+                "qzeros",
+                torch.nn.Parameter(qzeros_fp.contiguous().to(device=device), requires_grad=False),
+            )
+        else:
+            replace_parameter(
+                self,
+                "qzeros",
+                torch.nn.Parameter(
+                    torch.empty(0, dtype=scale_dtype, device=device),
+                    requires_grad=False,
+                ),
+            )
+
+        self.has_zero_points = has_zero_points
 
         if self.bias is not None:
             self.bias = self.bias.to(device=device)
