@@ -560,6 +560,13 @@ if BUILD_CUDA_EXT == "1":
         cutlass_include_flags = [f"-I{path}" for path in cutlass_include_paths]
         extra_compile_args["cxx"] += cutlass_include_flags
         extra_compile_args["nvcc"] += cutlass_include_flags
+        # Blackwell (SM 120) requires explicit family-enabled targets in CUDA 12.9+ for FP4 instructions.
+        if CUDA_ARCH_LIST and _version_geq(CUDA_VERSION, 12, 9):
+            parsed_arches = _parse_arch_list(CUDA_ARCH_LIST)
+            if any(a.split("+", 1)[0] in {"12.0", "12"} for a in parsed_arches):
+                flag = "-gencode=arch=compute_120,code=sm_120f"
+                if flag not in extra_compile_args["nvcc"]:
+                    extra_compile_args["nvcc"].append(flag)
 
         # Windows/OpenMP note: adjust flags as needed for MSVC if you add native Windows wheels
         if sys.platform == "win32":
