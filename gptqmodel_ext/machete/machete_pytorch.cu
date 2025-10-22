@@ -4,6 +4,8 @@
 
 #include "core/registration.h"
 
+#include <torch/extension.h>
+
 namespace machete {
 
 using namespace vllm;
@@ -71,3 +73,9 @@ TORCH_LIBRARY_IMPL(TORCH_EXTENSION_NAME, CatchAll, m) {
 }
 
 };  // namespace machete
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("machete_prepack_B", &machete::prepack_B);
+  m.def("machete_supported_schedules", &machete::supported_schedules);
+  m.def("machete_mm", &machete::mm);
+}
