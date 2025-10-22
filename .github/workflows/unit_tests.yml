@@ -281,7 +281,6 @@ jobs:
 
   torch:
     needs:
-      - build
       - list-test-files
       - check-vm
     runs-on: [ self-hosted, xeon5 ]
