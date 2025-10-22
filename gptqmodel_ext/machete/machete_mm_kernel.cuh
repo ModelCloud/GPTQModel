@@ -4,6 +4,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 
+#include "machete_arch_guard.cuh"
+
 // clang-format off
 // The cutlass include order matters (annoyingly)
 #include "cutlass/cutlass.h"

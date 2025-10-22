@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+import copy
 import os
 import re
 import subprocess
@@ -684,12 +685,21 @@ if BUILD_CUDA_EXT == "1":
 
                     machete_include_dirs = [str(Path("gptqmodel_ext").resolve())] + [str(path) for path in cutlass_include_paths]
 
+                    machete_extra_compile_args = copy.deepcopy(extra_compile_args)
+                    machete_arch_flags = [
+                        "--generate-code=arch=compute_90,code=sm_90",
+                        "--generate-code=arch=compute_90a,code=sm_90a",
+                    ]
+                    for flag in machete_arch_flags:
+                        if flag not in machete_extra_compile_args["nvcc"]:
+                            machete_extra_compile_args["nvcc"].append(flag)
+
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_machete_kernels",
                             machete_sources,
                             extra_link_args=extra_link_args,
-                            extra_compile_args=extra_compile_args,
+                            extra_compile_args=machete_extra_compile_args,
                             include_dirs=machete_include_dirs,
                         )
                     ]
