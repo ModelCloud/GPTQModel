@@ -9,27 +9,36 @@ import sys
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 
+from packaging.version import InvalidVersion, Version
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
 CUTLASS_PYPI_PACKAGE = "nvidia-cutlass"
-CUTLASS_REQUIRED_VERSION_PREFIX = "4.2."
+CUTLASS_MIN_VERSION = Version("4.2.0")
 
 
 def _ensure_cutlass_source() -> Path:
     try:
-        installed_version = importlib_metadata.version(CUTLASS_PYPI_PACKAGE)
+        installed_version_str = importlib_metadata.version(CUTLASS_PYPI_PACKAGE)
     except importlib_metadata.PackageNotFoundError as exc:
         raise RuntimeError(
-            f"{CUTLASS_PYPI_PACKAGE} {CUTLASS_REQUIRED_VERSION_PREFIX} is required. "
+            f"{CUTLASS_PYPI_PACKAGE} >= {CUTLASS_MIN_VERSION} is required. "
             "Install it via `pip install -U nvidia-cutlass`."
         ) from exc
 
-    if not installed_version.startswith(CUTLASS_REQUIRED_VERSION_PREFIX):
+    try:
+        installed_version = Version(installed_version_str)
+    except InvalidVersion as exc:
+        raise RuntimeError(
+            f"Could not parse installed {CUTLASS_PYPI_PACKAGE} version '{installed_version_str}'. "
+            f"Please reinstall via `pip install -U {CUTLASS_PYPI_PACKAGE}`."
+        ) from exc
+
+    if installed_version < CUTLASS_MIN_VERSION:
         raise RuntimeError(
             f"Detected {CUTLASS_PYPI_PACKAGE}=={installed_version}, but "
-            f"{CUTLASS_REQUIRED_VERSION_PREFIX.rstrip('.')}.* is required."
+            f"{CUTLASS_MIN_VERSION} or newer is required."
         )
 
     try:
@@ -37,7 +46,7 @@ def _ensure_cutlass_source() -> Path:
     except ImportError as exc:
         raise RuntimeError(
             "nvidia-cutlass package is installed but cutlass_library module is unavailable. "
-            "Please reinstall `pip install nvidia-cutlass==4.2.0`."
+            "Please reinstall via `pip install -U nvidia-cutlass`."
         ) from exc
 
     cutlass_root = Path(cutlass_library.__file__).resolve().parent / "source"
