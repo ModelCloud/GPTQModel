@@ -781,23 +781,23 @@ if BUILD_CUDA_EXT == "1":
             other_exts = [ext for ext in extensions if getattr(ext, "name", "") != "gptqmodel_machete_kernels"]
             extensions[:] = machete_exts + other_exts
 
-        # additional_setup_kwargs = {
-        #     "ext_modules": extensions,
-        #     "cmdclass": {"build_ext": cpp_ext.BuildExtension},
-        # }
-
         additional_setup_kwargs = {
             "ext_modules": extensions,
-            # "include_package_data": True,
-            # "package_data": {"": ["build/lib/*.so"]},
-            "cmdclass": {"build_ext": cpp_ext.BuildExtension.with_options(
-                use_ninja=True,
-                no_python_abi_suffix=True,
-                build_temp="build/temp",
-                # build_lib="build/lib", TODO FIX ME why package_data doesn't work..
-                clean_first=False  # keep intermediates for reuse
-            )},
+            "cmdclass": {"build_ext": cpp_ext.BuildExtension},
         }
+
+        # additional_setup_kwargs = {
+        #     "ext_modules": extensions,
+        #     # "include_package_data": True,
+        #     # "package_data": {"": ["build/lib/*.so"]},
+        #     "cmdclass": {"build_ext": cpp_ext.BuildExtension.with_options(
+        #         use_ninja=True,
+        #         no_python_abi_suffix=True,
+        #         build_temp="build/temp",
+        #         # build_lib="build/lib", TODO FIX ME why package_data doesn't work..
+        #         clean_first=False  # keep intermediates for reuse
+        #     )},
+        # }
 
 
 # ---------------------------
