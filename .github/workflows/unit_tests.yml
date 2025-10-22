@@ -337,7 +337,7 @@ jobs:
             bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
           fi
           
-          pip install nvidia-cutlass
+          pip install nvidia-cutlass backoff
 
           echo "::group::pyenv versions"
           pyenv versions
