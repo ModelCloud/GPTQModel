@@ -14,7 +14,6 @@ from shutil import rmtree
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
-
 CUTLASS_VERSION = "3.5.0"
 CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{CUTLASS_VERSION}.tar.gz"
 
@@ -420,6 +419,7 @@ def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
     # Fallback: default GitHub template
     return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
 
+
 # Decide HAS_CUDA_V8 / HAS_CUDA_V9 without torch
 HAS_CUDA_V8 = False
 HAS_CUDA_V9 = False
@@ -526,7 +526,7 @@ if BUILD_CUDA_EXT == "1":
         print(f"Using NVCC_THREADS={nvcc_threads} for per-invocation NVCC concurrency.")
 
         # Optional conda CUDA runtime headers
-        #conda_cuda_include_dir = os.path.join(get_python_lib(), "nvidia/cuda_runtime/include")
+        # conda_cuda_include_dir = os.path.join(get_python_lib(), "nvidia/cuda_runtime/include")
         # if os.path.isdir(conda_cuda_include_dir):
         #     include_dirs.append(conda_cuda_include_dir)
         #     print(f"appending conda cuda include dir {conda_cuda_include_dir}")
@@ -786,6 +786,8 @@ if BUILD_CUDA_EXT == "1":
 
         additional_setup_kwargs = {
             "ext_modules": extensions,
+            "include_package_data": True,
+            "package_data": {"": ["build/lib/*.so"]},
             "cmdclass": {"build_ext": cpp_ext.BuildExtension.with_options(
                 use_ninja=True,
                 no_python_abi_suffix=True,
@@ -850,7 +852,7 @@ for _pkg in _namespace_packages:
         _packages.append(_pkg)
 
 setup(
-    version = gptqmodel_version,
+    version=gptqmodel_version,
     packages=_packages,
     include_package_data=True,
     extras_require={
