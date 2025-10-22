@@ -641,33 +641,6 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
-                    machete_dir = Path("gptqmodel_ext/machete")
-                    machete_generated_dir = machete_dir / "generated"
-
-                    machete_sources = [str(machete_dir / "machete_pytorch.cu")]
-                    machete_generated_sources = sorted(machete_generated_dir.glob("*.cu"))
-
-                    if not machete_generated_sources:
-                        raise RuntimeError(
-                            "No generated machete kernel templates detected. Run gptqmodel_ext/machete/generate.py"
-                            " with CUTLASS checkout before building."
-                        )
-
-                    machete_sources += [str(path) for path in machete_generated_sources]
-
-                    machete_include_dirs = [str(Path("gptqmodel_ext").resolve())] + [str(path) for path in cutlass_include_paths]
-
-                    extensions += [
-                        cpp_ext.CUDAExtension(
-                            "gptqmodel_machete_kernels",
-                            machete_sources,
-                            extra_link_args=extra_link_args,
-                            extra_compile_args=extra_compile_args,
-                            include_dirs=machete_include_dirs,
-                        )
-                    ]
-
                 if BUILD_QQQ:
                     extensions += [
                         cpp_ext.CUDAExtension(
