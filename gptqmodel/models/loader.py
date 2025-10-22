@@ -372,6 +372,8 @@ def ModelLoader(cls):
 
         qcfg.calculate_bits_per_weight()
 
+        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if backend == BACKEND.VLLM:
                 if qcfg.format != FORMAT.GPTQ and qcfg.format != FORMAT.GEMM:
@@ -409,7 +411,10 @@ def ModelLoader(cls):
                 model,
                 quantized=True,
                 quantize_config=qcfg,
+                tokenizer=tokenizer,
                 qlinear_kernel=None,
+                load_quantized_model=True,
+                trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
             )
 
@@ -783,8 +788,6 @@ def ModelLoader(cls):
         model = gptqmodel_post_init(model, use_act_order=qcfg.desc_act, quantize_config=qcfg)
 
         model.eval()
-
-        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if backend == BACKEND.MLX:
             import tempfile
