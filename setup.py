@@ -615,6 +615,7 @@ if BUILD_CUDA_EXT == "1":
                     ]
 
                 if BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
+                    subprocess.run(["python", "gptqmodel_ext/machete/generate.py"])
                     machete_dir = Path("gptqmodel_ext/machete")
                     machete_generated_dir = machete_dir / "generated"
 
