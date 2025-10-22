@@ -310,7 +310,8 @@ jobs:
 
       - name: Compile
         if: env.SHOULD_RUN == 1
-        run: python setup.py bdist_wheel
+        run: |
+          python setup.py bdist_wheel
 
       - name: Test install
         if: env.SHOULD_RUN == 1
@@ -395,7 +396,8 @@ jobs:
           git checkout pr-${PR_NUMBER}
 
       - name: Compile
-        run: python -m build --no-isolation --sdist
+        run: |
+          python -m build --no-isolation --sdist
 
       - name: Check dist
         run: |
@@ -478,7 +480,7 @@ jobs:
           git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
-          
+
       - uses: actions/setup-python@v6
         with:
           python-version: 3.13
@@ -488,8 +490,11 @@ jobs:
         run: |
           pip install build setuptools uv -U
           uv pip install torch twine ninja --system
+
       - name: Compile
-        run: python -m build --no-isolation --sdist
+        run: |
+          python -m build --no-isolation --sdist
+
 
       - name: Check dist
         run: |
@@ -497,6 +502,7 @@ jobs:
           whl=$(ls -t dist/*.gz | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
           twine check dist/$whl
+
       - name: Upload to artifact
         uses: actions/upload-artifact@v4
         with:
@@ -516,6 +522,7 @@ jobs:
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         run: |
           for i in {1..5}; do sleep 5; done
+
       - name: Upload sdist to pypi
         if: (github.event_name == 'release' || github.event.inputs.upload_pypi == 'true') && !cancelled()
         env:
