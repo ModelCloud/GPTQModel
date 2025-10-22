@@ -117,6 +117,61 @@ def _download_python_headers(version: str) -> Path:
     return target_include.resolve()
 
 
+def _ensure_pyconfig_header(include_dir: Path) -> None:
+    target_pyconfig = include_dir / "pyconfig.h"
+    if target_pyconfig.exists():
+        return
+
+    config_vars = sysconfig.get_config_vars()
+    if not config_vars:
+        raise RuntimeError("Unable to synthesize pyconfig.h: sysconfig returned no configuration variables.")
+
+    lines: list[str] = [
+        "/*",
+        " * Auto-generated pyconfig.h for GPTQModel builds.",
+        f" * Generated from sysconfig for Python {sys.version.split()[0]}",
+        " */",
+        "#ifndef Py_PYCONFIG_H",
+        "#define Py_PYCONFIG_H",
+    ]
+
+    def _emit_undef(name: str) -> None:
+        lines.append(f"/* #undef {name} */")
+
+    for key in sorted(config_vars):
+        if not isinstance(key, str) or not key or not key[0].isalpha():
+            continue
+        if not key[0].isupper():
+            continue
+
+        value = config_vars[key]
+        if value is None:
+            _emit_undef(key)
+            continue
+
+        if isinstance(value, bool):
+            lines.append(f"#define {key} {int(value)}")
+            continue
+
+        if isinstance(value, (int, float)):
+            lines.append(f"#define {key} {value}")
+            continue
+
+        if isinstance(value, str):
+            if value == "":
+                _emit_undef(key)
+            else:
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                lines.append(f'#define {key} "{escaped}"')
+            continue
+
+        _emit_undef(key)
+
+    lines.append("#endif /* Py_PYCONFIG_H */")
+    include_dir.mkdir(parents=True, exist_ok=True)
+    target_pyconfig.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _ensure_python_headers() -> Path | None:
     for candidate in _python_include_candidates():
         header = candidate / "Python.h"
@@ -142,6 +197,10 @@ def _ensure_python_headers() -> Path | None:
         if not target_pyconfig.exists() and pyconfig_path.exists():
             target_pyconfig.parent.mkdir(parents=True, exist_ok=True)
             copy2(pyconfig_path, target_pyconfig)
+        elif not target_pyconfig.exists():
+            _ensure_pyconfig_header(downloaded_include)
+    else:
+        _ensure_pyconfig_header(downloaded_include)
 
     return downloaded_include
 
