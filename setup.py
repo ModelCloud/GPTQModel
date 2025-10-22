@@ -614,7 +614,7 @@ if BUILD_CUDA_EXT == "1":
         # Extensions (gate marlin/qqq/eora/exllamav2 on CUDA sm_80+ and non-ROCm)
         if sys.platform != "win32":
             if not ROCM_VERSION and HAS_CUDA_V8:
-                if False and BUILD_MARLIN:
+                if BUILD_MARLIN:
                     marlin_kernel_dir = Path("gptqmodel_ext/marlin")
                     marlin_kernel_files = sorted(marlin_kernel_dir.glob("kernel_*.cu"))
 
@@ -645,7 +645,7 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if False and BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
+                if BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
                     try:
                         result = subprocess.run(
                             [sys.executable, "gptqmodel_ext/machete/generate.py"],
@@ -686,7 +686,7 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if False and BUILD_QQQ:
+                if BUILD_QQQ:
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_qqq_kernels",
@@ -699,7 +699,7 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if False and BUILD_EORA:
+                if BUILD_EORA:
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_exllama_eora",
@@ -711,7 +711,7 @@ if BUILD_CUDA_EXT == "1":
                             extra_compile_args=extra_compile_args,
                         )
                     ]
-                if False and BUILD_EXLLAMA_V2:
+                if BUILD_EXLLAMA_V2:
                     extensions += [
                         cpp_ext.CUDAExtension(
                             "gptqmodel_exllamav2_kernels",
@@ -726,7 +726,7 @@ if BUILD_CUDA_EXT == "1":
                     ]
 
             # both CUDA and ROCm compatible
-            if True:
+            if BUILD_EXLLAMA_V1:
                 extensions += [
                     cpp_ext.CUDAExtension(
                         "gptqmodel_exllama_kernels",
@@ -742,7 +742,7 @@ if BUILD_CUDA_EXT == "1":
                     )
                 ]
 
-            if False and BUILD_AWQ:
+            if BUILD_AWQ:
                 if ROCM_VERSION:
                     print("Skipping AWQ kernels on ROCm: inline PTX is CUDA-only.")
                 else:
