@@ -26,6 +26,8 @@ else:
 
 _CUTLASS_PYTHON_DIR = _CUTLASS_ROOT / "python"
 
+_CUTLASS_PYTHON_DIR.mkdir(parents=True, exist_ok=True)
+
 if str(_CUTLASS_EXT_DIR) not in sys.path:
     sys.path.append(str(_CUTLASS_EXT_DIR))
 if _CUTLASS_PYTHON_DIR.exists() and str(_CUTLASS_PYTHON_DIR) not in sys.path:

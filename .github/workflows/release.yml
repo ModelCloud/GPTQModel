@@ -311,8 +311,6 @@ jobs:
       - name: Compile
         if: env.SHOULD_RUN == 1
         run: |
-          mkdir -p cutlass/python || true
-          python gptqmodel_ext/machete/generate.py
           python setup.py bdist_wheel
 
       - name: Test install
@@ -399,8 +397,6 @@ jobs:
 
       - name: Compile
         run: |
-          mkdir -p cutlass/python || true
-          python gptqmodel_ext/machete/generate.py
           python -m build --no-isolation --sdist
 
       - name: Check dist
@@ -497,8 +493,6 @@ jobs:
 
       - name: Compile
         run: |
-          mkdir -p cutlass/python || true
-          python gptqmodel_ext/machete/generate.py
           python -m build --no-isolation --sdist
 
 
