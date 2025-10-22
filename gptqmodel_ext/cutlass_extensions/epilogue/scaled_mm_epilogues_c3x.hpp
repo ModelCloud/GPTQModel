@@ -61,13 +61,13 @@ struct ScaledEpilogueBase {
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
   using ColLoad = cutlass::epilogue::fusion::Sm90ColBroadcast<
-      0 /*Stages*/, TileShape, T, T, Stride<Int<1>, Int<0>, Int<0>>,
+      0 /*Stages*/, TileShape, T, Stride<Int<1>, Int<0>, Int<0>>,
       128 / sizeof_bits_v<T>, EnableNullPtr>;
 
   // Don't want to support nullptr by default
   template <typename T, bool EnableNullPtr = false>
   using RowLoad = cutlass::epilogue::fusion::Sm90RowBroadcast<
-      0 /*Stages*/, TileShape, T, T, Stride<Int<0>, Int<1>, Int<0>>,
+      0 /*Stages*/, TileShape, T, Stride<Int<0>, Int<1>, Int<0>>,
       128 / sizeof_bits_v<T>, EnableNullPtr>;
 
   template <typename T>
