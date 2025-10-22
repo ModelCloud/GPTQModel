@@ -615,7 +615,20 @@ if BUILD_CUDA_EXT == "1":
                     ]
 
                 if BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
-                    subprocess.run(["python", "gptqmodel_ext/machete/generate.py"])
+                    try:
+                        result = subprocess.run(
+                            [sys.executable, "gptqmodel_ext/machete/generate.py"],
+                            check=True,
+                            text=True,
+                            capture_output=True
+                        )
+                    except subprocess.CalledProcessError as e:
+                        raise RuntimeError(
+                            f"Error generating machete kernel templates:\n"
+                            f"Return code: {e.returncode}\n"
+                            f"Stderr: {e.stderr}\n"
+                            f"Stdout: {e.stdout}"
+                        )
                     machete_dir = Path("gptqmodel_ext/machete")
                     machete_generated_dir = machete_dir / "generated"
 
