@@ -15,7 +15,7 @@ from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
 
 CUTLASS_PYPI_PACKAGE = "nvidia-cutlass"
-CUTLASS_MIN_VERSION = Version("4.2.0")
+CUTLASS_MIN_VERSION = Version("3.5.0.0")
 
 
 def _ensure_cutlass_source() -> Path:
@@ -23,7 +23,7 @@ def _ensure_cutlass_source() -> Path:
         installed_version_str = importlib_metadata.version(CUTLASS_PYPI_PACKAGE)
     except importlib_metadata.PackageNotFoundError as exc:
         raise RuntimeError(
-            f"{CUTLASS_PYPI_PACKAGE} >= {CUTLASS_MIN_VERSION} is required. "
+            f"{CUTLASS_PYPI_PACKAGE} == {CUTLASS_MIN_VERSION} is required. "
             "Install it via `pip install -U nvidia-cutlass`."
         ) from exc
 
@@ -35,10 +35,10 @@ def _ensure_cutlass_source() -> Path:
             f"Please reinstall via `pip install -U {CUTLASS_PYPI_PACKAGE}`."
         ) from exc
 
-    if installed_version < CUTLASS_MIN_VERSION:
+    if installed_version != CUTLASS_MIN_VERSION:
         raise RuntimeError(
             f"Detected {CUTLASS_PYPI_PACKAGE}=={installed_version}, but "
-            f"{CUTLASS_MIN_VERSION} or newer is required."
+            f"{CUTLASS_MIN_VERSION} is required."
         )
 
     try:
