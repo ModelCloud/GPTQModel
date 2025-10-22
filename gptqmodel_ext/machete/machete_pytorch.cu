@@ -4,11 +4,18 @@
 
 #include "core/registration.h"
 
-#include <torch/extension.h>
-
 namespace machete {
 
 using namespace vllm;
+
+TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
+  m.def(
+      "machete_prepack_B(Tensor B, ScalarType a_type, int b_type_id, ScalarType? group_scales_type) -> Tensor");
+  m.def(
+      "machete_mm(Tensor a, Tensor b, int b_type_id, ScalarType? out_type, Tensor? group_scales, Tensor? group_zeros, int? group_size, Tensor? channel_scales, Tensor? token_scales, str? schedule) -> Tensor");
+  m.def(
+      "machete_supported_schedules(ScalarType a_type, int b_type_id, ScalarType? group_scales_type, ScalarType? group_zeros_type, ScalarType? channel_scales_type, ScalarType? token_scales_type, ScalarType? out_type) -> str[]");
+}
 
 std::vector<std::string> supported_schedules(
     at::ScalarType a_type, int64_t b_type_id,
@@ -74,8 +81,4 @@ TORCH_LIBRARY_IMPL(TORCH_EXTENSION_NAME, CatchAll, m) {
 
 };  // namespace machete
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("machete_prepack_B", &machete::prepack_B);
-  m.def("machete_supported_schedules", &machete::supported_schedules);
-  m.def("machete_mm", &machete::mm);
-}
+REGISTER_EXTENSION(TORCH_EXTENSION_NAME);

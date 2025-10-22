@@ -3,18 +3,7 @@
 // For TORCH_CHECK
 #include <torch/library.h>
 
-#include <cstring>
-
 namespace vllm {
-
-template <typename To, typename From>
-inline To bit_cast_like(const From& src) noexcept {
-  static_assert(sizeof(To) == sizeof(From),
-                "bit_cast_like requires source and destination to be the same size");
-  To dst{};
-  std::memcpy(&dst, &src, sizeof(To));
-  return dst;
-}
 
 //
 //  ScalarType can represent a wide range of floating point and integer types,
@@ -219,29 +208,30 @@ class ScalarType {
     // the exponent
     uint64_t double_raw =
         (max_mantissa << (52 - mantissa)) | (max_exponent_double << 52);
-    return bit_cast_like<double>(double_raw);
+
+    return *reinterpret_cast<double*>(&double_raw);
   }
 
-  std::variant<int64_t, double> _raw_max() const {
+  constexpr std::variant<int64_t, double> _raw_max() const {
     if (is_floating_point()) {
       return {_floating_point_max()};
     } else {
-      TORCH_CHECK(size_bits() < 64 || (size_bits() == 64 && is_signed()),
+      TORCH_CHECK(size_bits() < 64 || size_bits() == 64 && is_signed(),
                   "Cannot represent max as a int64_t");
       return {(int64_t(1) << mantissa) - 1};
     }
   }
 
-  std::variant<int64_t, double> _raw_min() const {
+  constexpr std::variant<int64_t, double> _raw_min() const {
     if (is_floating_point()) {
       TORCH_CHECK(is_signed(),
                   "We currently assume all floating point types are signed");
       constexpr uint64_t sign_bit_double = (uint64_t(1) << 63);
 
       double max = _floating_point_max();
-      uint64_t max_raw = bit_cast_like<uint64_t>(max);
+      uint64_t max_raw = *reinterpret_cast<uint64_t*>(&max);
       uint64_t min_raw = max_raw | sign_bit_double;
-      return {bit_cast_like<double>(min_raw)};
+      return {*reinterpret_cast<double*>(&min_raw)};
     } else {
       TORCH_CHECK(!is_signed() || size_bits() <= 64,
                   "Cannot represent min as a int64_t");
@@ -259,7 +249,7 @@ class ScalarType {
  public:
   // Max representable value for this scalar type.
   // (accounting for bias if there is one)
-  std::variant<int64_t, double> max() const {
+  constexpr std::variant<int64_t, double> max() const {
     return std::visit(
         [this](auto x) -> std::variant<int64_t, double> { return {x - bias}; },
         _raw_max());
@@ -267,7 +257,7 @@ class ScalarType {
 
   // Min representable value for this scalar type.
   // (accounting for bias if there is one)
-  std::variant<int64_t, double> min() const {
+  constexpr std::variant<int64_t, double> min() const {
     return std::visit(
         [this](auto x) -> std::variant<int64_t, double> { return {x - bias}; },
         _raw_min());

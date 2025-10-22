@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Tuple
+from typing import Dict, Optional, Tuple
+
 import torch
 
 from ...adapter.adapter import Adapter, Lora
@@ -20,13 +20,8 @@ from ...utils.machete import (
     machete_import_exception,
     machete_mm,
     machete_prepack_B,
-    pack_quantized_values_into_int32,
-    query_machete_supported_group_sizes,
-    unpack_quantized_values_into_int32,
 )
-from ...utils.marlin import replace_parameter
-from ...utils.marlin_scalar_type import scalar_types
-from ...utils.rocm import IS_ROCM
+from ...utils.marlin_scalar_type import ScalarType, scalar_types
 
 
 log = setup_logger()
@@ -35,50 +30,55 @@ log = setup_logger()
 class MacheteQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 64, 128]
-    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True]
-    SUPPORTS_SHARDS = True
+    SUPPORTS_SHARDS = False
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [128]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
-    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX]
+
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = False
-
     QUANT_TYPE = "machete"
 
-    TYPE_MAP = {
+    TYPE_MAP: Dict[Tuple[int, bool], ScalarType] = {
         (4, True): scalar_types.uint4b8,
         (8, True): scalar_types.uint8b128,
     }
 
     def __init__(
-            self,
-            bits: int,
-            group_size: int,
-            desc_act: bool,
-            sym: bool,
-            in_features: int,
-            out_features: int,
-            bias: bool = False,
-            pack_dtype: torch.dtype = torch.int32,
-            register_buffers: bool = False,
-            adapter: Adapter = None,
-            **kwargs):
+        self,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        register_buffers: bool = False,
+        adapter: Adapter | None = None,
+        **kwargs,
+    ):
         if machete_import_exception is not None:
             raise ValueError(
-                "Trying to use the machete backend, but could not import the "
-                f"C++/CUDA dependencies with the following error: {machete_import_exception}"
+                "Trying to use the machete backend, but its CUDA extension could "
+                f"not be imported: {machete_import_exception}"
             )
 
+        ok_shape, msg = check_machete_supports_shape(in_features, out_features)
+        if not ok_shape:
+            raise ValueError(msg)
+
         if (bits, sym) not in self.TYPE_MAP:
-            raise ValueError(f"Unsupported quantization config: bits={bits}, sym={sym}")
+            raise ValueError(f"Unsupported quantization config bits={bits}, sym={sym}")
 
         super().__init__(
             bits=bits,
@@ -92,226 +92,151 @@ class MacheteQuantLinear(BaseQuantLinear):
             backend=kwargs.pop("backend", BACKEND.MACHETE),
             adapter=adapter,
             register_buffers=False,
-            **kwargs)
+            **kwargs,
+        )
 
-        # Quantized weights (packed)
+        self.sym = sym
+        self.weight_type = self.TYPE_MAP[(self.bits, sym)]
+
+        rows = self.in_features // self.pack_factor
         self.register_parameter(
             "qweight",
             torch.nn.Parameter(
-                torch.empty(
-                    self.in_features // self.pack_factor,
-                    self.out_features,
-                    dtype=torch.int32,
-                ),
+                torch.empty(rows, self.out_features, dtype=torch.int32),
                 requires_grad=False,
             ),
         )
 
-        # Activation order indices
-        self.register_parameter(
-            "g_idx",
-            torch.nn.Parameter(
-                torch.empty(self.in_features, dtype=torch.int32),
-                requires_grad=False,
-            ),
-        )
-
-        # Scales
-        scales_rows = self.in_features if self.group_size == -1 else self.in_features // self.group_size
+        groups = max(1, math.ceil(self.in_features / self.group_size))
         self.register_parameter(
             "scales",
             torch.nn.Parameter(
-                torch.empty(
-                    scales_rows,
-                    self.out_features,
-                    dtype=torch.float16,
-                ),
+                torch.empty(groups, self.out_features, dtype=torch.float16),
                 requires_grad=False,
             ),
         )
 
-        # Zero points (unused for symmetric GPTQ but required for checkpoint loading)
-        qzeros_rows = math.ceil(self.in_features / self.group_size) if self.group_size > 0 else 0
-        qzeros_cols = self.out_features // self.pack_factor if self.pack_factor > 0 else 0
-        if qzeros_rows <= 0 or qzeros_cols <= 0:
-            raise ValueError(
-                f"Invalid qzeros shape derived for machete layer: rows={qzeros_rows}, cols={qzeros_cols}."
-            )
-        qzeros = torch.zeros((qzeros_rows, qzeros_cols), dtype=torch.int32)
+        self.register_parameter(
+            "qzeros",
+            torch.nn.Parameter(
+                torch.empty(groups, self.out_features // self.pack_factor, dtype=torch.int32),
+                requires_grad=False,
+            ),
+        )
 
-        self.register_parameter("qzeros", torch.nn.Parameter(qzeros, requires_grad=False))
+        self.register_parameter(
+            "g_idx",
+            torch.nn.Parameter(
+                torch.empty(self.in_features, dtype=torch.int32), requires_grad=False
+            ),
+        )
 
         if bias:
-            self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
+            self.register_parameter(
+                "bias",
+                torch.nn.Parameter(
+                    torch.zeros(self.out_features, dtype=torch.float16), requires_grad=False
+                ),
+            )
         else:
             self.bias = None
 
-        self.weight_type = self.TYPE_MAP[(self.bits, sym)]
-        self.has_zero_points = False
-
-        # Buffer storing permutation applied to activations (empty when unused)
-        self.register_buffer("input_perm", torch.empty(0, dtype=torch.int32))
+        self._prepacked_cache: Dict[torch.dtype, torch.Tensor] = {}
 
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+    def validate(cls, **args):
         if machete_import_exception is not None:
             return False, ImportError(machete_import_exception)
-
-        ok, err = cls._validate(**args)
-        if not ok:
-            return ok, err
-
-        device = args.get("device")
-        if device is None:
-            if not _validate_machete_device_support():
-                return False, NotImplementedError("Machete kernel currently supports Hopper GPUs (SM 90) only.")
-
         in_features = args.get("in_features")
         out_features = args.get("out_features")
         if in_features is not None and out_features is not None:
-            supported, reason = check_machete_supports_shape(in_features, out_features)
-            if not supported:
-                return False, ValueError(reason)
-
-        bits = args.get("bits")
-        sym = args.get("sym", True)
-        quant_type = cls.TYPE_MAP.get((bits, sym))
-        if quant_type is None:
-            return False, ValueError(f"Machete does not support bits={bits}, sym={sym}")
-
+            ok, msg = check_machete_supports_shape(in_features, out_features)
+            if not ok:
+                return False, ValueError(msg)
         group_size = args.get("group_size")
-        dtype = args.get("dtype", torch.float16)
-        if group_size not in query_machete_supported_group_sizes(dtype):
-            return False, ValueError(
-                f"Machete does not support group_size={group_size} for dtype={dtype}"
+        desc_act = args.get("desc_act")
+        dtype = args.get("pack_dtype", torch.int32)
+        if desc_act and desc_act not in cls.SUPPORTS_DESC_ACT:
+            return False, NotImplementedError("Machete does not support desc_act=True.")
+        if dtype not in cls.SUPPORTS_PACK_DTYPES:
+            return False, NotImplementedError(
+                f"Machete only supports pack_dtype=torch.int32, got {dtype}."
             )
-
-        return True, None
+        return cls._validate(**args)
 
     @classmethod
     def validate_device(cls, device: DEVICE):
         super().validate_device(device)
-        if device == DEVICE.CUDA:
-            if IS_ROCM:
-                raise NotImplementedError("Machete kernel is not supported on ROCm.")
-            if not _validate_machete_device_support():
-                raise NotImplementedError("Machete kernel currently supports Hopper GPUs (SM 90) only.")
+        if device == DEVICE.CUDA and not _validate_machete_device_support():
+            raise NotImplementedError(
+                "Machete kernels require an NVIDIA Hopper (SM90+) GPU."
+            )
 
     def post_init(self):
-        device = self.qweight.device
-
-        perm = None
-        orig_g_idx = self.g_idx.data
-        scale_dtype = self.scales.dtype
-
-        if self.desc_act:
-            perm = torch.argsort(orig_g_idx).to(torch.int32)
-            sorted_g_idx = orig_g_idx[perm]
-            replace_parameter(
-                self,
-                "g_idx",
-                torch.nn.Parameter(sorted_g_idx.to(device=device), requires_grad=False),
-            )
-            self.input_perm = perm.to(device=device)
-        else:
-            self.input_perm = torch.empty(0, dtype=torch.int32, device=device)
-
-        qweight_unpacked = unpack_quantized_values_into_int32(
-            self.qweight.data, self.weight_type, packed_dim=0)
-        if perm is not None:
-            qweight_unpacked = qweight_unpacked[perm, :]
-
-        qweight_packed = pack_quantized_values_into_int32(
-            qweight_unpacked, self.weight_type, packed_dim=0)
-        qweight_packed = qweight_packed.t().contiguous().t()
-        prepacked = machete_prepack_B(
-            qweight_packed,
-            a_type=scale_dtype,
-            b_type=self.weight_type,
-            group_scales_type=scale_dtype,
-        )
-        replace_parameter(
-            self,
-            "qweight",
-            torch.nn.Parameter(prepacked.contiguous(), requires_grad=False),
-        )
-
-        scales_param = torch.nn.Parameter(
-            self.scales.data.contiguous().to(device=device, dtype=scale_dtype),
-            requires_grad=False,
-        )
-        replace_parameter(self, "scales", scales_param)
-
-        has_zero_points = bool(self.has_zero_points and self.qzeros.data.numel() > 0)
-        if has_zero_points:
-            qzeros_unpacked = unpack_quantized_values_into_int32(
-                self.qzeros.data, self.weight_type, packed_dim=1
-            )
-            qzeros_fp = -scales_param.data * qzeros_unpacked.to(scales_param.dtype)
-            replace_parameter(
-                self,
-                "qzeros",
-                torch.nn.Parameter(qzeros_fp.contiguous().to(device=device), requires_grad=False),
-            )
-        else:
-            replace_parameter(
-                self,
-                "qzeros",
-                torch.nn.Parameter(
-                    torch.empty(0, dtype=scale_dtype, device=device),
-                    requires_grad=False,
-                ),
+        if not _validate_machete_device_support():
+            raise RuntimeError(
+                "Machete kernel currently supports Hopper GPUs (SM90+) and CUDA."
             )
 
-        self.has_zero_points = has_zero_points
-
-        if self.bias is not None:
-            self.bias = self.bias.to(device=device)
+        self._prepacked_cache.clear()
 
         super().post_init()
 
-    def list_buffers(self) -> List:
-        buf = super().list_buffers()
-        if hasattr(self, "input_perm") and self.input_perm is not None:
-            buf.append(self.input_perm)
-        return buf
+    def _ensure_prepacked(self, act_dtype: torch.dtype) -> torch.Tensor:
+        cached = self._prepacked_cache.get(act_dtype)
+        if cached is not None and cached.device == self.qweight.device:
+            return cached
 
-    def forward(self, x: torch.Tensor):
+        group_scales_type = self.scales.dtype if self.scales is not None else None
+        weight = self.qweight.data
+        if weight.stride(0) != 1:
+            weight = weight.t().contiguous().t()
+
+        prepacked = machete_prepack_B(
+            weight,
+            a_type=act_dtype,
+            b_type=self.weight_type,
+            group_scales_type=group_scales_type,
+        ).detach()
+
+        self._prepacked_cache[act_dtype] = prepacked
+        return prepacked
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[0] == 0:
             return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
 
-        input_2d = x.reshape(-1, x.shape[-1])
+        if machete_import_exception is not None:
+            raise RuntimeError(machete_import_exception)
 
-        if self.input_perm.numel() > 0:
-            perm = self.input_perm
-            if perm.device != input_2d.device:
-                perm = perm.to(device=input_2d.device)
-            input_2d = input_2d[:, perm]
+        act_dtype = x.dtype
+        if act_dtype not in self.SUPPORTS_DTYPES:
+            raise ValueError(f"Machete kernel does not support dtype {act_dtype}.")
 
-        group_scales = self.scales
-        if group_scales.dtype != input_2d.dtype:
-            group_scales = group_scales.to(dtype=input_2d.dtype)
+        x_2d = x.reshape(-1, x.shape[-1])
 
-        group_zeros = self.qzeros if self.has_zero_points and self.qzeros.numel() > 0 else None
+        prepacked = self._ensure_prepacked(act_dtype)
+        group_scales = self.scales.to(dtype=act_dtype, device=x_2d.device)
 
-        output = machete_mm(
-            a=input_2d,
-            b_q=self.qweight,
+        output_2d = machete_mm(
+            a=x_2d.contiguous(),
+            b_q=prepacked,
             b_type=self.weight_type,
             b_group_scales=group_scales,
-            b_group_zeros=group_zeros,
+            b_group_zeros=None,
             b_group_size=self.group_size,
+            out_dtype=act_dtype,
         )
 
         if self.bias is not None:
-            output.add_(self.bias)
+            output_2d = output_2d + self.bias.to(dtype=output_2d.dtype, device=output_2d.device)
 
-        result = output.reshape(x.shape[:-1] + (self.out_features,))
+        output = output_2d.reshape(*x.shape[:-1], self.out_features)
 
-        if self.adapter:
-            result = self.adapter.apply(x=x, out=result)
+        if self.adapter is not None:
+            output = self.adapter.apply(x=x, out=output)
 
-        return result
+        return output
 
 
 __all__ = ["MacheteQuantLinear"]

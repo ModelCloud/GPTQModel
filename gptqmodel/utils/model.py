@@ -396,6 +396,19 @@ def create_quant_module(
     if err is not None:
         raise err
 
+    # determine the dtype the original module expected to operate in
+    module_dtype = None
+    if isinstance(submodule, BaseQuantLinear):
+        module_dtype = getattr(submodule, "module_dtype", None)
+        if module_dtype is None and hasattr(submodule, "scales"):
+            module_dtype = getattr(submodule.scales, "dtype", None)
+    elif hasattr(submodule, "weight") and submodule.weight is not None:
+        module_dtype = submodule.weight.dtype
+    elif hasattr(submodule, "bias") and submodule.bias is not None:
+        module_dtype = submodule.bias.dtype
+    if module_dtype is None:
+        module_dtype = torch.float16
+
     new_layer = linear_cls(
         bits=tmp_bits,
         group_size=tmp_group_size,
@@ -412,6 +425,7 @@ def create_quant_module(
         register_buffers=register_buffers,
         adapter=adapter,
     )
+    setattr(new_layer, "module_dtype", module_dtype)
     new_layer.device = ori_layer_device
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
 

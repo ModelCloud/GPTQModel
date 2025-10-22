@@ -655,30 +655,36 @@ if BUILD_CUDA_EXT == "1":
                     ]
 
                 if BUILD_MACHETE and HAS_CUDA_V9 and _version_geq(NVCC_VERSION, 12, 0):
+                    machete_dir = Path("gptqmodel_ext/machete")
+                    machete_generated_dir = machete_dir / "generated"
+                    if machete_generated_dir.exists():
+                        rmtree(machete_generated_dir)
+                    machete_generated_dir.mkdir(parents=True, exist_ok=True)
+
+                    generator_script = machete_dir / "generate.py"
+                    if not generator_script.exists():
+                        raise RuntimeError("Machete generator script not found; expected gptqmodel_ext/machete/generate.py")
                     try:
-                        result = subprocess.run(
-                            [sys.executable, "gptqmodel_ext/machete/generate.py"],
+                        subprocess.run(
+                            [sys.executable, str(generator_script)],
                             check=True,
                             text=True,
-                            capture_output=True
+                            capture_output=True,
                         )
                     except subprocess.CalledProcessError as e:
                         raise RuntimeError(
-                            f"Error generating machete kernel templates:\n"
+                            "Error generating machete kernel templates:\n"
                             f"Return code: {e.returncode}\n"
                             f"Stderr: {e.stderr}\n"
                             f"Stdout: {e.stdout}"
                         )
-                    machete_dir = Path("gptqmodel_ext/machete")
-                    machete_generated_dir = machete_dir / "generated"
 
                     machete_sources = [str(machete_dir / "machete_pytorch.cu")]
                     machete_generated_sources = sorted(machete_generated_dir.glob("*.cu"))
-
                     if not machete_generated_sources:
                         raise RuntimeError(
-                            "No generated machete kernel templates detected. Run gptqmodel_ext/machete/generate.py"
-                            " with CUTLASS checkout before building."
+                            "No generated machete kernel templates detected. "
+                            "Run gptqmodel_ext/machete/generate.py manually to diagnose generation issues."
                         )
 
                     machete_sources += [str(path) for path in machete_generated_sources]
@@ -790,12 +796,6 @@ if BUILD_CUDA_EXT == "1":
                             extra_compile_args=extra_compile_args,
                         ),
                     ]
-
-        # Ensure machete kernels are compiled before other extensions
-        machete_exts = [ext for ext in extensions if getattr(ext, "name", "") == "gptqmodel_machete_kernels"]
-        if machete_exts:
-            other_exts = [ext for ext in extensions if getattr(ext, "name", "") != "gptqmodel_machete_kernels"]
-            extensions[:] = machete_exts + other_exts
 
         # additional_setup_kwargs = {
         #     "ext_modules": extensions,

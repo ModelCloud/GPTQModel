@@ -20,7 +20,7 @@ from gptqmodel.utils.eval import EVAL
 # | arc_challenge :: acc_norm,none |   0.3601 |
 # | mmlu :: acc,none               |   0.3186 |
 class TestLlama3_2(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
+    NATIVE_MODEL_ID = "unsloth/Llama-3.2-3B-Instruct" 
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {

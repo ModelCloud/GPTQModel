@@ -687,7 +687,7 @@ class ModelTest(unittest.TestCase):
     @classmethod
     def load_dataset(cls, tokenizer=None, rows: int = 0):
         try:
-            dataset = load_dataset(path="/monster/data/model/dataset/nm-calibration", name="LLM", split="train")
+            dataset = load_dataset(path="neuralmagic/calibration", name="LLM", split="train")
         except Exception as exc:  # pragma: no cover - exercised in fallbacks
             log.warning("load_dataset failed; falling back to local parquet: %s", exc)
             dataset = cls._load_calibration_parquet()

@@ -18,7 +18,6 @@ from transformers import AutoTokenizer
 from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
-from gptqmodel.nn_modules.qlinear.awq_machete import AwqMacheteQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.machete import _validate_machete_device_support, machete_import_exception
@@ -126,7 +125,6 @@ class TestGroupSize(unittest.TestCase):
 
     @parameterized.expand([
         (FORMAT.GEMM, BACKEND.GEMM, 128),
-        (FORMAT.GEMM, BACKEND.MACHETE, 128),
         (FORMAT.GEMM, BACKEND.MARLIN, 128),
         (FORMAT.GEMV, BACKEND.GEMV, 128),
         (FORMAT.GEMV_FAST, BACKEND.GEMV_FAST, 128),
@@ -165,8 +163,6 @@ class TestGroupSize(unittest.TestCase):
         for _, module in model.named_modules():
             if backend == BACKEND.GEMM:
                 linear = AwqGEMMQuantLinear
-            elif backend == BACKEND.MACHETE:
-                linear = AwqMacheteQuantLinear
             elif backend == BACKEND.MARLIN:
                 linear = AwqMarlinQuantLinear
             elif backend == BACKEND.GEMV:

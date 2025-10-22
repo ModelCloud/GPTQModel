@@ -5,6 +5,7 @@ import itertools
 import math
 import os
 import shutil
+import sys
 from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass, fields
@@ -13,29 +14,23 @@ from pathlib import Path
 
 import jinja2
 
-import sys
-
-_ROOT = Path(__file__).resolve().parents[2]
-_CUTLASS_EXT_DIR = _ROOT / "gptqmodel_ext" / "cutlass_extensions"
+_THIS_DIR = Path(__file__).resolve().parent
+_CUTLASS_EXT_DIR = _THIS_DIR.parent / "cutlass_extensions"
+if str(_CUTLASS_EXT_DIR) not in sys.path:
+    sys.path.insert(0, str(_CUTLASS_EXT_DIR))
 
 _CUTLASS_ROOT = os.environ.get("GPTQMODEL_CUTLASS_DIR")
-if _CUTLASS_ROOT is not None:
-    _CUTLASS_ROOT = Path(_CUTLASS_ROOT)
-else:
-    _CUTLASS_ROOT = _ROOT / "cutlass"
+if not _CUTLASS_ROOT:
+    deps_dir = _THIS_DIR.parent.parent / "build" / "_deps"
+    if deps_dir.exists():
+        candidates = sorted(deps_dir.glob("cutlass-v*/"), reverse=True)
+        if candidates:
+            _CUTLASS_ROOT = str(candidates[0])
 
-_CUTLASS_PYTHON_DIR = _CUTLASS_ROOT / "python"
-
-_CUTLASS_PYTHON_DIR.mkdir(parents=True, exist_ok=True)
-
-if str(_CUTLASS_EXT_DIR) not in sys.path:
-    sys.path.append(str(_CUTLASS_EXT_DIR))
-if _CUTLASS_PYTHON_DIR.exists() and str(_CUTLASS_PYTHON_DIR) not in sys.path:
-    sys.path.append(str(_CUTLASS_PYTHON_DIR))
-if not _CUTLASS_PYTHON_DIR.exists():
-    raise RuntimeError(
-        "CUTLASS python bindings not found. Set GPTQMODEL_CUTLASS_DIR to a valid CUTLASS checkout."
-    )
+if _CUTLASS_ROOT:
+    cutlass_scripts = Path(_CUTLASS_ROOT) / "tools" / "library" / "scripts" / "py"
+    if cutlass_scripts.exists() and str(cutlass_scripts) not in sys.path:
+        sys.path.insert(0, str(cutlass_scripts))
 
 from vllm_cutlass_library_extension import (
     DataType,

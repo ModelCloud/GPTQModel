@@ -4,8 +4,6 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 
-#include "machete_arch_guard.cuh"
-
 // clang-format off
 // The cutlass include order matters (annoyingly)
 #include "cutlass/cutlass.h"
@@ -300,14 +298,8 @@ struct MacheteKernelTemplate {
     Gemm gemm_op;
 
     cutlass::Status status = gemm_op.initialize(args, workspace, stream);
-    if (status != cutlass::Status::kSuccess) {
-      cudaError_t last_error = cudaGetLastError();
-      TORCH_CHECK(
-          false,
-          "Machete kernel failed to initialize workspace (status=", int(status),
-          ", cudaError=", static_cast<int>(last_error), ": ",
-          cudaGetErrorString(last_error), ")");
-    }
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+                "Machete kernel failed to initialize workspace");
 
     status = gemm_op.run(stream);
     TORCH_CHECK(status == cutlass::Status::kSuccess, "Machete kernel failed");
