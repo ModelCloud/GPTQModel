@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 from dataclasses import dataclass
+from pathlib import Path
+import sys
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -20,7 +23,7 @@ from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-MINIMUM_BITBLAS_VERSION = "0.1.0"
+MINIMUM_BITBLAS_VERSION = "0.1.0.post1"
 BITBLAS_OPTIMIZE_FEATURES: List[int] = [1, 16, 32, 64, 128, 256, 512, 1024]
 BITBLAS_SUPPORTED_GROUP_SIZES: List[int] = [-1, 32, 64, 128]
 BITBLAS_SUPPORTED_BITS: List[int] = [1, 2, 4, 8]
@@ -31,12 +34,96 @@ BITBLAS_PROPAGATE_WEIGHTS = False
 BITBLAS_TARGET = None
 BITBLAS_DATABASE_PATH = None
 
-try:
-    import bitblas  # noqa: F401
+# TODO FIXME. ugly hack to bypass nv lib loadig for bitlbas
+def _load_cuda_libraries() -> bool:
+    loaded_any = False
+    candidate_dirs = []
 
-    BITBLAS_AVAILABLE = True
-except Exception:
-    BITBLAS_AVAILABLE = False
+    env_dirs = []
+    for var in ("LD_LIBRARY_PATH", "LIBRARY_PATH"):
+        paths = os.environ.get(var, "")
+        if paths:
+            env_dirs.extend(Path(p) for p in paths.split(":") if p)
+    candidate_dirs.extend(env_dirs)
+
+    candidate_dirs.extend(
+        [
+            Path("/usr/local/cuda/lib64"),
+            Path("/usr/local/cuda/lib"),
+            Path("/usr/lib/x86_64-linux-gnu"),
+        ]
+    )
+
+    try:
+        import nvidia  # noqa: F401
+    except Exception:  # pragma: no cover - optional dependency
+        nvidia_paths = []
+    else:
+        nvidia_paths = [Path(p) for p in getattr(nvidia, "__path__", [])]
+
+    for base in nvidia_paths:
+        candidate_dirs.extend(
+            [
+                base / "cuda_runtime" / "lib",
+                base / "cuda_nvrtc" / "lib",
+            ]
+        )
+        candidate_dirs.extend(path for path in base.glob("cu*/lib"))
+
+    site_packages = Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    candidate_dirs.append(site_packages)
+
+    seen_dirs = set()
+    for directory in candidate_dirs:
+        if not directory or not directory.is_dir():
+            continue
+        resolved = directory.resolve()
+        if resolved in seen_dirs:
+            continue
+        seen_dirs.add(resolved)
+
+        for pattern in ("libcudart.so*", "libnvrtc.so*"):
+            for candidate in sorted(directory.glob(pattern)):
+                if not candidate.is_file():
+                    continue
+                try:
+                    ctypes.CDLL(str(candidate), mode=ctypes.RTLD_GLOBAL)
+                    loaded_any = True
+                except OSError:
+                    continue
+
+    return loaded_any
+
+
+def _is_bitblas_available() -> bool:
+    try:
+        import bitblas
+    except Exception as exc:
+        error_text = str(exc)
+        if "libcu" not in error_text:
+            log.debug("BitBLAS import failed: %s", exc)
+            return False
+        if not _load_cuda_libraries():
+            log.debug("CUDA libraries missing, BitBLAS import failed: %s", exc)
+            return False
+        try:
+            import bitblas
+        except Exception as retry_exc:
+            log.debug("BitBLAS import retry failed: %s", retry_exc)
+            return False
+    parsed_version = version.parse(bitblas.__version__)
+    minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    if parsed_version < minimum_version:
+        log.debug(
+            "BitBLAS version %s below minimum required %s",
+            bitblas.__version__,
+            MINIMUM_BITBLAS_VERSION,
+        )
+        return False
+    return True
+
+
+BITBLAS_AVAILABLE = _is_bitblas_available()
 
 
 BITBLAS_INSTALL_HINT = (
@@ -50,7 +137,9 @@ def import_bitblas():
 
     import bitblas
 
-    if version.parse(bitblas.__version__) < version.parse(MINIMUM_BITBLAS_VERSION):
+    parsed_version = version.parse(bitblas.__version__)
+    minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    if parsed_version < minimum_version:
         raise ImportError(BITBLAS_INSTALL_HINT)
 
     bitblas.set_log_level("INFO")
