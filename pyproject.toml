@@ -11,7 +11,7 @@ dynamic = ["version"]
 description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
 readme = "README.md"
 requires-python = ">=3.10"
-license-files = ["licenses/LICENSE.apache"]
+license = { file = "licenses/LICENSE.apache" }
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
 ]
@@ -54,7 +54,7 @@ dependencies = [
     "dill>=0.3.8", # datasets requirements
     "pypcre>=0.2.4",
     # "cython>=3.1.4", # required by hf-xet/hf-transfer
-    # "flash-attn>=2.8.3", <-- install for lower vram usage
+# "flash-attn>=2.8.3", <-- install for lower vram usage
 ]
 
 [project.urls]
