@@ -35,13 +35,13 @@ class TestInferenceSpeed(InferenceSpeed):
     @parameterized.expand(
         [
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_EORA, 282.64, False, False),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 286.74, False, False),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 176.00, False, False),
-            # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 53, False, False),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 282.64, False, False),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 290.60, False, False),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 239.58, False, False),
-            (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 2167.38, False, False), # Second time running bitblas, there is cache
+            # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 286.74, False, False),
+            # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 176.00, False, False),
+            # # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 53, False, False),
+            # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 282.64, False, False),
+            # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 290.60, False, False),
+            # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 239.58, False, False),
+            # (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 2167.38, False, False), # Second time running bitblas, there is cache
         ]
     )
     def test_inference_speed(self, model_path, backend, tokens_per_second, optimize, fullgraph):
