@@ -244,13 +244,16 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
-    container:
-      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_1021
-      volumes:
-        - /home/ci/models/pyenv:/opt/pyenv
     steps:
       - name: Check matrix
         run: |
+          echo "==========================="
+          dpkg -l | grep nvidia
+          echo "==========================="
+          nvidia-smi
+          echo "==========================="
+          
+        
           # // for github limits, test only
           # // shouldRun=${{ (inputs['cuda-version'] == '' || matrix.cuda == inputs['cuda-version']) && (inputs['torch-version'] == '' || matrix.torch == inputs['torch-version']) && (inputs['python-version'] == ''|| matrix.python == inputs['python-version']) }}
           shouldRun=true
