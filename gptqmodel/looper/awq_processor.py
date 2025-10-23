@@ -709,11 +709,17 @@ class AWQProcessor(LoopProcessor):
             # records
             duration = time.time() - start_time
 
-            avg_loss = 999999999
+            avg_loss_value = None
             for _, layer_names, _, loss in scales_list:
                 if any(named_module.name in layer_name for layer_name in layer_names):
-                    avg_loss = loss
+                    avg_loss_value = loss
                     break
+
+            if avg_loss_value is None:
+                # Scaling not applied for this layer in AWQ; no meaningful loss metric.
+                loss_summary = "not applicable"
+            else:
+                loss_summary = f"{avg_loss_value:.10f}"
 
             # TODO "loss" and "nsamples" may not be consistent with the semantics of gptq quantization.
             stat = {
@@ -722,7 +728,7 @@ class AWQProcessor(LoopProcessor):
                 PROCESS_LOG_MODULE: named_module.name,
                 MODULE_FEATURE_COLUMN: self.module_feature_summary(named_module),
                 DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(named_module),
-                QUANT_LOG_LOSS: f"{avg_loss:.10f}",
+                QUANT_LOG_LOSS: loss_summary,
                 QUANT_LOG_NSAMPLES: f"{self.nsamples}",
                 # QUANT_LOG_DAMP: f"{damp_percent:.5f}",
                 PROCESS_LOG_TIME: f"{duration:.3f}",
