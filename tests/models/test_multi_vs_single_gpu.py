@@ -9,7 +9,7 @@ import os
 import sys
 from contextlib import ExitStack
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Dict, Iterable, List, Tuple
 from unittest import mock
 
@@ -262,9 +262,14 @@ class TestMultiVsSingleGPU(ModelTest):
             if loss_value is None or sample_value is None:
                 continue
 
+            try:
+                loss_decimal = Decimal(loss_value)
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+
             per_layer = layer_metrics.setdefault(layer_index, {})
             per_layer[module_name] = LayerMetrics(
-                loss=Decimal(loss_value),
+                loss=loss_decimal,
                 samples=int(sample_value),
             )
         return layer_metrics
