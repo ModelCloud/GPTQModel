@@ -42,10 +42,11 @@ class InferenceSpeed(unittest.TestCase):
     MAX_DELTA_FLOOR_PERCENT = 0.25
     MAX_POSITIVE_DELTA_CEIL_PERCENT = 0.25
 
-    def inference(self, model_path, backend, tokens_per_second, assert_result=True, optimize=False, fullgraph=False, warmup_runs=0):
+    def inference(self, model_path, backend, tokens_per_second, assert_result=True, optimize=False, fullgraph=False, warmup_runs=0, device=None):
         model = GPTQModel.from_quantized(
             model_path,
             backend=backend,
+            device=device,
         )
 
         if optimize:

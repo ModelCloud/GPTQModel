@@ -366,6 +366,11 @@ def ModelLoader(cls):
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
 
+        if backend == BACKEND.EXLLAMA_EORA:
+            # EXLLAMA_EORA only supports torch.float16
+            log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
+            dtype = torch.float16
+
         # inject adapter into qcfg
         if adapter is not None:
             qcfg.adapter = adapter
@@ -555,6 +560,7 @@ def ModelLoader(cls):
 
         def build_layerwise_device_map(
                 model,
+                device,
                 layers: List[torch.nn.Module],
                 ignore_modules: List[torch.nn.Module],
                 num_gpus: Optional[int] = None,
@@ -581,10 +587,16 @@ def ModelLoader(cls):
             device_map: Dict[str, str] = {}
             mod2name = {m: n for n, m in model.named_modules()}
             
-            if torch.cuda.is_available():
-                device_strs = [f"cuda:{i}" for i in range(num_gpus)]
-            elif hasattr(torch, "xpu") and torch.xpu.is_available():
-                device_strs = [f"xpu:{i}" for i in range(num_gpus)]
+            if device == DEVICE.CUDA:
+                if torch.cuda.is_available():
+                    device_strs = [f"cuda:{i}" for i in range(num_gpus)]
+                else:
+                    raise RuntimeError("CUDA is not available")
+            elif device == DEVICE.XPU:
+                if hasattr(torch, "xpu") and torch.xpu.is_available():
+                    device_strs = [f"xpu:{i}" for i in range(num_gpus)]
+                else:
+                    raise RuntimeError("XPU is not available")
             else:
                 device_strs = ["cpu"] * num_gpus
             
@@ -653,7 +665,7 @@ def ModelLoader(cls):
                         else:
                             owner = owner.rsplit(".", 1)[0]
                     if owner:
-                        device_map.setdefault(owner, fallback_device)
+                        device_map.setdefault(owner, device_strs[fallback_device])
                     else:
                         log.info(f"Loader: unable to map param '{param_name}' to a module; skipping fallback assignment.")
 
@@ -685,7 +697,7 @@ def ModelLoader(cls):
             num_gpus = torch.cuda.device_count()
         elif device is DEVICE.XPU:
             num_gpus = torch.xpu.device_count()
-        device_map = build_layerwise_device_map(model, layers, ignore_modules, num_gpus)
+        device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
         log.info(f"Loader: device_map = {device_map}")
 
         load_checkpoint_in_model = True

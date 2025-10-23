@@ -19,8 +19,8 @@ from gptqmodel.utils import BACKEND  # noqa: E402
 class TestInferenceSpeedTorchFused(InferenceSpeed):
     @parameterized.expand(
         [
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH_FUSED, 12),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH_FUSED, 2.57),
         ]
     )
     def test_inference_speed_torch_fused(self, model_path, backend, tokens_per_second):
-        self.inference(model_path=model_path, backend=backend, tokens_per_second=tokens_per_second)
+        self.inference(model_path=model_path, backend=backend, tokens_per_second=tokens_per_second, device="cpu")
