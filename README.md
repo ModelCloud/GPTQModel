@@ -196,14 +196,14 @@ Native support support some of the most popular multi-modal models:
 
 GPT-QModel is validated for Linux, MacOS, and Windows 11:
 
-| Platform        | Device        |     |  Optimized Arch              | Kernels                                                |
-|-----------------|---------------| --- | -------------- |--------------------------------------------------------| 
+| Platform        | Device        |     |  Optimized Arch              | Kernels                                       |
+|-----------------|---------------| --- | -------------- |-----------------------------------------------| 
 | 🐧 Linux           | Nvidia GPU    | ✅       | `Ampere+` | Marlin, Exllama V2, Exallma V1, Triton, Torch |
-| 🐧 Linux | AMD GPU     | ✅             |   `7900XT+`,  `ROCm 6.2+` | Exllama V2, Exallma V1, Torch                          |
-| 🐧 Linux | Intel XPU     | ✅             |   `Arc`, `Datacenter Max` | Torch Fused (Python 2.8+), Torch                       |
-| 🐧 Linux           | Intel/AMD CPU | ✅          | `avx`, `amx`, `xmx` | Torch Fused (Python 2.8+), Torch                       |
-| 🍎 MacOS | GPU (Metal) / CPU          | ✅             |   `Apple Silicon`, `M1+` | Torch, MLX via conversion                              |
-| 🪟 Windows | GPU (Nvidia) / CPU       | ✅             |   `Nvidia`  | Torch                                                  |
+| 🐧 Linux | AMD GPU     | ✅             |   `7900XT+`,  `ROCm 6.2+` | Exllama V2, Exallma V1, Torch                 |
+| 🐧 Linux | Intel XPU     | ✅             |   `Arc`, `Datacenter Max` | Torch Fused (Python 2.8+), Torch              |
+| 🐧 Linux           | Intel/AMD CPU | ✅          | `avx`, `amx`, `xmx` | Torch Fused (Python 2.8+), Torch              |
+| 🍎 MacOS | GPU (Metal) / CPU          | ✅             |   `Apple Silicon`, `M1+` | Torch, MLX via conversion                     |
+| 🪟 Windows | GPU (Nvidia) / CPU       | ✅             |   `Nvidia`  | Torch                                         |
 
 
 ## Install
