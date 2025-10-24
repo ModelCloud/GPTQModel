@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from gptqmodel.quantization.config import VRAMStrategy
 from model_test import ModelTest
 
 from gptqmodel.utils.eval import EVAL
@@ -24,6 +25,8 @@ class TestQwen3Next(ModelTest):
             "acc": {"value": 0.8403, "floor_pct": 0.04},
         },
     }
+
+    VRAM_STRATEGY = VRAMStrategy.BALANCED
     # TRUST_REMOTE_CODE = True
     # APPLY_CHAT_TEMPLATE = True
     # EVAL_BATCH_SIZE = 4
