@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ...quantization.config import VRAMStrategy
 
 
 class GLM4MoEGPTQ(BaseQModel):

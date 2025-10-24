@@ -15,8 +15,10 @@ thread pool.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
+import logging
 from concurrent.futures import as_completed
 from contextlib import nullcontext
 from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING
@@ -33,6 +35,7 @@ from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
+from ..quantization.config import VRAMStrategy
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
@@ -109,6 +112,24 @@ class ModuleLooper():
         self._quant_device_rr = 0
         self._module_device_map: Dict[str, torch.device] = {}
         self._quant_device_lock = threading.Lock()
+        vram_strategy = getattr(self.gptq_model.quantize_config, "vram_strategy", VRAMStrategy.EXCLUSIVE)
+        if isinstance(vram_strategy, str):
+            try:
+                vram_strategy = VRAMStrategy(vram_strategy.lower())
+            except ValueError:
+                vram_strategy = VRAMStrategy.EXCLUSIVE
+        supported_strategies = getattr(self.gptq_model, "supported_vram_strategies", [VRAMStrategy.EXCLUSIVE, VRAMStrategy.BALANCED])
+        if isinstance(supported_strategies, VRAMStrategy):
+            supported_strategies = [supported_strategies]
+        if vram_strategy not in supported_strategies:
+            log.debug(
+                "ModuleLooper: Model %s does not support VRAM strategy %s; falling back to exclusive.",
+                getattr(self.gptq_model, "__class__", type(self.gptq_model)).__name__,
+                vram_strategy,
+            )
+            vram_strategy = VRAMStrategy.EXCLUSIVE
+        self._vram_strategy = vram_strategy
+        self._moe_subset_threshold = 16
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
@@ -284,6 +305,36 @@ class ModuleLooper():
             counts.append(count if count > 0 else 0)
         return counts
 
+    def _extract_moe_group_key(self, module_name: Optional[str]) -> Optional[str]:
+        if not module_name:
+            return None
+
+        if ".experts." in module_name:
+            prefix, remainder = module_name.split(".experts.", 1)
+            expert_id = remainder.split(".", 1)[0]
+            if expert_id:
+                return f"{prefix}.experts.{expert_id}"
+            return None
+
+        if ".shared_experts." in module_name:
+            prefix, _ = module_name.split(".shared_experts.", 1)
+            return f"{prefix}.shared_experts"
+
+        return None
+
+    def _is_attention_module_name(self, module_name: str) -> bool:
+        if not module_name:
+            return False
+
+        lowered = module_name.lower()
+        if ".attn" in lowered or "attn." in lowered:
+            return True
+        if ".attention" in lowered or "attention." in lowered:
+            return True
+        if lowered.endswith("attn") or lowered.endswith("attention"):
+            return True
+        return False
+
     def _assign_quant_device_for_module(
         self,
         named_module: NamedModule,
@@ -294,7 +345,7 @@ class ModuleLooper():
             cached = self._module_device_map.get(key)
             if cached is not None:
                 return cached
-
+            device: Optional[torch.device]
             if len(self._quant_devices) <= 1:
                 device = self._quant_devices[0]
             else:
@@ -306,6 +357,72 @@ class ModuleLooper():
 
             self._module_device_map[key] = device
             return device
+
+    def _apply_forward_device_overrides(
+        self,
+        subset: Dict[str, NamedModule],
+        device_map: Dict[str, torch.device],
+        *,
+        fallback_modules: Optional[Dict[str, torch.nn.Module]] = None,
+    ) -> Dict[str, torch.device]:
+        previous: Dict[str, torch.device] = {}
+        if not device_map:
+            return previous
+
+        for name, target in device_map.items():
+            named_module = subset.get(name)
+            module_ref = None
+            if named_module is None and fallback_modules is not None:
+                module_ref = fallback_modules.get(name)
+                named_module = module_ref
+            elif named_module is not None:
+                module_ref = named_module.module if isinstance(named_module, NamedModule) else named_module
+            if module_ref is None:
+                continue
+            try:
+                current = get_device(module_ref)
+            except Exception:
+                current = None
+
+            if target is None or (current is not None and current == target):
+                continue
+
+            if current is not None:
+                previous[name] = current
+
+            move_to(module_ref, device=target)
+            rehome_module_to_device(module_ref, target, move_parameters=True, move_buffers=True)
+            if isinstance(named_module, NamedModule):
+                setattr(named_module, "target_device", target)
+            setattr(module_ref, "target_device", target)
+
+        return previous
+
+    def _restore_forward_device_overrides(
+        self,
+        subset: Dict[str, NamedModule],
+        previous_devices: Dict[str, torch.device],
+        *,
+        fallback_modules: Optional[Dict[str, torch.nn.Module]] = None,
+    ) -> None:
+        if not previous_devices:
+            return
+
+        for name, revert_device in previous_devices.items():
+            named_module = subset.get(name)
+            module_ref = None
+            if named_module is None and fallback_modules is not None:
+                module_ref = fallback_modules.get(name)
+                named_module = module_ref
+            elif named_module is not None:
+                module_ref = named_module.module if isinstance(named_module, NamedModule) else named_module
+            if module_ref is None:
+                continue
+            move_to(module_ref, device=revert_device)
+            rehome_module_to_device(module_ref, revert_device, move_parameters=True, move_buffers=True)
+            if isinstance(named_module, NamedModule):
+                setattr(named_module, "target_device", revert_device)
+            setattr(module_ref, "target_device", revert_device)
 
     def _rehome_processor_task(
         self,
@@ -360,7 +477,10 @@ class ModuleLooper():
         named_module: NamedModule,
         fallback_device: torch.device,
     ) -> torch.device:
-        target_device = self._assign_quant_device_for_module(named_module, fallback_device=fallback_device)
+        target_device = self._assign_quant_device_for_module(
+            named_module,
+            fallback_device=fallback_device,
+        )
 
         move_to(named_module.module, device=target_device)
         rehome_module_to_device(named_module.module, target_device, move_parameters=True, move_buffers=True)
@@ -387,11 +507,13 @@ class ModuleLooper():
         layer_index: int,
         need_outputs: bool,
         reuse_kv: bool,
-        progress_pb: "ProgressBar" | None = None,
+        progress_pb: ProgressBar = None,
         progress_title: Optional[str] = None,
         progress_stage: Optional[str] = None,
         progress_rows_per_batch: Optional[List[int]] = None,
         progress_total_rows: Optional[int] = None,
+        force_serial: bool = False,
+        preserve_module_devices: bool = False,
     ) -> List[List[torch.Tensor]]:
         """Dispatch the captured layer inputs through the module.
 
@@ -400,6 +522,28 @@ class ModuleLooper():
         single threaded path. The helper returns the ordered outputs that feed
         the next processor stage when ``need_outputs`` is set.
         """
+        if force_serial:
+            return self._run_forward_batches_single(
+                module=module,
+                processor=processor,
+                layer_inputs=layer_inputs,
+                layer_input_kwargs=layer_input_kwargs,
+                position_ids=position_ids,
+                attention_masks=attention_masks,
+                cur_layer_device=cur_layer_device,
+                is_lm_head_module=is_lm_head_module,
+                shared_kv_cache_dict=shared_kv_cache_dict,
+                layer_index=layer_index,
+                need_outputs=need_outputs,
+                reuse_kv=reuse_kv,
+                progress_pb=progress_pb,
+                progress_title=progress_title,
+                progress_stage=progress_stage,
+                progress_rows_per_batch=progress_rows_per_batch,
+                progress_total_rows=progress_total_rows,
+                preserve_module_devices=preserve_module_devices,
+            )
+
         devices = select_forward_devices(cur_layer_device)
 
         if len(devices) <= 1:
@@ -421,6 +565,7 @@ class ModuleLooper():
                 progress_stage=progress_stage,
                 progress_rows_per_batch=progress_rows_per_batch,
                 progress_total_rows=progress_total_rows,
+                preserve_module_devices=preserve_module_devices,
             )
 
         return self._run_forward_batches_parallel(
@@ -464,6 +609,7 @@ class ModuleLooper():
         progress_stage: Optional[str] = None,
         progress_rows_per_batch: Optional[List[int]] = None,
         progress_total_rows: Optional[int] = None,
+        preserve_module_devices: bool = False,
     ) -> List[List[torch.Tensor]]:
         """Sequential fallback when only one forward device is in use."""
         outputs: List[List[torch.Tensor]] = []
@@ -485,10 +631,16 @@ class ModuleLooper():
         for batch_idx in range(total_batches):
             processor._set_current_batch_index(batch_idx)
             try:
-                layer_input = [move_to(inp, device=cur_layer_device) for inp in layer_inputs[batch_idx]]
+                exec_device = cur_layer_device
+                if preserve_module_devices:
+                    module_target = getattr(module, "target_device", None)
+                    if module_target is not None:
+                        exec_device = module_target
+
+                layer_input = [move_to(inp, device=exec_device) for inp in layer_inputs[batch_idx]]
 
                 raw_mask = attention_masks[batch_idx]
-                attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device)
+                attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=exec_device)
 
                 keep_mask = None
                 if attn_tensor is not None:
@@ -503,15 +655,16 @@ class ModuleLooper():
                 if position_ids:
                     pos = position_ids[batch_idx]
                     if pos is not None:
-                        additional_inputs["position_ids"] = move_to(pos, device=cur_layer_device)
+                        additional_inputs["position_ids"] = move_to(pos, device=exec_device)
 
                 for key, value in layer_input_kwargs[batch_idx].items():
-                    additional_inputs[key] = nested_move_to(value, device=cur_layer_device)
+                    additional_inputs[key] = nested_move_to(value, device=exec_device)
 
                 if reuse_kv and prev_kv is not None:
-                    additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=cur_layer_device)
+                    additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=exec_device)
 
-                rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
+                if not preserve_module_devices:
+                    rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
                 module_output = None
                 try:
@@ -815,6 +968,7 @@ class ModuleLooper():
         layer_input_kwargs = []
 
         timer = getattr(self.gptq_model, "quant_region_timer", None)
+        layer_label = None
         if layers:
             first_layer = layers[0]
             layer_label = getattr(first_layer, "full_name", None)
@@ -841,6 +995,25 @@ class ModuleLooper():
 
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device
+
+        cache_forward_pb: ProgressBar = None
+        processed_rows = 0
+        cache_total_batches = None
+        if calibration_batches is not None and calibration_batches > 0:
+            cache_total_batches = int(calibration_batches)
+            cache_forward_pb = (
+                log.pb(range(max(cache_total_batches, 1)))
+                   .manual()
+                   .set(show_left_steps=False)
+            )
+            cache_title = (
+                f"Forward cached inputs (Pre {layer_label})"
+                if layer_label
+                else "Forward cached inputs"
+            )
+            cache_forward_pb.title(cache_title).subtitle(
+                f"Batch 0/{cache_total_batches}"
+            ).draw()
 
         # TODO HookLinear add register_forward_pre_hook()
         def store_input_hook(module, args, kwargs):
@@ -906,37 +1079,57 @@ class ModuleLooper():
         # LifeCycle: start pre-first layer embedding hook
         self.gptq_model.pre_quantize_generate_hook_start()
 
-        for example in calibration_data:
-            for k, v in example.items():
-                if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
-                    data_device = self.gptq_model.quantize_config.device
-                else:
-                    data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
-                if isinstance(v, list):
-                    for index in range(len(v)):
-                        if len(v[index].shape) == 1:
-                            v[index] = v[index].unsqueeze(0)
-                        v[index] = move_to(v[index].to(self.gptq_model.model.visual_tokenizer.dtype) if is_ovis else v[index],
-                                                  device=data_device)
-                else:
-                    if len(v.shape) == 1:
-                        v = v.unsqueeze(0)
-                    example[k] = move_to(v, device=data_device)
-            try:
-                if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
-                    example["attention_mask"] = example["attention_mask"].long()
-
-                # Ensure initial caches (like RoPE) are created on the quant device
-                with ctx(
-                    DEVICE_THREAD_POOL.read_lock(self.gptq_model.quantize_config.device),
-                    device_ctx(self.gptq_model.quantize_config.device),
-                ):
-                    if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
-                        self.gptq_model.model.generate(**example, **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS)
+        try:
+            for batch_index, example in enumerate(calibration_data, start=1):
+                for k, v in example.items():
+                    if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
+                        data_device = self.gptq_model.quantize_config.device
                     else:
-                        self.gptq_model.model(**example, use_cache=use_cache)
-            except StopForward:
-                pass
+                        data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
+                    if isinstance(v, list):
+                        for index in range(len(v)):
+                            if len(v[index].shape) == 1:
+                                v[index] = v[index].unsqueeze(0)
+                            v[index] = move_to(
+                                v[index].to(self.gptq_model.model.visual_tokenizer.dtype) if is_ovis else v[index],
+                                device=data_device,
+                            )
+                    else:
+                        if len(v.shape) == 1:
+                            v = v.unsqueeze(0)
+                        example[k] = move_to(v, device=data_device)
+                try:
+                    if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
+                        example["attention_mask"] = example["attention_mask"].long()
+
+                    # Ensure initial caches (like RoPE) are created on the quant device
+                    with ctx(
+                        DEVICE_THREAD_POOL.read_lock(self.gptq_model.quantize_config.device),
+                        device_ctx(self.gptq_model.quantize_config.device),
+                    ):
+                        if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
+                            self.gptq_model.model.generate(**example, **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS)
+                        else:
+                            self.gptq_model.model(**example, use_cache=use_cache)
+                except StopForward:
+                    pass
+                finally:
+                    processed_batches = batch_index
+                    if cache_forward_pb is not None:
+                        rows_for_batch = 0
+                        if batch_index <= len(layer_inputs):
+                            rows_for_batch = self._batch_row_count(layer_inputs[batch_index - 1])
+                            if rows_for_batch <= 0:
+                                rows_for_batch = 1
+                        processed_rows += rows_for_batch
+                        cache_forward_pb.current_iter_step = processed_batches
+                        subtitle = f"Batch {processed_batches}/{cache_total_batches}"
+                        if processed_rows > 0:
+                            subtitle += f" rows {processed_rows}"
+                        cache_forward_pb.subtitle(subtitle).draw()
+        finally:
+            if cache_forward_pb is not None:
+                cache_forward_pb.close()
 
         # LifeCycle: pre-first layer embedding hook
         self.gptq_model.pre_quantize_generate_hook_end()
@@ -1138,6 +1331,77 @@ class ModuleLooper():
                     if len(subset) == 0:
                         continue
 
+                    moe_group_keys_all: List[str] = []
+                    forward_device_map: Dict[str, torch.device] = {}
+                    subset_forward_serial = False
+
+                    attention_subset = bool(subset) and all(
+                        self._is_attention_module_name(name) for name in subset
+                    )
+
+                    moe_group_key_by_name: Dict[str, Optional[str]] = {
+                        name: self._extract_moe_group_key(name)
+                        for name in subset
+                    }
+                    moe_module_names = [
+                        name for name, group_key in moe_group_key_by_name.items()
+                        if group_key is not None
+                    ]
+                    moe_modules_set = set(moe_module_names)
+                    is_moe_subset = len(moe_module_names) >= self._moe_subset_threshold
+
+                    if is_moe_subset:
+                        expert_groups: Dict[str, List[str]] = {}
+                        combined_names: List[str] = list(subset.keys())
+                        if full is not None:
+                            for candidate in full.keys():
+                                if candidate not in subset:
+                                    combined_names.append(candidate)
+
+                        for sub_name in combined_names:
+                            group_key = self._extract_moe_group_key(sub_name)
+                            if group_key is None:
+                                continue
+                            expert_groups.setdefault(group_key, []).append(sub_name)
+
+                        moe_group_keys_all = list(expert_groups.keys())
+
+                        for name, named_module in subset.items():
+                            setattr(named_module, "moe_enabled", name in moe_modules_set)
+
+                        if self._vram_strategy == VRAMStrategy.BALANCED:
+                            devices = [
+                                dev for dev in self._quant_devices
+                                if dev is not None and getattr(dev, "type", None) != "cpu"
+                            ]
+                            if len(devices) > 1 and expert_groups:
+                                assignable_group_keys: List[str] = []
+                                for group_key, module_names in expert_groups.items():
+                                    suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
+                                    if {"gate_proj", "up_proj"}.issubset(suffixes):
+                                        assignable_group_keys.append(group_key)
+
+                                if assignable_group_keys:
+                                    groups_per_device = max(
+                                        math.ceil(len(assignable_group_keys) / len(devices)), 1
+                                    )
+                                    for group_index, group_key in enumerate(assignable_group_keys):
+                                        device_idx = min(group_index // groups_per_device, len(devices) - 1)
+                                        target_device = devices[device_idx]
+                                        for module_name in expert_groups[group_key]:
+                                            forward_device_map[module_name] = target_device
+
+                        subset_forward_serial = self._vram_strategy == VRAMStrategy.BALANCED
+                        if subset_forward_serial:
+                            active_group_count = len(moe_group_keys_all)
+                            if active_group_count == 0:
+                                subset_forward_serial = False
+                            elif attention_subset and active_group_count <= self._moe_subset_threshold:
+                                subset_forward_serial = False
+                    else:
+                        for named_module in subset.values():
+                            setattr(named_module, "moe_enabled", False)
+
                     handle = []
                     subset_total = len(modules)
                     batch_count = self._resolve_batch_total(
@@ -1200,6 +1464,35 @@ class ModuleLooper():
                     # try to cleanup recent objects before forward
                     #timed_gc_collect(1)
 
+                    previous_forward_devices: Dict[str, torch.device] = {}
+                    preserve_devices = bool(forward_device_map)
+                    if forward_device_map:
+                        previous_forward_devices = self._apply_forward_device_overrides(
+                            subset,
+                            forward_device_map,
+                            fallback_modules=full,
+                        )
+
+                    # if log.isEnabledFor(logging.DEBUG):
+                    #     device_snapshot = []
+                    #     for name, named_module in subset.items():
+                    #         target_device = getattr(named_module, "target_device", None)
+                    #         if target_device is None:
+                    #             try:
+                    #                 target_device = get_device(named_module.module)
+                    #             except Exception:
+                    #                 target_device = None
+                    #         target_device_str = str(target_device) if target_device is not None else "unknown"
+                    #         device_snapshot.append(f"{name}:{target_device_str}")
+                    #     log.debug(
+                    #         "ModuleLooper: Forward subset device snapshot (layer=`%s`, subset=%d/%d, serial=%s) %s",
+                    #         layer_descriptor,
+                    #         index + 1,
+                    #         subset_total,
+                    #         subset_forward_serial,
+                    #         ", ".join(device_snapshot),
+                    #     )
+
                     try:
                         forward_outputs = self._run_forward_batches(
                             module=module,
@@ -1219,8 +1512,16 @@ class ModuleLooper():
                             progress_stage="Forward",
                             progress_rows_per_batch=forward_row_counts,
                             progress_total_rows=forward_total_rows,
+                            force_serial=subset_forward_serial,
+                            preserve_module_devices=preserve_devices,
                         )
                     finally:
+                        if forward_device_map:
+                            self._restore_forward_device_overrides(
+                                subset,
+                                previous_forward_devices,
+                                fallback_modules=full,
+                            )
                         if forward_pb is not None:
                             forward_pb.close()
                     if need_outputs:
@@ -1363,6 +1664,34 @@ class ModuleLooper():
                     replay_start = time.perf_counter()
                     replay_source = f"{layer_descriptor}:subset{index + 1}/{subset_total}"
 
+                    replay_prev_devices: Dict[str, torch.device] = {}
+                    if forward_device_map:
+                        replay_prev_devices = self._apply_forward_device_overrides(
+                            subset,
+                            forward_device_map,
+                            fallback_modules=full,
+                        )
+
+                    # if log.isEnabledFor(logging.DEBUG):
+                    #     replay_snapshot = []
+                    #     for name, named_module in subset.items():
+                    #         target_device = getattr(named_module, "target_device", None)
+                    #         if target_device is None:
+                    #             try:
+                    #                 target_device = get_device(named_module.module)
+                    #             except Exception:
+                    #                 target_device = None
+                    #         target_device_str = str(target_device) if target_device is not None else "unknown"
+                    #         replay_snapshot.append(f"{name}:{target_device_str}")
+                    #     log.debug(
+                    #         "ModuleLooper: Forward replay device snapshot (layer=`%s`, subset=%d/%d, serial=%s) %s",
+                    #         layer_descriptor,
+                    #         index + 1,
+                    #         subset_total,
+                    #         subset_forward_serial,
+                    #         ", ".join(replay_snapshot),
+                    #     )
+
                     try:
                         layer_outputs = self._run_forward_batches(
                             module=module,
@@ -1382,8 +1711,16 @@ class ModuleLooper():
                             progress_stage="Forward replay",
                             progress_rows_per_batch=replay_row_counts,
                             progress_total_rows=replay_total_rows,
+                            force_serial=subset_forward_serial,
+                            preserve_module_devices=preserve_devices,
                         )
                     finally:
+                        if forward_device_map:
+                            self._restore_forward_device_overrides(
+                                subset,
+                                replay_prev_devices,
+                                fallback_modules=full,
+                            )
                         if replay_pb is not None:
                             replay_pb.close()
                     if region_timer is not None:
