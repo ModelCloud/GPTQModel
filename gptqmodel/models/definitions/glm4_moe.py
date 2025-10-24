@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ...quantization.config import VRAMStrategy
 
 
 class GLM4MoEGPTQ(BaseQModel):
@@ -16,6 +17,8 @@ class GLM4MoEGPTQ(BaseQModel):
     # allow dynamic expert index for layer_modules so we don't need to write out 128 layers here
     # config.n_routed_experts contains the actual expert count used for index
     dynamic_expert_index = "n_routed_experts"
+
+    supported_vram_strategies = [VRAMStrategy.EXCLUSIVE, VRAMStrategy.BALANCED]
 
     pre_lm_head_norm_module = "model.norm"
 
