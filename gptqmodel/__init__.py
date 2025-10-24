@@ -31,7 +31,7 @@ DEVICE_THREAD_POOL = DeviceThreadPool(
         "cpu": run_torch_linalg_warmup,
     },
     workers={
-        "cuda:per": 1,
+        "cuda:per": 4,
         "xpu:per": 1,
         "mps": 8,
         "cpu": min(12, max(1, (os.cpu_count() or 1) // 2)),

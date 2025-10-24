@@ -15,7 +15,7 @@ log = setup_logger()
 
 
 class Qwen3NextGPTQ(BaseQModel):
-    require_monkeypatch = True
+    require_monkeypatch = False
     supported_vram_strategies = [VRAMStrategy.EXCLUSIVE, VRAMStrategy.BALANCED]
     """
     GPTQ config for Qwen3-Next (HF: Qwen3Next*), supporting:

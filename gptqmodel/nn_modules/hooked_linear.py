@@ -40,13 +40,19 @@ class HookedConv1D(transformers.Conv1D):
 
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input = input.to(device=self.weight.data.device)
+        original_device = input.device
+        target_device = self.weight.data.device
+        if original_device != target_device:
+            input = input.to(device=target_device)
         output = super().forward(input)
 
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+
+        if output.device != original_device:
+            output = output.to(device=original_device)
         return output
 
 class HookedConv1d(torch.nn.Conv1d):
@@ -98,12 +104,17 @@ class HookedConv1d(torch.nn.Conv1d):
 
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input = input.to(device=self.weight.data.device)
+        original_device = input.device
+        target_device = self.weight.data.device
+        if original_device != target_device:
+            input = input.to(device=target_device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+        if output.device != original_device:
+            output = output.to(device=original_device)
         return output
 
 # Models using conv2d: ovis
@@ -156,12 +167,17 @@ class HookedConv2d(torch.nn.Conv2d):
 
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input = input.to(device=self.weight.data.device)
+        original_device = input.device
+        target_device = self.weight.data.device
+        if original_device != target_device:
+            input = input.to(device=target_device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+        if output.device != original_device:
+            output = output.to(device=original_device)
         return output
 
 # Models using transformers.conv1d: gpt2
@@ -182,12 +198,17 @@ class HookedTransformerConv1D(transformers.Conv1D):
 
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input = input.to(device=self.weight.data.device)
+        original_device = input.device
+        target_device = self.weight.data.device
+        if original_device != target_device:
+            input = input.to(device=target_device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+        if output.device != original_device:
+            output = output.to(device=original_device)
         return output
 
 class HookedLinear(torch.nn.Linear):
@@ -209,12 +230,17 @@ class HookedLinear(torch.nn.Linear):
 
     @torch.inference_mode()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input = input.to(device=self.weight.data.device)
+        original_device = input.device
+        target_device = self.weight.data.device
+        if original_device != target_device:
+            input = input.to(device=target_device)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+        if output.device != original_device:
+            output = output.to(device=original_device)
         return output
 
 
