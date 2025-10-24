@@ -683,7 +683,7 @@ class DeviceThreadPool:
         # Physical-device GC bookkeeping (per accelerator index).
         self._gc_done_physical: Dict[str, int] = {}
         self._last_gc_done_physical: Dict[str, int] = {}
-        self._gc_pending_physical: Set[str] = set()
+        self._gc_pending_physical: Dict[str, int] = {}
         self._physical_children: Dict[str, Set[str]] = {}
 
         # Device-SMI handles are created lazily for GC logging.
@@ -1629,7 +1629,9 @@ class DeviceThreadPool:
         if not hasattr(self, "_gc_done_physical"):
             self._gc_done_physical = {}
         if not hasattr(self, "_gc_pending_physical"):
-            self._gc_pending_physical = set()
+            self._gc_pending_physical = {}
+        elif not isinstance(self._gc_pending_physical, dict):
+            self._gc_pending_physical = {k: 1 for k in self._gc_pending_physical}
         if not hasattr(self, "_last_gc_done_physical"):
             self._last_gc_done_physical = {}
         if not hasattr(self, "_physical_children"):
@@ -1651,9 +1653,9 @@ class DeviceThreadPool:
                 current = self._gc_done_physical.get(physical_key, 0) + 1
                 self._gc_done_physical[physical_key] = current
                 if current % self._empty_cache_every_n == 0:
-                    if physical_key not in self._gc_pending_physical:
-                        self._gc_pending_physical.add(physical_key)
-                        self._gc_generation += 1
+                    pending_map = self._gc_pending_physical
+                    pending_map[physical_key] = pending_map.get(physical_key, 0) + 1
+                    self._gc_generation += 1
                     trigger_gc = True
                     if DEBUG_ON:
                         log.debug(
@@ -1663,7 +1665,7 @@ class DeviceThreadPool:
                             current,
                             self._empty_cache_every_n,
                             self._total_done,
-                            sorted(self._gc_pending_physical),
+                            sorted(k for k, count in pending_map.items() if count > 0),
                         )
         if trigger_gc:
             self._gc_event.set()
@@ -1733,7 +1735,11 @@ class DeviceThreadPool:
         for phys_key, members in physical_children.items():
             per_done_physical[phys_key] = sum(per_done.get(member, 0) for member in members)
 
-        pending_gc = sorted(getattr(self, "_gc_pending_physical", set()))
+        raw_pending = getattr(self, "_gc_pending_physical", {})
+        if isinstance(raw_pending, dict):
+            pending_gc = sorted(k for k, count in raw_pending.items() if count > 0)
+        else:
+            pending_gc = sorted(raw_pending)
 
         snap: Dict[str, Any] = {
             "devices": sorted(self._devices_by_key.keys()),
@@ -2008,7 +2014,11 @@ class DeviceThreadPool:
                     log.warn(f"Failed to render GC pre-snapshot: {e!r}")
                 except Exception:
                     pass
-                pending_targets = sorted(getattr(self, "_gc_pending_physical", set()))
+                raw_pending = getattr(self, "_gc_pending_physical", {})
+                if isinstance(raw_pending, dict):
+                    pending_targets = sorted(k for k, count in raw_pending.items() if count > 0)
+                else:
+                    pending_targets = sorted(raw_pending)
 
             if not pending_targets:
                 if DEBUG_ON:
@@ -2080,13 +2090,17 @@ class DeviceThreadPool:
                         pass
 
             with self._stats_lock:
+                pending_map = self._gc_pending_physical
+                if not isinstance(pending_map, dict):
+                    pending_map = {k: 1 for k in pending_map}
+                    self._gc_pending_physical = pending_map
                 for key in processed_devices:
-                    self._gc_pending_physical.discard(key)
+                    pending_map.pop(key, None)
                     self._last_gc_done_physical[key] = self._gc_done_physical.get(key, 0)
                 for key in skipped_devices:
-                    self._gc_pending_physical.discard(key)
+                    pending_map.pop(key, None)
                 self._last_consumed_gc_generation = max(self._last_consumed_gc_generation, current_generation)
-                if self._gc_pending_physical:
+                if any(count > 0 for count in pending_map.values()):
                     self._gc_event.set()
 
     # Legacy helper (not used by janitor). Kept for compatibility with any
