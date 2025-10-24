@@ -8,6 +8,7 @@ from typing import Optional
 import torch
 
 from ...quantization import METHOD
+from ...quantization.config import VRAMStrategy
 from ...utils.logger import setup_logger
 from ..base import BaseQModel
 
@@ -55,6 +56,17 @@ class Qwen3MoeQModel(BaseQModel):
     }
 
     def monkey_patch(self):
+        strategy = getattr(self.quantize_config, "vram_strategy", None)
+        if strategy is None:
+            return
+        if isinstance(strategy, str):
+            try:
+                strategy = VRAMStrategy(strategy.lower())
+            except ValueError:
+                return
+        if strategy != VRAMStrategy.BALANCED:
+            log.debug("Qwen3Moe: VRAM strategy %s does not require monkey patch.", strategy)
+            return
         import torch
         import torch.nn.functional as F
         from transformers.models.qwen3_moe.modeling_qwen3_moe import (
