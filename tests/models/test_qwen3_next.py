@@ -27,7 +27,7 @@ class TestQwen3Next(ModelTest):
     }
 
     VRAM_STRATEGY = VRAMStrategy.BALANCED
-    DATASET_SIZE = 2048
+    # DATASET_SIZE = 2048
     # TRUST_REMOTE_CODE = True
     # APPLY_CHAT_TEMPLATE = True
     # EVAL_BATCH_SIZE = 4
