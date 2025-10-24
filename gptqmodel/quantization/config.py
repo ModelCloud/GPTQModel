@@ -78,6 +78,11 @@ class METHOD(str, Enum):
     AWQ = "awq"
 
 
+class VRAMStrategy(str, Enum):
+    EXCLUSIVE = "exclusive"
+    BALANCED = "balanced"
+
+
 QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.GPTQ: {
         FORMAT.GPTQ,
@@ -234,6 +239,9 @@ class QuantizeConfig():
     hessian_chunk_bytes: Optional[int] = field(default=None, metadata={"help": "Memory budget (in bytes) for Hessian chunk staging"})
     hessian_use_bfloat16_staging: bool = field(default=False, metadata={"help": "Stage Hessian chunks in bfloat16 when supported"})
 
+    # VRAM allocation strategy for MoE-heavy subsets
+    vram_strategy: VRAMStrategy = field(default=VRAMStrategy.EXCLUSIVE)
+
     def __post_init__(self):
         fields_info = fields(self)
 
@@ -367,6 +375,18 @@ class QuantizeConfig():
             path_key = f"{randWords.get_random_word()}-{randWords.get_random_word()}"
             self.offload_to_disk_path = f"./gptqmodel_offload/{path_key}/"
             log.info(f"QuantizeConfig: offload_to_disk_path auto set to `{self.offload_to_disk_path}`")
+
+        if isinstance(self.vram_strategy, str):
+            try:
+                self.vram_strategy = VRAMStrategy(self.vram_strategy.lower())
+            except ValueError as exc:
+                raise ValueError(
+                    f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VRAMStrategy]}."
+                ) from exc
+        elif not isinstance(self.vram_strategy, VRAMStrategy):
+            raise ValueError(
+                f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VRAMStrategy]}."
+            )
 
     def extension_set(self, key: str, value: Any):
         if self.adapter is None:

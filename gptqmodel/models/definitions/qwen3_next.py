@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ...quantization import METHOD
+from ...quantization.config import VRAMStrategy
 from ..base import BaseQModel
 
 
@@ -37,7 +39,7 @@ class Qwen3NextGPTQ(BaseQModel):
             # MLP / MoE
             "mlp": {
                 # MoE router + shared expert (Qwen3NextSparseMoeBlock)
-                "gate": ("gate",),  # router gate linear
+                "gate": ("gate:!",),  # router gate linear
                 "shared_expert_gate": ("shared_expert_gate:!",), # <-- single (1, N) logic projections should not be quantized
                 "shared_expert": ("gate_proj", "up_proj", "down_proj"),
 
@@ -48,3 +50,13 @@ class Qwen3NextGPTQ(BaseQModel):
             },
         },
     ]
+
+    module_tree_overrides = {
+        METHOD.AWQ: [
+            {
+                "mlp": {
+                    "gate": ("gate",),
+                }
+            }
+        ]
+    }
