@@ -16,6 +16,8 @@ log = setup_logger()
 
 
 class Qwen3MoeQModel(BaseQModel):
+    supported_vram_strategies = [VRAMStrategy.EXCLUSIVE, VRAMStrategy.BALANCED]
+
     require_monkeypatch = True
 
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here

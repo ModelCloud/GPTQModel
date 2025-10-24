@@ -43,7 +43,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, dynamic_get
+from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, VRAMStrategy, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.data import collate_data
@@ -179,6 +179,9 @@ class BaseQModel(nn.Module):
 
     # monkey patch api for trust_remote_code=True models that have broken transformer compat
     require_monkeypatch = False
+
+    # VRAM strategy support list
+    supported_vram_strategies: List[VRAMStrategy] = [VRAMStrategy.EXCLUSIVE]
 
     # some models have broken attention mask codes so we need to only use batch 1 with no masks
     support_batch_quantize = True

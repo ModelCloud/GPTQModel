@@ -6,6 +6,7 @@
 from typing import Optional
 
 import torch
+from ...quantization import METHOD
 from ...quantization.config import VRAMStrategy
 from ...utils.logger import setup_logger
 from ..base import BaseQModel
@@ -15,6 +16,7 @@ log = setup_logger()
 
 class Qwen3NextGPTQ(BaseQModel):
     require_monkeypatch = True
+    supported_vram_strategies = [VRAMStrategy.EXCLUSIVE, VRAMStrategy.BALANCED]
     """
     GPTQ config for Qwen3-Next (HF: Qwen3Next*), supporting:
       - Mixed token mixers per layer: 'full_attention' (self_attn.*) and 'linear_attention' (linear_attn.*)

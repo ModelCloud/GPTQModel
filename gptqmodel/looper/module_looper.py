@@ -118,6 +118,16 @@ class ModuleLooper():
                 vram_strategy = VRAMStrategy(vram_strategy.lower())
             except ValueError:
                 vram_strategy = VRAMStrategy.EXCLUSIVE
+        supported_strategies = getattr(self.gptq_model, "supported_vram_strategies", [VRAMStrategy.EXCLUSIVE])
+        if isinstance(supported_strategies, VRAMStrategy):
+            supported_strategies = [supported_strategies]
+        if vram_strategy not in supported_strategies:
+            log.debug(
+                "ModuleLooper: Model %s does not support VRAM strategy %s; falling back to exclusive.",
+                getattr(self.gptq_model, "__class__", type(self.gptq_model)).__name__,
+                vram_strategy,
+            )
+            vram_strategy = VRAMStrategy.EXCLUSIVE
         self._vram_strategy = vram_strategy
         self._moe_subset_threshold = 10
 
