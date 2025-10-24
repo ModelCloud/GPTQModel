@@ -129,7 +129,7 @@ class ModuleLooper():
             )
             vram_strategy = VRAMStrategy.EXCLUSIVE
         self._vram_strategy = vram_strategy
-        self._moe_subset_threshold = 10
+        self._moe_subset_threshold = 16
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
@@ -1265,16 +1265,16 @@ class ModuleLooper():
                     forward_device_map: Dict[str, torch.device] = {}
                     subset_forward_serial = is_moe_subset and self._vram_strategy == VRAMStrategy.BALANCED
                     if is_moe_subset:
-                        subset_names = ", ".join(subset.keys())
-                        log.debug(
-                            "ModuleLooper: MoE subset detected (layer=`%s`, subset=%d/%d, modules=%d, strategy=%s, names=[%s])",
-                            layer_descriptor,
-                            index + 1,
-                            subset_total,
-                            len(subset),
-                            getattr(self._vram_strategy, "value", str(self._vram_strategy)),
-                            subset_names,
-                        )
+                        # subset_names = ", ".join(subset.keys())
+                        # log.debug(
+                        #     "ModuleLooper: MoE subset detected (layer=`%s`, subset=%d/%d, modules=%d, strategy=%s, names=[%s])",
+                        #     layer_descriptor,
+                        #     index + 1,
+                        #     subset_total,
+                        #     len(subset),
+                        #     getattr(self._vram_strategy, "value", str(self._vram_strategy)),
+                        #     subset_names,
+                        # )
                         for named_module in subset.values():
                             setattr(named_module, "moe_enabled", True)
                         if self._vram_strategy == VRAMStrategy.BALANCED:
@@ -1315,17 +1315,17 @@ class ModuleLooper():
                                         for module_name in expert_groups[group_key]:
                                             forward_device_map[module_name] = target_device
 
-                                    assignment = ", ".join(
-                                        f"{name}->{forward_device_map[name]}"
-                                        for name in forward_device_map
-                                    )
-                                    log.debug(
-                                        "ModuleLooper: MoE balanced device map (layer=`%s`, subset=%d/%d) %s",
-                                        layer_descriptor,
-                                        index + 1,
-                                        subset_total,
-                                        assignment,
-                                    )
+                                    # assignment = ", ".join(
+                                    #     f"{name}->{forward_device_map[name]}"
+                                    #     for name in forward_device_map
+                                    # )
+                                    # log.debug(
+                                    #     "ModuleLooper: MoE balanced device map (layer=`%s`, subset=%d/%d) %s",
+                                    #     layer_descriptor,
+                                    #     index + 1,
+                                    #     subset_total,
+                                    #     assignment,
+                                    # )
                     else:
                         for named_module in subset.values():
                             setattr(named_module, "moe_enabled", False)
@@ -1401,25 +1401,25 @@ class ModuleLooper():
                             fallback_modules=full,
                         )
 
-                    if log.isEnabledFor(logging.DEBUG):
-                        device_snapshot = []
-                        for name, named_module in subset.items():
-                            target_device = getattr(named_module, "target_device", None)
-                            if target_device is None:
-                                try:
-                                    target_device = get_device(named_module.module)
-                                except Exception:
-                                    target_device = None
-                            target_device_str = str(target_device) if target_device is not None else "unknown"
-                            device_snapshot.append(f"{name}:{target_device_str}")
-                        log.debug(
-                            "ModuleLooper: Forward subset device snapshot (layer=`%s`, subset=%d/%d, serial=%s) %s",
-                            layer_descriptor,
-                            index + 1,
-                            subset_total,
-                            subset_forward_serial,
-                            ", ".join(device_snapshot),
-                        )
+                    # if log.isEnabledFor(logging.DEBUG):
+                    #     device_snapshot = []
+                    #     for name, named_module in subset.items():
+                    #         target_device = getattr(named_module, "target_device", None)
+                    #         if target_device is None:
+                    #             try:
+                    #                 target_device = get_device(named_module.module)
+                    #             except Exception:
+                    #                 target_device = None
+                    #         target_device_str = str(target_device) if target_device is not None else "unknown"
+                    #         device_snapshot.append(f"{name}:{target_device_str}")
+                    #     log.debug(
+                    #         "ModuleLooper: Forward subset device snapshot (layer=`%s`, subset=%d/%d, serial=%s) %s",
+                    #         layer_descriptor,
+                    #         index + 1,
+                    #         subset_total,
+                    #         subset_forward_serial,
+                    #         ", ".join(device_snapshot),
+                    #     )
 
                     try:
                         forward_outputs = self._run_forward_batches(
@@ -1600,25 +1600,25 @@ class ModuleLooper():
                             fallback_modules=full,
                         )
 
-                    if log.isEnabledFor(logging.DEBUG):
-                        replay_snapshot = []
-                        for name, named_module in subset.items():
-                            target_device = getattr(named_module, "target_device", None)
-                            if target_device is None:
-                                try:
-                                    target_device = get_device(named_module.module)
-                                except Exception:
-                                    target_device = None
-                            target_device_str = str(target_device) if target_device is not None else "unknown"
-                            replay_snapshot.append(f"{name}:{target_device_str}")
-                        log.debug(
-                            "ModuleLooper: Forward replay device snapshot (layer=`%s`, subset=%d/%d, serial=%s) %s",
-                            layer_descriptor,
-                            index + 1,
-                            subset_total,
-                            subset_forward_serial,
-                            ", ".join(replay_snapshot),
-                        )
+                    # if log.isEnabledFor(logging.DEBUG):
+                    #     replay_snapshot = []
+                    #     for name, named_module in subset.items():
+                    #         target_device = getattr(named_module, "target_device", None)
+                    #         if target_device is None:
+                    #             try:
+                    #                 target_device = get_device(named_module.module)
+                    #             except Exception:
+                    #                 target_device = None
+                    #         target_device_str = str(target_device) if target_device is not None else "unknown"
+                    #         replay_snapshot.append(f"{name}:{target_device_str}")
+                    #     log.debug(
+                    #         "ModuleLooper: Forward replay device snapshot (layer=`%s`, subset=%d/%d, serial=%s) %s",
+                    #         layer_descriptor,
+                    #         index + 1,
+                    #         subset_total,
+                    #         subset_forward_serial,
+                    #         ", ".join(replay_snapshot),
+                    #     )
 
                     try:
                         layer_outputs = self._run_forward_batches(
