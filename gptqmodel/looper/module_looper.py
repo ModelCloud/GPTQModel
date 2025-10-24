@@ -477,7 +477,7 @@ class ModuleLooper():
         layer_index: int,
         need_outputs: bool,
         reuse_kv: bool,
-        progress_pb: "ProgressBar" | None = None,
+        progress_pb: ProgressBar = None,
         progress_title: Optional[str] = None,
         progress_stage: Optional[str] = None,
         progress_rows_per_batch: Optional[List[int]] = None,
@@ -938,6 +938,7 @@ class ModuleLooper():
         layer_input_kwargs = []
 
         timer = getattr(self.gptq_model, "quant_region_timer", None)
+        layer_label = None
         if layers:
             first_layer = layers[0]
             layer_label = getattr(first_layer, "full_name", None)
@@ -964,6 +965,25 @@ class ModuleLooper():
 
         cur_layer_device = get_device(layers[0])
         data_device = cur_layer_device
+
+        cache_forward_pb: ProgressBar = None
+        processed_rows = 0
+        cache_total_batches = None
+        if calibration_batches is not None and calibration_batches > 0:
+            cache_total_batches = int(calibration_batches)
+            cache_forward_pb = (
+                log.pb(range(max(cache_total_batches, 1)))
+                   .manual()
+                   .set(show_left_steps=False)
+            )
+            cache_title = (
+                f"Forward cached inputs (Pre {layer_label})"
+                if layer_label
+                else "Forward cached inputs"
+            )
+            cache_forward_pb.title(cache_title).subtitle(
+                f"Batch 0/{cache_total_batches}"
+            ).draw()
 
         # TODO HookLinear add register_forward_pre_hook()
         def store_input_hook(module, args, kwargs):
@@ -1029,37 +1049,57 @@ class ModuleLooper():
         # LifeCycle: start pre-first layer embedding hook
         self.gptq_model.pre_quantize_generate_hook_start()
 
-        for example in calibration_data:
-            for k, v in example.items():
-                if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
-                    data_device = self.gptq_model.quantize_config.device
-                else:
-                    data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
-                if isinstance(v, list):
-                    for index in range(len(v)):
-                        if len(v[index].shape) == 1:
-                            v[index] = v[index].unsqueeze(0)
-                        v[index] = move_to(v[index].to(self.gptq_model.model.visual_tokenizer.dtype) if is_ovis else v[index],
-                                                  device=data_device)
-                else:
-                    if len(v.shape) == 1:
-                        v = v.unsqueeze(0)
-                    example[k] = move_to(v, device=data_device)
-            try:
-                if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
-                    example["attention_mask"] = example["attention_mask"].long()
-
-                # Ensure initial caches (like RoPE) are created on the quant device
-                with ctx(
-                    DEVICE_THREAD_POOL.read_lock(self.gptq_model.quantize_config.device),
-                    device_ctx(self.gptq_model.quantize_config.device),
-                ):
-                    if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
-                        self.gptq_model.model.generate(**example, **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS)
+        try:
+            for batch_index, example in enumerate(calibration_data, start=1):
+                for k, v in example.items():
+                    if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
+                        data_device = self.gptq_model.quantize_config.device
                     else:
-                        self.gptq_model.model(**example, use_cache=use_cache)
-            except StopForward:
-                pass
+                        data_device = self.gptq_model.quantize_config.device if k == "pixel_values" else cur_layer_device
+                    if isinstance(v, list):
+                        for index in range(len(v)):
+                            if len(v[index].shape) == 1:
+                                v[index] = v[index].unsqueeze(0)
+                            v[index] = move_to(
+                                v[index].to(self.gptq_model.model.visual_tokenizer.dtype) if is_ovis else v[index],
+                                device=data_device,
+                            )
+                    else:
+                        if len(v.shape) == 1:
+                            v = v.unsqueeze(0)
+                        example[k] = move_to(v, device=data_device)
+                try:
+                    if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
+                        example["attention_mask"] = example["attention_mask"].long()
+
+                    # Ensure initial caches (like RoPE) are created on the quant device
+                    with ctx(
+                        DEVICE_THREAD_POOL.read_lock(self.gptq_model.quantize_config.device),
+                        device_ctx(self.gptq_model.quantize_config.device),
+                    ):
+                        if self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS:
+                            self.gptq_model.model.generate(**example, **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS)
+                        else:
+                            self.gptq_model.model(**example, use_cache=use_cache)
+                except StopForward:
+                    pass
+                finally:
+                    processed_batches = batch_index
+                    if cache_forward_pb is not None:
+                        rows_for_batch = 0
+                        if batch_index <= len(layer_inputs):
+                            rows_for_batch = self._batch_row_count(layer_inputs[batch_index - 1])
+                            if rows_for_batch <= 0:
+                                rows_for_batch = 1
+                        processed_rows += rows_for_batch
+                        cache_forward_pb.current_iter_step = processed_batches
+                        subtitle = f"Batch {processed_batches}/{cache_total_batches}"
+                        if processed_rows > 0:
+                            subtitle += f" rows {processed_rows}"
+                        cache_forward_pb.subtitle(subtitle).draw()
+        finally:
+            if cache_forward_pb is not None:
+                cache_forward_pb.close()
 
         # LifeCycle: pre-first layer embedding hook
         self.gptq_model.pre_quantize_generate_hook_end()
