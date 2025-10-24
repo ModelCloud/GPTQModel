@@ -9,6 +9,7 @@ import copy
 import csv
 import json
 import os
+import shutil
 from os.path import isfile, join
 from typing import Any, Dict, Optional, Union
 
@@ -16,6 +17,7 @@ import pcre as re
 import torch
 import transformers
 from safetensors.torch import save_file
+from safetensors import safe_open
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
@@ -374,6 +376,83 @@ def ModelWriter(cls):
         # save lora
         if self.quantize_config.adapter:
             _eora_save(self, save_dir=eora_path if eora_path else self.quantize_config.adapter.path, model_save_dir=save_dir)
+
+        # Handle `dangling` tensor files that HF doesn't support (optional) but very useful
+        extra_tensor_files = getattr(self, "out_of_model_tensor_files", None)
+        if extra_tensor_files:
+            if isinstance(extra_tensor_files, str):
+                extra_tensor_files = [extra_tensor_files]
+            else:
+                extra_tensor_files = list(extra_tensor_files)
+
+            index_save_name = model_save_name + ".index.json"
+            index_save_path = join(save_dir, index_save_name)
+
+            if os.path.exists(index_save_path):
+                with open(index_save_path, "r", encoding="utf-8") as f:
+                    index_data = json.load(f)
+            else:
+                index_data = {
+                    "metadata": {"total_size": total_size_bytes},
+                    "weight_map": dict(tensor_to_filename),
+                }
+
+            if "metadata" not in index_data:
+                index_data["metadata"] = {}
+            if "weight_map" not in index_data:
+                index_data["weight_map"] = {}
+
+            total_size_value = index_data["metadata"].get("total_size", total_size_bytes)
+            index_updated = False
+
+            for tensor_file_name in extra_tensor_files:
+                original_tensor_path = os.path.join(self.model_local_path, tensor_file_name)
+                if not os.path.exists(original_tensor_path):
+                    log.warn(
+                        f"Model: out_of_model_tensor_files configured with '{tensor_file_name}', "
+                        f"but the file was not found at '{original_tensor_path}'"
+                    )
+                    continue
+
+                target_tensor_path = os.path.join(save_dir, tensor_file_name)
+                shutil.copy2(original_tensor_path, target_tensor_path)
+                log.info(
+                    f"Model: Copied {tensor_file_name} from original model directory to quantized model directory"
+                )
+
+                tensor_names = []
+                try:
+                    with safe_open(original_tensor_path, framework="pt", device="cpu") as f:
+                        tensor_names = list(f.keys())
+                except Exception as exc:
+                    log.warn(
+                        f"Model: Failed to read tensor names from {tensor_file_name}: {exc}"
+                    )
+
+                for tensor_name in tensor_names:
+                    index_data["weight_map"][tensor_name] = tensor_file_name
+
+                if tensor_names:
+                    log.info(
+                        f"Model: Added {len(tensor_names)} tensors from {tensor_file_name} to weight_map"
+                    )
+
+                try:
+                    tensor_file_size = os.path.getsize(target_tensor_path)
+                except OSError:
+                    tensor_file_size = 0
+
+                total_size_value += tensor_file_size
+                index_updated = True
+
+            if index_updated:
+                index_data["metadata"]["total_size"] = total_size_value
+                with open(index_save_path, "w", encoding="utf-8") as f:
+                    content = json.dumps(index_data, indent=2, sort_keys=True) + "\n"
+                    f.write(content)
+                log.info(
+                    f"Model: Updated {index_save_name} to include `out_of_model_tensor_files`"
+                )
 
         # If the saved model is a loaded quantized model, do not calculate the size diff.
         if not self.load_quantized_model:

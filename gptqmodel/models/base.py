@@ -190,6 +190,11 @@ class BaseQModel(nn.Module):
     # list of supported keys: [ "notes" = print the notes value on model load ]
     info: Dict[str, str] = {}
 
+    # Some models have optional layers that are not loaded or supported by HF so even when they exist in the original
+    # model, they are not properly saved on save(). GLM 4.5/4.6 (air) with MTP layers is such example.
+    # List the `dangling` optional tensor files here, and we will merge them in on model.save()
+    out_of_model_tensor_files: Optional[List[str]] = None
+
     supports_desc_act = [True, False]
 
     modality: List[MODALITY] = [MODALITY.TEXT]
