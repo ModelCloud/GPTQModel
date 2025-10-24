@@ -305,6 +305,36 @@ class ModuleLooper():
             counts.append(count if count > 0 else 0)
         return counts
 
+    def _extract_moe_group_key(self, module_name: Optional[str]) -> Optional[str]:
+        if not module_name:
+            return None
+
+        if ".experts." in module_name:
+            prefix, remainder = module_name.split(".experts.", 1)
+            expert_id = remainder.split(".", 1)[0]
+            if expert_id:
+                return f"{prefix}.experts.{expert_id}"
+            return None
+
+        if ".shared_experts." in module_name:
+            prefix, _ = module_name.split(".shared_experts.", 1)
+            return f"{prefix}.shared_experts"
+
+        return None
+
+    def _is_attention_module_name(self, module_name: str) -> bool:
+        if not module_name:
+            return False
+
+        lowered = module_name.lower()
+        if ".attn" in lowered or "attn." in lowered:
+            return True
+        if ".attention" in lowered or "attention." in lowered:
+            return True
+        if lowered.endswith("attn") or lowered.endswith("attention"):
+            return True
+        return False
+
     def _assign_quant_device_for_module(
         self,
         named_module: NamedModule,
@@ -1301,71 +1331,73 @@ class ModuleLooper():
                     if len(subset) == 0:
                         continue
 
-                    is_moe_subset = len(subset) >= self._moe_subset_threshold
+                    moe_group_keys_all: List[str] = []
                     forward_device_map: Dict[str, torch.device] = {}
-                    subset_forward_serial = is_moe_subset and self._vram_strategy == VRAMStrategy.BALANCED
+                    subset_forward_serial = False
+
+                    attention_subset = bool(subset) and all(
+                        self._is_attention_module_name(name) for name in subset
+                    )
+
+                    moe_group_key_by_name: Dict[str, Optional[str]] = {
+                        name: self._extract_moe_group_key(name)
+                        for name in subset
+                    }
+                    moe_module_names = [
+                        name for name, group_key in moe_group_key_by_name.items()
+                        if group_key is not None
+                    ]
+                    moe_modules_set = set(moe_module_names)
+                    is_moe_subset = len(moe_module_names) >= self._moe_subset_threshold
+
                     if is_moe_subset:
-                        # subset_names = ", ".join(subset.keys())
-                        # log.debug(
-                        #     "ModuleLooper: MoE subset detected (layer=`%s`, subset=%d/%d, modules=%d, strategy=%s, names=[%s])",
-                        #     layer_descriptor,
-                        #     index + 1,
-                        #     subset_total,
-                        #     len(subset),
-                        #     getattr(self._vram_strategy, "value", str(self._vram_strategy)),
-                        #     subset_names,
-                        # )
-                        for named_module in subset.values():
-                            setattr(named_module, "moe_enabled", True)
+                        expert_groups: Dict[str, List[str]] = {}
+                        combined_names: List[str] = list(subset.keys())
+                        if full is not None:
+                            for candidate in full.keys():
+                                if candidate not in subset:
+                                    combined_names.append(candidate)
+
+                        for sub_name in combined_names:
+                            group_key = self._extract_moe_group_key(sub_name)
+                            if group_key is None:
+                                continue
+                            expert_groups.setdefault(group_key, []).append(sub_name)
+
+                        moe_group_keys_all = list(expert_groups.keys())
+
+                        for name, named_module in subset.items():
+                            setattr(named_module, "moe_enabled", name in moe_modules_set)
+
                         if self._vram_strategy == VRAMStrategy.BALANCED:
-                            devices = [dev for dev in self._quant_devices if dev is not None and getattr(dev, "type", None) != "cpu"]
-                            if len(devices) > 1:
-                                expert_groups: Dict[str, List[str]] = {}
-                                combined_names: List[str] = list(subset.keys())
-                                if full is not None:
-                                    for candidate in full.keys():
-                                        if candidate not in subset:
-                                            combined_names.append(candidate)
+                            devices = [
+                                dev for dev in self._quant_devices
+                                if dev is not None and getattr(dev, "type", None) != "cpu"
+                            ]
+                            if len(devices) > 1 and expert_groups:
+                                assignable_group_keys: List[str] = []
+                                for group_key, module_names in expert_groups.items():
+                                    suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
+                                    if {"gate_proj", "up_proj"}.issubset(suffixes):
+                                        assignable_group_keys.append(group_key)
 
-                                for sub_name in combined_names:
-                                    group_key = None
-                                    if ".experts." in sub_name:
-                                        prefix, remainder = sub_name.split(".experts.", 1)
-                                        expert_id = remainder.split(".", 1)[0]
-                                        group_key = f"{prefix}.experts.{expert_id}"
-                                    elif ".shared_experts." in sub_name:
-                                        prefix, _ = sub_name.split(".shared_experts.", 1)
-                                        group_key = f"{prefix}.shared_experts"
-                                    if group_key is None:
-                                        continue
-                                    expert_groups.setdefault(group_key, []).append(sub_name)
-
-                                group_keys: List[str] = []
-                                if expert_groups:
-                                    for group_key, module_names in expert_groups.items():
-                                        suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
-                                        if {"gate_proj", "up_proj"}.issubset(suffixes):
-                                            group_keys.append(group_key)
-
-                                if group_keys:
-                                    groups_per_device = max(math.ceil(len(group_keys) / len(devices)), 1)
-                                    for group_index, group_key in enumerate(group_keys):
+                                if assignable_group_keys:
+                                    groups_per_device = max(
+                                        math.ceil(len(assignable_group_keys) / len(devices)), 1
+                                    )
+                                    for group_index, group_key in enumerate(assignable_group_keys):
                                         device_idx = min(group_index // groups_per_device, len(devices) - 1)
                                         target_device = devices[device_idx]
                                         for module_name in expert_groups[group_key]:
                                             forward_device_map[module_name] = target_device
 
-                                    # assignment = ", ".join(
-                                    #     f"{name}->{forward_device_map[name]}"
-                                    #     for name in forward_device_map
-                                    # )
-                                    # log.debug(
-                                    #     "ModuleLooper: MoE balanced device map (layer=`%s`, subset=%d/%d) %s",
-                                    #     layer_descriptor,
-                                    #     index + 1,
-                                    #     subset_total,
-                                    #     assignment,
-                                    # )
+                        subset_forward_serial = self._vram_strategy == VRAMStrategy.BALANCED
+                        if subset_forward_serial:
+                            active_group_count = len(moe_group_keys_all)
+                            if active_group_count == 0:
+                                subset_forward_serial = False
+                            elif attention_subset and active_group_count <= self._moe_subset_threshold:
+                                subset_forward_serial = False
                     else:
                         for named_module in subset.values():
                             setattr(named_module, "moe_enabled", False)
