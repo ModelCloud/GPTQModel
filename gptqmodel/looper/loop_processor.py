@@ -21,6 +21,7 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS,
                              QUANT_LOG_NSAMPLES)
 from ..quantization.config import QuantizeConfig
+from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
 from ..utils.torch import CPU, DEVICE_0, DEVICE_1
 
@@ -197,22 +198,25 @@ class LoopProcessor:
             if columns_rebuilt or self.log_call_count % self._log_header_interval == 1:
                 self._log_columns.info.header()
 
-            row_values = [self._format_log_value(column, stat.get(column, "")) for column in self._log_column_labels]
+            row_values = [
+                self._format_log_value(column, stat.get(column, ""), stat)
+                for column in self._log_column_labels
+            ]
             self._log_columns.info(*row_values)
 
         self.log_save_async(stat)
 
-    def loss_color(self, loss_value):
+    def loss_color(self, loss_value: float) -> ANSIColor:
         if loss_value <= 0.1:
-            return "\033[92m"  # Green
+            return ANSIColor.GREEN
         elif loss_value <= 1:
-            return "\033[96m" # Cyan
+            return ANSIColor.CYAN
         elif loss_value <= 5:
-            return "\033[93m"  # Yellow
+            return ANSIColor.YELLOW
         elif loss_value <= 20:
-            return "\033[33m"  # Orange
+            return ANSIColor.ORANGE
         else:
-            return "\033[91m"  # Red
+            return ANSIColor.BRIGHT_RED
 
     def _ensure_log_columns(self, stat: Dict[str, Any]) -> bool:
         desired_labels = list(DEFAULT_LOG_COLUMNS)
@@ -233,7 +237,7 @@ class LoopProcessor:
             "36616", "0.05000", "0.841", "7.984", "cuda:0=9.1GB","")
         return True
 
-    def _format_log_value(self, key: str, value: Any) -> str:
+    def _format_log_value(self, key: str, value: Any, stat: Dict[str, Any]) -> str:
         text = "" if value is None else str(value)
 
         if key == QUANT_LOG_LOSS and text:
@@ -241,10 +245,39 @@ class LoopProcessor:
                 color_code = self.loss_color(float(text))
             except (TypeError, ValueError):
                 return text
-            reset = "\033[0m"
-            return f"{color_code}{text}{reset}"
+            return color_text(text, color_code)
+
+        if key == QUANT_LOG_NSAMPLES and text:
+            try:
+                samples_value = float(text)
+            except (TypeError, ValueError):
+                return text
+
+            color_code = self._samples_color(samples_value, stat)
+            if color_code is not None:
+                return color_text(text, color_code)
 
         return text
+
+    def _samples_color(self, samples_value: float, stat: Dict[str, Any]) -> Optional[ANSIColor]:
+        quant_method = str(stat.get(PROCESS_LOG_NAME, "")).lower()
+
+        divisor = 10.0 if quant_method.startswith("awq") else 1.0
+
+        threshold_green = 4096 / divisor
+        threshold_dark_green = 1024 / divisor
+        threshold_orange = 756 / divisor
+        threshold_red = 512 / divisor
+
+        if samples_value >= threshold_green:
+            return ANSIColor.BRIGHT_GREEN
+        if samples_value >= threshold_dark_green:
+            return ANSIColor.GREEN
+        if samples_value >= threshold_orange:
+            return ANSIColor.ORANGE
+        if samples_value < threshold_red:
+            return ANSIColor.BRIGHT_RED
+        return ANSIColor.RED
 
     def module_feature_summary(self, module: NamedModule) -> str:
         in_features = module.state.get("in_features")
