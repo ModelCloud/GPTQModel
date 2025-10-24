@@ -109,6 +109,7 @@ class ModelTest(unittest.TestCase):
     ACT_GROUP_AWARE = True
     FAIL_SAFE = True
     EORA = None
+    DAMP_PERCENT = 0.05
 
     SAVE_PATH = None  # default is temp folder
 
@@ -719,6 +720,7 @@ class ModelTest(unittest.TestCase):
             adapter=self.EORA,
             pack_impl="cpu",
             vram_strategy=self.VRAM_STRATEGY,
+            damp_percent=self.DAMP_PERCENT,
         )
 
         log.info(f"Quant config: {quantize_config}")
