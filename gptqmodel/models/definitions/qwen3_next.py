@@ -9,7 +9,6 @@ from ..base import BaseQModel
 
 
 class Qwen3NextGPTQ(BaseQModel):
-    supported_vram_strategies = [VRAMStrategy.EXCLUSIVE, VRAMStrategy.BALANCED]
     """
     GPTQ config for Qwen3-Next (HF: Qwen3Next*), supporting:
       - Mixed token mixers per layer: 'full_attention' (self_attn.*) and 'linear_attention' (linear_attn.*)

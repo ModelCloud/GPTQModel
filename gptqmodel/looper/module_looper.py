@@ -118,7 +118,7 @@ class ModuleLooper():
                 vram_strategy = VRAMStrategy(vram_strategy.lower())
             except ValueError:
                 vram_strategy = VRAMStrategy.EXCLUSIVE
-        supported_strategies = getattr(self.gptq_model, "supported_vram_strategies", [VRAMStrategy.EXCLUSIVE])
+        supported_strategies = getattr(self.gptq_model, "supported_vram_strategies", [VRAMStrategy.EXCLUSIVE, VRAMStrategy.BALANCED])
         if isinstance(supported_strategies, VRAMStrategy):
             supported_strategies = [supported_strategies]
         if vram_strategy not in supported_strategies:

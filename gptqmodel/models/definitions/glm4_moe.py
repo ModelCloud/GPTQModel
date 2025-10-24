@@ -18,8 +18,6 @@ class GLM4MoEGPTQ(BaseQModel):
     # config.n_routed_experts contains the actual expert count used for index
     dynamic_expert_index = "n_routed_experts"
 
-    supported_vram_strategies = [VRAMStrategy.EXCLUSIVE, VRAMStrategy.BALANCED]
-
     pre_lm_head_norm_module = "model.norm"
 
     # Set to False since GLM-4.5-Air may have dynamic module structures
