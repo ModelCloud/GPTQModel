@@ -3,4 +3,4 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-__version__ = "5.0.0"
+__version__ = "5.1.0-dev"
