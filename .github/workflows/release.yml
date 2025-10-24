@@ -330,7 +330,7 @@ jobs:
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           echo "WHL_NAME=$whl" >> $GITHUB_ENV
 
-          [ $(stat -c%s "$whl") -lt 104857600 ] && echo "wheel size < 100M" && exit 1 || echo "$whl size check passed."
+          [ $(stat -c%s "dist/$whl") -lt 104857600 ] && echo "wheel size < 100M" && exit 1 || echo "$whl size check passed."
 
           if [ "${{ matrix.python }}" != "313t" ]; then # twine doesn't support python 3.13 yet
             pip install twine
