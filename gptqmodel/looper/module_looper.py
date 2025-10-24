@@ -15,8 +15,10 @@ thread pool.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
+import logging
 from concurrent.futures import as_completed
 from contextlib import nullcontext
 from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING
@@ -33,6 +35,7 @@ from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
+from ..quantization.config import VRAMStrategy
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
@@ -109,6 +112,14 @@ class ModuleLooper():
         self._quant_device_rr = 0
         self._module_device_map: Dict[str, torch.device] = {}
         self._quant_device_lock = threading.Lock()
+        vram_strategy = getattr(self.gptq_model.quantize_config, "vram_strategy", VRAMStrategy.EXCLUSIVE)
+        if isinstance(vram_strategy, str):
+            try:
+                vram_strategy = VRAMStrategy(vram_strategy.lower())
+            except ValueError:
+                vram_strategy = VRAMStrategy.EXCLUSIVE
+        self._vram_strategy = vram_strategy
+        self._moe_subset_threshold = 10
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
@@ -294,7 +305,7 @@ class ModuleLooper():
             cached = self._module_device_map.get(key)
             if cached is not None:
                 return cached
-
+            device: Optional[torch.device]
             if len(self._quant_devices) <= 1:
                 device = self._quant_devices[0]
             else:
@@ -306,6 +317,72 @@ class ModuleLooper():
 
             self._module_device_map[key] = device
             return device
+
+    def _apply_forward_device_overrides(
+        self,
+        subset: Dict[str, NamedModule],
+        device_map: Dict[str, torch.device],
+        *,
+        fallback_modules: Optional[Dict[str, torch.nn.Module]] = None,
+    ) -> Dict[str, torch.device]:
+        previous: Dict[str, torch.device] = {}
+        if not device_map:
+            return previous
+
+        for name, target in device_map.items():
+            named_module = subset.get(name)
+            module_ref = None
+            if named_module is None and fallback_modules is not None:
+                module_ref = fallback_modules.get(name)
+                named_module = module_ref
+            elif named_module is not None:
+                module_ref = named_module.module if isinstance(named_module, NamedModule) else named_module
+            if module_ref is None:
+                continue
+            try:
+                current = get_device(module_ref)
+            except Exception:
+                current = None
+
+            if target is None or (current is not None and current == target):
+                continue
+
+            if current is not None:
+                previous[name] = current
+
+            move_to(module_ref, device=target)
+            rehome_module_to_device(module_ref, target, move_parameters=True, move_buffers=True)
+            if isinstance(named_module, NamedModule):
+                setattr(named_module, "target_device", target)
+            setattr(module_ref, "target_device", target)
+
+        return previous
+
+    def _restore_forward_device_overrides(
+        self,
+        subset: Dict[str, NamedModule],
+        previous_devices: Dict[str, torch.device],
+        *,
+        fallback_modules: Optional[Dict[str, torch.nn.Module]] = None,
+    ) -> None:
+        if not previous_devices:
+            return
+
+        for name, revert_device in previous_devices.items():
+            named_module = subset.get(name)
+            module_ref = None
+            if named_module is None and fallback_modules is not None:
+                module_ref = fallback_modules.get(name)
+                named_module = module_ref
+            elif named_module is not None:
+                module_ref = named_module.module if isinstance(named_module, NamedModule) else named_module
+            if module_ref is None:
+                continue
+            move_to(module_ref, device=revert_device)
+            rehome_module_to_device(module_ref, revert_device, move_parameters=True, move_buffers=True)
+            if isinstance(named_module, NamedModule):
+                setattr(named_module, "target_device", revert_device)
+            setattr(module_ref, "target_device", revert_device)
 
     def _rehome_processor_task(
         self,
@@ -360,7 +437,10 @@ class ModuleLooper():
         named_module: NamedModule,
         fallback_device: torch.device,
     ) -> torch.device:
-        target_device = self._assign_quant_device_for_module(named_module, fallback_device=fallback_device)
+        target_device = self._assign_quant_device_for_module(
+            named_module,
+            fallback_device=fallback_device,
+        )
 
         move_to(named_module.module, device=target_device)
         rehome_module_to_device(named_module.module, target_device, move_parameters=True, move_buffers=True)
@@ -392,6 +472,8 @@ class ModuleLooper():
         progress_stage: Optional[str] = None,
         progress_rows_per_batch: Optional[List[int]] = None,
         progress_total_rows: Optional[int] = None,
+        force_serial: bool = False,
+        preserve_module_devices: bool = False,
     ) -> List[List[torch.Tensor]]:
         """Dispatch the captured layer inputs through the module.
 
@@ -400,6 +482,28 @@ class ModuleLooper():
         single threaded path. The helper returns the ordered outputs that feed
         the next processor stage when ``need_outputs`` is set.
         """
+        if force_serial:
+            return self._run_forward_batches_single(
+                module=module,
+                processor=processor,
+                layer_inputs=layer_inputs,
+                layer_input_kwargs=layer_input_kwargs,
+                position_ids=position_ids,
+                attention_masks=attention_masks,
+                cur_layer_device=cur_layer_device,
+                is_lm_head_module=is_lm_head_module,
+                shared_kv_cache_dict=shared_kv_cache_dict,
+                layer_index=layer_index,
+                need_outputs=need_outputs,
+                reuse_kv=reuse_kv,
+                progress_pb=progress_pb,
+                progress_title=progress_title,
+                progress_stage=progress_stage,
+                progress_rows_per_batch=progress_rows_per_batch,
+                progress_total_rows=progress_total_rows,
+                preserve_module_devices=preserve_module_devices,
+            )
+
         devices = select_forward_devices(cur_layer_device)
 
         if len(devices) <= 1:
@@ -421,6 +525,7 @@ class ModuleLooper():
                 progress_stage=progress_stage,
                 progress_rows_per_batch=progress_rows_per_batch,
                 progress_total_rows=progress_total_rows,
+                preserve_module_devices=preserve_module_devices,
             )
 
         return self._run_forward_batches_parallel(
@@ -464,6 +569,7 @@ class ModuleLooper():
         progress_stage: Optional[str] = None,
         progress_rows_per_batch: Optional[List[int]] = None,
         progress_total_rows: Optional[int] = None,
+        preserve_module_devices: bool = False,
     ) -> List[List[torch.Tensor]]:
         """Sequential fallback when only one forward device is in use."""
         outputs: List[List[torch.Tensor]] = []
@@ -485,10 +591,16 @@ class ModuleLooper():
         for batch_idx in range(total_batches):
             processor._set_current_batch_index(batch_idx)
             try:
-                layer_input = [move_to(inp, device=cur_layer_device) for inp in layer_inputs[batch_idx]]
+                exec_device = cur_layer_device
+                if preserve_module_devices:
+                    module_target = getattr(module, "target_device", None)
+                    if module_target is not None:
+                        exec_device = module_target
+
+                layer_input = [move_to(inp, device=exec_device) for inp in layer_inputs[batch_idx]]
 
                 raw_mask = attention_masks[batch_idx]
-                attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=cur_layer_device)
+                attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=exec_device)
 
                 keep_mask = None
                 if attn_tensor is not None:
@@ -503,15 +615,16 @@ class ModuleLooper():
                 if position_ids:
                     pos = position_ids[batch_idx]
                     if pos is not None:
-                        additional_inputs["position_ids"] = move_to(pos, device=cur_layer_device)
+                        additional_inputs["position_ids"] = move_to(pos, device=exec_device)
 
                 for key, value in layer_input_kwargs[batch_idx].items():
-                    additional_inputs[key] = nested_move_to(value, device=cur_layer_device)
+                    additional_inputs[key] = nested_move_to(value, device=exec_device)
 
                 if reuse_kv and prev_kv is not None:
-                    additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=cur_layer_device)
+                    additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=exec_device)
 
-                rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
+                if not preserve_module_devices:
+                    rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
                 module_output = None
                 try:
@@ -1138,6 +1251,75 @@ class ModuleLooper():
                     if len(subset) == 0:
                         continue
 
+                    is_moe_subset = len(subset) >= self._moe_subset_threshold
+                    forward_device_map: Dict[str, torch.device] = {}
+                    subset_forward_serial = is_moe_subset and self._vram_strategy == VRAMStrategy.BALANCED
+                    if is_moe_subset:
+                        subset_names = ", ".join(subset.keys())
+                        log.debug(
+                            "ModuleLooper: MoE subset detected (layer=`%s`, subset=%d/%d, modules=%d, strategy=%s, names=[%s])",
+                            layer_descriptor,
+                            index + 1,
+                            subset_total,
+                            len(subset),
+                            getattr(self._vram_strategy, "value", str(self._vram_strategy)),
+                            subset_names,
+                        )
+                        for named_module in subset.values():
+                            setattr(named_module, "moe_enabled", True)
+                        if self._vram_strategy == VRAMStrategy.BALANCED:
+                            devices = [dev for dev in self._quant_devices if dev is not None and getattr(dev, "type", None) != "cpu"]
+                            if len(devices) > 1:
+                                expert_groups: Dict[str, List[str]] = {}
+                                combined_names: List[str] = list(subset.keys())
+                                if full is not None:
+                                    for candidate in full.keys():
+                                        if candidate not in subset:
+                                            combined_names.append(candidate)
+
+                                for sub_name in combined_names:
+                                    group_key = None
+                                    if ".experts." in sub_name:
+                                        prefix, remainder = sub_name.split(".experts.", 1)
+                                        expert_id = remainder.split(".", 1)[0]
+                                        group_key = f"{prefix}.experts.{expert_id}"
+                                    elif ".shared_experts." in sub_name:
+                                        prefix, _ = sub_name.split(".shared_experts.", 1)
+                                        group_key = f"{prefix}.shared_experts"
+                                    if group_key is None:
+                                        continue
+                                    expert_groups.setdefault(group_key, []).append(sub_name)
+
+                                group_keys: List[str] = []
+                                if expert_groups:
+                                    for group_key, module_names in expert_groups.items():
+                                        suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
+                                        if {"gate_proj", "up_proj"}.issubset(suffixes):
+                                            group_keys.append(group_key)
+
+                                if group_keys:
+                                    groups_per_device = max(math.ceil(len(group_keys) / len(devices)), 1)
+                                    for group_index, group_key in enumerate(group_keys):
+                                        device_idx = min(group_index // groups_per_device, len(devices) - 1)
+                                        target_device = devices[device_idx]
+                                        for module_name in expert_groups[group_key]:
+                                            forward_device_map[module_name] = target_device
+
+                                    assignment = ", ".join(
+                                        f"{name}->{forward_device_map[name]}"
+                                        for name in forward_device_map
+                                    )
+                                    log.debug(
+                                        "ModuleLooper: MoE balanced device map (layer=`%s`, subset=%d/%d) %s",
+                                        layer_descriptor,
+                                        index + 1,
+                                        subset_total,
+                                        assignment,
+                                    )
+                    else:
+                        for named_module in subset.values():
+                            setattr(named_module, "moe_enabled", False)
+
                     handle = []
                     subset_total = len(modules)
                     batch_count = self._resolve_batch_total(
@@ -1200,6 +1382,35 @@ class ModuleLooper():
                     # try to cleanup recent objects before forward
                     #timed_gc_collect(1)
 
+                    previous_forward_devices: Dict[str, torch.device] = {}
+                    preserve_devices = bool(forward_device_map)
+                    if forward_device_map:
+                        previous_forward_devices = self._apply_forward_device_overrides(
+                            subset,
+                            forward_device_map,
+                            fallback_modules=full,
+                        )
+
+                    if log.isEnabledFor(logging.DEBUG):
+                        device_snapshot = []
+                        for name, named_module in subset.items():
+                            target_device = getattr(named_module, "target_device", None)
+                            if target_device is None:
+                                try:
+                                    target_device = get_device(named_module.module)
+                                except Exception:
+                                    target_device = None
+                            target_device_str = str(target_device) if target_device is not None else "unknown"
+                            device_snapshot.append(f"{name}:{target_device_str}")
+                        log.debug(
+                            "ModuleLooper: Forward subset device snapshot (layer=`%s`, subset=%d/%d, serial=%s) %s",
+                            layer_descriptor,
+                            index + 1,
+                            subset_total,
+                            subset_forward_serial,
+                            ", ".join(device_snapshot),
+                        )
+
                     try:
                         forward_outputs = self._run_forward_batches(
                             module=module,
@@ -1219,8 +1430,16 @@ class ModuleLooper():
                             progress_stage="Forward",
                             progress_rows_per_batch=forward_row_counts,
                             progress_total_rows=forward_total_rows,
+                            force_serial=subset_forward_serial,
+                            preserve_module_devices=preserve_devices,
                         )
                     finally:
+                        if forward_device_map:
+                            self._restore_forward_device_overrides(
+                                subset,
+                                previous_forward_devices,
+                                fallback_modules=full,
+                            )
                         if forward_pb is not None:
                             forward_pb.close()
                     if need_outputs:
@@ -1363,6 +1582,34 @@ class ModuleLooper():
                     replay_start = time.perf_counter()
                     replay_source = f"{layer_descriptor}:subset{index + 1}/{subset_total}"
 
+                    replay_prev_devices: Dict[str, torch.device] = {}
+                    if forward_device_map:
+                        replay_prev_devices = self._apply_forward_device_overrides(
+                            subset,
+                            forward_device_map,
+                            fallback_modules=full,
+                        )
+
+                    if log.isEnabledFor(logging.DEBUG):
+                        replay_snapshot = []
+                        for name, named_module in subset.items():
+                            target_device = getattr(named_module, "target_device", None)
+                            if target_device is None:
+                                try:
+                                    target_device = get_device(named_module.module)
+                                except Exception:
+                                    target_device = None
+                            target_device_str = str(target_device) if target_device is not None else "unknown"
+                            replay_snapshot.append(f"{name}:{target_device_str}")
+                        log.debug(
+                            "ModuleLooper: Forward replay device snapshot (layer=`%s`, subset=%d/%d, serial=%s) %s",
+                            layer_descriptor,
+                            index + 1,
+                            subset_total,
+                            subset_forward_serial,
+                            ", ".join(replay_snapshot),
+                        )
+
                     try:
                         layer_outputs = self._run_forward_batches(
                             module=module,
@@ -1382,8 +1629,16 @@ class ModuleLooper():
                             progress_stage="Forward replay",
                             progress_rows_per_batch=replay_row_counts,
                             progress_total_rows=replay_total_rows,
+                            force_serial=subset_forward_serial,
+                            preserve_module_devices=preserve_devices,
                         )
                     finally:
+                        if forward_device_map:
+                            self._restore_forward_device_overrides(
+                                subset,
+                                replay_prev_devices,
+                                fallback_modules=full,
+                            )
                         if replay_pb is not None:
                             replay_pb.close()
                     if region_timer is not None:

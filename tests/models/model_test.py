@@ -61,7 +61,7 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
-from gptqmodel.quantization.config import QuantizeConfig  # noqa: E402
+from gptqmodel.quantization.config import QuantizeConfig, VRAMStrategy  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -79,6 +79,7 @@ DEFAULT_TASK_NAMES = (EVAL.LM_EVAL.ARC_CHALLENGE,)
 class ModelTest(unittest.TestCase):
     DEBUG = True # enable extra debug output
 
+    VRAM_STRATEGY = VRAMStrategy.EXCLUSIVE
     TRUST_REMOTE_CODE = False
     APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
@@ -717,6 +718,7 @@ class ModelTest(unittest.TestCase):
             v2=self.V2,
             adapter=self.EORA,
             pack_impl="cpu",
+            vram_strategy=self.VRAM_STRATEGY,
         )
 
         log.info(f"Quant config: {quantize_config}")
