@@ -187,6 +187,8 @@ class BaseQModel(nn.Module):
     # list of supported keys: [ "notes" = print the notes value on model load ]
     info: Dict[str, str] = {}
 
+    mtp_file: str = None
+
     supports_desc_act = [True, False]
 
     modality: List[MODALITY] = [MODALITY.TEXT]

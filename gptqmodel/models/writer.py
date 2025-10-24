@@ -9,6 +9,7 @@ import copy
 import csv
 import json
 import os
+import shutil
 from os.path import isfile, join
 from typing import Any, Dict, Optional, Union
 
@@ -16,6 +17,7 @@ import pcre as re
 import torch
 import transformers
 from safetensors.torch import save_file
+from safetensors import safe_open
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
@@ -374,6 +376,54 @@ def ModelWriter(cls):
         # save lora
         if self.quantize_config.adapter:
             _eora_save(self, save_dir=eora_path if eora_path else self.quantize_config.adapter.path, model_save_dir=save_dir)
+
+        # Handle mtp.safetensors file if it exists in the original model directory
+        if self.mtp_file:
+            mtp_file_name = self.mtp_file
+            original_mtp_path = os.path.join(self.model_local_path, mtp_file_name)
+            if os.path.exists(original_mtp_path):
+                target_mtp_path = os.path.join(save_dir, mtp_file_name)
+                shutil.copy2(original_mtp_path, target_mtp_path)
+                log.info(f"Model: Copied {mtp_file_name} from original model directory to quantized model directory")
+                
+                # Update model.safetensors.index.json to include mtp.safetensors if index file exists
+                index_save_name = model_save_name + ".index.json"
+                index_save_path = join(save_dir, index_save_name)
+                if os.path.exists(index_save_path):
+                    with open(index_save_path, "r", encoding="utf-8") as f:
+                        index_data = json.load(f)
+                    
+                    # Read the tensor names from mtp.safetensors file
+                    try:
+                        with safe_open(original_mtp_path, framework="pt", device="cpu") as f:
+                            mtp_tensor_names = f.keys()
+                            
+                            # Add mtp.safetensors tensors to the weight_map
+                            if "weight_map" not in index_data:
+                                index_data["weight_map"] = {}
+                            
+                            for tensor_name in mtp_tensor_names:
+                                index_data["weight_map"][tensor_name] = mtp_file_name
+                                
+                            log.info(f"Model: Added {len(mtp_tensor_names)} tensors from {mtp_file_name} to weight_map")
+                            
+                    except Exception as e:
+                        log.warn(f"Model: Failed to read tensor names from {mtp_file_name}: {e}")
+                        # Fallback: just ensure weight_map exists
+                        if "weight_map" not in index_data:
+                            index_data["weight_map"] = {}
+                    
+                    # Get the file size of mtp.safetensors and add it to total_size
+                    mtp_size = os.path.getsize(target_mtp_path)
+                    if "metadata" in index_data and "total_size" in index_data["metadata"]:
+                        index_data["metadata"]["total_size"] += mtp_size
+                    
+                    # Save the updated index file
+                    with open(index_save_path, "w", encoding="utf-8") as f:
+                        content = json.dumps(index_data, indent=2, sort_keys=True) + "\n"
+                        f.write(content)
+                    
+                    log.info(f"Model: Updated {index_save_name} to include {mtp_file_name}")
 
         # If the saved model is a loaded quantized model, do not calculate the size diff.
         if not self.load_quantized_model:
