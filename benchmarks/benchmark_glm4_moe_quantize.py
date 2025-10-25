@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Optional, Tuple
+import math
 
 import torch
 import torch.nn as nn
@@ -47,6 +48,26 @@ def cpu_autocast_context(dtype: torch.dtype):
 
 
 CPU_AUTOCAST_AVAILABLE = has_cpu_autocast()
+
+
+def fmt_value(value: float, precision: int = 2) -> str:
+    if not math.isfinite(value):
+        return str(value)
+    if value == 0:
+        return "0.00"
+    abs_v = abs(value)
+    if 0.01 <= abs_v < 1e5:
+        return f"{value:.{precision}f}"
+    return f"{value:.{precision}e}"
+
+
+def to_channels_last_2d(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.dim() != 2:
+        raise ValueError("channels_last conversion expects a rank-2 tensor.")
+    leading = tensor.size(0)
+    reshaped = tensor.contiguous().view(leading, tensor.size(1), 1, 1)
+    cl = reshaped.to(memory_format=torch.channels_last)
+    return cl.contiguous().view_as(tensor)
 
 
 @dataclass
@@ -164,15 +185,22 @@ def run_forward_matmul(
     device: torch.device,
     batch_size: int,
     enable_cpu_amp: bool = False,
+    use_channels_last: bool = False,
 ) -> BenchRun:
     if enable_cpu_amp and device.type != "cpu":
         raise ValueError("CPU autocast is only applicable to CPU devices.")
     if enable_cpu_amp and not CPU_AUTOCAST_AVAILABLE:
         raise RuntimeError("torch.cpu.amp.autocast is not available in this environment.")
+    if use_channels_last and device.type != "cpu":
+        raise ValueError("channels_last memory format test only applies to CPU tensors.")
 
     matmul_dtype = MATMUL_DTYPE
     weight = weights.to(device=device, dtype=matmul_dtype, copy=True)
     inp = inputs.to(device=device, dtype=matmul_dtype, copy=True)
+
+    if device.type == "cpu" and use_channels_last:
+        weight = to_channels_last_2d(weight)
+        inp = to_channels_last_2d(inp)
 
     if device.type == "cuda":
         sync = torch.cuda.synchronize
@@ -222,7 +250,15 @@ def main() -> None:
     forward_runs = []
     for bsz in FORWARD_BATCH_SIZES:
         cpu_forward = run_forward_matmul(expert_weights, forward_inputs[bsz], cpu_device, bsz)
+        cpu_forward_cl = run_forward_matmul(
+            expert_weights,
+            forward_inputs[bsz],
+            cpu_device,
+            bsz,
+            use_channels_last=True,
+        )
         cpu_forward_amp: Optional[BenchRun] = None
+        cpu_forward_amp_cl: Optional[BenchRun] = None
         if CPU_AUTOCAST_AVAILABLE:
             cpu_forward_amp = run_forward_matmul(
                 expert_weights,
@@ -231,8 +267,25 @@ def main() -> None:
                 bsz,
                 enable_cpu_amp=True,
             )
+            cpu_forward_amp_cl = run_forward_matmul(
+                expert_weights,
+                forward_inputs[bsz],
+                cpu_device,
+                bsz,
+                enable_cpu_amp=True,
+                use_channels_last=True,
+            )
         gpu_forward = run_forward_matmul(expert_weights, forward_inputs[bsz], GPU_DEVICE, bsz)
-        forward_runs.append((bsz, cpu_forward, cpu_forward_amp, gpu_forward))
+        forward_runs.append(
+            (
+                bsz,
+                cpu_forward,
+                cpu_forward_cl,
+                cpu_forward_amp,
+                cpu_forward_amp_cl,
+                gpu_forward,
+            )
+        )
 
     print(f"Largest expert linear: {expert_name} with weight shape {expert_shape}")
     print(f"Calibration tokens: batch={BATCH_SIZE}, seq={SEQ_LEN}, total_tokens={BATCH_SIZE * SEQ_LEN}")
@@ -257,44 +310,89 @@ def main() -> None:
     print(tabulate(quant_rows, headers=["Device", "time (s)", "nsamples", "samples/s", "label"], tablefmt="github"))
     print(f"GPU speedup vs CPU: {cpu_run.elapsed_s / gpu_run.elapsed_s:.2f}x faster\n")
 
-    forward_headers = [
+    time_headers = [
         "batch",
         "CPU bf16 (s)",
-        "CPU bf16 samples/s",
+        "CPU bf16 CL (s)",
         "CPU autocast (s)",
-        "CPU autocast samples/s",
+        "CPU autocast CL (s)",
         "GPU (s)",
-        "GPU samples/s",
-        "GPU speedup vs CPU bf16",
-        "GPU speedup vs CPU autocast",
     ]
-    forward_rows = []
-    for bsz, cpu_forward, cpu_forward_amp, gpu_forward in forward_runs:
-        speedup_bf16 = cpu_forward.elapsed_s / gpu_forward.elapsed_s
-        autop_speedup = "-"
-        autocast_time = "-"
-        autocast_samples = "-"
-        if cpu_forward_amp is not None:
-            autocast_time = f"{cpu_forward_amp.elapsed_s:.5f}"
-            autocast_samples = f"{cpu_forward_amp.samples_per_s:.2f}"
-            autop_speedup = f"{cpu_forward_amp.elapsed_s / gpu_forward.elapsed_s:.2f}"
-        row = [
-            bsz,
-            f"{cpu_forward.elapsed_s:.5f}",
-            f"{cpu_forward.samples_per_s:.2f}",
-            autocast_time,
-            autocast_samples,
-            f"{gpu_forward.elapsed_s:.5f}",
-            f"{gpu_forward.samples_per_s:.2f}",
-            f"{speedup_bf16:.2f}",
-            autop_speedup,
-        ]
-        forward_rows.append(row)
+    throughput_headers = [
+        "batch",
+        "CPU bf16 samp/s",
+        "CPU bf16 CL samp/s",
+        "CPU autocast samp/s",
+        "CPU autocast CL samp/s",
+        "GPU samp/s",
+        "GPU vs CPU bf16",
+        "GPU vs CPU bf16 CL",
+        "GPU vs CPU autocast",
+        "GPU vs CPU autocast CL",
+    ]
+    time_rows = []
+    throughput_rows = []
+    for (
+        bsz,
+        cpu_forward,
+        cpu_forward_cl,
+        cpu_forward_amp,
+        cpu_forward_amp_cl,
+        gpu_forward,
+    ) in forward_runs:
+        def fmt(run: Optional[BenchRun]) -> Tuple[str, str]:
+            if run is None:
+                return "-", "-"
+            return fmt_value(run.elapsed_s), fmt_value(run.samples_per_s)
+
+        cpu_bf16_time, cpu_bf16_samples = fmt(cpu_forward)
+        cpu_bf16_cl_time, cpu_bf16_cl_samples = fmt(cpu_forward_cl)
+        cpu_amp_time, cpu_amp_samples = fmt(cpu_forward_amp)
+        cpu_amp_cl_time, cpu_amp_cl_samples = fmt(cpu_forward_amp_cl)
+        gpu_time, gpu_samples = fmt(gpu_forward)
+
+        def speedup(ref: Optional[BenchRun]) -> str:
+            if ref is None:
+                return "-"
+            return f"{fmt_value(ref.elapsed_s / gpu_forward.elapsed_s)}x"
+
+        speedup_bf16 = speedup(cpu_forward)
+        speedup_bf16_cl = speedup(cpu_forward_cl)
+        speedup_amp = speedup(cpu_forward_amp)
+        speedup_amp_cl = speedup(cpu_forward_amp_cl)
+
+        time_rows.append(
+            [
+                bsz,
+                cpu_bf16_time,
+                cpu_bf16_cl_time,
+                cpu_amp_time,
+                cpu_amp_cl_time,
+                gpu_time,
+            ]
+        )
+        throughput_rows.append(
+            [
+                bsz,
+                cpu_bf16_samples,
+                cpu_bf16_cl_samples,
+                cpu_amp_samples,
+                cpu_amp_cl_samples,
+                gpu_samples,
+                speedup_bf16,
+                speedup_bf16_cl,
+                speedup_amp,
+                speedup_amp_cl,
+            ]
+        )
 
     print("--- bf16 token-level matmul (batch × hidden × intermediate) ---")
     if not CPU_AUTOCAST_AVAILABLE:
         print("Note: torch.cpu.amp.autocast is unavailable; CPU autocast columns contain '-'.")
-    print(tabulate(forward_rows, headers=forward_headers, tablefmt="github"))
+    print("Time per batch:")
+    print(tabulate(time_rows, headers=time_headers, tablefmt="github"))
+    print("\nThroughput and GPU speedups:")
+    print(tabulate(throughput_rows, headers=throughput_headers, tablefmt="github"))
 
 
 if __name__ == "__main__":
