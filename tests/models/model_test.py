@@ -519,6 +519,49 @@ class ModelTest(unittest.TestCase):
             print(f"\n{colorize(f'Index file: {rel_name}', 0, False)}")
             print(json.dumps(content, indent=2, sort_keys=True))
 
+    def _prepare_quant_save_destination(self, need_eval):
+        if self.SAVE_PATH:
+            return contextlib.nullcontext(self.SAVE_PATH), self.SAVE_PATH, None
+
+        if need_eval:
+            tmp_dir = tempfile.mkdtemp()
+            return contextlib.nullcontext(tmp_dir), tmp_dir, lambda: shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        tmp_context = tempfile.TemporaryDirectory()
+        return tmp_context, tmp_context.name, tmp_context.cleanup
+
+    def _resolve_quantized_model_path(self, model_candidate):
+        if model_candidate is None:
+            return None
+        if isinstance(model_candidate, (list, tuple)):
+            model_candidate = model_candidate[0]
+        if isinstance(model_candidate, str):
+            return model_candidate
+        return getattr(model_candidate, "model_local_path", None)
+
+    def _cleanup_quantized_model(self, model_candidate, enabled=True):
+        if not enabled:
+            return False
+        target_path = self._resolve_quantized_model_path(model_candidate)
+        if not target_path or not isinstance(target_path, str):
+            return False
+
+        temp_root = os.path.realpath(tempfile.gettempdir())
+        candidate_path = os.path.realpath(target_path)
+        if not candidate_path.startswith(temp_root):
+            return False
+        if not os.path.exists(candidate_path):
+            return False
+
+        try:
+            shutil.rmtree(candidate_path)
+        except OSError as exc:
+            log.warn(f"Failed to delete temp model `{candidate_path}`: {exc}")
+            return False
+
+        log.info(f"Deleting temp model: {candidate_path}")
+        return True
+
     @staticmethod
     def _colorize(text, matched):
         color = "\033[92m" if matched else "\033[91m"
@@ -764,43 +807,56 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
         if not is_quantized:
-            model.quantize(calibration_dataset, calibration_sort=self.DATASET_SORT, backend=self.QUANT_BACKEND, batch_size=batch_size)
+            save_context = None
+            planned_save_path = None
+            cleanup_callback = None
+            try:
+                save_context, planned_save_path, cleanup_callback = self._prepare_quant_save_destination(need_eval)
+                log.info(f"Quantized model artifacts will be saved to: {planned_save_path}")
+                model.quantize(calibration_dataset, calibration_sort=self.DATASET_SORT, backend=self.QUANT_BACKEND, batch_size=batch_size)
 
-            self.check_kernel(model, self.KERNEL_QUANT)
+                self.check_kernel(model, self.KERNEL_QUANT)
 
-            # TODO: make into shared method
-            with (contextlib.nullcontext(self.SAVE_PATH) if self.SAVE_PATH else contextlib.nullcontext(tempfile.mkdtemp()) if need_eval else tempfile.TemporaryDirectory()) as path:
-                os.makedirs(path, exist_ok=True)
-                self.clear_directory(path)
+                # TODO: make into shared method
+                with save_context as path:
+                    cleanup_callback = None
+                    os.makedirs(path, exist_ok=True)
+                    self.clear_directory(path)
 
-                model.save(path)
-                tokenizer.save_pretrained(path)
-                self._print_post_quant_artifacts(path)
-                log.info(f"Quantized Model saved to tmp dir: {path}")
+                    model.save(path)
+                    tokenizer.save_pretrained(path)
+                    self._print_post_quant_artifacts(path)
 
-                reuse_candidates, eval_records = self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
-                self._post_quant_eval_records = eval_records
-                target_backend = self._current_load_backend()
+                    reuse_candidates, eval_records = self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
+                    self._post_quant_eval_records = eval_records
+                    target_backend = self._current_load_backend()
 
-                q_model = reuse_candidates.pop(target_backend, None)
-                if q_model is None:
-                    # Ensure the post-quant reload stays on a single CUDA device when available.
-                    use_cuda_map = torch.cuda.is_available() and target_backend != BACKEND.TORCH_FUSED
-                    if use_cuda_map:
-                        q_model = self.loadQuantModel(
-                            path,
-                            trust_remote_code=trust_remote_code,
-                            backend=target_backend,
-                            device_map={"": "cuda:0"},
-                        )
+                    q_model = reuse_candidates.pop(target_backend, None)
+                    if q_model is None:
+                        # Ensure the post-quant reload stays on a single CUDA device when available.
+                        use_cuda_map = torch.cuda.is_available() and target_backend != BACKEND.TORCH_FUSED
+                        if use_cuda_map:
+                            q_model = self.loadQuantModel(
+                                path,
+                                trust_remote_code=trust_remote_code,
+                                backend=target_backend,
+                                device_map={"": "cuda:0"},
+                            )
+                        else:
+                            q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code, backend=target_backend)
                     else:
-                        q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code, backend=target_backend)
-                else:
-                    log.info(f"Reusing post-quant validation model for backend `{target_backend.name}`")
+                        log.info(f"Reusing post-quant validation model for backend `{target_backend.name}`")
 
-                q_tokenizer = q_model.tokenizer or self.load_tokenizer(path, trust_remote_code=trust_remote_code)
-                if need_create_processor:
-                    processor = AutoProcessor.from_pretrained(path)
+                    q_tokenizer = q_model.tokenizer or self.load_tokenizer(path, trust_remote_code=trust_remote_code)
+                    if need_create_processor:
+                        processor = AutoProcessor.from_pretrained(path)
+            except Exception:
+                if cleanup_callback is not None:
+                    try:
+                        cleanup_callback()
+                    except Exception:
+                        pass
+                raise
 
         else:
             if need_create_processor:
@@ -949,16 +1005,7 @@ class ModelTest(unittest.TestCase):
                         aggregated_results[normalized_task_name] = filtered_metrics
                         print({normalized_task_name: filtered_metrics})
 
-                # only delete tmp folders
-                model_local_path = getattr(model, "model_local_path", "")
-                if (
-                    delete_quantized_model
-                    and isinstance(model_local_path, str)
-                    and model_local_path.startswith("/tmp")
-                    and os.path.exists(model_local_path)
-                ):
-                    log.info(f"Deleting temp model: {model_local_path}")
-                    shutil.rmtree(model_local_path)
+                self._cleanup_quantized_model(model, enabled=delete_quantized_model)
                 return aggregated_results
         except BaseException as e:
             if isinstance(e, torch.OutOfMemoryError):
@@ -1012,6 +1059,7 @@ class ModelTest(unittest.TestCase):
                 delete_quantized_model=self.DELETE_QUANTIZED_MODEL,
             )
         self.check_results(task_results)
+        self._cleanup_quantized_model(self.model, enabled=self.DELETE_QUANTIZED_MODEL)
 
     def check_results(self, task_results):
         baselines = self.get_eval_tasks()

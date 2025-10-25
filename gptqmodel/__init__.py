@@ -14,6 +14,7 @@ patch_safetensors_save_file()
 patch_triton_autotuner()
 
 from .utils.env import env_flag
+from .utils.logger import setup_logger
 
 
 DEBUG_ON = env_flag("DEBUG")
@@ -41,10 +42,13 @@ DEVICE_THREAD_POOL = DeviceThreadPool(
 )
 
 from .models import GPTQModel, get_best_device
+from .models.auto import ASCII_LOGO
 from .quantization import BaseQuantizeConfig, QuantizeConfig
 from .utils import BACKEND
 from .utils.exllama import exllama_set_max_input_length
 from .version import __version__
+
+setup_logger().info("\n%s", ASCII_LOGO)
 
 
 if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
