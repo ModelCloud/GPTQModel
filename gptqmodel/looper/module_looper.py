@@ -1321,7 +1321,6 @@ class ModuleLooper():
 
                 processed_subset = {}
                 
-                any_modules_processed = False  # Flag to track if any modules were actually processed
                 subset_total = len(modules)
                 index = 0
                 subset = {}
@@ -1346,8 +1345,6 @@ class ModuleLooper():
                                                       names=names,
                                                       processor=processor,
                                                       fail_safe=fail_safe)
-
-                    any_modules_processed = any_modules_processed or bool(subset)
 
                     moe_group_keys_all: List[str] = []
 
@@ -1646,7 +1643,7 @@ class ModuleLooper():
                 is_last_module = layer_index == len(pb) - 1
                 layer_outputs: List[List[torch.Tensor]] = []
                 # second forward after process()
-                if not is_last_module and processor.fwd_after_process and any_modules_processed:
+                if not is_last_module and processor.fwd_after_process:
                     replay_batch_count = self._resolve_batch_total(
                         getattr(processor, "num_batches", None),
                         layer_inputs,
