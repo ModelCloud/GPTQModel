@@ -1328,14 +1328,13 @@ class ModuleLooper():
                 # Proactively inspect for MoE architecture using the robust helper function.
                 forward_device_map: Dict[str, torch.device] = {}
                 is_moe_layer = full and any(self._extract_moe_group_key(name) for name in full.keys())
-                if is_moe_layer:
-                    for name, submodule in full.items():
-                        try:
-                            device = get_device(submodule)
-                            if device and device.type != 'meta':
-                                forward_device_map[name] = device
-                        except Exception:
-                            pass
+                for name, submodule in full.items():
+                    try:
+                        device = get_device(submodule)
+                        if device and device.type != 'meta':
+                            forward_device_map[name] = device
+                    except Exception:
+                        pass
 
                 subset_forward_serial = is_moe_layer and self._vram_strategy == VRAMStrategy.BALANCED
 
