@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-import math
 
 import torch
 import torch.nn as nn
@@ -51,14 +50,9 @@ CPU_AUTOCAST_AVAILABLE = has_cpu_autocast()
 
 
 def fmt_value(value: float, precision: int = 2) -> str:
-    if not math.isfinite(value):
+    if not torch.isfinite(torch.tensor(value)):
         return str(value)
-    if value == 0:
-        return "0.00"
-    abs_v = abs(value)
-    if 0.01 <= abs_v < 1e5:
-        return f"{value:.{precision}f}"
-    return f"{value:.{precision}e}"
+    return f"{value:.{precision}f}"
 
 
 def to_channels_last_2d(tensor: torch.Tensor) -> torch.Tensor:
