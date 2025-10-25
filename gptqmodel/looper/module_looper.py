@@ -1320,6 +1320,8 @@ class ModuleLooper():
                 attention_masks = processor.inputs_cache.attention_masks
 
                 processed_subset = {}
+                
+                any_modules_processed = False  # Flag to track if any modules were actually processed
 
                 for index, names in enumerate(modules):
                     subset = self.crate_named_modules(full=full, is_lm_head_module=is_lm_head_module,
@@ -1330,6 +1332,8 @@ class ModuleLooper():
 
                     if len(subset) == 0:
                         continue
+                        
+                    any_modules_processed = True  # Mark that at least one subset had modules
 
                     moe_group_keys_all: List[str] = []
                     forward_device_map: Dict[str, torch.device] = {}
@@ -1629,8 +1633,8 @@ class ModuleLooper():
 
                 is_last_module = layer_index == len(pb) - 1
                 layer_outputs: List[List[torch.Tensor]] = []
-                # second forward after process()
-                if not is_last_module and processor.fwd_after_process:
+                # second forward after process() - only run if any modules were actually processed
+                if not is_last_module and processor.fwd_after_process and any_modules_processed:
                     replay_batch_count = self._resolve_batch_total(
                         getattr(processor, "num_batches", None),
                         layer_inputs,
