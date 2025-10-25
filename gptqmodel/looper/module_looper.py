@@ -1646,7 +1646,7 @@ class ModuleLooper():
                 is_last_module = layer_index == len(pb) - 1
                 layer_outputs: List[List[torch.Tensor]] = []
                 # second forward after process()
-                if not is_last_module and processor.fwd_after_process:
+                if not is_last_module and processor.fwd_after_process and any_modules_processed:
                     replay_batch_count = self._resolve_batch_total(
                         getattr(processor, "num_batches", None),
                         layer_inputs,
