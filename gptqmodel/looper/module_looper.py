@@ -1322,6 +1322,23 @@ class ModuleLooper():
                 processed_subset = {}
                 
                 any_modules_processed = False  # Flag to track if any modules were actually processed
+                subset_total = len(modules)
+                index = 0
+                subset = {}
+
+                # Proactively inspect for MoE architecture using the robust helper function.
+                forward_device_map: Dict[str, torch.device] = {}
+                is_moe_layer = full and any(self._extract_moe_group_key(name) for name in full.keys())
+                if is_moe_layer:
+                    for name, submodule in full.items():
+                        try:
+                            device = get_device(submodule)
+                            if device and device.type != 'meta':
+                                forward_device_map[name] = device
+                        except Exception:
+                            pass
+
+                subset_forward_serial = is_moe_layer and self._vram_strategy == VRAMStrategy.BALANCED
 
                 for index, names in enumerate(modules):
                     subset = self.crate_named_modules(full=full, is_lm_head_module=is_lm_head_module,
@@ -1330,14 +1347,9 @@ class ModuleLooper():
                                                       processor=processor,
                                                       fail_safe=fail_safe)
 
-                    if len(subset) == 0:
-                        continue
-                        
-                    any_modules_processed = True  # Mark that at least one subset had modules
+                    any_modules_processed = any_modules_processed or bool(subset)
 
                     moe_group_keys_all: List[str] = []
-                    forward_device_map: Dict[str, torch.device] = {}
-                    subset_forward_serial = False
 
                     attention_subset = bool(subset) and all(
                         self._is_attention_module_name(name) for name in subset
@@ -1373,6 +1385,8 @@ class ModuleLooper():
                         for name, named_module in subset.items():
                             setattr(named_module, "moe_enabled", name in moe_modules_set)
 
+                        # This logic is now for refining the device map for quantization,
+                        # not for the initial architectural discovery.
                         if self._vram_strategy == VRAMStrategy.BALANCED:
                             devices = [
                                 dev for dev in self._quant_devices
@@ -1395,7 +1409,6 @@ class ModuleLooper():
                                         for module_name in expert_groups[group_key]:
                                             forward_device_map[module_name] = target_device
 
-                        subset_forward_serial = self._vram_strategy == VRAMStrategy.BALANCED
                         if subset_forward_serial:
                             active_group_count = len(moe_group_keys_all)
                             if active_group_count == 0:
@@ -1407,7 +1420,6 @@ class ModuleLooper():
                             setattr(named_module, "moe_enabled", False)
 
                     handle = []
-                    subset_total = len(modules)
                     batch_count = self._resolve_batch_total(
                         getattr(processor, "num_batches", None),
                         layer_inputs,
@@ -1633,8 +1645,8 @@ class ModuleLooper():
 
                 is_last_module = layer_index == len(pb) - 1
                 layer_outputs: List[List[torch.Tensor]] = []
-                # second forward after process() - only run if any modules were actually processed
-                if not is_last_module and processor.fwd_after_process and any_modules_processed:
+                # second forward after process()
+                if not is_last_module and processor.fwd_after_process:
                     replay_batch_count = self._resolve_batch_total(
                         getattr(processor, "num_batches", None),
                         layer_inputs,
@@ -1733,7 +1745,6 @@ class ModuleLooper():
                             time.perf_counter() - replay_start,
                             source=replay_source,
                         )
-
                 # Finalize module after last processor
                 if p_index == len(self.processors) - 1:
                     torch_sync()
