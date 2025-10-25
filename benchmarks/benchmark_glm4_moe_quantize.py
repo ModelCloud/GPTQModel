@@ -6,8 +6,9 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -28,6 +29,23 @@ MATMUL_DTYPE = torch.bfloat16
 FORWARD_BATCH_SIZES = (1, 2, 3, 4)
 # Honor CUDA_VISIBLE_DEVICES masking by letting torch resolve the active device.
 GPU_DEVICE = torch.device("cuda")
+
+
+def has_cpu_autocast() -> bool:
+    new_api = hasattr(torch, "amp") and hasattr(torch.amp, "autocast")
+    legacy_api = hasattr(torch, "cpu") and hasattr(torch.cpu, "amp") and hasattr(torch.cpu.amp, "autocast")
+    return new_api or legacy_api
+
+
+def cpu_autocast_context(dtype: torch.dtype):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast(device_type="cpu", dtype=dtype)
+    if hasattr(torch, "cpu") and hasattr(torch.cpu, "amp") and hasattr(torch.cpu.amp, "autocast"):
+        return torch.cpu.amp.autocast(dtype=dtype)
+    raise RuntimeError("torch.amp.autocast or torch.cpu.amp.autocast is not available for CPU.")
+
+
+CPU_AUTOCAST_AVAILABLE = has_cpu_autocast()
 
 
 @dataclass
@@ -139,16 +157,36 @@ def run_quantize_benchmark(layer: nn.Module, inputs: torch.Tensor, device: torch
     return BenchRun(device_label=str(device), elapsed_s=time.perf_counter() - start, nsamples=gptq.nsamples)
 
 
-def run_forward_matmul(weights: torch.Tensor, inputs: torch.Tensor, device: torch.device, batch_size: int) -> BenchRun:
-    weight = weights.to(device=device, dtype=MATMUL_DTYPE, copy=True)
-    inp = inputs.to(device=device, dtype=MATMUL_DTYPE, copy=True)
+def run_forward_matmul(
+    weights: torch.Tensor,
+    inputs: torch.Tensor,
+    device: torch.device,
+    batch_size: int,
+    enable_cpu_amp: bool = False,
+) -> BenchRun:
+    if enable_cpu_amp and device.type != "cpu":
+        raise ValueError("CPU autocast is only applicable to CPU devices.")
+    if enable_cpu_amp and not CPU_AUTOCAST_AVAILABLE:
+        raise RuntimeError("torch.cpu.amp.autocast is not available in this environment.")
+
+    matmul_dtype = MATMUL_DTYPE
+    weight = weights.to(device=device, dtype=matmul_dtype, copy=True)
+    inp = inputs.to(device=device, dtype=matmul_dtype, copy=True)
 
     if device.type == "cuda":
-        torch.cuda.synchronize(device)
+        sync = torch.cuda.synchronize
+    else:
+        sync = lambda *args, **kwargs: None
+
+    ctx = nullcontext()
+    if device.type == "cpu" and enable_cpu_amp:
+        ctx = cpu_autocast_context(dtype=MATMUL_DTYPE)
+
+    sync(device)
     start = time.perf_counter()
-    _ = inp @ weight.t()
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    with ctx:
+        _ = inp @ weight.t()
+    sync(device)
 
     return BenchRun(device_label=str(device), elapsed_s=time.perf_counter() - start, nsamples=batch_size)
 
@@ -183,8 +221,17 @@ def main() -> None:
     forward_runs = []
     for bsz in FORWARD_BATCH_SIZES:
         cpu_forward = run_forward_matmul(expert_weights, forward_inputs[bsz], cpu_device, bsz)
+        cpu_forward_amp: Optional[BenchRun] = None
+        if CPU_AUTOCAST_AVAILABLE:
+            cpu_forward_amp = run_forward_matmul(
+                expert_weights,
+                forward_inputs[bsz],
+                cpu_device,
+                bsz,
+                enable_cpu_amp=True,
+            )
         gpu_forward = run_forward_matmul(expert_weights, forward_inputs[bsz], GPU_DEVICE, bsz)
-        forward_runs.append((bsz, cpu_forward, gpu_forward))
+        forward_runs.append((bsz, cpu_forward, cpu_forward_amp, gpu_forward))
 
     print(f"Largest expert linear: {expert_name} with weight shape {expert_shape}")
     print(f"Calibration tokens: batch={BATCH_SIZE}, seq={SEQ_LEN}, total_tokens={BATCH_SIZE * SEQ_LEN}")
@@ -192,13 +239,25 @@ def main() -> None:
     print(f"GPU quantize time:  {gpu_run.elapsed_s:.3f}s (nsamples={gpu_run.nsamples}) on {gpu_run.device_label}")
     print(f"GPU speedup vs CPU: {cpu_run.elapsed_s / gpu_run.elapsed_s:.2f}x faster")
     print("--- bf16 token-level matmul (batch × hidden × intermediate) ---")
-    for bsz, cpu_forward, gpu_forward in forward_runs:
-        speedup = cpu_forward.elapsed_s / gpu_forward.elapsed_s
-        print(
-            f"batch={bsz}: CPU {cpu_forward.elapsed_s:.5f}s ({cpu_forward.samples_per_s:.2f} samples/s) "
-            f"vs GPU {gpu_forward.elapsed_s:.5f}s ({gpu_forward.samples_per_s:.2f} samples/s) "
-            f"-> GPU {speedup:.2f}x faster"
+    if not CPU_AUTOCAST_AVAILABLE:
+        print("Note: torch.cpu.amp.autocast is unavailable; CPU autocast timings are skipped.")
+    for bsz, cpu_forward, cpu_forward_amp, gpu_forward in forward_runs:
+        speedup_bf16 = cpu_forward.elapsed_s / gpu_forward.elapsed_s
+        line = (
+            f"batch={bsz}: CPU bf16 {cpu_forward.elapsed_s:.5f}s ({cpu_forward.samples_per_s:.2f} samples/s)"
         )
+        if cpu_forward_amp is not None:
+            speedup_amp = cpu_forward_amp.elapsed_s / gpu_forward.elapsed_s
+            line += (
+                f", CPU autocast {cpu_forward_amp.elapsed_s:.5f}s ({cpu_forward_amp.samples_per_s:.2f} samples/s)"
+            )
+        line += (
+            f", GPU {gpu_forward.elapsed_s:.5f}s ({gpu_forward.samples_per_s:.2f} samples/s)"
+            f" -> GPU vs CPU bf16 {speedup_bf16:.2f}x faster"
+        )
+        if cpu_forward_amp is not None:
+            line += f", vs CPU autocast {speedup_amp:.2f}x faster"
+        print(line)
 
 
 if __name__ == "__main__":
