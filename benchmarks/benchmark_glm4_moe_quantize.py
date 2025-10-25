@@ -321,14 +321,14 @@ def main() -> None:
     throughput_headers = [
         "batch",
         "CPU bf16 samp/s",
+        "vs GPU",
         "CPU bf16 CL samp/s",
+        "vs GPU",
         "CPU autocast samp/s",
+        "vs GPU",
         "CPU autocast CL samp/s",
+        "vs GPU",
         "GPU samp/s",
-        "GPU vs CPU bf16",
-        "GPU vs CPU bf16 CL",
-        "GPU vs CPU autocast",
-        "GPU vs CPU autocast CL",
     ]
     time_rows = []
     throughput_rows = []
@@ -375,14 +375,14 @@ def main() -> None:
             [
                 bsz,
                 cpu_bf16_samples,
-                cpu_bf16_cl_samples,
-                cpu_amp_samples,
-                cpu_amp_cl_samples,
-                gpu_samples,
                 speedup_bf16,
+                cpu_bf16_cl_samples,
                 speedup_bf16_cl,
+                cpu_amp_samples,
                 speedup_amp,
+                cpu_amp_cl_samples,
                 speedup_amp_cl,
+                gpu_samples,
             ]
         )
 
@@ -390,9 +390,9 @@ def main() -> None:
     if not CPU_AUTOCAST_AVAILABLE:
         print("Note: torch.cpu.amp.autocast is unavailable; CPU autocast columns contain '-'.")
     print("Time per batch:")
-    print(tabulate(time_rows, headers=time_headers, tablefmt="github"))
+    print(tabulate(time_rows, headers=time_headers, tablefmt="github", disable_numparse=True))
     print("\nThroughput and GPU speedups:")
-    print(tabulate(throughput_rows, headers=throughput_headers, tablefmt="github"))
+    print(tabulate(throughput_rows, headers=throughput_headers, tablefmt="github", disable_numparse=True))
 
 
 if __name__ == "__main__":
