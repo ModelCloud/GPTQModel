@@ -15,6 +15,7 @@ import torch.nn as nn
 from accelerate import init_empty_weights
 from safetensors import safe_open
 from transformers import AutoConfig, Glm4MoeForCausalLM
+from tabulate import tabulate
 
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
@@ -235,29 +236,65 @@ def main() -> None:
 
     print(f"Largest expert linear: {expert_name} with weight shape {expert_shape}")
     print(f"Calibration tokens: batch={BATCH_SIZE}, seq={SEQ_LEN}, total_tokens={BATCH_SIZE * SEQ_LEN}")
-    print(f"CPU quantize time:  {cpu_run.elapsed_s:.3f}s (nsamples={cpu_run.nsamples}) on {cpu_run.device_label}")
-    print(f"GPU quantize time:  {gpu_run.elapsed_s:.3f}s (nsamples={gpu_run.nsamples}) on {gpu_run.device_label}")
-    print(f"GPU speedup vs CPU: {cpu_run.elapsed_s / gpu_run.elapsed_s:.2f}x faster")
-    print("--- bf16 token-level matmul (batch × hidden × intermediate) ---")
-    if not CPU_AUTOCAST_AVAILABLE:
-        print("Note: torch.cpu.amp.autocast is unavailable; CPU autocast timings are skipped.")
+
+    quant_rows = [
+        [
+            "CPU",
+            f"{cpu_run.elapsed_s:.3f}",
+            cpu_run.nsamples,
+            f"{cpu_run.samples_per_s:.2f}",
+            cpu_run.device_label,
+        ],
+        [
+            "GPU",
+            f"{gpu_run.elapsed_s:.3f}",
+            gpu_run.nsamples,
+            f"{gpu_run.samples_per_s:.2f}",
+            gpu_run.device_label,
+        ],
+    ]
+    print("\n--- GPTQ quantize timing ---")
+    print(tabulate(quant_rows, headers=["Device", "time (s)", "nsamples", "samples/s", "label"], tablefmt="github"))
+    print(f"GPU speedup vs CPU: {cpu_run.elapsed_s / gpu_run.elapsed_s:.2f}x faster\n")
+
+    forward_headers = [
+        "batch",
+        "CPU bf16 (s)",
+        "CPU bf16 samples/s",
+        "CPU autocast (s)",
+        "CPU autocast samples/s",
+        "GPU (s)",
+        "GPU samples/s",
+        "GPU speedup vs CPU bf16",
+        "GPU speedup vs CPU autocast",
+    ]
+    forward_rows = []
     for bsz, cpu_forward, cpu_forward_amp, gpu_forward in forward_runs:
         speedup_bf16 = cpu_forward.elapsed_s / gpu_forward.elapsed_s
-        line = (
-            f"batch={bsz}: CPU bf16 {cpu_forward.elapsed_s:.5f}s ({cpu_forward.samples_per_s:.2f} samples/s)"
-        )
+        autop_speedup = "-"
+        autocast_time = "-"
+        autocast_samples = "-"
         if cpu_forward_amp is not None:
-            speedup_amp = cpu_forward_amp.elapsed_s / gpu_forward.elapsed_s
-            line += (
-                f", CPU autocast {cpu_forward_amp.elapsed_s:.5f}s ({cpu_forward_amp.samples_per_s:.2f} samples/s)"
-            )
-        line += (
-            f", GPU {gpu_forward.elapsed_s:.5f}s ({gpu_forward.samples_per_s:.2f} samples/s)"
-            f" -> GPU vs CPU bf16 {speedup_bf16:.2f}x faster"
-        )
-        if cpu_forward_amp is not None:
-            line += f", vs CPU autocast {speedup_amp:.2f}x faster"
-        print(line)
+            autocast_time = f"{cpu_forward_amp.elapsed_s:.5f}"
+            autocast_samples = f"{cpu_forward_amp.samples_per_s:.2f}"
+            autop_speedup = f"{cpu_forward_amp.elapsed_s / gpu_forward.elapsed_s:.2f}"
+        row = [
+            bsz,
+            f"{cpu_forward.elapsed_s:.5f}",
+            f"{cpu_forward.samples_per_s:.2f}",
+            autocast_time,
+            autocast_samples,
+            f"{gpu_forward.elapsed_s:.5f}",
+            f"{gpu_forward.samples_per_s:.2f}",
+            f"{speedup_bf16:.2f}",
+            autop_speedup,
+        ]
+        forward_rows.append(row)
+
+    print("--- bf16 token-level matmul (batch × hidden × intermediate) ---")
+    if not CPU_AUTOCAST_AVAILABLE:
+        print("Note: torch.cpu.amp.autocast is unavailable; CPU autocast columns contain '-'.")
+    print(tabulate(forward_rows, headers=forward_headers, tablefmt="github"))
 
 
 if __name__ == "__main__":
