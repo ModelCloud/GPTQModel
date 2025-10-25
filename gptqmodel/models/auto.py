@@ -261,8 +261,6 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **kwargs,
     ):
-        log.info("\n%s", ASCII_LOGO)
-
         if isinstance(model_id_or_path, str):
             model_id_or_path = model_id_or_path.strip()
 
