@@ -93,6 +93,7 @@ class LoopProcessor:
 
         self.pb = None
         self.fwd_time = None
+        self.replay_time = None
         self.layer_count = None
 
 
@@ -521,6 +522,9 @@ class LoopProcessor:
         fwd_time = self.fwd_time if self.fwd_time is not None else 0.0
         return f"{fwd_time:.3f}"
 
+    def set_replay_time(self, replay_time: float) -> None:
+        self.replay_time = replay_time
+
     # called first
     def preprocess(self, module: NamedModule, **kwargs):
         pass
@@ -540,6 +544,10 @@ class LoopProcessor:
     def clear_cache_data(self):
         self.tasks = {}
         self.inputs_cache.layer_inputs = []
+
+    def recall_zp_snr_stats(self, layer_index: int) -> None:
+        """Optional hook for processors needing to restore per-layer stats."""
+        return None
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         pass

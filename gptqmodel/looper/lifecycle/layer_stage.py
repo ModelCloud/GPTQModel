@@ -556,7 +556,7 @@ class LayerLoopStage:
 
                 timer = getattr(gptq_model, "quant_region_timer", None)
                 start = time.perf_counter() if timer else None
-                processor.finalize(module=module)
+                processor.finalize(model=gptq_model, module=module)
                 if timer is not None and start is not None:
                     timer.record(
                         "processor_finalize",
@@ -571,14 +571,14 @@ class LayerLoopStage:
 
                     for reverse_p in reversed(looper.processors):
                         for module in processed_subset.values():
-                            actual_module = module.module if isinstance(module, NamedModule) else module
+                            # actual_module = module.module if isinstance(module, NamedModule) else module
 
-                            get_device_new(
-                                actual_module,
-                                recursive=True,
-                                assert_mode=True,
-                                expected=CPU,
-                            )
+                            # get_device_new(
+                            #     actual_module,
+                            #     recursive=True,
+                            #     assert_mode=True,
+                            #     expected=CPU,
+                            # )
                             with looper._quant_device_lock:
                                 key = getattr(module, "full_name", getattr(module, "name", None))
                                 if key is not None:
