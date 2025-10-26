@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass
 from contextlib import nullcontext
@@ -30,6 +31,10 @@ MATMUL_DTYPE = torch.bfloat16
 FORWARD_BATCH_SIZES = (1, 2, 3, 4)
 # Honor CUDA_VISIBLE_DEVICES masking by letting torch resolve the active device.
 GPU_DEVICE = torch.device("cuda")
+TIME_PRECISION = 5
+ANSI_RED = "\033[31m"
+ANSI_GREEN = "\033[32m"
+ANSI_RESET = "\033[0m"
 
 
 def has_cpu_autocast() -> bool:
@@ -53,6 +58,10 @@ def fmt_value(value: float, precision: int = 2) -> str:
     if not torch.isfinite(torch.tensor(value)):
         return str(value)
     return f"{value:.{precision}f}"
+
+
+def fmt_time(value: float) -> str:
+    return fmt_value(value, precision=TIME_PRECISION)
 
 
 def to_channels_last_2d(tensor: torch.Tensor) -> torch.Tensor:
@@ -287,14 +296,14 @@ def main() -> None:
     quant_rows = [
         [
             "CPU",
-            f"{cpu_run.elapsed_s:.3f}",
+            fmt_time(cpu_run.elapsed_s),
             cpu_run.nsamples,
             f"{cpu_run.samples_per_s:.2f}",
             cpu_run.device_label,
         ],
         [
             "GPU",
-            f"{gpu_run.elapsed_s:.3f}",
+            fmt_time(gpu_run.elapsed_s),
             gpu_run.nsamples,
             f"{gpu_run.samples_per_s:.2f}",
             gpu_run.device_label,
@@ -337,7 +346,7 @@ def main() -> None:
         def fmt(run: Optional[BenchRun]) -> Tuple[str, str]:
             if run is None:
                 return "-", "-"
-            return fmt_value(run.elapsed_s), fmt_value(run.samples_per_s)
+            return fmt_time(run.elapsed_s), fmt_value(run.samples_per_s)
 
         cpu_bf16_time, cpu_bf16_samples = fmt(cpu_forward)
         cpu_bf16_cl_time, cpu_bf16_cl_samples = fmt(cpu_forward_cl)
@@ -348,7 +357,22 @@ def main() -> None:
         def speedup(ref: Optional[BenchRun]) -> str:
             if ref is None:
                 return "-"
-            return f"{fmt_value(ref.elapsed_s / gpu_forward.elapsed_s)}x"
+            gpu_time = gpu_forward.elapsed_s
+            ref_time = ref.elapsed_s
+            if gpu_time == 0 or ref_time == 0:
+                return "-"
+            if math.isclose(ref_time, gpu_time, rel_tol=1e-9):
+                return f"{fmt_value(1.0, precision=2)}x same"
+            cpu_faster = ref_time < gpu_time
+            if cpu_faster:
+                ratio = gpu_time / ref_time
+                prefix = f"{ANSI_GREEN}+"
+                qualifier = "faster"
+            else:
+                ratio = ref_time / gpu_time
+                prefix = f"{ANSI_RED}-"
+                qualifier = "slower"
+            return f"{prefix}{fmt_value(ratio, precision=2)}x {qualifier}{ANSI_RESET}"
 
         speedup_bf16 = speedup(cpu_forward)
         speedup_bf16_cl = speedup(cpu_forward_cl)
