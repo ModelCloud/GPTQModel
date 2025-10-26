@@ -1372,8 +1372,6 @@ class ModuleLooper():
                         for name, named_module in subset.items():
                             setattr(named_module, "moe_enabled", name in moe_modules_set)
 
-                        # This logic is now for refining the device map for quantization,
-                        # not for the initial architectural discovery.
                         if self._vram_strategy == VRAMStrategy.BALANCED:
                             devices = [
                                 dev for dev in self._quant_devices
@@ -1397,7 +1395,6 @@ class ModuleLooper():
                                             forward_device_map[module_name] = target_device
 
                         subset_forward_serial = self._vram_strategy == VRAMStrategy.BALANCED
-
                         if subset_forward_serial:
                             active_group_count = len(moe_group_keys_all)
                             if active_group_count == 0:
@@ -1734,6 +1731,7 @@ class ModuleLooper():
                             time.perf_counter() - replay_start,
                             source=replay_source,
                         )
+                
                 # Finalize module after last processor
                 if p_index == len(self.processors) - 1:
                     torch_sync()
