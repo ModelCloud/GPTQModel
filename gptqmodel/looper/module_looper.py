@@ -1324,19 +1324,8 @@ class ModuleLooper():
                 subset_total = len(modules)
                 index = 0
                 subset = {}
-
-                # Proactively inspect for MoE architecture using the robust helper function.
                 forward_device_map: Dict[str, torch.device] = {}
-                is_moe_layer = full and any(self._extract_moe_group_key(name) for name in full.keys())
-                for name, submodule in full.items():
-                    try:
-                        device = get_device(submodule)
-                        if device and device.type != 'meta':
-                            forward_device_map[name] = device
-                    except Exception:
-                        pass
-
-                subset_forward_serial = is_moe_layer and self._vram_strategy == VRAMStrategy.BALANCED
+                subset_forward_serial = False
 
                 for index, names in enumerate(modules):
                     subset = self.crate_named_modules(full=full, is_lm_head_module=is_lm_head_module,
@@ -1346,6 +1335,8 @@ class ModuleLooper():
                                                       fail_safe=fail_safe)
 
                     moe_group_keys_all: List[str] = []
+                    forward_device_map: Dict[str, torch.device] = {}
+                    subset_forward_serial = False
 
                     attention_subset = bool(subset) and all(
                         self._is_attention_module_name(name) for name in subset
@@ -1404,6 +1395,8 @@ class ModuleLooper():
                                         target_device = devices[device_idx]
                                         for module_name in expert_groups[group_key]:
                                             forward_device_map[module_name] = target_device
+
+                        subset_forward_serial = self._vram_strategy == VRAMStrategy.BALANCED
 
                         if subset_forward_serial:
                             active_group_count = len(moe_group_keys_all)
