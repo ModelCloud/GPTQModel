@@ -1731,7 +1731,7 @@ class ModuleLooper():
                             time.perf_counter() - replay_start,
                             source=replay_source,
                         )
-                
+
                 # Finalize module after last processor
                 if p_index == len(self.processors) - 1:
                     torch_sync()
