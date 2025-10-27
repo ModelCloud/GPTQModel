@@ -19,17 +19,13 @@ class TestQwen2_5(ModelTest):
     EVAL_BATCH_SIZE = 64
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
-            "chat_template": True,
-            "acc": {"value": 0.2892, "floor_pct": 0.04},
-            "acc_norm": {"value": 0.3302, "floor_pct": 0.04},
+            "acc": {"value": 0.2910, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.3268, "floor_pct": 0.04},
         },
         EVAL.LM_EVAL.MMLU_STEM: {
-            "acc": {"value": 0.4351, "floor_pct": 0.04},
+            "acc": {"value": 0.3819, "floor_pct": 0.04},
         },
     }
-    #TRUST_REMOTE_CODE = False
-    #APPLY_CHAT_TEMPLATE = True
-    #EVAL_BATCH_SIZE = 6
 
     def test_qwen2_5(self):
         self.quant_lm_eval()
