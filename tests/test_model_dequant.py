@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+
 import json
 from pathlib import Path
 
@@ -32,7 +37,7 @@ def _pack_cols(values: torch.Tensor, bits: int = 4) -> torch.Tensor:
 
 
 def _write_index(path: Path, shard: str, keys: list[str]) -> None:
-    weight_map = {key: shard for key in keys}
+    weight_map = dict.fromkeys(keys, shard)
     payload = {"weight_map": weight_map}
     (path / "model.safetensors.index.json").write_text(json.dumps(payload))
 
