@@ -22,7 +22,6 @@ from gptqmodel.nn_modules.qlinear.awq_machete import AwqMacheteQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.machete import _validate_machete_device_support, machete_import_exception
-from gptqmodel.utils.torch import torch_empty_cache
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"

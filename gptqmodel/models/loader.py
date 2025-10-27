@@ -586,7 +586,7 @@ def ModelLoader(cls):
             device_ids = list(range(num_gpus))
             device_map: Dict[str, str] = {}
             mod2name = {m: n for n, m in model.named_modules()}
-            
+
             if device == DEVICE.CUDA:
                 if torch.cuda.is_available():
                     device_strs = [f"cuda:{i}" for i in range(num_gpus)]
@@ -599,7 +599,7 @@ def ModelLoader(cls):
                     raise RuntimeError("XPU is not available")
             else:
                 device_strs = ["cpu"] * num_gpus
-            
+
             def assign(mod, device_id):
                 if mod is None:
                     return

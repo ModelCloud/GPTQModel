@@ -1631,7 +1631,7 @@ class DeviceThreadPool:
         if not hasattr(self, "_gc_pending_physical"):
             self._gc_pending_physical = {}
         elif not isinstance(self._gc_pending_physical, dict):
-            self._gc_pending_physical = {k: 1 for k in self._gc_pending_physical}
+            self._gc_pending_physical = dict.fromkeys(self._gc_pending_physical, 1)
         if not hasattr(self, "_last_gc_done_physical"):
             self._last_gc_done_physical = {}
         if not hasattr(self, "_physical_children"):
@@ -2092,7 +2092,7 @@ class DeviceThreadPool:
             with self._stats_lock:
                 pending_map = self._gc_pending_physical
                 if not isinstance(pending_map, dict):
-                    pending_map = {k: 1 for k in pending_map}
+                    pending_map = dict.fromkeys(pending_map, 1)
                     self._gc_pending_physical = pending_map
                 for key in processed_devices:
                     pending_map.pop(key, None)

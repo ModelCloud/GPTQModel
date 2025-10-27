@@ -6,8 +6,7 @@ import pytest
 import torch
 from tabulate import tabulate
 
-from gptqmodel.quantization import gar
-from gptqmodel.quantization import gar_ref
+from gptqmodel.quantization import gar, gar_ref
 
 
 def _benchmark_fn(label, fn, device, warmup_runs=3, measured_runs=10):

@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ...quantization import METHOD
-from ...quantization.config import VRAMStrategy
 from ..base import BaseQModel
 
 

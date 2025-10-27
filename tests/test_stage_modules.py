@@ -1,11 +1,9 @@
-import types
-
 import threading
 import types
 
 import torch
 
-from gptqmodel.looper.module_looper import ModuleLooper, FinalizeProgressInfo
+from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.looper.stage_layer import run_layer_stage
 from gptqmodel.looper.stage_subset import SubsetForwardContext, SubsetStageResult

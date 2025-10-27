@@ -132,7 +132,7 @@ def test_out_of_model_tensor_files_are_copied_and_indexed(tmp_path, monkeypatch)
     def _fake_streaming_state_dict_to_shards(state_dict, save_dir, model_base_name, single_file_name, metadata, *_args, **_kwargs):
         file_path = os.path.join(save_dir, single_file_name)
         save_file(state_dict, file_path, metadata=metadata)
-        tensor_to_filename = {name: single_file_name for name in state_dict.keys()}
+        tensor_to_filename = dict.fromkeys(state_dict.keys(), single_file_name)
         total_size = os.path.getsize(file_path)
         return [single_file_name], tensor_to_filename, total_size
 
