@@ -12,11 +12,11 @@ class TestLlama4(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-4-Scout-17B-16E-Instruct" # "meta-llama/Llama-4-Scout-17B-16E-Instruct"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
             "acc": {"value": 0.3567, "floor_pct": 0.36},
             "acc_norm": {"value": 0.3805, "floor_pct": 0.36},
         },
     }
-    APPLY_CHAT_TEMPLATE = True
     TRUST_REMOTE_CODE = False
 
     def test_llama4(self):

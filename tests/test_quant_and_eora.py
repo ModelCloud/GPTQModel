@@ -40,12 +40,12 @@ class Test(ModelTest):
 
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
             "acc": {"value": 0.3183, "floor_pct": 0.05},
             "acc_norm": {"value": 0.3404, "floor_pct": 0.05},
         },
     }
 
-    APPLY_CHAT_TEMPLATE = True
     QUANT_BATCH_SIZE = 4
     # V2 = False
     # DEBUG = True

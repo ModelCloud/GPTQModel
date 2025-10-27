@@ -14,7 +14,6 @@ class TestOvis1_6_Llama(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ovis1.6-Llama3.2-3B"
 
     TRUST_REMOTE_CODE = True
-    APPLY_CHAT_TEMPLATE = False
     EVAL_BATCH_SIZE = 1
     USE_FLASH_ATTN = False
 

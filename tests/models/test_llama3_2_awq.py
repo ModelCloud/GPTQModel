@@ -17,11 +17,11 @@ class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
             "acc": {"value": 0.3234, "floor_pct": 0.36},
             "acc_norm": {"value": 0.3524, "floor_pct": 0.36},
         },
     }
-    APPLY_CHAT_TEMPLATE = True
     V2 = False
     DEBUG = True
     ACT_GROUP_AWARE = False

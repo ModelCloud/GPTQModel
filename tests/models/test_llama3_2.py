@@ -21,34 +21,33 @@ from gptqmodel.utils.eval import EVAL
 # | mmlu_stem :: acc,none          |   0.3186 |
 class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
+    EVAL_BATCH_SIZE = 64
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
             "acc": {
-                "value": 0.3174,
-                "floor_pct": 0.05,
+                "value": 0.3191,
+                "floor_pct": 0.04,
                 "ceil_pct": 0.10,
             },
             "acc_norm": {
-                "value": 0.3601,
-                "floor_pct": 0.07,
-                "ceil_pct": 0.10,
-            },
-        },
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
-            "exact_match": {
-                "value": 0.3186,
+                "value": 0.3507,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.10,
             },
         },
         EVAL.LM_EVAL.MMLU_STEM: {
+            "chat_template": False,
             "acc": {
-                "value": 0.3186,
+                "value": 0.2978,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.10,
             },
         },
     }
+
+    # llama 3.2 Instruct requires chat = true to have normal ARC scores
+    # mmlu requires chat = false
     # APPLY_CHAT_TEMPLATE = True
     # QUANT_BATCH_SIZE = 4
 

@@ -12,12 +12,12 @@ class TestLing(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ling-mini-2.0/"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
             "acc": {"value": 0.5009, "floor_pct": 0.2},
             "acc_norm": {"value": 0.5137, "floor_pct": 0.2},
         },
     }
     TRUST_REMOTE_CODE = True
-    APPLY_CHAT_TEMPLATE = True
     # EVAL_BATCH_SIZE = 6
     V2 = False
     DEBUG = True

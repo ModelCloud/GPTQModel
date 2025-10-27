@@ -12,12 +12,12 @@ class TestSeedOSS(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Seed-OSS-36B-Instruct/"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
             "acc": {"value": 0.2739, "floor_pct": 0.2},
             "acc_norm": {"value": 0.3055, "floor_pct": 0.2},
         },
     }
     TRUST_REMOTE_CODE = False
-    APPLY_CHAT_TEMPLATE = True
     EVAL_BATCH_SIZE = 6
 
     def test_seed_oss(self):

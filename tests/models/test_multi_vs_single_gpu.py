@@ -48,11 +48,11 @@ class TestMultiVsSingleGPU(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
             "acc": {"value": 0.3311, "floor_pct": 0.05},
             "acc_norm": {"value": 0.3549, "floor_pct": 0.05},
         },
     }
-    APPLY_CHAT_TEMPLATE = True
     V2 = False
     DEBUG = True
     ACT_GROUP_AWARE = False

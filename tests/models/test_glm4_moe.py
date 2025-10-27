@@ -5,7 +5,7 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
+from gptqmodel.utils.eval import EVALm
 
 
 class TestGlm4Moe(ModelTest):
