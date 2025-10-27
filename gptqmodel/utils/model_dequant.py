@@ -85,16 +85,27 @@ def _dequantize_shard(
                     )
 
                 scale_inv = reader.get_tensor(scale_inv_name)
-                tensors[name] = dequantize_f8_e4m3(
+                deq = dequantize_f8_e4m3(
                     tensor,
                     scale_inv=scale_inv,
                     axis=None,
                     target_dtype=target_dtype,
-                ).to("cpu")
+                )
+                if deq.ndimension() >= 4:
+                    tensors[name] = deq.to("cpu", memory_format=torch.channels_last)
+                else:
+                    tensors[name] = deq.to("cpu")
             elif tensor.dtype is torch.uint8 and name.endswith(".weight"):
-                tensors[name] = tensor.to(target_dtype).to("cpu")
+                converted = tensor.to(target_dtype)
+                if converted.ndimension() >= 4:
+                    tensors[name] = converted.to("cpu", memory_format=torch.channels_last)
+                else:
+                    tensors[name] = converted.to("cpu")
             else:
-                tensors[name] = tensor.to("cpu")
+                if tensor.ndimension() >= 4 and (device is None or tensor.device.type == "cpu"):
+                    tensors[name] = tensor.to("cpu", memory_format=torch.channels_last)
+                else:
+                    tensors[name] = tensor.to("cpu")
 
     save_file(tensors, str(output_path))
 

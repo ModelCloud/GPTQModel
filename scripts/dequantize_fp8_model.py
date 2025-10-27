@@ -6,6 +6,11 @@
 
 from __future__ import annotations
 
+import os
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7" #"expandable_segments:True"
+
+
 import argparse
 from pathlib import Path
 
