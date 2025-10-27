@@ -25,16 +25,15 @@ class TestInferenceResultXPU(ModelTest):
             (BACKEND.TORCH, DEVICE.XPU, False),
         ]
     )
-    def testTritonXPU(self, backend, device, template):
+    def testTorchXPU(self, backend, device, template):
         origin_model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
-            quantize_config=QuantizeConfig(),
+            quantize_config=QuantizeConfig(device=device),
             backend=backend,
-            device=device,
         )
         tokenizer = self.load_tokenizer(self.NATIVE_MODEL_ID)
         calibration_dataset = self.load_dataset(tokenizer, rows=128)
-        origin_model.quantize(calibration_dataset, backend=BACKEND.TRITON)
+        origin_model.quantize(calibration_dataset, backend=BACKEND.TORCH)
 
         with tempfile.TemporaryDirectory() as tmpdir:
           origin_model.save(tmpdir)
