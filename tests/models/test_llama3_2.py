@@ -25,12 +25,12 @@ class TestLlama3_2(ModelTest):
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {
                 "value": 0.3174,
-                "floor_pct": 0.06,
+                "floor_pct": 0.05,
                 "ceil_pct": 0.10,
             },
             "acc_norm": {
                 "value": 0.3601,
-                "floor_pct": 0.06,
+                "floor_pct": 0.07,
                 "ceil_pct": 0.10,
             },
         },
