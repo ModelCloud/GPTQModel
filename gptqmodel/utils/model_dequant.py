@@ -25,22 +25,22 @@ from ..utils.logger import setup_logger
 LOG = logging.getLogger(__name__)
 
 
-def _load_json(path: Path) -> dict:
+def load_json(path: Path) -> dict:
     if not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
 
 
-def _write_json(path: Path, payload: dict) -> None:
+def write_json(path: Path, payload: dict) -> None:
     with path.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2)
 
 
-def _list_safetensor_files(model_path: Path) -> Tuple[list, Optional[dict]]:
+def list_safetensor_files(model_path: Path) -> Tuple[list, Optional[dict]]:
     index_path = model_path / "model.safetensors.index.json"
     if index_path.exists():
-        index = _load_json(index_path)
+        index = load_json(index_path)
         files = sorted(set(index.get("weight_map", {}).values()))
         return files, index
 
@@ -48,7 +48,7 @@ def _list_safetensor_files(model_path: Path) -> Tuple[list, Optional[dict]]:
     return files, None
 
 
-def _finalize_for_save(tensor: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
+def finalize_for_save(tensor: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
     """Cast to ``target_dtype`` when floating point and move to CPU with optimal layout."""
 
     if torch.is_floating_point(tensor):
@@ -60,7 +60,7 @@ def _finalize_for_save(tensor: torch.Tensor, target_dtype: torch.dtype) -> torch
     return tensor_cpu
 
 
-def _normalize_device(device: Optional[str]) -> Optional[str]:
+def normalize_device(device: Optional[str]) -> Optional[str]:
     if device is None:
         return None
     device = device.strip()
@@ -76,7 +76,7 @@ def _normalize_device(device: Optional[str]) -> Optional[str]:
     return f"cuda:{dev.index}"
 
 
-def _resolve_block_size(config: dict) -> Optional[Tuple[int, int]]:
+def resolve_block_size(config: dict) -> Optional[Tuple[int, int]]:
     quant_cfg = config.get("quantization_config", {}) or {}
     block_size = quant_cfg.get("weight_block_size")
     if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
@@ -84,7 +84,7 @@ def _resolve_block_size(config: dict) -> Optional[Tuple[int, int]]:
     return None
 
 
-def _infer_block_shape(weight_shape: Tuple[int, int], scale_tensor: torch.Tensor) -> Tuple[int, int]:
+def infer_block_shape(weight_shape: Tuple[int, int], scale_tensor: torch.Tensor) -> Tuple[int, int]:
     rows, cols = weight_shape
     shape = tuple(scale_tensor.shape)
 
@@ -175,15 +175,15 @@ def _infer_block_shape(weight_shape: Tuple[int, int], scale_tensor: torch.Tensor
 
         raise ValueError("unable to infer block size from 1D scale tensor")
 
-    raise ValueError("unsupported scale tensor rank for block size inference")
+        raise ValueError("unsupported scale tensor rank for block size inference")
 
 
-def _detect_format(model_path: Path, config: dict) -> str:
+def detect_format(model_path: Path, config: dict) -> str:
     quant_cfg = config.get("quantization_config", {}) or {}
     method = (quant_cfg.get("quant_method") or "").lower()
     fmt = (quant_cfg.get("fmt") or "").lower()
 
-    files, _ = _list_safetensor_files(model_path)
+    files, _ = list_safetensor_files(model_path)
     if not files:
         raise FileNotFoundError("No .safetensors files found in model directory")
 
@@ -227,7 +227,7 @@ def _detect_format(model_path: Path, config: dict) -> str:
     raise ValueError("Unable to detect quantization format for model")
 
 
-def _unpack_cols(packed: torch.Tensor, bits: int) -> torch.Tensor:
+def unpack_cols(packed: torch.Tensor, bits: int) -> torch.Tensor:
     pack_bits = packed.element_size() * 8
     pack_factor = pack_bits // bits
     mask = (1 << bits) - 1
@@ -239,7 +239,7 @@ def _unpack_cols(packed: torch.Tensor, bits: int) -> torch.Tensor:
     return result
 
 
-def _unpack_rows(packed: torch.Tensor, bits: int) -> torch.Tensor:
+def unpack_rows(packed: torch.Tensor, bits: int) -> torch.Tensor:
     pack_bits = packed.element_size() * 8
     pack_factor = pack_bits // bits
     mask = (1 << bits) - 1
@@ -251,7 +251,7 @@ def _unpack_rows(packed: torch.Tensor, bits: int) -> torch.Tensor:
     return result
 
 
-def _convert_fp8_shard(
+def convert_fp8_shard(
     reader,
     target_dtype: torch.dtype,
     *,
@@ -271,7 +271,7 @@ def _convert_fp8_shard(
             effective_block = block_shape
             if effective_block is None:
                 try:
-                    effective_block = _infer_block_shape((rows, cols), scale_inv)
+                    effective_block = infer_block_shape((rows, cols), scale_inv)
                     LOG.debug("Inferred block size %s for weight '%s'", effective_block, key)
                 except ValueError as exc:
                     LOG.debug(
@@ -297,16 +297,16 @@ def _convert_fp8_shard(
                 axis=None,
                 target_dtype=target_dtype,
             )
-            tensors[key] = _finalize_for_save(deq, target_dtype)
+            tensors[key] = finalize_for_save(deq, target_dtype)
         elif key.endswith("_scale_inv"):
             LOG.debug("Dropping auxiliary FP8 tensor '%s' after dequantization", key)
             continue
         else:
-            tensors[key] = _finalize_for_save(tensor, target_dtype)
+            tensors[key] = finalize_for_save(tensor, target_dtype)
     return tensors
 
 
-def _convert_nvfp4_shard(reader, target_dtype: torch.dtype) -> Dict[str, torch.Tensor]:
+def convert_nvfp4_shard(reader, target_dtype: torch.dtype) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     for key in reader.keys():
         tensor = reader.get_tensor(key)
@@ -322,16 +322,16 @@ def _convert_nvfp4_shard(reader, target_dtype: torch.dtype) -> Dict[str, torch.T
                 axis=None,
                 target_dtype=target_dtype,
             )
-            tensors[key] = _finalize_for_save(deq, target_dtype)
+            tensors[key] = finalize_for_save(deq, target_dtype)
         elif key.endswith("_weight_scale"):
             LOG.debug("Dropping auxiliary NVFP4 tensor '%s' after dequantization", key)
             continue
         else:
-            tensors[key] = _finalize_for_save(tensor, target_dtype)
+            tensors[key] = finalize_for_save(tensor, target_dtype)
     return tensors
 
 
-def _convert_awq_file(path: Path, target_dtype: torch.dtype, device: str) -> Dict[str, torch.Tensor]:
+def convert_awq_file(path: Path, target_dtype: torch.dtype, device: str) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
     with safe_open(path, framework="pt", device=device) as reader:
@@ -350,7 +350,7 @@ def _convert_awq_file(path: Path, target_dtype: torch.dtype, device: str) -> Dic
                 module_buffers[prefix]["scales"] = tensor
                 LOG.debug("Collected AWQ scale tensor '%s'", key)
             else:
-                tensors[key] = _finalize_for_save(tensor, target_dtype)
+                tensors[key] = finalize_for_save(tensor, target_dtype)
 
     for prefix, buf in module_buffers.items():
         missing = {k for k in ("qweight", "qzeros", "scales") if k not in buf}
@@ -362,8 +362,8 @@ def _convert_awq_file(path: Path, target_dtype: torch.dtype, device: str) -> Dic
         scales = buf["scales"]
         bits = 4
 
-        unpacked_weight = _unpack_cols(qweight, bits).to(torch.float32)
-        unpacked_zeros = _unpack_cols(qzeros, bits).to(torch.float32)
+        unpacked_weight = unpack_cols(qweight, bits).to(torch.float32)
+        unpacked_zeros = unpack_cols(qzeros, bits).to(torch.float32)
 
         num_groups = scales.shape[0]
         group_size = unpacked_weight.shape[0] // num_groups
@@ -371,18 +371,18 @@ def _convert_awq_file(path: Path, target_dtype: torch.dtype, device: str) -> Dic
         zeros_full = unpacked_zeros.repeat_interleave(group_size, dim=0)
 
         weight = (unpacked_weight - zeros_full) * scales_full
-        tensors[prefix + ".weight"] = _finalize_for_save(
+        tensors[prefix + ".weight"] = finalize_for_save(
             weight.to(target_dtype).t().contiguous(),
             target_dtype,
         )
         LOG.debug("Dequantized AWQ module '%s' to dtype %s", prefix, target_dtype)
         if prefix + ".bias" in tensors:
-            tensors[prefix + ".bias"] = _finalize_for_save(tensors[prefix + ".bias"], target_dtype)
+            tensors[prefix + ".bias"] = finalize_for_save(tensors[prefix + ".bias"], target_dtype)
 
     return tensors
 
 
-def _convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, device: str) -> Dict[str, torch.Tensor]:
+def convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, device: str) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
     with safe_open(path, framework="pt", device=device) as reader:
@@ -405,7 +405,7 @@ def _convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, devi
                 module_buffers[prefix]["g_idx"] = tensor
                 LOG.debug("Collected GPTQ g_idx tensor '%s'", key)
             else:
-                tensors[key] = _finalize_for_save(tensor, target_dtype)
+                tensors[key] = finalize_for_save(tensor, target_dtype)
 
     for prefix, buf in module_buffers.items():
         missing = {k for k in ("qweight", "qzeros", "scales", "g_idx") if k not in buf}
@@ -418,13 +418,13 @@ def _convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, devi
         g_idx = buf["g_idx"].to(torch.long)
 
         bits = config.get("bits", 4)
-        weight_int = _unpack_rows(qweight, bits)
-        zeros = _unpack_cols(qzeros, bits)
+        weight_int = unpack_rows(qweight, bits)
+        zeros = unpack_cols(qzeros, bits)
 
         scales_full = scales.to(torch.float32)[g_idx]
         zeros_full = zeros.to(torch.float32)[g_idx]
         weight = (weight_int.to(torch.float32) - zeros_full) * scales_full
-        tensors[prefix + ".weight"] = _finalize_for_save(
+        tensors[prefix + ".weight"] = finalize_for_save(
             weight.to(target_dtype).t().contiguous(),
             target_dtype,
         )
@@ -435,12 +435,12 @@ def _convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, devi
             target_dtype,
         )
         if prefix + ".bias" in tensors:
-            tensors[prefix + ".bias"] = _finalize_for_save(tensors[prefix + ".bias"], target_dtype)
+            tensors[prefix + ".bias"] = finalize_for_save(tensors[prefix + ".bias"], target_dtype)
 
     return tensors
 
 
-def _copy_aux_files(model_path: Path, output_path: Path, skip: Iterable[str]) -> None:
+def copy_aux_files(model_path: Path, output_path: Path, skip: Iterable[str]) -> None:
     for item in model_path.iterdir():
         if item.name in skip:
             continue
@@ -466,22 +466,22 @@ def dequantize_model(
 
     output_path.mkdir(parents=True)
 
-    config = _load_json(model_path / "config.json")
+    config = load_json(model_path / "config.json")
     quant_cfg = config.get("quantization_config", {}) or {}
-    fmt = _detect_format(model_path, config)
+    fmt = detect_format(model_path, config)
 
-    files, index = _list_safetensor_files(model_path)
+    files, index = list_safetensor_files(model_path)
     if not files:
         raise RuntimeError("No safetensor files to convert")
 
-    device_str = _normalize_device(device)
+    device_str = normalize_device(device)
     if device_str is not None:
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available for GPU dequantization")
         torch.cuda.set_device(torch.device(device_str))
     open_device = device_str or "cpu"
 
-    block_shape = _resolve_block_size(config) if fmt == "fp8" else None
+    block_shape = resolve_block_size(config) if fmt == "fp8" else None
 
     if block_shape is not None:
         LOG.debug("Configured FP8 block size %s found in quantization_config", block_shape)
@@ -508,14 +508,14 @@ def dequantize_model(
             LOG.debug("Processing shard '%s' for format %s on device %s", filename, fmt, open_device)
             if fmt == "fp8":
                 with safe_open(path, framework="pt", device=open_device) as reader:
-                    tensors = _convert_fp8_shard(reader, target_dtype, block_shape=block_shape)
+                    tensors = convert_fp8_shard(reader, target_dtype, block_shape=block_shape)
             elif fmt == "nvfp4":
                 with safe_open(path, framework="pt", device=open_device) as reader:
-                    tensors = _convert_nvfp4_shard(reader, target_dtype)
+                    tensors = convert_nvfp4_shard(reader, target_dtype)
             elif fmt == "awq":
-                tensors = _convert_awq_file(path, target_dtype, open_device)
+                tensors = convert_awq_file(path, target_dtype, open_device)
             elif fmt == "gptq":
-                tensors = _convert_gptq_file(path, target_dtype, quant_cfg, open_device)
+                tensors = convert_gptq_file(path, target_dtype, quant_cfg, open_device)
             else:
                 raise ValueError(f"Unsupported format {fmt}")
 
@@ -534,15 +534,15 @@ def dequantize_model(
     metadata["total_size"] = total_size
     new_index["metadata"] = metadata
     new_index["weight_map"] = weight_map
-    _write_json(output_path / "model.safetensors.index.json", new_index)
+    write_json(output_path / "model.safetensors.index.json", new_index)
 
     new_config = dict(config)
     new_config.pop("quantization_config", None)
     new_config["torch_dtype"] = str(target_dtype).split(".")[-1]
-    _write_json(output_path / "config.json", new_config)
+    write_json(output_path / "config.json", new_config)
 
     skip_files = set(files) | {"config.json", "model.safetensors.index.json"}
-    _copy_aux_files(model_path, output_path, skip_files)
+    copy_aux_files(model_path, output_path, skip_files)
 
 
 # Backwards compatibility with older imports.
