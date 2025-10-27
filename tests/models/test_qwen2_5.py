@@ -16,8 +16,10 @@ from gptqmodel.utils.eval import EVAL
 class TestQwen2_5(ModelTest):
     GROUP_SIZE = 32
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
+    EVAL_BATCH_SIZE = 64
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
             "acc": {"value": 0.2892, "floor_pct": 0.04},
             "acc_norm": {"value": 0.3302, "floor_pct": 0.04},
         },
