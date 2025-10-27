@@ -14,7 +14,6 @@ class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ovis2-1B"
 
     TRUST_REMOTE_CODE = True
-    APPLY_CHAT_TEMPLATE = False
     EVAL_BATCH_SIZE = 1
 
     def test_ovis(self):

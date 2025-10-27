@@ -12,16 +12,18 @@ from gptqmodel.utils.eval import EVAL
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.2892 |
 # | arc_challenge :: acc_norm,none |   0.3302 |
-# | mmlu :: acc,none               |   0.4351 |
+# | mmlu_stem :: acc,none          |   0.4351 |
 class TestQwen2_5(ModelTest):
     GROUP_SIZE = 32
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
+    EVAL_BATCH_SIZE = 64
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
             "acc": {"value": 0.2892, "floor_pct": 0.04},
             "acc_norm": {"value": 0.3302, "floor_pct": 0.04},
         },
-        EVAL.LM_EVAL.MMLU: {
+        EVAL.LM_EVAL.MMLU_STEM: {
             "acc": {"value": 0.4351, "floor_pct": 0.04},
         },
     }

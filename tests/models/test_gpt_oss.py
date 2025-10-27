@@ -12,12 +12,12 @@ class TestGPTOSS(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gpt-oss-20b-BF16/"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": False,
             "acc": {"value": 0.4411, "floor_pct": 0.2},
             "acc_norm": {"value": 0.4718, "floor_pct": 0.2},
         },
     }
     TRUST_REMOTE_CODE = False
-    APPLY_CHAT_TEMPLATE = False
     EVAL_BATCH_SIZE = 6
     USE_VLLM = False
 

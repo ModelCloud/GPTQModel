@@ -15,12 +15,12 @@ class TestQwen2_5_Omni(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-Omni-3B"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
             "acc": {"value": 0.2329, "floor_pct": 0.2},
             "acc_norm": {"value": 0.2765, "floor_pct": 0.2},
         },
     }
     TRUST_REMOTE_CODE = False
-    APPLY_CHAT_TEMPLATE = True
     EVAL_BATCH_SIZE = 6
 
     def test_qwen2_5_omni(self):

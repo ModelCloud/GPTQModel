@@ -81,7 +81,6 @@ class ModelTest(unittest.TestCase):
 
     VRAM_STRATEGY = VRAMStrategy.EXCLUSIVE
     TRUST_REMOTE_CODE = False
-    APPLY_CHAT_TEMPLATE = False
     TORCH_DTYPE = "auto"
     EVAL_BATCH_SIZE = "auto"
     QUANT_BATCH_SIZE = 1
@@ -191,6 +190,9 @@ class ModelTest(unittest.TestCase):
             lookup = getattr(self, "_resolved_task_lookup", None)
             if isinstance(lookup, dict):
                 lookup[normalized] = EVAL.LM_EVAL.ARC_CHALLENGE
+            chat_lookup = getattr(self, "_task_chat_template", None)
+            if isinstance(chat_lookup, dict):
+                chat_lookup[normalized] = False
         return baselines
 
     def _normalize_metric_spec(self, spec):
@@ -226,18 +228,30 @@ class ModelTest(unittest.TestCase):
 
     def get_eval_tasks(self):
         self._resolved_task_lookup = {}
+        self._task_chat_template = {}
         if self.EVAL_TASKS:
             baselines = {}
             for task, metrics in self.EVAL_TASKS.items():
                 resolved_task = self._resolve_task_enum(task)
                 normalized_task = self._normalize_task_identifier(resolved_task)
                 self._resolved_task_lookup[normalized_task] = resolved_task
+
+                metrics_dict = dict(metrics or {})
+                chat_template = bool(metrics_dict.pop("chat_template", False))
+                self._task_chat_template[normalized_task] = chat_template
+
                 baselines[normalized_task] = {
                     metric_name: self._normalize_metric_spec(spec)
-                    for metric_name, spec in metrics.items()
+                    for metric_name, spec in metrics_dict.items()
                 }
             return baselines
-        return self._legacy_arc_tasks()
+
+        baselines = self._legacy_arc_tasks()
+        if isinstance(baselines, dict):
+            for task_name in baselines.keys():
+                if task_name not in self._task_chat_template:
+                    self._task_chat_template[task_name] = False
+        return baselines
 
     @staticmethod
     def _flatten_task_metrics(task_results):
@@ -349,7 +363,6 @@ class ModelTest(unittest.TestCase):
         try:
             task_results = self.lm_eval(
                 model=model,
-                apply_chat_template=self.APPLY_CHAT_TEMPLATE,
                 trust_remote_code=self.TRUST_REMOTE_CODE,
                 delete_quantized_model=False,
             )
@@ -920,7 +933,7 @@ class ModelTest(unittest.TestCase):
 
         return model
 
-    def lm_eval(self, model, apply_chat_template=False, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
+    def lm_eval(self, model, trust_remote_code=False, delete_quantized_model=False, extra_args:dict=None):
         try:
             task_names = self._normalize_task_list()
             aggregated_results = {}
@@ -948,6 +961,8 @@ class ModelTest(unittest.TestCase):
 
                 task_groups = EVAL.get_task_groups_from_tasks(task_names)
 
+                chat_template_lookup = getattr(self, "_task_chat_template", {}) or {}
+
                 for framework, tasks in task_groups.items():
                     active_backend = self._current_load_backend()
                     log.info(f"TEST: EVAL starting: backend = {active_backend.name}")
@@ -973,37 +988,45 @@ class ModelTest(unittest.TestCase):
                                 resolved_lookup[normalized_task] = original_task
                         eval_tasks.append(original_task)
 
-                    results = GPTQModel.eval(
-                        model_or_id_or_path=eval_target,
-                        llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
-                        model_args=model_args,
-                        output_path=tmp_dir,
-                        backend=active_backend,
-                        framework=framework,
-                        tasks=eval_tasks,
-                        apply_chat_template=apply_chat_template,
-                        trust_remote_code=trust_remote_code,
-                        batch_size=self.EVAL_BATCH_SIZE,
-                        gen_kwargs="temperature=0.0,top_k=50",
-                        random_seed=RAND_SEED,
-                        task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
-                    )
+                    grouped_tasks: Dict[bool, List] = {}
+                    for task in eval_tasks:
+                        normalized_name = self._normalize_task_identifier(task)
+                        apply_chat = bool(chat_template_lookup.get(normalized_name, False))
+                        grouped_tasks.setdefault(apply_chat, []).append(task)
 
-                    print('--------Eval Result---------')
-                    print(make_table(results))
-                    if "groups" in results:
-                        print(make_table(results, "groups"))
-                    print('--------Eval Result End---------')
-                    for task_name in eval_tasks:
-                        normalized_task_name = self._normalize_task_identifier(task_name)
-                        metrics = results["results"].get(normalized_task_name, {})
-                        filtered_metrics = {
-                            metric: value
-                            for metric, value in metrics.items()
-                            if metric != "alias" and "stderr" not in metric
-                        }
-                        aggregated_results[normalized_task_name] = filtered_metrics
-                        print({normalized_task_name: filtered_metrics})
+                    for apply_chat_template, grouped in grouped_tasks.items():
+                        results = GPTQModel.eval(
+                            model_or_id_or_path=eval_target,
+                            llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
+                            model_args=model_args,
+                            output_path=tmp_dir,
+                            backend=active_backend,
+                            framework=framework,
+                            tasks=grouped,
+                            apply_chat_template=apply_chat_template,
+                            trust_remote_code=trust_remote_code,
+                            batch_size=self.EVAL_BATCH_SIZE,
+                            gen_kwargs="temperature=0.0,top_k=50",
+                            random_seed=RAND_SEED,
+                            task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
+                        )
+
+                        print('--------Eval Result---------')
+                        print(make_table(results))
+                        if "groups" in results:
+                            print(make_table(results, "groups"))
+                        print('--------Eval Result End---------')
+
+                        for task_name in grouped:
+                            normalized_task_name = self._normalize_task_identifier(task_name)
+                            metrics = results["results"].get(normalized_task_name, {})
+                            filtered_metrics = {
+                                metric: value
+                                for metric, value in metrics.items()
+                                if metric != "alias" and "stderr" not in metric
+                            }
+                            aggregated_results[normalized_task_name] = filtered_metrics
+                            print({normalized_task_name: filtered_metrics})
 
                 self._cleanup_quantized_model(model, enabled=delete_quantized_model)
                 return aggregated_results
@@ -1020,9 +1043,9 @@ class ModelTest(unittest.TestCase):
 
                 if int(self.EVAL_BATCH_SIZE) > 0:
                     self.lm_eval(model=model,
-                                 apply_chat_template=apply_chat_template,
                                  trust_remote_code=trust_remote_code,
-                                 delete_quantized_model=delete_quantized_model)
+                                 delete_quantized_model=delete_quantized_model,
+                                 extra_args=extra_args)
                     print(f"set batch size to {self.EVAL_BATCH_SIZE}, passed")
                 else:
                     print(f"set batch size to {self.EVAL_BATCH_SIZE}, failed")
@@ -1054,7 +1077,6 @@ class ModelTest(unittest.TestCase):
         else:
             task_results = self.lm_eval(
                 model=self.SAVE_PATH if self.SAVE_PATH else self.model,
-                apply_chat_template=self.APPLY_CHAT_TEMPLATE,
                 trust_remote_code=self.TRUST_REMOTE_CODE,
                 delete_quantized_model=self.DELETE_QUANTIZED_MODEL,
             )

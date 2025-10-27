@@ -48,6 +48,7 @@ from .utils import BACKEND
 from .utils.exllama import exllama_set_max_input_length
 from .version import __version__
 
+
 setup_logger().info("\n%s", ASCII_LOGO)
 
 

@@ -40,7 +40,6 @@ class TestLmHeadLoad(ModelTest):
 
 
 class TestLmHeadQuant(ModelTest):
-    APPLY_CHAT_TEMPLATE = True
     EXPECT_LM_HEAD_LOSS = 0.0094
 
     sample_length = 1024
@@ -57,6 +56,7 @@ class TestLmHeadQuant(ModelTest):
     def test_quant_lm_head(self):
         self.EVAL_TASKS = {
             EVAL.LM_EVAL.ARC_CHALLENGE: {
+                "chat_template": True,
                 "acc": {"value": 0.3148464163822526, "floor_pct": 0.2},
                 "acc_norm": {"value": 0.3310580204778157, "floor_pct": 0.2},
             },
@@ -83,7 +83,6 @@ class TestLmHeadQuant(ModelTest):
             )
 
             task_results = self.lm_eval(model=model,
-                                        apply_chat_template=self.APPLY_CHAT_TEMPLATE,
                                         trust_remote_code=self.TRUST_REMOTE_CODE,
                                         delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
             self.check_results(task_results)

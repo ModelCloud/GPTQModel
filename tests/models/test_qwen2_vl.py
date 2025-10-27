@@ -13,12 +13,12 @@ class TestQwen2_VL(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2-VL-2B-Instruct"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
             "acc": {"value": 0.3524, "floor_pct": 0.2},
             "acc_norm": {"value": 0.3763, "floor_pct": 0.2},
         },
     }
     TRUST_REMOTE_CODE = False
-    APPLY_CHAT_TEMPLATE = True
     EVAL_BATCH_SIZE = 6
 
     def test_qwen2_vl(self):
@@ -70,7 +70,6 @@ class TestQwen2_VL(ModelTest):
         self.check_kernel(model, self.KERNEL_INFERENCE)
 
         task_results = self.lm_eval(model=model,
-                                    apply_chat_template=self.APPLY_CHAT_TEMPLATE,
                                     trust_remote_code=self.TRUST_REMOTE_CODE,
                                     delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
         self.check_results(task_results)
