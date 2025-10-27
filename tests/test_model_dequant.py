@@ -15,7 +15,7 @@ from gptqmodel.quantization.dtype import dequantize_f8_e4m3
 from gptqmodel.utils.model_dequant import dequantize_model
 
 
-def _pack_cols(values: torch.Tensor, bits: int = 4) -> torch.Tensor:
+def pack_cols(values: torch.Tensor, bits: int = 4) -> torch.Tensor:
     """Pack per-column low-bit values into int32 words."""
 
     if values.dtype != torch.int32:
@@ -36,7 +36,7 @@ def _pack_cols(values: torch.Tensor, bits: int = 4) -> torch.Tensor:
     return packed
 
 
-def _write_index(path: Path, shard: str, keys: list[str]) -> None:
+def write_index(path: Path, shard: str, keys: list[str]) -> None:
     weight_map = dict.fromkeys(keys, shard)
     payload = {"weight_map": weight_map}
     (path / "model.safetensors.index.json").write_text(json.dumps(payload))
@@ -67,7 +67,7 @@ def test_dequantize_model_fp8_infers_block_size(tmp_path):
         },
         str(model_dir / shard_name),
     )
-    _write_index(model_dir, shard_name, ["linear.weight", "linear.weight_scale_inv"])
+    write_index(model_dir, shard_name, ["linear.weight", "linear.weight_scale_inv"])
 
     dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
 
@@ -106,7 +106,7 @@ def test_dequantize_model_fp8(tmp_path):
         },
         str(model_dir / shard_name),
     )
-    _write_index(model_dir, shard_name, ["linear.weight", "linear.weight_scale_inv", "linear.bias"])
+    write_index(model_dir, shard_name, ["linear.weight", "linear.weight_scale_inv", "linear.bias"])
 
     dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
 
@@ -148,8 +148,8 @@ def test_dequantize_model_awq(tmp_path):
     scales = torch.rand(rows, cols, dtype=torch.float32) * 0.5 + 0.5
     bias = torch.randn(cols, dtype=torch.float32)
 
-    packed_weight = _pack_cols(weight_values)
-    packed_zero = _pack_cols(zero_values)
+    packed_weight = pack_cols(weight_values)
+    packed_zero = pack_cols(zero_values)
 
     shard_name = "awq.safetensors"
     save_file(
@@ -161,7 +161,7 @@ def test_dequantize_model_awq(tmp_path):
         },
         str(model_dir / shard_name),
     )
-    _write_index(
+    write_index(
         model_dir,
         shard_name,
         ["layer.qweight", "layer.qzeros", "layer.scales", "layer.bias"],
