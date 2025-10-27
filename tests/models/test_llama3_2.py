@@ -42,8 +42,8 @@ class TestLlama3_2(ModelTest):
             },
         },
     }
-    APPLY_CHAT_TEMPLATE = True
-    QUANT_BATCH_SIZE = 4
+    # APPLY_CHAT_TEMPLATE = True
+    # QUANT_BATCH_SIZE = 4
 
     # EORA = Lora(
     #     # for quant, path is save path. for load, it is loading path
