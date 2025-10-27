@@ -1320,6 +1320,12 @@ class ModuleLooper():
                 attention_masks = processor.inputs_cache.attention_masks
 
                 processed_subset = {}
+                
+                subset_total = len(modules)
+                index = 0
+                subset = {}
+                forward_device_map: Dict[str, torch.device] = {}
+                subset_forward_serial = False
 
                 for index, names in enumerate(modules):
                     subset = self.crate_named_modules(full=full, is_lm_head_module=is_lm_head_module,
@@ -1327,9 +1333,6 @@ class ModuleLooper():
                                                       names=names,
                                                       processor=processor,
                                                       fail_safe=fail_safe)
-
-                    if len(subset) == 0:
-                        continue
 
                     moe_group_keys_all: List[str] = []
                     forward_device_map: Dict[str, torch.device] = {}
@@ -1403,7 +1406,6 @@ class ModuleLooper():
                             setattr(named_module, "moe_enabled", False)
 
                     handle = []
-                    subset_total = len(modules)
                     batch_count = self._resolve_batch_total(
                         getattr(processor, "num_batches", None),
                         layer_inputs,
