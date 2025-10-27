@@ -95,15 +95,70 @@ def dequantize_f8_e4m3(
     else:
         result = tensor.to(target_dtype)
 
+    def _expand_scale(scale_tensor: torch.Tensor, *, axis_hint: Optional[int]) -> torch.Tensor:
+        if scale_tensor.ndim == 0:
+            return scale_tensor
+
+        target_shape = result.shape
+
+        if scale_tensor.shape == target_shape:
+            return scale_tensor
+
+        # Block-wise expansion (e.g. [num_row_blocks, num_col_blocks])
+        if scale_tensor.ndim == 2 and len(target_shape) == 2:
+            blocks_r, blocks_c = scale_tensor.shape
+            rows, cols = target_shape
+            if rows % blocks_r == 0 and cols % blocks_c == 0:
+                repeat_r = rows // blocks_r
+                repeat_c = cols // blocks_c
+                expanded = scale_tensor.repeat_interleave(repeat_r, dim=0)
+                expanded = expanded.repeat_interleave(repeat_c, dim=1)
+                return expanded
+
+        if scale_tensor.ndim == 1 and len(target_shape) == 2:
+            rows, cols = target_shape
+            count = scale_tensor.shape[0]
+            axis = axis_hint if axis_hint is not None else 0
+            axis = axis if axis >= 0 else axis + len(target_shape)
+            if axis == 0 and rows % count == 0:
+                repeat = rows // count
+                expanded = scale_tensor.repeat_interleave(repeat, dim=0).view(rows, 1)
+                return expanded.expand(rows, cols)
+            if axis == 1 and cols % count == 0:
+                repeat = cols // count
+                expanded = scale_tensor.repeat_interleave(repeat, dim=0).view(1, cols)
+                return expanded.expand(rows, cols)
+
+        if scale_tensor.ndim == result.ndim:
+            expanded = scale_tensor
+            for dim, (target_size, current_size) in enumerate(zip(result.shape, expanded.shape)):
+                if target_size == current_size:
+                    continue
+                if current_size == 1:
+                    expanded = expanded.expand(*[
+                        target_size if i == dim else expanded.shape[i]
+                        for i in range(expanded.ndim)
+                    ])
+                    continue
+                if target_size % current_size != 0:
+                    raise ValueError(
+                        f"Cannot broadcast scale dimension {current_size} to target {target_size}"
+                    )
+                repeat = target_size // current_size
+                expanded = expanded.repeat_interleave(repeat, dim=dim)
+            return expanded
+
+        reshaped = _reshape_for_axis(scale_tensor, axis_hint, result.ndim)
+        return reshaped.expand(result.shape)
+
     if scale is not None:
-        scale_tensor = scale.to(result.dtype)
-        if axis is not None or scale_tensor.ndim < result.ndim:
-            scale_tensor = _reshape_for_axis(scale_tensor, axis, result.ndim)
+        scale_tensor = _expand_scale(scale.to(result.dtype), axis_hint=axis)
         result = result * scale_tensor
     elif scale_inv is not None:
-        scale_tensor = scale_inv.to(result.dtype)
-        if axis is not None or scale_tensor.ndim < result.ndim:
-            scale_tensor = _reshape_for_axis(scale_tensor, axis, result.ndim)
-        result = result / scale_tensor
+        scale_tensor = _expand_scale(scale_inv.to(result.dtype), axis_hint=axis)
+        if torch.max(torch.abs(scale_tensor)) <= 1:
+            result = result * scale_tensor
+        else:
+            result = result / scale_tensor
 
     return result

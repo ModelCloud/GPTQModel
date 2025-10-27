@@ -27,7 +27,7 @@ def test_dequantize_f8_e4m3_with_scale_inv():
 
     got = dequantize_f8_e4m3(fp8, scale_inv=scale_inv, axis=0)
 
-    expected = (fp8.to(torch.bfloat16) / scale_inv.view(-1, 1)).to(torch.bfloat16)
+    expected = (fp8.to(torch.bfloat16) / scale_inv.view(-1, 1).to(torch.bfloat16)).to(torch.bfloat16)
     assert torch.equal(got, expected)
 
 
@@ -40,6 +40,18 @@ def test_dequantize_f8_e4m3_with_scale_axis_one():
     got = dequantize_f8_e4m3(fp8, scale=scale, axis=1)
 
     expected = (fp8.to(torch.bfloat16) * scale.view(1, -1)).to(torch.bfloat16)
+    assert torch.equal(got, expected)
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
+def test_dequantize_f8_e4m3_with_fractional_scale_inv():
+    src = torch.randn(4, 4, dtype=torch.float32)
+    fp8 = src.to(torch.float8_e4m3fn)
+    scale_inv = torch.full((4,), 1 / 4, dtype=torch.float32)
+
+    got = dequantize_f8_e4m3(fp8, scale_inv=scale_inv, axis=0)
+
+    expected = (fp8.to(torch.bfloat16) * scale_inv.view(-1, 1).to(torch.bfloat16)).to(torch.bfloat16)
     assert torch.equal(got, expected)
 
 
