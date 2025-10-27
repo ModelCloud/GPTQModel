@@ -554,16 +554,6 @@ class LayerLoopStage:
                 if isinstance(processor, GPTQProcessor):
                     processor.recall_zp_snr_stats(layer_index)
 
-                timer = getattr(gptq_model, "quant_region_timer", None)
-                start = time.perf_counter() if timer else None
-                processor.finalize(model=gptq_model, module=module)
-                if timer is not None and start is not None:
-                    timer.record(
-                        "processor_finalize",
-                        time.perf_counter() - start,
-                        source=getattr(processor, "name", lambda: "<processor>")(),
-                    )
-
                 if p_index == len(looper.processors) - 1:
                     torch_sync()
 
