@@ -134,7 +134,7 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
     def __init__(self, config: MiniMaxM2Config) -> None:
         super().__init__()
         self.hidden_dim = config.hidden_size
-        self.ffn = nn.ModuleList([MiniMaxM2MLP(config) for _ in range(config.num_local_experts)])
+        self.experts = nn.ModuleList([MiniMaxM2MLP(config) for _ in range(config.num_local_experts)])
         self.num_experts = config.num_local_experts
         self.top_k = config.num_experts_per_tok
         self.jitter_noise = config.router_jitter_noise
@@ -178,7 +178,7 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
         else:
             original_scores = scores
 
-        topk_scores, selected_experts = torch.topk(scores, self.top_k, dim=-1)
+        topk_scores, selected_experts = torch.topk(scores, self.top_k, dim=-1, sorted=True)
         if correction_bias is not None:
             routing_weights = original_scores.gather(1, selected_experts)
         else:
@@ -193,7 +193,7 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
         expert_hit = torch.nonzero(expert_mask.sum(dim=(-1, -2)) > 0, as_tuple=False).flatten()
 
         for expert_idx in expert_hit.tolist():
-            expert_layer = self.ffn[expert_idx]
+            expert_layer = self.experts[expert_idx]
             idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
             token_states = hidden_states.index_select(0, top_x)
             expert_output = expert_layer(token_states) * routing_weights[top_x, idx].unsqueeze(-1)
