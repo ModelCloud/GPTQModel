@@ -139,6 +139,7 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
         self.top_k = config.num_experts_per_tok
         self.jitter_noise = config.router_jitter_noise
         self.use_routing_bias = config.use_routing_bias
+        self.scoring_func = getattr(config, "scoring_func", "softmax")
 
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
         if self.use_routing_bias:
@@ -157,13 +158,35 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
 
         hidden_states = hidden_states.view(-1, hidden_dim)
         router_logits = self.gate(hidden_states.to(torch.float32))
+        router_logits = router_logits.to(torch.float32)
         if self.e_score_correction_bias is not None:
-            router_logits = router_logits + self.e_score_correction_bias
+            # Bias is applied after scoring (see vLLM/SGLang implementations).
+            correction_bias = self.e_score_correction_bias.to(router_logits.device, router_logits.dtype)
+        else:
+            correction_bias = None
 
-        routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float32)
-        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+        if self.scoring_func == "sigmoid":
+            scores = torch.sigmoid(router_logits)
+        elif self.scoring_func == "softmax":
+            scores = torch.softmax(router_logits, dim=-1)
+        else:
+            raise ValueError(f"Unsupported scoring function: {self.scoring_func}")
+
+        if correction_bias is not None:
+            original_scores = scores
+            scores = scores + correction_bias
+        else:
+            original_scores = scores
+
+        topk_scores, selected_experts = torch.topk(scores, self.top_k, dim=-1)
+        if correction_bias is not None:
+            routing_weights = original_scores.gather(1, selected_experts)
+        else:
+            routing_weights = topk_scores
+
+        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True).clamp(min=1e-12)
         routing_weights = routing_weights.to(hidden_states.dtype)
+        selected_experts = selected_experts.to(torch.long)
 
         final_hidden_states = torch.zeros_like(hidden_states)
         expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
