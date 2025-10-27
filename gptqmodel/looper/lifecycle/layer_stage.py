@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import threading
 import time
 from concurrent.futures import as_completed
@@ -29,6 +30,13 @@ from ..qqq_processor import QQQProcessor
 from ..named_module import NamedModule
 from ..lifecycle.types import FinalizeProgressInfo
 from ..input_cache import InputCache
+
+LOOP_DEBUG_ENABLED = os.environ.get("GPTQ_LOOP_DEBUG", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _loop_debug(log: logging.Logger, message: str) -> None:
+    if LOOP_DEBUG_ENABLED:
+        log.info("[LoopDebug] %s", message)
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..module_looper import ModuleLooper
@@ -150,10 +158,19 @@ class LayerLoopStage:
             else:
                 layer_descriptor = str(layer_index)
 
+            _loop_debug(
+                log,
+                f"Entering layer {layer_index} (descriptor={layer_descriptor}, lm_head={is_lm_head_module})",
+            )
+
             cur_layer_device = get_device(module)
             full = find_modules(module, name=gptq_model.lm_head if is_lm_head_module else "")
 
             for p_index, processor in enumerate(looper.processors):
+                _loop_debug(
+                    log,
+                    f"Layer {layer_index}: starting processor {p_index + 1}/{len(looper.processors)} ({processor.name()})",
+                )
                 processor.log_call_count = 0
                 processor.collect_memory_info(layer_index)
 
@@ -579,6 +596,16 @@ class LayerLoopStage:
                             layer_idx = getattr(module, "layer_index", None)
                             finalize_tasks.append((reverse_p, module, module_label, target_dev, layer_idx))
 
+                    if LOOP_DEBUG_ENABLED:
+                        debug_summary = [
+                            f"{getattr(proc, 'name', lambda: '<processor>')()}:{label or '<unnamed>'}"
+                            for proc, _, label, _, _ in finalize_tasks
+                        ]
+                        _loop_debug(
+                            log,
+                            f"Layer {layer_index}: scheduled {len(finalize_tasks)} finalize tasks -> {debug_summary}",
+                        )
+
                     finalize_count = len(finalize_tasks)
                     finalize_futures = []
                     finalize_pb = log.pb(range(finalize_count)).manual().set(show_left_steps=False)
@@ -587,6 +614,10 @@ class LayerLoopStage:
                     def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
                         resolved_label = module_label or getattr(module, "full_name", getattr(module, "name", ""))
                         start = time.perf_counter() if region_timer is not None else None
+                        _loop_debug(
+                            log,
+                            f"Layer {layer_idx}: finalize start ({idx}/{total}) proc={getattr(process, 'name', lambda: '<processor>')()} module={resolved_label}",
+                        )
                         try:
                             with log_time_block(
                                 "submodule_finalize",
@@ -627,8 +658,12 @@ class LayerLoopStage:
                                         log.warning(
                                             "Skipping disk offload for %s: no offload path configured",
                                             module_label,
-                                        )
+                                                )
                         finally:
+                            _loop_debug(
+                                log,
+                                f"Layer {layer_idx}: finalize end proc={getattr(process, 'name', lambda: '<processor>')()} module={resolved_label}",
+                            )
                             if region_timer is not None and start is not None:
                                 region_timer.record(
                                     "submodule_finalize",
@@ -690,11 +725,19 @@ class LayerLoopStage:
                         finalize_count_local,
                         layer_idx_for_callback,
                     ):
+                        _loop_debug(
+                            log,
+                            f"Layer {layer_idx_for_callback}: draining {len(futures)} finalize futures",
+                        )
                         completed_local = 0
                         try:
                             for future in as_completed(futures):
                                 try:
                                     result = future.result()
+                                    _loop_debug(
+                                        log,
+                                        f"Layer {layer_idx_for_callback}: finalize future completed ({completed_local + 1}/{finalize_count_local})",
+                                    )
                                 except BaseException as exc:
                                     log.exception("Submodule finalize task raised an exception")
                                     looper._request_loop_stop(exc)
@@ -729,6 +772,10 @@ class LayerLoopStage:
                             )
 
                     if finalize_futures_snapshot:
+                        _loop_debug(
+                            log,
+                            f"Layer {layer_index}: launching finalize watcher for {len(finalize_futures_snapshot)} futures",
+                        )
                         threading.Thread(
                             target=_drain_finalize_futures,
                             args=(
@@ -741,11 +788,20 @@ class LayerLoopStage:
                             daemon=True,
                         ).start()
                     else:
+                        _loop_debug(
+                            log,
+                            f"Layer {layer_index}: no finalize futures, emitting completion directly",
+                        )
                         looper._emit_layer_complete(
                             layer_idx=layer_index,
                             submodule_finalized=True,
                             raise_in_place=True,
                         )
+
+                _loop_debug(
+                    log,
+                    f"Layer {layer_index}: completed processor {p_index + 1}/{len(looper.processors)} ({processor.name()})",
+                )
 
         looper._check_loop_stop()
         DEVICE_THREAD_POOL.wait()

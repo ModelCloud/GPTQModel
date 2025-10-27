@@ -331,6 +331,13 @@ def create_quant_module(
         ori_layer_device = submodule.list_buffers()[0].device
 
     if ori_layer_device.type != CPU.type:
+        for p in submodule.parameters():
+            log.debug(f"Parameter `{p.names}` has type {p.type}. device = {p.device}")
+
+        if isinstance(submodule, BaseQuantLinear):
+            for b in submodule.list_buffers():
+                log.debug(f"Buffer `{b}` has type {b.type}. device = {b.device}")
+
         raise AssertionError(
             f"Expected `{name}` to reside on CPU during quant module creation, "
             f"but found tensors on `{ori_layer_device}`."

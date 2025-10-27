@@ -250,16 +250,11 @@ class GPTQProcessor(LoopProcessor):
         # cleanup all memory or states vars persistently added by this processor
         module.stream_sync()
         with self.lock:
-            # safe to drop w and wq here, no longer needed
-            weight = module.weight.data
-            trailing_shape = tuple(weight.shape[1:]) if weight is not None else ()
-            empty_shape = (0, *trailing_shape)
-            dtype = weight.dtype if weight is not None else torch.float32
-            module.weight.data = torch.empty(empty_shape, dtype=dtype, device=CPU)
-
             # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
             if self.calculate_w_wq_diff:
-                module.weight.data = module.state.pop("wq")
+                module.weight.data = module.state.pop("wq").to(CPU)
+            else:
+                module.weight.data = module.weight.data.to(CPU)
 
             module.state.pop("w", None) #
             module.state.pop("w_wq_diff", None)
