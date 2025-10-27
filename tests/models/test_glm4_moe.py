@@ -18,10 +18,9 @@ class TestGlm4Moe(ModelTest):
             "acc": {"value": 0.5026, "floor_pct": 0.04},
             "acc_norm": {"value": 0.5171, "floor_pct": 0.04},
         },
-        EVAL.LM_EVAL.MMLU: {
+        EVAL.LM_EVAL.MMLU_STEM: {
             "acc": {"value": 0.6362, "floor_pct": 0.04},
         },
     }
     def test_glm4moe(self):
         self.quant_lm_eval()
-

@@ -24,6 +24,7 @@ class EVAL:
         GSM8K_PLATINUM_COT = "gsm8k_platinum_cot"
         HELLASWAG = "hellaswag"
         MMLU = "mmlu"
+        MMLU_STEM = "mmlu_stem"
         GPQA = "gpqa"
         ARC_EASY = "arc_easy"
         BOOLQ = "boolq"
@@ -179,4 +180,3 @@ def evalplus_make_table(results):
     print("|-------------|------------|--------------------|")
     for task, metrics in results.items():
         print(f"| {task} | {metrics['base tests']} | {metrics['base + extra tests']} |")
-

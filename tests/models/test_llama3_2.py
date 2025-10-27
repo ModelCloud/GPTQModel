@@ -18,7 +18,7 @@ from gptqmodel.utils.eval import EVAL
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.3174 |
 # | arc_challenge :: acc_norm,none |   0.3601 |
-# | mmlu :: acc,none               |   0.3186 |
+# | mmlu_stem :: acc,none          |   0.3186 |
 class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_TASKS = {
@@ -34,7 +34,14 @@ class TestLlama3_2(ModelTest):
                 "ceil_pct": 0.10,
             },
         },
-        EVAL.LM_EVAL.MMLU: {
+        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+            "exact_match": {
+                "value": 0.3186,
+                "floor_pct": 0.04,
+                "ceil_pct": 0.10,
+            },
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
             "acc": {
                 "value": 0.3186,
                 "floor_pct": 0.04,

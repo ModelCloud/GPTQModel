@@ -149,7 +149,7 @@ class Test(ModelTest):
             tasks=[EVAL.LM_EVAL.ARC_CHALLENGE],
             apply_chat_template=True,
             # MMLU is too slow for ci test
-            # EVAL.LM_EVAL.MMLU
+            # EVAL.LM_EVAL.MMLU_STEM
         )
 
         del model
