@@ -11,8 +11,9 @@ from typing import Optional
 
 import torch
 
+
 try:
-    from torchao.prototype.mx_formats.kernels import unpack_uint4, f4_unpacked_to_f32
+    from torchao.prototype.mx_formats.kernels import f4_unpacked_to_f32, unpack_uint4
 except Exception:
     unpack_uint4 = None
     f4_unpacked_to_f32 = None

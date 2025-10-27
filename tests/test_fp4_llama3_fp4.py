@@ -12,6 +12,7 @@ from safetensors import safe_open
 
 from gptqmodel.quantization.dtype import dequantize_f4_e2m1
 
+
 try:
     from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor
 except Exception:

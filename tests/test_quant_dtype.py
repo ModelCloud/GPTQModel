@@ -1,13 +1,12 @@
 import time
 
-import torch
-
 import pytest
+import torch
 from tabulate import tabulate
 
 from gptqmodel.quantization.dtype import (
-    dequantize_f8_e4m3,
     dequantize_f4_e2m1,
+    dequantize_f8_e4m3,
     device_supports_native_fp8,
 )
 
