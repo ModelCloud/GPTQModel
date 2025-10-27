@@ -1,11 +1,19 @@
+import time
+
 import torch
 
 import pytest
+from tabulate import tabulate
 
 from gptqmodel.quantization.dtype import (
     dequantize_f8_e4m3,
     device_supports_native_fp8,
 )
+
+
+def _print_accuracy(title: str, rows, headers) -> None:
+    table = tabulate(rows, headers=headers, floatfmt=".6f")
+    print(f"\n{title}\n{table}\n")
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
@@ -28,6 +36,15 @@ def test_dequantize_f8_e4m3_with_scale_inv():
     got = dequantize_f8_e4m3(fp8, scale_inv=scale_inv, axis=0)
 
     expected = (fp8.to(torch.bfloat16) / scale_inv.view(-1, 1).to(torch.bfloat16)).to(torch.bfloat16)
+    diff = torch.max(torch.abs(got - expected)).item()
+    _print_accuracy(
+        "dequantize_f8_e4m3_with_scale_inv",
+        [
+            ["baseline", str(expected.dtype), float(expected.abs().max().item()), 0.0],
+            ["candidate", str(got.dtype), float(got.abs().max().item()), diff],
+        ],
+        ["variant", "dtype", "max|value|", "max|diff vs baseline|"],
+    )
     assert torch.equal(got, expected)
 
 
@@ -40,6 +57,15 @@ def test_dequantize_f8_e4m3_with_scale_axis_one():
     got = dequantize_f8_e4m3(fp8, scale=scale, axis=1)
 
     expected = (fp8.to(torch.bfloat16) * scale.view(1, -1)).to(torch.bfloat16)
+    diff = torch.max(torch.abs(got - expected)).item()
+    _print_accuracy(
+        "dequantize_f8_e4m3_with_scale_axis_one",
+        [
+            ["baseline", str(expected.dtype), float(expected.abs().max().item()), 0.0],
+            ["candidate", str(got.dtype), float(got.abs().max().item()), diff],
+        ],
+        ["variant", "dtype", "max|value|", "max|diff vs baseline|"],
+    )
     assert torch.equal(got, expected)
 
 
@@ -52,6 +78,15 @@ def test_dequantize_f8_e4m3_with_fractional_scale_inv():
     got = dequantize_f8_e4m3(fp8, scale_inv=scale_inv, axis=0)
 
     expected = (fp8.to(torch.bfloat16) * scale_inv.view(-1, 1).to(torch.bfloat16)).to(torch.bfloat16)
+    diff = torch.max(torch.abs(got - expected)).item()
+    _print_accuracy(
+        "dequantize_f8_e4m3_with_fractional_scale_inv",
+        [
+            ["baseline", str(expected.dtype), float(expected.abs().max().item()), 0.0],
+            ["candidate", str(got.dtype), float(got.abs().max().item()), diff],
+        ],
+        ["variant", "dtype", "max|value|", "max|diff vs baseline|"],
+    )
     assert torch.equal(got, expected)
 
 
@@ -69,3 +104,48 @@ def test_device_supports_native_fp8_reports_capability(monkeypatch):
 
     monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (8, 0))
     assert device_supports_native_fp8(torch.device("cuda", 0)) is False
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA device required for GPU benchmark",
+)
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
+def test_dequantize_f8_e4m3_cpu_vs_gpu_benchmark():
+    rows = 128 * 4
+    cols = 128 * 3
+    src = torch.randn(rows, cols, dtype=torch.float32)
+    fp8 = src.to(torch.float8_e4m3fn)
+    scale_inv = torch.rand(rows // 128, cols // 128, dtype=torch.float32) * 0.5
+
+    # Warmup
+    dequantize_f8_e4m3(fp8, scale_inv=scale_inv, axis=None, target_dtype=torch.bfloat16)
+
+    start = time.perf_counter()
+    cpu_result = dequantize_f8_e4m3(fp8, scale_inv=scale_inv, axis=None, target_dtype=torch.bfloat16)
+    cpu_time = time.perf_counter() - start
+
+    fp8_gpu = fp8.cuda()
+    scale_inv_gpu = scale_inv.cuda()
+
+    dequantize_f8_e4m3(fp8_gpu, scale_inv=scale_inv_gpu, axis=None, target_dtype=torch.bfloat16)
+    torch.cuda.synchronize()
+
+    start = time.perf_counter()
+    gpu_result = dequantize_f8_e4m3(fp8_gpu, scale_inv=scale_inv_gpu, axis=None, target_dtype=torch.bfloat16)
+    torch.cuda.synchronize()
+    gpu_time = time.perf_counter() - start
+
+    diff = torch.max(torch.abs(cpu_result - gpu_result.cpu())).item()
+    _print_accuracy(
+        "dequantize_f8_e4m3_cpu_vs_gpu",
+        [
+            ["CPU", cpu_time, float(cpu_result.abs().max().item()), 0.0],
+            ["GPU", gpu_time, float(gpu_result.abs().max().item()), diff],
+        ],
+        ["variant", "time (s)", "max|value|", "max|diff vs baseline|"],
+    )
+    assert torch.allclose(cpu_result, gpu_result.cpu(), atol=1e-3, rtol=1e-3)
+
+    # GPU should not be dramatically slower than CPU
+    assert gpu_time <= cpu_time * 2, f"GPU dequant slower than expected (cpu={cpu_time:.4f}s, gpu={gpu_time:.4f}s)"
