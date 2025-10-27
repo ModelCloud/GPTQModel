@@ -22,12 +22,14 @@ from ..quantization import GPTQ, GPTQv2
 from ..quantization.config import METHOD, QuantizeConfig
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger, log_time_block
+from ..utils.env import env_flag
 from ..utils.device import get_device
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import tf32_disable_guard
 
 log = setup_logger()
+GPTQ_DEBUG = env_flag("GPTQ_LOOP_DEBUG")
 lock = threading.Lock()
 
 class GPTQProcessor(LoopProcessor):
@@ -249,6 +251,7 @@ class GPTQProcessor(LoopProcessor):
 
         # cleanup all memory or states vars persistently added by this processor
         module.stream_sync()
+        weight_shape_snapshot = None
         with self.lock:
             # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
             if self.calculate_w_wq_diff:
@@ -264,12 +267,24 @@ class GPTQProcessor(LoopProcessor):
             q_scales = module.state.pop("q_scales").clone()
             q_g_idx = module.state.pop("q_g_idx").clone()
 
+        if GPTQ_DEBUG:
+            weight_shape_snapshot = tuple(module.weight.data.shape) if hasattr(module, "weight") else None
+
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
         assert q_g_idx.device == CPU
 
         layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
+        if GPTQ_DEBUG:
+            log.info(
+                "[GPTQDebug] %s finalized state weight=%s q_scales=%s q_zeros=%s q_g_idx=%s",
+                module_label,
+                weight_shape_snapshot,
+                tuple(q_scales.shape),
+                tuple(q_zeros.shape),
+                tuple(q_g_idx.shape),
+            )
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
 
         # replace module with quantized module

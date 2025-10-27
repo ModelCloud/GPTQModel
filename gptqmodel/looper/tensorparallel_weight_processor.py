@@ -23,7 +23,7 @@ log = setup_logger()
 class TensorParallelWeightProcessor(LoopProcessor):
     """Annotate modules with tensor-parallel padding metadata before quantisation.
 
-    Quantisation backends that shard weights across tensor-parallel ranks expect
+    Quantization backends that shard weights across tensor-parallel ranks expect
     column dimensions to align with the shard size. This processor computes the
     minimal zero padding required to satisfy splits of 2, 4, and 8 and records
     the result on the wrapped module so later stages can materialise padded
