@@ -23,7 +23,6 @@ def test_fp8_weight_dequant_matches_scaled_matmul():
     weight_block_size = config.get("quantization_config", {}).get("weight_block_size", [128, 128])
     block_rows, block_cols = weight_block_size
 
-    weight_name = None
     scale_inv_name = None
     weight_tensor = None
     scale_inv_tensor = None
@@ -42,7 +41,6 @@ def test_fp8_weight_dequant_matches_scaled_matmul():
                     candidate = key + "_scale_inv"
                     if candidate not in f.keys():
                         continue
-                    weight_name = key
                     scale_inv_name = candidate
                     weight_tensor = tensor
                     scale_inv_tensor = f.get_tensor(scale_inv_name)
