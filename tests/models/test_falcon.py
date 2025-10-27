@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import torch  # noqa: E402from tests.model_test import ModelTest
+import torch  # noqa: E402
 from model_test import ModelTest
 
 from gptqmodel.utils.eval import EVAL
