@@ -38,6 +38,43 @@ def _write_index(path: Path, shard: str, keys: list[str]) -> None:
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
+def test_dequantize_model_fp8_infers_block_size(tmp_path):
+    model_dir = tmp_path / "fp8_model_infer"
+    output_dir = tmp_path / "fp8_output_infer"
+    model_dir.mkdir()
+
+    config = {
+        "architectures": ["TestModel"],
+        "quantization_config": {
+            "fmt": "float8_e4m3fn",
+            "quant_method": "fp8",
+        },
+    }
+    (model_dir / "config.json").write_text(json.dumps(config))
+
+    weight = torch.randn(4, 8, dtype=torch.float32).to(torch.float8_e4m3fn)
+    scale_inv = torch.ones(2, 2, dtype=torch.float32)
+    shard_name = "model.safetensors"
+    save_file(
+        {
+            "linear.weight": weight,
+            "linear.weight_scale_inv": scale_inv,
+        },
+        str(model_dir / shard_name),
+    )
+    _write_index(model_dir, shard_name, ["linear.weight", "linear.weight_scale_inv"])
+
+    dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
+
+    with safe_open(output_dir / shard_name, framework="pt", device="cpu") as reader:
+        weight_out = reader.get_tensor("linear.weight")
+        assert weight_out.dtype is torch.bfloat16
+
+    expected = dequantize_f8_e4m3(weight, scale_inv=scale_inv, axis=None, target_dtype=torch.bfloat16)
+    assert torch.equal(weight_out, expected)
+
+
+@pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
 def test_dequantize_model_fp8(tmp_path):
     model_dir = tmp_path / "fp8_model"
     output_dir = tmp_path / "fp8_output"

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from collections import defaultdict
 from pathlib import Path
@@ -19,6 +20,9 @@ from safetensors.torch import save_file
 
 from ..quantization.dtype import dequantize_f4_e2m1, dequantize_f8_e4m3
 from ..utils.logger import setup_logger
+
+
+LOG = logging.getLogger(__name__)
 
 
 def _load_json(path: Path) -> dict:
@@ -72,12 +76,106 @@ def _normalize_device(device: Optional[str]) -> Optional[str]:
     return f"cuda:{dev.index}"
 
 
-def _resolve_block_size(config: dict) -> tuple[int, int]:
+def _resolve_block_size(config: dict) -> Optional[Tuple[int, int]]:
     quant_cfg = config.get("quantization_config", {}) or {}
     block_size = quant_cfg.get("weight_block_size")
     if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
         return int(block_size[0]), int(block_size[1])
-    return (128, 128)
+    return None
+
+
+def _infer_block_shape(weight_shape: Tuple[int, int], scale_tensor: torch.Tensor) -> Tuple[int, int]:
+    rows, cols = weight_shape
+    shape = tuple(scale_tensor.shape)
+
+    if scale_tensor.ndim == 0:
+        LOG.debug(
+            "Inferred block size (%d, %d) from scalar scale tensor for weight shape %s",
+            rows,
+            cols,
+            weight_shape,
+        )
+        return rows, cols
+
+    if shape == weight_shape:
+        LOG.debug(
+            "Inferred element-wise scaling (block size 1x1) for weight shape %s",
+            weight_shape,
+        )
+        return 1, 1
+
+    if scale_tensor.ndim == 2:
+        block_rows = shape[0]
+        block_cols = shape[1]
+        if block_rows == 0 or block_cols == 0:
+            raise ValueError("scale tensor has zero-sized dimension")
+        if rows % block_rows != 0 or cols % block_cols != 0:
+            raise ValueError("scale tensor shape incompatible with weight dimensions")
+        inferred = (rows // block_rows, cols // block_cols)
+        LOG.debug(
+            "Inferred block size %s from 2D scale tensor shape %s and weight shape %s",
+            inferred,
+            shape,
+            weight_shape,
+        )
+        return inferred
+
+    if scale_tensor.ndim == 1:
+        count = shape[0]
+        if count == 0:
+            raise ValueError("scale tensor is empty")
+
+        candidates: list[Tuple[int, int]] = []
+        for row_blocks in range(1, count + 1):
+            if count % row_blocks != 0:
+                continue
+            if rows % row_blocks != 0:
+                continue
+            col_blocks = count // row_blocks
+            if cols % col_blocks != 0:
+                continue
+            block_rows = rows // row_blocks
+            block_cols = cols // col_blocks
+            candidates.append((block_rows, block_cols))
+
+        if candidates:
+            candidates.sort(
+                key=lambda bc: (
+                    abs(bc[0] - bc[1]),
+                    -min(bc),
+                    -max(bc),
+                    bc[0],
+                )
+            )
+            inferred = candidates[0]
+            LOG.debug(
+                "Inferred block size %s from 1D scale tensor (count=%d) and weight shape %s",
+                inferred,
+                count,
+                weight_shape,
+            )
+            return inferred
+
+        if rows % count == 0:
+            inferred = (rows // count, cols)
+            LOG.debug(
+                "Inferred row-only scaling block size %s from 1D scale tensor (count=%d)",
+                inferred,
+                count,
+            )
+            return inferred
+        if cols % count == 0:
+            inferred = (rows, cols // count)
+            LOG.debug(
+                "Inferred column-only scaling block size %s from 1D scale tensor (count=%d)",
+                inferred,
+                count,
+            )
+            return inferred
+
+        raise ValueError("unable to infer block size from 1D scale tensor")
+
+    raise ValueError("unsupported scale tensor rank for block size inference")
 
 
 def _detect_format(model_path: Path, config: dict) -> str:
@@ -96,22 +194,34 @@ def _detect_format(model_path: Path, config: dict) -> str:
             if key.endswith(".weight"):
                 tensor = reader.get_tensor(key)
                 if tensor.dtype == torch.float8_e4m3fn:
+                    LOG.debug("Detected FP8 weights via dtype on tensor '%s'", key)
                     return "fp8"
                 if tensor.dtype == torch.uint8 and (key + "_scale") in keys:
+                    LOG.debug("Detected NVFP4 weights via dtype on tensor '%s'", key)
                     return "nvfp4"
         if any(k.endswith(".weight_scale") for k in keys):
+            LOG.debug("Detected NVFP4 format via '.weight_scale' metadata in shard '%s'", files[0])
             return "nvfp4"
         if any(k.endswith(".weight_scale_inv") for k in keys):
+            LOG.debug("Detected FP8 format via '.weight_scale_inv' metadata in shard '%s'", files[0])
             return "fp8"
         if any(k.endswith(".qweight") for k in keys):
             has_g = any(k.endswith(".g_idx") for k in keys)
+            LOG.debug(
+                "Detected %s format via qweight tensors in shard '%s'",
+                "gptq" if has_g else "awq",
+                files[0],
+            )
             return "gptq" if has_g else "awq"
 
     if fmt == "float8_e4m3fn":
+        LOG.debug("Detected FP8 format via config fmt=%s", fmt)
         return "fp8"
     if method in ("gptq", "gptqmodel"):
+        LOG.debug("Detected GPTQ format via quant_method=%s", method)
         return "gptq"
     if method == "awq":
+        LOG.debug("Detected AWQ format via quant_method=%s", method)
         return "awq"
 
     raise ValueError("Unable to detect quantization format for model")
@@ -145,11 +255,9 @@ def _convert_fp8_shard(
     reader,
     target_dtype: torch.dtype,
     *,
-    block_shape: tuple[int, int],
+    block_shape: Optional[Tuple[int, int]],
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
-    block_rows, block_cols = block_shape
-
     for key in reader.keys():
         tensor = reader.get_tensor(key)
         if key.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn:
@@ -157,11 +265,30 @@ def _convert_fp8_shard(
             if scale_key not in reader.keys():
                 raise KeyError(f"Missing scale inverse tensor for {key}")
             scale_inv = reader.get_tensor(scale_key)
+            LOG.debug("Using scale_inv tensor '%s' for FP8 weight '%s'", scale_key, key)
 
             rows, cols = tensor.shape
+            effective_block = block_shape
+            if effective_block is None:
+                try:
+                    effective_block = _infer_block_shape((rows, cols), scale_inv)
+                    LOG.debug("Inferred block size %s for weight '%s'", effective_block, key)
+                except ValueError as exc:
+                    LOG.debug(
+                        "Falling back to full-tensor block size for weight '%s' (%s)",
+                        key,
+                        exc,
+                    )
+                    effective_block = (rows, cols)
+            else:
+                LOG.debug("Using configured block size %s for weight '%s'", effective_block, key)
+
+            block_rows, block_cols = effective_block
+            if block_rows <= 0 or block_cols <= 0:
+                raise ValueError(f"Inferred invalid block size {effective_block} for {key}")
             if rows % block_rows != 0 or cols % block_cols != 0:
                 raise ValueError(
-                    f"Tensor {key} shape {tensor.shape} incompatible with block size {block_shape}"
+                    f"Tensor {key} shape {tensor.shape} incompatible with block size {effective_block}"
                 )
 
             deq = dequantize_f8_e4m3(
@@ -172,6 +299,7 @@ def _convert_fp8_shard(
             )
             tensors[key] = _finalize_for_save(deq, target_dtype)
         elif key.endswith("_scale_inv"):
+            LOG.debug("Dropping auxiliary FP8 tensor '%s' after dequantization", key)
             continue
         else:
             tensors[key] = _finalize_for_save(tensor, target_dtype)
@@ -187,6 +315,7 @@ def _convert_nvfp4_shard(reader, target_dtype: torch.dtype) -> Dict[str, torch.T
             if scale_key not in reader.keys():
                 raise KeyError(f"Missing scale tensor for {key}")
             scale = reader.get_tensor(scale_key)
+            LOG.debug("Using scale tensor '%s' for NVFP4 weight '%s'", scale_key, key)
             deq = dequantize_f4_e2m1(
                 tensor,
                 scale=scale,
@@ -195,6 +324,7 @@ def _convert_nvfp4_shard(reader, target_dtype: torch.dtype) -> Dict[str, torch.T
             )
             tensors[key] = _finalize_for_save(deq, target_dtype)
         elif key.endswith("_weight_scale"):
+            LOG.debug("Dropping auxiliary NVFP4 tensor '%s' after dequantization", key)
             continue
         else:
             tensors[key] = _finalize_for_save(tensor, target_dtype)
@@ -210,12 +340,15 @@ def _convert_awq_file(path: Path, target_dtype: torch.dtype, device: str) -> Dic
             if key.endswith(".qweight"):
                 prefix = key[:-len(".qweight")]
                 module_buffers[prefix]["qweight"] = tensor
+                LOG.debug("Collected AWQ qweight tensor '%s'", key)
             elif key.endswith(".qzeros"):
                 prefix = key[:-len(".qzeros")]
                 module_buffers[prefix]["qzeros"] = tensor
+                LOG.debug("Collected AWQ qzeros tensor '%s'", key)
             elif key.endswith(".scales"):
                 prefix = key[:-len(".scales")]
                 module_buffers[prefix]["scales"] = tensor
+                LOG.debug("Collected AWQ scale tensor '%s'", key)
             else:
                 tensors[key] = _finalize_for_save(tensor, target_dtype)
 
@@ -242,6 +375,7 @@ def _convert_awq_file(path: Path, target_dtype: torch.dtype, device: str) -> Dic
             weight.to(target_dtype).t().contiguous(),
             target_dtype,
         )
+        LOG.debug("Dequantized AWQ module '%s' to dtype %s", prefix, target_dtype)
         if prefix + ".bias" in tensors:
             tensors[prefix + ".bias"] = _finalize_for_save(tensors[prefix + ".bias"], target_dtype)
 
@@ -257,15 +391,19 @@ def _convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, devi
             if key.endswith(".qweight"):
                 prefix = key[:-len(".qweight")]
                 module_buffers[prefix]["qweight"] = tensor
+                LOG.debug("Collected GPTQ qweight tensor '%s'", key)
             elif key.endswith(".qzeros"):
                 prefix = key[:-len(".qzeros")]
                 module_buffers[prefix]["qzeros"] = tensor
+                LOG.debug("Collected GPTQ qzeros tensor '%s'", key)
             elif key.endswith(".scales"):
                 prefix = key[:-len(".scales")]
                 module_buffers[prefix]["scales"] = tensor
+                LOG.debug("Collected GPTQ scale tensor '%s'", key)
             elif key.endswith(".g_idx"):
                 prefix = key[:-len(".g_idx")]
                 module_buffers[prefix]["g_idx"] = tensor
+                LOG.debug("Collected GPTQ g_idx tensor '%s'", key)
             else:
                 tensors[key] = _finalize_for_save(tensor, target_dtype)
 
@@ -288,6 +426,12 @@ def _convert_gptq_file(path: Path, target_dtype: torch.dtype, config: dict, devi
         weight = (weight_int.to(torch.float32) - zeros_full) * scales_full
         tensors[prefix + ".weight"] = _finalize_for_save(
             weight.to(target_dtype).t().contiguous(),
+            target_dtype,
+        )
+        LOG.debug(
+            "Dequantized GPTQ module '%s' with %d-bit groups to dtype %s",
+            prefix,
+            bits,
             target_dtype,
         )
         if prefix + ".bias" in tensors:
@@ -339,7 +483,19 @@ def dequantize_model(
 
     block_shape = _resolve_block_size(config) if fmt == "fp8" else None
 
+    if block_shape is not None:
+        LOG.debug("Configured FP8 block size %s found in quantization_config", block_shape)
+    else:
+        LOG.debug("No explicit FP8 block size found; will infer from scale tensors if needed")
+
     log = setup_logger()
+    LOG.debug(
+        "Starting dequantization for model '%s' (format=%s, target_dtype=%s, device=%s)",
+        model_path,
+        fmt,
+        target_dtype,
+        open_device,
+    )
     pb = log.pb(range(len(files))).manual().set(show_left_steps=False).title(f"Dequantizing ({fmt})")
     pb.draw()
 
@@ -349,10 +505,9 @@ def dequantize_model(
     try:
         for idx, filename in enumerate(files):
             path = model_path / filename
+            LOG.debug("Processing shard '%s' for format %s on device %s", filename, fmt, open_device)
             if fmt == "fp8":
                 with safe_open(path, framework="pt", device=open_device) as reader:
-                    if block_shape is None:
-                        raise RuntimeError("FP8 conversion requires block_shape metadata")
                     tensors = _convert_fp8_shard(reader, target_dtype, block_shape=block_shape)
             elif fmt == "nvfp4":
                 with safe_open(path, framework="pt", device=open_device) as reader:
