@@ -543,7 +543,3 @@ def dequantize_model(
 
     skip_files = set(files) | {"config.json", "model.safetensors.index.json"}
     copy_aux_files(model_path, output_path, skip_files)
-
-
-# Backwards compatibility with older imports.
-dequantize = dequantize_model
