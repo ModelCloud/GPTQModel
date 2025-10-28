@@ -35,7 +35,6 @@ def test_tensorparallel_pre_padding_applies_zero_pad_metadata():
         calibration_concat_size=None,
         calibration_sort=None,
         batch_size=1,
-        logger_board="",
     )
 
     preprocessor.process(named)
@@ -85,7 +84,6 @@ def test_tensorparallel_weight_processor_with_positive_group_size():
         calibration_concat_size=None,
         calibration_sort=None,
         batch_size=1,
-        logger_board="",
     )
 
     # Verify that _target_multiple includes group_size in LCM calculation
@@ -116,7 +114,6 @@ def test_tensorparallel_weight_processor_with_negative_group_size():
         calibration_concat_size=None,
         calibration_sort=None,
         batch_size=1,
-        logger_board="",
     )
 
     # Verify that _target_multiple only uses TP_TARGETS when group_size < 0
@@ -147,7 +144,6 @@ def test_tensorparallel_weight_processor_group_size_lcm_calculation():
         calibration_concat_size=None,
         calibration_sort=None,
         batch_size=1,
-        logger_board="",
     )
 
     # math.lcm(8, 32) = 32
@@ -163,7 +159,6 @@ def test_tensorparallel_weight_processor_group_size_lcm_calculation():
         calibration_concat_size=None,
         calibration_sort=None,
         batch_size=1,
-        logger_board="",
     )
 
     # math.lcm(8, 64) = 64
@@ -179,7 +174,6 @@ def test_tensorparallel_weight_processor_group_size_lcm_calculation():
         calibration_concat_size=None,
         calibration_sort=None,
         batch_size=1,
-        logger_board="",
     )
 
     # math.lcm(8, 12) = 24
