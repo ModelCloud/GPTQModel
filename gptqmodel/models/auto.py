@@ -119,6 +119,7 @@ from .definitions.mpt import MptQModel  # noqa: E402
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
+from .definitions.ovis2 import Ovis2QModel  # noqa: E402
 from .definitions.pangu_alpha import PanguAlphaQModel  # noqa: E402
 from .definitions.phi import PhiQModel  # noqa: E402
 from .definitions.phi3 import Phi3QModel, PhiMoEGPTQForCausalLM  # noqa: E402
@@ -219,6 +220,7 @@ MODEL_MAP = {
     "hymba": HymbaQModel,
     "olmo2": LlamaQModel, # 100% llama clone
     "ovis": OvisQModel,
+    "ovis2": Ovis2QModel,
     "telechat": TeleChat2QModel,
     "instella": InstellaQModel,
     "mimo": MimoQModel,
