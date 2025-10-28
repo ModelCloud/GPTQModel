@@ -187,6 +187,8 @@ class StageInputsCapture:
                                 **example,
                                 **self.gptq_model.INPUT_EMBEDDING_EXTRA_ARGS,
                             )
+                        elif is_ovis:
+                            self.gptq_model.model.generate(inputs=example.pop("input_ids"), **example)
                         else:
                             self.gptq_model.model(**example, use_cache=use_cache)
                 except StopForward:

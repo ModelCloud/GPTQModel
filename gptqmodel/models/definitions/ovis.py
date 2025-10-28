@@ -14,6 +14,7 @@ from ...utils.image import fetch_image
 from ...utils.model import MODALITY, move_to
 from .._const import CPU
 from ..base import BaseQModel
+from ...utils.offload import offload_to_disk
 
 
 class OvisQModel(BaseQModel):
@@ -48,11 +49,24 @@ class OvisQModel(BaseQModel):
         self.model.visual_tokenizer = self.model.visual_tokenizer.to(dtype=self.model.llm.dtype)
         self.model.vte = self.model.vte.to(dtype=self.model.llm.dtype)
 
+        self.model.llm.generation_config.max_length = 8192
+
     def pre_quantize_generate_hook_start(self):
-        self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, device=self.quantize_config.device)
-        self.model.vte = move_to(self.model.vte, device=self.quantize_config.device)
+        self.shell_module_materialize(self.model.visual_tokenizer, self.quantize_config.device)
+        self.shell_module_materialize(self.model.vte, self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
+        if self.quantize_config.offload_to_disk:
+            offload_to_disk(model=self.model,
+                            module=self.model.visual_tokenizer,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            offload_to_disk(model=self.model,
+                            module=self.model.vte,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            return
+
         self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, device=CPU)
         self.model.vte = move_to(self.model.vte, device=CPU)
 
