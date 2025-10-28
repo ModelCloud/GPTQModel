@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -42,6 +42,10 @@ class MiniMaxM2Config(PretrainedConfig):
         router_aux_loss_coef: float = 0.001,
         router_jitter_noise: float = 0.0,
         output_router_logits: bool = False,
+        use_grouped_topk: bool = True,
+        num_expert_group: Optional[int] = None,
+        topk_group: Optional[int] = None,
+        routed_scaling_factor: float = 1.0,
         layernorm_full_attention_beta: float = 1.0,
         layernorm_linear_attention_beta: float = 1.0,
         layernorm_mlp_beta: float = 1.0,
@@ -50,9 +54,12 @@ class MiniMaxM2Config(PretrainedConfig):
         use_mtp: bool = True,
         num_mtp_modules: int = 3,
         mtp_transformer_layers: int = 1,
+        attn_window_size: Optional[Union[int, List[int]]] = None,
+        swa_rope_theta: float = -1.0,
         sliding_window: Optional[int] = None,
         initializer_range: float = 0.02,
         tie_word_embeddings: bool = False,
+        max_model_len: Optional[int] = None,
         bos_token_id: Optional[int] = None,
         eos_token_id: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -95,6 +102,10 @@ class MiniMaxM2Config(PretrainedConfig):
         self.router_aux_loss_coef = router_aux_loss_coef
         self.router_jitter_noise = router_jitter_noise
         self.output_router_logits = output_router_logits
+        self.use_grouped_topk = use_grouped_topk
+        self.num_expert_group = num_expert_group
+        self.topk_group = topk_group
+        self.routed_scaling_factor = routed_scaling_factor
         self.layernorm_full_attention_beta = layernorm_full_attention_beta
         self.layernorm_linear_attention_beta = layernorm_linear_attention_beta
         self.layernorm_mlp_beta = layernorm_mlp_beta
@@ -103,8 +114,11 @@ class MiniMaxM2Config(PretrainedConfig):
         self.use_mtp = use_mtp
         self.num_mtp_modules = num_mtp_modules
         self.mtp_transformer_layers = mtp_transformer_layers
+        self.attn_window_size = attn_window_size
+        self.swa_rope_theta = swa_rope_theta
         self.sliding_window = sliding_window
         self.initializer_range = initializer_range
+        self.max_model_len = max_model_len
         self.use_cache = use_cache
 
         # Convenient accessor used by rotary embedding helper

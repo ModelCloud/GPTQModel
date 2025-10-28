@@ -242,11 +242,30 @@ class MiniMaxM2Attention(nn.Module):
         self.head_dim = config.head_dim
         self.num_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
+        self.num_key_value_groups = self.num_heads // max(1, self.num_key_value_heads)
         self.rotary_dim = config.rotary_dim
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
         self.is_causal = True
+
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        max_model_len = getattr(config, "max_model_len", None)
+        if max_model_len is not None:
+            max_position_embeddings = max(max_position_embeddings, max_model_len)
+
+        attn_window_size = getattr(config, "attn_window_size", None)
+        if isinstance(attn_window_size, list):
+            sliding_window = attn_window_size[layer_idx]
+        else:
+            sliding_window = attn_window_size
+        if sliding_window is not None and sliding_window <= 0:
+            sliding_window = None
+        self.sliding_window = sliding_window
+
+        swa_rope_theta = getattr(config, "swa_rope_theta", -1.0)
+        rope_theta = config.rope_theta
+        if self.sliding_window is not None and swa_rope_theta > 0:
+            rope_theta = swa_rope_theta
 
         self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
@@ -262,6 +281,8 @@ class MiniMaxM2Attention(nn.Module):
         rope_config.hidden_size = config.hidden_size
         rope_config.num_attention_heads = config.num_attention_heads
         rope_config.partial_rotary_factor = float(config.rotary_dim) / float(self.head_dim)
+        rope_config.rope_theta = rope_theta
+        rope_config.max_position_embeddings = max_position_embeddings
         self.rotary_emb = LlamaRotaryEmbedding(rope_config)
 
     def forward(
@@ -311,6 +332,13 @@ class MiniMaxM2Attention(nn.Module):
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
 
+        if self.sliding_window is not None and past_key_values is None:
+            query_positions = torch.arange(q_len, device=hidden_states.device).view(1, 1, q_len, 1)
+            key_positions = torch.arange(key_states.shape[-2], device=hidden_states.device).view(1, 1, 1, -1)
+            window_mask = key_positions < (query_positions - self.sliding_window)
+            if window_mask.any():
+                attn_weights = attn_weights.masked_fill(window_mask, float("-inf"))
+
         attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         if self.training and self.attention_dropout > 0:
             attn_weights = F.dropout(attn_weights, p=self.attention_dropout)
@@ -322,6 +350,18 @@ class MiniMaxM2Attention(nn.Module):
         if not output_attentions:
             attn_weights = None
         return attn_output, attn_weights
+
+
+class MiniMaxM2LogitsProcessor(nn.Module):
+    def __init__(self, config: MiniMaxM2Config) -> None:
+        super().__init__()
+        self.scale = getattr(config, "logits_scale", 1.0)
+
+    def forward(self, lm_head: nn.Module, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = lm_head(hidden_states)
+        if self.scale != 1.0:
+            logits = logits * self.scale
+        return logits
 
 
 class MiniMaxM2DecoderLayer(nn.Module):
@@ -343,8 +383,9 @@ class MiniMaxM2DecoderLayer(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         output_attentions: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        residual = hidden_states
+        residual: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        residual_input = hidden_states if residual is None else residual
         hidden_states = self.input_layernorm(hidden_states)
 
         attn_output, attn_weights = self.self_attn(
@@ -357,14 +398,14 @@ class MiniMaxM2DecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             output_attentions=output_attentions,
         )
-        hidden_states = residual + attn_output
+        hidden_states = residual_input + attn_output
 
-        residual = hidden_states
+        residual_post_attn = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         moe_output, router_logits = self.block_sparse_moe(hidden_states)
-        hidden_states = residual + moe_output
+        hidden_states = residual_post_attn + moe_output
 
-        return hidden_states, router_logits, attn_weights
+        return hidden_states, hidden_states, router_logits, attn_weights
 
 
 class MiniMaxM2PreTrainedModel(PreTrainedModel):
@@ -386,6 +427,35 @@ class MiniMaxM2PreTrainedModel(PreTrainedModel):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
 
+    def _remap_qkv_weights(self, state_dict):
+        num_q = self.config.num_attention_heads * self.config.head_dim
+        num_kv = self.config.num_key_value_heads * self.config.head_dim
+
+        for layer_idx in range(self.config.num_hidden_layers):
+            prefix = f"model.layers.{layer_idx}.self_attn"
+            weight_key = f"{prefix}.qkv_proj.weight"
+            if weight_key in state_dict:
+                qkv_weight = state_dict.pop(weight_key)
+                q_weight, k_weight, v_weight = qkv_weight.split([num_q, num_kv, num_kv], dim=0)
+                state_dict.setdefault(f"{prefix}.q_proj.weight", q_weight)
+                state_dict.setdefault(f"{prefix}.k_proj.weight", k_weight)
+                state_dict.setdefault(f"{prefix}.v_proj.weight", v_weight)
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        if not isinstance(state_dict, dict):
+            raise TypeError(f"Expected state_dict to be dict, got {type(state_dict)}")
+
+        filtered_state_dict = {}
+        drop_suffixes = ("weight_scale_inv", "weight_scale", "input_scale", "scales", "amax")
+        for key, value in state_dict.items():
+            if key.endswith(drop_suffixes) or "fp8" in key:
+                continue
+            filtered_state_dict[key] = value
+
+        self._remap_qkv_weights(filtered_state_dict)
+
+        return super().load_state_dict(filtered_state_dict, strict=strict)
+
 
 class MiniMaxM2Model(MiniMaxM2PreTrainedModel):
     def __init__(self, config: MiniMaxM2Config) -> None:
@@ -399,7 +469,6 @@ class MiniMaxM2Model(MiniMaxM2PreTrainedModel):
         )
         self.norm = MiniMaxM2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
-        self.rotary_emb = LlamaRotaryEmbedding(config)
 
         self.post_init()
 
@@ -467,12 +536,12 @@ class MiniMaxM2Model(MiniMaxM2PreTrainedModel):
             )
 
         hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         all_hidden_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
         all_router_logits = () if output_router_logits else None
 
+        residual = None
         for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
@@ -484,13 +553,12 @@ class MiniMaxM2Model(MiniMaxM2PreTrainedModel):
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 cache_position=cache_position,
-                position_embeddings=position_embeddings,
+                position_embeddings=None,
                 output_attentions=output_attentions,
+                residual=residual,
             )
 
-            hidden_states = layer_outputs[0]
-            router_logits = layer_outputs[1]
-            attn_weights = layer_outputs[2]
+            hidden_states, residual, router_logits, attn_weights = layer_outputs
 
             if output_router_logits:
                 all_router_logits = all_router_logits + (router_logits,)
@@ -530,6 +598,7 @@ class MiniMaxM2ForCausalLM(MiniMaxM2PreTrainedModel, GenerationMixin):
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.num_experts = config.num_local_experts
         self.num_experts_per_tok = config.num_experts_per_tok
+        self.logits_processor = MiniMaxM2LogitsProcessor(config)
 
         self.post_init()
 
@@ -602,7 +671,7 @@ class MiniMaxM2ForCausalLM(MiniMaxM2PreTrainedModel, GenerationMixin):
 
         hidden_states = model_outputs.last_hidden_state
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) and logits_to_keep > 0 else slice(None)
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        logits = self.logits_processor(self.lm_head, hidden_states[:, slice_indices, :])
 
         loss = None
         if labels is not None:
