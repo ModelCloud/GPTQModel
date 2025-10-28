@@ -61,7 +61,6 @@ class Ovis2QModel(BaseQModel):
         processor = self.load_processor()
         calib_data = []
         for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
-            print("batch", batch)
             text = processor.apply_chat_template(
                 batch, tokenize=False, add_generation_prompt=True
             )

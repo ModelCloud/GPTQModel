@@ -48,6 +48,7 @@ def format_qwen2_vl_dataset(image, assistant):
         {"role": "assistant", "content": assistant},
     ]
 
+
 def format_qwen2_5_omni_dataset(image, assistant):
     return [
         {
@@ -66,6 +67,7 @@ def format_qwen2_5_omni_dataset(image, assistant):
         },
         {"role": "assistant", "content": assistant},
     ]
+
 
 def prepare_dataset(format_func, n_sample: int = 20) -> list[list[dict]]:
     from datasets import load_dataset

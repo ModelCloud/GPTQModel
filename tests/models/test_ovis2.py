@@ -34,7 +34,6 @@ class Test(ModelTest):
         image_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ovis/10016.jpg")
         image = Image.open(image_path)
         messages = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        print(messages)
 
         inputs = processor(
             images=[image],
