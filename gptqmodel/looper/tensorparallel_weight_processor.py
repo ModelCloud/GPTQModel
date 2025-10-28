@@ -38,7 +38,9 @@ class TensorParallelWeightProcessor(LoopProcessor):
         kwargs.setdefault("require_fwd", False)
         kwargs.setdefault("fwd_after_process", False)
         super().__init__(*args, **kwargs)
-        self.qcfg = kwargs.pop("qcfg", None)
+        qcfg_from_kwargs = kwargs.pop("qcfg", None)
+        if qcfg_from_kwargs is not None:
+            self.qcfg = qcfg_from_kwargs
 
         self._target_multiple = math.lcm(*self._TP_TARGETS)
 
