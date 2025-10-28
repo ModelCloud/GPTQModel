@@ -38,8 +38,12 @@ class TensorParallelWeightProcessor(LoopProcessor):
         kwargs.setdefault("require_fwd", False)
         kwargs.setdefault("fwd_after_process", False)
         super().__init__(*args, **kwargs)
+        self.qcfg = kwargs.pop("qcfg", None)
 
         self._target_multiple = math.lcm(*self._TP_TARGETS)
+
+        if self.qcfg and hasattr(self.qcfg, 'group_size') and self.qcfg.group_size > 0:
+            self._target_multiple = math.lcm(self._target_multiple, self.qcfg.group_size)
 
     def preprocess(self, module: NamedModule):  # pragma: no cover - simple hook
         # The processor operates on every eligible module; no setup required.
