@@ -9,9 +9,10 @@ from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
+from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY
 from ..base import BaseQModel
-from ...utils.image import extract_vision_info, fetch_image
+
 
 class Ovis2QModel(BaseQModel):
     loader = AutoModelForImageTextToText

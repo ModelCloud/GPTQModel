@@ -37,6 +37,7 @@ from .internlm2 import InternLM2QModel
 from .llama4 import Llama4QModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel
+from .minimax_m2 import MiniMaxM2GPTQ
 from .mixtral import MixtralQModel
 from .mllama import MLlamaQModel
 from .mobilellm import MobileLLMQModel

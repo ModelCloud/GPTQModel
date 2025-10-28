@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+
 import torch
 
 from gptqmodel.looper.named_module import NamedModule
@@ -67,7 +68,7 @@ def test_tensorparallel_pre_padding_applies_zero_pad_metadata():
 def test_tensorparallel_weight_processor_with_positive_group_size():
     """Test that _target_multiple is correctly calculated when group_size > 0."""
     linear = torch.nn.Linear(10, 7, bias=False)
-    named = NamedModule(linear, name="proj", full_name="layer.0.proj", layer_index=0)
+    NamedModule(linear, name="proj", full_name="layer.0.proj", layer_index=0)
 
     qcfg = QuantizeConfig(bits=4, mock_quantization=True)
     qcfg.group_size = 128  # Positive group_size
@@ -97,7 +98,7 @@ def test_tensorparallel_weight_processor_with_positive_group_size():
 def test_tensorparallel_weight_processor_with_negative_group_size():
     """Test that _target_multiple uses default value when group_size < 0."""
     linear = torch.nn.Linear(10, 7, bias=False)
-    named = NamedModule(linear, name="proj", full_name="layer.0.proj", layer_index=0)
+    NamedModule(linear, name="proj", full_name="layer.0.proj", layer_index=0)
 
     qcfg = QuantizeConfig(bits=4, mock_quantization=True)
     qcfg.group_size = -1  # Negative group_size
@@ -126,7 +127,7 @@ def test_tensorparallel_weight_processor_with_negative_group_size():
 def test_tensorparallel_weight_processor_group_size_lcm_calculation():
     """Test LCM calculation with various group_size values."""
     linear = torch.nn.Linear(10, 7, bias=False)
-    named = NamedModule(linear, name="proj", full_name="layer.0.proj", layer_index=0)
+    NamedModule(linear, name="proj", full_name="layer.0.proj", layer_index=0)
 
     calibration_stub = [{"input_ids": torch.ones((1, 1), dtype=torch.long)}]
 

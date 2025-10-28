@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from gptqmodel.models.definitions.ovis import OvisQModel
-from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
+from gptqmodel.models.definitions.ovis import OvisQModel
+from gptqmodel.models.definitions.ovis2 import Ovis2QModel
+
 
 def format_ovis_dataset(image, assistant):
     return {

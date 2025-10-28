@@ -5,9 +5,8 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
 from gptqmodel.utils.backend import BACKEND
-
+from gptqmodel.utils.eval import EVAL
 
 
 class TestLongLlama(ModelTest):

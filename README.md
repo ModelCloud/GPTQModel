@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 10/28/2025 5.1.0-dev: Minimax M2 support with [ModelCloud BF16 M2 Model](https://huggingface.co/ModelCloud/MiniMax-M2-BF16). New `VramStrategy.Balanced` quantization property for reduced memory usage for large MoE on multi-3090 (24GB) devices.
 * 10/24/2025 [5.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.0.0): 🎉 Data-parallel quant support for `MoE` models on multi-gpu using `nogil` Python. `offload_to_disk` support enabled by 
 default to massively reduce `cpu` ram usage. New `Intel` and `AMD` cpu hw accelerated `TorchFused` kernel. Packing stage is now 4x faster and now inlined with quantization. `Vram` pressure for large models reduced during quantization.
 `act_group_aware` is  16k+ times faster and now the default when `desc_act=False` for higher quality recovery without inference penalty of `desc_act=True`. New beta quality `AWQ` support with full `gemm`, 
@@ -133,15 +134,15 @@ GPT-QModel not only supports GPTQ but also QQQ, GPTQv2, Eora with more quantizat
 
 GPT-QModel is a modular design supporting multiple quantization methods and feature extensions.
 
-| Quantization Feature       | GPT-QModel | Transformers | vLLM  | SGLang | Lora Training |
-|----------------------------|------------|---|---|---|---------------|
-| GPTQ                       | ✅          | ✅ | ✅ | ✅ | ✅             | 
-| EoRA                       | ✅          | ✅ | ✅ | ✅ | x             | 
+| Quantization Feature      | GPT-QModel | Transformers | vLLM  | SGLang | Lora Training |
+|---------------------------|------------|---|---|---|---------------|
+| GPTQ                      | ✅          | ✅ | ✅ | ✅ | ✅             | 
+| EoRA                      | ✅          | ✅ | ✅ | ✅ | x             | 
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
-| AWQ                        | ✅          | ✅* | ✅* | ✅* | ✅*             | 
-| QQQ                        | ✅          | x | x | x | x             | 
-| Rotation                   | ✅          | x | x | x | x             |  
-| GPTQ v2*                   | ✅          | ✅ | ✅ | ✅ | ✅             | 
+| AWQ                       | ✅          | ✅* | ✅* | ✅* | ✅*             | 
+| QQQ                       | ✅          | x | x | x | x             | 
+| Rotation                  | ✅          | x | x | x | x             |  
+| GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             | 
 
 ## Multi-Modal
 
@@ -289,9 +290,9 @@ model.quantize(calibration_dataset, batch_size=1)
 model.save(quant_path)
 ```
 
-### Quantization using GPTQ V2* (Experimental, not MoE compatible, and results may not be better than v1)
+### Quantization using GPTAQ (Experimental, not MoE compatible, and results may not be better than v1)
 
-Enable GPTQ v2 quantization by setting `v2 = True`.
+Enable GPTAQ quantization by setting `v2 = True`.
 ```py
 # Note v2 is currently experimental, not MoE compatible, and requires 2-4x more vram to execute
 # We have many reports of v2 not working better or exceeding v1 so please use for testing only
@@ -300,12 +301,12 @@ quant_config = QuantizeConfig(bits=4, group_size=128, v2=True)
 ```
 `Llama 3.1 8B-Instruct` quantized using `test/models/test_llama3_2.py`
 
-| Method  | Bits/Group Size | ARC_CHALLENGE   | GSM8K_Platinum_COT | 
-|---------|-----------------|-----------------|--------------------|
-| GPTQ    | 4 / 128         | 49.15           | 48.30              |
-| GPTQ v2 | 4 / 128         | 49.74  +1.20%   | 61.46  +27.25%     |
-| GPTQ    | 3 / 128         | 39.93           | 43.26              |
-| GPTQ v2 | 3 / 128         | 41.13  +3.01%   | 50.54  +16.83%     | 
+| Method | Bits/Group Size | ARC_CHALLENGE   | GSM8K_Platinum_COT | 
+|--------|-----------------|-----------------|--------------------|
+| GPTQ   | 4 / 128         | 49.15           | 48.30              |
+| GPTAQ  | 4 / 128         | 49.74  +1.20%   | 61.46  +27.25%     |
+| GPTQ   | 3 / 128         | 39.93           | 43.26              |
+| GPTAQ  | 3 / 128         | 41.13  +3.01%   | 50.54  +16.83%     | 
 
 # Quantization Inference
 ```py
@@ -433,13 +434,13 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 
 ### Experimental Features
 
-* GPTQ v2: set `v2=True` in quantization config.
+* GPTAQ: set `v2=True` in quantization config.
 
 
 ### Attribution of Quantization Methods:
 
 * GPTQ (v1): IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
-* GPTQ (v2*): Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692. v2 naming is by Yale author and not endorsed by original GPTQ authors.
+* GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * EoRA: Nvidia, main-author: Shih-Yang Liu, arXiv preprint arXiv:2410.21271.
 * GAR: Intel, main-author: T Gafni, A Karnieli, Y Hanani, [Paper](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
@@ -508,9 +509,9 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
   year={2023}
 }
 
-# GPTQ v2
-@article{li2025gptqv2,
-  title={GPTQv2: Efficient Finetuning-Free Quantization for Asymmetric Calibration}, 
+# GPTAQ
+@article{li2025gptaq,
+  title={GPTAQ: Efficient Finetuning-Free Quantization for Asymmetric Calibration}, 
   author={Yuhang Li and Ruokai Yin and Donghyun Lee and Shiting Xiao and Priyadarshini Panda},
   journal={arXiv preprint arXiv:2504.02692},
   year={2025}

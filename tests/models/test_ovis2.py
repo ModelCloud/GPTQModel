@@ -10,7 +10,6 @@ from model_test import ModelTest
 from PIL import Image
 
 
-
 class Test(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ovis2-2B-hf"
 
