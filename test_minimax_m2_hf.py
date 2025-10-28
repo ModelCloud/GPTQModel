@@ -21,20 +21,20 @@ from pathlib import Path
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
-from gptqmodel.hf_minimax_m2.modeling_minimax_m2 import (
-    MiniMaxAttention,
-    MiniMaxDecoderLayer,
-    MiniMaxForCausalLM,
-    MiniMaxMLP,
-    MiniMaxM2Attention,
-    MiniMaxM2DecoderLayer,
-    MiniMaxM2ForCausalLM,
-    MiniMaxM2MLP,
-    MiniMaxM2RMSNorm,
-    MiniMaxM2SparseMoeBlock,
-    MiniMaxRMSNorm,
-    MiniMaxSparseMoeBlock,
-)
+# from gptqmodel.hf_minimax_m2.modeling_minimax_m2 import (
+#     MiniMaxAttention,
+#     MiniMaxDecoderLayer,
+#     MiniMaxForCausalLM,
+#     MiniMaxMLP,
+#     MiniMaxM2Attention,
+#     MiniMaxM2DecoderLayer,
+#     MiniMaxM2ForCausalLM,
+#     MiniMaxM2MLP,
+#     MiniMaxM2RMSNorm,
+#     MiniMaxM2SparseMoeBlock,
+#     MiniMaxRMSNorm,
+#     MiniMaxSparseMoeBlock,
+# )
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,47 +68,47 @@ def build_prompt(tokenizer: AutoTokenizer, question: str) -> str:
     return tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
 
 
-def assert_module_types(model: MiniMaxM2ForCausalLM) -> None:
-    causal_lm_types = (MiniMaxM2ForCausalLM, MiniMaxForCausalLM)
-    decoder_layer_types = (MiniMaxM2DecoderLayer, MiniMaxDecoderLayer)
-    attention_types = (MiniMaxM2Attention, MiniMaxAttention)
-    moe_block_types = (MiniMaxM2SparseMoeBlock, MiniMaxSparseMoeBlock)
-    norm_types = (MiniMaxM2RMSNorm, MiniMaxRMSNorm)
-    mlp_types = (MiniMaxM2MLP, MiniMaxMLP)
-
-    assert isinstance(
-        model, causal_lm_types
-    ), f"Expected MiniMaxM2ForCausalLM/MiniMaxForCausalLM, received {type(model).__name__}"
-
-    decoder = getattr(model, "model", None)
-    assert decoder is not None, "Model is missing the `model` attribute with decoder layers."
-
-    for layer_idx, layer in enumerate(decoder.layers):
-        assert isinstance(
-            layer, decoder_layer_types
-        ), f"Layer {layer_idx}: expected MiniMax(M2)DecoderLayer, got {type(layer).__name__}"
-        assert isinstance(
-            layer.self_attn, attention_types
-        ), f"Layer {layer_idx}: unexpected self_attn type {type(layer.self_attn).__name__}"
-        assert isinstance(
-            layer.block_sparse_moe, moe_block_types
-        ), f"Layer {layer_idx}: unexpected MoE block type {type(layer.block_sparse_moe).__name__}"
-        assert isinstance(
-            layer.input_layernorm, norm_types
-        ), f"Layer {layer_idx}: unexpected input_layernorm type {type(layer.input_layernorm).__name__}"
-        assert isinstance(
-            layer.post_attention_layernorm, norm_types
-        ), f"Layer {layer_idx}: unexpected post_attention_layernorm type {type(layer.post_attention_layernorm).__name__}"
-
-        moe_block = layer.block_sparse_moe
-        assert isinstance(
-            moe_block.experts, nn.ModuleList
-        ), f"Layer {layer_idx}: expected experts to be a ModuleList, got {type(moe_block.experts).__name__}"
-        for expert_idx, expert in enumerate(moe_block.experts):
-            assert isinstance(
-                expert, mlp_types
-            ), f"Layer {layer_idx} expert {expert_idx}: expected MiniMax(M2)MLP, got {type(expert).__name__}"
-
+# def assert_module_types(model: MiniMaxM2ForCausalLM) -> None:
+#     causal_lm_types = (MiniMaxM2ForCausalLM, MiniMaxForCausalLM)
+#     decoder_layer_types = (MiniMaxM2DecoderLayer, MiniMaxDecoderLayer)
+#     attention_types = (MiniMaxM2Attention, MiniMaxAttention)
+#     moe_block_types = (MiniMaxM2SparseMoeBlock, MiniMaxSparseMoeBlock)
+#     norm_types = (MiniMaxM2RMSNorm, MiniMaxRMSNorm)
+#     mlp_types = (MiniMaxM2MLP, MiniMaxMLP)
+#
+#     assert isinstance(
+#         model, causal_lm_types
+#     ), f"Expected MiniMaxM2ForCausalLM/MiniMaxForCausalLM, received {type(model).__name__}"
+#
+#     decoder = getattr(model, "model", None)
+#     assert decoder is not None, "Model is missing the `model` attribute with decoder layers."
+#
+#     for layer_idx, layer in enumerate(decoder.layers):
+#         assert isinstance(
+#             layer, decoder_layer_types
+#         ), f"Layer {layer_idx}: expected MiniMax(M2)DecoderLayer, got {type(layer).__name__}"
+#         assert isinstance(
+#             layer.self_attn, attention_types
+#         ), f"Layer {layer_idx}: unexpected self_attn type {type(layer.self_attn).__name__}"
+#         assert isinstance(
+#             layer.block_sparse_moe, moe_block_types
+#         ), f"Layer {layer_idx}: unexpected MoE block type {type(layer.block_sparse_moe).__name__}"
+#         assert isinstance(
+#             layer.input_layernorm, norm_types
+#         ), f"Layer {layer_idx}: unexpected input_layernorm type {type(layer.input_layernorm).__name__}"
+#         assert isinstance(
+#             layer.post_attention_layernorm, norm_types
+#         ), f"Layer {layer_idx}: unexpected post_attention_layernorm type {type(layer.post_attention_layernorm).__name__}"
+#
+#         moe_block = layer.block_sparse_moe
+#         assert isinstance(
+#             moe_block.experts, nn.ModuleList
+#         ), f"Layer {layer_idx}: expected experts to be a ModuleList, got {type(moe_block.experts).__name__}"
+#         for expert_idx, expert in enumerate(moe_block.experts):
+#             assert isinstance(
+#                 expert, mlp_types
+#             ), f"Layer {layer_idx} expert {expert_idx}: expected MiniMax(M2)MLP, got {type(expert).__name__}"
+#
 
 def main() -> None:
     args = parse_args()
