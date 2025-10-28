@@ -140,6 +140,19 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
         self.jitter_noise = config.router_jitter_noise
         self.use_routing_bias = config.use_routing_bias
         self.scoring_func = getattr(config, "scoring_func", "softmax")
+        self.use_grouped_topk = getattr(config, "use_grouped_topk", False)
+        self.num_expert_group = getattr(config, "num_expert_group", None)
+        self.topk_group = getattr(config, "topk_group", None)
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+
+        if self.use_grouped_topk:
+            if self.num_expert_group is None:
+                self.num_expert_group = self.num_experts
+            if self.topk_group is None:
+                self.topk_group = min(self.num_expert_group, self.top_k)
+        else:
+            self.num_expert_group = 1
+            self.topk_group = 1
 
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
         if self.use_routing_bias:
@@ -177,14 +190,31 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
             scores = scores + correction_bias
         else:
             original_scores = scores
+        topk_scores: torch.Tensor
+        if self.use_grouped_topk and self.num_expert_group > 1:
+            experts_per_group = scores.size(-1) // self.num_expert_group
+            scores_grouped = scores.view(scores.size(0), self.num_expert_group, experts_per_group)
+            if correction_bias is not None:
+                group_scores = scores_grouped.topk(2, dim=-1)[0].sum(dim=-1)
+            else:
+                group_scores = scores_grouped.max(dim=-1).values
+            group_mask = torch.zeros_like(group_scores)
+            selected_groups = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=True).indices
+            group_mask.scatter_(1, selected_groups, 1.0)
+            mask = group_mask.unsqueeze(-1).expand(-1, -1, experts_per_group).reshape(scores.size())
+            masked_scores = scores.masked_fill(mask == 0, float("-inf"))
+            topk_scores, selected_experts = torch.topk(masked_scores, self.top_k, dim=-1, sorted=True)
+        else:
+            topk_scores, selected_experts = torch.topk(scores, self.top_k, dim=-1, sorted=True)
 
-        topk_scores, selected_experts = torch.topk(scores, self.top_k, dim=-1, sorted=True)
         if correction_bias is not None:
             routing_weights = original_scores.gather(1, selected_experts)
         else:
             routing_weights = topk_scores
 
         routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+        if self.routed_scaling_factor != 1.0:
+            routing_weights = routing_weights * self.routed_scaling_factor
         routing_weights = routing_weights.to(hidden_states.dtype)
         selected_experts = selected_experts.to(torch.long)
 
