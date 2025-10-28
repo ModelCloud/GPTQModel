@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 """
 MiniMax-M2 Hugging Face checkpoint sanity check with streaming output.
@@ -132,26 +133,46 @@ def main() -> None:
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
     print("Running generation (streaming)...\n")
-    streamer = TextIteratorStreamer(tokenizer, skip_special_tokens=True)
+    streamer = TextIteratorStreamer(tokenizer, skip_special_tokens=False)
+    eos_ids = model.generation_config.eos_token_id
+    if eos_ids is None:
+        eos_ids = []
+    elif isinstance(eos_ids, int):
+        eos_ids = [eos_ids]
+    think_end_id = tokenizer.convert_tokens_to_ids("</think>")
+    if think_end_id is not None and think_end_id not in eos_ids:
+        eos_ids = eos_ids + [think_end_id]
+
     generation_kwargs = dict(
         **inputs,
         max_new_tokens=args.max_new_tokens,
         streamer=streamer,
+        eos_token_id=eos_ids if eos_ids else None,
     )
 
     generation_thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
     generation_thread.start()
 
     completion = []
+    first_chunk = True
+    seen_end_reasoning = False
     for text in streamer:
+        if first_chunk:
+            print("<think>", end="", flush=True)
+            completion.append("<think>")
+            first_chunk = False
         print(text, end="", flush=True)
         completion.append(text)
+        if "</think>" in text:
+            seen_end_reasoning = True
 
     generation_thread.join()
     print("\n\n=== Completed Response ===")
-    print("".join(completion).strip() or "<empty response>")
+    final_text = "".join(completion).strip()
+    print(final_text or "<empty response>")
+    if not seen_end_reasoning:
+        print("\n[warning] No </think> token detected in streamed output.", flush=True)
 
 
 if __name__ == "__main__":
     main()
-
