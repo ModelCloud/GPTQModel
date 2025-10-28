@@ -147,9 +147,9 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
         if self.use_grouped_topk:
-            if self.num_expert_group is None:
-                self.num_expert_group = self.num_experts
-            if self.topk_group is None:
+            if self.num_expert_group is None or self.num_expert_group <= 0:
+                self.num_expert_group = 1
+            if self.topk_group is None or self.topk_group <= 0:
                 self.topk_group = min(self.num_expert_group, self.top_k)
         else:
             self.num_expert_group = 1
@@ -196,7 +196,11 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
             experts_per_group = scores.size(-1) // self.num_expert_group
             scores_grouped = scores.view(scores.size(0), self.num_expert_group, experts_per_group)
             if correction_bias is not None:
-                group_scores = scores_grouped.topk(2, dim=-1)[0].sum(dim=-1)
+                topk_in_group = min(2, experts_per_group)
+                if topk_in_group > 0:
+                    group_scores = scores_grouped.topk(topk_in_group, dim=-1)[0].sum(dim=-1)
+                else:
+                    group_scores = torch.zeros_like(scores_grouped[..., 0])
             else:
                 group_scores = scores_grouped.max(dim=-1).values
             group_mask = torch.zeros_like(group_scores)
