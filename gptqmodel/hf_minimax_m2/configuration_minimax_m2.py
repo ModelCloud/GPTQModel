@@ -12,6 +12,19 @@ from typing import List, Optional, Union
 from transformers.configuration_utils import PretrainedConfig
 
 
+class _QuantizationConfigDict(dict):
+    """Ensure quantization config always exposes a `quant_method`."""
+
+    def __init__(self, data: Optional[dict] = None):
+        if data is None:
+            data = {}
+        super().__init__(data)
+        self.setdefault("quant_method", "none")
+
+    def to_dict(self):
+        return dict(self)
+
+
 class MiniMaxM2Config(PretrainedConfig):
     model_type = "minimax"
 
@@ -67,6 +80,10 @@ class MiniMaxM2Config(PretrainedConfig):
         **kwargs,
     ) -> None:
         quantization_config = kwargs.pop("quantization_config", None)
+        if quantization_config is None:
+            quantization_config = _QuantizationConfigDict()
+        elif not isinstance(quantization_config, _QuantizationConfigDict):
+            quantization_config = _QuantizationConfigDict(quantization_config)
         transformers_version = kwargs.pop("transformers_version", None)
 
         super().__init__(

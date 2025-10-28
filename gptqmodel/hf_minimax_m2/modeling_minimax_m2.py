@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import copy
+import time
 from typing import Optional, Tuple, Union
 
 import torch
@@ -170,8 +171,8 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
             hidden_states = hidden_states * noise
 
         hidden_states = hidden_states.view(-1, hidden_dim)
-        router_logits = self.gate(hidden_states.to(torch.float32))
-        router_logits = router_logits.to(torch.float32)
+        gate_dtype = self.gate.weight.dtype
+        router_logits = self.gate(hidden_states.to(gate_dtype)).to(torch.float32)
         if self.e_score_correction_bias is not None:
             # Bias is applied after scoring (see vLLM/SGLang implementations).
             correction_bias = self.e_score_correction_bias.to(router_logits.device, router_logits.dtype)
@@ -454,7 +455,20 @@ class MiniMaxM2PreTrainedModel(PreTrainedModel):
 
         self._remap_qkv_weights(filtered_state_dict)
 
-        return super().load_state_dict(filtered_state_dict, strict=strict)
+        if logger.isEnabledFor(logging.INFO):
+            logger.info(
+                "MiniMaxM2: loading %d tensors (filtered from %d original).",
+                len(filtered_state_dict),
+                len(state_dict),
+            )
+
+        load_start = time.perf_counter()
+        result = super().load_state_dict(filtered_state_dict, strict=strict)
+        load_elapsed = time.perf_counter() - load_start
+        if logger.isEnabledFor(logging.INFO):
+            logger.info("MiniMaxM2: state_dict load finished in %.2f seconds.", load_elapsed)
+
+        return result
 
 
 class MiniMaxM2Model(MiniMaxM2PreTrainedModel):
@@ -711,6 +725,22 @@ class MiniMaxM2ForCausalLM(MiniMaxM2PreTrainedModel, GenerationMixin):
             router_logits=model_outputs.router_logits,
         )
 
+# -----------------------------------------------------------------------------
+# Backward compatibility aliases
+# -----------------------------------------------------------------------------
+
+MiniMaxRMSNorm = MiniMaxM2RMSNorm
+MiniMaxSparseMoeBlock = MiniMaxM2SparseMoeBlock
+MiniMaxAttention = MiniMaxM2Attention
+MiniMaxDecoderLayer = MiniMaxM2DecoderLayer
+MiniMaxMLP = MiniMaxM2MLP
+MiniMaxPreTrainedModel = MiniMaxM2PreTrainedModel
+MiniMaxModel = MiniMaxM2Model
+
+
+class MiniMaxForCausalLM(MiniMaxM2ForCausalLM):
+    """Alias for compatibility with checkpoints exporting MiniMaxForCausalLM."""
+
 
 __all__ = [
     "MiniMaxM2RMSNorm",
@@ -720,4 +750,12 @@ __all__ = [
     "MiniMaxM2Model",
     "MiniMaxM2ForCausalLM",
     "MiniMaxM2PreTrainedModel",
+    "MiniMaxRMSNorm",
+    "MiniMaxSparseMoeBlock",
+    "MiniMaxAttention",
+    "MiniMaxDecoderLayer",
+    "MiniMaxPreTrainedModel",
+    "MiniMaxModel",
+    "MiniMaxMLP",
+    "MiniMaxForCausalLM",
 ]
