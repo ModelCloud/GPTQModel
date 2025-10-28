@@ -238,6 +238,30 @@ MODEL_MAP = {
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
 
+def _is_supported_quantization_config(config: AutoConfig) -> bool:
+    quantization_config = getattr(config, "quantization_config", None)
+    if not isinstance(quantization_config, dict):
+        return False
+
+    quant_format = quantization_config.get("quant_format")
+    if isinstance(quant_format, str) and quant_format.lower() in (
+        METHOD.GPTQ,
+        METHOD.AWQ,
+        METHOD.QQQ,
+    ):
+        return True
+
+    quant_method = quantization_config.get("quant_method")
+    if isinstance(quant_method, str) and quant_method.lower() in (
+        METHOD.GPTQ,
+        METHOD.AWQ,
+        METHOD.QQQ,
+    ):
+        return True
+
+    return False
+
+
 def check_and_get_model_type(model_dir, trust_remote_code=False):
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
     if config.model_type.lower() not in SUPPORTED_MODELS:
@@ -276,10 +300,9 @@ class GPTQModel:
 
         is_gptqmodel_quantized = False
         model_cfg = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-        if hasattr(model_cfg, "quantization_config") and "quant_format" in model_cfg.quantization_config:
+        if _is_supported_quantization_config(model_cfg):
             # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
-            if model_cfg.quantization_config["quant_format"].lower() in (METHOD.GPTQ, METHOD.AWQ, METHOD.QQQ):
-                is_gptqmodel_quantized = True
+            is_gptqmodel_quantized = True
         else:
             # TODO FIX ME...not decoded to check if quant method is compatible or quantized by gptqmodel
             for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
@@ -329,8 +352,8 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseQModel:
-        if hasattr(AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code),
-                   "quantization_config"):
+        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        if _is_supported_quantization_config(config):
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")
