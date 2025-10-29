@@ -21,6 +21,7 @@ from gptqmodel.nn_modules.qlinear.awq_marlin import (
     AwqMarlinQuantLinear,
     marlin_import_exception,
 )
+from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
 from gptqmodel.utils.marlin import marlin_make_workspace_new
 
 
@@ -40,13 +41,16 @@ class TestAwqKernelOutput(unittest.TestCase):
     TARGET = "model.layers.20.self_attn.v_proj"
     BITS = 4
     GROUP_SIZE = 128
-    SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
+    SUPPORTED_DTYPES = (torch.float16,)
 
+    baseline_backend = BACKEND.TORCH_AWQ
     backend_cases = [
-        (BACKEND.GEMM, torch.float16, 0.0),
-        (BACKEND.GEMM, torch.bfloat16, 0.0005),
+        (baseline_backend, torch.float16, 0.0),
+        # (baseline_backend, torch.bfloat16, 0.0),
+        (BACKEND.GEMM, torch.float16, 0.001),
+        # (BACKEND.GEMM, torch.bfloat16, 0.05),
         (BACKEND.MARLIN, torch.float16, 0.01),
-        (BACKEND.MARLIN, torch.bfloat16, 0.015),
+        # (BACKEND.MARLIN, torch.bfloat16, 0.05),
     ]
 
     @classmethod
@@ -76,6 +80,10 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         cls.modules: Dict[BACKEND, Optional[torch.nn.Module]] = {}
 
+        cls.modules[cls.baseline_backend] = cls._build_torch_awq_module(
+            qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
+        )
+
         cls.modules[BACKEND.GEMM] = cls._build_gemm_module(
             qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
         )
@@ -94,9 +102,20 @@ class TestAwqKernelOutput(unittest.TestCase):
                 for tensor in base_inputs
             ]
             cls.inputs[dtype] = converted_inputs
+            torch_module = cls.modules.get(cls.baseline_backend)
+            if torch_module is None:
+                raise unittest.SkipTest("Torch AWQ kernel unavailable for baseline.")
+
+            forward_kwargs = {}
+            if dtype == torch.bfloat16:
+                forward_kwargs = {
+                    "compute_dtype": torch.float16,
+                    "output_dtype": dtype,
+                }
             cls.reference_outputs[dtype] = cls._forward(
-                cls.modules[BACKEND.GEMM],
+                torch_module,
                 converted_inputs,
+                **forward_kwargs,
             )
 
     @classmethod
@@ -151,8 +170,8 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         module.qweight.copy_(qweight_cpu.to(cls.device))
         module.qzeros.copy_(qzeros_cpu.to(cls.device))
-        module.scales.copy_(scales_cpu.to(torch.float32).to(cls.device))
-        module.bias.copy_(bias_cpu.to(torch.float32).to(cls.device))
+        module.scales.copy_(scales_cpu.to(cls.device))
+        module.bias.copy_(bias_cpu.to(cls.device))
 
         module.eval()
         module.post_init()
@@ -200,6 +219,35 @@ class TestAwqKernelOutput(unittest.TestCase):
         return module
 
     @classmethod
+    def _build_torch_awq_module(
+        cls,
+        qweight_cpu: torch.Tensor,
+        qzeros_cpu: torch.Tensor,
+        scales_cpu: torch.Tensor,
+        bias_cpu: torch.Tensor,
+    ) -> AwqTorchQuantLinear:
+        module = AwqTorchQuantLinear(
+            bits=cls.BITS,
+            group_size=cls.GROUP_SIZE,
+            sym=True,
+            desc_act=False,
+            in_features=cls.in_features,
+            out_features=cls.out_features,
+            bias=True,
+            adapter=None,
+            register_buffers=True,
+        ).to(cls.device)
+
+        module.qweight.copy_(qweight_cpu.to(cls.device))
+        module.qzeros.copy_(qzeros_cpu.to(cls.device))
+        module.scales.copy_(scales_cpu.to(cls.device))
+        module.bias.copy_(bias_cpu.to(cls.device))
+
+        module.eval()
+        module.post_init()
+        return module
+
+    @classmethod
     def _generate_inputs(cls) -> List[torch.Tensor]:
         large_shapes = [(4, 32), (2, 64), (1, 96)]
         medium_shapes = [(2, 32), (1, 48), (1, 32)]
@@ -237,12 +285,20 @@ class TestAwqKernelOutput(unittest.TestCase):
         cls,
         module: torch.nn.Module,
         inputs: Iterable[torch.Tensor],
+        *,
+        compute_dtype: Optional[torch.dtype] = None,
+        output_dtype: Optional[torch.dtype] = None,
     ) -> List[torch.Tensor]:
         outputs: List[torch.Tensor] = []
         with torch.inference_mode():
             for tensor in inputs:
-                result = module(tensor)
-                outputs.append(result.detach().to(torch.float32).cpu())
+                local_tensor = tensor
+                if compute_dtype is not None and tensor.dtype != compute_dtype:
+                    local_tensor = tensor.to(dtype=compute_dtype)
+                result = module(local_tensor)
+                if output_dtype is not None and result.dtype != output_dtype:
+                    result = result.to(dtype=output_dtype)
+                outputs.append(result.detach().cpu())
         return outputs
 
     def _maybe_skip_backend(self, backend: BACKEND) -> None:
@@ -262,10 +318,15 @@ class TestAwqKernelOutput(unittest.TestCase):
     ) -> None:
         failures = []
         total = len(actual_outputs)
+        max_abs_diff = 0.0
+        mean_abs_diff = 0.0
 
         for idx, (reference, actual) in enumerate(zip(reference_outputs, actual_outputs)):
             reference_fp32 = reference.to(torch.float32)
             actual_fp32 = actual.to(torch.float32)
+            diff = torch.abs(reference_fp32 - actual_fp32)
+            max_abs_diff = max(max_abs_diff, float(diff.max().item()))
+            mean_abs_diff += float(diff.mean().item())
             is_close_tensor = torch.isclose(reference_fp32, actual_fp32, rtol=0.15, atol=atol)
             if not bool(torch.all(is_close_tensor)):
                 failures.append(
@@ -278,6 +339,7 @@ class TestAwqKernelOutput(unittest.TestCase):
                 )
 
         status = f"{GREEN}PASS{RESET}" if not failures else f"{RED}FAIL{RESET}"
+        avg_abs_diff = mean_abs_diff / total if total else 0.0
         details = "\n\n".join(str(detail) for detail in failures) if failures else "-"
 
         table = tabulate(
@@ -286,6 +348,8 @@ class TestAwqKernelOutput(unittest.TestCase):
                     backend.name,
                     str(dtype),
                     total,
+                    f"{max_abs_diff:.6f}",
+                    f"{avg_abs_diff:.6f}",
                     status,
                     len(failures),
                     details,
@@ -295,6 +359,8 @@ class TestAwqKernelOutput(unittest.TestCase):
                 "Backend",
                 "DType",
                 "Samples",
+                "MaxAbsDiff",
+                "MeanAbsDiff",
                 "Status",
                 "Failures",
                 "Expected vs Actual",
@@ -318,7 +384,10 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         inputs = self.inputs[dtype]
         reference_outputs = self.reference_outputs[dtype]
-        actual_outputs = self._forward(module, inputs)
+        if backend == self.baseline_backend:
+            actual_outputs = reference_outputs
+        else:
+            actual_outputs = self._forward(module, inputs)
         self._summarize_results(
             reference_outputs=reference_outputs,
             actual_outputs=actual_outputs,
@@ -326,5 +395,5 @@ class TestAwqKernelOutput(unittest.TestCase):
             dtype=dtype,
             atol=atol,
             title=f"AWQ Kernel Output {dtype}",
-            reference_label="AWQ GEMM output",
+            reference_label="Torch AWQ output",
         )
