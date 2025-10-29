@@ -67,7 +67,9 @@ class FORMAT(str, Enum):
     QQQ = "qqq"
 
     GEMM = "gemm"
+    GEMM_V2 = "gemm_v2"
     GEMV = "gemv"
+    GEMV_V2 = "gemv_v2"
     GEMV_FAST = "gemv_fast"
 
 
@@ -95,7 +97,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
     },
     METHOD.AWQ: {
         FORMAT.GEMM,
+        FORMAT.GEMM_V2,
         FORMAT.GEMV,
+        FORMAT.GEMV_V2,
         FORMAT.GEMV_FAST,
         FORMAT.MARLIN,
     },
@@ -283,9 +287,22 @@ class QuantizeConfig():
                 self.damp_auto_increment = 0.01
 
         # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
-        if self.quant_method == METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM]:
+        if self.quant_method == METHOD.AWQ and self.format not in [
+            FORMAT.MARLIN,
+            FORMAT.GEMV,
+            FORMAT.GEMV_V2,
+            FORMAT.GEMV_FAST,
+            FORMAT.GEMM,
+            FORMAT.GEMM_V2,
+        ]:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
+
+        if self.quant_method == METHOD.AWQ:
+            if self.format == FORMAT.GEMM:
+                self.format = FORMAT.GEMM_V2
+            elif self.format == FORMAT.GEMV:
+                self.format = FORMAT.GEMV_V2
 
         if self.format not in valid_formats:
             raise ValueError(

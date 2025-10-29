@@ -387,7 +387,7 @@ def ModelLoader(cls):
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if backend == BACKEND.VLLM:
-                if qcfg.format != FORMAT.GPTQ and qcfg.format != FORMAT.GEMM:
+                if qcfg.format not in (FORMAT.GPTQ, FORMAT.GEMM, FORMAT.GEMM_V2):
                     raise ValueError(f"{backend} backend only supports FORMAT.GPTQ or FORMAT.GEMM: actual = {qcfg.format}")
             elif backend == BACKEND.SGLANG:
                 if qcfg.format != FORMAT.GPTQ:

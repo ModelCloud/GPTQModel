@@ -5,6 +5,8 @@
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
-    m.def("gemm_forward_cuda_prefill", &gemm_forward_cuda_prefill, "New quantized GEMM kernel.");
-    m.def("gemv_forward_cuda_decode", &gemv_forward_cuda_decode, "New quantized GEMM kernel.");
+    m.def("gemm_forward_cuda", &gemm_forward_cuda_prefill, "Quantized GEMM kernel (v2).");
+    m.def("gemm_forward_cuda_prefill", &gemm_forward_cuda_prefill, "Quantized GEMM kernel (v2).");
+    m.def("gemv_forward_cuda", &gemv_forward_cuda_decode, "Quantized GEMV kernel (v2).");
+    m.def("gemv_forward_cuda_decode", &gemv_forward_cuda_decode, "Quantized GEMV kernel (v2).");
 }

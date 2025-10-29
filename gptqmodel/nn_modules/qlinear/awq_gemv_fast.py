@@ -16,7 +16,7 @@ from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-awq_v2_ext, msg = try_import("gptqmodel_awq_v2_kernels")
+awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
 
 class AwqGEMVFastQuantLinear(AWQuantLinear):
@@ -49,7 +49,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         in_features: int,
         out_features: int,
         bias: bool = False,
-        pack_dtype: torch.dtype = torch.int32,
+        pack_dtype: torch.dtype = torch.int16,
         adapter: Adapter = None,
         register_buffers: bool = False,
         **kwargs,
@@ -115,8 +115,8 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         super().post_init()
 
     def forward(self, x: torch.Tensor):
-        if awq_v2_ext is None:
-            raise ModuleNotFoundError("External AWQ V2 kernels are not properly installed." + msg)
+        if awq_ext is None:
+            raise ModuleNotFoundError("External AWQ kernels are not properly installed." + msg)
 
         inputs = x
         batch_size, n_tokens, _ = inputs.shape
@@ -133,7 +133,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             self.bias = self.bias.to(dtype=inputs.dtype)
 
         if batch_size < 8 and n_tokens == 1:
-            out = awq_v2_ext.gemv_forward_cuda_decode(
+            out = awq_ext.gemv_forward_cuda(
                 inputs,
                 self.qweight,
                 self.scales,
@@ -144,7 +144,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
                 self.group_size,
             )
         else:
-            out = awq_v2_ext.gemm_forward_cuda_prefill(
+            out = awq_ext.gemm_forward_cuda(
                 inputs, self.qweight, self.scales, self.qzeros
             )
         if self.bias is not None:

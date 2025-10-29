@@ -841,11 +841,10 @@ class BaseQModel(nn.Module):
             )
 
         if self.quantize_config.quant_method == METHOD.AWQ:
-            if self.quantize_config.format == FORMAT.GEMV_FAST:
-                # AWQ GEMV_FAST only supports pack_dtype is torch.int16
-                log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
+            if self.quantize_config.format in (FORMAT.GEMM, FORMAT.GEMM_V2, FORMAT.GEMV, FORMAT.GEMV_V2, FORMAT.GEMV_FAST):
+                log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16` for AWQ layout")
                 self.quantize_config.pack_dtype = torch.int16
-            elif self.quantize_config.format == FORMAT.MARLIN:
+            if self.quantize_config.format == FORMAT.MARLIN:
                 # AWQ MARLIN only supports zero_point is false
                 log.info("Quantize Model: Auto fix `zero_point` to `False`")
                 self.quantize_config.zero_point = False

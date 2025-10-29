@@ -9,7 +9,7 @@ import torch
 from gptqmodel.quantization.awq.utils.module import try_import
 
 
-awq_v2_ext, msg = try_import("gptqmodel_awq_v2_kernels")
+awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
 def make_divisible(c, divisor):
     return (c + divisor - 1) // divisor
@@ -191,8 +191,8 @@ class WQLinear_GEMVFast(torch.nn.Module):
 
     @torch.inference_mode()
     def forward(self, x):
-        if awq_v2_ext is None:
-            raise ModuleNotFoundError("External AWQ V2 kernels are not properly installed." + msg)
+        if awq_ext is None:
+            raise ModuleNotFoundError("External AWQ kernels are not properly installed." + msg)
         inputs = x
         batch_size, n_tokens, _ = inputs.shape
         if inputs.dtype not in (torch.float16, torch.bfloat16):
@@ -208,7 +208,7 @@ class WQLinear_GEMVFast(torch.nn.Module):
             self.bias = self.bias.to(dtype=inputs.dtype)
 
         if batch_size < 8 and n_tokens == 1:
-            out = awq_v2_ext.gemv_forward_cuda_decode(
+            out = awq_ext.gemv_forward_cuda(
                 inputs,
                 self.qweight,
                 self.scales,
@@ -219,7 +219,7 @@ class WQLinear_GEMVFast(torch.nn.Module):
                 self.group_size,
             )
         else:
-            out = awq_v2_ext.gemm_forward_cuda_prefill(
+            out = awq_ext.gemm_forward_cuda(
                 inputs, self.qweight, self.scales, self.qzeros
             )
         if self.bias is not None:

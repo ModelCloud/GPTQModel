@@ -750,22 +750,8 @@ if BUILD_CUDA_EXT == "1":
                     print("Skipping AWQ kernels on ROCm: inline PTX is CUDA-only.")
                 else:
                     extensions += [
-                        # contain un-hipifiable inline PTX
                         cpp_ext.CUDAExtension(
                             "gptqmodel_awq_kernels",
-                            [
-                                "gptqmodel_ext/awq/pybind_awq.cpp",
-                                "gptqmodel_ext/awq/quantization/gemm_cuda_gen.cu",
-                                "gptqmodel_ext/awq/quantization/gemv_cuda.cu",
-                            ],
-                            extra_link_args=extra_link_args,
-                            extra_compile_args=extra_compile_args,
-                        ),
-                        # TODO only compatible with ampere?
-                        # arch_flags = get_compute_capabilities({80, 86, 89, 90})
-                        # extra_compile_args_v2 = get_extra_compile_args(arch_flags, generator_flags)
-                        cpp_ext.CUDAExtension(
-                            "gptqmodel_awq_v2_kernels",
                             [
                                 "gptqmodel_ext/awq/pybind_awq_v2.cpp",
                                 "gptqmodel_ext/awq/quantization_new/gemv/gemv_cuda.cu",
