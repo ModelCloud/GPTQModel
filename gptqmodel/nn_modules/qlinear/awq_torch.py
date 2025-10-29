@@ -32,7 +32,7 @@ class AwqTorchQuantLinear(AWQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float16]
 
     REQUIRES_FORMAT_V2 = False
 
@@ -78,21 +78,18 @@ class AwqTorchQuantLinear(AWQuantLinear):
 
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
-        original_dtype = x.dtype
         device = x.device
 
-        self.ensure_buffer_dtype(original_dtype)
 
-        target_dtype = original_dtype
-        x_flat = x.reshape(-1, x.shape[-1]).to(dtype=target_dtype)
+        x_flat = x.reshape(-1, x.shape[-1])
 
-        weight = dequantize_gemm(self.qweight, self.qzeros, self.scales, self.bits, self.group_size).to(dtype=target_dtype)
+        weight = dequantize_gemm(self.qweight, self.qzeros, self.scales, self.bits, self.group_size)
 
         output = torch.matmul(x_flat, weight)
 
         bias = None
         if self.bias is not None:
-            bias = self.bias.to(device=device, dtype=target_dtype, non_blocking=True)
+            bias = self.bias.to(device=device)
         if bias is not None:
             output = output + bias
 
@@ -102,12 +99,5 @@ class AwqTorchQuantLinear(AWQuantLinear):
         output = output.reshape(original_shape)
 
         return output
-
-    def ensure_buffer_dtype(self, dtype: torch.dtype) -> None:
-        if self.scales.dtype != dtype:
-            self.scales = self.scales.to(dtype=dtype)
-        if self.bias is not None and self.bias.dtype != dtype:
-            self.bias = self.bias.to(dtype=dtype)
-
 
 __all__ = ["AwqTorchQuantLinear"]
