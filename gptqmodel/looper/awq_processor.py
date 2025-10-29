@@ -62,6 +62,7 @@ class AWQProcessor(LoopProcessor):
         self.avg_losses = []
         self.nsamples = 0
         self._nsamples_total = 0
+        self._quant_batch_size = batch_size
 
         self._layer_states: Dict[int, _AWQLayerState] = {}
         self._layer_states_lock = threading.Lock()
@@ -76,12 +77,6 @@ class AWQProcessor(LoopProcessor):
         # " Adjust this parameter to increase or decrease memory usage for these computations."
         # " Default is 1GB (1024 * 1024 * 1024)."
         self.max_chunk_memory = 1024 * 1024 * 1024
-
-        # "The number of parallel samples to run through the model. "
-        # "A high number of parallel samples can result in OOM during quantization if max_calib_samples is high enough. "
-        # "If None, runs through all samples at the same time. "
-        # "You can set this to a low number for more memory efficient quantization."
-        self.n_parallel_calib_samples = None if batch_size == 1 else batch_size
 
         # This argument avoids real quantization by only applying the scales without quantizing down to FP16.
         self.export_compatible = False
@@ -314,12 +309,14 @@ class AWQProcessor(LoopProcessor):
     def init_quant(self):
         modules, _ = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.extract_layers_node())
         sample_tensors = []
+        total_sequences = 0
         for data in self.calibration_dataset:
             tensor = data["input_ids"]
             if tensor.dim() == 1:
                 tensor = tensor.unsqueeze(0)
             sample_tensors.append(tensor)
-        self._nsamples_total = len(sample_tensors)
+            total_sequences += tensor.shape[0]
+        self._nsamples_total = total_sequences
         self.nsamples = self._nsamples_total
         max_len = max(tensor.shape[-1] for tensor in sample_tensors)
         pad_token_id = getattr(getattr(self.gptq_model, "tokenizer", None), "pad_token_id", None)
@@ -926,25 +923,36 @@ class AWQProcessor(LoopProcessor):
                 pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
             module_kwargs["position_ids"] = pos_values
 
-        if self.n_parallel_calib_samples is None:
-            # runs through all samples at once
+        if self._quant_batch_size is None or self._quant_batch_size <= 1:
             module_output = module(x, **module_kwargs)
             if isinstance(module_output, tuple):
                 module_output = module_output[0]
-        else:
-            # memory efficiently runs through all calibration samples
-            # but only n_parallel_calib_samples at a time
-            module_output = []
-            partitioned_inputs = torch.split(x, self.n_parallel_calib_samples)
-            for x_partial in partitioned_inputs:
-                partial_output = module(x_partial, **module_kwargs)
+            return module_output
 
-                if isinstance(partial_output, tuple):
-                    partial_output = partial_output[0]
+        def _slice_value(val, length):
+            if isinstance(val, torch.Tensor) and val.shape[0] == module_kwargs.get("position_ids", val).shape[0]:
+                return val[:length]
+            if isinstance(val, torch.Tensor) and val.shape[0] != length:
+                return val
+            if isinstance(val, torch.Tensor):
+                return val[:length]
+            if isinstance(val, (list, tuple)):
+                sliced = [_slice_value(item, length) for item in val]
+                return type(val)(sliced)
+            return val
 
-                module_output.append(partial_output.cpu())
+        outputs = []
+        for x_partial in torch.split(x, self._quant_batch_size, dim=0):
+            partial_kwargs = {
+                key: _slice_value(value, x_partial.shape[0])
+                for key, value in module_kwargs.items()
+            }
+            partial_output = module(x_partial, **partial_kwargs)
+            if isinstance(partial_output, tuple):
+                partial_output = partial_output[0]
+            outputs.append(partial_output)
 
-            module_output = torch.cat(module_output, dim=0)
+        module_output = torch.cat(outputs, dim=0)
 
         return module_output
 
