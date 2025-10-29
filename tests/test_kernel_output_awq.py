@@ -17,6 +17,7 @@ from tabulate import tabulate
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
+from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_marlin import (
     AwqMarlinQuantLinear,
     marlin_import_exception,
@@ -47,6 +48,8 @@ class TestAwqKernelOutput(unittest.TestCase):
         (BACKEND.GEMM, torch.bfloat16, 0.0005),
         (BACKEND.MARLIN, torch.float16, 0.01),
         (BACKEND.MARLIN, torch.bfloat16, 0.015),
+        (BACKEND.TORCH_AWQ, torch.float16, 0.001),
+        (BACKEND.TORCH_AWQ, torch.bfloat16, 0.05),
     ]
 
     @classmethod
@@ -81,6 +84,9 @@ class TestAwqKernelOutput(unittest.TestCase):
         )
 
         cls.modules[BACKEND.MARLIN] = cls._build_marlin_module(
+            qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
+        )
+        cls.modules[BACKEND.TORCH_AWQ] = cls._build_torch_awq_module(
             qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
         )
 
@@ -194,6 +200,35 @@ class TestAwqKernelOutput(unittest.TestCase):
         module.qzeros.data.copy_(qzeros_cpu.to(cls.device))
         module.scales.data.copy_(scales_cpu.to(torch.float16).to(cls.device))
         module.bias.data.copy_(bias_cpu.to(torch.float16).to(cls.device))
+
+        module.eval()
+        module.post_init()
+        return module
+
+    @classmethod
+    def _build_torch_awq_module(
+        cls,
+        qweight_cpu: torch.Tensor,
+        qzeros_cpu: torch.Tensor,
+        scales_cpu: torch.Tensor,
+        bias_cpu: torch.Tensor,
+    ) -> AwqTorchQuantLinear:
+        module = AwqTorchQuantLinear(
+            bits=cls.BITS,
+            group_size=cls.GROUP_SIZE,
+            sym=True,
+            desc_act=False,
+            in_features=cls.in_features,
+            out_features=cls.out_features,
+            bias=True,
+            adapter=None,
+            register_buffers=True,
+        ).to(cls.device)
+
+        module.qweight.copy_(qweight_cpu.to(cls.device))
+        module.qzeros.copy_(qzeros_cpu.to(cls.device))
+        module.scales.copy_(scales_cpu.to(torch.float32).to(cls.device))
+        module.bias.copy_(bias_cpu.to(torch.float32).to(cls.device))
 
         module.eval()
         module.post_init()
