@@ -126,6 +126,8 @@ class GptOssTopKRouterNew(nn.Module):
         return router_scores, router_indices
 
 class GPTOSSGPTQ(BaseQModel):
+    support_offload_to_disk = False
+
     dynamic_expert_index = "num_local_experts"
 
     pre_lm_head_norm_module = "model.norm"

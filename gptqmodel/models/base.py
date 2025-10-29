@@ -205,6 +205,8 @@ class BaseQModel(nn.Module):
 
     support_batch_quantize = True
 
+    support_offload_to_disk = True
+
     ATTENTION_MASKS_DTYPE = torch.bool # default to bool
 
     ATTENTION_MASKS_REQUIRED_FOR_INPUT: bool = False
