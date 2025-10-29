@@ -1030,6 +1030,8 @@ class PackableQuantLinear(BaseQuantLinear):
             # print("self qw", self.qweight, self.scales, self.qzeros)
 
 class AWQuantLinear(BaseQuantLinear):
+    REQUIRES_FORMAT_V2 = False
+
     def __init__(self,
                  bias: bool = False,
                  register_buffers: bool = False,

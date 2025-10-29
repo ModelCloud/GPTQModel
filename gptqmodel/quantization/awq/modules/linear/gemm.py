@@ -48,7 +48,7 @@ class WQLinearMMFunction(Function):
         ctx.out_features = out_features
 
         out_shape = x.shape[:-1] + (out_features,)
-        x = x.to(torch.float16)
+        # x = x.to(torch.float16)
         if x.shape[0] == 0:
             return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
 

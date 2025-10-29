@@ -32,9 +32,8 @@ class AwqTorchQuantLinear(AWQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
-    REQUIRES_FORMAT_V2 = False
 
     QUANT_TYPE = "awq_torch"
 

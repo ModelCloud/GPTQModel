@@ -31,9 +31,7 @@ class AwqGEMMQuantLinear(AWQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16]
-
-    REQUIRES_FORMAT_V2 = False
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemm"
@@ -76,19 +74,15 @@ class AwqGEMMQuantLinear(AWQuantLinear):
         #     self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
         #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
         #                               device=self.g_idx.device)
-
-        # awq only accepts float16
-        if self.scales is not None:
-            self.scales = self.scales.to(dtype=torch.float16)
-
         super().post_init()
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
 
-        input_dtype = x.dtype
-        if input_dtype != torch.float16:
-            x = x.half()
+        if self.scales.dtype != x.dtype:
+            self.scales = self.scales.to(x.dtype)
+            if self.bias is not None:
+                self.bias = self.bias.to(x.dtype)
 
         if self.training:
             out = WQLinearMMFunction.apply(
@@ -113,9 +107,6 @@ class AwqGEMMQuantLinear(AWQuantLinear):
                     self.bias,
                     self.out_features,
                 )
-
-        if input_dtype != torch.float16:
-            out = out.to(dtype=input_dtype)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
