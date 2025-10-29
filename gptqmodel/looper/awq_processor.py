@@ -25,12 +25,12 @@ from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
 from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
 from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_GEMVFast, WQLinear_Marlin
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
-from ..quantization.awq.utils.module import append_str_prefix, get_op_name, set_op_by_name
+from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name, set_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.ctx import ctx
-from ..utils.model import get_module_by_name_prefix, move_to
+from ..utils.model import find_modules, get_module_by_name_prefix, move_to
 from ..utils.torch import CPU
 
 log = setup_logger()
@@ -44,6 +44,7 @@ class _AWQLayerState:
     layer_module: Optional[torch.nn.Module] = None
     previous_weight_scale: Optional[float] = None
     quantized: bool = False
+    pending_modules: Set[str] = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 class AWQProcessor(LoopProcessor):
@@ -286,11 +287,25 @@ class AWQProcessor(LoopProcessor):
         setattr(self._scale_context, "layer_index", layer_index)
         setattr(self._scale_context, "prev_scale", state.previous_weight_scale)
 
-        module_config = self.gptq_model.awq_get_modules_for_scaling(
-            layer_module_ref,
-            input_feat,
-            module_kwargs_global,
-        )
+        while True:
+            try:
+                module_config = self.gptq_model.awq_get_modules_for_scaling(
+                    layer_module_ref,
+                    input_feat,
+                    module_kwargs_global,
+                )
+                break
+            except KeyError as missing_key:
+                missing_name = missing_key.args[0]
+                if missing_name in input_feat or not input_feat:
+                    raise
+                surrogate = next(iter(input_feat.values()))
+                input_feat[missing_name] = surrogate
+                log.debug(
+                    "AWQProcessor: layer %s using surrogate activation for missing module `%s`.",
+                    layer_index,
+                    missing_name,
+                )
 
         if not module_config:
             log.warning(
@@ -316,6 +331,69 @@ class AWQProcessor(LoopProcessor):
             entry["kwargs"] = self._sanitize_kwargs(entry_kwargs, inspect_module)
             sanitized_module_config.append(entry)
 
+        filtered_module_config: List[Dict] = []
+        skipped_groups: List[Tuple[List[str], List[str]]] = []
+        for cfg in sanitized_module_config:
+            layers_sample = cfg.get("layers") or []
+            prev_module = cfg.get("prev_op")
+            first_layer_module = layers_sample[0] if layers_sample else None
+            if (
+                isinstance(prev_module, nn.Linear)
+                and isinstance(first_layer_module, nn.Linear)
+                and prev_module.weight.shape[0] != first_layer_module.weight.shape[1]
+            ):
+                try:
+                    prev_name = get_op_name(layer_module_ref, prev_module)
+                except Exception:
+                    prev_name = str(prev_module)
+                try:
+                    first_name = get_op_name(layer_module_ref, first_layer_module)
+                except Exception:
+                    first_name = str(first_layer_module)
+                log.debug(
+                    "AWQProcessor: layer %s skipping scaling group due to dimension mismatch prev_op=%s shape=%s first_layer=%s shape=%s",
+                    layer_index,
+                    prev_name,
+                    tuple(prev_module.weight.shape),
+                    first_name,
+                    tuple(first_layer_module.weight.shape),
+                )
+                continue
+            layer_names = [
+                get_op_name(layer_module_ref, layer) if isinstance(layer, torch.nn.Module) else str(layer)
+                for layer in layers_sample
+            ]
+            missing_layers = [name for name in layer_names if name not in input_feat]
+            if missing_layers:
+                skipped_groups.append((layer_names, missing_layers))
+                continue
+            filtered_module_config.append(cfg)
+
+        if skipped_groups:
+            log.debug(
+                "AWQProcessor: layer %s skipping %d scaling groups due to missing features (sample=%s)",
+                layer_index,
+                len(skipped_groups),
+                skipped_groups[:3],
+            )
+
+        sanitized_module_config = filtered_module_config
+        if not sanitized_module_config:
+            log.warning(
+                "AWQProcessor: no valid scaling groups for layer %s after filtering; marking layer as quantized.",
+                layer_index,
+            )
+            with state.lock:
+                state.quantized = True
+                state.processed_subsets.clear()
+                state.subset_total = None
+                state.previous_weight_scale = None
+            if hasattr(self._scale_context, "layer_index"):
+                delattr(self._scale_context, "layer_index")
+            if hasattr(self._scale_context, "prev_scale"):
+                delattr(self._scale_context, "prev_scale")
+            return
+
         sample_groups = []
         for cfg in sanitized_module_config[:3]:
             layers_sample = cfg.get("layers") or []
@@ -334,7 +412,51 @@ class AWQProcessor(LoopProcessor):
             for layer in sanitized_module_config
         ]
 
-        apply_scale(layer_module_ref, scales_list, input_feat_dict=input_feat)
+        try:
+            apply_scale(layer_module_ref, scales_list, input_feat_dict=input_feat)
+        except RuntimeError as exc:
+            debug_entries = []
+            for prev_op_name, layer_names, scales, _loss in scales_list:
+                entry = {"prev": prev_op_name, "prev_shape": None, "layer_shapes": [], "scale_elems": None}
+                try:
+                    prev_module = get_op_by_name(layer_module_ref, prev_op_name)
+                except Exception:
+                    prev_module = None
+                weight = getattr(prev_module, "weight", None) if prev_module is not None else None
+                if isinstance(weight, torch.Tensor):
+                    entry["prev_shape"] = tuple(weight.shape)
+                elif prev_module is None:
+                    entry["prev_shape"] = "missing"
+                else:
+                    entry["prev_shape"] = f"{type(prev_module).__name__} (no weight)"
+
+                layer_shapes = []
+                for lname in layer_names:
+                    try:
+                        layer_module = get_op_by_name(layer_module_ref, lname)
+                    except Exception:
+                        layer_shapes.append((lname, "missing"))
+                        continue
+                    weight = getattr(layer_module, "weight", None)
+                    if isinstance(weight, torch.Tensor):
+                        layer_shapes.append((lname, tuple(weight.shape)))
+                    else:
+                        layer_shapes.append((lname, f"{type(layer_module).__name__} (no weight)"))
+                entry["layer_shapes"] = layer_shapes
+                if hasattr(scales, "numel"):
+                    try:
+                        entry["scale_elems"] = int(scales.numel())
+                    except Exception:
+                        entry["scale_elems"] = "unknown"
+                debug_entries.append(entry)
+
+            log.error(
+                "AWQProcessor: apply_scale failed at layer %s with %s. Shape summary (first 5 groups): %s",
+                layer_index,
+                exc,
+                debug_entries[:5],
+            )
+            raise
         scales_list = append_str_prefix(
             scales_list,
             get_op_name(self.model, layer_module_ref) + ".",
@@ -352,6 +474,8 @@ class AWQProcessor(LoopProcessor):
                 clip_list,
                 get_op_name(self.model, layer_module_ref) + ".",
             )
+
+        named_childs = {name: named for name, named in named_childs.items() if name in input_feat}
 
         if not self.export_compatible:
             start = time.time()
@@ -945,8 +1069,16 @@ class AWQProcessor(LoopProcessor):
         with layer_state.lock:
             layer_state.modules[module.name] = module
             layer_module_ref = module.state.get("layer_module")
-            if layer_module_ref is not None:
+            if layer_state.layer_module is None and layer_module_ref is not None:
                 layer_state.layer_module = layer_module_ref
+            effective_layer = layer_state.layer_module or layer_module_ref
+            if not layer_state.pending_modules and effective_layer is not None:
+                try:
+                    all_linears = find_modules(effective_layer)
+                except Exception:
+                    all_linears = {}
+                layer_state.pending_modules.update(all_linears.keys())
+            layer_state.pending_modules.add(module.name)
         with self.lock:
             entry = self.tasks.get(module.name)
             if entry is None:
@@ -995,13 +1127,22 @@ class AWQProcessor(LoopProcessor):
             if subset_index is not None:
                 state.processed_subsets.add(subset_index)
 
+            if module is not None:
+                state.pending_modules.discard(module.name)
+
             if previous_subset:
                 state.previous_weight_scale = self._capture_previous_subset_scale(previous_subset)
 
             should_quantize = (
-                state.subset_total is not None
-                and len(state.processed_subsets) >= state.subset_total
-                and not state.quantized
+                not state.quantized
+                and bool(state.modules)
+                and (
+                    not state.pending_modules
+                    or (
+                        state.subset_total is not None
+                        and len(state.processed_subsets) >= state.subset_total
+                    )
+                )
             )
 
         if should_quantize:

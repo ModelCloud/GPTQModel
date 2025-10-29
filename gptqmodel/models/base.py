@@ -1334,6 +1334,24 @@ class BaseQModel(nn.Module):
             else:
                 return module_name
 
+        def _try_update_last_module(candidate_name: str) -> bool:
+            nonlocal last_module, last_module_name, last_module_root
+
+            resolved_module, _ = get_module_by_name_prefix(module, candidate_name)
+            if resolved_module is None:
+                log.debug(
+                    "awq_get_modules_for_scaling: last-module candidate `%s` missing; retaining previous `%s`",
+                    candidate_name,
+                    last_module_name,
+                )
+                return False
+
+            last_module = resolved_module
+            last_module_name = candidate_name
+            if "." in candidate_name:
+                last_module_root = candidate_name.split(".", 1)[0]
+            return True
+
         full_layer_modules = self.full_layer_modules(self.model.config, is_awq_quantize=True)
         for i, block in enumerate(full_layer_modules):
             not_quantized = all(NOT_QUANTIZE_FLAG in name for name in block)
@@ -1345,8 +1363,8 @@ class BaseQModel(nn.Module):
                     continue
 
                 # Remember the latest norm (use the last entry if multiple are present)
-                last_module_name = strip_not_quantize_flag(block[-1])
-                last_module, _ = get_module_by_name_prefix(module, last_module_name)
+                candidate_name = strip_not_quantize_flag(block[-1])
+                _try_update_last_module(candidate_name)
                 continue
 
             if num_experts is not None and len(block) == num_experts and last_module is not None and last_module_name is not None:
@@ -1355,9 +1373,14 @@ class BaseQModel(nn.Module):
                 for name in block:
                     prev_op_name = ".".join(name.split(".")[:-1] + [target_suffix])
                     prev_op, _ = get_module_by_name_prefix(module, prev_op_name)
-                    assert prev_op is not None
+                    if prev_op is None or name not in input_feat:
+                        log.debug("awq_get_modules_for_scaling: skipping expert `%s` due to missing prev_op or features", name)
+                        continue
 
                     m, _ = get_module_by_name_prefix(module, name)
+                    if m is None:
+                        log.debug("awq_get_modules_for_scaling: skipping missing expert module `%s`", name)
+                        continue
                     subset = [m]
                     n, root = generate_node_for_awq_scaling(inp=input_feat[name], prev_op=prev_op,
                                                             module_kwargs=module_kwargs, nodes_size=len(nodes),
@@ -1382,14 +1405,19 @@ class BaseQModel(nn.Module):
                             # log.debug(f'"{name}" attention out skipped.')
                             skip = True
 
+                        if m is None:
+                            log.debug("awq_get_modules_for_scaling: skipping missing module `%s`", name)
+                            skip = True
+                            break
                         subset.append(m)
 
-                if skip:
+                if skip or not subset:
                     continue
 
-                assert len(subset) > 0
                 prev_op = last_module
-                assert prev_op is not None
+                if prev_op is None:
+                    log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
+                    continue
 
                 root_split = block[0].split(".")
                 module2inspect = None
@@ -1408,7 +1436,11 @@ class BaseQModel(nn.Module):
                         )
                     inp = input_feat.get(last_module_root, input_feat.get(block[0]))
                 else:
-                    inp = input_feat[block[0]]
+                    inp = input_feat.get(block[0])
+
+                if inp is None:
+                    log.debug("awq_get_modules_for_scaling: skipping block %s due to missing input features", block)
+                    continue
 
                 n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
                                                         module_kwargs=module_kwargs, nodes_size=len(nodes),
@@ -1417,8 +1449,8 @@ class BaseQModel(nn.Module):
                 nodes.append(n)
 
             # Update tracker to the LAST item of this block
-            last_module_name = strip_not_quantize_flag(block[-1])
-            last_module, _ = get_module_by_name_prefix(module, last_module_name)
+            candidate_name = strip_not_quantize_flag(block[-1])
+            _try_update_last_module(candidate_name)
 
         import torch
         def format_nodes(nodes):
