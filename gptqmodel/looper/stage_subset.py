@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from dataclasses import dataclass
@@ -72,6 +73,10 @@ def run_subset_stage(
     """Process a single subset of modules within the layer quantization loop."""
     logger = log or setup_logger()
 
+    processor_name = processor.name() if hasattr(processor, "name") else type(processor).__name__
+    processor_name_lower = processor_name.lower()
+    is_awq_processor = processor_name_lower.startswith("awq")
+
     subset = looper.crate_named_modules(
         full=full,
         is_lm_head_module=is_lm_head_module,
@@ -84,7 +89,36 @@ def run_subset_stage(
     )
 
     if len(subset) == 0:
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "StageSubset: layer=%s subset=%s/%s processor=%s produced empty subset (names=%s)",
+                layer_index,
+                subset_index + 1,
+                subset_total,
+                processor_name,
+                subset_names,
+            )
         return SubsetStageResult(processed_subset={}, layer_inputs=layer_inputs, forward_context=None)
+
+    if is_awq_processor:
+        logger.info(
+            "StageSubset[awq]: layer=%s subset=%s/%s modules=%s sample=%s",
+            layer_index,
+            subset_index + 1,
+            subset_total,
+            len(subset),
+            list(subset.keys())[:8],
+        )
+    elif logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "StageSubset: layer=%s subset=%s/%s processor=%s created %s modules (sample=%s)",
+            layer_index,
+            subset_index + 1,
+            subset_total,
+            processor_name,
+            len(subset),
+            list(subset.keys())[:8],
+        )
 
     moe_group_keys_all: List[str] = []
     forward_device_map: Dict[str, torch.device] = {}
@@ -191,6 +225,24 @@ def run_subset_stage(
             handle.append(subset[name].register_forward_hook(
                 looper._masked_hook_wrapper(processor, original_hook, hook_source)
             ))
+
+    if is_awq_processor:
+        logger.info(
+            "StageSubset[awq]: layer=%s subset=%s/%s registering hooks for %s modules",
+            layer_index,
+            subset_index + 1,
+            subset_total,
+            len(subset),
+        )
+    elif logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "StageSubset: layer=%s subset=%s/%s processor=%s registering hooks for %s modules",
+            layer_index,
+            subset_index + 1,
+            subset_total,
+            processor_name,
+            len(subset),
+        )
 
     fwd_start = time.perf_counter()
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
@@ -321,6 +373,7 @@ def run_subset_stage(
         subset_total_count: int,
     ):
         module_label = getattr(nm, "full_name", getattr(nm, "name", repr(nm)))
+        proc_name = proc.name() if hasattr(proc, "name") else type(proc).__name__
         module_ref = nm.module if isinstance(nm, NamedModule) else nm
         module_weight = getattr(module_ref, "weight", None)
         if module_weight is not None and expected_device is not None:
@@ -334,6 +387,26 @@ def run_subset_stage(
         timer = getattr(looper.gptq_model, "quant_region_timer", None)
         start = time.perf_counter() if timer else None
         try:
+            if is_awq_processor:
+                logger.info(
+                    "StageSubsetWorker[awq]: layer=%s subset=%s/%s module=%s previous_subset=%s",
+                    getattr(nm, "layer_index", None),
+                    subset_idx + 1,
+                    subset_total_count,
+                    module_label,
+                    bool(previous_subset_ref),
+                )
+            elif logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "StageSubsetWorker: processor=%s layer=%s subset=%s/%s module=%s running on %s (previous_subset=%s)",
+                    proc_name,
+                    getattr(nm, "layer_index", None),
+                    subset_idx + 1,
+                    subset_total_count,
+                    module_label,
+                    expected_device,
+                    bool(previous_subset_ref),
+                )
             proc.process(
                 module=nm,
                 subset=subset_ref,

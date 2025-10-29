@@ -910,6 +910,17 @@ class AWQProcessor(LoopProcessor):
             # Log the new row
             self.log_new_row(stat)
 
+            # Mirror GPTQ-style visibility in the CLI so awq modules show up
+            # even when the table view is busy with progress updates.
+            log.info(
+                "awq | layer=%s module=%s loss=%s samples=%s time=%ss",
+                named_module.layer_index,
+                named_module.name,
+                loss_summary,
+                self._nsamples_total,
+                f"{duration:.3f}",
+            )
+
     def _sanitize_kwargs(self, inputs_kwargs, module):
         """
         Remove the arguments that are not supported in the module's

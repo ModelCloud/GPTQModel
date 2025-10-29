@@ -101,14 +101,24 @@ def run_layer_stage(
             previous_subset_processed: Optional[Dict[str, NamedModule]] = None
 
             for index, names in enumerate(modules):
-                if log.isEnabledFor(logging.DEBUG):
-                    log.debug(
-                        "StageLayer: layer %s subset %s/%s size=%s sample=%s",
+                if isinstance(processor, AWQProcessor):
+                    log.info(
+                        "StageLayer[awq]: layer=%s subset=%s/%s size=%s names=%s",
                         layer_index,
                         index + 1,
                         subset_total,
                         len(names),
                         names[:5],
+                    )
+                elif log.isEnabledFor(logging.DEBUG):
+                    log.debug(
+                        "StageLayer: layer=%s subset=%s/%s processor=%s size=%s names=%s",
+                        layer_index,
+                        index + 1,
+                        subset_total,
+                        processor.name(),
+                        len(names),
+                        names[:8],
                     )
                 subset_result = run_subset_stage(
                     looper,
