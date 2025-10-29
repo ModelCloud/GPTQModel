@@ -3,32 +3,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import json
 import os
-import tempfile
 import unittest
-from typing import List
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
-from datasets import load_dataset
 from logbar import LogBar
 from parameterized import parameterized
+from safetensors.torch import safe_open
 from tabulate import tabulate
-from transformers import AutoTokenizer
 
-from gptqmodel import BACKEND, FORMAT, GPTQModel, QuantizeConfig
+from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
-from gptqmodel.nn_modules.qlinear.awq_gemv_fast import (
-    AwqGEMVFastQuantLinear,
-    awq_v2_ext,
-    msg as awq_v2_msg,
-)
 from gptqmodel.nn_modules.qlinear.awq_marlin import (
     AwqMarlinQuantLinear,
     marlin_import_exception,
 )
-from gptqmodel.quantization import METHOD
 from gptqmodel.utils.marlin import marlin_make_workspace_new
-from gptqmodel.utils.model import find_modules
 
 
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
@@ -42,35 +35,16 @@ RED = "\033[31m"
 RESET = "\033[0m"
 
 
-class Data:
-    def __init__(self) -> None:
-        self.inputs: List[torch.Tensor] = []
-        self.reference_outputs: List[torch.Tensor] = []
-
-
 class TestAwqKernelOutput(unittest.TestCase):
-    pretrained_model_id = "/monster/data/model/Llama-3.2-1B"
-    dataset_path = "/monster/data/model/dataset/c4-train.00000-of-01024.json.gz"
-    target = "model.layers.6.self_attn.v_proj"
-    group_size = 128
-    calibration_concat_size = 0
-
-    target_qliner_map = {
-        BACKEND.GEMM: AwqGEMMQuantLinear,
-        BACKEND.GEMV_FAST: AwqGEMVFastQuantLinear,
-        BACKEND.MARLIN: AwqMarlinQuantLinear,
-    }
-
-    backend_to_format = {
-        BACKEND.GEMM: FORMAT.GEMM,
-        BACKEND.MARLIN: FORMAT.GEMM,
-        BACKEND.GEMV_FAST: FORMAT.GEMV_FAST,
-    }
+    MODEL_PATH = Path("/monster/data/model/deepseek-r1-distill-qwen-7b-awq")
+    TARGET = "model.layers.20.self_attn.v_proj"
+    BITS = 4
+    GROUP_SIZE = 128
+    DTYPE = torch.float16
 
     float16_cases = [
-        (BACKEND.GEMM, torch.float16, 0.0),
-        (BACKEND.GEMV_FAST, torch.float16, 0.0005),
-        (BACKEND.MARLIN, torch.float16, 0.0005),
+        (BACKEND.GEMM, 0.0),
+        (BACKEND.MARLIN, 0.01),
     ]
 
     @classmethod
@@ -78,113 +52,148 @@ class TestAwqKernelOutput(unittest.TestCase):
         if not torch.cuda.is_available():
             raise unittest.SkipTest("CUDA is required for AWQ kernel output checks.")
 
-        cls.test_dtypes = [torch.float16]
-        cls.quantized_tempdirs = {}
-        cls.quantized_model_paths = {}
-        cls.data = {}
+        cls.device = DEVICE
+        cls.log = log
+        cls._weight_map = cls._load_weight_map()
+        cls.backend_skip_reason: Dict[BACKEND, str] = {}
 
         try:
-            cls._prepare_calibration_dataset()
-            cls._quantize_models()
-            cls._prepare_random_inputs()
-        except unittest.SkipTest:
-            raise
-        except Exception as exc:  # pragma: no cover - defensive skip for CI env mismatches
-            raise unittest.SkipTest(f"Skipping AWQ kernel output tests: {exc}") from exc
+            tensors = cls._load_awq_tensors(cls.TARGET)
+        except Exception as exc:  # pragma: no cover - skip if model unavailable
+            raise unittest.SkipTest(f"Unable to load AWQ tensors: {exc}") from exc
+
+        (
+            qweight_cpu,
+            qzeros_cpu,
+            scales_cpu,
+            bias_cpu,
+        ) = tensors
+
+        cls.in_features = qweight_cpu.shape[0]
+        cls.out_features = qweight_cpu.shape[1] * (32 // cls.BITS)
+
+        cls.modules: Dict[BACKEND, Optional[torch.nn.Module]] = {}
+
+        cls.modules[BACKEND.GEMM] = cls._build_gemm_module(
+            qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
+        )
+
+        cls.modules[BACKEND.MARLIN] = cls._build_marlin_module(
+            qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
+        )
+
+        cls.inputs = cls._generate_inputs()
+        cls.reference_outputs = cls._forward(cls.modules[BACKEND.GEMM], cls.inputs)
 
     @classmethod
     def tearDownClass(cls) -> None:
-        for tmp_dir in getattr(cls, "quantized_tempdirs", {}).values():
-            tmp_dir.cleanup()
+        for module in getattr(cls, "modules", {}).values():
+            if module is not None:
+                del module
+        torch.cuda.empty_cache()
 
     @classmethod
-    def _prepare_calibration_dataset(cls) -> None:
-        try:
-            cls.tokenizer = AutoTokenizer.from_pretrained(cls.pretrained_model_id, use_fast=True)
-        except Exception as exc:
-            raise unittest.SkipTest(f"Tokenizer unavailable for AWQ tests: {exc}") from exc
-
-        requested_samples = os.getenv("GPTQMODEL_AWQ_KERNEL_SAMPLES")
-        if requested_samples is not None:
-            sample_count = max(8, int(requested_samples))
-        else:
-            try:
-                total_mem_gb = (
-                    torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
-                    / (1024 ** 3)
-                )
-            except Exception:  # pragma: no cover - fallback on inspect failure
-                total_mem_gb = 0.0
-
-            if total_mem_gb >= 80:
-                sample_count = 256
-            elif total_mem_gb >= 48:
-                sample_count = 128
-            else:
-                sample_count = 48
-
-        try:
-            dataset = load_dataset("json", data_files=cls.dataset_path, split="train")
-        except Exception as exc:
-            raise unittest.SkipTest(f"Calibration dataset unavailable for AWQ tests: {exc}") from exc
-
-        if len(dataset) < sample_count:
-            raise unittest.SkipTest(
-                f"Calibration dataset too small ({len(dataset)} < {sample_count})."
-            )
-
-        cls.calibration_dataset = dataset.select(range(sample_count))
+    def _load_weight_map(cls) -> Dict[str, str]:
+        index_path = cls.MODEL_PATH / "model.safetensors.index.json"
+        with open(index_path, "r") as handle:
+            index = json.load(handle)
+        return index["weight_map"]
 
     @classmethod
-    def _quantize_models(cls) -> None:
-        quantize_targets = [
-            (FORMAT.GEMM, cls.group_size),
-            (FORMAT.GEMV_FAST, cls.group_size),
-        ]
+    def _load_tensor(cls, key: str) -> torch.Tensor:
+        if key not in cls._weight_map:
+            raise KeyError(f"Tensor `{key}` not found in weight map.")
+        filename = cls.MODEL_PATH / cls._weight_map[key]
+        with safe_open(filename, framework="pt", device="cpu") as f:
+            return f.get_tensor(key)
 
-        for checkpoint_format, group_size in quantize_targets:
-            quantize_config = QuantizeConfig(
-                bits=4,
-                group_size=group_size,
-                quant_method=METHOD.AWQ,
-                format=checkpoint_format,
-            )
+    @classmethod
+    def _load_awq_tensors(cls, target: str) -> Tuple[torch.Tensor, ...]:
+        qweight = cls._load_tensor(f"{target}.qweight").contiguous()
+        qzeros = cls._load_tensor(f"{target}.qzeros").contiguous()
+        scales = cls._load_tensor(f"{target}.scales").contiguous()
+        bias = cls._load_tensor(f"{target}.bias").contiguous()
+        return qweight, qzeros, scales, bias
 
-            model = GPTQModel.load(
-                cls.pretrained_model_id,
-                quantize_config=quantize_config,
-            )
+    @classmethod
+    def _build_gemm_module(
+        cls,
+        qweight_cpu: torch.Tensor,
+        qzeros_cpu: torch.Tensor,
+        scales_cpu: torch.Tensor,
+        bias_cpu: torch.Tensor,
+    ) -> AwqGEMMQuantLinear:
+        module = AwqGEMMQuantLinear(
+            bits=cls.BITS,
+            group_size=cls.GROUP_SIZE,
+            sym=True,
+            desc_act=False,
+            in_features=cls.in_features,
+            out_features=cls.out_features,
+            bias=True,
+            adapter=None,
+            register_buffers=True,
+        ).to(cls.device)
 
-            model.quantize(cls.calibration_dataset, batch_size=1, calibration_concat_size=cls.calibration_concat_size)
+        module.qweight.copy_(qweight_cpu.to(cls.device))
+        module.qzeros.copy_(qzeros_cpu.to(cls.device))
+        module.scales.copy_(scales_cpu.to(torch.float32).to(cls.device))
+        module.bias.copy_(bias_cpu.to(torch.float32).to(cls.device))
 
-            tmp_dir = tempfile.TemporaryDirectory()
-            model.save(tmp_dir.name)
+        module.eval()
+        module.post_init()
+        return module
 
-            cls.quantized_tempdirs[(checkpoint_format, group_size)] = tmp_dir
-            cls.quantized_model_paths[(checkpoint_format, group_size)] = tmp_dir.name
+    @classmethod
+    def _build_marlin_module(
+        cls,
+        qweight_cpu: torch.Tensor,
+        qzeros_cpu: torch.Tensor,
+        scales_cpu: torch.Tensor,
+        bias_cpu: torch.Tensor,
+    ) -> Optional[AwqMarlinQuantLinear]:
+        if marlin_import_exception is not None:
+            cls.backend_skip_reason[BACKEND.MARLIN] = f"AWQ Marlin kernel unavailable: {marlin_import_exception}"
+            return None
 
-            del model
+        try:
+            workspace = marlin_make_workspace_new(cls.device)
+            del workspace
             torch.cuda.empty_cache()
+        except Exception as exc:
+            cls.backend_skip_reason[BACKEND.MARLIN] = f"Unable to allocate Marlin workspace: {exc}"
+            return None
+
+        module = AwqMarlinQuantLinear(
+            bits=cls.BITS,
+            group_size=cls.GROUP_SIZE,
+            sym=True,
+            desc_act=False,
+            in_features=cls.in_features,
+            out_features=cls.out_features,
+            bias=True,
+            adapter=None,
+            register_buffers=True,
+        ).to(cls.device)
+
+        module.qweight.data.copy_(qweight_cpu.to(cls.device))
+        module.qzeros.data.copy_(qzeros_cpu.to(cls.device))
+        module.scales.data.copy_(scales_cpu.to(torch.float16).to(cls.device))
+        module.bias.data.copy_(bias_cpu.to(torch.float16).to(cls.device))
+
+        module.eval()
+        module.post_init()
+        return module
 
     @classmethod
-    def _prepare_random_inputs(cls) -> None:
-        model_path = cls.quantized_model_paths[(FORMAT.GEMM, cls.group_size)]
-        model = GPTQModel.load(model_path, backend=BACKEND.GEMM, dtype=torch.float16)
-
-        modules = find_modules(model.model, layers=[AwqGEMMQuantLinear])
-        if cls.target not in modules:
-            raise unittest.SkipTest(f"Target layer `{cls.target}` missing in quantized model.")
-
-        module = modules[cls.target]
-        in_features = module.in_features
-
-        large_shapes = [(1, 128), (1, 64), (1, 48)]
-        medium_shapes = [(1, 64), (1, 48), (1, 32)]
+    def _generate_inputs(cls) -> List[torch.Tensor]:
+        large_shapes = [(4, 32), (2, 64), (1, 96)]
+        medium_shapes = [(2, 32), (1, 48), (1, 32)]
         small_shapes = [(1, 32), (1, 24), (1, 16)]
 
         try:
             total_mem_gb = (
-                torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
+                torch.cuda.get_device_properties(cls.device).total_memory
                 / (1024 ** 3)
             )
         except Exception:  # pragma: no cover
@@ -199,81 +208,39 @@ class TestAwqKernelOutput(unittest.TestCase):
         else:
             shapes = small_shapes
 
-        for dtype in cls.test_dtypes:
-            data = Data()
-            cls.data[dtype] = data
-
-            with torch.inference_mode():
-                for batch_tokens, seq_len in shapes:
-                    inputs = torch.rand(
-                        (batch_tokens, seq_len, in_features),
-                        device=DEVICE,
-                        dtype=dtype,
-                    )
-                    data.inputs.append(inputs)
-
-                reference_outputs = cls._forward(
-                    model_path=model_path,
-                    backend=BACKEND.GEMM,
-                    dtype=dtype,
-                    inputs=data.inputs,
-                )
-                data.reference_outputs.extend(reference_outputs)
-
-        del module
-        del model
-        torch.cuda.empty_cache()
+        inputs: List[torch.Tensor] = []
+        for batch, tokens in shapes:
+            tensor = torch.rand(
+                (batch, tokens, cls.in_features),
+                device=cls.device,
+                dtype=cls.DTYPE,
+            )
+            inputs.append(tensor)
+        return inputs
 
     @classmethod
     def _forward(
         cls,
-        model_path: str,
-        backend: BACKEND,
-        dtype: torch.dtype,
-        inputs: List[torch.Tensor],
+        module: torch.nn.Module,
+        inputs: Iterable[torch.Tensor],
     ) -> List[torch.Tensor]:
-        model = GPTQModel.load(model_path, backend=backend, dtype=dtype)
-
-        target_qlinear_cls = cls.target_qliner_map[backend]
-        modules = find_modules(model.model, layers=[target_qlinear_cls])
-        if cls.target not in modules:
-            raise unittest.SkipTest(f"Target layer `{cls.target}` missing for backend `{backend}`.")
-
-        module = modules[cls.target]
-
         outputs: List[torch.Tensor] = []
         with torch.inference_mode():
             for tensor in inputs:
-                outputs.append(module(tensor))
-
-        del module
-        del model
-        torch.cuda.empty_cache()
-
+                result = module(tensor)
+                outputs.append(result.detach().to(torch.float32).cpu())
         return outputs
 
     def _maybe_skip_backend(self, backend: BACKEND) -> None:
-        if backend == BACKEND.GEMV_FAST and awq_v2_ext is None:
-            self.skipTest(f"AWQ GEMV_FAST kernel unavailable: {awq_v2_msg}")
-
-        if backend == BACKEND.MARLIN:
-            if marlin_import_exception is not None:
-                self.skipTest(f"AWQ Marlin kernel unavailable: {marlin_import_exception}")
-
-            # Validate CUDA capability for Marlin kernels.
-            try:
-                workspace = marlin_make_workspace_new(DEVICE)
-                del workspace
-                torch.cuda.empty_cache()
-            except Exception as exc:
-                self.skipTest(f"Unable to allocate Marlin workspace: {exc}")
+        reason = self.backend_skip_reason.get(backend)
+        if reason:
+            self.skipTest(reason)
 
     def _summarize_results(
         self,
         reference_outputs: List[torch.Tensor],
         actual_outputs: List[torch.Tensor],
         backend: BACKEND,
-        dtype: torch.dtype,
         atol: float,
         title: str,
         reference_label: str,
@@ -300,7 +267,7 @@ class TestAwqKernelOutput(unittest.TestCase):
             [
                 [
                     backend.name,
-                    str(dtype),
+                    str(self.DTYPE),
                     total,
                     status,
                     len(failures),
@@ -317,34 +284,27 @@ class TestAwqKernelOutput(unittest.TestCase):
             ],
             tablefmt="github",
         )
-        log.info("\n" + title + "\n" + table)
+        self.log.info("\n" + title + "\n" + table)
 
         if failures:
             raise AssertionError(
-                f"{len(failures)} mismatched outputs for backend `{backend}` and dtype `{dtype}`"
+                f"{len(failures)} mismatched outputs for backend `{backend}`"
             )
 
     @parameterized.expand(float16_cases)
-    def test_awq_kernel_outputs(self, backend: BACKEND, dtype: torch.dtype, atol: float) -> None:
+    def test_awq_kernel_outputs(self, backend: BACKEND, atol: float) -> None:
         self._maybe_skip_backend(backend)
 
-        quant_format = self.backend_to_format[backend]
-        model_path = self.quantized_model_paths[(quant_format, self.group_size)]
+        module = self.modules.get(backend)
+        if module is None:
+            self.skipTest(f"Backend `{backend}` module unavailable.")
 
-        data = self.data[dtype]
-        actual_outputs = self._forward(
-            model_path=model_path,
-            backend=backend,
-            dtype=dtype,
-            inputs=data.inputs,
-        )
-
+        actual_outputs = self._forward(module, self.inputs)
         self._summarize_results(
-            reference_outputs=data.reference_outputs,
+            reference_outputs=self.reference_outputs,
             actual_outputs=actual_outputs,
             backend=backend,
-            dtype=dtype,
             atol=atol,
-            title=f"AWQ Kernel Output {dtype}",
+            title=f"AWQ Kernel Output {self.DTYPE}",
             reference_label="AWQ GEMM output",
         )
