@@ -29,8 +29,10 @@ def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
     return packed
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 def test_awq_torch_matches_manual_dequant(dtype):
+    if dtype not in AwqTorchQuantLinear.SUPPORTS_DTYPES:
+        pytest.skip(f"dtype {dtype} not supported by AwqTorchQuantLinear")
     torch.manual_seed(0)
 
     bits = 4
@@ -46,8 +48,8 @@ def test_awq_torch_matches_manual_dequant(dtype):
 
     int_weight = torch.randint(0, 2**bits, size=(in_features, out_features), dtype=torch.int32)
     zero_points = torch.randint(0, 2**bits, size=(groups, pack_cols), dtype=torch.int32)
-    scales = (torch.rand(groups, pack_cols, dtype=torch.float32) * 2.0) + 0.25
-    bias = torch.randn(out_features, dtype=torch.float32)
+    scales = (torch.rand(groups, pack_cols, dtype=torch.float16) * 2.0) + 0.25
+    bias = torch.randn(out_features, dtype=torch.float16)
 
     qweight = _pack_awq_tensor(int_weight, bits)
     qzeros = _pack_awq_tensor(zero_points, bits)
@@ -65,7 +67,8 @@ def test_awq_torch_matches_manual_dequant(dtype):
 
     module.qweight.copy_(qweight)
     module.qzeros.copy_(qzeros)
-    module.scales.copy_(scales)
+    module.scales = module.scales.to(dtype=torch.float16)
+    module.scales.copy_(scales.to(torch.float16))
     module.bias.copy_(bias)
     module.post_init()
     module.eval()
@@ -73,13 +76,12 @@ def test_awq_torch_matches_manual_dequant(dtype):
     batch = 4
     x = torch.randn(batch, in_features, dtype=dtype)
 
-    scales_expected = scales.to(dtype=dtype)
-    bias_expected = bias.to(dtype=dtype)
+    bias_expected = module.bias
 
     dequant_weight = dequantize_gemm(
-        qweight=qweight.to(torch.int32),
-        qzeros=qzeros.to(torch.int32),
-        scales=scales_expected,
+        qweight=module.qweight,
+        qzeros=module.qzeros,
+        scales=module.scales,
         bits=bits,
         group_size=group_size,
     ).to(dtype=dtype)

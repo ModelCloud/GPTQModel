@@ -170,8 +170,8 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         module.qweight.copy_(qweight_cpu.to(cls.device))
         module.qzeros.copy_(qzeros_cpu.to(cls.device))
-        module.scales.copy_(scales_cpu.to(torch.float32).to(cls.device))
-        module.bias.copy_(bias_cpu.to(torch.float32).to(cls.device))
+        module.scales.copy_(scales_cpu.to(cls.device))
+        module.bias.copy_(bias_cpu.to(cls.device))
 
         module.eval()
         module.post_init()
@@ -240,8 +240,8 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         module.qweight.copy_(qweight_cpu.to(cls.device))
         module.qzeros.copy_(qzeros_cpu.to(cls.device))
-        module.scales.copy_(scales_cpu.to(torch.float32).to(cls.device))
-        module.bias.copy_(bias_cpu.to(torch.float32).to(cls.device))
+        module.scales.copy_(scales_cpu.to(cls.device))
+        module.bias.copy_(bias_cpu.to(cls.device))
 
         module.eval()
         module.post_init()
@@ -298,7 +298,7 @@ class TestAwqKernelOutput(unittest.TestCase):
                 result = module(local_tensor)
                 if output_dtype is not None and result.dtype != output_dtype:
                     result = result.to(dtype=output_dtype)
-                outputs.append(result.detach().to(torch.float32).cpu())
+                outputs.append(result.detach().cpu())
         return outputs
 
     def _maybe_skip_backend(self, backend: BACKEND) -> None:
