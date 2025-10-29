@@ -29,6 +29,7 @@ class BACKEND(str, Enum):
     GEMM = "gemm"
     GEMV = "gemv"
     GEMV_FAST = "gemv_fast"
+    TORCH_AWQ = "torch_awq"
 
     # external
     VLLM = "vllm" # External inference engine: CUDA + ROCm + IPEX
