@@ -1432,7 +1432,7 @@ class BaseQModel(nn.Module):
                 out.append(entry)
             return out
 
-        print("DEBUG AWQ NODES:", format_nodes(nodes))
+        # print("DEBUG AWQ NODES:", format_nodes(nodes))
         return nodes
 
     def _clone_model_init_kwargs(self, source: PreTrainedModel) -> Dict[str, Any]:
