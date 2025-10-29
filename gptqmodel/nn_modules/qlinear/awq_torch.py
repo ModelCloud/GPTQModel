@@ -7,13 +7,16 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
+from .awq_gemm import _convert_awq_v1_to_v2
 
 
 log = setup_logger()
+awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
 
 class AwqTorchQuantLinear(AWQuantLinear):
@@ -66,6 +69,10 @@ class AwqTorchQuantLinear(AWQuantLinear):
             **kwargs,
         )
 
+        self._legacy_qweight: torch.Tensor | None = None
+        self._legacy_qzeros: torch.Tensor | None = None
+        self._legacy_scales: torch.Tensor | None = None
+
     def post_init(self):
         super().post_init()
 
@@ -75,14 +82,75 @@ class AwqTorchQuantLinear(AWQuantLinear):
             f"bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}"
         )
 
+    def load_legacy_tensors(
+        self,
+        qweight: torch.Tensor,
+        qzeros: torch.Tensor,
+        scales: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> None:
+        device = qweight.device
+        for name in ("qweight", "scales", "qzeros", "bias"):
+            if hasattr(self, name):
+                delattr(self, name)
+            if name in getattr(self, "_buffers", {}):
+                del self._buffers[name]
+
+        self._legacy_qweight = qweight.to(device)
+        self._legacy_qzeros = qzeros.to(device)
+        self._legacy_scales = scales.to(device)
+
+        qweight_v2, scales_processed, zeros_processed = _convert_awq_v1_to_v2(
+            qweight,
+            qzeros,
+            scales,
+            bits=self.bits,
+            group_size=self.group_size,
+            in_features=self.in_features,
+            out_features=self.out_features,
+            interleave=4,
+        )
+        self.register_buffer("qweight", qweight_v2)
+        self.register_buffer("scales", scales_processed)
+        self.register_buffer("qzeros", zeros_processed)
+        if bias is not None:
+            self.register_buffer("bias", bias.to(device=device, dtype=scales.dtype))
+        else:
+            self.bias = None
+        self.pack_dtype = torch.int16
+
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
         device = x.device
         x_flat = x.reshape(-1, x.shape[-1])
 
-        weight = dequantize_gemm(self.qweight, self.qzeros, self.scales, self.bits, self.group_size)
-        assert weight.dtype == torch.float16, f"weight {weight.dtype} is not float16"
-        if weight.dtype != x_flat.dtype or weight.device != device:
+        if awq_ext is not None:
+            weight = awq_ext.dequantize_weights_cuda(
+                self.qweight,
+                self.scales,
+                self.qzeros,
+                0,
+                0,
+                0,
+                False,
+            )
+            weight = weight.to(dtype=x_flat.dtype, device=device)
+        else:
+            if (
+                self._legacy_qweight is None
+                or self._legacy_qzeros is None
+                or self._legacy_scales is None
+            ):
+                raise RuntimeError("Legacy AWQ tensors unavailable for Torch fallback.")
+            weight = dequantize_gemm(
+                self._legacy_qweight,
+                self._legacy_qzeros,
+                self._legacy_scales,
+                self.bits,
+                self.group_size,
+            )
+            scales_expanded = self._legacy_scales.repeat_interleave(self.group_size, dim=0).to(weight.dtype)
+            weight = weight - 8 * scales_expanded
             weight = weight.to(device=device, dtype=x_flat.dtype)
 
         output = torch.matmul(x_flat, weight)

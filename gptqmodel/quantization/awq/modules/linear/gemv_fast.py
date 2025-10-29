@@ -207,7 +207,7 @@ class WQLinear_GEMVFast(torch.nn.Module):
         if self.bias is not None and self.bias.dtype != inputs.dtype:
             self.bias = self.bias.to(dtype=inputs.dtype)
 
-        use_fp32_accum = inputs.dtype == torch.bfloat16
+        use_fp32_accum = True
 
         if batch_size < 8 and n_tokens == 1:
             out = awq_ext.gemv_forward_cuda(

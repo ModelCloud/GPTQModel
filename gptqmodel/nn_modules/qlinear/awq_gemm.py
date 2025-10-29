@@ -8,6 +8,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
+from ...utils.gemv import calculate_zeros_width
 
 __all__ = ["AwqGEMMQuantLinear"]
 
@@ -26,8 +27,8 @@ def _qweight_unpack(packed: torch.Tensor) -> torch.Tensor:
     if packed.dtype != torch.int32:
         packed = packed.to(torch.int32)
     mask = torch.tensor(0xF, dtype=torch.int32, device=packed.device)
-    offsets = torch.arange(8, device=packed.device, dtype=torch.int32)
-    unpacked = (packed.unsqueeze(-1) >> (offsets * 4)) & mask
+    shifts = torch.arange(8, device=packed.device, dtype=torch.int32) * 4
+    unpacked = (packed.unsqueeze(-1) >> shifts) & mask
     unpacked = unpacked.index_select(-1, _awq_reverse_indices(packed.device))
     return unpacked.reshape(packed.shape[0], packed.shape[1] * 8)
 
@@ -52,11 +53,81 @@ def _packing_v2_from_unpacked(unpacked: torch.Tensor, interleave: int, kstride: 
 
 def _multiply_scale_qzero_negative(scales: torch.Tensor, qzeros: torch.Tensor, zp_shift: int = 0) -> torch.Tensor:
     """Replica of TinyChat multiply_scale_qzero_negative for AWQ layouts."""
-    zeros = _qweight_unpack(qzeros.to(torch.int32)).to(dtype=scales.dtype)
+    if qzeros.dtype != torch.int32:
+        qzeros = qzeros.to(torch.int32)
+    pack_size = 8
+    rows, cols = scales.shape
+    offsets = torch.arange(pack_size, device=scales.device, dtype=torch.int32)
+    zeros = ((qzeros.unsqueeze(-1) >> (offsets * 4)) & 0xF)
+    zeros = zeros.index_select(-1, _awq_reverse_indices(scales.device))
+    zeros = zeros.reshape(rows, -1)[:, :cols].to(scales.dtype)
     scaled = scales * zeros
     if zp_shift:
         scaled = scaled + zp_shift * scales
     return -scaled
+
+
+def _convert_awq_v1_to_v2(
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    bits: int,
+    group_size: int,
+    in_features: int,
+    out_features: int,
+    interleave: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    device = qweight.device
+    unpacked = _qweight_unpack(qweight.to(device))
+    if unpacked.shape == (in_features, out_features):
+        unpacked = unpacked.transpose(0, 1).contiguous()
+    elif unpacked.shape != (out_features, in_features):
+        raise ValueError(
+            f"Unexpected legacy qweight shape {tuple(unpacked.shape)}; expected "
+            f"({out_features}, {in_features}) or ({in_features}, {out_features})."
+        )
+    qweight_v2 = _packing_v2_from_unpacked(unpacked, interleave, 64).contiguous()
+
+    pack_num = 32 // bits
+    zeros_width = calculate_zeros_width(in_features, group_size, pack_num=pack_num)
+
+    scales_legacy = scales.to(device=device).contiguous()
+    groups = 1 if group_size in (-1, 0) else in_features // group_size
+    if scales_legacy.shape != (out_features, groups):
+        if scales_legacy.shape == (groups, out_features):
+            scales_legacy = scales_legacy.transpose(0, 1).contiguous()
+        else:
+            raise ValueError(
+                f"Unexpected legacy scales shape {tuple(scales_legacy.shape)}; "
+                f"expected ({out_features}, {groups}) or ({groups}, {out_features})."
+            )
+
+    qzeros_legacy = qzeros.to(device=device)
+    if qzeros_legacy.shape != (out_features, zeros_width):
+        if qzeros_legacy.shape == (zeros_width, out_features):
+            qzeros_legacy = qzeros_legacy.transpose(0, 1).contiguous()
+        else:
+            raise ValueError(
+                f"Unexpected legacy qzeros shape {tuple(qzeros_legacy.shape)}; "
+                f"expected ({out_features}, {zeros_width}) or ({zeros_width}, {out_features})."
+            )
+
+    qscales = torch.zeros(
+        (out_features, zeros_width * pack_num),
+        dtype=scales_legacy.dtype,
+        device=device,
+    )
+    qscales[:, : scales_legacy.shape[1]] = scales_legacy
+
+    scaled_zeros = torch.zeros_like(qscales)
+    scaled_zeros[:, : scales_legacy.shape[1]] = _multiply_scale_qzero_negative(
+        qscales[:, : scales_legacy.shape[1]], qzeros_legacy
+    )
+
+    scales_processed = qscales.transpose(0, 1).contiguous()
+    zeros_processed = scaled_zeros.transpose(0, 1).contiguous()
+    return qweight_v2, scales_processed, zeros_processed
 
 
 class AwqGEMMQuantLinear(AWQuantLinear):
@@ -148,20 +219,19 @@ class AwqGEMMQuantLinear(AWQuantLinear):
                 delattr(self, name)
             if name in getattr(self, "_buffers", {}):
                 del self._buffers[name]
-        unpacked = _qweight_unpack(qweight.to(device))
-        if unpacked.shape[0] == self.in_features and unpacked.shape[1] == self.out_features:
-            unpacked = unpacked.transpose(0, 1).contiguous()
-        elif unpacked.shape[0] != self.out_features or unpacked.shape[1] != self.in_features:
-            raise ValueError(
-                f"Unexpected legacy qweight shape {tuple(unpacked.shape)}; "
-                f"expected ({self.out_features}, {self.in_features}) post-unpack."
-            )
-        qweight_v2 = _packing_v2_from_unpacked(unpacked, self.INTERLEAVE, 64).contiguous()
-        scales_v2 = scales.to(device=device).contiguous()
-        scaled_zeros = _multiply_scale_qzero_negative(scales_v2, qzeros.to(device), zp_shift=0).contiguous()
+        qweight_v2, scales_processed, zeros_processed = _convert_awq_v1_to_v2(
+            qweight,
+            qzeros,
+            scales,
+            bits=self.bits,
+            group_size=self.group_size,
+            in_features=self.in_features,
+            out_features=self.out_features,
+            interleave=self.INTERLEAVE,
+        )
         self.register_buffer("qweight", qweight_v2)
-        self.register_buffer("scales", scales_v2)
-        self.register_buffer("qzeros", scaled_zeros)
+        self.register_buffer("scales", scales_processed)
+        self.register_buffer("qzeros", zeros_processed)
         if bias is not None:
             self.register_buffer("bias", bias.to(device=device, dtype=scales.dtype))
         else:
@@ -180,7 +250,7 @@ class AwqGEMMQuantLinear(AWQuantLinear):
         if self.bias is not None and self.bias.dtype != x.dtype:
             self.bias = self.bias.to(dtype=x.dtype)
         num_tokens = x.numel() // x.shape[-1]
-        use_fp32_accum = x.dtype == torch.bfloat16
+        use_fp32_accum = True
         if num_tokens < 8:
             out = awq_ext.gemv_forward_cuda(
                 x,
