@@ -18,6 +18,7 @@ log = setup_logger()
 
 awq_v2_ext, msg = try_import("gptqmodel_awq_v2_kernels")
 
+
 class AwqGEMVFastQuantLinear(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
@@ -34,7 +35,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int16]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv_fast"
@@ -119,6 +120,17 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
         inputs = x
         batch_size, n_tokens, _ = inputs.shape
+        if inputs.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(f"{self.__class__.__name__} only supports dtypes {{torch.float16, torch.bfloat16}}: got {inputs.dtype}.")
+
+        if self.scales is not None and self.scales.dtype != inputs.dtype:
+            self.scales = self.scales.to(dtype=inputs.dtype)
+
+        if self.qzeros is not None and self.qzeros.dtype != inputs.dtype:
+            self.qzeros = self.qzeros.to(dtype=inputs.dtype)
+
+        if self.bias is not None and self.bias.dtype != inputs.dtype:
+            self.bias = self.bias.to(dtype=inputs.dtype)
 
         if batch_size < 8 and n_tokens == 1:
             out = awq_v2_ext.gemv_forward_cuda_decode(
@@ -135,7 +147,8 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             out = awq_v2_ext.gemm_forward_cuda_prefill(
                 inputs, self.qweight, self.scales, self.qzeros
             )
-        out = out + self.bias if self.bias is not None else out
+        if self.bias is not None:
+            out = out + self.bias
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)

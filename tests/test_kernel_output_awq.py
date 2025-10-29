@@ -41,16 +41,16 @@ class TestAwqKernelOutput(unittest.TestCase):
     TARGET = "model.layers.20.self_attn.v_proj"
     BITS = 4
     GROUP_SIZE = 128
-    SUPPORTED_DTYPES = (torch.float16,)
+    SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
 
     baseline_backend = BACKEND.TORCH_AWQ
     backend_cases = [
         (baseline_backend, torch.float16, 0.0),
-        # (baseline_backend, torch.bfloat16, 0.0),
+        (baseline_backend, torch.bfloat16, 0.0),
         (BACKEND.GEMM, torch.float16, 0.001),
-        # (BACKEND.GEMM, torch.bfloat16, 0.05),
+        (BACKEND.GEMM, torch.bfloat16, 0.05),
         (BACKEND.MARLIN, torch.float16, 0.01),
-        # (BACKEND.MARLIN, torch.bfloat16, 0.05),
+        (BACKEND.MARLIN, torch.bfloat16, 0.05),
     ]
 
     @classmethod

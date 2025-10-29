@@ -89,6 +89,8 @@ class AwqTorchQuantLinear(AWQuantLinear):
         output = torch.matmul(x_flat, weight)
 
         if self.bias is not None:
+            if self.bias.dtype != output.dtype:
+                self.bias = self.bias.to(dtype=output.dtype)
             output = output + self.bias
 
         if self.adapter:

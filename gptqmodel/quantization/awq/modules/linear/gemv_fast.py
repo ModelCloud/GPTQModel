@@ -195,6 +195,18 @@ class WQLinear_GEMVFast(torch.nn.Module):
             raise ModuleNotFoundError("External AWQ V2 kernels are not properly installed." + msg)
         inputs = x
         batch_size, n_tokens, _ = inputs.shape
+        if inputs.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(f"WQLinear_GEMVFast only supports dtypes {{torch.float16, torch.bfloat16}}: got {inputs.dtype}.")
+
+        if self.scales is not None and self.scales.dtype != inputs.dtype:
+            self.scales = self.scales.to(dtype=inputs.dtype)
+
+        if self.qzeros is not None and self.qzeros.dtype != inputs.dtype:
+            self.qzeros = self.qzeros.to(dtype=inputs.dtype)
+
+        if self.bias is not None and self.bias.dtype != inputs.dtype:
+            self.bias = self.bias.to(dtype=inputs.dtype)
+
         if batch_size < 8 and n_tokens == 1:
             out = awq_v2_ext.gemv_forward_cuda_decode(
                 inputs,
@@ -210,6 +222,7 @@ class WQLinear_GEMVFast(torch.nn.Module):
             out = awq_v2_ext.gemm_forward_cuda_prefill(
                 inputs, self.qweight, self.scales, self.qzeros
             )
-        out = out + self.bias if self.bias is not None else out
+        if self.bias is not None:
+            out = out + self.bias
 
         return out
