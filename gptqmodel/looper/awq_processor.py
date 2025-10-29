@@ -61,7 +61,6 @@ class AWQProcessor(LoopProcessor):
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
         self.nsamples = 0
-        self._nsamples_total = 0
 
         self._layer_states: Dict[int, _AWQLayerState] = {}
         self._layer_states_lock = threading.Lock()
@@ -98,7 +97,6 @@ class AWQProcessor(LoopProcessor):
         self.modules, self.module_kwargs, self.inps = self.init_quant()
         self._module_forward_kwargs = dict(self.module_kwargs)
         self._module_forward_kwargs.setdefault("attention_mask", None)
-        self._nsamples_total = self._resolve_nsamples(self.inps)
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
@@ -141,16 +139,6 @@ class AWQProcessor(LoopProcessor):
             return None
 
         return float(sum(values) / len(values))
-
-    def _resolve_nsamples(self, tensor) -> int:
-        if tensor is None:
-            return 0
-        if isinstance(tensor, torch.Tensor):
-            return int(tensor.shape[0])
-        try:
-            return int(len(tensor))
-        except Exception:
-            return 0
 
     def _layer_input_features(self, state: _AWQLayerState) -> Dict[str, torch.Tensor]:
         features: Dict[str, torch.Tensor] = {}
@@ -370,7 +358,7 @@ class AWQProcessor(LoopProcessor):
             # If use_cache=True, layer_kwargs will contain past_key_values instead of attention_mask.
             # Autoawq does not pass the use_cache parameter here.
             # I haven't found the root cause yet.
-            
+
             # Check if model parameters are on meta device and use best_device instead
             # to avoid torch.autocast(device_type="meta") error in transformers
             model_device = next(self.model.parameters()).device
@@ -394,7 +382,7 @@ class AWQProcessor(LoopProcessor):
 
         del samples
         inps = inps[0]
-        
+
         # we no longer need embed, reduce vram
         self.gptq_model.move_embed("cpu")
 
@@ -476,6 +464,8 @@ class AWQProcessor(LoopProcessor):
             module2inspect=None,
             kwargs={},
     ):
+        self.nsamples += inp.shape[0]
+
         if module2inspect is None:
             assert len(layers) == 1
             module2inspect = layers[0]
@@ -696,7 +686,7 @@ class AWQProcessor(LoopProcessor):
         del org_out
 
         return best_max_val.squeeze(1)
-    
+
     def pseudo_quantize_tensor(self, w: torch.Tensor):
         org_w_shape = w.shape
         if self.qcfg.group_size > 0:
@@ -1048,7 +1038,7 @@ class AWQProcessor(LoopProcessor):
                 MODULE_FEATURE_COLUMN: self.module_feature_summary(named_module),
                 DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(named_module),
                 QUANT_LOG_LOSS: loss_summary,
-                QUANT_LOG_NSAMPLES: f"{self._nsamples_total}",
+                QUANT_LOG_NSAMPLES: f"{self.nsamples}",
                 # QUANT_LOG_DAMP: f"{damp_percent:.5f}",
                 PROCESS_LOG_TIME: f"{duration:.3f}",
                 # PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
