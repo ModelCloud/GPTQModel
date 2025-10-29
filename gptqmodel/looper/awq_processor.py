@@ -181,9 +181,13 @@ class AWQProcessor(LoopProcessor):
         if cache is None:
             return
 
+        refreshed: Dict[str, torch.Tensor] = {}
+
         if getattr(cache, "attention_masks", None):
             mask = cache.attention_masks[-1]
-            self._module_forward_kwargs["attention_mask"] = mask
+            refreshed["attention_mask"] = mask
+        else:
+            refreshed["attention_mask"] = None
 
         rotary = getattr(getattr(self.model, "model", self.model), "rotary_emb", None)
         pos_ids_cache = cache.position_ids[-1] if getattr(cache, "position_ids", None) else None
@@ -210,19 +214,21 @@ class AWQProcessor(LoopProcessor):
                 pos_for_rotary = torch.arange(seq_len, device=x_for_rotary.device, dtype=torch.long)
                 pos_for_rotary = pos_for_rotary.unsqueeze(0).expand(batch, -1)
 
-            self._module_forward_kwargs["position_ids"] = pos_for_rotary
+            refreshed["position_ids"] = pos_for_rotary
             try:
                 pe = rotary(x_for_rotary, pos_for_rotary)
-                self._module_forward_kwargs["position_embeddings"] = pe
+                refreshed["position_embeddings"] = pe
             except Exception:
                 pass
         elif pos_ids_cache is not None:
-            self._module_forward_kwargs["position_ids"] = pos_ids_cache
+            refreshed["position_ids"] = pos_ids_cache
 
         if getattr(cache, "layer_input_kwargs", None):
             latest_kwargs = cache.layer_input_kwargs[-1] or {}
             for key, value in latest_kwargs.items():
-                self._module_forward_kwargs[key] = value
+                refreshed[key] = value
+
+        self._module_forward_kwargs = refreshed
 
     def _quantize_layer(self, layer_index: int, state: _AWQLayerState) -> None:
         with state.lock:
