@@ -7,6 +7,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.utils.module import try_import
+from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
 
@@ -139,7 +140,11 @@ class AwqGEMMQuantLinear(AWQuantLinear):
                 delattr(self, name)
             if name in getattr(self, "_buffers", {}):
                 del self._buffers[name]
-        unpacked = _qweight_unpack(qweight.to(device))
+        self._legacy_qweight = qweight.to(device)
+        self._legacy_qzeros = qzeros.to(device)
+        self._legacy_scales = scales.to(device)
+
+        unpacked = _qweight_unpack(self._legacy_qweight)
         if unpacked.shape[0] == self.in_features and unpacked.shape[1] == self.out_features:
             unpacked = unpacked.transpose(0, 1).contiguous()
         elif unpacked.shape[0] != self.out_features or unpacked.shape[1] != self.in_features:
@@ -176,24 +181,14 @@ class AwqGEMMQuantLinear(AWQuantLinear):
         if self.bias is not None and self.bias.dtype != x.dtype:
             self.bias = self.bias.to(dtype=x.dtype)
         num_tokens = x.numel() // x.shape[-1]
-        if num_tokens < 8:
-            out = awq_ext.gemv_forward_cuda(
-                x,
-                self.qweight,
-                self.scales,
-                self.qzeros,
-                num_tokens,
-                self.out_features,
-                self.in_features,
-                self.group_size,
-            )
-        else:
-            out = awq_ext.gemm_forward_cuda(
-                x,
-                self.qweight,
-                self.scales,
-                self.qzeros,
-            )
+        weight = dequantize_gemm(
+            self._legacy_qweight,
+            self._legacy_qzeros,
+            self._legacy_scales,
+            self.bits,
+            self.group_size,
+        ).to(device=x.device, dtype=x.dtype)
+        out = torch.matmul(x, weight)
         if self.bias is not None:
             out = out + self.bias
         if self.adapter:
