@@ -258,29 +258,54 @@ class AWQProcessor(LoopProcessor):
             if layer_module_ref is None:
                 raise RuntimeError(f"AWQProcessor: unable to resolve layer module for layer index {layer_index}")
 
-            named_childs = dict(state.modules)
-
         log.info(
             "AWQProcessor: layer %s tracking %s modules before quantization (subsets processed=%s/%s); first modules=%s",
             layer_index,
-            len(named_childs),
+            len(state.modules),
             len(state.processed_subsets),
             state.subset_total,
-            list(named_childs.keys())[:8],
+            list(state.modules.keys())[:8],
         )
 
         input_feat = self._layer_input_features(state)
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
         if missing:
-            log.error(
-                "AWQProcessor: layer %s missing features for %d modules (sample=%s)",
+            log.warning(
+                "AWQProcessor: layer %s skipping %d modules with missing features (sample=%s)",
                 layer_index,
                 len(missing),
                 missing[:8],
             )
-            raise RuntimeError(
-                f"AWQProcessor: missing calibration features for modules: {', '.join(missing)}."
-            )
+            for name in missing:
+                input_feat.pop(name, None)
+                with state.lock:
+                    state.modules.pop(name, None)
+                    state.pending_modules.discard(name)
+                task_entry = self.tasks.pop(name, None)
+                if task_entry and "inputs" in task_entry:
+                    task_entry["inputs"].clear()
+
+            with state.lock:
+                remaining_modules = dict(state.modules)
+
+            if not remaining_modules:
+                log.warning(
+                    "AWQProcessor: layer %s has no modules with captured activations; marking quantized.",
+                    layer_index,
+                )
+                with state.lock:
+                    state.quantized = True
+                    state.processed_subsets.clear()
+                    state.subset_total = None
+                    state.previous_weight_scale = None
+                if hasattr(self._scale_context, "layer_index"):
+                    delattr(self._scale_context, "layer_index")
+                if hasattr(self._scale_context, "prev_scale"):
+                    delattr(self._scale_context, "prev_scale")
+                return
+
+        with state.lock:
+            named_childs = dict(state.modules)
 
         module_kwargs_global = dict(self._module_forward_kwargs)
 
