@@ -364,9 +364,11 @@ class AWQProcessor(LoopProcessor):
             layers_sample = cfg.get("layers") or []
             prev_module = cfg.get("prev_op")
             first_layer_module = layers_sample[0] if layers_sample else None
+            same_module = prev_module is first_layer_module
             if (
                 isinstance(prev_module, nn.Linear)
                 and isinstance(first_layer_module, nn.Linear)
+                and not same_module
                 and prev_module.weight.shape[0] != first_layer_module.weight.shape[1]
             ):
                 try:
