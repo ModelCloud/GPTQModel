@@ -39,10 +39,20 @@
   int j_factors1 = num_out_channels / CTA_N / 1;                                                                                                        \
   dim3 num_blocks((num_out_feats + CTA_M - 1) / CTA_M * j_factors1 * SPLITK);                                                                           \
   dim3 threads_per_block(WARP_SIZE, NUM_WARPS);                                                                                                         \
-  auto kernel_func = gemm_w4a16_T1<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, SPLITK, ctype>;                                                     \
-  cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);                                                        \
-  kernel_func<<<num_blocks, threads_per_block, kSmemByteSize>>>(                                                                                        \
-      in_feats, kernel, scales, zeros, out_feats, semaphores, num_in_feats, num_out_channels, num_in_channels);
+  if (use_fp32)                                                                                                                                         \
+  {                                                                                                                                                     \
+    auto kernel_func = gemm_w4a16_T1<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, SPLITK, ctype, true>;                                      \
+    cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);                                                      \
+    kernel_func<<<num_blocks, threads_per_block, kSmemByteSize>>>(                                                                                      \
+        in_feats, kernel, scales, zeros, out_feats, semaphores, num_in_feats, num_out_channels, num_in_channels);                                       \
+  }                                                                                                                                                     \
+  else                                                                                                                                                  \
+  {                                                                                                                                                     \
+    auto kernel_func = gemm_w4a16_T1<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, SPLITK, ctype, false>;                                     \
+    cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);                                                      \
+    kernel_func<<<num_blocks, threads_per_block, kSmemByteSize>>>(                                                                                      \
+        in_feats, kernel, scales, zeros, out_feats, semaphores, num_in_feats, num_out_channels, num_in_channels);                                       \
+  }
 
 template <int N>
 __inline__ __host__ __device__ int get_log_tile(int n)
@@ -129,6 +139,15 @@ __device__ __inline__ void mma_m16n8k16_f16f16f16(half *C_warp, half *A_shared_w
       "{%0, %1}, {%2, %3, %4, %5}, {%6, %7}, {%8, %9};"
       : "=r"(((unsigned *)C_warp)[0]), "=r"(((unsigned *)C_warp)[1])
       : "r"(((unsigned *)A_shared_warp)[0]), "r"(((unsigned *)A_shared_warp)[1]), "r"(((unsigned *)A_shared_warp)[2]), "r"(((unsigned *)A_shared_warp)[3]), "r"(((unsigned *)B_shared_warp)[0]), "r"(((unsigned *)B_shared_warp)[1]), "r"(((unsigned *)C_warp)[0]), "r"(((unsigned *)C_warp)[1]));
+}
+
+__device__ __inline__ void mma_m16n8k16_f32f16f16f32(float *C_warp, half *A_shared_warp, half *B_shared_warp)
+{
+  __asm__ __volatile__(
+      "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+      "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};"
+      : "=f"(C_warp[0]), "=f"(C_warp[1]), "=f"(C_warp[2]), "=f"(C_warp[3])
+      : "r"(((unsigned *)A_shared_warp)[0]), "r"(((unsigned *)A_shared_warp)[1]), "r"(((unsigned *)A_shared_warp)[2]), "r"(((unsigned *)A_shared_warp)[3]), "r"(((unsigned *)B_shared_warp)[0]), "r"(((unsigned *)B_shared_warp)[1]), "f"(C_warp[0]), "f"(C_warp[1]), "f"(C_warp[2]), "f"(C_warp[3]));
 }
 
 __device__ __inline__ void mma_m16n8k16_bf16bf16f32(float *C_warp, nv_bfloat16 *A_shared_warp, nv_bfloat16 *B_shared_warp)
@@ -310,10 +329,10 @@ __device__ __inline__ void share_to_reg_one_stage_B(T *src, T *src_scales, T *sr
   }
 }
 
-template <int CTA_M, int CTA_N, int CTA_K, int WARP_M, int WARP_N, int WARP_K, int STAGES, int G, int SPLITK, typename T>
+template <int CTA_M, int CTA_N, int CTA_K, int WARP_M, int WARP_N, int WARP_K, int STAGES, int G, int SPLITK, typename T, bool UseFP32Accum>
 __global__ void gemm_w4a16_T1(T *__restrict__ A, T *__restrict__ B, T *__restrict__ scales, T *__restrict__ zeros, T *__restrict__ C, int *__restrict__ semaphores, int M, int N, int K)
 {
-  using DTypeAccum = typename std::conditional<std::is_same<T, half>::value, half, float>::type;  
+  using DTypeAccum = typename std::conditional<UseFP32Accum || !std::is_same<T, half>::value, float, half>::type;
   constexpr int NUM_WARPS_MN = CTA_M / WARP_M * CTA_N / WARP_N;
   constexpr int NUM_WARPS = NUM_WARPS_MN * CTA_K / WARP_K;
   constexpr int CTA_SIZE = NUM_WARPS * WARP_SIZE;
@@ -451,8 +470,16 @@ __global__ void gemm_w4a16_T1(T *__restrict__ A, T *__restrict__ B, T *__restric
         {
           if constexpr (std::is_same<T, half>::value)
           {
-            mma_m16n8k16_f16f16f16(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4);
-            mma_m16n8k16_f16f16f16(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8 + 4, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4 + 8);
+            if constexpr (UseFP32Accum)
+            {
+              mma_m16n8k16_f32f16f16f32(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4);
+              mma_m16n8k16_f32f16f16f32(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8 + 4, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4 + 8);
+            }
+            else
+            {
+              mma_m16n8k16_f16f16f16(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4);
+              mma_m16n8k16_f16f16f16(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8 + 4, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4 + 8);
+            }
           }
           else
           {
@@ -499,123 +526,249 @@ __global__ void gemm_w4a16_T1(T *__restrict__ A, T *__restrict__ B, T *__restric
 
   if constexpr (std::is_same<T, half>::value)
   {
-    if constexpr (SLICES > 1)
+    if constexpr (!UseFP32Accum)
     {
-  #pragma unroll
-      for (int z = 0; z < SLICES; ++z)
+      if constexpr (SLICES > 1)
       {
-        if (slice_id == z)
+#pragma unroll
+        for (int z = 0; z < SLICES; ++z)
         {
-  #pragma unroll
+          if (slice_id == z)
+          {
+#pragma unroll
+            for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
+            {
+#pragma unroll
+              for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
+              {
+#pragma unroll
+                for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; ++local_id)
+                {
+                  if (z > 0)
+                  {
+                    C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id] += C_shared[warp_offset_m * CTA_N + ax0_0_1 * OP_M * CTA_N + warp_offset_n + ax1_0_1 * 16 + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4)) * CTA_N + (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2];
+                  }
+                  C_shared[warp_offset_m * CTA_N + ax0_0_1 * OP_M * CTA_N + warp_offset_n + ax1_0_1 * 16 + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4)) * CTA_N + (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2] = C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id];
+                };
+              }
+            }
+          }
+          __syncthreads();
+        }
+        if (slice_id == 0)
+        {
+#pragma unroll
           for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
           {
-  #pragma unroll
+#pragma unroll
             for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
             {
-  #pragma unroll
+#pragma unroll
               for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; ++local_id)
               {
-                if (z > 0)
-                {
-                  C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id] += C_shared[warp_offset_m * CTA_N + ax0_0_1 * OP_M * CTA_N + warp_offset_n + ax1_0_1 * 16 + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4)) * CTA_N + (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2];
-                }
-                C_shared[warp_offset_m * CTA_N + ax0_0_1 * OP_M * CTA_N + warp_offset_n + ax1_0_1 * 16 + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4)) * CTA_N + (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2] = C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id];
+                C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id] = C_shared[warp_offset_m * CTA_N + ax0_0_1 * OP_M * CTA_N + warp_offset_n + ax1_0_1 * 16 + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4)) * CTA_N + (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2];
               };
             }
           }
         }
-        __syncthreads();
       }
+
       if (slice_id == 0)
       {
-  #pragma unroll
-        for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
+        Semaphore semaphore(semaphores + blockIdx_y, threadIdx.x);
+
+        if constexpr (SPLITK > 1)
         {
-  #pragma unroll
-          for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
-          {
-  #pragma unroll
-            for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; ++local_id)
-            {
-              C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id] = C_shared[warp_offset_m * CTA_N + ax0_0_1 * OP_M * CTA_N + warp_offset_n + ax1_0_1 * 16 + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4)) * CTA_N + (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2];
-            };
-          }
+          semaphore.fetch();
         }
-      }
-    }
 
-    if (slice_id == 0)
-    {
-      Semaphore semaphore(semaphores + blockIdx_y, threadIdx.x);
-
-      if constexpr (SPLITK > 1)
-      {
-        semaphore.fetch();
-      }
-
-      if (blockIdx_z != 0)
-      {
-        semaphore.wait(blockIdx_z);
-        for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
+        if (blockIdx_z != 0)
         {
-          for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
+          semaphore.wait(blockIdx_z);
+          for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
           {
-            for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; local_id += 2)
+            for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
             {
-              int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
-
-              if (write_row < M)
+              for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; local_id += 2)
               {
-                half2 *existing_psum_ptr = reinterpret_cast<half2 *>(
-                    C + write_row * N +
-                    cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
-                    (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2);
+                int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
 
-                *existing_psum_ptr = __hadd2(*existing_psum_ptr,
-                                            *reinterpret_cast<half2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
-                                                                                          ax1_0_1 * 8 + local_id));
-              }
-            };
+                if (write_row < M)
+                {
+                  half2 *existing_psum_ptr = reinterpret_cast<half2 *>(
+                      C + write_row * N +
+                      cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
+                      (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2);
+
+                  *existing_psum_ptr = __hadd2(*existing_psum_ptr,
+                                               *reinterpret_cast<half2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
+                                                                                         ax1_0_1 * 8 + local_id));
+                }
+              };
+            }
           }
-        }
-      }
-      else
-      {
-        for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
-        {
-          for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
-          {
-            for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; local_id += 2)
-            {
-              int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
-              if (write_row < M)
-              {
-                *reinterpret_cast<half2 *>(
-                    C + write_row * N +
-                    cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
-                    (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
-                    *reinterpret_cast<half2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
-                                                                  ax1_0_1 * 8 + local_id);
-              }
-            };
-          }
-        }
-      }
-
-      if constexpr (SPLITK > 1)
-      {
-
-        int lock = 0;
-        if (SPLITK == blockIdx_z + 1)
-        {
-
-          lock = 0;
         }
         else
         {
-          lock = blockIdx_z + 1;
+          for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
+          {
+            for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
+            {
+              for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; local_id += 2)
+              {
+                int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
+                if (write_row < M)
+                {
+                  *reinterpret_cast<half2 *>(
+                      C + write_row * N +
+                      cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
+                      (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
+                      *reinterpret_cast<half2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
+                                                                 ax1_0_1 * 8 + local_id);
+                }
+              };
+            }
+          }
         }
-        semaphore.release(lock);
+
+        if constexpr (SPLITK > 1)
+        {
+
+          int lock = 0;
+          if (SPLITK == blockIdx_z + 1)
+          {
+
+            lock = 0;
+          }
+          else
+          {
+            lock = blockIdx_z + 1;
+          }
+          semaphore.release(lock);
+        }
+      }
+    }
+    else
+    {
+      if constexpr (SLICES > 1)
+      {
+#pragma unroll
+        for (int z = 0; z < SLICES; ++z)
+        {
+          if (slice_id == z)
+          {
+#pragma unroll
+            for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
+            {
+#pragma unroll
+              for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
+              {
+#pragma unroll
+                for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; ++local_id)
+                {
+                  int shared_index = warp_offset_m * CTA_N + ax0_0_1 * OP_M * CTA_N + warp_offset_n + ax1_0_1 * 16 + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4)) * CTA_N + (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2;
+                  if (z > 0)
+                  {
+                    C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id] += __half2float(C_shared[shared_index]);
+                  }
+                  C_shared[shared_index] = __float2half(C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id]);
+                };
+              }
+            }
+          }
+          __syncthreads();
+        }
+        if (slice_id == 0)
+        {
+#pragma unroll
+          for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
+          {
+#pragma unroll
+            for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
+            {
+#pragma unroll
+              for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; ++local_id)
+              {
+                int shared_index = warp_offset_m * CTA_N + ax0_0_1 * OP_M * CTA_N + warp_offset_n + ax1_0_1 * 16 + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4)) * CTA_N + (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2;
+                C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id] = __half2float(C_shared[shared_index]);
+              };
+            }
+          }
+        }
+      }
+
+      if (slice_id == 0)
+      {
+        Semaphore semaphore(semaphores + blockIdx_y, threadIdx.x);
+
+        if constexpr (SPLITK > 1)
+        {
+          semaphore.fetch();
+        }
+
+        if (blockIdx_z != 0)
+        {
+          semaphore.wait(blockIdx_z);
+          for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
+          {
+            for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
+            {
+              for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; local_id += 2)
+              {
+                int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
+
+                if (write_row < M)
+                {
+                  half2 *existing_psum_ptr = reinterpret_cast<half2 *>(
+                      C + write_row * N +
+                      cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
+                      (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2);
+                  float val0 = C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id];
+                  float val1 = C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id + 1];
+                  half2 packed = __floats2half2_rn(val0, val1);
+                  *existing_psum_ptr = __hadd2(*existing_psum_ptr, packed);
+                }
+              };
+            }
+          }
+        }
+        else
+        {
+          for (int ax0_0_1 = 0; ax0_0_1 < WARP_M / INTRIN_M; ++ax0_0_1)
+          {
+            for (int ax1_0_1 = 0; ax1_0_1 < WARP_N / INTRIN_N; ++ax1_0_1)
+            {
+              for (int local_id = 0; local_id < OP_M * 16 / WARP_SIZE; local_id += 2)
+              {
+                int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
+                if (write_row < M)
+                {
+                  float val0 = C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id];
+                  float val1 = C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id + 1];
+                  *reinterpret_cast<half2 *>(
+                      C + write_row * N +
+                      cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
+                      (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
+                      __floats2half2_rn(val0, val1);
+                }
+              };
+            }
+          }
+        }
+
+        if constexpr (SPLITK > 1)
+        {
+          int lock = 0;
+          if (SPLITK == blockIdx_z + 1)
+          {
+            lock = 0;
+          }
+          else
+          {
+            lock = blockIdx_z + 1;
+          }
+          semaphore.release(lock);
+        }
       }
     }
   }
@@ -920,10 +1073,10 @@ __device__ __inline__ void share_to_reg_one_stage_B_T2(T *src, T *src_scales, T 
   }
 }
 
-template <int CTA_M, int CTA_N, int CTA_K, int WARP_M, int WARP_N, int WARP_K, int STAGES, int G, typename T>
+template <int CTA_M, int CTA_N, int CTA_K, int WARP_M, int WARP_N, int WARP_K, int STAGES, int G, typename T, bool UseFP32Accum>
 __global__ void gemm_w4a16_T2(T *__restrict__ A, T *__restrict__ B, T *__restrict__ scales, T *__restrict__ zeros, T *__restrict__ C, int M, int N, int K)
 {
-  using DTypeAccum = typename std::conditional<std::is_same<T, half>::value, half, float>::type;
+  using DTypeAccum = typename std::conditional<UseFP32Accum || !std::is_same<T, half>::value, float, half>::type;
   constexpr int NUM_WARPS = CTA_M / WARP_M * CTA_N / WARP_N;
   constexpr int CTA_SIZE = NUM_WARPS * WARP_SIZE;
   int num_blocks_n = (N + CTA_N - 1) / CTA_N;
@@ -1050,8 +1203,16 @@ __global__ void gemm_w4a16_T2(T *__restrict__ A, T *__restrict__ B, T *__restric
         {
           if constexpr (std::is_same<T, half>::value)
           {
-            mma_m16n8k16_f16f16f16(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4);
-            mma_m16n8k16_f16f16f16(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8 + 4, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4 + 8);
+            if constexpr (UseFP32Accum)
+            {
+              mma_m16n8k16_f32f16f16f32(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4);
+              mma_m16n8k16_f32f16f16f32(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8 + 4, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4 + 8);
+            }
+            else
+            {
+              mma_m16n8k16_f16f16f16(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4);
+              mma_m16n8k16_f16f16f16(C_warp + i_0_3 * WARP_N / INTRIN_N * 8 + j_0_4 * 8 + 4, A_shared_warp + i_0_3 * 8, B_shared_warp + j_0_4 * 16 + (iter_k % 2) * 4 + 8);
+            }
           }
           else
           {
@@ -1102,12 +1263,25 @@ __global__ void gemm_w4a16_T2(T *__restrict__ A, T *__restrict__ B, T *__restric
         {
           if constexpr (std::is_same<T, half>::value)
           {
-            *reinterpret_cast<half2 *>(
-                C + write_row * N +
-                cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
-                (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
-                (*reinterpret_cast<half2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
-                                                              ax1_0_1 * 8 + local_id));
+            if constexpr (UseFP32Accum)
+            {
+              float val0 = C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id];
+              float val1 = C_warp[ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id + 1];
+              *reinterpret_cast<half2 *>(
+                  C + write_row * N +
+                  cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
+                  (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
+                  __floats2half2_rn(val0, val1);
+            }
+            else
+            {
+              *reinterpret_cast<half2 *>(
+                  C + write_row * N +
+                  cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
+                  (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
+                  (*reinterpret_cast<half2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
+                                                                ax1_0_1 * 8 + local_id));
+            }
           }
           else
           {
@@ -1128,7 +1302,8 @@ torch::Tensor gemm_forward_cuda_prefill(
     torch::Tensor _in_feats,
     torch::Tensor _kernel,
     torch::Tensor _scales,
-    torch::Tensor _zeros)
+    torch::Tensor _zeros,
+    bool use_fp32)
 {
   std::vector<int64_t> output_shape = _in_feats.sizes().vec();
   output_shape.back() = _kernel.size(0) * kInterleave;
@@ -1226,10 +1401,20 @@ torch::Tensor gemm_forward_cuda_prefill(
       int j_factors1 = num_out_channels / CTA_N / 1;
       dim3 num_blocks((num_out_feats + CTA_M - 1) / CTA_M * j_factors1);
       dim3 threads_per_block(WARP_SIZE, NUM_WARPS);
-      auto kernel_func = gemm_w4a16_T2<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, ctype>;
-      cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);
-      kernel_func<<<num_blocks, threads_per_block, kSmemByteSize>>>(
-          in_feats, kernel, scales, zeros, out_feats, num_in_feats, num_out_channels, num_in_channels);
+      if (use_fp32)
+      {
+        auto kernel_func = gemm_w4a16_T2<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, ctype, true>;
+        cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);
+        kernel_func<<<num_blocks, threads_per_block, kSmemByteSize>>>(
+            in_feats, kernel, scales, zeros, out_feats, num_in_feats, num_out_channels, num_in_channels);
+      }
+      else
+      {
+        auto kernel_func = gemm_w4a16_T2<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, ctype, false>;
+        cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);
+        kernel_func<<<num_blocks, threads_per_block, kSmemByteSize>>>(
+            in_feats, kernel, scales, zeros, out_feats, num_in_feats, num_out_channels, num_in_channels);
+      }
     }
   });
 

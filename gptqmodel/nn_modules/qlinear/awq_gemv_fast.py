@@ -132,6 +132,8 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         if self.bias is not None and self.bias.dtype != inputs.dtype:
             self.bias = self.bias.to(dtype=inputs.dtype)
 
+        use_fp32_accum = inputs.dtype == torch.bfloat16
+
         if batch_size < 8 and n_tokens == 1:
             out = awq_ext.gemv_forward_cuda(
                 inputs,
@@ -145,7 +147,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             )
         else:
             out = awq_ext.gemm_forward_cuda(
-                inputs, self.qweight, self.scales, self.qzeros
+                inputs, self.qweight, self.scales, self.qzeros, use_fp32_accum
             )
         if self.bias is not None:
             out = out + self.bias
