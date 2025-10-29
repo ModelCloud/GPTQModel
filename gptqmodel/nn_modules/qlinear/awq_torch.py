@@ -79,19 +79,17 @@ class AwqTorchQuantLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
         device = x.device
-
-
         x_flat = x.reshape(-1, x.shape[-1])
 
         weight = dequantize_gemm(self.qweight, self.qzeros, self.scales, self.bits, self.group_size)
+        assert weight.dtype == torch.float16
+        if weight.dtype != x_flat.dtype or weight.device != device:
+            weight = weight.to(device=device, dtype=x_flat.dtype)
 
         output = torch.matmul(x_flat, weight)
 
-        bias = None
         if self.bias is not None:
-            bias = self.bias.to(device=device)
-        if bias is not None:
-            output = output + bias
+            output = output + self.bias
 
         if self.adapter:
             output = self.adapter.apply(x=x_flat, out=output)
