@@ -173,11 +173,13 @@ class AWQProcessor(LoopProcessor):
             root = name.split(".", 1)[0]
             root_buckets.setdefault(root, []).extend(tensors)
             if features[name] is not None and features[name].numel() > 0:
-                log.info(
-                    "AWQProcessor: input feature `%s` shape=%s",
-                    name,
-                    tuple(features[name].shape),
-                )
+                pass  # previously logged input feature shapes
+                # log.info(
+                #     "AWQProcessor: input feature `%s` shape=%s",
+                #     name,
+                #     tuple(features[name].shape),
+                # )
+
         for root, tensors in root_buckets.items():
             if not tensors or root in features:
                 continue
