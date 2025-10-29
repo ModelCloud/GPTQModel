@@ -1030,7 +1030,12 @@ class ModuleLooper():
         if region_timer is not None:
             region_timer.flush()
 
-        layer_modules = self.gptq_model.simple_layer_modules(model_config=self.gptq_model.model.config, quantize_config=self.gptq_model.quantize_config)
+        is_awq_quantize = any(isinstance(proc, AWQProcessor) for proc in self.processors)
+        layer_modules = self.gptq_model.simple_layer_modules(
+            model_config=self.gptq_model.model.config,
+            quantize_config=self.gptq_model.quantize_config,
+            is_awq_quantize=is_awq_quantize,
+        )
 
         # true-sequential will replay the quantized activations after each subset has been quantized to be used for next subset quantization
         # this should always be true for gptq unless you want lower but misleading error_loss that is misleading and will lead to lower post-quantized model
