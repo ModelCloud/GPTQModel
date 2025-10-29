@@ -61,6 +61,7 @@ class AWQProcessor(LoopProcessor):
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
         self.nsamples = 0
+        self._nsamples_total = 0
 
         self._layer_states: Dict[int, _AWQLayerState] = {}
         self._layer_states_lock = threading.Lock()
@@ -86,10 +87,6 @@ class AWQProcessor(LoopProcessor):
         self.export_compatible = False
 
         self.version = qcfg.format
-
-        # TODO Can it be configured?
-        # The maximum sequence length of the calibration dataset. Discard samples greater than max_calib_seq_len.
-        self.max_calib_seq_len = 512
 
         # Whether to scale using both w/x or just x.
         self.duo_scaling = True
@@ -316,10 +313,34 @@ class AWQProcessor(LoopProcessor):
 
     def init_quant(self):
         modules, _ = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.extract_layers_node())
-        # make sure samples tensor's shape is [1, max_calib_seq_len]
-        samples = [data['input_ids'][:, :self.max_calib_seq_len] for data in self.calibration_dataset if data['input_ids'].shape[1] >= self.max_calib_seq_len]
-
-        samples = torch.cat(samples, dim=0)
+        sample_tensors = []
+        for data in self.calibration_dataset:
+            tensor = data["input_ids"]
+            if tensor.dim() == 1:
+                tensor = tensor.unsqueeze(0)
+            sample_tensors.append(tensor)
+        self._nsamples_total = len(sample_tensors)
+        self.nsamples = self._nsamples_total
+        max_len = max(tensor.shape[-1] for tensor in sample_tensors)
+        pad_token_id = getattr(getattr(self.gptq_model, "tokenizer", None), "pad_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = getattr(getattr(self.gptq_model, "tokenizer", None), "eos_token_id", 0)
+        if pad_token_id is None:
+            pad_token_id = 0
+        padded_samples = []
+        for tensor in sample_tensors:
+            if tensor.shape[-1] == max_len:
+                padded_samples.append(tensor)
+                continue
+            pad_width = max_len - tensor.shape[-1]
+            pad_tensor = torch.full(
+                (tensor.shape[0], pad_width),
+                fill_value=pad_token_id,
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
+            padded_samples.append(torch.cat([tensor, pad_tensor], dim=-1))
+        samples = torch.cat(padded_samples, dim=0)
 
         inps = []
         layer_kwargs = {}
@@ -464,8 +485,6 @@ class AWQProcessor(LoopProcessor):
             module2inspect=None,
             kwargs={},
     ):
-        self.nsamples += inp.shape[0]
-
         if module2inspect is None:
             assert len(layers) == 1
             module2inspect = layers[0]
@@ -1038,7 +1057,7 @@ class AWQProcessor(LoopProcessor):
                 MODULE_FEATURE_COLUMN: self.module_feature_summary(named_module),
                 DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(named_module),
                 QUANT_LOG_LOSS: loss_summary,
-                QUANT_LOG_NSAMPLES: f"{self.nsamples}",
+                QUANT_LOG_NSAMPLES: f"{self._nsamples_total}",
                 # QUANT_LOG_DAMP: f"{damp_percent:.5f}",
                 PROCESS_LOG_TIME: f"{duration:.3f}",
                 # PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
