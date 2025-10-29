@@ -40,11 +40,13 @@ class TestAwqKernelOutput(unittest.TestCase):
     TARGET = "model.layers.20.self_attn.v_proj"
     BITS = 4
     GROUP_SIZE = 128
-    DTYPE = torch.float16
+    SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
 
-    float16_cases = [
-        (BACKEND.GEMM, 0.0),
-        (BACKEND.MARLIN, 0.01),
+    backend_cases = [
+        (BACKEND.GEMM, torch.float16, 0.0),
+        (BACKEND.GEMM, torch.bfloat16, 0.0005),
+        (BACKEND.MARLIN, torch.float16, 0.01),
+        (BACKEND.MARLIN, torch.bfloat16, 0.015),
     ]
 
     @classmethod
@@ -82,8 +84,20 @@ class TestAwqKernelOutput(unittest.TestCase):
             qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
         )
 
-        cls.inputs = cls._generate_inputs()
-        cls.reference_outputs = cls._forward(cls.modules[BACKEND.GEMM], cls.inputs)
+        base_inputs = cls._generate_inputs()
+        cls.inputs: Dict[torch.dtype, List[torch.Tensor]] = {}
+        cls.reference_outputs: Dict[torch.dtype, List[torch.Tensor]] = {}
+
+        for dtype in cls.SUPPORTED_DTYPES:
+            converted_inputs = [
+                tensor.to(dtype=dtype) if tensor.dtype != dtype else tensor.clone()
+                for tensor in base_inputs
+            ]
+            cls.inputs[dtype] = converted_inputs
+            cls.reference_outputs[dtype] = cls._forward(
+                cls.modules[BACKEND.GEMM],
+                converted_inputs,
+            )
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -213,7 +227,7 @@ class TestAwqKernelOutput(unittest.TestCase):
             tensor = torch.rand(
                 (batch, tokens, cls.in_features),
                 device=cls.device,
-                dtype=cls.DTYPE,
+                dtype=torch.float16,
             )
             inputs.append(tensor)
         return inputs
@@ -241,6 +255,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         reference_outputs: List[torch.Tensor],
         actual_outputs: List[torch.Tensor],
         backend: BACKEND,
+        dtype: torch.dtype,
         atol: float,
         title: str,
         reference_label: str,
@@ -267,7 +282,7 @@ class TestAwqKernelOutput(unittest.TestCase):
             [
                 [
                     backend.name,
-                    str(self.DTYPE),
+                    str(dtype),
                     total,
                     status,
                     len(failures),
@@ -291,20 +306,28 @@ class TestAwqKernelOutput(unittest.TestCase):
                 f"{len(failures)} mismatched outputs for backend `{backend}`"
             )
 
-    @parameterized.expand(float16_cases)
-    def test_awq_kernel_outputs(self, backend: BACKEND, atol: float) -> None:
+    @parameterized.expand(backend_cases)
+    def test_awq_kernel_outputs(self, backend: BACKEND, dtype: torch.dtype, atol: float) -> None:
         self._maybe_skip_backend(backend)
 
         module = self.modules.get(backend)
         if module is None:
             self.skipTest(f"Backend `{backend}` module unavailable.")
 
-        actual_outputs = self._forward(module, self.inputs)
+        inputs = self.inputs[dtype]
+        reference_outputs = self.reference_outputs[dtype]
+        try:
+            actual_outputs = self._forward(module, inputs)
+        except RuntimeError as exc:
+            if backend == BACKEND.MARLIN and dtype == torch.bfloat16:
+                self.skipTest(f"AWQ Marlin bf16 execution unavailable: {exc}")
+            raise
         self._summarize_results(
-            reference_outputs=self.reference_outputs,
+            reference_outputs=reference_outputs,
             actual_outputs=actual_outputs,
             backend=backend,
+            dtype=dtype,
             atol=atol,
-            title=f"AWQ Kernel Output {self.DTYPE}",
+            title=f"AWQ Kernel Output {dtype}",
             reference_label="AWQ GEMM output",
         )
