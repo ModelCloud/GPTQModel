@@ -215,6 +215,7 @@ MODEL_MAP = {
     "exaone": ExaOneQModel,
     "grinmoe": GrinMoeQModel,
     "mllama": MLlamaQModel,
+    "marin": Qwen3QModel,
     "granite": LlamaQModel, # 100% llama clone
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
