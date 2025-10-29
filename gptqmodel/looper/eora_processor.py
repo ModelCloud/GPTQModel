@@ -195,7 +195,15 @@ class EoraProcessor(LoopProcessor):
 
         return merge_eora_segments(segment_pairs)
 
-    def process(self, module: NamedModule):
+    def process(
+        self,
+        module: NamedModule,
+        device: torch.device = None,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        previous_subset: Optional[Dict[str, NamedModule]] = None,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ):
         assert isinstance(module.adapter_cfg, Lora)
 
         self.pb.title(f"EoRA: Processing {module.name} ({module.module_dtype}) in layer").draw()

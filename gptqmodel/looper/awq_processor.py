@@ -6,9 +6,11 @@
 import functools
 import inspect
 import math
+import threading
 import time
 from collections import defaultdict
-from typing import Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -35,6 +37,17 @@ from ..utils.torch import CPU, tf32_disable_guard, tf32_enable_guard, torch_sync
 
 log = setup_logger()
 
+
+@dataclass
+class _AWQLayerState:
+    modules: Dict[str, NamedModule] = field(default_factory=dict)
+    subset_total: Optional[int] = None
+    processed_subsets: Set[int] = field(default_factory=set)
+    layer_module: Optional[torch.nn.Module] = None
+    previous_weight_scale: Optional[float] = None
+    quantized: bool = False
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
 class AWQProcessor(LoopProcessor):
     def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration, prepare_dataset_func,
                  calibration_concat_size: Optional[int], calibration_sort: Optional[str], batch_size: int, gptq_model, model,
@@ -43,11 +56,17 @@ class AWQProcessor(LoopProcessor):
         super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration=calibration,
                          calibration_concat_size=calibration_concat_size, calibration_sort=calibration_sort,
                          prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
-                         require_fwd=require_fwd)
+                         require_fwd=require_fwd, fwd_after_process=False)
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
         self.nsamples = 0
+        self._nsamples_total = 0
+
+        self._layer_states: Dict[int, _AWQLayerState] = {}
+        self._layer_states_lock = threading.Lock()
+        self._scale_context = threading.local()
+        self._module_forward_kwargs: Dict[str, torch.Tensor] = {}
 
         self.gptq_model = gptq_model
         self.model = model
@@ -77,9 +96,235 @@ class AWQProcessor(LoopProcessor):
         self.duo_scaling = True
 
         self.modules, self.module_kwargs, self.inps = self.init_quant()
+        self._module_forward_kwargs = dict(self.module_kwargs)
+        self._module_forward_kwargs.setdefault("attention_mask", None)
+        self._nsamples_total = self._resolve_nsamples(self.inps)
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
+
+    def _get_layer_state(self, layer_index: int) -> _AWQLayerState:
+        with self._layer_states_lock:
+            state = self._layer_states.get(layer_index)
+            if state is None:
+                state = _AWQLayerState()
+                self._layer_states[layer_index] = state
+        return state
+
+    def _record_input_feature(self, module_name: str, feature: torch.Tensor) -> None:
+        if feature.device.type != "cpu":
+            feature = feature.detach().cpu()
+        else:
+            feature = feature.detach()
+
+        with self.lock:
+            entry = self.tasks.get(module_name)
+            if entry is None:
+                entry = {"inputs": []}
+                self.tasks[module_name] = entry
+            inputs_list = entry.setdefault("inputs", [])
+            inputs_list.append(feature)
+
+    def _capture_previous_subset_scale(self, previous_subset: Optional[Dict[str, NamedModule]]) -> Optional[float]:
+        if not previous_subset:
+            return None
+
+        values: List[float] = []
+        for named_module in previous_subset.values():
+            weight = getattr(named_module.module, "weight", None)
+            if weight is None:
+                continue
+            with torch.no_grad():
+                values.append(float(weight.detach().abs().mean().item()))
+
+        if not values:
+            return None
+
+        return float(sum(values) / len(values))
+
+    def _resolve_nsamples(self, tensor) -> int:
+        if tensor is None:
+            return 0
+        if isinstance(tensor, torch.Tensor):
+            return int(tensor.shape[0])
+        try:
+            return int(len(tensor))
+        except Exception:
+            return 0
+
+    def _layer_input_features(self, state: _AWQLayerState) -> Dict[str, torch.Tensor]:
+        features: Dict[str, torch.Tensor] = {}
+        for name in state.modules:
+            entry = self.tasks.get(name) or {}
+            tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
+            if not tensors:
+                features[name] = torch.empty(0)
+                continue
+            try:
+                features[name] = torch.cat(tensors, dim=0)
+            except RuntimeError:
+                features[name] = tensors[0]
+            if features[name] is not None and features[name].numel() > 0:
+                log.info(
+                    "AWQProcessor: input feature `%s` shape=%s",
+                    name,
+                    tuple(features[name].shape),
+                )
+        return features
+
+    def _refresh_forward_kwargs_from_cache(self) -> None:
+        cache = getattr(self, "inputs_cache", None)
+        if cache is None:
+            return
+
+        if getattr(cache, "attention_masks", None):
+            mask = cache.attention_masks[-1]
+            self._module_forward_kwargs["attention_mask"] = mask
+
+        rotary = getattr(getattr(self.model, "model", self.model), "rotary_emb", None)
+        pos_ids_cache = cache.position_ids[-1] if getattr(cache, "position_ids", None) else None
+        hidden_cache = None
+        if getattr(cache, "layer_inputs", None):
+            last_inputs = cache.layer_inputs[-1]
+            if last_inputs:
+                hidden_cache = last_inputs[0]
+
+        if rotary is not None and hidden_cache is not None:
+            x_for_rotary = hidden_cache
+            if x_for_rotary.dim() == 2:
+                x_for_rotary = x_for_rotary.unsqueeze(0)
+            seq_len = x_for_rotary.shape[1] if x_for_rotary.dim() >= 2 else x_for_rotary.shape[0]
+            batch = x_for_rotary.shape[0] if x_for_rotary.dim() >= 2 else 1
+
+            target_device = getattr(getattr(rotary, "inv_freq", None), "device", None)
+            if target_device is not None and x_for_rotary.device != target_device:
+                x_for_rotary = x_for_rotary.to(target_device)
+
+            if pos_ids_cache is not None and pos_ids_cache.shape[-1] == seq_len:
+                pos_for_rotary = pos_ids_cache.to(x_for_rotary.device)
+            else:
+                pos_for_rotary = torch.arange(seq_len, device=x_for_rotary.device, dtype=torch.long)
+                pos_for_rotary = pos_for_rotary.unsqueeze(0).expand(batch, -1)
+
+            self._module_forward_kwargs["position_ids"] = pos_for_rotary
+            try:
+                pe = rotary(x_for_rotary, pos_for_rotary)
+                self._module_forward_kwargs["position_embeddings"] = pe
+            except Exception:
+                pass
+        elif pos_ids_cache is not None:
+            self._module_forward_kwargs["position_ids"] = pos_ids_cache
+
+        if getattr(cache, "layer_input_kwargs", None):
+            latest_kwargs = cache.layer_input_kwargs[-1] or {}
+            for key, value in latest_kwargs.items():
+                self._module_forward_kwargs[key] = value
+
+    def _quantize_layer(self, layer_index: int, state: _AWQLayerState) -> None:
+        with state.lock:
+            if state.quantized:
+                return
+
+            layer_module = state.layer_module
+            if layer_module is None and state.modules:
+                sample_module = next(iter(state.modules.values()))
+                layer_path = sample_module.full_name.rsplit(".", 1)[0]
+                layer_module, _ = get_module_by_name_prefix(self.gptq_model.model, layer_path)
+                state.layer_module = layer_module
+
+            layer_module_ref = state.layer_module
+
+            if layer_module_ref is None:
+                raise RuntimeError(f"AWQProcessor: unable to resolve layer module for layer index {layer_index}")
+
+            named_childs = dict(state.modules)
+
+        input_feat = self._layer_input_features(state)
+        missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
+        if missing:
+            raise RuntimeError(
+                f"AWQProcessor: missing calibration features for modules: {', '.join(missing)}."
+            )
+
+        module_kwargs_global = dict(self._module_forward_kwargs or self.module_kwargs)
+
+        setattr(self._scale_context, "layer_index", layer_index)
+        setattr(self._scale_context, "prev_scale", state.previous_weight_scale)
+
+        module_config = self.gptq_model.awq_get_modules_for_scaling(
+            layer_module_ref,
+            input_feat,
+            module_kwargs_global,
+        )
+
+        if not module_config:
+            log.warning(
+                "AWQProcessor: no module configuration generated for layer index %s; skipping quantization.",
+                layer_index,
+            )
+            with state.lock:
+                state.quantized = True
+                state.processed_subsets.clear()
+                state.subset_total = None
+                state.previous_weight_scale = None
+            if hasattr(self._scale_context, "layer_index"):
+                delattr(self._scale_context, "layer_index")
+            if hasattr(self._scale_context, "prev_scale"):
+                delattr(self._scale_context, "prev_scale")
+            return
+
+        sanitized_module_config: List[Dict] = []
+        for entry in module_config:
+            entry = dict(entry)
+            inspect_module = entry.get("module2inspect") or layer_module_ref
+            entry_kwargs = entry.get("kwargs") or module_kwargs_global
+            entry["kwargs"] = self._sanitize_kwargs(entry_kwargs, inspect_module)
+            sanitized_module_config.append(entry)
+
+        scales_list = [
+            self._search_best_scale(layer_module_ref, **layer)
+            for layer in sanitized_module_config
+        ]
+
+        apply_scale(layer_module_ref, scales_list, input_feat_dict=input_feat)
+        scales_list = append_str_prefix(
+            scales_list,
+            get_op_name(self.model, layer_module_ref) + ".",
+        )
+
+        clip_list = None
+        if self.apply_clip:
+            clip_list = self._search_best_clip(
+                layer_module_ref,
+                {name: named.module for name, named in named_childs.items()},
+                input_feat,
+            )
+            apply_clip(layer_module_ref, clip_list)
+            clip_list = append_str_prefix(
+                clip_list,
+                get_op_name(self.model, layer_module_ref) + ".",
+            )
+
+        if not self.export_compatible:
+            start = time.time()
+            self._apply_quant(layer_module_ref, named_childs, start, scales_list)
+
+        with state.lock:
+            state.quantized = True
+            state.processed_subsets.clear()
+            state.subset_total = None
+            state.previous_weight_scale = None
+
+        with self.lock:
+            for name in named_childs:
+                task_entry = self.tasks.get(name)
+                if task_entry and "inputs" in task_entry:
+                    task_entry["inputs"].clear()
+
+        if hasattr(self._scale_context, "layer_index"):
+            delattr(self._scale_context, "layer_index")
+        if hasattr(self._scale_context, "prev_scale"):
+            delattr(self._scale_context, "prev_scale")
 
     def init_quant(self):
         modules, _ = get_module_by_name_prefix(self.gptq_model.model, self.gptq_model.extract_layers_node())
@@ -231,8 +476,6 @@ class AWQProcessor(LoopProcessor):
             module2inspect=None,
             kwargs={},
     ):
-        self.nsamples += inp.shape[0]
-
         if module2inspect is None:
             assert len(layers) == 1
             module2inspect = layers[0]
@@ -282,6 +525,11 @@ class AWQProcessor(LoopProcessor):
 
         # [STEP 3]: Compute output of module
         module_kwargs = self._sanitize_kwargs(kwargs, module2inspect)
+        global_kwargs = getattr(self, "_module_forward_kwargs", {})
+        global_allowed_kwargs = self._sanitize_kwargs(global_kwargs, module2inspect)
+        for key, value in global_allowed_kwargs.items():
+            module_kwargs.setdefault(key, value)
+
         with ctx(torch.inference_mode()):
             fp16_output = self._module_forward(inp, module2inspect, module_kwargs)
 
@@ -517,6 +765,10 @@ class AWQProcessor(LoopProcessor):
         x_mean = x_mean.view(-1).to(device)
         w_mean = w_mean.view(-1).to(device)
 
+        prev_scale_hint = getattr(self._scale_context, "prev_scale", None)
+        if prev_scale_hint is not None:
+            w_mean = w_mean * float(prev_scale_hint)
+
         for ratio in range(n_grid):
             # create new scales
             ratio = ratio / n_grid
@@ -598,6 +850,73 @@ class AWQProcessor(LoopProcessor):
     def _module_forward(
             self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
     ) -> torch.Tensor:
+        target_device = None
+        try:
+            target_device = next(module.parameters()).device
+        except StopIteration:
+            target_device = None
+        except Exception:
+            target_device = None
+
+        for key, value in list(module_kwargs.items()):
+            if isinstance(value, torch.Tensor):
+                if target_device is not None and value.device != target_device:
+                    module_kwargs[key] = value.to(target_device)
+            elif isinstance(value, (list, tuple)):
+                converted = []
+                changed = False
+                for item in value:
+                    if isinstance(item, torch.Tensor) and target_device is not None and item.device != target_device:
+                        converted.append(item.to(target_device))
+                        changed = True
+                    else:
+                        converted.append(item)
+                if changed:
+                    module_kwargs[key] = type(value)(converted)
+
+        seq_len = None
+        batch_dim = None
+        if x.dim() >= 2:
+            batch_dim = x.shape[0]
+            seq_len = x.shape[1]
+        else:
+            batch_dim = 1
+            seq_len = x.shape[0]
+
+        supports_position_ids = False
+        supports_position_embeddings = False
+        try:
+            signature = inspect.signature(module.forward).parameters
+            supports_position_ids = "position_ids" in signature
+            supports_position_embeddings = "position_embeddings" in signature
+        except (ValueError, TypeError):
+            pass
+
+        rotary = getattr(getattr(self.model, "model", self.model), "rotary_emb", None)
+        if seq_len is not None and rotary is not None and supports_position_embeddings:
+            pos_ids = module_kwargs.get("position_ids") if supports_position_ids else None
+            if not supports_position_ids:
+                pos_ids = None
+            if pos_ids is None or pos_ids.shape[-1] != seq_len:
+                pos_values = torch.arange(seq_len, device=target_device or x.device, dtype=torch.long)
+                if x.dim() >= 2:
+                    pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
+                if supports_position_ids:
+                    module_kwargs["position_ids"] = pos_values
+                pos_for_rotary = pos_values
+            else:
+                pos_for_rotary = pos_ids.to(target_device or pos_ids.device)
+                if supports_position_ids:
+                    module_kwargs["position_ids"] = pos_for_rotary
+
+            x_for_rotary = x if target_device is None else x.to(target_device)
+            module_kwargs["position_embeddings"] = rotary(x_for_rotary, pos_for_rotary)
+        elif supports_position_ids and seq_len is not None and "position_ids" not in module_kwargs:
+            pos_values = torch.arange(seq_len, device=target_device or x.device, dtype=torch.long)
+            if x.dim() >= 2:
+                pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
+            module_kwargs["position_ids"] = pos_values
+
         if self.n_parallel_calib_samples is None:
             # runs through all samples at once
             module_output = module(x, **module_kwargs)
@@ -729,7 +1048,7 @@ class AWQProcessor(LoopProcessor):
                 MODULE_FEATURE_COLUMN: self.module_feature_summary(named_module),
                 DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(named_module),
                 QUANT_LOG_LOSS: loss_summary,
-                QUANT_LOG_NSAMPLES: f"{self.nsamples}",
+                QUANT_LOG_NSAMPLES: f"{self._nsamples_total}",
                 # QUANT_LOG_DAMP: f"{damp_percent:.5f}",
                 PROCESS_LOG_TIME: f"{duration:.3f}",
                 # PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
@@ -761,30 +1080,75 @@ class AWQProcessor(LoopProcessor):
                 sanitized_kwargs[k] = v
         return sanitized_kwargs
 
-    def preprocess(self, module: NamedModule, fail_safe: bool):
-        # TODO Dynamic is not yet supported
-        pass
+    def preprocess(self, module: NamedModule, fail_safe: Optional[bool] = None):
+        layer_state = self._get_layer_state(module.layer_index)
+        with layer_state.lock:
+            layer_state.modules[module.name] = module
+            layer_module_ref = module.state.get("layer_module")
+            if layer_module_ref is not None:
+                layer_state.layer_module = layer_module_ref
+        with self.lock:
+            entry = self.tasks.get(module.name)
+            if entry is None:
+                self.tasks[module.name] = {"inputs": []}
+            else:
+                entry.setdefault("inputs", [])
 
     def is_skipped(self, module: NamedModule) -> bool:
-        # TODO Dynamic is not yet supported
-        # gptq has no dynamic method of full override (removal)
-        # t = self.tasks.get(module.name, False)
-        # if t == False:
-        #     return True
-        # else:
-        #     return False
-        pass
+        return False
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
-        pass
+        def hook(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+            if not inp:
+                return
+            feature = inp[0]
+            if isinstance(feature, (tuple, list)) and feature:
+                feature = feature[0]
+            self._record_input_feature(name, feature)
+        return hook
 
-    def process(self, module: NamedModule):
-        # awq uses model.layers[0] for quantization instead of model.layers.0.self_attn.q_proj
-        # This method will not be called.
-        pass
+    def process(
+        self,
+        module: NamedModule,
+        device: torch.device = None,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        previous_subset: Optional[Dict[str, NamedModule]] = None,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ):
+        self._refresh_forward_kwargs_from_cache()
+        layer_index = module.layer_index
+        state = self._get_layer_state(layer_index)
+
+        with state.lock:
+            if subset is not None:
+                state.modules.update(subset)
+                if state.layer_module is None:
+                    for candidate in subset.values():
+                        layer_module_ref = candidate.state.get("layer_module")
+                        if layer_module_ref is not None:
+                            state.layer_module = layer_module_ref
+                            break
+
+            if subset_total is not None:
+                state.subset_total = subset_total
+            if subset_index is not None:
+                state.processed_subsets.add(subset_index)
+
+            if previous_subset:
+                state.previous_weight_scale = self._capture_previous_subset_scale(previous_subset)
+
+            should_quantize = (
+                state.subset_total is not None
+                and len(state.processed_subsets) >= state.subset_total
+                and not state.quantized
+            )
+
+        if should_quantize:
+            self._quantize_layer(layer_index, state)
 
     # submodule_finalized is called in reverse after all next sequential processes are called
-    def submodule_finalize(self, module: NamedModule, **kwargs):
+    def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         # generate complete, safe to move to cpu
         module.weight.data = move_to(module.weight.data, device=CPU) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now

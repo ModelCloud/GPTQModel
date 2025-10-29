@@ -67,6 +67,7 @@ def run_subset_stage(
     pb,
     log=None,
     region_timer=None,
+    previous_processed_subset: Optional[Dict[str, NamedModule]] = None,
 ) -> SubsetStageResult:
     """Process a single subset of modules within the layer quantization loop."""
     logger = log or setup_logger()
@@ -79,6 +80,7 @@ def run_subset_stage(
         names=subset_names,
         processor=processor,
         fail_safe=fail_safe,
+        layer_module=module,
     )
 
     if len(subset) == 0:
@@ -313,6 +315,10 @@ def run_subset_stage(
         proc: LoopProcessor,
         nm: NamedModule,
         expected_device: torch.device,
+        subset_ref: Dict[str, NamedModule],
+        previous_subset_ref: Optional[Dict[str, NamedModule]],
+        subset_idx: int,
+        subset_total_count: int,
     ):
         module_label = getattr(nm, "full_name", getattr(nm, "name", repr(nm)))
         module_ref = nm.module if isinstance(nm, NamedModule) else nm
@@ -328,7 +334,13 @@ def run_subset_stage(
         timer = getattr(looper.gptq_model, "quant_region_timer", None)
         start = time.perf_counter() if timer else None
         try:
-            proc.process(module=nm)
+            proc.process(
+                module=nm,
+                subset=subset_ref,
+                previous_subset=previous_subset_ref,
+                subset_index=subset_idx,
+                subset_total=subset_total_count,
+            )
         finally:
             if timer is not None and start is not None:
                 timer.record(
@@ -341,7 +353,17 @@ def run_subset_stage(
     for name, named_module in subset.items():
         tgt_dev = quant_target_devices.get(name, cur_layer_device)
         futures.append(
-            DEVICE_THREAD_POOL.submit(tgt_dev, _process_on_worker, processor, named_module, tgt_dev)
+            DEVICE_THREAD_POOL.submit(
+                tgt_dev,
+                _process_on_worker,
+                processor,
+                named_module,
+                tgt_dev,
+                subset,
+                previous_processed_subset,
+                subset_index,
+                subset_total,
+            )
         )
 
     for fut in futures:

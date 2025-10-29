@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 import torch
 from torch.nn import Module
@@ -66,7 +66,15 @@ class NativeProcessor(LoopProcessor):
 
         return tmp
 
-    def process(self, module: NamedModule):
+    def process(
+        self,
+        module: NamedModule,
+        device: torch.device = None,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        previous_subset: Optional[Dict[str, NamedModule]] = None,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ):
         module.state[NATIVE_INPUTS_STATE_KEY] = self.native_inp_caches.pop(module.name)
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):

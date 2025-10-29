@@ -5,7 +5,7 @@
 
 import contextlib
 import copy
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 import torch
 from torch.nn import Module
@@ -100,7 +100,15 @@ class QQQProcessor(LoopProcessor):
             q.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
 
-    def process(self, module: NamedModule):
+    def process(
+        self,
+        module: NamedModule,
+        device: torch.device = None,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        previous_subset: Optional[Dict[str, NamedModule]] = None,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ):
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
         qqq = self.tasks
 

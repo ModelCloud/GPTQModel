@@ -10,7 +10,6 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import as_completed
-from contextlib import nullcontext
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
@@ -20,10 +19,8 @@ from ..looper.awq_processor import AWQProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
 from ..looper.qqq_processor import QQQProcessor
-from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.looper_helpers import device_ctx
 from ..utils.model import find_modules, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_sync
@@ -90,37 +87,6 @@ def run_layer_stage(
                 # merge all subsets into one
                 modules = [sum(modules, [])]
 
-            # AWQ does per-layer itself; skip here
-            if isinstance(processor, AWQProcessor):
-                named_childs = dict()
-                for index, names in enumerate(modules):
-                    named_modules = looper.crate_named_modules(full=full,
-                                                             is_lm_head_module=is_lm_head_module,
-                                                             layer_index=layer_index, layers_prefix=layers_prefix,
-                                                             names=names,
-                                                             processor=processor,
-                                                             fail_safe=fail_safe)
-                    named_childs.update(named_modules)
-
-                lock_ctx = nullcontext()
-                device_for_ctx = cur_layer_device if getattr(cur_layer_device, 'type', None) != 'meta' else None
-                if device_for_ctx is not None:
-                    lock_ctx = DEVICE_THREAD_POOL.read_lock(cur_layer_device)
-                with ctx(lock_ctx, device_ctx(device_for_ctx)):
-                    processor.layer_quantize(module, cur_layer_device, named_childs)
-                if p_index == len(looper.processors) - 1:
-                    looper._emit_layer_complete(
-                        layer_idx=layer_index,
-                        submodule_finalized=False,
-                        raise_in_place=True,
-                    )
-                    looper._emit_layer_complete(
-                        layer_idx=layer_index,
-                        submodule_finalized=True,
-                        raise_in_place=True,
-                    )
-                continue
-
             layer_inputs = processor.inputs_cache.layer_inputs
             if is_lm_head_module:
                 layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
@@ -131,6 +97,7 @@ def run_layer_stage(
             processed_subset: Dict[str, NamedModule] = {}
             last_subset_context: Optional[SubsetForwardContext] = None
             subset_total = len(modules)
+            previous_subset_processed: Optional[Dict[str, NamedModule]] = None
 
             for index, names in enumerate(modules):
                 subset_result = run_subset_stage(
@@ -156,10 +123,12 @@ def run_layer_stage(
                     pb=pb,
                     log=log,
                     region_timer=region_timer,
+                    previous_processed_subset=previous_subset_processed,
                 )
 
                 layer_inputs = subset_result.layer_inputs
                 processed_subset.update(subset_result.processed_subset)
+                previous_subset_processed = subset_result.processed_subset
                 if subset_result.forward_context is not None:
                     last_subset_context = subset_result.forward_context
 

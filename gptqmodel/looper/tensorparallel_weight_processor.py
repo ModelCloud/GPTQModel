@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 
@@ -60,7 +60,15 @@ class TensorParallelWeightProcessor(LoopProcessor):
 
         return _noop
 
-    def process(self, module: NamedModule):
+    def process(
+        self,
+        module: NamedModule,
+        device: torch.device = None,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        previous_subset: Optional[Dict[str, NamedModule]] = None,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ):
         target = module.module if isinstance(module, NamedModule) else module
         weight = getattr(target, "weight", None)
         if weight is None:
