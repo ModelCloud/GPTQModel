@@ -242,16 +242,16 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             "Use marlin_post_init() on the whole model."
         )
 
-        input_tensor = x.contiguous() if self.is_lm_head else x
+        x = x.contiguous() if self.is_lm_head else x
 
-        if self.scales.dtype != input_tensor.dtype:
-            self.scales.data = self.scales.data.to(input_tensor.dtype)
+        if self.scales.dtype != x.dtype:
+            self.scales.data = self.scales.data.to(x.dtype)
 
-        if self.bias is not None and self.bias.dtype != input_tensor.dtype:
-            self.bias.data = self.bias.data.to(input_tensor.dtype)
+        if self.bias is not None and self.bias.dtype != x.dtype:
+            self.bias.data = self.bias.data.to(x.dtype)
 
         out = apply_awq_marlin_linear(
-            input=input_tensor,
+            input=x,
             weight=self.qweight,
             weight_scale=self.scales,
             weight_zp=self.qzeros,
