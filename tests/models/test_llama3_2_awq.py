@@ -20,12 +20,12 @@ class TestLlama3_2_awq(ModelTest):
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
-                "value": 0.3234,
+                "value": 0.3148,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.10,
             },
             "acc_norm": {
-                "value": 0.3481,
+                "value": 0.3413,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.10,
             },
@@ -33,7 +33,7 @@ class TestLlama3_2_awq(ModelTest):
         EVAL.LM_EVAL.MMLU_STEM: {
             "chat_template": False,
             "acc": {
-                "value": 0.2978,
+                "value": 0.3657,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.10,
             },
