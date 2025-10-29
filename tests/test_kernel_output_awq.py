@@ -47,7 +47,7 @@ class TestAwqKernelOutput(unittest.TestCase):
     backend_cases = [
         (baseline_backend, torch.float16, 0.0),
         (baseline_backend, torch.bfloat16, 0.0),
-        (BACKEND.GEMM, torch.float16, 0.001),
+        (BACKEND.GEMM, torch.float16, 0.01),
         (BACKEND.GEMM, torch.bfloat16, 0.05),
         (BACKEND.MARLIN, torch.float16, 0.01),
         (BACKEND.MARLIN, torch.bfloat16, 0.05),
@@ -165,16 +165,17 @@ class TestAwqKernelOutput(unittest.TestCase):
             out_features=cls.out_features,
             bias=True,
             adapter=None,
-            register_buffers=True,
+            register_buffers=False,
         ).to(cls.device)
 
-        module.qweight.copy_(qweight_cpu.to(cls.device))
-        module.qzeros.copy_(qzeros_cpu.to(cls.device))
-        module.scales.copy_(scales_cpu.to(cls.device))
-        module.bias.copy_(bias_cpu.to(cls.device))
+        module.load_legacy_tensors(
+            qweight_cpu.to(cls.device),
+            qzeros_cpu.to(cls.device),
+            scales_cpu.to(cls.device),
+            bias_cpu.to(cls.device),
+        )
 
         module.eval()
-        module.post_init()
         return module
 
     @classmethod

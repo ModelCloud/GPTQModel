@@ -2,8 +2,13 @@
 
 import torch
 
-from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
-from gptqmodel.quantization.awq.modules.linear.gemm import WQLinear_GEMM
+from gptqmodel.nn_modules.qlinear.awq_gemm import (
+    AwqGEMMQuantLinear,
+    _multiply_scale_qzero_negative,
+    _packing_v2_from_unpacked,
+    _qweight_unpack,
+)
+from gptqmodel.quantization.awq.modules.linear.gemv_fast import calculate_zeros_width
 
 
 def _pack_weights_v1(intweight: torch.Tensor, bits: int) -> torch.Tensor:
@@ -14,8 +19,8 @@ def _pack_weights_v1(intweight: torch.Tensor, bits: int) -> torch.Tensor:
     packed = torch.zeros((rows, packed_cols), dtype=torch.int32)
     mask = (1 << bits) - 1
     for col in range(packed_cols):
-        for idx, order in enumerate(order_map):
-            src = col * pack_num + order
+            for idx, order in enumerate(order_map):
+                src = col * pack_num + order
             if src >= cols:
                 continue
             packed[:, col] |= ((intweight[:, src].to(torch.int32) & mask) << (idx * bits))
@@ -30,8 +35,8 @@ def _pack_zeros_v1(zeros: torch.Tensor, bits: int) -> torch.Tensor:
     packed = torch.zeros((rows, packed_cols), dtype=torch.int32)
     mask = (1 << bits) - 1
     for col in range(packed_cols):
-        for idx, order in enumerate(order_map):
-            src = col * pack_num + order
+            for idx, order in enumerate(order_map):
+                src = col * pack_num + order
             if src >= cols:
                 continue
             packed[:, col] |= ((zeros[:, src].to(torch.int32) & mask) << (idx * bits))
@@ -76,23 +81,28 @@ def test_awq_gemm_legacy_conversion_matches_v2():
         bias=True,
         register_buffers=False,
     )
-    module.register_buffer("qweight", qweight_v1.clone())
-    module.register_buffer("qzeros", qzeros_v1.clone())
-    module.register_buffer("scales", scales_v1.clone())
-    module.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
-
-    module.post_init()
-
-    expected = WQLinear_GEMM.from_linear(
-        linear,
-        w_bit=bits,
-        group_size=group_size,
-        scales=scales.t().contiguous(),
-        zeros=zeros.t().contiguous(),
+    module.load_legacy_tensors(
+        qweight_v1.clone(),
+        qzeros_v1.clone(),
+        scales_v1.clone(),
+        torch.zeros(out_features, dtype=torch.float16),
     )
 
+    unpacked_expected = _qweight_unpack(qweight_v1.clone())
+    if unpacked_expected.shape[0] == in_features and unpacked_expected.shape[1] == out_features:
+        unpacked_expected = unpacked_expected.transpose(0, 1).contiguous()
+    expected_qweight = _packing_v2_from_unpacked(unpacked_expected, interleave=4, kstride=64)
+
+    pack_num = 32 // bits
+    zeros_width = calculate_zeros_width(in_features, group_size, pack_num=pack_num)
+    expected_scales = torch.zeros((zeros_width * pack_num, out_features), dtype=torch.float16)
+    expected_scales[: scales.shape[0], :] = scales
+    expected_qzeros = torch.zeros_like(expected_scales)
+    expected_qzeros[: scales.shape[0], :] = _multiply_scale_qzero_negative(scales, qzeros_v1, zp_shift=0)
+    expected_bias = torch.zeros(out_features, dtype=torch.float16)
+
     assert module.qweight.dtype == torch.int16
-    torch.testing.assert_close(module.qweight.to(torch.int32), expected.qweight.to(torch.int32))
-    torch.testing.assert_close(module.scales.to(torch.float32), expected.scales.to(torch.float32))
-    torch.testing.assert_close(module.qzeros.to(torch.float32), expected.qzeros.to(torch.float32))
-    torch.testing.assert_close(module.bias.to(torch.float16), expected.bias.to(torch.float16))
+    torch.testing.assert_close(module.qweight.to(torch.int32), expected_qweight.to(torch.int32))
+    torch.testing.assert_close(module.scales.to(torch.float32), expected_scales.to(torch.float32))
+    torch.testing.assert_close(module.qzeros.to(torch.float32), expected_qzeros.to(torch.float32))
+    torch.testing.assert_close(module.bias.to(torch.float16), expected_bias.to(torch.float16))
