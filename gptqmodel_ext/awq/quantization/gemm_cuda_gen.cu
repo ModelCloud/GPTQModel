@@ -1143,7 +1143,21 @@ torch::Tensor dequantize_weights_cuda(
 
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_scaling_factors));
 
-    auto options = torch::TensorOptions().dtype(_scaling_factors.dtype()).device(_scaling_factors.device());
+    const auto scales_dtype = _scaling_factors.scalar_type();
+    TORCH_CHECK(
+        scales_dtype == at::kHalf || scales_dtype == at::kBFloat16,
+        "dequantize_weights_cuda only supports float16 and bfloat16 scales; got ",
+        scales_dtype);
+    const bool use_bfloat16 = scales_dtype == at::kBFloat16;
+
+    at::Tensor scaling_half = _scaling_factors.contiguous();
+    if (use_bfloat16) {
+      scaling_half = _scaling_factors.to(at::kHalf);
+    }
+
+    auto options = torch::TensorOptions()
+                       .dtype(use_bfloat16 ? at::kHalf : scales_dtype)
+                       .device(_scaling_factors.device());
     at::Tensor _de_kernel;
     if (num_experts == 1) {
       _de_kernel = torch::empty({in_c, out_c}, options);
@@ -1153,7 +1167,7 @@ torch::Tensor dequantize_weights_cuda(
 
     auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
     auto de_kernel = reinterpret_cast<half*>(_de_kernel.data_ptr<at::Half>());
-    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
+    auto scaling_factors = reinterpret_cast<half*>(scaling_half.data_ptr<at::Half>());
     auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
 
     dim3 num_blocks(x_blocks, y_blocks, num_experts);
@@ -1161,6 +1175,9 @@ torch::Tensor dequantize_weights_cuda(
 
     dequantize_weights<<<num_blocks, threads_per_block>>>(kernel, scaling_factors, zeros, de_kernel, G, in_c, out_c);
 
+    if (use_bfloat16) {
+      return _de_kernel.to(at::kBFloat16);
+    }
     return _de_kernel;
 }
 

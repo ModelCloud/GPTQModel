@@ -53,17 +53,9 @@ class WQLinearMMFunction(Function):
             return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
 
         if awq_ext is not None:
-            FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
-
-            if FP16_MATMUL_HEURISTIC_CONDITION:
-                out = awq_ext.dequantize_weights_cuda(
-                    qweight, scales, qzeros, 0, 0, 0, False
-                )
-                out = torch.matmul(x, out)
-            else:
-                out = awq_ext.gemm_forward_cuda(
-                    x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, 8
-                )
+            out = awq_ext.gemm_forward_cuda(
+                x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, 8
+            )
 
         elif TRITON_AVAILABLE:
             FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
