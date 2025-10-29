@@ -120,6 +120,7 @@ from .definitions.qwen3 import Qwen3QModel  # noqa: E402
 from .definitions.qwen3_moe import Qwen3MoeQModel  # noqa: E402
 from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
+from .definitions.qwen3_vl import Qwen3_VLQModel
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
@@ -192,6 +193,7 @@ MODEL_MAP = {
     "qwen2_5_vl_text": Qwen2_5_VLQModel,
     "qwen2_5_omni": Qwen2_5_OmniGPTQ,
     "qwen3_omni_moe": Qwen3OmniMoeGPTQ,
+    "qwen3_vl": Qwen3_VLQModel,
     "dbrx": DbrxQModel,
     "dbrx_converted": DbrxConvertedQModel,
     "deepseek_v2": DeepSeekV2QModel,
