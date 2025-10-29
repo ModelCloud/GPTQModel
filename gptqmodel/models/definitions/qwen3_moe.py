@@ -36,13 +36,3 @@ class Qwen3MoeQModel(BaseQModel):
             },
         }
     ]
-
-    module_tree_overrides = {
-        METHOD.AWQ: [
-            {
-                "mlp": {
-                    "gate": ("gate",),
-                }
-            }
-        ]
-    }

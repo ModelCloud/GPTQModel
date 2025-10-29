@@ -1332,9 +1332,16 @@ class BaseQModel(nn.Module):
             else:
                 return module_name
 
-        for i, block in enumerate(self.full_layer_modules(self.model.config, is_awq_quantize=True)):
+        full_layer_modules = self.full_layer_modules(self.model.config, is_awq_quantize=True)
+        for i, block in enumerate(full_layer_modules):
             not_quantized = all(NOT_QUANTIZE_FLAG in name for name in block)
             if not_quantized:
+                # If both the current block and the previous one are marked as not quantized,
+                # skip remembering the current block. This ensures that when two consecutive
+                # blocks are not quantized, only the first one is remembered as last_module.
+                if i > 0 and all(NOT_QUANTIZE_FLAG in name for name in full_layer_modules[i - 1]):
+                    continue
+
                 # Remember the latest norm (use the last entry if multiple are present)
                 last_module_name = strip_not_quantize_flag(block[-1])
                 last_module, _ = get_module_by_name_prefix(module, last_module_name)
@@ -1363,10 +1370,6 @@ class BaseQModel(nn.Module):
                 skip = False
                 for name in block:
                     if NOT_QUANTIZE_FLAG not in name:
-                        if name == "mlp.gate":
-                            log.debug(f'"{name}" skipped.')
-                            skip = True
-
                         m, _ = get_module_by_name_prefix(module, name)
                         # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
                         # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
