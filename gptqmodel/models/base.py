@@ -211,6 +211,8 @@ class BaseQModel(nn.Module):
 
     INPUT_EMBEDDING_EXTRA_ARGS = None
 
+    COMPUTE_ONLY_MODULES = []
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -1363,7 +1365,7 @@ class BaseQModel(nn.Module):
                 skip = False
                 for name in block:
                     if NOT_QUANTIZE_FLAG not in name:
-                        if name == "mlp.gate":
+                        if name in self.COMPUTE_ONLY_MODULES:
                             log.debug(f'"{name}" skipped.')
                             skip = True
 

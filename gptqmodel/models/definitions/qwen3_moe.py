@@ -37,6 +37,8 @@ class Qwen3MoeQModel(BaseQModel):
         }
     ]
 
+    COMPUTE_ONLY_MODULES = ["mlp.gate"]
+
     module_tree_overrides = {
         METHOD.AWQ: [
             {
