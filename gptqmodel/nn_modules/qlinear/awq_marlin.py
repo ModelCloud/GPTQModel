@@ -244,18 +244,16 @@ class AwqMarlinQuantLinear(AWQuantLinear):
 
         input_tensor = x.contiguous() if self.is_lm_head else x
 
-        weight_scale = self.scales
-        if weight_scale.dtype != input_tensor.dtype:
-            weight_scale = weight_scale.to(input_tensor.dtype)
+        if self.scales.dtype != input_tensor.dtype:
+            self.scales.data = self.scales.data.to(input_tensor.dtype)
 
-        bias = self.bias
-        if bias is not None and bias.dtype != input_tensor.dtype:
-            bias = bias.to(input_tensor.dtype)
+        if self.bias is not None and self.bias.dtype != input_tensor.dtype:
+            self.bias.data = self.bias.data.to(input_tensor.dtype)
 
         out = apply_awq_marlin_linear(
             input=input_tensor,
             weight=self.qweight,
-            weight_scale=weight_scale,
+            weight_scale=self.scales,
             weight_zp=self.qzeros,
             g_idx=self.g_idx,
             g_idx_sort_indices=self.g_idx_sort_indices,
@@ -263,7 +261,7 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             quant_type=self.weight_type,
             output_size_per_partition=self.out_features,
             input_size_per_partition=self.in_features,
-            bias=bias,
+            bias=self.bias,
         )
 
         if self.adapter:
