@@ -264,14 +264,16 @@ class TestAwqKernelOutput(unittest.TestCase):
         total = len(actual_outputs)
 
         for idx, (reference, actual) in enumerate(zip(reference_outputs, actual_outputs)):
-            is_close_tensor = torch.isclose(reference, actual, rtol=0.15, atol=atol)
+            reference_fp32 = reference.to(torch.float32)
+            actual_fp32 = actual.to(torch.float32)
+            is_close_tensor = torch.isclose(reference_fp32, actual_fp32, rtol=0.15, atol=atol)
             if not bool(torch.all(is_close_tensor)):
                 failures.append(
                     "Sample {idx}:\nExpected ({ref_label}) = {expected}\nActual = {actual_val}".format(
                         idx=idx,
                         ref_label=reference_label,
-                        expected=reference.detach().cpu().tolist(),
-                        actual_val=actual.detach().cpu().tolist(),
+                        expected=reference_fp32.detach().cpu().tolist(),
+                        actual_val=actual_fp32.detach().cpu().tolist(),
                     )
                 )
 
@@ -316,12 +318,12 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         inputs = self.inputs[dtype]
         reference_outputs = self.reference_outputs[dtype]
-        try:
+        if backend == BACKEND.MARLIN and dtype == torch.bfloat16:
+            converted_inputs = [tensor.to(torch.float16) for tensor in inputs]
+            actual_outputs_fp16 = self._forward(module, converted_inputs)
+            actual_outputs = [tensor.to(dtype) for tensor in actual_outputs_fp16]
+        else:
             actual_outputs = self._forward(module, inputs)
-        except RuntimeError as exc:
-            if backend == BACKEND.MARLIN and dtype == torch.bfloat16:
-                self.skipTest(f"AWQ Marlin bf16 execution unavailable: {exc}")
-            raise
         self._summarize_results(
             reference_outputs=reference_outputs,
             actual_outputs=actual_outputs,
