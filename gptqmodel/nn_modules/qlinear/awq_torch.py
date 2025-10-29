@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from __future__ import annotations
-
 import torch
 
 from ...adapter.adapter import Adapter, Lora
@@ -69,13 +67,7 @@ class AwqTorchQuantLinear(AWQuantLinear):
             **kwargs,
         )
 
-        self._cached_weights: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
-
-    def _invalidate_cache(self) -> None:
-        self._cached_weights.clear()
-
     def post_init(self):
-        self._invalidate_cache()
         super().post_init()
 
     def extra_repr(self) -> str:
@@ -84,39 +76,23 @@ class AwqTorchQuantLinear(AWQuantLinear):
             f"bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}"
         )
 
-    def _materialize_weight(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        qweight = self.qweight.to(device=device, non_blocking=True)
-        qzeros = self.qzeros.to(device=device, non_blocking=True) if self.qzeros is not None else None
-        scales = self.scales.to(device=device, non_blocking=True)
-
-        weight = dequantize_gemm(qweight, qzeros, scales, self.bits, self.group_size)
-        return weight.to(dtype=dtype)
-
-    def _get_dequantized_weight(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        key = (device, dtype)
-        cached = self._cached_weights.get(key)
-        if cached is None:
-            cached = self._materialize_weight(device=device, dtype=dtype)
-            self._cached_weights[key] = cached
-        return cached
-
-    def _get_bias(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
-        if self.bias is None:
-            return None
-        return self.bias.to(device=device, dtype=dtype, non_blocking=True)
-
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
         original_dtype = x.dtype
         device = x.device
 
-        target_dtype = x.dtype
+        self.ensure_buffer_dtype(original_dtype)
+
+        target_dtype = original_dtype
         x_flat = x.reshape(-1, x.shape[-1]).to(dtype=target_dtype)
 
-        weight = self._get_dequantized_weight(device=device, dtype=target_dtype)
+        weight = dequantize_gemm(self.qweight, self.qzeros, self.scales, self.bits, self.group_size).to(dtype=target_dtype)
+
         output = torch.matmul(x_flat, weight)
 
-        bias = self._get_bias(device=device, dtype=output.dtype)
+        bias = None
+        if self.bias is not None:
+            bias = self.bias.to(device=device, dtype=target_dtype, non_blocking=True)
         if bias is not None:
             output = output + bias
 
@@ -127,15 +103,11 @@ class AwqTorchQuantLinear(AWQuantLinear):
 
         return output
 
-    def load_state_dict(self, state_dict, strict=True):
-        result = super().load_state_dict(state_dict, strict=strict)
-        self._invalidate_cache()
-        return result
-
-    def to(self, *args, **kwargs):
-        module = super().to(*args, **kwargs)
-        self._invalidate_cache()
-        return module
+    def ensure_buffer_dtype(self, dtype: torch.dtype) -> None:
+        if self.scales.dtype != dtype:
+            self.scales = self.scales.to(dtype=dtype)
+        if self.bias is not None and self.bias.dtype != dtype:
+            self.bias = self.bias.to(dtype=dtype)
 
 
 __all__ = ["AwqTorchQuantLinear"]

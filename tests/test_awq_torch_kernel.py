@@ -73,16 +73,19 @@ def test_awq_torch_matches_manual_dequant(dtype):
     batch = 4
     x = torch.randn(batch, in_features, dtype=dtype)
 
+    scales_expected = scales.to(dtype=dtype)
+    bias_expected = bias.to(dtype=dtype)
+
     dequant_weight = dequantize_gemm(
         qweight=qweight.to(torch.int32),
         qzeros=qzeros.to(torch.int32),
-        scales=scales,
+        scales=scales_expected,
         bits=bits,
         group_size=group_size,
     ).to(dtype=dtype)
 
     expected = torch.matmul(x.to(dtype), dequant_weight)
-    expected = expected + bias.to(dtype)
+    expected = expected + bias_expected
 
     output_first = module(x)
     output_second = module(x)
