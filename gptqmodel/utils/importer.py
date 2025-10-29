@@ -20,6 +20,7 @@ from ..nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
 from ..nn_modules.qlinear.awq_machete import AwqMacheteQuantLinear
 from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
+from ..nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
@@ -69,6 +70,7 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.GEMM: AwqGEMMQuantLinear,
         BACKEND.GEMV: AwqGEMVQuantLinear,
         BACKEND.GEMV_FAST: AwqGEMVFastQuantLinear,
+        BACKEND.TORCH_AWQ: AwqTorchQuantLinear,
     }),
 }
 
@@ -83,7 +85,7 @@ SUPPORTS_BACKEND_MAP = {
         FORMAT.QQQ: [BACKEND.QQQ],
     },
     METHOD.AWQ: {
-        FORMAT.GEMM: [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.GEMM],
+        FORMAT.GEMM: [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.GEMM, BACKEND.TORCH_AWQ],
         FORMAT.GEMV: [BACKEND.GEMV],
         FORMAT.GEMV_FAST: [BACKEND.GEMV_FAST],
         FORMAT.MARLIN: [BACKEND.MACHETE, BACKEND.MARLIN],
@@ -314,6 +316,8 @@ def select_quant_linear(
         qlinear = AwqGEMVQuantLinear
     elif backend == BACKEND.GEMV_FAST:
         qlinear = AwqGEMVFastQuantLinear
+    elif backend == BACKEND.TORCH_AWQ:
+        qlinear = AwqTorchQuantLinear
     elif backend == BACKEND.TORCH:
         qlinear = TorchQuantLinear
     elif backend == BACKEND.TORCH_FUSED:

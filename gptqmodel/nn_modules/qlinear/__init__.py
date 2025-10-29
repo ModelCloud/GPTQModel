@@ -1032,12 +1032,10 @@ class PackableQuantLinear(BaseQuantLinear):
 class AWQuantLinear(BaseQuantLinear):
     def __init__(self,
                  bias: bool = False,
-                 use_bf16: bool = False,
                  register_buffers: bool = False,
                  **kwargs):
         super().__init__(bias=bias, register_buffers=False, **kwargs)
 
-        self.use_bf16 = use_bf16
 
         in_features = self.in_features
         out_features = self.out_features
@@ -1058,12 +1056,12 @@ class AWQuantLinear(BaseQuantLinear):
                 "scales",
                 t.zeros(
                     (in_features // self.group_size, out_features),
-                    dtype=t.bfloat16 if self.use_bf16 else t.float32,
+                    dtype=t.float16,
                 ),
             )
 
             if bias:
-                self.register_buffer("bias", t.zeros(out_features, dtype=t.bfloat16 if self.use_bf16 else t.float32,))
+                self.register_buffer("bias", t.zeros(out_features, dtype=t.float16))
             else:
                 self.bias = None
 

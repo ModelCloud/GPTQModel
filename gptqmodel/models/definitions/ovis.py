@@ -12,9 +12,9 @@ import torch
 from ...utils.calibration import batched
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY, move_to
+from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
-from ...utils.offload import offload_to_disk
 
 
 class OvisQModel(BaseQModel):

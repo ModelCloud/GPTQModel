@@ -205,6 +205,12 @@ def ModelLoader(cls):
         if hasattr(config, "hidden_act") and config.hidden_act == "xielu":
             quantize_config.offload_to_disk = False
 
+        # some models need convert moe-experts after model loaded, like GPTOSS and Llama4
+        # so offload_to_disk is not supported for them.
+        if not cls.support_offload_to_disk:
+            quantize_config.offload_to_disk = False
+            log.warn(f"{cls} doesn't support offload_to_disk, set quantize_config.offload_to_disk to False.")
+
         if quantize_config.offload_to_disk:
             model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
             model._model_init_kwargs = model_init_kwargs

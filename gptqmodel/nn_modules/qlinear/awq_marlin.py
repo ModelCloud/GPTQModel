@@ -53,7 +53,7 @@ class AwqMarlinQuantLinear(AWQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float16]
 
     REQUIRES_FORMAT_V2 = False
 
@@ -242,8 +242,16 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             "Use marlin_post_init() on the whole model."
         )
 
+        x = x.contiguous() if self.is_lm_head else x
+
+        if self.scales.dtype != x.dtype:
+            self.scales.data = self.scales.data.to(x.dtype)
+
+        if self.bias is not None and self.bias.dtype != x.dtype:
+            self.bias.data = self.bias.data.to(x.dtype)
+
         out = apply_awq_marlin_linear(
-            input=x.contiguous() if self.is_lm_head else x,
+            input=x,
             weight=self.qweight,
             weight_scale=self.scales,
             weight_zp=self.qzeros,
