@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from concurrent.futures import as_completed
@@ -100,6 +101,15 @@ def run_layer_stage(
             previous_subset_processed: Optional[Dict[str, NamedModule]] = None
 
             for index, names in enumerate(modules):
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug(
+                        "StageLayer: layer %s subset %s/%s size=%s sample=%s",
+                        layer_index,
+                        index + 1,
+                        subset_total,
+                        len(names),
+                        names[:5],
+                    )
                 subset_result = run_subset_stage(
                     looper,
                     processor=processor,

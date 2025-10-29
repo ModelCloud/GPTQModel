@@ -1363,9 +1363,9 @@ class BaseQModel(nn.Module):
                 skip = False
                 for name in block:
                     if NOT_QUANTIZE_FLAG not in name:
-                        if name == "mlp.gate":
-                            log.debug(f'"{name}" skipped.')
-                            skip = True
+                        # if name == "mlp.gate":
+                        #     log.debug(f'"{name}" skipped.')
+                        #     skip = True
 
                         m, _ = get_module_by_name_prefix(module, name)
                         # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
@@ -1395,7 +1395,13 @@ class BaseQModel(nn.Module):
                         module2inspect, _ = get_module_by_name_prefix(module, root)
 
                 if num_experts is not None and len(block) == 2 * num_experts and module2inspect is not None:
-                    inp = input_feat[last_module_root]
+                    if last_module_root not in input_feat:
+                        log.debug(
+                            "awq_get_modules_for_scaling: missing input feature for `%s` while processing experts block (layer block size=%s)",
+                            last_module_root,
+                            len(block),
+                        )
+                    inp = input_feat.get(last_module_root, input_feat.get(block[0]))
                 else:
                     inp = input_feat[block[0]]
 

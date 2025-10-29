@@ -158,6 +158,7 @@ class AWQProcessor(LoopProcessor):
 
     def _layer_input_features(self, state: _AWQLayerState) -> Dict[str, torch.Tensor]:
         features: Dict[str, torch.Tensor] = {}
+        root_buckets: Dict[str, List[torch.Tensor]] = {}
         for name in state.modules:
             entry = self.tasks.get(name) or {}
             tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
@@ -168,12 +169,21 @@ class AWQProcessor(LoopProcessor):
                 features[name] = torch.cat(tensors, dim=0)
             except RuntimeError:
                 features[name] = tensors[0]
+            root = name.split(".", 1)[0]
+            root_buckets.setdefault(root, []).extend(tensors)
             if features[name] is not None and features[name].numel() > 0:
                 log.info(
                     "AWQProcessor: input feature `%s` shape=%s",
                     name,
                     tuple(features[name].shape),
                 )
+        for root, tensors in root_buckets.items():
+            if not tensors or root in features:
+                continue
+            try:
+                features[root] = torch.cat(tensors, dim=0)
+            except RuntimeError:
+                features[root] = tensors[0]
         return features
 
     def _refresh_forward_kwargs_from_cache(self) -> None:
@@ -249,9 +259,24 @@ class AWQProcessor(LoopProcessor):
 
             named_childs = dict(state.modules)
 
+        log.info(
+            "AWQProcessor: layer %s tracking %s modules before quantization (subsets processed=%s/%s); first modules=%s",
+            layer_index,
+            len(named_childs),
+            len(state.processed_subsets),
+            state.subset_total,
+            list(named_childs.keys())[:8],
+        )
+
         input_feat = self._layer_input_features(state)
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
         if missing:
+            log.error(
+                "AWQProcessor: layer %s missing features for %d modules (sample=%s)",
+                layer_index,
+                len(missing),
+                missing[:8],
+            )
             raise RuntimeError(
                 f"AWQProcessor: missing calibration features for modules: {', '.join(missing)}."
             )
@@ -290,6 +315,19 @@ class AWQProcessor(LoopProcessor):
             entry_kwargs = entry.get("kwargs") or module_kwargs_global
             entry["kwargs"] = self._sanitize_kwargs(entry_kwargs, inspect_module)
             sanitized_module_config.append(entry)
+
+        sample_groups = []
+        for cfg in sanitized_module_config[:3]:
+            layers_sample = cfg.get("layers") or []
+            layers_names = [get_op_name(layer_module_ref, layer) if isinstance(layer, torch.nn.Module) else str(layer) for layer in layers_sample[:4]]
+            sample_groups.append(layers_names)
+
+        log.info(
+            "AWQProcessor: layer %s sanitized %d scaling groups; sample=%s",
+            layer_index,
+            len(sanitized_module_config),
+            sample_groups,
+        )
 
         scales_list = [
             self._search_best_scale(layer_module_ref, **layer)
