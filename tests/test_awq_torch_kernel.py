@@ -7,8 +7,8 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
-from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import select_quant_linear
 

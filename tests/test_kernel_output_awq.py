@@ -17,11 +17,11 @@ from tabulate import tabulate
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
-from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.awq_marlin import (
     AwqMarlinQuantLinear,
     marlin_import_exception,
 )
+from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
 from gptqmodel.utils.marlin import marlin_make_workspace_new
 
 
