@@ -178,7 +178,18 @@ class GPTOSSGPTQ(BaseQModel):
                 routed_out = self.experts(hidden_states, router_indices=router_indices, routing_weights=router_scores)
                 return routed_out, router_scores
 
-        model = model.to("cpu")
+        
+        original_device = next(model.parameters()).device if hasattr(model, "parameters") else "cpu"
+
+        # Handle meta tensor conversion properly
+        try:
+            model = model.to("cpu")
+        except NotImplementedError as e:
+            if "Cannot copy out of meta tensor; no data!" in str(e):
+                # Use to_empty() for meta tensors
+                model = model.to_empty(device="cpu")
+            else:
+                raise
         def process_module(name, module, model, config):
             if isinstance(module, gpt_oss_modeling.GptOssMLP):
                 new_module = GptOssMLPNew(config=config, ori_mlp=module)
@@ -189,5 +200,7 @@ class GPTOSSGPTQ(BaseQModel):
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
             process_fn = partial(process_module, model=model, config=model.config)
             list(executor.map(lambda x: process_fn(x[0], x[1]), model.named_modules()))
+
+        model = model.to(original_device)
 
         return model

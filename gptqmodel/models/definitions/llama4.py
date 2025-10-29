@@ -152,7 +152,18 @@ class Llama4QModel(BaseQModel):
 
                 return out, router_logits
 
-        model = model.to("cpu")
+        original_device = next(model.parameters()).device if hasattr(model, "parameters") else "cpu"
+
+        # Handle meta tensor conversion properly
+        try:
+            model = model.to("cpu")
+        except NotImplementedError as e:
+            if "Cannot copy out of meta tensor; no data!" in str(e):
+                # Use to_empty() for meta tensors
+                model = model.to_empty(device="cpu")
+            else:
+                raise
+
         def process_module(name, module, model, config):
             if isinstance(module, Llama4TextMoe):
                 new_module = SequentialLlama4TextMoe(config=config, original=module)
@@ -160,9 +171,12 @@ class Llama4QModel(BaseQModel):
                 print("replace moe" + name + child)
                 parent = model.get_submodule(parent)
                 setattr(parent, child, new_module)
+
         print("cpu count", os.cpu_count())
         with ThreadPoolExecutor(max_workers=8) as executor:
             process_fn = partial(process_module, model=model, config=model.config.get_text_config())
             list(executor.map(lambda x: process_fn(x[0], x[1]), model.named_modules()))
+
+        model = model.to(original_device)
 
         return model

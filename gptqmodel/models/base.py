@@ -250,7 +250,7 @@ class BaseQModel(nn.Module):
         self.processor: ProcessorMixin = None
 
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
-        self.turtle_model = turtle_model
+        self.turtle_model = self.after_model_load(turtle_model, load_quantized_model=load_quantized_model)
 
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
