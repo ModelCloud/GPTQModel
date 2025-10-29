@@ -318,12 +318,7 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         inputs = self.inputs[dtype]
         reference_outputs = self.reference_outputs[dtype]
-        if backend == BACKEND.MARLIN and dtype == torch.bfloat16:
-            converted_inputs = [tensor.to(torch.float16) for tensor in inputs]
-            actual_outputs_fp16 = self._forward(module, converted_inputs)
-            actual_outputs = [tensor.to(dtype) for tensor in actual_outputs_fp16]
-        else:
-            actual_outputs = self._forward(module, inputs)
+        actual_outputs = self._forward(module, inputs)
         self._summarize_results(
             reference_outputs=reference_outputs,
             actual_outputs=actual_outputs,
