@@ -367,7 +367,7 @@ class TestAwqKernelOutput(unittest.TestCase):
             diff = torch.abs(reference_fp32 - actual_fp32)
             max_abs_diff = max(max_abs_diff, float(diff.max().item()))
             mean_abs_diff += float(diff.mean().item())
-            is_close_tensor = torch.isclose(reference_fp32, actual_fp32, rtol=0.15, atol=atol)
+            is_close_tensor = torch.isclose(reference, actual, rtol=0.15, atol=atol)
             if not bool(torch.all(is_close_tensor)):
                 sample_max = float(diff.max().item())
                 sample_mean = float(diff.mean().item())
@@ -413,8 +413,12 @@ class TestAwqKernelOutput(unittest.TestCase):
         self.log.info("\n" + title + "\n" + table)
 
         if failures:
+            preview = "\n".join(failures[:5])
+            if len(failures) > 5:
+                preview += f"\n... ({len(failures) - 5} additional mismatches)"
             raise AssertionError(
-                f"{len(failures)} mismatched outputs for backend `{backend}`"
+                f"{len(failures)} mismatched outputs for backend `{backend}` "
+                f"(rtol=0.15, atol={atol:.6f})\n{preview}"
             )
 
     @parameterized.expand(backend_cases)
