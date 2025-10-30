@@ -7,8 +7,6 @@ from ..base import BaseQModel
 
 
 class GraniteMoeHybridQModel(BaseQModel):
-    dynamic_expert_index = "num_local_experts"
-
     pre_lm_head_norm_module = "model.norm"
 
     layer_modules_strict = False
