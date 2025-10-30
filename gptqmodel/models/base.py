@@ -1334,6 +1334,14 @@ class BaseQModel(nn.Module):
             else:
                 return module_name
 
+        def _select_feature_name(names):
+            """Return the first quantized child that has captured activations."""
+            for raw in names:
+                stripped = strip_not_quantize_flag(raw)
+                if stripped in input_feat:
+                    return stripped
+            return strip_not_quantize_flag(names[0]) if names else None
+
         def _try_update_last_module(candidate_name: str) -> bool:
             nonlocal last_module, last_module_name, last_module_root
 
@@ -1391,7 +1399,7 @@ class BaseQModel(nn.Module):
                     nodes.append(n)
             else:
                 # Normal execution subset
-                subset = []
+                subset = []  # preserve execution order while collecting quantizable modules
                 skip = False
                 for name in block:
                     if NOT_QUANTIZE_FLAG not in name:
@@ -1419,7 +1427,9 @@ class BaseQModel(nn.Module):
                     log.debug("awq_get_modules_for_scaling: skipping block %s due to missing previous module", block)
                     continue
 
-                root_split = block[0].split(".")
+                # Match the activation bucket to the first quantized child in this block
+                feature_name = _select_feature_name(block) or strip_not_quantize_flag(block[0])
+                root_split = feature_name.split(".")
                 module2inspect = None
                 if len(root_split) >= 2:
                     root = root_split[0]
@@ -1434,9 +1444,9 @@ class BaseQModel(nn.Module):
                             last_module_root,
                             len(block),
                         )
-                    inp = input_feat.get(last_module_root, input_feat.get(block[0]))
+                    inp = input_feat.get(last_module_root, input_feat.get(_select_feature_name(block)))
                 else:
-                    inp = input_feat.get(block[0])
+                    inp = input_feat.get(_select_feature_name(block))
 
                 if inp is None:
                     log.debug("awq_get_modules_for_scaling: skipping block %s due to missing input features", block)

@@ -278,6 +278,7 @@ class AWQProcessor(LoopProcessor):
                 len(missing),
                 missing[:8],
             )
+            # Drop modules with no captured activations so the layer can still quantize the rest
             for name in missing:
                 input_feat.pop(name, None)
                 with state.lock:
@@ -364,6 +365,7 @@ class AWQProcessor(LoopProcessor):
             layers_sample = cfg.get("layers") or []
             prev_module = cfg.get("prev_op")
             first_layer_module = layers_sample[0] if layers_sample else None
+            # Some configs alias prev_op to the first layer (e.g. gate_proj); treat that as valid
             same_module = prev_module is first_layer_module
             if (
                 isinstance(prev_module, nn.Linear)
