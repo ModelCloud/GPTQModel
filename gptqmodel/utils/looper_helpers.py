@@ -25,6 +25,7 @@ from ..utils.torch import ALL_DEVICES, CPU, torch_sync
 
 
 USE_TORCH_REPLICATE = env_flag("GPTQMODEL_USE_TORCH_REPLICATE", True)
+FORWARD_TRACE = env_flag("GPTQMODEL_FORWARD_TRACE", False)
 
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
@@ -400,17 +401,112 @@ def forward_batch_worker(
 
     module_output = None
     kv_next = None
+    trace_enabled = FORWARD_TRACE
+    module_label = getattr(module, "full_name", getattr(module, "name", module.__class__.__name__))
+    processor_label = None
+    if trace_enabled:
+        name_attr = getattr(processor, "name", None)
+        processor_label = name_attr() if callable(name_attr) else str(name_attr) if name_attr is not None else processor.__class__.__name__
+
+        def _describe_item(item):
+            if torch.is_tensor(item):
+                return f"Tensor(shape={tuple(item.shape)}, device={item.device.type}:{item.device.index if item.device.index is not None else 'cpu'}, dtype={item.dtype})"
+            if isinstance(item, (list, tuple)):
+                return f"{type(item).__name__}(len={len(item)})"
+            if isinstance(item, dict):
+                keys = list(item.keys())
+                preview = ", ".join(map(str, keys[:3]))
+                if len(keys) > 3:
+                    preview += ", ..."
+                return f"dict(keys=[{preview}])"
+            return type(item).__name__
+
+        def _describe_collection(collection):
+            try:
+                if isinstance(collection, dict):
+                    return {key: _describe_item(val) for key, val in collection.items()}
+                return [_describe_item(val) for val in collection]
+            except Exception:
+                return "<unavailable>"
+
+        total_batches = getattr(processor, "num_batches", None)
+        log.info(
+            "ForwardTrace:start module=%s processor=%s batch=%s%s device=%s reuse_kv=%s need_output=%s inputs=%s extras=%s",
+            module_label,
+            processor_label,
+            batch_index,
+            f"/{total_batches}" if isinstance(total_batches, int) else "",
+            module_device,
+            reuse_kv,
+            need_output,
+            _describe_collection(inputs),
+            _describe_collection(additional_inputs),
+        )
+        trace_start = time.perf_counter()
+    else:
+        trace_start = None
+
+    trace_status = "pending"
     try:
         if is_lm_head_module:
             module_output = module(*inputs)
         else:
             module_output = module(*inputs, **additional_inputs)
+        trace_status = "ok"
     except StopForward:
         module_output = None
+        if trace_enabled:
+            log.info(
+                "ForwardTrace:stop module=%s batch=%s reason=StopForward",
+                module_label,
+                batch_index,
+            )
+        trace_status = "stopped"
+    except Exception as exc:
+        if trace_enabled:
+            log.exception(
+                "ForwardTrace:error module=%s batch=%s device=%s",
+                module_label,
+                batch_index,
+                module_device,
+            )
+        trace_status = "error"
+        raise
     finally:
         if mask_tls is not None:
             mask_tls.value = None
         processor._set_current_batch_index(None)
+        if trace_enabled:
+            if trace_start is not None:
+                duration = time.perf_counter() - trace_start
+            else:
+                duration = None
+
+            def _describe_output(output):
+                if output is None:
+                    return "None"
+                if torch.is_tensor(output):
+                    return f"Tensor(shape={tuple(output.shape)}, device={output.device.type}:{output.device.index if output.device.index is not None else 'cpu'}, dtype={output.dtype})"
+                if isinstance(output, tuple):
+                    return "(" + ", ".join(_describe_output(item) for item in output[:4]) + (", ..." if len(output) > 4 else "") + ")"
+                if isinstance(output, list):
+                    return "[" + ", ".join(_describe_output(item) for item in output[:4]) + (", ..." if len(output) > 4 else "") + "]"
+                if isinstance(output, dict):
+                    keys = list(output.keys())
+                    preview = {k: _describe_output(output[k]) for k in keys[:4]}
+                    if len(keys) > 4:
+                        preview["..."] = f"{len(keys) - 4} more"
+                    return preview
+                return type(output).__name__
+
+            log.info(
+                "ForwardTrace:end module=%s batch=%s status=%s duration=%.4fs output=%s",
+                module_label,
+                batch_index,
+                trace_status,
+                duration if duration is not None else float("nan"),
+                _describe_output(module_output),
+            )
 
     if reuse_kv and module_output is not None and isinstance(module_output, tuple) and len(module_output) > 0:
         kv_next = module_output[-1]
