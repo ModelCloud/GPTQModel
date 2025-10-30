@@ -37,6 +37,8 @@ __all__ = ["patch_safetensors_save_file", "patch_triton_autotuner"]
 
 
 def patch_triton_autotuner() -> None:
+    return
+
     try:
         import triton # noqa
         from triton.runtime import autotuner as module
