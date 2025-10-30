@@ -62,7 +62,8 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
         if hasattr(self.model, "token2wav"):
             self.shell_module_materialize(self.model.token2wav, self.quantize_config.device)
         for layer in self.model.thinker.model.layers:
-            self.shell_module_materialize(layer.self_attn.rotary_emb, self.quantize_config.device)
+            if hasattr(layer.self_attn, "rotary_emb"):
+                self.shell_module_materialize(layer.self_attn.rotary_emb, self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
         if self.quantize_config.offload_to_disk:
@@ -103,7 +104,11 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
                                 )
 
             for layer in self.model.thinker.model.layers:
-                layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(CPU)
+                if hasattr(layer.self_attn, "rotary_emb"):
+                    offload_to_disk(model=self.model.thinker.model,
+                                    module=layer.self_attn.rotary_emb,
+                                    disk_path=self.quantize_config.offload_to_disk_path,
+                                    )
 
             return
 
