@@ -292,7 +292,7 @@ def make_quant(
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
         except NotImplementedError as e:
-            log.info(f"Kernel: skipped -> `{cls}`.")
+            log.info(f"Kernel: skipped -> `{cls}`. {str(e)}")
 
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
@@ -750,6 +750,8 @@ def pack_module(
             "block": "module.pack_block",
             "original": "module.pack_original",
         }
+
+        effective_impl = "original"
 
         packer_label = label_map[effective_impl]
 

@@ -382,7 +382,13 @@ class ModelTest(unittest.TestCase):
         eval_records = {}
         reuse_candidates = {}
 
-        compare_backends = (BACKEND.MARLIN,) if self.FORMAT is FORMAT.GPTQ else (BACKEND.MARLIN, BACKEND.GEMM)
+        if self.FORMAT is FORMAT.GPTQ:
+            if self.LOAD_BACKEND == BACKEND.MARLIN:
+                compare_backends = (BACKEND.MARLIN,)
+            else:
+                compare_backends = (self.LOAD_BACKEND,)
+        else:
+            compare_backends = (BACKEND.MARLIN, BACKEND.GEMM)
         fallback_backend = None
         if BACKEND.MARLIN in compare_backends:
             try:

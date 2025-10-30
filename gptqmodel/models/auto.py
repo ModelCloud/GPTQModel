@@ -138,6 +138,7 @@ from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
+from .definitions.granitemoehybrid import GraniteMoeHybridQModel
 
 
 # make quants and inference more determinisitc
@@ -217,6 +218,7 @@ MODEL_MAP = {
     "mllama": MLlamaQModel,
     "marin": Qwen3QModel,
     "granite": LlamaQModel, # 100% llama clone
+    "granitemoehybrid": GraniteMoeHybridQModel,
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
     "olmo2": LlamaQModel, # 100% llama clone
