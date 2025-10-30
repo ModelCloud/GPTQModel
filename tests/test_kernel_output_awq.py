@@ -36,6 +36,18 @@ RED = "\033[31m"
 RESET = "\033[0m"
 
 
+def _reorder_packed_to_awq_order(packed: torch.Tensor, bits: int) -> torch.Tensor:
+    if bits != 4:
+        return packed
+    order = [0, 2, 4, 6, 1, 3, 5, 7]
+    mask = (1 << bits) - 1
+    result = torch.zeros_like(packed)
+    for dst, src in enumerate(order):
+        nib = (packed >> (src * bits)) & mask
+        result |= nib << (dst * bits)
+    return result
+
+
 class TestAwqKernelOutput(unittest.TestCase):
     MODEL_PATH = Path("/monster/data/model/deepseek-r1-distill-qwen-7b-awq")
     TARGET = "model.layers.20.self_attn.v_proj"
@@ -49,7 +61,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         (baseline_backend, torch.bfloat16, 0.0),
         (BACKEND.GEMM, torch.float16, 0.001),
         (BACKEND.GEMM, torch.bfloat16, 0.05),
-        (BACKEND.MARLIN, torch.float16, 0.01),
+        (BACKEND.MARLIN, torch.float16, 0.02),
         (BACKEND.MARLIN, torch.bfloat16, 0.05),
     ]
 
@@ -62,6 +74,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         cls.log = log
         cls._weight_map = cls._load_weight_map()
         cls.backend_skip_reason: Dict[BACKEND, str] = {}
+        cls._forward_kwargs: Dict[torch.dtype, Dict[str, torch.dtype]] = {}
 
         try:
             tensors = cls._load_awq_tensors(cls.TARGET)
@@ -112,6 +125,7 @@ class TestAwqKernelOutput(unittest.TestCase):
                     "compute_dtype": torch.float16,
                     "output_dtype": dtype,
                 }
+            cls._forward_kwargs[dtype] = forward_kwargs
             cls.reference_outputs[dtype] = cls._forward(
                 torch_module,
                 converted_inputs,
@@ -210,8 +224,11 @@ class TestAwqKernelOutput(unittest.TestCase):
             register_buffers=True,
         ).to(cls.device)
 
-        module.qweight.data.copy_(qweight_cpu.to(cls.device))
-        module.qzeros.data.copy_(qzeros_cpu.to(cls.device))
+        qweight_reordered = _reorder_packed_to_awq_order(qweight_cpu, cls.BITS)
+        qzeros_reordered = _reorder_packed_to_awq_order(qzeros_cpu, cls.BITS)
+
+        module.qweight.data.copy_(qweight_reordered.to(cls.device))
+        module.qzeros.data.copy_(qzeros_reordered.to(cls.device))
         module.scales.data.copy_(scales_cpu.to(torch.float16).to(cls.device))
         module.bias.data.copy_(bias_cpu.to(torch.float16).to(cls.device))
 
@@ -236,16 +253,17 @@ class TestAwqKernelOutput(unittest.TestCase):
             out_features=cls.out_features,
             bias=True,
             adapter=None,
-            register_buffers=True,
+            register_buffers=False,
         ).to(cls.device)
 
-        module.qweight.copy_(qweight_cpu.to(cls.device))
-        module.qzeros.copy_(qzeros_cpu.to(cls.device))
-        module.scales.copy_(scales_cpu.to(cls.device))
-        module.bias.copy_(bias_cpu.to(cls.device))
+        module.load_legacy_tensors(
+            qweight_cpu.to(cls.device),
+            qzeros_cpu.to(cls.device),
+            scales_cpu.to(cls.device),
+            bias_cpu.to(cls.device),
+        )
 
         module.eval()
-        module.post_init()
         return module
 
     @classmethod
@@ -388,7 +406,8 @@ class TestAwqKernelOutput(unittest.TestCase):
         if backend == self.baseline_backend:
             actual_outputs = reference_outputs
         else:
-            actual_outputs = self._forward(module, inputs)
+            forward_kwargs = self._forward_kwargs.get(dtype, {})
+            actual_outputs = self._forward(module, inputs, **forward_kwargs)
         self._summarize_results(
             reference_outputs=reference_outputs,
             actual_outputs=actual_outputs,

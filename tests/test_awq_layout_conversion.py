@@ -1,22 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
 import torch
 import pytest
 
-from gptqmodel.nn_modules.qlinear.awq_gemm import (
-    AwqGEMMQuantLinear,
-    _multiply_scale_qzero_negative,
-    _packing_v2_from_unpacked,
-    _qweight_unpack,
+from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
+from gptqmodel.quantization.awq.utils.mit_repacker import (
+    multiply_scale_qzero_negative as mit_multiply_scale_qzero_negative,
+    packing_v2_from_unpacked as mit_packing_v2_from_unpacked,
+    qweight_unpack as mit_qweight_unpack,
 )
 from gptqmodel.quantization.awq.utils.module import try_import
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.quantization.awq.modules.linear.gemv_fast import calculate_zeros_width
+from safetensors.torch import load_file
 
 
 def _pack_weights_v1(intweight: torch.Tensor, bits: int) -> torch.Tensor:
     pack_num = 32 // bits
-    order_map = [0, 2, 4, 6, 1, 3, 5, 7]
+    order_map = list(range(pack_num))
     rows, cols = intweight.shape
     packed_cols = (cols + pack_num - 1) // pack_num
     packed = torch.zeros((rows, packed_cols), dtype=torch.int32)
@@ -32,7 +35,7 @@ def _pack_weights_v1(intweight: torch.Tensor, bits: int) -> torch.Tensor:
 
 def _pack_zeros_v1(zeros: torch.Tensor, bits: int) -> torch.Tensor:
     pack_num = 32 // bits
-    order_map = [0, 2, 4, 6, 1, 3, 5, 7]
+    order_map = list(range(pack_num))
     rows, cols = zeros.shape
     packed_cols = (cols + pack_num - 1) // pack_num
     packed = torch.zeros((rows, packed_cols), dtype=torch.int32)
@@ -81,10 +84,10 @@ def test_awq_gemm_legacy_conversion_matches_v2():
         torch.zeros(out_features, dtype=torch.float16),
     )
 
-    unpacked_expected = _qweight_unpack(qweight_v1.clone())
+    unpacked_expected = mit_qweight_unpack(qweight_v1.clone())
     if unpacked_expected.shape[0] == in_features and unpacked_expected.shape[1] == out_features:
         unpacked_expected = unpacked_expected.transpose(0, 1).contiguous()
-    expected_qweight = _packing_v2_from_unpacked(unpacked_expected, interleave=4, kstride=64)
+    expected_qweight = mit_packing_v2_from_unpacked(unpacked_expected, interleave=4, kstride=64)
     pack_num = 32 // bits
     zeros_width = calculate_zeros_width(in_features, group_size, pack_num=pack_num)
     expected_scales = torch.zeros((zeros_width * pack_num, out_features), dtype=torch.float16)
@@ -141,3 +144,63 @@ def test_awq_gemm_legacy_conversion_matches_v2():
         expected_out = expected_out.view(inputs.shape[0], inputs.shape[1], out_features)
         actual_out = module(inputs)
     torch.testing.assert_close(actual_out, expected_out, atol=5e-1, rtol=5e-3)
+
+
+@pytest.mark.cuda
+def test_awq_gemm_conversion_real_checkpoint():
+    ckpt_dir = Path("/monster/data/model/deepseek-r1-distill-qwen-7b-awq")
+    safetensor_path = ckpt_dir / "model-00001-of-00002.safetensors"
+    if not safetensor_path.exists():
+        pytest.skip("DeepSeek AWQ checkpoint unavailable at expected path.")
+
+    tensors = load_file(str(safetensor_path))
+    tensor_prefix = "model.layers.0.self_attn.q_proj"
+    qweight = tensors[f"{tensor_prefix}.qweight"]
+    qzeros = tensors[f"{tensor_prefix}.qzeros"]
+    scales = tensors[f"{tensor_prefix}.scales"]
+
+    bits = 4
+    group_size = 128
+    groups = scales.shape[0]
+    out_features = scales.shape[1]
+    in_features = groups * group_size
+
+    module = AwqGEMMQuantLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        register_buffers=False,
+    )
+    module.load_legacy_tensors(qweight, qzeros, scales, bias=None)
+
+    pack_num = 32 // bits
+    zeros_width = calculate_zeros_width(in_features, group_size, pack_num=pack_num)
+
+    unpacked = mit_qweight_unpack(qweight)
+    if unpacked.shape == (in_features, out_features):
+        unpacked = unpacked.transpose(0, 1).contiguous()
+    expected_qweight = mit_packing_v2_from_unpacked(unpacked, interleave=4, kstride=64)
+
+    scales_groups = scales if scales.shape == (groups, out_features) else scales.transpose(0, 1).contiguous()
+    expected_zero_cols = out_features // pack_num
+    qzeros_groups = qzeros
+    if qzeros_groups.shape == (out_features, expected_zero_cols):
+        qzeros_groups = qzeros_groups.transpose(0, 1).contiguous()
+    elif qzeros_groups.shape == (expected_zero_cols, out_features):
+        qzeros_groups = qzeros_groups.transpose(0, 1).contiguous()
+
+    scaled_zeros_groups = mit_multiply_scale_qzero_negative(scales_groups, qzeros_groups, zp_shift=0)
+
+    padded_rows = zeros_width * pack_num
+    expected_scales = torch.zeros((padded_rows, out_features), dtype=scales_groups.dtype)
+    expected_zeros = torch.zeros_like(expected_scales)
+    expected_scales[: groups, :] = scales_groups
+    expected_zeros[: groups, :] = scaled_zeros_groups
+
+    torch.testing.assert_close(module.qweight.to(torch.int32), expected_qweight.to(torch.int32))
+    torch.testing.assert_close(module.scales.to(torch.float32), expected_scales.to(torch.float32))
+    torch.testing.assert_close(module.qzeros.to(torch.float32), expected_zeros.to(torch.float32))

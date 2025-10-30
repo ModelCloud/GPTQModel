@@ -6,6 +6,11 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
+from ...quantization.awq.utils.mit_repacker import (
+    multiply_scale_qzero_negative as mit_multiply_scale_qzero_negative,
+    packing_v2_from_unpacked as mit_packing_v2_from_unpacked,
+    qweight_unpack as mit_qweight_unpack,
+)
 from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
@@ -13,59 +18,6 @@ from ...utils.gemv import calculate_zeros_width
 __all__ = ["AwqGEMMQuantLinear"]
 
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
-
-AWQ_ORDER = (0, 2, 4, 6, 1, 3, 5, 7)
-AWQ_REVERSE_ORDER = (0, 4, 1, 5, 2, 6, 3, 7)
-
-
-def _awq_reverse_indices(device: torch.device) -> torch.Tensor:
-    return torch.tensor(AWQ_REVERSE_ORDER, dtype=torch.long, device=device)
-
-
-def _qweight_unpack(packed: torch.Tensor) -> torch.Tensor:
-    """Mirror MIT TinyChat offline-weight-repacker qweight_unpack with AWQ ordering fix."""
-    if packed.dtype != torch.int32:
-        packed = packed.to(torch.int32)
-    mask = torch.tensor(0xF, dtype=torch.int32, device=packed.device)
-    shifts = torch.arange(8, device=packed.device, dtype=torch.int32) * 4
-    unpacked = (packed.unsqueeze(-1) >> shifts) & mask
-    unpacked = unpacked.index_select(-1, _awq_reverse_indices(packed.device))
-    return unpacked.reshape(packed.shape[0], packed.shape[1] * 8)
-
-
-def _packing_v2_from_unpacked(unpacked: torch.Tensor, interleave: int, kstride: int) -> torch.Tensor:
-    """Port of TinyChat packing_v2_from_unpacked implemented with torch ops."""
-    rows, cols = unpacked.shape
-    kernel = unpacked.view(rows, cols // 32, 32)
-    kernel = kernel.view(rows, cols // 32, 4, 4, 2).permute(0, 1, 3, 2, 4).reshape(rows, cols // 32, 32)
-    kernel = kernel.view(rows, cols // 32, 4, 8)
-    kernel = kernel.view(rows, cols // 32, 4, 4, 2).permute(0, 1, 2, 4, 3).reshape(rows, cols)
-    kernel = kernel.view(rows // interleave, interleave, cols // kstride, kstride)
-    kernel = kernel.permute(0, 2, 1, 3).reshape(rows // interleave, cols // kstride, kstride, interleave)
-    kernel = (
-        kernel[..., 0]
-        | (kernel[..., 1] << 4)
-        | (kernel[..., 2] << 8)
-        | (kernel[..., 3] << 12)
-    )
-    return kernel.reshape(rows // interleave, cols).to(torch.int16)
-
-
-def _multiply_scale_qzero_negative(scales: torch.Tensor, qzeros: torch.Tensor, zp_shift: int = 0) -> torch.Tensor:
-    """Replica of TinyChat multiply_scale_qzero_negative for AWQ layouts."""
-    if qzeros.dtype != torch.int32:
-        qzeros = qzeros.to(torch.int32)
-    pack_size = 8
-    rows, cols = scales.shape
-    offsets = torch.arange(pack_size, device=scales.device, dtype=torch.int32)
-    zeros = ((qzeros.unsqueeze(-1) >> (offsets * 4)) & 0xF)
-    zeros = zeros.index_select(-1, _awq_reverse_indices(scales.device))
-    zeros = zeros.reshape(rows, -1)[:, :cols].to(scales.dtype)
-    scaled = scales * zeros
-    if zp_shift:
-        scaled = scaled + zp_shift * scales
-    return -scaled
-
 
 def _convert_awq_v1_to_v2(
     qweight: torch.Tensor,
@@ -79,7 +31,7 @@ def _convert_awq_v1_to_v2(
     interleave: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     device = qweight.device
-    unpacked = _qweight_unpack(qweight.to(device))
+    unpacked = mit_qweight_unpack(qweight.to(device))
     if unpacked.shape == (in_features, out_features):
         unpacked = unpacked.transpose(0, 1).contiguous()
     elif unpacked.shape != (out_features, in_features):
@@ -87,46 +39,51 @@ def _convert_awq_v1_to_v2(
             f"Unexpected legacy qweight shape {tuple(unpacked.shape)}; expected "
             f"({out_features}, {in_features}) or ({in_features}, {out_features})."
         )
-    qweight_v2 = _packing_v2_from_unpacked(unpacked, interleave, 64).contiguous()
+    qweight_v2 = mit_packing_v2_from_unpacked(unpacked, interleave, 64).contiguous()
 
     pack_num = 32 // bits
     zeros_width = calculate_zeros_width(in_features, group_size, pack_num=pack_num)
 
-    scales_legacy = scales.to(device=device).contiguous()
     groups = 1 if group_size in (-1, 0) else in_features // group_size
-    if scales_legacy.shape != (out_features, groups):
-        if scales_legacy.shape == (groups, out_features):
-            scales_legacy = scales_legacy.transpose(0, 1).contiguous()
-        else:
-            raise ValueError(
-                f"Unexpected legacy scales shape {tuple(scales_legacy.shape)}; "
-                f"expected ({out_features}, {groups}) or ({groups}, {out_features})."
-            )
+    scales_legacy = scales.to(device=device).contiguous()
+    if scales_legacy.shape == (out_features, groups):
+        scales_groups_first = scales_legacy.transpose(0, 1).contiguous()
+    elif scales_legacy.shape == (groups, out_features):
+        scales_groups_first = scales_legacy
+    else:
+        raise ValueError(
+            f"Unexpected legacy scales shape {tuple(scales_legacy.shape)}; "
+            f"expected ({out_features}, {groups}) or ({groups}, {out_features})."
+        )
 
-    qzeros_legacy = qzeros.to(device=device)
-    if qzeros_legacy.shape != (out_features, zeros_width):
-        if qzeros_legacy.shape == (zeros_width, out_features):
-            qzeros_legacy = qzeros_legacy.transpose(0, 1).contiguous()
-        else:
-            raise ValueError(
-                f"Unexpected legacy qzeros shape {tuple(qzeros_legacy.shape)}; "
-                f"expected ({out_features}, {zeros_width}) or ({zeros_width}, {out_features})."
-            )
+    qzeros_legacy = qzeros.to(device=device).contiguous()
+    expected_zero_cols = out_features // pack_num
+    if qzeros_legacy.shape == (out_features, expected_zero_cols):
+        qzeros_groups_first = qzeros_legacy.transpose(0, 1).contiguous()
+    elif qzeros_legacy.shape == (expected_zero_cols, out_features):
+        qzeros_groups_first = qzeros_legacy.transpose(0, 1).contiguous()
+    elif qzeros_legacy.shape == (groups, expected_zero_cols):
+        qzeros_groups_first = qzeros_legacy
+    else:
+        raise ValueError(
+            f"Unexpected legacy qzeros shape {tuple(qzeros_legacy.shape)}; "
+            f"expected one of {{({out_features}, {expected_zero_cols}), ({expected_zero_cols}, {out_features}), ({groups}, {expected_zero_cols})}}."
+        )
 
-    qscales = torch.zeros(
-        (out_features, zeros_width * pack_num),
-        dtype=scales_legacy.dtype,
+    scaled_zeros_groups_first = mit_multiply_scale_qzero_negative(
+        scales_groups_first, qzeros_groups_first, zp_shift=0
+    )
+
+    padded_rows = zeros_width * pack_num
+    scales_processed = torch.zeros(
+        (padded_rows, out_features),
+        dtype=scales_groups_first.dtype,
         device=device,
     )
-    qscales[:, : scales_legacy.shape[1]] = scales_legacy
-
-    scaled_zeros = torch.zeros_like(qscales)
-    scaled_zeros[:, : scales_legacy.shape[1]] = _multiply_scale_qzero_negative(
-        qscales[:, : scales_legacy.shape[1]], qzeros_legacy
-    )
-
-    scales_processed = qscales.transpose(0, 1).contiguous()
-    zeros_processed = scaled_zeros.transpose(0, 1).contiguous()
+    zeros_processed = torch.zeros_like(scales_processed)
+    rows = min(padded_rows, scales_groups_first.shape[0])
+    scales_processed[:rows, :] = scales_groups_first[:rows, :]
+    zeros_processed[:rows, :] = scaled_zeros_groups_first[:rows, :]
     return qweight_v2, scales_processed, zeros_processed
 
 
