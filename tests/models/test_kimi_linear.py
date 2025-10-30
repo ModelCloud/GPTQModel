@@ -14,6 +14,7 @@ class TestKimiLinear(ModelTest):
 
     NATIVE_MODEL_ID = "/mnt/shared/Kimi-Linear-48B-A3B-Instruct"
     TRUST_REMOTE_CODE = True
+    USE_FLASH_ATTN = False
     DELETE_QUANTIZED_MODEL = False
     DATASET_SIZE = 1024
     GROUP_SIZE = 32
