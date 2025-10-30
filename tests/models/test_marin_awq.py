@@ -4,12 +4,11 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from accelerate import init_empty_weights
+from model_test import ModelTest
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from model_test import ModelTest
-
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
-from gptqmodel.quantization.config import VRAMStrategy, METHOD, FORMAT
+from gptqmodel.quantization.config import FORMAT, METHOD
 from gptqmodel.utils.eval import EVAL
 
 
