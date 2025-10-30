@@ -14,8 +14,17 @@ from gptqmodel.quantization.config import VRAMStrategy
 
 class TestMarin(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/marin-32b-base"
-    VRAM_STRATEGY = VRAMStrategy.BALANCED
+    # VRAM_STRATEGY = VRAMStrategy.BALANCED
     # Marin inherits Qwen3's backbone with QK-Norm attention.
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.5725, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.6007, "floor_pct": 0.04},
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
+            "acc": {"value": 0.6670, "floor_pct": 0.04},
+        },
+    }
 
     def test_marin_module_tree(self):
         config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=True)
