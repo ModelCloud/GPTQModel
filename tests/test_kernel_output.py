@@ -231,16 +231,18 @@ class TestKernelOutput(unittest.TestCase):
                 self.skipTest("Machete requires NVIDIA Hopper or newer (SM90+)")
 
     float16_cases = [
-        (BACKEND.TORCH, torch.float16, 0.0000),
-        (BACKEND.TRITON, torch.float16, 0.00001),
-        (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
-        (BACKEND.MACHETE, torch.float16, 0.00040),
-        (BACKEND.MARLIN, torch.float16, 0.00035),
-        (BACKEND.BITBLAS, torch.float16, 0.0035),
+        ("torch_fp16", BACKEND.TORCH, torch.float16, 0.0000),
+        ("triton_fp16", BACKEND.TRITON, torch.float16, 0.00001),
+        ("exllamav2_fp16", BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
+        ("machete_fp16", BACKEND.MACHETE, torch.float16, 0.00040),
+        ("marlin_fp16", BACKEND.MARLIN, torch.float16, 0.00035),
+        ("bitblas_fp16", BACKEND.BITBLAS, torch.float16, 0.0035),
     ]
 
     @parameterized.expand(float16_cases)
-    def test_kernel_float16(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
+    def test_kernel_float16(
+        self, _case_name: str, backend: BACKEND, dtype: torch.dtype, a_tolerance: float
+    ):
         self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
@@ -257,16 +259,18 @@ class TestKernelOutput(unittest.TestCase):
         )
 
     bfloat16_cases = [
-        (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        (BACKEND.TRITON, torch.bfloat16, 0.00001),
-        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
-        (BACKEND.MACHETE, torch.bfloat16, 0.0033),
-        (BACKEND.MARLIN, torch.bfloat16, 0.0031),
-        (BACKEND.BITBLAS, torch.bfloat16, 0.0031),
+        ("torch_bf16", BACKEND.TORCH, torch.bfloat16, 0.0000),
+        ("triton_bf16", BACKEND.TRITON, torch.bfloat16, 0.00001),
+        ("exllamav2_bf16", BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
+        ("machete_bf16", BACKEND.MACHETE, torch.bfloat16, 0.0033),
+        ("marlin_bf16", BACKEND.MARLIN, torch.bfloat16, 0.0031),
+        ("bitblas_bf16", BACKEND.BITBLAS, torch.bfloat16, 0.0031),
     ]
 
     @parameterized.expand(bfloat16_cases)
-    def test_kernel_bfloat16(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
+    def test_kernel_bfloat16(
+        self, _case_name: str, backend: BACKEND, dtype: torch.dtype, a_tolerance: float
+    ):
         self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
@@ -283,16 +287,18 @@ class TestKernelOutput(unittest.TestCase):
         )
 
     float16_lora_cases = [
-        (BACKEND.TORCH, torch.float16, 0.0000),
-        (BACKEND.TRITON, torch.float16, 0.00001),
-        (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
-        (BACKEND.MACHETE, torch.float16, 0.00040),
-        (BACKEND.MARLIN, torch.float16, 0.00035),
-        (BACKEND.BITBLAS, torch.float16, 0.00035),
+        ("torch_fp16", BACKEND.TORCH, torch.float16, 0.0000),
+        ("triton_fp16", BACKEND.TRITON, torch.float16, 0.00001),
+        ("exllamav2_fp16", BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
+        ("machete_fp16", BACKEND.MACHETE, torch.float16, 0.00040),
+        ("marlin_fp16", BACKEND.MARLIN, torch.float16, 0.00035),
+        ("bitblas_fp16", BACKEND.BITBLAS, torch.float16, 0.00035),
     ]
 
     @parameterized.expand(float16_lora_cases)
-    def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
+    def test_kernel_float16_with_lora(
+        self, _case_name: str, backend: BACKEND, dtype: torch.dtype, a_tolerance: float
+    ):
         self._maybe_skip_backend(backend)
 
         data = self.data[dtype]
@@ -308,16 +314,18 @@ class TestKernelOutput(unittest.TestCase):
         )
 
     bfloat16_lora_cases = [
-        (BACKEND.TORCH, torch.bfloat16, 0.0000),
-        (BACKEND.TRITON, torch.bfloat16, 0.00001),
-        (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
-        (BACKEND.MACHETE, torch.bfloat16, 0.0033),
-        (BACKEND.MARLIN, torch.bfloat16, 0.0050),
-        (BACKEND.BITBLAS, torch.bfloat16, 0.0033),
+        ("torch_bf16", BACKEND.TORCH, torch.bfloat16, 0.0000),
+        ("triton_bf16", BACKEND.TRITON, torch.bfloat16, 0.00001),
+        ("exllamav2_bf16", BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
+        ("machete_bf16", BACKEND.MACHETE, torch.bfloat16, 0.0033),
+        ("marlin_bf16", BACKEND.MARLIN, torch.bfloat16, 0.0050),
+        ("bitblas_bf16", BACKEND.BITBLAS, torch.bfloat16, 0.0033),
     ]
 
     @parameterized.expand(bfloat16_lora_cases)
-    def test_kernel_bfloat16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
+    def test_kernel_bfloat16_with_lora(
+        self, _case_name: str, backend: BACKEND, dtype: torch.dtype, a_tolerance: float
+    ):
         self._maybe_skip_backend(backend)
 
         data = self.data[dtype]

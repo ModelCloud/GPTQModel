@@ -36,21 +36,33 @@ RED = "\033[31m"
 RESET = "\033[0m"
 
 
+def _reorder_packed_to_awq_order(packed: torch.Tensor, bits: int) -> torch.Tensor:
+    if bits != 4:
+        return packed
+    order = [0, 2, 4, 6, 1, 3, 5, 7]
+    mask = (1 << bits) - 1
+    result = torch.zeros_like(packed)
+    for dst, src in enumerate(order):
+        nib = (packed >> (src * bits)) & mask
+        result |= nib << (dst * bits)
+    return result
+
+
 class TestAwqKernelOutput(unittest.TestCase):
     MODEL_PATH = Path("/monster/data/model/deepseek-r1-distill-qwen-7b-awq")
     TARGET = "model.layers.20.self_attn.v_proj"
     BITS = 4
     GROUP_SIZE = 128
-    SUPPORTED_DTYPES = (torch.float16,)
+    SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
 
     baseline_backend = BACKEND.TORCH_AWQ
     backend_cases = [
-        (baseline_backend, torch.float16, 0.0),
-        # (baseline_backend, torch.bfloat16, 0.0),
-        (BACKEND.GEMM, torch.float16, 0.001),
-        # (BACKEND.GEMM, torch.bfloat16, 0.05),
-        (BACKEND.MARLIN, torch.float16, 0.01),
-        # (BACKEND.MARLIN, torch.bfloat16, 0.05),
+        ("torch_awq_fp16", baseline_backend, torch.float16, 0.0),
+        ("torch_awq_bf16", baseline_backend, torch.bfloat16, 0.0),
+        ("gemm_fp16", BACKEND.GEMM, torch.float16, 0.0039),
+        ("gemm_bf16", BACKEND.GEMM, torch.bfloat16, 0.016),
+        ("marlin_fp16", BACKEND.MARLIN, torch.float16, 0.016),
+        ("marlin_bf16", BACKEND.MARLIN, torch.bfloat16, 0.016),
     ]
 
     @classmethod
@@ -62,6 +74,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         cls.log = log
         cls._weight_map = cls._load_weight_map()
         cls.backend_skip_reason: Dict[BACKEND, str] = {}
+        cls._forward_kwargs: Dict[torch.dtype, Dict[str, torch.dtype]] = {}
 
         try:
             tensors = cls._load_awq_tensors(cls.TARGET)
@@ -112,6 +125,7 @@ class TestAwqKernelOutput(unittest.TestCase):
                     "compute_dtype": torch.float16,
                     "output_dtype": dtype,
                 }
+            cls._forward_kwargs[dtype] = forward_kwargs
             cls.reference_outputs[dtype] = cls._forward(
                 torch_module,
                 converted_inputs,
@@ -165,16 +179,17 @@ class TestAwqKernelOutput(unittest.TestCase):
             out_features=cls.out_features,
             bias=True,
             adapter=None,
-            register_buffers=True,
+            register_buffers=False,
         ).to(cls.device)
 
-        module.qweight.copy_(qweight_cpu.to(cls.device))
-        module.qzeros.copy_(qzeros_cpu.to(cls.device))
-        module.scales.copy_(scales_cpu.to(cls.device))
-        module.bias.copy_(bias_cpu.to(cls.device))
+        module.load_legacy_tensors(
+            qweight_cpu.to(cls.device),
+            qzeros_cpu.to(cls.device),
+            scales_cpu.to(cls.device),
+            bias_cpu.to(cls.device),
+        )
 
         module.eval()
-        module.post_init()
         return module
 
     @classmethod
@@ -209,8 +224,11 @@ class TestAwqKernelOutput(unittest.TestCase):
             register_buffers=True,
         ).to(cls.device)
 
-        module.qweight.data.copy_(qweight_cpu.to(cls.device))
-        module.qzeros.data.copy_(qzeros_cpu.to(cls.device))
+        qweight_reordered = _reorder_packed_to_awq_order(qweight_cpu, cls.BITS)
+        qzeros_reordered = _reorder_packed_to_awq_order(qzeros_cpu, cls.BITS)
+
+        module.qweight.data.copy_(qweight_reordered.to(cls.device))
+        module.qzeros.data.copy_(qzeros_reordered.to(cls.device))
         module.scales.data.copy_(scales_cpu.to(torch.float16).to(cls.device))
         module.bias.data.copy_(bias_cpu.to(torch.float16).to(cls.device))
 
@@ -235,49 +253,71 @@ class TestAwqKernelOutput(unittest.TestCase):
             out_features=cls.out_features,
             bias=True,
             adapter=None,
-            register_buffers=True,
+            register_buffers=False,
         ).to(cls.device)
 
-        module.qweight.copy_(qweight_cpu.to(cls.device))
-        module.qzeros.copy_(qzeros_cpu.to(cls.device))
-        module.scales.copy_(scales_cpu.to(cls.device))
-        module.bias.copy_(bias_cpu.to(cls.device))
+        module.load_legacy_tensors(
+            qweight_cpu.to(cls.device),
+            qzeros_cpu.to(cls.device),
+            scales_cpu.to(cls.device),
+            bias_cpu.to(cls.device),
+        )
 
         module.eval()
-        module.post_init()
         return module
 
     @classmethod
+    def _parse_shapes(cls, expr: str) -> List[Tuple[int, int]]:
+        shapes: List[Tuple[int, int]] = []
+        for part in expr.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            dim_str, samples_str = part.split(":", 1)
+            shapes.append((int(dim_str), int(samples_str)))
+        return shapes
+
+    @classmethod
     def _generate_inputs(cls) -> List[torch.Tensor]:
-        large_shapes = [(4, 32), (2, 64), (1, 96)]
-        medium_shapes = [(2, 32), (1, 48), (1, 32)]
-        small_shapes = [(1, 32), (1, 24), (1, 16)]
+        large_shapes = [(1, 256), (16, 128), (32, 64), (64, 32), (128, 16)]
+        medium_shapes = [(1, 128), (16, 64), (32, 32), (64, 16)]
+        small_shapes = [(1, 64), (8, 32), (16, 16)]
 
-        try:
-            total_mem_gb = (
-                torch.cuda.get_device_properties(cls.device).total_memory
-                / (1024 ** 3)
-            )
-        except Exception:  # pragma: no cover
-            total_mem_gb = 0.0
-
-        if os.getenv("GPTQMODEL_FAST_TESTS", "0") == "1":
-            shapes = small_shapes
-        elif total_mem_gb >= 80:
-            shapes = large_shapes
-        elif total_mem_gb >= 48:
-            shapes = medium_shapes
+        env_shapes = os.getenv("GPTQMODEL_KERNEL_TEST_SHAPES")
+        if env_shapes:
+            shapes = cls._parse_shapes(env_shapes)
         else:
-            shapes = small_shapes
+            total_mem_gb = 0.0
+            if torch.cuda.is_available():
+                device_index = cls.device.index if cls.device.index is not None else 0
+                try:  # pragma: no cover - hardware dependent
+                    if torch.cuda.device_count() > device_index:
+                        props = torch.cuda.get_device_properties(device_index)
+                        total_mem_gb = props.total_memory / (1024 ** 3)
+                except Exception:  # pragma: no cover - fall back to smallest shapes
+                    total_mem_gb = 0.0
+
+            if os.getenv("GPTQMODEL_FAST_TESTS", "0") == "1":
+                shapes = small_shapes
+            elif total_mem_gb >= 80:
+                shapes = large_shapes
+            elif total_mem_gb >= 48:
+                shapes = medium_shapes
+            else:
+                shapes = small_shapes
+
+        cls._shape_plan = shapes
+        cls._random_input_sample_size = sum(samples for _, samples in shapes)
 
         inputs: List[torch.Tensor] = []
-        for batch, tokens in shapes:
-            tensor = torch.rand(
-                (batch, tokens, cls.in_features),
-                device=cls.device,
-                dtype=torch.float16,
-            )
-            inputs.append(tensor)
+        for leading_dim, samples in shapes:
+            for _ in range(samples):
+                tensor = torch.rand(
+                    (leading_dim, cls.in_features),
+                    device=cls.device,
+                    dtype=torch.float16,
+                )
+                inputs.append(tensor)
         return inputs
 
     @classmethod
@@ -327,15 +367,18 @@ class TestAwqKernelOutput(unittest.TestCase):
             diff = torch.abs(reference_fp32 - actual_fp32)
             max_abs_diff = max(max_abs_diff, float(diff.max().item()))
             mean_abs_diff += float(diff.mean().item())
-            is_close_tensor = torch.isclose(reference_fp32, actual_fp32, rtol=0.15, atol=atol)
+            is_close_tensor = torch.isclose(reference, actual, rtol=0.15, atol=atol)
             if not bool(torch.all(is_close_tensor)):
+                sample_max = float(diff.max().item())
+                sample_mean = float(diff.mean().item())
                 failures.append(
-                    "Sample {idx}:\nExpected ({ref_label}) = {expected}\nActual = {actual_val}".format(
+                    "Sample {idx}: max_abs_diff={max_diff:.6f}, mean_abs_diff={mean_diff:.6f}, "
+                    "rtol=0.15, atol={atol:.6f}".format(
                         idx=idx,
-                        ref_label=reference_label,
-                        expected=reference_fp32.detach().cpu().tolist(),
-                        actual_val=actual_fp32.detach().cpu().tolist(),
-                    )
+                        max_diff=sample_max,
+                        mean_diff=sample_mean,
+                        atol=atol,
+                    ),
                 )
 
         status = f"{GREEN}PASS{RESET}" if not failures else f"{RED}FAIL{RESET}"
@@ -370,12 +413,18 @@ class TestAwqKernelOutput(unittest.TestCase):
         self.log.info("\n" + title + "\n" + table)
 
         if failures:
+            preview = "\n".join(failures[:5])
+            if len(failures) > 5:
+                preview += f"\n... ({len(failures) - 5} additional mismatches)"
             raise AssertionError(
-                f"{len(failures)} mismatched outputs for backend `{backend}`"
+                f"{len(failures)} mismatched outputs for backend `{backend}` "
+                f"(rtol=0.15, atol={atol:.6f})\n{preview}"
             )
 
     @parameterized.expand(backend_cases)
-    def test_awq_kernel_outputs(self, backend: BACKEND, dtype: torch.dtype, atol: float) -> None:
+    def test_awq_kernel_outputs(
+        self, _case_name: str, backend: BACKEND, dtype: torch.dtype, atol: float
+    ) -> None:
         self._maybe_skip_backend(backend)
 
         module = self.modules.get(backend)
@@ -387,7 +436,8 @@ class TestAwqKernelOutput(unittest.TestCase):
         if backend == self.baseline_backend:
             actual_outputs = reference_outputs
         else:
-            actual_outputs = self._forward(module, inputs)
+            forward_kwargs = self._forward_kwargs.get(dtype, {})
+            actual_outputs = self._forward(module, inputs, **forward_kwargs)
         self._summarize_results(
             reference_outputs=reference_outputs,
             actual_outputs=actual_outputs,

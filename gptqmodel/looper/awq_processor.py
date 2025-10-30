@@ -68,6 +68,10 @@ class AWQProcessor(LoopProcessor):
         self.export_compatible = False
 
         self.version = qcfg.format
+        if self.version == FORMAT.GEMM:
+            self.version = FORMAT.GEMM_V2
+        elif self.version == FORMAT.GEMV:
+            self.version = FORMAT.GEMV_V2
 
         # TODO Can it be configured?
         # The maximum sequence length of the calibration dataset. Discard samples greater than max_calib_seq_len.
@@ -675,13 +679,13 @@ class AWQProcessor(LoopProcessor):
 
             linear_layer.weight.data = wq
 
-            if self.version == "gemm":
+            if self.version in ("gemm", "gemm_v2"):
                 scales = scales.t().contiguous()
                 if zeros is not None:
                     zeros = zeros.t().contiguous()
                 q_linear_module = WQLinear_GEMM
 
-            elif self.version == "gemv":
+            elif self.version in ("gemv", "gemv_v2"):
                 q_linear_module = WQLinear_GEMV
 
             elif self.version == "marlin":
@@ -790,9 +794,11 @@ class AWQProcessor(LoopProcessor):
         module.state.pop("w", None) # no need for original weights now
 
     def finalize(self, model: BaseQModel, **kwargs):
-        if model.quantize_config.format == FORMAT.GEMM:
+        if model.quantize_config.format in (FORMAT.GEMM, FORMAT.GEMM_V2):
+            model.quantize_config.format = FORMAT.GEMM_V2
             model.qlinear_kernel = AwqGEMMQuantLinear
-        elif model.quantize_config.format == FORMAT.GEMV:
+        elif model.quantize_config.format in (FORMAT.GEMV, FORMAT.GEMV_V2):
+            model.quantize_config.format = FORMAT.GEMV_V2
             model.qlinear_kernel = AwqGEMVQuantLinear
         elif model.quantize_config.format == FORMAT.GEMV_FAST:
             model.qlinear_kernel = AwqGEMVFastQuantLinear
