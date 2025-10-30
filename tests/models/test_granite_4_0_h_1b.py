@@ -8,17 +8,13 @@ from model_test import ModelTest
 from gptqmodel.utils.eval import EVAL
 
 
-# a100:7, MARLIN kernel
-# desc_act = False, act_group_aware = False 0.3200/0.3447
-# desc_act = False, act_group_aware = True 0.3181/0.3481
-# desc_act = True, REGRESSION 0.3191/0.3601
-# a100:6+7: MARLIN kernel
-# desc_act = False, act_group_aware = True 0.3217/0.3643
+# a100:0, TORCH kernel
+# desc_act = False, act_group_aware = True
 # | Metric                         |   MARLIN |
 # |--------------------------------|----------|
-# | arc_challenge :: acc,none      |   0.3174 |
-# | arc_challenge :: acc_norm,none |   0.3601 |
-# | mmlu_stem :: acc,none          |   0.3186 |
+# | arc_challenge :: acc,none      |   0.3968 |
+# | arc_challenge :: acc_norm,none |   0.4138 |
+# | mmlu_stem :: acc,none          |   0.4015 |
 class Test_Granite_4_0_H_1B(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/granite-4.0-h-1b" # "ibm-granite/granite-4.0-h-1b"
     GROUP_SIZE = 32
