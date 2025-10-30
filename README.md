@@ -128,9 +128,7 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 ## What is GPT-QModel?
 GPT-QModel is a production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF Transformers, vLLM, and SGLang.
 
-Public and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
-
-GPT-QModel not only supports GPTQ but also QQQ, GPTQv2, Eora with more quantization methods and enhancements planned. 
+GPT-QModel currently supports GPTQ, AWQ, QQQ, GPTAQ, EoRa, GAR with more quantization methods and enhancements planned. 
 
 ## Quantization Support
 
