@@ -617,7 +617,11 @@ def ModelLoader(cls):
             # 1–3. Assign input embeddings, layers, and ignored modules
             # -------------------------------------------------------------
             # Input embeddings → GPU 0
-            in_emb = model.get_input_embeddings() if hasattr(model, "get_input_embeddings") else None
+            try:
+                in_emb = model.get_input_embeddings()
+            except NotImplementedError:
+                log.warning("Model does not implement get_input_embeddings. Skipping input embeddings assignment.")
+                in_emb = None
             assign(in_emb, device_ids[0])
 
             # Alternating layers
