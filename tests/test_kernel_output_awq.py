@@ -267,36 +267,57 @@ class TestAwqKernelOutput(unittest.TestCase):
         return module
 
     @classmethod
+    def _parse_shapes(cls, expr: str) -> List[Tuple[int, int]]:
+        shapes: List[Tuple[int, int]] = []
+        for part in expr.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            dim_str, samples_str = part.split(":", 1)
+            shapes.append((int(dim_str), int(samples_str)))
+        return shapes
+
+    @classmethod
     def _generate_inputs(cls) -> List[torch.Tensor]:
-        large_shapes = [(4, 32), (2, 64), (1, 96)]
-        medium_shapes = [(2, 32), (1, 48), (1, 32)]
-        small_shapes = [(1, 32), (1, 24), (1, 16)]
+        large_shapes = [(1, 256), (16, 128), (32, 64), (64, 32), (128, 16)]
+        medium_shapes = [(1, 128), (16, 64), (32, 32), (64, 16)]
+        small_shapes = [(1, 64), (8, 32), (16, 16)]
 
-        try:
-            total_mem_gb = (
-                torch.cuda.get_device_properties(cls.device).total_memory
-                / (1024 ** 3)
-            )
-        except Exception:  # pragma: no cover
-            total_mem_gb = 0.0
-
-        if os.getenv("GPTQMODEL_FAST_TESTS", "0") == "1":
-            shapes = small_shapes
-        elif total_mem_gb >= 80:
-            shapes = large_shapes
-        elif total_mem_gb >= 48:
-            shapes = medium_shapes
+        env_shapes = os.getenv("GPTQMODEL_KERNEL_TEST_SHAPES")
+        if env_shapes:
+            shapes = cls._parse_shapes(env_shapes)
         else:
-            shapes = small_shapes
+            total_mem_gb = 0.0
+            if torch.cuda.is_available():
+                device_index = cls.device.index if cls.device.index is not None else 0
+                try:  # pragma: no cover - hardware dependent
+                    if torch.cuda.device_count() > device_index:
+                        props = torch.cuda.get_device_properties(device_index)
+                        total_mem_gb = props.total_memory / (1024 ** 3)
+                except Exception:  # pragma: no cover - fall back to smallest shapes
+                    total_mem_gb = 0.0
+
+            if os.getenv("GPTQMODEL_FAST_TESTS", "0") == "1":
+                shapes = small_shapes
+            elif total_mem_gb >= 80:
+                shapes = large_shapes
+            elif total_mem_gb >= 48:
+                shapes = medium_shapes
+            else:
+                shapes = small_shapes
+
+        cls._shape_plan = shapes
+        cls._random_input_sample_size = sum(samples for _, samples in shapes)
 
         inputs: List[torch.Tensor] = []
-        for batch, tokens in shapes:
-            tensor = torch.rand(
-                (batch, tokens, cls.in_features),
-                device=cls.device,
-                dtype=torch.float16,
-            )
-            inputs.append(tensor)
+        for leading_dim, samples in shapes:
+            for _ in range(samples):
+                tensor = torch.rand(
+                    (leading_dim, cls.in_features),
+                    device=cls.device,
+                    dtype=torch.float16,
+                )
+                inputs.append(tensor)
         return inputs
 
     @classmethod
