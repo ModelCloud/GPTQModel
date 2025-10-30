@@ -12,7 +12,7 @@ class TestKimiLinear(ModelTest):
     # FORMAT = FORMAT.GEMM
     # METHOD = METHOD.AWQ
 
-    NATIVE_MODEL_ID = "/monster/data/model/Kimi-Linear-48B-A3B-Instruct"
+    NATIVE_MODEL_ID = "/mnt/shared/Kimi-Linear-48B-A3B-Instruct"
     TRUST_REMOTE_CODE = True
     DELETE_QUANTIZED_MODEL = False
     DATASET_SIZE = 1024
