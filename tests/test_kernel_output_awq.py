@@ -57,12 +57,12 @@ class TestAwqKernelOutput(unittest.TestCase):
 
     baseline_backend = BACKEND.TORCH_AWQ
     backend_cases = [
-        (baseline_backend, torch.float16, 0.0),
-        (baseline_backend, torch.bfloat16, 0.0),
-        (BACKEND.GEMM, torch.float16, 0.001),
-        (BACKEND.GEMM, torch.bfloat16, 0.05),
-        (BACKEND.MARLIN, torch.float16, 0.02),
-        (BACKEND.MARLIN, torch.bfloat16, 0.05),
+        ("torch_awq_fp16", baseline_backend, torch.float16, 0.0),
+        ("torch_awq_bf16", baseline_backend, torch.bfloat16, 0.0),
+        ("gemm_fp16", BACKEND.GEMM, torch.float16, 0.001),
+        ("gemm_bf16", BACKEND.GEMM, torch.bfloat16, 0.05),
+        ("marlin_fp16", BACKEND.MARLIN, torch.float16, 0.02),
+        ("marlin_bf16", BACKEND.MARLIN, torch.bfloat16, 0.05),
     ]
 
     @classmethod
@@ -369,13 +369,16 @@ class TestAwqKernelOutput(unittest.TestCase):
             mean_abs_diff += float(diff.mean().item())
             is_close_tensor = torch.isclose(reference_fp32, actual_fp32, rtol=0.15, atol=atol)
             if not bool(torch.all(is_close_tensor)):
+                sample_max = float(diff.max().item())
+                sample_mean = float(diff.mean().item())
                 failures.append(
-                    "Sample {idx}:\nExpected ({ref_label}) = {expected}\nActual = {actual_val}".format(
+                    "Sample {idx}: max_abs_diff={max_diff:.6f}, mean_abs_diff={mean_diff:.6f}, "
+                    "rtol=0.15, atol={atol:.6f}".format(
                         idx=idx,
-                        ref_label=reference_label,
-                        expected=reference_fp32.detach().cpu().tolist(),
-                        actual_val=actual_fp32.detach().cpu().tolist(),
-                    )
+                        max_diff=sample_max,
+                        mean_diff=sample_mean,
+                        atol=atol,
+                    ),
                 )
 
         status = f"{GREEN}PASS{RESET}" if not failures else f"{RED}FAIL{RESET}"
@@ -415,7 +418,9 @@ class TestAwqKernelOutput(unittest.TestCase):
             )
 
     @parameterized.expand(backend_cases)
-    def test_awq_kernel_outputs(self, backend: BACKEND, dtype: torch.dtype, atol: float) -> None:
+    def test_awq_kernel_outputs(
+        self, _case_name: str, backend: BACKEND, dtype: torch.dtype, atol: float
+    ) -> None:
         self._maybe_skip_backend(backend)
 
         module = self.modules.get(backend)
