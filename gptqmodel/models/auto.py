@@ -102,6 +102,7 @@ from .definitions.instella import InstellaQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
+from .definitions.kimi_linear import KimiLinearQModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
 from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel  # noqa: E402
@@ -153,6 +154,7 @@ MODEL_MAP = {
     "gpt_neo": GptNeoQModel,
     "kimi_k2": DeepSeekV3QModel, # 100% DeepSeekV3QModel clone
     "klear": KlearQModel,
+    "kimi_linear": KimiLinearQModel,
     "gpt_neox": GPTNeoXQModel,
     "gptj": GptJQModel,
     "gpt2": GPT2QModel,

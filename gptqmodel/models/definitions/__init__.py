@@ -63,6 +63,7 @@ from .pangu_alpha import PanguAlphaQModel
 from .longcat_flash import LongCatFlashQModel
 from .apertus import ApertusQModel
 from .klear import KlearQModel
+from .kimi_linear import KimiLinearQModel
 from .llava_qwen2 import LlavaQwen2QModel
 from .nemotron_h import NemotronHQModel
 from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
