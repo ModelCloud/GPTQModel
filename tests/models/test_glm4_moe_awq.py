@@ -5,8 +5,9 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
 from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.utils.eval import EVAL
+
 
 class TestGlm4Moe(ModelTest):
     FORMAT = FORMAT.GEMM

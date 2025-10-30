@@ -7,10 +7,11 @@
 
 import threading
 import time
+from importlib.metadata import version
+
+from packaging.version import InvalidVersion, Version
 
 from .safe import ThreadSafe
-from importlib.metadata import version
-from packaging.version import Version, InvalidVersion
 
 
 _PATCHED_ATTR = "_gptqmodel_locked_save_file"
@@ -37,7 +38,7 @@ __all__ = ["patch_safetensors_save_file", "patch_triton_autotuner"]
 
 def patch_triton_autotuner() -> None:
     try:
-        import triton
+        import triton # noqa
         from triton.runtime import autotuner as module
     except ImportError:
         return
