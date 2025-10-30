@@ -130,6 +130,22 @@ class ModelTest(unittest.TestCase):
         {"prompt": "Name the largest ocean on Earth.", "keywords": ["pacific"]},
     ]
 
+    STORAGE_DIR = "/tmp"
+
+    @classmethod
+    def _resolve_storage_dir(cls) -> str:
+        storage_root = cls.STORAGE_DIR or tempfile.gettempdir()
+        storage_path = Path(storage_root).expanduser()
+        try:
+            storage_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(f"Failed to create storage directory `{storage_path}`") from exc
+        try:
+            resolved = storage_path.resolve()
+        except OSError:
+            resolved = storage_path
+        return str(resolved)
+
     def _normalize_task_identifier(self, task):
         if isinstance(task, Enum):
             return task.value
@@ -542,11 +558,12 @@ class ModelTest(unittest.TestCase):
         if self.SAVE_PATH:
             return contextlib.nullcontext(self.SAVE_PATH), self.SAVE_PATH, None
 
+        storage_root = self._resolve_storage_dir()
         if need_eval:
-            tmp_dir = tempfile.mkdtemp()
+            tmp_dir = tempfile.mkdtemp(dir=storage_root)
             return contextlib.nullcontext(tmp_dir), tmp_dir, lambda: shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        tmp_context = tempfile.TemporaryDirectory()
+        tmp_context = tempfile.TemporaryDirectory(dir=storage_root)
         return tmp_context, tmp_context.name, tmp_context.cleanup
 
     def _resolve_quantized_model_path(self, model_candidate):
@@ -565,7 +582,7 @@ class ModelTest(unittest.TestCase):
         if not target_path or not isinstance(target_path, str):
             return False
 
-        temp_root = os.path.realpath(tempfile.gettempdir())
+        temp_root = os.path.realpath(self._resolve_storage_dir())
         candidate_path = os.path.realpath(target_path)
         if not candidate_path.startswith(temp_root):
             return False
@@ -943,7 +960,8 @@ class ModelTest(unittest.TestCase):
         try:
             task_names = self._normalize_task_list()
             aggregated_results = {}
-            with tempfile.TemporaryDirectory() as tmp_dir:
+            storage_root = self._resolve_storage_dir()
+            with tempfile.TemporaryDirectory(dir=storage_root) as tmp_dir:
                 model_path = getattr(model, "model_local_path", None)
                 if isinstance(model, str):
                     model_path = model
