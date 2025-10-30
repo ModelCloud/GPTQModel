@@ -39,15 +39,15 @@ class HookedConv1D(transformers.Conv1D):
         return custom
 
     @torch.inference_mode()
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        original_device = input.device
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        original_device = x.device
         target_device = self.weight.data.device
         if original_device != target_device:
-            input = input.to(device=target_device)
-        output = super().forward(input)
+            x = x.to(device=target_device)
+        output = super().forward(x)
 
         if self.forward_hook:
-            self.forward_hook(self, (input,), output)
+            self.forward_hook(self, (x,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
 
@@ -103,14 +103,14 @@ class HookedConv1d(torch.nn.Conv1d):
         return custom
 
     @torch.inference_mode()
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        original_device = input.device
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        original_device = x.device
         target_device = self.weight.data.device
         if original_device != target_device:
-            input = input.to(device=target_device)
-        output = super().forward(input)
+            x = x.to(device=target_device)
+        output = super().forward(x)
         if self.forward_hook:
-            self.forward_hook(self, (input,), output)
+            self.forward_hook(self, (x,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
         if output.device != original_device:
