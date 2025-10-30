@@ -342,6 +342,9 @@ class AWQProcessor(LoopProcessor):
             )
             with state.lock:
                 state.quantized = True
+                state.modules.clear()
+                state.pending_modules.clear()
+                state.layer_module = None
                 state.processed_subsets.clear()
                 state.subset_total = None
                 state.previous_weight_scale = None
@@ -514,13 +517,16 @@ class AWQProcessor(LoopProcessor):
 
         with state.lock:
             state.quantized = True
+            state.modules.clear()
+            state.pending_modules.clear()
+            state.layer_module = None
             state.processed_subsets.clear()
             state.subset_total = None
             state.previous_weight_scale = None
 
         with self.lock:
             for name in named_childs:
-                task_entry = self.tasks.get(name)
+                task_entry = self.tasks.pop(name, None)
                 if task_entry and "inputs" in task_entry:
                     task_entry["inputs"].clear()
 
