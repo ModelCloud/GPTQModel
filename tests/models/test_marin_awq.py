@@ -8,20 +8,26 @@ from model_test import ModelTest
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
+from gptqmodel.quantization.config import FORMAT, METHOD
 from gptqmodel.utils.eval import EVAL
 
 
 class TestMarin(ModelTest):
+    DATASET_SIZE = 1024
+    GROUP_SIZE = 32
+    METHOD = METHOD.AWQ
+    FORMAT = FORMAT.GEMM
+
     NATIVE_MODEL_ID = "/monster/data/model/marin-32b-base"
     # VRAM_STRATEGY = VRAMStrategy.BALANCED
     # Marin inherits Qwen3's backbone with QK-Norm attention.
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
-            "acc": {"value": 0.5725, "floor_pct": 0.04},
+            "acc": {"value": 0.5828, "floor_pct": 0.04},
             "acc_norm": {"value": 0.6007, "floor_pct": 0.04},
         },
         EVAL.LM_EVAL.MMLU_STEM: {
-            "acc": {"value": 0.6670, "floor_pct": 0.04},
+            "acc": {"value": 0.6673, "floor_pct": 0.04},
         },
     }
 

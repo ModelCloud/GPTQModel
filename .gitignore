@@ -183,3 +183,4 @@ example.py
 /gptqmodel_ext/marlin/kernel_fp16_ku8b128.cu
 /gptqmodel_offload/
 /gptqmodel_ext/machete/generated/
+AGENT.md

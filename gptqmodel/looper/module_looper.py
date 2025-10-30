@@ -1030,7 +1030,12 @@ class ModuleLooper():
         if region_timer is not None:
             region_timer.flush()
 
-        layer_modules = self.gptq_model.simple_layer_modules(model_config=self.gptq_model.model.config, quantize_config=self.gptq_model.quantize_config)
+        is_awq_quantize = any(isinstance(proc, AWQProcessor) for proc in self.processors)
+        layer_modules = self.gptq_model.simple_layer_modules(
+            model_config=self.gptq_model.model.config,
+            quantize_config=self.gptq_model.quantize_config,
+            is_awq_quantize=is_awq_quantize,
+        )
 
         # true-sequential will replay the quantized activations after each subset has been quantized to be used for next subset quantization
         # this should always be true for gptq unless you want lower but misleading error_loss that is misleading and will lead to lower post-quantized model
@@ -1143,8 +1148,7 @@ class ModuleLooper():
 
         return total_log
 
-    def crate_named_modules(self, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe) -> Dict[str, NamedModule]:
-        is_awq_quant = isinstance(processor, AWQProcessor)
+    def crate_named_modules(self, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe, layer_module=None) -> Dict[str, NamedModule]:
         subset = {}
         for n in names:
             if n in full:
@@ -1168,20 +1172,20 @@ class ModuleLooper():
 
                 subset[name] = named_module
                 full[name] = named_module
+                if layer_module is not None:
+                    named_module.state.setdefault("layer_module", layer_module)
 
-            if not is_awq_quant:
-                if isinstance(processor, GPTQProcessor):
-                    processor.preprocess(subset[name], fail_safe=fail_safe)
-                else:
-                    processor.preprocess(subset[name])
-                # some modules are skipped
-                if processor.is_skipped(subset[name]):
-                    skipped_modules.append(name)
+            if isinstance(processor, GPTQProcessor):
+                processor.preprocess(subset[name], fail_safe=fail_safe)
+            else:
+                processor.preprocess(subset[name])
+            # some modules are skipped
+            if processor.is_skipped(subset[name]):
+                skipped_modules.append(name)
 
-        if not is_awq_quant:
-            for name in skipped_modules:
-                subset.pop(name)
-                task_map = getattr(processor, "tasks", None)
-                if task_map is not None:
-                    task_map.pop(name, None)
+        for name in skipped_modules:
+            subset.pop(name)
+            task_map = getattr(processor, "tasks", None)
+            if task_map is not None:
+                task_map.pop(name, None)
         return subset

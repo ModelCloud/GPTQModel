@@ -13,31 +13,34 @@ from gptqmodel.utils.eval import EVAL
 # desc_act = False, act_group_aware = False 0.2500/0.2841
 # desc_act = False, act_group_aware = True 0.3063/0.3456
 # desc_act = True, 0.3089/0.3328
-class TestLlama3_2(ModelTest):
+class TestLlama3_2_awq(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
+    EVAL_BATCH_SIZE = 64
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
-            "acc": {"value": 0.3234, "floor_pct": 0.36},
-            "acc_norm": {"value": 0.3524, "floor_pct": 0.36},
+            "acc": {
+                "value": 0.3200,
+                "floor_pct": 0.04,
+                "ceil_pct": 0.10,
+            },
+            "acc_norm": {
+                "value": 0.3362,
+                "floor_pct": 0.04,
+                "ceil_pct": 0.10,
+            },
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
+            "chat_template": False,
+            "acc": {
+                "value": 0.3657,
+                "floor_pct": 0.04,
+                "ceil_pct": 0.10,
+            },
         },
     }
-    V2 = False
-    DEBUG = True
-    ACT_GROUP_AWARE = False
-    DESC_ACT = False
-    DATASET_SIZE = 1024
-    DATASET_SORT = "desc"
-    QUANT_BATCH_SIZE = 4
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
-    # USE_FLASH_ATTN = False
-    # EORA = Lora(
-    #     # for quant, path is save path. for load, it is loading path
-    #     path="./eora_test",
-    #     rank=128,
-    # )
-    # b1 = 0.315, b4 = 0.3106, b8 = 0.3148, b32 = 0.3148, b16 = 0.3234
 
-    def test_llama3_2(self):
+    def test_llama3_2_awq(self):
         self.quant_lm_eval()

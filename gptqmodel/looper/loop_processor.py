@@ -545,7 +545,15 @@ class LoopProcessor:
         pass
 
     # do work and return processor.self state which will updated/merged
-    def process(self, module: NamedModule, device: torch.device = None):
+    def process(
+            self,
+            module: NamedModule,
+            device: torch.device = None,
+            subset: Optional[Dict[str, NamedModule]] = None,
+            previous_subset: Optional[Dict[str, NamedModule]] = None,
+            subset_index: Optional[int] = None,
+            subset_total: Optional[int] = None,
+    ):
         pass
 
     # last step, after all loop processor is called
