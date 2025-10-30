@@ -59,10 +59,10 @@ class TestAwqKernelOutput(unittest.TestCase):
     backend_cases = [
         ("torch_awq_fp16", baseline_backend, torch.float16, 0.0),
         ("torch_awq_bf16", baseline_backend, torch.bfloat16, 0.0),
-        ("gemm_fp16", BACKEND.GEMM, torch.float16, 0.001),
-        ("gemm_bf16", BACKEND.GEMM, torch.bfloat16, 0.05),
-        ("marlin_fp16", BACKEND.MARLIN, torch.float16, 0.02),
-        ("marlin_bf16", BACKEND.MARLIN, torch.bfloat16, 0.05),
+        ("gemm_fp16", BACKEND.GEMM, torch.float16, 0.0039),
+        ("gemm_bf16", BACKEND.GEMM, torch.bfloat16, 0.016),
+        ("marlin_fp16", BACKEND.MARLIN, torch.float16, 0.016),
+        ("marlin_bf16", BACKEND.MARLIN, torch.bfloat16, 0.016),
     ]
 
     @classmethod
