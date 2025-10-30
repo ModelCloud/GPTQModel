@@ -292,7 +292,7 @@ def make_quant(
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
         except NotImplementedError as e:
-            log.info(f"Kernel: skipped -> `{cls}`. {str(e)}")
+            log.info(f"Kernel: skipped -> `{cls}`.")
 
             # only fallback to other quant linears when backend is auto.
             if backend not in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
@@ -751,8 +751,6 @@ def pack_module(
             "original": "module.pack_original",
         }
 
-        effective_impl = "original"
-
         packer_label = label_map[effective_impl]
 
         with log_time_block(
@@ -761,20 +759,26 @@ def pack_module(
             module_name=name,
         ):
             if effective_impl == "gpu":
-                module.pack_gpu(
-                    linear=layer,
-                    scales=q_scales,
-                    zeros=q_zeros,
-                    g_idx=q_g_idx,
-                    device=target_device,
-                )
+                try:
+                    module.pack_gpu(
+                        linear=layer,
+                        scales=q_scales,
+                        zeros=q_zeros,
+                        g_idx=q_g_idx,
+                        device=target_device,
+                    )
+                except ValueError:
+                    module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
             elif effective_impl == "block":
-                module.pack_block(
-                    linear=layer,
-                    scales=q_scales,
-                    zeros=q_zeros,
-                    g_idx=q_g_idx,
-                )
+                try:
+                    module.pack_block(
+                        linear=layer,
+                        scales=q_scales,
+                        zeros=q_zeros,
+                        g_idx=q_g_idx,
+                    )
+                except ValueError:
+                    module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
             else:
                 module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
 
