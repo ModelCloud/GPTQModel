@@ -15,9 +15,6 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
-GENERATION_SAMPLING_FIELDS = ("temperature", "top_p")
-
-
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False
     if cfg is None:
@@ -27,12 +24,6 @@ def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: 
         cfg.do_sample = True
         changed = True
 
-    if drop_sampling_fields:
-        for field in GENERATION_SAMPLING_FIELDS:
-            if hasattr(cfg, field):
-                if getattr(cfg, field) is not None:
-                    changed = True
-                setattr(cfg, field, None)
     return changed
 
 
@@ -43,18 +34,11 @@ def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
         return None
 
     cleaned = dict(config_dict)
-    removed = False
-    for field in GENERATION_SAMPLING_FIELDS:
-        if field in cleaned:
-            cleaned.pop(field, None)
-            removed = True
     if cleaned.get("do_sample") is not True:
         cleaned["do_sample"] = True
 
     cfg = GenerationConfig.from_dict(cleaned, **kwargs)
-    if removed:
-        log.info("Model: Removed unsupported sampling fields from `generation_config.json` during load.")
-    _sanitize_generation_config(cfg, drop_sampling_fields=True)
+    _sanitize_generation_config(cfg, drop_sampling_fields=False)
     return cfg
 
 
@@ -68,7 +52,7 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
                 cfg = _load_sanitized_generation_config(path)
                 if cfg is None:
                     cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
-                    _sanitize_generation_config(cfg, drop_sampling_fields=True)
+                    _sanitize_generation_config(cfg, drop_sampling_fields=False)
                 if cfg != model.generation_config:
                     # migrated pad_token_id to config
                     if hasattr(model.generation_config, "pad_token_id"):
@@ -90,7 +74,7 @@ def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
 
 
 def autofix_hf_generation_config(cfg: GenerationConfig):
-    _sanitize_generation_config(cfg, drop_sampling_fields=True)
+    _sanitize_generation_config(cfg, drop_sampling_fields=False)
     # HF has recently started to perform very strict validation model save which results in warnings on load()
     # to become exceptions on save().
     if cfg.do_sample is False:
@@ -125,10 +109,6 @@ def sanitize_generation_config_file(path: str) -> bool:
         return False
 
     changed = False
-    for field in GENERATION_SAMPLING_FIELDS:
-        if field in data:
-            data.pop(field, None)
-            changed = True
 
     if data.get("do_sample") is not True:
         data["do_sample"] = True

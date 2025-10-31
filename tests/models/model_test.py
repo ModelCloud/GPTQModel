@@ -24,7 +24,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:2
 
 from enum import Enum  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Dict, List  # noqa: E402
+from typing import Any, Dict, List  # noqa: E402
 
 from logbar import LogBar  # noqa: E402
 from tabulate import tabulate  # noqa: E402
@@ -95,6 +95,7 @@ class ModelTest(unittest.TestCase):
     DATASET_SORT = "desc"
     DELETE_QUANTIZED_MODEL = True
     EVAL_TASKS = None
+    LOAD_MODEL_EXTRA_ARGS: Dict[str, Any] = {}
 
     KERNEL_QUANT = {}  # kernel sets
     KERNEL_INFERENCE = {}  # kernel sets
@@ -909,6 +910,9 @@ class ModelTest(unittest.TestCase):
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, backend=None, **args):
 
         load_kwargs = dict(args)
+        if self.LOAD_MODEL_EXTRA_ARGS:
+            for key, value in self.LOAD_MODEL_EXTRA_ARGS.items():
+                load_kwargs.setdefault(key, value)
 
         if self.USE_FLASH_ATTN:
             if is_flash_attn_2_available():

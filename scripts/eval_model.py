@@ -13,7 +13,7 @@ from typing import Dict, Iterable, List, Tuple
 
 import gptqmodel
 from tabulate import tabulate
-
+from gptqmodel import GPTQModel
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.utils.eval import EVAL
 

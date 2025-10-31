@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 11/1/2025 5.1.0-dev: ✨Brumby (attention free) model support. 
 * 10/31/2025 5.1.0-dev: ✨IBM Granite Nano support. New `calibration_concat_separator` config option.
 * 10/30/2025 5.1.0-dev: 🎉AWQ support out of beta with full feature support in including multi-gpu quant and MoE vram saving.  
 * 10/30/2025 5.1.0-dev: ✨Marin model. New AWQ Torch reference kernel. Fix AWQ Marlin kernel for bf16. Fix GLM 4.5/4.6 MoE missing `mtp` layers on model save (HF bug). Modular refractor. 
@@ -180,20 +181,21 @@ Native support support some of the most popular multi-modal models:
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
 ## Model Support  
-| Model             |   |             |   |                |   |                |   |                     |   |
-|-------------------|---|-------------|---|----------------|---|----------------|---|---------------------|---|
-| Apertus           | ✅ | EXAONE 3.0  | ✅ | InternLM 1/2.5 | ✅ | Mixtral        | ✅ | Qwen 2/3 (Next/MoE) | ✅ |
-| Baichuan          | ✅ | Falcon (H1) | ✅ | Kimi K2        | ✅ | MobileLLM      | ✅ | Qwen 2/2.5/3 VL     | ✅ |
-| Bloom             | ✅ | FastVLM     | ✅ | Klear          | ✅ | MOSS           | ✅ | Qwen 2.5/3 Omni     | ✅ |
-| ChatGLM           | ✅ | Gemma 1/2/3 | ✅ | LING/RING      | ✅ | MPT            | ✅ | RefinedWeb          | ✅ |
-| CodeGen           | ✅ | GPTBigCod   | ✅ | Llama 1-3.3    | ✅ | Nemotron H     | ✅ | StableLM            | ✅ |
-| Cohere 1-2        | ✅ | GPTQ-Neo(X) | ✅ | Llama 3.2 VL   | ✅ | Nemotron Ultra | ✅ | StarCoder2          | ✅ |
-| DBRX Converted    | ✅ | GPT-2       | ✅ | Llama 4        | ✅ | OPT            | ✅ | TeleChat2           | ✅ |
-| Deci              | ✅ | GPT-J       | ✅ | LongCatFlash   | ✅ | OLMo2          | ✅ | Yi                  | ✅ |
-| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS     | ✅ | LongLLaMA      | ✅ | Ovis 1.6/2     | ✅ | Seed-OSS            | ✅ |
-| DeepSeek-V2-Lite  | ✅ | Granite     | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | XVERSE              | ✅ |
-| Dream             | ✅ | GRIN-MoE    | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | Minimax M2          | ✅ |
-| ERNIE 4.5         | ✅ | Hymba       | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ | GLM 4.X             | ✅ |
+| Model             |   |             |   |               |  |           |  |                 |  |
+|-------------------|---|-------------|---|---------------|--|-----------|--|-----------------|--|
+| Apertus           | ✅ | EXAONE 3.0  | ✅ | InternLM 1/2.5 | ✅ | Mixtral   | ✅ | Qwen 2/3 (Next/MoE) | ✅ |
+| Baichuan          | ✅ | Falcon (H1) | ✅ | Kimi K2       | ✅ | MobileLLM | ✅ | Qwen 2/2.5/3 VL | ✅ |
+| Bloom             | ✅ | FastVLM     | ✅ | Klear         | ✅ | MOSS      | ✅ | Qwen 2.5/3 Omni | ✅ |
+| ChatGLM           | ✅ | Gemma 1/2/3 | ✅ | LING/RING     | ✅ | MPT       | ✅ | RefinedWeb      | ✅ |
+| CodeGen           | ✅ | GPTBigCod   | ✅ | Llama 1-3.3   | ✅ | Nemotron H | ✅ | StableLM        | ✅ |
+| Cohere 1-2        | ✅ | GPTQ-Neo(X) | ✅ | Llama 3.2 VL  | ✅ | Nemotron Ultra | ✅ | StarCoder2      | ✅ |
+| DBRX Converted    | ✅ | GPT-2       | ✅ | Llama 4       | ✅ | OPT       | ✅ | TeleChat2       | ✅ |
+| Deci              | ✅ | GPT-J       | ✅ | LongCatFlash  | ✅ | OLMo2     | ✅ | Yi              | ✅ |
+| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS     | ✅ | LongLLaMA     | ✅ | Ovis 1.6/2 | ✅ | Seed-OSS        | ✅ |
+| DeepSeek-V2-Lite  | ✅ | Granite     | ✅ | Instella      | ✅ | Phi 1-4   | ✅ | XVERSE          | ✅ |
+| Dream             | ✅ | GRIN-MoE    | ✅ | MiniCPM3      | ✅ | PanGu-α   | ✅ | Minimax M2      | ✅ |
+| ERNIE 4.5         | ✅ | Hymba       | ✅ | Mistral       | ✅ | Qwen 1/2/3 | ✅ | GLM 4.X         | ✅ |
+| Brumby            | ✅ |             |   |               |  |      |  |              |  |
 
 
 ## Platform and HW Support 
