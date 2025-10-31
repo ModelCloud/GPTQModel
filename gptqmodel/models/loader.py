@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Union
 
 import torch
 import transformers
+from itertools import chain
 
 from ..utils.structure import print_module_tree
 
@@ -561,9 +562,6 @@ def ModelLoader(cls):
                 )
 
 
-
-        import torch
-
         def build_layerwise_device_map(
                 model,
                 device,
@@ -625,15 +623,35 @@ def ModelLoader(cls):
             assign(in_emb, device_ids[0])
 
             # Alternating layers
+            layer_name2devid: Dict[str, int] = {}
+
             for i, layer in enumerate(layers):
                 gpu = device_ids[i % num_gpus]
                 assign(layer, gpu)
+                lname = mod2name.get(layer)
+                if lname is not None:
+                    layer_name2devid[lname] = gpu
 
             # Ignored modules - skip input embeddings to avoid overriding GPU 0 assignment
             for mod in ignore_modules:
                 if in_emb is not None and mod is in_emb:
                     continue  # Skip input embedding to preserve GPU 0 assignment
-                assign(mod, device_ids[-1])
+                name = mod2name.get(mod)
+                if name is None:
+                    continue
+                # walk up ancestors to find the nearest repeating layer
+                owner = name
+                dev_id = None
+                while owner:
+                    if owner in layer_name2devid:
+                        dev_id = layer_name2devid[owner]
+                        break
+                    if "." not in owner:
+                        break
+                    owner = owner.rsplit(".", 1)[0]
+                if dev_id is None:
+                    dev_id = device_ids[-1]
+                assign(mod, dev_id)
 
             # -------------------------------------------------------------
             # 4. Handle lm_head / output projection explicitly
@@ -660,7 +678,7 @@ def ModelLoader(cls):
             # 5. Safety check: ensure all params are covered
             # -------------------------------------------------------------
             missing = [
-                n for n, _ in model.named_parameters()
+                n for n, _ in chain(model.named_parameters(), model.named_buffers())
                 if not any(n == k or n.startswith(k + ".") for k in device_map)
             ]
             module_names = set(mod2name.values())
@@ -693,6 +711,24 @@ def ModelLoader(cls):
                 if child_devices and (len(child_devices) > 1 or device_str not in child_devices):
                     log.info(f"Loader: dropping parent '{name}' from device_map to preserve child placements.")
                     device_map.pop(name, None)
+
+            missing_after_prune = [
+                n for n, _ in chain(model.named_parameters(), model.named_buffers())
+                if not any(n == k or n.startswith(k + ".") for k in device_map)
+            ]
+            if missing_after_prune:
+                fallback_device = device_ids[-1]
+                for param_name in missing_after_prune:
+                    owner = param_name
+                    while owner and owner not in module_names:
+                        if "." not in owner:
+                            owner = ""
+                        else:
+                            owner = owner.rsplit(".", 1)[0]
+                    if owner:
+                        device_map.setdefault(owner, device_strs[fallback_device])
+                    else:
+                        log.info(f"Loader: unable to map param '{param_name}' to a module; skipping fallback assignment.")
 
             # optional logging for debug
             log.info(f"Loader: Built map across {num_gpus} GPU(s), "
