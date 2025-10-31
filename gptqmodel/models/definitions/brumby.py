@@ -35,3 +35,11 @@ class BrumbyQModel(BaseQModel):
             ),
         },
     ]
+
+    def after_model_load(self, model, load_quantized_model=False):
+        if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+            model.config.use_cache = False
+        generation_config = getattr(model, "generation_config", None)
+        if generation_config is not None and hasattr(generation_config, "use_cache"):
+            generation_config.use_cache = False
+        return model
