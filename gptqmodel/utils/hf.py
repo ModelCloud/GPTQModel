@@ -15,9 +15,6 @@ from ..utils.logger import setup_logger
 
 log = setup_logger()
 
-GENERATION_SAMPLING_FIELDS = ("temperature", "top_p")
-
-
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False
     if cfg is None:
@@ -27,12 +24,6 @@ def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: 
         cfg.do_sample = True
         changed = True
 
-    if drop_sampling_fields:
-        for field in GENERATION_SAMPLING_FIELDS:
-            if hasattr(cfg, field):
-                if getattr(cfg, field) is not None:
-                    changed = True
-                setattr(cfg, field, None)
     return changed
 
 
@@ -43,17 +34,10 @@ def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
         return None
 
     cleaned = dict(config_dict)
-    removed = False
-    for field in GENERATION_SAMPLING_FIELDS:
-        if field in cleaned:
-            cleaned.pop(field, None)
-            removed = True
     if cleaned.get("do_sample") is not True:
         cleaned["do_sample"] = True
 
     cfg = GenerationConfig.from_dict(cleaned, **kwargs)
-    if removed:
-        log.info("Model: Removed unsupported sampling fields from `generation_config.json` during load.")
     _sanitize_generation_config(cfg, drop_sampling_fields=False)
     return cfg
 
@@ -125,10 +109,6 @@ def sanitize_generation_config_file(path: str) -> bool:
         return False
 
     changed = False
-    for field in GENERATION_SAMPLING_FIELDS:
-        if field in data:
-            data.pop(field, None)
-            changed = True
 
     if data.get("do_sample") is not True:
         data["do_sample"] = True

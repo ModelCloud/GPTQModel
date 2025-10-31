@@ -9,17 +9,7 @@ from gptqmodel.utils.eval import EVAL
 from gptqmodel.quantization import FORMAT, METHOD
 
 
-
-# | Metric                    |   MARLIN |
-# |---------------------------|----------|
-# | arc_challenge :: acc      |   0.8900 |
-# | gsm8k_cot :: exact        |   0.8800 |
-# | gsm8k_platinum_cot :: exact_match,flexible-extract |   0.8700 |
-# | mmlu :: acc               |   0.7100 |
 class TestBrumby(ModelTest):
-    # FORMAT = FORMAT.GEMM
-    # METHOD = METHOD.AWQ
-
     GROUP_SIZE = 32
     DATASET_SIZE = 1024
     NATIVE_MODEL_ID = "/monster/data/model/Brumby-14B-Base"
