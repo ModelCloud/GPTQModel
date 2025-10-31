@@ -14,8 +14,8 @@ class TestQwen2_VL(ModelTest):
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
-            "acc": {"value": 0.3618, "floor_pct": 0.2},
-            "acc_norm": {"value": 00.3882, "floor_pct": 0.2},
+            "acc": {"value": 0.3618, "floor_pct": 0.04},
+            "acc_norm": {"value": 00.3882, "floor_pct": 0.04},
         },
     }
     TRUST_REMOTE_CODE = False
