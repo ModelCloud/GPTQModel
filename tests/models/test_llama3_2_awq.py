@@ -22,12 +22,10 @@ class TestLlama3_2_awq(ModelTest):
             "acc": {
                 "value": 0.3200,
                 "floor_pct": 0.04,
-                "ceil_pct": 0.10,
             },
             "acc_norm": {
                 "value": 0.3362,
                 "floor_pct": 0.04,
-                "ceil_pct": 0.10,
             },
         },
         EVAL.LM_EVAL.MMLU_STEM: {
@@ -35,7 +33,6 @@ class TestLlama3_2_awq(ModelTest):
             "acc": {
                 "value": 0.3657,
                 "floor_pct": 0.04,
-                "ceil_pct": 0.10,
             },
         },
     }
