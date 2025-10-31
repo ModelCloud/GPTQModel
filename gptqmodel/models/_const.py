@@ -131,5 +131,3 @@ def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:
 EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
 
 EXPERT_INDEX_PLACEHOLDER = "{expert_index}"
-
-CALIBRATION_DATASET_CONCAT_CHAR = " "

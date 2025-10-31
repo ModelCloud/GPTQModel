@@ -559,35 +559,69 @@ class GPTQ:
 
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
-        damp = self.qcfg.damp_percent
-        mean = torch.mean(torch.diag(H))
+        # Capture a writable view of the Hessian diagonal so we can restore it between attempts.
+        diag_view = H.diagonal()
+        orig_diag = diag_view.clone()
 
-        orig_diag = H.diag().clone()
-        while 0 < damp < 1:
-            try:
-                H.diagonal().add_(damp * mean)
-                H2 = torch.linalg.cholesky(H)
-                Hinv = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
-                H.diagonal().copy_(orig_diag)
-                del H2
-                break
-            except torch._C._LinAlgError as e:
-                H.diagonal().copy_(orig_diag)
-                if self.qcfg.damp_auto_increment != 0:
+        # When a block is numerically singular, pure damping can stall at 1.0.
+        # Prepare a tiny diagonal floor (relative to the largest entry) that we
+        # only inject if the normal damping loop fails. Keeping the scale near 1e-6
+        # of the dominant entry keeps the bias negligible for healthy layers while
+        # still rescuing pathological Hessian blocks.
+        base_abs_max = torch.max(orig_diag.abs()).item()
+        if not math.isfinite(base_abs_max) or base_abs_max == 0.0:
+            base_abs_max = 1.0
+        floor_base = base_abs_max * 1e-6
+        max_floor_attempts = 6
+        used_damp = self.qcfg.damp_percent
+        last_error = None
+
+        attempt = 0
+        while attempt <= max_floor_attempts:
+            if attempt == 0:
+                current_diag = orig_diag
+            else:
+                floor_increment = floor_base * math.pow(10.0, attempt - 1)
+                current_diag = torch.clamp(orig_diag + floor_increment, min=floor_increment)
+                if attempt == 1:
                     log.warn(
-                        f"Quantization: Module `{self.name}` -> Current `damp_percent = {damp:.5f}` is too low, auto-incrementing by `{self.qcfg.damp_auto_increment:.5f}`")
-                    damp += self.qcfg.damp_auto_increment
+                        f"Quantization: Module `{self.name}` -> Applying Hessian diagonal floor (+{floor_increment:.2e}) to recover positive definiteness.")
                 else:
                     log.warn(
-                        "Quantization: Module `{self.name}` -> Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp:.5f}`")
-                    raise e
+                        f"Quantization: Module `{self.name}` -> Increasing Hessian diagonal floor to +{floor_increment:.2e}.")
 
-        if not (0 < damp < 1):
-            log.error(
-                f"Quantization: Module `{self.name}` -> `damp_percent` must between 0 and 1. current is {damp}. Module cannot be correctly processed.")
-            return None, 1.0
+            diag_view.copy_(current_diag)
+            mean = torch.mean(current_diag)
+            damp = self.qcfg.damp_percent
 
-        return Hinv, damp
+            while 0 < damp < 1:
+                try:
+                    diag_view.add_(damp * mean)
+                    H2 = torch.linalg.cholesky(H)
+                    Hinv_result = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
+                    diag_view.copy_(current_diag)
+                    del H2
+                    used_damp = damp
+                    return Hinv_result, used_damp
+                except torch._C._LinAlgError as e:
+                    last_error = e
+                    diag_view.copy_(current_diag)
+                    if self.qcfg.damp_auto_increment != 0:
+                        log.warn(
+                            f"Quantization: Module `{self.name}` -> Current `damp_percent = {damp:.5f}` is too low, auto-incrementing by `{self.qcfg.damp_auto_increment:.5f}`")
+                        damp += self.qcfg.damp_auto_increment
+                    else:
+                        log.warn(
+                            f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with `damp_percent={damp:.5f}` and no auto increment configured.")
+                        break
+
+            attempt += 1
+
+        log.error(
+            f"Quantization: Module `{self.name}` -> Hessian remained non positive-definite after diagonal floor attempts. Last `damp_percent` tried = {damp:.5f}.")
+        if last_error is not None:
+            log.debug(f"Hessian failure detail: {last_error}")
+        return None, 1.0
 
     @torch.inference_mode()
     def quantize(

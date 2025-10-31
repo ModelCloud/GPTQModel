@@ -20,7 +20,14 @@ from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.threadx import DeviceThreadPool
 
 
-def _dummy_prepare_dataset(*, calibration_dataset, calibration_dataset_concat_size, calibration_dataset_sort, batch_size):
+def _dummy_prepare_dataset(
+    *,
+    calibration_dataset,
+    calibration_dataset_concat_size,
+    calibration_dataset_sort,
+    batch_size,
+    calibration_concat_separator=None,
+):
     return calibration_dataset
 
 

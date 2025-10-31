@@ -7,12 +7,10 @@ from __future__ import annotations
 import copy
 import json
 import os
-import random
 import re
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Sequence
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
 
@@ -46,7 +44,7 @@ from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, VRAMStrategy, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
-from ..utils.data import collate_data
+from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
@@ -56,7 +54,6 @@ from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from ._const import (
-    CALIBRATION_DATASET_CONCAT_CHAR,
     CPU,
     DEFAULT_MAX_SHARD_SIZE,
     DEVICE,
@@ -413,393 +410,22 @@ class BaseQModel(nn.Module):
             "HFDatasetType",
             "HFIterableDatasetType",
         ],
-        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
         calibration_dataset_concat_size: Optional[int] = None,
         calibration_dataset_sort: Optional[str] = None,
         batch_size: int = 1,
         calibration_data_min_length: int = 10,
+        calibration_concat_separator: Optional[str] = None,
     ):
-        hf_dataset_types: tuple = ()
-        if HFDataset is not None:
-            hf_dataset_types += (HFDataset,)
-        if HFIterableDataset is not None:
-            hf_dataset_types += (HFIterableDataset,)
-
-        if isinstance(calibration_dataset, str):
-            raise ValueError("Quantize: calibration dataset must be iterable, not a single string.")
-
-        if hf_dataset_types and isinstance(calibration_dataset, hf_dataset_types):
-            raw_examples = list(calibration_dataset)
-        elif isinstance(calibration_dataset, list):
-            raw_examples = calibration_dataset
-        elif isinstance(calibration_dataset, Sequence) and not isinstance(calibration_dataset, (bytes, bytearray)):
-            raw_examples = list(calibration_dataset)
-        else:
-            raw_examples = list(calibration_dataset)
-
-        if len(raw_examples) == 0:
-            raise ValueError("Quantize: calibration dataset is empty.")
-
-        def _require_tokenizer(reason: str) -> None:
-            if self.tokenizer is None:
-                raise ValueError(f"tokenizer must be provided when {reason}.")
-
-        def _to_2d_long_tensor(value: Any, name: str, idx: int) -> torch.Tensor:
-            try:
-                tensor = torch.as_tensor(value, dtype=torch.long)
-            except Exception as exc:
-                raise ValueError(f"Quantize: failed to convert `{name}` to tensor for calibration item {idx}.") from exc
-
-            if tensor.ndim == 0:
-                raise ValueError(f"Quantize: `{name}` for calibration item {idx} must be 1D or 2D, got scalar.")
-            if tensor.ndim == 1:
-                tensor = tensor.unsqueeze(0)
-            elif tensor.ndim != 2:
-                raise ValueError(
-                    f"Quantize: `{name}` for calibration item {idx} must be rank 1 or 2, got rank {tensor.ndim}."
-                )
-            return tensor
-
-        def _pack_ids(ids_value: Any, mask_value: Any, idx: int) -> Dict[str, torch.Tensor]:
-            ids_tensor = _to_2d_long_tensor(ids_value, "input_ids", idx)
-
-            if mask_value is None:
-                mask_tensor = torch.ones_like(ids_tensor, dtype=torch.long)
-            else:
-                mask_tensor = _to_2d_long_tensor(mask_value, "attention_mask", idx)
-                if mask_tensor.shape != ids_tensor.shape:
-                    if mask_tensor.numel() == ids_tensor.numel():
-                        mask_tensor = mask_tensor.reshape(ids_tensor.shape)
-                    else:
-                        raise ValueError(
-                            f"Quantize: attention_mask shape {tuple(mask_tensor.shape)} does not match input_ids shape "
-                            f"{tuple(ids_tensor.shape)} for calibration item {idx}."
-                        )
-
-            return {
-                "input_ids": ids_tensor.detach(),
-                "attention_mask": mask_tensor.detach(),
-            }
-
-        def _tokenize_text_value(text_value: Any, idx: int) -> Dict[str, torch.Tensor]:
-            _require_tokenizer("calibration data contains raw text")
-            tokenized = self.tokenizer(
-                text_value,
-                add_special_tokens=True,
-                return_tensors="pt",
-            )
-            input_ids = tokenized["input_ids"]
-            attention_mask = tokenized.get("attention_mask")
-            return _pack_ids(input_ids, attention_mask, idx)
-
-        def _tokenize_messages_value(messages_value: Any, idx: int) -> Dict[str, torch.Tensor]:
-            _require_tokenizer("calibration data uses the `messages` feature")
-            apply_fn = getattr(self.tokenizer, "apply_template", None)
-            if apply_fn is None:
-                raise ValueError("tokenizer must expose `apply_template` to handle `messages` calibration data.")
-            try:
-                templated = apply_fn(messages_value, tokenize=False)
-            except TypeError:
-                templated = apply_fn(messages_value)
-
-            if templated is None:
-                raise ValueError(f"tokenizer.apply_template returned None for calibration item {idx}.")
-
-            if hasattr(templated, "get"):
-                ids_value = templated.get("input_ids")
-                mask_value = templated.get("attention_mask")
-                text_value = templated.get("text")
-                if ids_value is not None:
-                    return _pack_ids(ids_value, mask_value, idx)
-                if text_value is not None:
-                    return _tokenize_text_value(text_value, idx)
-
-            if isinstance(templated, (list, tuple)):
-                if len(templated) > 0 and isinstance(templated[0], int):
-                    return _pack_ids(list(templated), None, idx)
-                raise ValueError(
-                    f"tokenizer.apply_template returned an unsupported sequence type for calibration item {idx}."
-                )
-
-            if torch.is_tensor(templated):
-                return _pack_ids(templated, None, idx)
-
-            if isinstance(templated, str):
-                return _tokenize_text_value(templated, idx)
-
-            raise ValueError(
-                f"tokenizer.apply_template returned unsupported type {type(templated)} for calibration item {idx}."
-            )
-
-        processed_examples: List[Dict[str, torch.Tensor]] = []
-        for idx, example in enumerate(raw_examples):
-            if isinstance(example, dict):
-                if "messages" in example:
-                    apply_fn = getattr(self.tokenizer, "apply_template", None) if self.tokenizer else None
-                    if apply_fn is None:
-                        if "text" in example:
-                            processed_examples.append(_tokenize_text_value(example["text"], idx))
-                            continue
-                        raise ValueError(
-                            "tokenizer must expose `apply_template` or calibration data must provide `text` when using `messages`."
-                        )
-                    processed_examples.append(_tokenize_messages_value(example["messages"], idx))
-                    continue
-                if "text" in example:
-                    processed_examples.append(_tokenize_text_value(example["text"], idx))
-                    continue
-                if "input_ids" in example:
-                    processed_examples.append(_pack_ids(example["input_ids"], example.get("attention_mask"), idx))
-                    continue
-                raise ValueError(
-                    f"Quantize: unsupported calibration example structure at index {idx}: keys={list(example.keys())}"
-                )
-
-            if isinstance(example, str):
-                processed_examples.append(_tokenize_text_value(example, idx))
-                continue
-
-            if isinstance(example, (list, tuple)):
-                if all(isinstance(x, int) for x in example):
-                    processed_examples.append(_pack_ids(list(example), None, idx))
-                    continue
-                raise ValueError(
-                    f"Quantize: list-based calibration example at index {idx} must contain only integers."
-                )
-
-            if torch.is_tensor(example):
-                processed_examples.append(_pack_ids(example, None, idx))
-                continue
-
-            try:
-                processed_examples.append(_pack_ids(example, None, idx))
-            except Exception as exc:
-                raise ValueError(
-                    f"Quantize: unsupported calibration example type {type(example)} at index {idx}."
-                ) from exc
-
-        calibration_dataset = processed_examples
-
-        def _convert_tensor_to_list(tensor):
-            if isinstance(tensor, torch.Tensor):
-                if len(tensor.shape) == 1:
-                    tensor = tensor.unsqueeze(0)
-                tensor = tensor.long()
-                return tensor.cpu().numpy().tolist()
-            return [tensor]
-
-        new_calibration_dataset = []
-        too_short_calibration_data_count = 0
-
-        max_positions = None
-        max_positions_source = None
-        trimmed_row_count = 0
-        longest_trimmed_row = 0
-
-        def _maybe_resolve_length(value, source_name):
-            nonlocal max_positions, max_positions_source
-            try:
-                if value is None:
-                    return False
-                limit = int(value)
-            except Exception:
-                return False
-            if limit <= 0:
-                return False
-            if max_positions is None or limit < max_positions:
-                max_positions = limit
-                max_positions_source = source_name
-            return True
-
-        model_config = getattr(self.model, "config", None)
-        if model_config is not None:
-            primary_names = ("max_position_embeddings",)
-            fallback_names = (
-                "max_sequence_length",
-                "max_seq_len",
-                "n_positions",
-                "seq_length",
-            )
-
-            for attr_name in primary_names:
-                if _maybe_resolve_length(getattr(model_config, attr_name, None), attr_name):
-                    break
-            if max_positions is None:
-                for attr_name in fallback_names:
-                    if _maybe_resolve_length(getattr(model_config, attr_name, None), attr_name):
-                        break
-
-        for example in calibration_dataset:
-            input_ids = _convert_tensor_to_list(example["input_ids"])
-            attention_mask = _convert_tensor_to_list(example["attention_mask"])
-
-            if max_positions is not None:
-                trimmed = False
-                trimmed_input_ids = []
-                trimmed_attention_mask = []
-
-                for row_ids, row_mask in zip(input_ids, attention_mask):
-                    row_len = len(row_ids)
-                    if row_len > max_positions:
-                        trimmed = True
-                        trimmed_row_count += 1
-                        longest_trimmed_row = max(longest_trimmed_row, row_len)
-                        trimmed_input_ids.append(row_ids[:max_positions])
-                        trimmed_attention_mask.append(row_mask[:max_positions])
-                    else:
-                        trimmed_input_ids.append(row_ids)
-                        trimmed_attention_mask.append(row_mask)
-
-                if trimmed:
-                    input_ids = trimmed_input_ids
-                    attention_mask = trimmed_attention_mask
-
-            # filter if input_ids is too short
-            if len(input_ids[0]) <= calibration_data_min_length:
-                too_short_calibration_data_count += 1
-                continue
-
-            new_calibration_dataset.append(
-                {
-                    "input_ids": input_ids,
-                    "attention_mask": attention_mask,
-                }
-            )
-
-        if too_short_calibration_data_count > 0:
-            log.warn(f"Quantize: {too_short_calibration_data_count} input_ids with length <= {calibration_data_min_length} were removed. "
-                     f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length.")
-
-        if trimmed_row_count > 0:
-            log.info(
-                "Quantize: trimmed %s calibration rows above %s=%s (longest original length=%s)",
-                trimmed_row_count,
-                max_positions_source,
-                max_positions,
-                longest_trimmed_row,
-            )
-
-        if calibration_dataset_concat_size:
-            _require_tokenizer("`calibration_dataset_concat_size` is specified")
-            concatenated_data = []
-            input_ids_buff = []
-            attention_mask_buff = []
-            current_length = 0
-
-            new_line = self.tokenizer(CALIBRATION_DATASET_CONCAT_CHAR, return_tensors="pt")
-            new_line_input_ids = _convert_tensor_to_list(new_line["input_ids"])[0]
-            new_line_attention_mask = _convert_tensor_to_list(new_line["attention_mask"])[0]
-            new_line_input_ids_len = len(new_line_input_ids)
-
-            for example in new_calibration_dataset:
-                input_ids = example["input_ids"][0]
-                attention_mask = example["attention_mask"][0]
-
-                if current_length + len(input_ids) + new_line_input_ids_len >= calibration_dataset_concat_size:
-                    if len(input_ids_buff) > 0:
-                        remaining_space = calibration_dataset_concat_size - current_length
-                        # if there is remaining space, add the remaining input to the current block
-                        if remaining_space > 0:
-                            input_ids_buff.extend(new_line_input_ids)
-                            input_ids_buff.extend(input_ids[:remaining_space - new_line_input_ids_len])
-                            attention_mask_buff.extend(new_line_attention_mask)
-                            attention_mask_buff.extend(attention_mask[:remaining_space - new_line_input_ids_len])
-
-                            concatenated_data.append({
-                                "input_ids": [input_ids_buff],
-                                "attention_mask": [attention_mask_buff]
-                            })
-                        else:
-                            # if there is no remaining space, add the current block to the concatenated data
-                            concatenated_data.append({
-                                "input_ids": [input_ids_buff],
-                                "attention_mask": [attention_mask_buff]
-                            })
-
-                        input_ids_buff = input_ids[:calibration_dataset_concat_size]
-                        attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
-                        current_length = len(input_ids_buff)
-                    else:
-                        input_ids_buff = input_ids[:calibration_dataset_concat_size]
-                        attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
-                        current_length = len(input_ids_buff)
-                else:
-                    if len(input_ids_buff) > 0:
-                        input_ids_buff.extend(new_line_input_ids)
-                        attention_mask_buff.extend(new_line_attention_mask)
-                        current_length += new_line_input_ids_len
-
-                    input_ids_buff.extend(input_ids)
-                    attention_mask_buff.extend(attention_mask)
-                    current_length += len(input_ids)
-
-
-            if input_ids_buff:
-                padding_length = calibration_dataset_concat_size - len(input_ids_buff)
-                if padding_length > 0:
-                    input_ids_buff.extend([self.tokenizer.pad_token_id] * padding_length)
-                    attention_mask_buff.extend([0] * padding_length)
-                concatenated_data.append({
-                    "input_ids": [input_ids_buff],
-                    "attention_mask": [attention_mask_buff]
-                })
-
-            new_calibration_dataset = concatenated_data
-
-        # Sort or shuffle calibration dataset
-        if calibration_dataset_sort == "asc":
-            log.info("Calibration: Sort in ascending order by length")
-            sorted_dataset = sorted(
-                new_calibration_dataset,
-                key=lambda item: len(item["input_ids"][0])
-            )
-        elif calibration_dataset_sort == "desc":
-            log.info("Calibration: Sort in descending order by length")
-            sorted_dataset = sorted(
-                new_calibration_dataset,
-                key=lambda item: len(item["input_ids"][0]),
-                reverse=True
-            )
-        elif calibration_dataset_sort == "shuffle":
-            log.info("Calibration: Sort by random shuffle")
-            sorted_dataset = new_calibration_dataset[:]  # shallow copy
-            random.shuffle(sorted_dataset)
-        else:
-            log.info("Calibration: Native order")
-            sorted_dataset = new_calibration_dataset  # fallback: no sort
-
-        if self.support_batch_quantize:
-            new_calibration_dataset_batched = [
-                collate_data(sorted_dataset[start: start + batch_size], self.tokenizer.pad_token_id)
-                for start in range(0, len(sorted_dataset), batch_size)
-            ]
-
-            # total tokens counters
-            total_padded = 0
-            total_non_padded = 0
-
-            for batch in new_calibration_dataset_batched:
-                # attention_mask is shape [batch_size, seq_len]
-                mask = batch["attention_mask"]
-
-                # count where mask == 0 (padded tokens)
-                total_padded += (mask == 0).sum().item()
-
-                # count where mask == 1 (non-padded tokens)
-                total_non_padded += (mask == 1).sum().item()
-
-            log.info(f"Calibration: Total padded tokens: {total_padded}")
-            log.info(f"Calibration: Total non-padded tokens: {total_non_padded}")
-            log.info(f"Calibration: Total tokens: {total_non_padded + total_padded}")
-        else:
-            new_calibration_dataset_batched = [
-                {
-                    "input_ids": torch.tensor(block["input_ids"], dtype=torch.long),
-                }
-                for block in sorted_dataset
-            ]
-
-        return new_calibration_dataset_batched
+        return prepare_calibration_dataset(
+            self,
+            calibration_dataset=calibration_dataset,
+            calibration_dataset_concat_size=calibration_dataset_concat_size,
+            calibration_dataset_sort=calibration_dataset_sort,
+            batch_size=batch_size,
+            calibration_data_min_length=calibration_data_min_length,
+            calibration_concat_separator=calibration_concat_separator,
+            logger=log,
+        )
 
     def quantize(
         self,
@@ -815,6 +441,7 @@ class BaseQModel(nn.Module):
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
         # minimum length of calibration data, default is 10
         calibration_data_min_length: int = 10,
+        calibration_concat_separator: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -909,6 +536,7 @@ class BaseQModel(nn.Module):
             "prepare_dataset_func": self.prepare_dataset,
             "calibration_concat_size": calibration_concat_size,
             "calibration_sort": calibration_sort,
+            "calibration_concat_separator": calibration_concat_separator,
             "batch_size": batch_size,
             "calculate_w_wq_diff": needs_lora,  # lora needs original w - wq delta
         }
@@ -1013,6 +641,7 @@ class BaseQModel(nn.Module):
                     prepare_dataset_func=self.prepare_dataset,
                     calibration_concat_size=calibration_concat_size,
                     calibration_sort=calibration_sort,
+                    calibration_concat_separator=calibration_concat_separator,
                     batch_size=batch_size,
                 )
             )
@@ -1041,6 +670,7 @@ class BaseQModel(nn.Module):
         calibration_dataset_sort: Optional[str] = None,
         batch_size: int = 1,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        calibration_concat_separator: Optional[str] = None,
     ):
         if self.quantized:
             raise EnvironmentError("eora_generate() is called a model that is already quantized")
@@ -1073,6 +703,7 @@ class BaseQModel(nn.Module):
                 prepare_dataset_func=self.prepare_dataset,
                 calibration_concat_size=calibration_dataset_concat_size,
                 calibration_sort=calibration_dataset_sort,
+                calibration_concat_separator=calibration_concat_separator,
                 batch_size=batch_size,
             ),
             DequantizeProcessor(
@@ -1085,6 +716,7 @@ class BaseQModel(nn.Module):
                 prepare_dataset_func=self.prepare_dataset,
                 calibration_concat_size=calibration_dataset_concat_size,
                 calibration_sort=calibration_dataset_sort,
+                calibration_concat_separator=calibration_concat_separator,
                 batch_size=batch_size,
             ),
         ]

@@ -96,6 +96,7 @@ from .definitions.gpt_neo import GptNeoQModel  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXQModel  # noqa: E402
 from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 from .definitions.gptj import GptJQModel  # noqa: E402
+from .definitions.granitemoehybrid import GraniteMoeHybridQModel
 from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
@@ -139,7 +140,6 @@ from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
-from .definitions.granitemoehybrid import GraniteMoeHybridQModel
 
 
 # make quants and inference more determinisitc
@@ -692,6 +692,7 @@ class GPTQModel:
             calibration_dataset_sort: Optional[str] = None,
             batch_size: Optional[int] = 1,
             tokenizer: Optional[PreTrainedTokenizerBase] = None,
+            calibration_concat_separator: Optional[str] = None,
             # pass-through vars for load()
             trust_remote_code: bool = False,
             dtype: Optional[Union[str, torch.dtype]] = None,
@@ -736,5 +737,6 @@ class GPTQModel:
                 calibration_dataset_sort=calibration_dataset_sort,
                 batch_size=batch_size,
                 tokenizer=tokenizer,
+                calibration_concat_separator=calibration_concat_separator,
             )
             return

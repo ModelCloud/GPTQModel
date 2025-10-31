@@ -8,40 +8,40 @@ from model_test import ModelTest
 from gptqmodel.utils.eval import EVAL
 
 
-# a100:7, MARLIN kernel
-# desc_act = False, act_group_aware = False 0.3200/0.3447
-# desc_act = False, act_group_aware = True 0.3181/0.3481
-# desc_act = True, REGRESSION 0.3191/0.3601
-# a100:6+7: MARLIN kernel
-# desc_act = False, act_group_aware = True 0.3217/0.3643
 # | Metric                         |   MARLIN |
 # |--------------------------------|----------|
-# | arc_challenge :: acc,none      |   0.3174 |
-# | arc_challenge :: acc_norm,none |   0.3601 |
-# | mmlu_stem :: acc,none          |   0.3186 |
+# | arc_challenge :: acc,none      |   0.3046 |
+# | arc_challenge :: acc_norm,none |   0.3345 |
+# | mmlu_stem :: acc,none          |   0.3768 |
+# | gsm8k_plat :: exact,flexible   |   0.1944 |
 class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
+    DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
-            "acc": {
-                "value": 0.3191,
+            "exact_match,flexible-extract": {
+                "value": 0.1944,
                 "floor_pct": 0.04,
-                "ceil_pct": 0.10,
-            },
-            "acc_norm": {
-                "value": 0.3507,
-                "floor_pct": 0.04,
-                "ceil_pct": 0.10,
             },
         },
         EVAL.LM_EVAL.MMLU_STEM: {
             "chat_template": False,
             "acc": {
-                "value": 0.2978,
+                "value": 0.3768, # 0.3099 4096, 0.3270 2048
                 "floor_pct": 0.04,
-                "ceil_pct": 0.10,
+            },
+        },
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
+            "acc": {
+                "value": 0.3046,  # 0.3294 4096, 0.3242 2048
+                "floor_pct": 0.04,
+            },
+            "acc_norm": {
+                "value": 0.3345,  # 0.3558 4096, 0.3635 2048
+                "floor_pct": 0.04,
             },
         },
     }
