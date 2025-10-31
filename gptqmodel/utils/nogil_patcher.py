@@ -138,7 +138,7 @@ def patch_triton_autotuner() -> None:
         )
         return False, bench_time, configs_timings, best_config
 
-    def _get_config_for_key(self, key, nargs, args, kwargs):
+    def _get_config_for_key(self, key, args, kwargs):
         with self._cache_lock:
             cached = self._cache.get(key)
             if cached is not None:
@@ -157,18 +157,17 @@ def patch_triton_autotuner() -> None:
             if future.error is not None:
                 raise future.error
             return future.config, future.used_cached_result, future.bench_time
-
-        pruned_configs = self.prune_configs(kwargs, nargs)
+        pruned_configs = self.prune_configs(kwargs)
 
         def benchmark():
             bench_start = time.time()
             timings = {
-                config: self._bench(nargs, *args, config=config, **kwargs)
+                config: self._bench(*args, config=config, **kwargs)
                 for config in pruned_configs
             }
             bench_duration = time.time() - bench_start
             best_config = builtins_mod.min(timings, key=timings.get)
-            full_nargs_local = {**nargs, **kwargs, **best_config.all_kwargs()}
+            full_nargs_local = {**self.nargs, **kwargs, **best_config.all_kwargs()}
             self.pre_hook(full_nargs_local, reset_only=True)
             return timings, bench_duration, best_config
 
@@ -203,6 +202,7 @@ def patch_triton_autotuner() -> None:
 
     def patched_run(self, *args, **kwargs):
         nargs = dict(zip(self.arg_names, args))
+        self.nargs = nargs
         used_cached_result = True
         bench_time = None
         key = None
@@ -214,7 +214,7 @@ def patch_triton_autotuner() -> None:
                 if hasattr(arg, "dtype"):
                     key_values.append(str(arg.dtype))
             key = tuple(key_values)
-            config, used_cached_result, bench_time = _get_config_for_key(self, key, nargs, args, kwargs)
+            config, used_cached_result, bench_time = _get_config_for_key(self, key, args, kwargs)
         else:
             config = self.configs[0]
 
@@ -231,11 +231,13 @@ def patch_triton_autotuner() -> None:
         full_nargs = {**nargs, **kwargs, **config.all_kwargs()}
         if config.pre_hook is not None:
             config.pre_hook(full_nargs)
-        return self.fn.run(
+        result = self.fn.run(
             *args,
             **kwargs,
             **config.all_kwargs(),
         )
+        self.nargs = None
+        return result
 
     autotuner_cls.__init__ = patched_init
     autotuner_cls.check_disk_cache = patched_check_disk_cache

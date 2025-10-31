@@ -594,6 +594,10 @@ class GPTQ:
             mean = torch.mean(current_diag)
             damp = self.qcfg.damp_percent
 
+            damp_recovery_started = False
+            recovery_initial_damp = None
+            recovery_last_damp = None
+
             while 0 < damp < 1:
                 try:
                     diag_view.add_(damp * mean)
@@ -602,18 +606,35 @@ class GPTQ:
                     diag_view.copy_(current_diag)
                     del H2
                     used_damp = damp
+                    if damp_recovery_started:
+                        log.warn(
+                            f"Quantization: Module `{self.name}` -> Damp recovery succeeded at `damp_percent={damp:.5f}` "
+                            f"(started at {recovery_initial_damp:.5f})."
+                        )
                     return Hinv_result, used_damp
                 except torch._C._LinAlgError as e:
                     last_error = e
                     diag_view.copy_(current_diag)
                     if self.qcfg.damp_auto_increment != 0:
-                        log.warn(
-                            f"Quantization: Module `{self.name}` -> Current `damp_percent = {damp:.5f}` is too low, auto-incrementing by `{self.qcfg.damp_auto_increment:.5f}`")
+                        if not damp_recovery_started:
+                            damp_recovery_started = True
+                            recovery_initial_damp = damp
+                            log.warn(
+                                f"Quantization: Module `{self.name}` -> Starting damp recovery at "
+                                f"`damp_percent={damp:.5f}`, increment step `{self.qcfg.damp_auto_increment:.5f}`."
+                            )
                         damp += self.qcfg.damp_auto_increment
+                        recovery_last_damp = damp
                     else:
                         log.warn(
                             f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with `damp_percent={damp:.5f}` and no auto increment configured.")
                         break
+
+            if damp_recovery_started:
+                final_damp = recovery_last_damp if recovery_last_damp is not None else damp
+                log.warn(
+                    f"Quantization: Module `{self.name}` -> Damp recovery failed after reaching `damp_percent={final_damp:.5f}`."
+                )
 
             attempt += 1
 
