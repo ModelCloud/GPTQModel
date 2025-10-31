@@ -74,6 +74,7 @@ from .definitions.apertus import ApertusQModel  # noqa: E402
 from .definitions.baichuan import BaiChuanQModel  # noqa: E402
 from .definitions.bailing_moe import BailingMoeQModel  # noqa: E402
 from .definitions.bloom import BloomQModel  # noqa: E402
+from .definitions.brumby import BrumbyQModel  # noqa: E402
 from .definitions.chatglm import ChatGLMQModel  # noqa: E402
 from .definitions.codegen import CodeGenQModel  # noqa: E402
 from .definitions.dbrx import DbrxQModel  # noqa: E402
@@ -151,6 +152,7 @@ MODEL_MAP = {
     "apertus": ApertusQModel,
     "dream": DreamQModel,
     "bloom": BloomQModel,
+    "brumby": BrumbyQModel,
     "gpt_neo": GptNeoQModel,
     "kimi_k2": DeepSeekV3QModel, # 100% DeepSeekV3QModel clone
     "klear": KlearQModel,

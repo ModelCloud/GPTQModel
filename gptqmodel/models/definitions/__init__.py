@@ -10,6 +10,7 @@ from .llama import LlamaQModel
 # other model
 from .baichuan import BaiChuanQModel
 from .bloom import BloomQModel
+from .brumby import BrumbyQModel
 from .chatglm import ChatGLMQModel
 from .codegen import CodeGenQModel
 from .dbrx import DbrxQModel
