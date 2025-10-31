@@ -109,6 +109,8 @@ class ModelTest(unittest.TestCase):
     FAIL_SAFE = True
     EORA = None
     DAMP_PERCENT = 0.05
+    MSE = 0.0
+    DYNAMIC = None
 
     SAVE_PATH = None  # default is temp folder
 
@@ -783,6 +785,8 @@ class ModelTest(unittest.TestCase):
             pack_impl="cpu",
             vram_strategy=self.VRAM_STRATEGY,
             damp_percent=self.DAMP_PERCENT,
+            mse=self.MSE,
+            dynamic=self.DYNAMIC,
         )
 
         log.info(f"Quant config: {quantize_config}")
