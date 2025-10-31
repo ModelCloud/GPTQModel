@@ -15,6 +15,7 @@ import torch
 from .data import collate_data
 from .logger import setup_logger
 
+
 try:  # pragma: no cover - optional dependency
     from datasets import Dataset as HFDataset
     from datasets import IterableDataset as HFIterableDataset

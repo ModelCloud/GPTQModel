@@ -8,11 +8,11 @@ from __future__ import annotations
 import os
 import time
 from importlib.metadata import PackageNotFoundError, version
+from itertools import chain
 from typing import Dict, List, Optional, Union
 
 import torch
 import transformers
-from itertools import chain
 
 from ..utils.structure import print_module_tree
 

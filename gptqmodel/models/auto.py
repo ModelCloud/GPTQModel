@@ -96,6 +96,7 @@ from .definitions.gpt_neo import GptNeoQModel  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXQModel  # noqa: E402
 from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 from .definitions.gptj import GptJQModel  # noqa: E402
+from .definitions.granitemoehybrid import GraniteMoeHybridQModel
 from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
@@ -139,7 +140,6 @@ from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
-from .definitions.granitemoehybrid import GraniteMoeHybridQModel
 
 
 # make quants and inference more determinisitc
