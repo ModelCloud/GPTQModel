@@ -90,6 +90,7 @@ class ModelTest(unittest.TestCase):
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
     DATASET_SIZE = 512
+    DATASET_CONCAT_SIZE = None
     DATASET_SORT = "desc"
     DELETE_QUANTIZED_MODEL = True
     EVAL_TASKS = None
@@ -836,7 +837,13 @@ class ModelTest(unittest.TestCase):
             try:
                 save_context, planned_save_path, cleanup_callback = self._prepare_quant_save_destination(need_eval)
                 log.info(f"Quantized model artifacts will be saved to: {planned_save_path}")
-                model.quantize(calibration_dataset, calibration_sort=self.DATASET_SORT, backend=self.QUANT_BACKEND, batch_size=batch_size)
+                model.quantize(
+                    calibration_dataset,
+                    calibration_concat_size=self.DATASET_CONCAT_SIZE,
+                    calibration_sort=self.DATASET_SORT,
+                    backend=self.QUANT_BACKEND,
+                    batch_size=batch_size,
+                )
 
                 self.check_kernel(model, self.KERNEL_QUANT)
 
