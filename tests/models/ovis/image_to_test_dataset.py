@@ -7,6 +7,7 @@ from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
 from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
+from gptqmodel.models.definitions.qwen3_vl import Qwen3_VLQModel
 
 
 def format_ovis_dataset(image, assistant):
@@ -94,5 +95,8 @@ def get_calib_dataset(model):
 
     if isinstance(model, BaseQwen2_5_OmniGPTQ):
         return prepare_dataset(format_qwen2_5_omni_dataset, n_sample=20)
+
+    if isinstance(model, Qwen3_VLQModel):
+        return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)
 
     raise NotImplementedError(f"Unsupported MODEL: {model.__class__}")
