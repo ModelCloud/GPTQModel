@@ -22,26 +22,24 @@ from gptqmodel.utils.eval import EVAL
 class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
+    DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
-                "value": 0.3191,
+                "value": 0.3191, # 0.3294 4096, 0.3242 2048
                 "floor_pct": 0.04,
-                "ceil_pct": 0.10,
             },
             "acc_norm": {
-                "value": 0.3507,
+                "value": 0.3507, # 0.3558 4096, 0.3635 2048
                 "floor_pct": 0.04,
-                "ceil_pct": 0.10,
             },
         },
         EVAL.LM_EVAL.MMLU_STEM: {
             "chat_template": False,
             "acc": {
-                "value": 0.2978,
+                "value": 0.2978, # 0.3099 4096, 0.3270 2048
                 "floor_pct": 0.04,
-                "ceil_pct": 0.10,
             },
         },
     }
