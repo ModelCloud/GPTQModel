@@ -692,6 +692,7 @@ class GPTQModel:
             calibration_dataset_sort: Optional[str] = None,
             batch_size: Optional[int] = 1,
             tokenizer: Optional[PreTrainedTokenizerBase] = None,
+            calibration_concat_separator: Optional[str] = None,
             # pass-through vars for load()
             trust_remote_code: bool = False,
             dtype: Optional[Union[str, torch.dtype]] = None,
@@ -736,5 +737,6 @@ class GPTQModel:
                 calibration_dataset_sort=calibration_dataset_sort,
                 batch_size=batch_size,
                 tokenizer=tokenizer,
+                calibration_concat_separator=calibration_concat_separator,
             )
             return

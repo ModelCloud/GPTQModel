@@ -16,7 +16,14 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import QuantizeConfig
 
 
-def _dummy_prepare_dataset(*, calibration_dataset, calibration_dataset_concat_size, calibration_dataset_sort, batch_size):
+def _dummy_prepare_dataset(
+    *,
+    calibration_dataset,
+    calibration_dataset_concat_size,
+    calibration_dataset_sort,
+    batch_size,
+    calibration_concat_separator=None,
+):
     return calibration_dataset
 
 

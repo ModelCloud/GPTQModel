@@ -91,6 +91,7 @@ class ModelTest(unittest.TestCase):
     MODEL_MAX_LEN = 4096
     DATASET_SIZE = 512
     DATASET_CONCAT_SIZE = None
+    DATASET_CONCAT_SEPARATOR = None
     DATASET_SORT = "desc"
     DELETE_QUANTIZED_MODEL = True
     EVAL_TASKS = None
@@ -840,6 +841,7 @@ class ModelTest(unittest.TestCase):
                 model.quantize(
                     calibration_dataset,
                     calibration_concat_size=self.DATASET_CONCAT_SIZE,
+                    calibration_concat_separator=self.DATASET_CONCAT_SEPARATOR,
                     calibration_sort=self.DATASET_SORT,
                     backend=self.QUANT_BACKEND,
                     batch_size=batch_size,

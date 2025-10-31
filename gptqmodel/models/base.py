@@ -56,7 +56,6 @@ from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from ._const import (
-    CALIBRATION_DATASET_CONCAT_CHAR,
     CPU,
     DEFAULT_MAX_SHARD_SIZE,
     DEVICE,
@@ -418,6 +417,7 @@ class BaseQModel(nn.Module):
         calibration_dataset_sort: Optional[str] = None,
         batch_size: int = 1,
         calibration_data_min_length: int = 10,
+        calibration_concat_separator: Optional[str] = None,
     ):
         hf_dataset_types: tuple = ()
         if HFDataset is not None:
@@ -686,9 +686,14 @@ class BaseQModel(nn.Module):
             attention_mask_buff = []
             current_length = 0
 
-            new_line = self.tokenizer(CALIBRATION_DATASET_CONCAT_CHAR, return_tensors="pt")
-            new_line_input_ids = _convert_tensor_to_list(new_line["input_ids"])[0]
-            new_line_attention_mask = _convert_tensor_to_list(new_line["attention_mask"])[0]
+            separator = calibration_concat_separator if calibration_concat_separator is not None else ""
+            if separator:
+                new_line = self.tokenizer(separator, return_tensors="pt")
+                new_line_input_ids = _convert_tensor_to_list(new_line["input_ids"])[0]
+                new_line_attention_mask = _convert_tensor_to_list(new_line["attention_mask"])[0]
+            else:
+                new_line_input_ids = []
+                new_line_attention_mask = []
             new_line_input_ids_len = len(new_line_input_ids)
 
             for example in new_calibration_dataset:
@@ -700,10 +705,14 @@ class BaseQModel(nn.Module):
                         remaining_space = calibration_dataset_concat_size - current_length
                         # if there is remaining space, add the remaining input to the current block
                         if remaining_space > 0:
-                            input_ids_buff.extend(new_line_input_ids)
-                            input_ids_buff.extend(input_ids[:remaining_space - new_line_input_ids_len])
-                            attention_mask_buff.extend(new_line_attention_mask)
-                            attention_mask_buff.extend(attention_mask[:remaining_space - new_line_input_ids_len])
+                            sep_tokens = min(new_line_input_ids_len, remaining_space)
+                            if sep_tokens:
+                                input_ids_buff.extend(new_line_input_ids[:sep_tokens])
+                                attention_mask_buff.extend(new_line_attention_mask[:sep_tokens])
+                            payload_tokens = remaining_space - sep_tokens
+                            if payload_tokens > 0:
+                                input_ids_buff.extend(input_ids[:payload_tokens])
+                                attention_mask_buff.extend(attention_mask[:payload_tokens])
 
                             concatenated_data.append({
                                 "input_ids": [input_ids_buff],
@@ -815,6 +824,7 @@ class BaseQModel(nn.Module):
         adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
         # minimum length of calibration data, default is 10
         calibration_data_min_length: int = 10,
+        calibration_concat_separator: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -909,6 +919,7 @@ class BaseQModel(nn.Module):
             "prepare_dataset_func": self.prepare_dataset,
             "calibration_concat_size": calibration_concat_size,
             "calibration_sort": calibration_sort,
+            "calibration_concat_separator": calibration_concat_separator,
             "batch_size": batch_size,
             "calculate_w_wq_diff": needs_lora,  # lora needs original w - wq delta
         }
@@ -1013,6 +1024,7 @@ class BaseQModel(nn.Module):
                     prepare_dataset_func=self.prepare_dataset,
                     calibration_concat_size=calibration_concat_size,
                     calibration_sort=calibration_sort,
+                    calibration_concat_separator=calibration_concat_separator,
                     batch_size=batch_size,
                 )
             )
@@ -1041,6 +1053,7 @@ class BaseQModel(nn.Module):
         calibration_dataset_sort: Optional[str] = None,
         batch_size: int = 1,
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        calibration_concat_separator: Optional[str] = None,
     ):
         if self.quantized:
             raise EnvironmentError("eora_generate() is called a model that is already quantized")
@@ -1073,6 +1086,7 @@ class BaseQModel(nn.Module):
                 prepare_dataset_func=self.prepare_dataset,
                 calibration_concat_size=calibration_dataset_concat_size,
                 calibration_sort=calibration_dataset_sort,
+                calibration_concat_separator=calibration_concat_separator,
                 batch_size=batch_size,
             ),
             DequantizeProcessor(
@@ -1085,6 +1099,7 @@ class BaseQModel(nn.Module):
                 prepare_dataset_func=self.prepare_dataset,
                 calibration_concat_size=calibration_dataset_concat_size,
                 calibration_sort=calibration_dataset_sort,
+                calibration_concat_separator=calibration_concat_separator,
                 batch_size=batch_size,
             ),
         ]
