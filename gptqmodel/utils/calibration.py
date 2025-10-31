@@ -348,53 +348,52 @@ def prepare_calibration_dataset(
             new_line_attention_mask = []
         new_line_input_ids_len = len(new_line_input_ids)
 
+        def flush_buffer():
+            nonlocal input_ids_buff, attention_mask_buff, current_length
+            concatenated_data.append(
+                {
+                    "input_ids": [input_ids_buff],
+                    "attention_mask": [attention_mask_buff],
+                }
+            )
+            input_ids_buff = []
+            attention_mask_buff = []
+            current_length = 0
+
         for example in new_calibration_dataset:
-            input_ids = example["input_ids"][0]
-            attention_mask = example["attention_mask"][0]
+            row_ids = example["input_ids"][0]
+            row_mask = example["attention_mask"][0]
+            position = 0
+            row_length = len(row_ids)
 
-            if current_length + len(input_ids) + new_line_input_ids_len >= calibration_dataset_concat_size:
-                if len(input_ids_buff) > 0:
-                    remaining_space = calibration_dataset_concat_size - current_length
-                    if remaining_space > 0:
-                        sep_tokens = min(new_line_input_ids_len, remaining_space)
-                        if sep_tokens:
-                            input_ids_buff.extend(new_line_input_ids[:sep_tokens])
-                            attention_mask_buff.extend(new_line_attention_mask[:sep_tokens])
-                        payload_tokens = remaining_space - sep_tokens
-                        if payload_tokens > 0:
-                            input_ids_buff.extend(input_ids[:payload_tokens])
-                            attention_mask_buff.extend(attention_mask[:payload_tokens])
+            while position < row_length:
+                if input_ids_buff:
+                    if new_line_input_ids_len:
+                        if current_length + new_line_input_ids_len > calibration_dataset_concat_size:
+                            flush_buffer()
+                            continue
+                        input_ids_buff.extend(new_line_input_ids)
+                        attention_mask_buff.extend(new_line_attention_mask)
+                        current_length += new_line_input_ids_len
 
-                        concatenated_data.append(
-                            {
-                                "input_ids": [input_ids_buff],
-                                "attention_mask": [attention_mask_buff],
-                            }
-                        )
-                    else:
-                        concatenated_data.append(
-                            {
-                                "input_ids": [input_ids_buff],
-                                "attention_mask": [attention_mask_buff],
-                            }
-                        )
+                available = calibration_dataset_concat_size - current_length
+                if available == 0:
+                    flush_buffer()
+                    continue
 
-                    input_ids_buff = input_ids[:calibration_dataset_concat_size]
-                    attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
-                    current_length = len(input_ids_buff)
-                else:
-                    input_ids_buff = input_ids[:calibration_dataset_concat_size]
-                    attention_mask_buff = attention_mask[:calibration_dataset_concat_size]
-                    current_length = len(input_ids_buff)
-            else:
-                if len(input_ids_buff) > 0:
-                    input_ids_buff.extend(new_line_input_ids)
-                    attention_mask_buff.extend(new_line_attention_mask)
-                    current_length += new_line_input_ids_len
+                chunk_len = min(available, row_length - position)
+                if chunk_len == 0:
+                    flush_buffer()
+                    continue
 
-                input_ids_buff.extend(input_ids)
-                attention_mask_buff.extend(attention_mask)
-                current_length += len(input_ids)
+                end = position + chunk_len
+                input_ids_buff.extend(row_ids[position:end])
+                attention_mask_buff.extend(row_mask[position:end])
+                current_length += chunk_len
+                position = end
+
+                if current_length == calibration_dataset_concat_size:
+                    flush_buffer()
 
         if input_ids_buff:
             padding_length = calibration_dataset_concat_size - len(input_ids_buff)
