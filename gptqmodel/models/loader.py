@@ -35,6 +35,7 @@ from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
+from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
 from ..utils.machete import _validate_machete_device_support
 from ..utils.marlin import _validate_marlin_device_support
@@ -50,7 +51,6 @@ from ..utils.model import (
     make_quant,
     simple_dispatch_model,
 )
-from ..utils.inspect import safe_kwargs_call
 from ._const import DEVICE, normalize_device
 
 
