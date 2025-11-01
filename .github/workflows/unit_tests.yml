@@ -86,7 +86,7 @@ jobs:
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
-      max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
+      max-parallel: ${{ steps.get_ip.outputs['max-parallel'] }}
       cuda_version: ${{ env.CUDA_VERSION }}
     steps:
       - name: Print env
@@ -95,7 +95,7 @@ jobs:
           echo "ref: ${{ env.ref }}"
           echo "artifact_id: ${{ github.event.inputs.artifact_id }}"
           echo "test_names: ${{ github.event.inputs.test_names }}"
-          echo "exclusive-gpu: ${{ github.event.inputs.exclusive-gpu }}"
+          echo "exclusive-gpu: ${{ github.event.inputs['exclusive-gpu'] }}"
           echo "selected server: ${{ github.event.inputs.server }}"
 
       - name: Select server
@@ -113,7 +113,7 @@ jobs:
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "artifact_id=$run_id"
 
-          max_p=${{ github.event.inputs.max-parallel }}
+          max_p=${{ github.event.inputs['max-parallel'] }}
           max_p="{\"size\": ${max_p:-20}}"
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
@@ -204,7 +204,7 @@ jobs:
           echo "will m4 run: ${{ (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && (needs.list-test-files.outputs.m4-files != '' || needs.list-test-files.outputs.m4-files != '[]') }}"
 
   build:
-    runs-on: ${{ fromJSON(github.event.inputs.server ) }}
+    runs-on: ${{ fromJSON(github.event.inputs.server || '["self-hosted", "xeon5"]') }}
     needs:
       - check-vm
       - list-test-files
@@ -363,7 +363,7 @@ jobs:
         - /home/ci/models/pyenv:/opt/pyenv
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 20 }}
+      max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-files != '[]'
@@ -566,12 +566,12 @@ jobs:
           timestamp=$(date +%s%3N)
           gpu_id=-1
 
-          url="http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }}"
+          url="http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs['exclusive-gpu'] }}"
           echo "$url"
           while [ "$gpu_id" -lt 0 ]; do
             gpu_id=$(curl -s "$url")
             if [ "$gpu_id" -lt 0 ]; then
-              echo "http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs.exclusive-gpu }} returned $gpu_id"
+              echo "http://$XEON5/gpu/get?id=${{ github.run_id }}&timestamp=$timestamp&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&exclusive=${{ github.event.inputs['exclusive-gpu'] }} returned $gpu_id"
               echo "No available GPU, waiting 5 seconds..."
               curl http://$XEON5/gpu/status2
               sleep 5
@@ -619,7 +619,7 @@ jobs:
 
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
-    if: always() && inputs.exclusive-gpu
+    if: always() && inputs['exclusive-gpu']
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     needs:
