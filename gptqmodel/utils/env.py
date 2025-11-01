@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 
 
-_TRUTHY = {"1", "true", "yes", "on", "y"}
+TRUTHFUL = {"1", "true", "yes", "on", "y"}
 
 
 def env_flag(name: str, default: str | bool | None = "0") -> bool:
@@ -23,7 +23,7 @@ def env_flag(name: str, default: str | bool | None = "0") -> bool:
         if isinstance(default, bool):
             return default
         value = default
-    return str(value).strip().lower() in _TRUTHY
+    return str(value).strip().lower() in TRUTHFUL
 
 
 __all__ = ["env_flag"]

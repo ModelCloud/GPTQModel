@@ -7,7 +7,8 @@ import contextlib
 import time
 from contextlib import contextmanager
 from enum import Enum
-from typing import Callable, List, Union
+from functools import lru_cache
+from typing import Callable, List, Optional, Union
 
 import torch
 from packaging import version
@@ -82,7 +83,8 @@ if hasattr(torch, "npu") and hasattr(torch.npu, "is_available") and torch.npu.is
 
 # mlx check
 try:
-    import mlx.core.metal
+    import mlx.core  # type: ignore # noqa: F401
+    import mlx.core.metal  # noqa: F401
     HAS_MLX = True
 except BaseException:
     pass
@@ -228,35 +230,128 @@ def torch_sync(device: torch.device = None):
     elif device.type == "cpu":
         torch.cpu.synchronize()
 
-def torch_empty_cache(device: torch.device = None, gc: bool = True):
+def _normalize_device(device: Union[torch.device, str, int, None]) -> Optional[torch.device]:
+    if device is None:
+        return None
+    if isinstance(device, torch.device):
+        return device
+    if isinstance(device, str):
+        return torch.device(device)
+    if isinstance(device, int):
+        if HAS_CUDA and torch.cuda.device_count() > device:
+            return torch.device("cuda", device)
+        if HAS_XPU and hasattr(torch.xpu, "device_count") and torch.xpu.device_count() > device:
+            return torch.device("xpu", device)
+        if HAS_NPU and hasattr(torch.npu, "device_count") and torch.npu.device_count() > device:
+            return torch.device("npu", device)
+        raise ValueError(f"Unable to map integer `{device}` to a known accelerator device.")
+    raise TypeError(f"Unsupported device specifier type: {type(device)}")
+
+
+@lru_cache(maxsize=12)
+def resolve_empty_cache_callable(device_type: str) -> Optional[Callable[[], None]]:
+    try:
+        if device_type == "cuda" and HAS_CUDA:
+            candidate = getattr(torch.cuda, "empty_cache", None)
+        elif device_type == "xpu" and HAS_XPU:
+            candidate = getattr(torch.xpu, "empty_cache", None)
+        elif device_type == "mps" and HAS_MPS:
+            candidate = getattr(torch.mps, "empty_cache", None)
+        elif device_type == "npu" and HAS_NPU:
+            candidate = getattr(torch.npu, "empty_cache", None)
+        else:
+            candidate = None
+    except Exception:
+        candidate = None
+
+    if callable(candidate):
+        return candidate
+
+    return None
+
+
+def empty_cache_for_device(device: torch.device) -> bool:
+    if device.type == "cuda":
+        fn = resolve_empty_cache_callable("cuda")
+        if fn is None:
+            return False
+        target = device if device.index is not None else torch.device("cuda")
+        with torch.cuda.device(target):
+            fn()
+        return True
+
+    if device.type == "xpu":
+        fn = resolve_empty_cache_callable("xpu")
+        if fn is None:
+            return False
+        target = device if device.index is not None else torch.device("xpu")
+        with torch.xpu.device(target):
+            fn()
+        return True
+
+    if device.type == "mps":
+        fn = resolve_empty_cache_callable("mps")
+        if fn is None:
+            return False
+        fn()
+        if HAS_MLX:
+            mlx.core.clear_cache()
+        return True
+
+    if device.type == "npu":
+        fn = resolve_empty_cache_callable("npu")
+        if fn is None:
+            return False
+        target = device if device.index is not None else torch.device("npu")
+        with torch.npu.device(target):
+            fn()
+        return True
+
+    if device.type == "cpu" and HAS_MLX:
+        mlx.core.clear_cache()
+        return True
+    return False
+
+
+def torch_empty_cache_any(device: Union[torch.device, str, int, None] = None, gc: bool = True) -> bool:
+    normalized = _normalize_device(device)
+
     if gc:
         timed_gc_collect()
 
-    # check all backends
-    if device is None:
+    success = False
+
+    if normalized is None:
         if HAS_CUDA:
-            # torch.cuda.synchronize()
-            torch.cuda.empty_cache()
+            fn = resolve_empty_cache_callable("cuda")
+            if fn is not None:
+                fn()
+                success = True
         if HAS_XPU:
-            # torch.xpu.synchronize()
-            torch.xpu.empty_cache()
+            fn = resolve_empty_cache_callable("xpu")
+            if fn is not None:
+                fn()
+                success = True
         if HAS_MPS:
-            torch.mps.empty_cache()
+            fn = resolve_empty_cache_callable("mps")
+            if fn is not None:
+                fn()
+                success = True
+        if HAS_NPU:
+            fn = resolve_empty_cache_callable("npu")
+            if fn is not None:
+                fn()
+                success = True
         if HAS_MLX:
             mlx.core.clear_cache()
-        return
+            success = True
+        return success
 
-    # if device passed, only execute for device backend
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    elif device.type == "xpu":
-        torch.xpu.empty_cache()
-    elif device.type == "mps":
-        torch.mps.empty_cache()
+    return empty_cache_for_device(normalized)
 
-        # mlx is detached from pytorch
-        if HAS_MLX:
-            mlx.core.clear_cache()
+
+def torch_empty_cache(device: torch.device = None, gc: bool = True) -> bool:
+    return torch_empty_cache_any(device=device, gc=gc)
 
 def auto_select_torch_device(index: int = 0):
     assert index >= 0, f"device index should be a positive integer: actual = `{index}`"

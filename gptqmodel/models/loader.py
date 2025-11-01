@@ -14,14 +14,12 @@ from typing import Dict, List, Optional, Union
 import torch
 import transformers
 
+from ..utils.modelscope import ensure_modelscope_available
 from ..utils.structure import print_module_tree
 
 
-if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
-    try:
-        from modelscope import snapshot_download
-    except Exception:
-        raise ModuleNotFoundError("env `GPTQMODEL_USE_MODELSCOPE` used but modelscope pkg is not found: please install with `pip install modelscope`.")
+if ensure_modelscope_available():
+    from modelscope import snapshot_download
 else:
     from huggingface_hub import snapshot_download
 
