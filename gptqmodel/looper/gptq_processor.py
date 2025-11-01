@@ -85,15 +85,15 @@ class GPTQProcessor(LoopProcessor):
                 qcfg_clone.act_group_aware = act_group_aware_override
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
-            qcfg_clone.v2 = self.qcfg.dynamic_get(module.full_name, "v2", qcfg_clone.v2)
-            qcfg_clone.v2_alpha = self.qcfg.dynamic_get(module.full_name, "v2_alpha", qcfg_clone.v2_alpha)
+            qcfg_clone.gptaq = self.qcfg.dynamic_get(module.full_name, "gptaq", qcfg_clone.gptaq)
+            qcfg_clone.gptaq_alpha = self.qcfg.dynamic_get(module.full_name, "gptaq_alpha", qcfg_clone.gptaq_alpha)
 
             qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
 
         # store last used qcfg_dynamic
         self.qcfg_dynamic = qcfg_clone
 
-        if qcfg_clone.v2 is True:
+        if qcfg_clone.gptaq is True:
             tmp = GPTQv2(module=module, qcfg=qcfg_clone)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
@@ -383,4 +383,4 @@ class GPTQProcessor(LoopProcessor):
     def name(self) -> str:
         # TODO fix me..this hacks inherited base class logic, why not override name in gptqv2?
         qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
-        return "gptq v2" if qcfg.v2 else "gptq"
+        return "gptaq" if qcfg.gptaq else "gptq"

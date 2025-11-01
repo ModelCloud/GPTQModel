@@ -35,8 +35,8 @@ from ..quantization.config import (
     META_FIELD_STATIC_GROUPS,
     META_FIELD_TRUE_SEQUENTIAL,
     META_FIELD_URI,
-    META_FIELD_V2_ALPHA,
-    META_FIELD_V2_ENABLED,
+    META_FIELD_GPTAQ_ALPHA,
+    META_FIELD_GPTAQ_ENABLED,
     META_QUANTIZER_GPTQMODEL,
     META_VALUE_URI,
     MIN_VERSION_WITH_V2,
@@ -199,13 +199,13 @@ def ModelWriter(cls):
         )
 
         self.quantize_config.meta_set(
-            key=META_FIELD_V2_ENABLED,
-            value=self.quantize_config.v2
+            key=META_FIELD_GPTAQ_ENABLED,
+            value=self.quantize_config.gptaq
         )
 
         self.quantize_config.meta_set(
-            key=META_FIELD_V2_ALPHA,
-            value=self.quantize_config.v2_alpha
+            key=META_FIELD_GPTAQ_ALPHA,
+            value=self.quantize_config.gptaq_alpha
         )
 
         self.quantize_config.meta_set(
