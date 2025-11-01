@@ -12,6 +12,7 @@ description = "Production ready LLM model compression/quantization toolkit with 
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+license-files = ["licenses/LICENSE.apache"]
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
 ]
@@ -60,9 +61,6 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/ModelCloud/GPTQModel"
-
-[tool.setuptools]
-license-files = ["licenses/LICENSE.apache"]
 
 [project.optional-dependencies]
 test = [

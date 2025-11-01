@@ -50,6 +50,7 @@ on:
       server:
         description: 'Wheel Build Server'
         type: choice
+        default: '["self-hosted", "xeon5"]'
         options:
           - '["self-hosted", "xeon5"]'
           - '["self-hosted", "zen4"]'
@@ -185,23 +186,6 @@ jobs:
           echo "Transformers Test files: $transformers_test_files"
           echo "MLX Test files: $mlx_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
-
-      - name: Print conditions and parameters
-        run: |
-          echo "Parameters:"
-          echo "needs.list-test-files.outputs.torch-files: ${{ needs.list-test-files.outputs.torch-files }}"
-          echo "needs.list-test-files.outputs.transformers-files: ${{ needs.list-test-files.outputs.transformers-files }}"
-          echo "needs.list-test-files.outputs.m4-files: ${{ needs.list-test-files.outputs.m4-files }}"
-          echo "github.event.inputs.artifact_id: ${{ github.event.inputs.artifact_id }}"
-          echo "needs.build.result: ${{ needs.build.result }}"
-          echo "github.event.inputs.test_names: ${{ github.event.inputs.test_names }}"
-          echo ""
-
-          echo "Conditions:"
-          echo "will build run: ${{ needs.list-test-files.outputs.torch-files != '[]' && needs.list-test-files.outputs.transformers-files != '[]' && !(needs.list-test-files.outputs.m4-files == '[]' && needs.list-test-files.outputs.m4-files == '[]') }}"
-          echo "will legacy run: ${{ (needs.build.result == 'success' || github.event.inputs.artifact_id != '') &&  needs.list-test-files.outputs.transformers-files != '[]' }}"
-          echo "will torch run: ${{ (needs.build.result == 'success' || github.event.inputs.artifact_id != '') &&  needs.list-test-files.outputs.torch-files != '[]' }}"
-          echo "will m4 run: ${{ (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && (needs.list-test-files.outputs.m4-files != '' || needs.list-test-files.outputs.m4-files != '[]') }}"
 
   build:
     runs-on: ${{ fromJSON(github.event.inputs.server || '["self-hosted", "xeon5"]') }}

@@ -858,18 +858,6 @@ setup(
     version=gptqmodel_version,
     packages=_packages,
     include_package_data=True,
-    extras_require={
-        "test": ["pytest>=8.2.2", "parameterized"],
-        "quality": ["ruff==0.13.0", "isort==6.0.1"],
-        "vllm": ["vllm>=0.8.5", "flashinfer-python>=0.2.1"],
-        "sglang": ["sglang[srt]>=0.4.6", "flashinfer-python>=0.2.1"],
-        "bitblas": ["bitblas==0.0.1-dev13"],
-        "hf": ["optimum>=1.21.2"],
-        "eval": ["lm_eval>=0.4.7", "evalplus>=0.3.1"],
-        "triton": ["triton>=3.4.0"],
-        "openai": ["uvicorn", "fastapi", "pydantic"],
-        "mlx": ["mlx_lm>=0.28.2"],
-    },
     include_dirs=include_dirs,
     cmdclass=(
         {"bdist_wheel": CachedWheelsCommand, "build_ext": additional_setup_kwargs.get("cmdclass", {}).get("build_ext")}
