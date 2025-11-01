@@ -88,18 +88,6 @@ def run_subset_stage(
         layer_module=module,
     )
 
-    if len(subset) == 0:
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "StageSubset: layer=%s subset=%s/%s processor=%s produced empty subset (names=%s)",
-                layer_index,
-                subset_index + 1,
-                subset_total,
-                processor_name,
-                subset_names,
-            )
-        return SubsetStageResult(processed_subset={}, layer_inputs=layer_inputs, forward_context=None)
-
     if is_awq_processor:
         logger.info(
             "StageSubset[awq]: layer=%s subset=%s/%s modules=%s sample=%s",
