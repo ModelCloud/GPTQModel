@@ -472,6 +472,14 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
   
 }
 
+# AWQ
+@article{lin2023awq,
+  title={AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration},
+  author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song},
+  journal={arXiv},
+  year={2023}
+}
+
 # EoRA
 @article{liu2024eora,
   title={EoRA: Training-free Compensation for Compressed LLM with Eigenspace Low-Rank Approximation},
@@ -502,14 +510,6 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
       author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
       journal={arXiv preprint arXiv:2406.09904},
       year={2024}
-}
-
-# AWQ
-@article{lin2023awq,
-  title={AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration},
-  author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song},
-  journal={arXiv},
-  year={2023}
 }
 
 # GPTAQ
