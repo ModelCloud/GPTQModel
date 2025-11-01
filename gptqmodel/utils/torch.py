@@ -83,8 +83,8 @@ if hasattr(torch, "npu") and hasattr(torch.npu, "is_available") and torch.npu.is
 
 # mlx check
 try:
-    import mlx.core.metal  # noqa: F401
     import mlx.core  # type: ignore # noqa: F401
+    import mlx.core.metal  # noqa: F401
     HAS_MLX = True
 except BaseException:
     pass
