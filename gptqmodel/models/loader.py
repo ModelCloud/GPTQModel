@@ -50,12 +50,15 @@ from ..utils.model import (
     make_quant,
     simple_dispatch_model,
 )
+from ..utils.inspect import safe_kwargs_call
 from ._const import DEVICE, normalize_device
 
 
 log = setup_logger()
 
 ATTN_IMPLEMENTATION = "attn_implementation"
+
+
 def parse_version_string(version_str: str):
     try:
         return Version(version_str)
@@ -105,12 +108,15 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
     if is_local:
         return os.path.normpath(pretrained_model_id_or_path)
-    else:
-        # Clone kwargs before modifying
-        download_kwargs = kwargs.copy()
-        download_kwargs.pop("attn_implementation", None)
-        download_kwargs.pop("use_flash_attention_2", None)
-        return snapshot_download(pretrained_model_id_or_path, **download_kwargs)
+    def _log_removed(removed: list[str]):
+        log.debug("Loader: dropping unsupported snapshot_download kwargs: %s", ", ".join(removed))
+
+    return safe_kwargs_call(
+        snapshot_download,
+        pretrained_model_id_or_path,
+        kwargs=kwargs,
+        on_removed=_log_removed,
+    )
 
 
 def ModelLoader(cls):
