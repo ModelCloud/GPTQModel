@@ -500,9 +500,23 @@ class GPTQ:
 
             for partial_device, partial in self._device_hessian_partials.items():
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
-                    tmp = partial.to(device=result_accum.device, dtype=torch.float32)
-                    result_accum.add_(tmp)
-                    del tmp
+                    try:
+                        tmp = partial.to(device=result_accum.device, dtype=torch.float32)
+                        result_accum.add_(tmp)
+                        del tmp
+                    except:
+                        log.warn(f"Quantization: Module `{self.name}` -> Retry 1/2 partial.to in 0.5s")
+                        time.sleep(0.5)
+                        try:
+                            tmp = partial.to(device=result_accum.device, dtype=torch.float32)
+                            result_accum.add_(tmp)
+                            del tmp
+                        except:
+                            log.warn(f"Quantization: Module `{self.name}` -> Retry 2/2 partial.to in 0.5s")
+                            time.sleep(0.5)
+                            tmp = partial.to(device=result_accum.device, dtype=torch.float32)
+                            result_accum.add_(tmp)
+                            del tmp
                 else:
                     result_accum.add_(partial)
 
