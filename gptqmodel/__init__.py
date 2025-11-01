@@ -15,6 +15,7 @@ patch_triton_autotuner()
 
 from .utils.env import env_flag
 from .utils.logger import setup_logger
+from .utils.modelscope import ensure_modelscope_available
 
 
 DEBUG_ON = env_flag("DEBUG")
@@ -52,9 +53,11 @@ from .version import __version__
 setup_logger().info("\n%s", ASCII_LOGO)
 
 
-if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
+if ensure_modelscope_available():
     try:
         from modelscope.utils.hf_util.patcher import patch_hub
         patch_hub()
-    except Exception:
-        raise ModuleNotFoundError("you have set GPTQMODEL_USE_MODELSCOPE env, but doesn't have modelscope? install it with `pip install modelscope`")
+    except Exception as exc:
+        raise ModuleNotFoundError(
+            "env `GPTQMODEL_USE_MODELSCOPE` used but modelscope pkg is not found: please install with `pip install modelscope`."
+        ) from exc
