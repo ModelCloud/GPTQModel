@@ -236,9 +236,32 @@ def ModelWriter(cls):
         config.quantization_config = quantize_config.to_dict()
         self.model.config = config
 
-        # Save model config, including generation_config
-        # Use empty state_dict hack to bypass saving weights
-        self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+        def strip_attention_impl_fields(target: Any) -> Dict[str, Any]:
+            removed: Dict[str, Any] = {}
+            for attr in ("attn_implementation", "_attn_implementation"):
+                if hasattr(target, attr):
+                    removed[attr] = getattr(target, attr)
+                    delattr(target, attr)
+            return removed
+
+        generation_config = getattr(self.model, "generation_config", None)
+        removed_config_attention_attrs: Dict[str, Any] = {}
+        removed_generation_attention_attrs: Dict[str, Any] = {}
+
+        try:
+            removed_config_attention_attrs = strip_attention_impl_fields(self.model.config)
+            if generation_config is not None:
+                removed_generation_attention_attrs = strip_attention_impl_fields(generation_config)
+
+            # Save model config, including generation_config
+            # Use empty state_dict hack to bypass saving weights
+            self.model.save_pretrained(save_dir, state_dict={}, is_main_process=True)
+        finally:
+            for attr, value in removed_config_attention_attrs.items():
+                setattr(self.model.config, attr, value)
+            if generation_config is not None:
+                for attr, value in removed_generation_attention_attrs.items():
+                    setattr(generation_config, attr, value)
 
         gen_config_path = os.path.join(save_dir, "generation_config.json")
         if sanitize_generation_config_file(gen_config_path):
