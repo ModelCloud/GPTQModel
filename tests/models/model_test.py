@@ -107,7 +107,7 @@ class ModelTest(unittest.TestCase):
     GROUP_SIZE = 128
     DESC_ACT = False
     SYM = True
-    V2 = False
+    GPTQA = False
     ACT_GROUP_AWARE = True
     FAIL_SAFE = True
     EORA = None
@@ -783,7 +783,7 @@ class ModelTest(unittest.TestCase):
             act_group_aware=self.ACT_GROUP_AWARE,
             fail_safe=self.FAIL_SAFE,
             sym=self.SYM,
-            v2=self.V2,
+            gptaq=self.GPTQA,
             adapter=self.EORA,
             pack_impl="cpu",
             vram_strategy=self.VRAM_STRATEGY,

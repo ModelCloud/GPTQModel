@@ -53,7 +53,7 @@ class TestMultiVsSingleGPU(ModelTest):
             "acc_norm": {"value": 0.3549, "floor_pct": 0.05},
         },
     }
-    V2 = False
+    GPTQA = False
     DEBUG = True
     ACT_GROUP_AWARE = False
     DESC_ACT = True

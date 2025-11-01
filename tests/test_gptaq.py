@@ -19,7 +19,7 @@ class TestQwen2_5_GPTQv2(ModelTest):
     }
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
-    V2 = True
+    GPTQA = True
 
     def test_qwen2_5(self):
         self.quant_lm_eval()
