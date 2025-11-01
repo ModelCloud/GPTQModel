@@ -23,8 +23,9 @@ class _DummyQuantizeConfig:
     static_groups = False
     true_sequential = False
     mse = False
-    v2 = False
-    v2_alpha = 0.0
+    gptaq = False
+    gptaq_alpha = 0.0
+    gptaq_memory_device = "auto"
     act_group_aware = False
     adapter = None
     dynamic = False

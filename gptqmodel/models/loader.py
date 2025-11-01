@@ -768,7 +768,7 @@ def ModelLoader(cls):
 
             if qcfg.format == FORMAT.GPTQ:
                 # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
-                if not qcfg.sym and not qcfg.is_quantized_by_v2():
+                if not qcfg.sym and not qcfg.is_quantized_by_gptaq():
                     raise ValueError(
                         f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                     )

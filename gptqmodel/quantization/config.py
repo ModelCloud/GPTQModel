@@ -51,9 +51,9 @@ META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 META_FIELD_MSE = "mse"
 META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
-META_FIELD_V2_ENABLED = "v2"
-META_FIELD_V2_ALPHA = "v2_alpha"
-META_FIELD_V2_MEMORY_DEVICE = "v2_memory_device"
+META_FIELD_GPTAQ_ENABLED = "gptaq"
+META_FIELD_GPTAQ_ALPHA = "gptaq_alpha"
+META_FIELD_GPTAQ_MEMORY_DEVICE = "gptaq_memory_device"
 
 ADAPTER_FIELD = "adapter"
 
@@ -112,8 +112,17 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     "q_group_size": GROUP_SIZE_FIELD_CODE,
     # AWQ compat
     "version" : FORMAT_FIELD_CODE,
+    "v2": "gptaq",
+    "v2_alpha": "gptaq_alpha",
+    "v2_memory_device": "gptaq_memory_device",
     # map format field (checkpoint_format) to class/code (format)
     FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
+}
+
+DYNAMIC_FIELD_SYNONYMS = {
+    "gptaq": ("v2",),
+    "gptaq_alpha": ("v2_alpha",),
+    "gptaq_memory_device": ("v2_memory_device",),
 }
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
@@ -145,12 +154,23 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
                 # subkey example: Lora override format: `{ "adapter": { "rank": 512 } }`
                 if sub_key:
                     sub_value = overrides.get(key, None)
+                    if sub_value is None and key in DYNAMIC_FIELD_SYNONYMS:
+                        for legacy_key in DYNAMIC_FIELD_SYNONYMS[key]:
+                            if legacy_key in overrides:
+                                sub_value = overrides[legacy_key]
+                                break
                     if isinstance(sub_value, Dict):
                         return sub_value.get(sub_key, default)
                     else:
                         log.info(f"QuantConfig: Dynamic `sub_key`: `{sub_key}` failed extraction from  `sub_value`: `{sub_value}`")
                 else:
-                    return overrides.get(key, default)
+                    if key in overrides:
+                        return overrides[key]
+                    if key in DYNAMIC_FIELD_SYNONYMS:
+                        for legacy_key in DYNAMIC_FIELD_SYNONYMS[key]:
+                            if legacy_key in overrides:
+                                return overrides[legacy_key]
+                    return default
     return default
 
 @dataclass
@@ -222,10 +242,10 @@ class QuantizeConfig():
     # use mock quantization to quantize module so the gptq process can continue and not fail
     fail_safe: bool = field(default=False)
 
-    # gptq v2* only:
-    v2: bool = field(default=False)
-    v2_alpha: float = field(default=0.25)
-    v2_memory_device: str = field(default="auto")
+    # gptaq only:
+    gptaq: bool = field(default=False)
+    gptaq_alpha: float = field(default=0.25)
+    gptaq_memory_device: str = field(default="auto")
 
     # awq only:
     zero_point: bool = field(default=True)
@@ -449,8 +469,8 @@ class QuantizeConfig():
                 result.append((parts[0].lower(), parts[1].lower()))
         return result
 
-    # is quantized model quantized or packed by gptqmodel version with v2 format code
-    def is_quantized_by_v2(self) -> bool:
+    # is quantized model quantized or packed by gptqmodel version with gptaq format code
+    def is_quantized_by_gptaq(self) -> bool:
         # check meta.quantizer
         result = self.meta_get_versionable(META_FIELD_QUANTIZER)
         if len(result) > 0:
@@ -549,6 +569,18 @@ class QuantizeConfig():
             log.warn(
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
+
+        dynamic_overrides = normalized.get("dynamic")
+        if isinstance(dynamic_overrides, dict):
+            for overrides in dynamic_overrides.values():
+                if not isinstance(overrides, dict):
+                    continue
+                if "v2" in overrides and "gptaq" not in overrides:
+                    overrides["gptaq"] = overrides.pop("v2")
+                if "v2_alpha" in overrides and "gptaq_alpha" not in overrides:
+                    overrides["gptaq_alpha"] = overrides.pop("v2_alpha")
+                if "v2_memory_device" in overrides and "gptaq_memory_device" not in overrides:
+                    overrides["gptaq_memory_device"] = overrides.pop("v2_memory_device")
 
         return cls(**normalized)
 

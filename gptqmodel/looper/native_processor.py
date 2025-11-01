@@ -65,19 +65,19 @@ class NativeProcessor(LoopProcessor):
             # gptq is mutable.
             inp = inp[0].detach()
 
-            if self.qcfg.v2_memory_device == "auto":
-                v2_memory_device = DEVICE_1
-            elif self.qcfg.v2_memory_device == "cpu":
+            if self.qcfg.gptaq_memory_device == "auto":
+                target_device = DEVICE_1
+            elif self.qcfg.gptaq_memory_device == "cpu":
                 # slower but >= 4x vram memory reduction
-                v2_memory_device = CPU
-            elif isinstance(self.qcfg.v2_memory_device, str):
-                v2_memory_device = torch.device(self.qcfg.v2_memory_device)
-            elif isinstance(self.qcfg.v2_memory_device, torch.device):
-                v2_memory_device = self.qcfg.v2_memory_device
+                target_device = CPU
+            elif isinstance(self.qcfg.gptaq_memory_device, str):
+                target_device = torch.device(self.qcfg.gptaq_memory_device)
+            elif isinstance(self.qcfg.gptaq_memory_device, torch.device):
+                target_device = self.qcfg.gptaq_memory_device
             else:
-                v2_memory_device = DEVICE_1
+                target_device = DEVICE_1
 
-            self.native_inp_caches[name] += [inp.to(device=v2_memory_device)]
+            self.native_inp_caches[name] += [inp.to(device=target_device)]
             del inp, out
 
         return tmp
