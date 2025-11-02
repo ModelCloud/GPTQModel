@@ -23,6 +23,7 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
+from ..utils.torch import torch_sync
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -349,7 +350,9 @@ class GPTQ:
 
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
-            return torch.matmul(mat32.T, mat32)
+            xtx = torch.matmul(mat32.T, mat32)
+            torch_sync(device=xtx.device)
+            return xtx
 
         xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
@@ -360,6 +363,7 @@ class GPTQ:
                 materialized32 = materialized
                 xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
 
+        torch_sync(device=xtx_accum.device)
         return xtx_accum
 
     def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
@@ -460,7 +464,7 @@ class GPTQ:
 
         return torch.device("cpu")
 
-    def _materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
+    def materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
         device = self._select_hessian_target_device(target_device)
 
         with self.lock:
@@ -500,19 +504,7 @@ class GPTQ:
 
             for partial_device, partial in self._device_hessian_partials.items():
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
-                    # TODO FIXME multi-3090 using P2P is revaling an issue where result_accum and/or partial is not ready for consolidation on the main thread
-                    # when parials are calculated on the individual 
-                    try:
-                        tmp = partial.to(device=result_accum.device, dtype=torch.float32)
-                        result_accum.add_(tmp)
-                        del tmp
-                    except:
-                        log.warn(f"Quantization: Module `{self.name}` -> Retry 1/2 partial.to in 0.5s")
-                        time.sleep(0.25)
-                        tmp = partial.to(device=result_accum.device, dtype=torch.float32)
-                        result_accum.add_(tmp)
-                        del tmp
-                       
+                    result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
                 else:
                     result_accum.add_(partial)
 
@@ -527,7 +519,7 @@ class GPTQ:
             del result_accum
 
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
-        self._materialize_global_hessian(target_device=target_device)
+        self.materialize_global_hessian(target_device=target_device)
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self._select_hessian_target_device(target_device))
         return self.H

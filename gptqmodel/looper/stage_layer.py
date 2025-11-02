@@ -48,6 +48,8 @@ def run_layer_stage(
     """Execute the main per-layer quantization loop."""
     log = logger or setup_logger()
     for layer_index in pb:
+        # Iterate over every transformer layer (plus lm_head when enabled) as
+        # progress-bar controlled units of work.
         if looper._check_loop_stop():
             break
         is_lm_head_module = layer_index >= layer_count
@@ -78,6 +80,8 @@ def run_layer_stage(
         full = find_modules(module, name=looper.gptq_model.lm_head if is_lm_head_module else "")
 
         for p_index, processor in enumerate(looper.processors):
+            # Each processor contributes a quantization phase; walk them in
+            # order so their caches and side effects line up with the pipeline.
             processor.log_call_count = 0  # reset
             processor.collect_memory_info(layer_index)
 
@@ -101,6 +105,8 @@ def run_layer_stage(
             previous_subset_processed: Optional[Dict[str, NamedModule]] = None
 
             for index, names in enumerate(modules):
+                # Process the layer in smaller subsets so attention groups or
+                # MoE experts can be quantized independently within a layer.
                 if isinstance(processor, AWQProcessor):
                     log.info(
                         "StageLayer[awq]: layer=%s subset=%s/%s size=%s names=%s",
@@ -273,6 +279,8 @@ def run_layer_stage(
                     looper.gptq_model.post_quantize(module)
 
                 for finalized in processed_subset.values():
+                    # Reset finalized modules to CPU to guarantee deterministic
+                    # ownership before the next processor touches the layer.
                     if isinstance(finalized, NamedModule):
                         setattr(finalized, "target_device", CPU)
                         inner_module = getattr(finalized, "module", None)
@@ -299,6 +307,8 @@ def run_layer_stage(
                 finalize_tasks = []
 
                 for reverse_p in reversed(looper.processors):
+                    # Collect finalize tasks in reverse to mirror the processor
+                    # execution order and honor downstream dependencies.
                     for module in processed_subset.values():
                         actual_module = module.module if isinstance(module, NamedModule) else module
 
@@ -383,6 +393,8 @@ def run_layer_stage(
                     # ).draw()
 
                 for index, (process, module, module_label, target_dev, layer_idx) in enumerate(finalize_tasks, start=1):
+                    # Schedule finalize work on the device thread pool so CPU
+                    # bound tasks do not stall the main orchestration loop.
                     future = DEVICE_THREAD_POOL.submit(
                         target_dev,
                         _finalize_on_worker,
@@ -440,6 +452,8 @@ def run_layer_stage(
                     completed_local = 0
                     try:
                         for future in as_completed(futures):
+                            # Drain futures as they complete to surface errors
+                            # quickly and keep the progress bar in sync.
                             try:
                                 result = future.result()
                             except BaseException as exc:

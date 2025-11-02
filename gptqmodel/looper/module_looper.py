@@ -820,6 +820,8 @@ class ModuleLooper():
         num_devices = len(devices)
 
         for index, device in enumerate(devices):
+            # Split the outstanding batches across devices so that each accelerator
+            # receives a contiguous slice.
             remaining_batches = max(total_batches - segment_start, 0)
             remaining_devices = max(num_devices - index, 1)
             segment_length = remaining_batches // remaining_devices
@@ -841,6 +843,7 @@ class ModuleLooper():
                 max_segment_length = len(indices)
 
         for position in range(max_segment_length):
+            # Submit one batch per device
             futures = []
             for device in devices:
                 segment_indices = device_segments.get(device, [])
@@ -874,6 +877,7 @@ class ModuleLooper():
                 )
 
             for fut in futures:
+                # Preserve the original batch order
                 batch_idx, module_output, kv_next = fut.result()
                 if need_outputs and module_output is not None:
                     results[batch_idx] = module_output
@@ -903,6 +907,8 @@ class ModuleLooper():
 
         ordered_outputs: List[List[torch.Tensor]] = []
         for idx in range(total_batches):
+            # Rebuild the ordered list of batch outputs expected by the next
+            # stage.
             module_output = results.get(idx)
             if module_output is None:
                 raise RuntimeError("Forward batch returned no output; data-parallel execution produced empty result.")
@@ -1105,6 +1111,7 @@ class ModuleLooper():
 
         try:
             for index, reverse_p in enumerate(reversed_processors, start=1):
+                # Finalize processors in reverse order
                 self._check_loop_stop()
                 if isinstance(reverse_p, GPTQProcessor):
                     pass

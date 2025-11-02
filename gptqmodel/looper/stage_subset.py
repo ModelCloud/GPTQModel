@@ -148,6 +148,8 @@ def run_subset_stage(
                     combined_names.append(candidate)
 
         for sub_name in combined_names:
+            # Group every expert (including ones outside the current subset) so
+            # load balancing decisions can span the full MoE family.
             group_key = looper._extract_moe_group_key(sub_name)
             if group_key is None:
                 continue
@@ -208,6 +210,9 @@ def run_subset_stage(
 
     subset_size = len(subset)
     for idx, (name, m) in enumerate(subset.items()):
+        # Register the forward hook that captures activations for quantization.
+        # The final module optionally flips a flag so processors can trigger
+        # once-per-subset logic after the forward pass.
         is_last = (idx == subset_size - 1)
         hook_source = getattr(m, "full_name", None)
         if hook_source is None:
@@ -320,9 +325,12 @@ def run_subset_stage(
     pb.title(layer_title).subtitle("").draw()
 
     for h in handle:
+        # Detach temporary hooks to avoid leaking state into future passes.
         h.remove()
 
     for name in subset:
+        # Reset inline hook attributes on NamedModule wrappers so future passes
+        # do not reuse state from this subset run.
         if hasattr(subset[name], 'forward_hook'):
             subset[name].forward_hook = None
             subset[name].forward_hook_last = False
@@ -330,6 +338,8 @@ def run_subset_stage(
     moe_skip_modules = []
     if isinstance(processor, GPTQProcessor):
         for name in subset:
+            # Skip MoE experts that never fired; they likely lacked calibration
+            # traffic and would produce invalid statistics.
             if processor.tasks[name].fwd_counter == 0:
                 logger.error(f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it.")
                 moe_skip_modules.append(name)
@@ -343,6 +353,8 @@ def run_subset_stage(
 
     quant_target_devices: Dict[str, torch.device] = {}
     for name, named_module in subset.items():
+        # Ensure each module has a matching processor task before sending it to
+        # the worker pool; otherwise freeze it on the current device.
         task_map = getattr(processor, "tasks", None)
         has_task = bool(task_map and task_map.get(name) is not None)
 
@@ -424,6 +436,8 @@ def run_subset_stage(
         return nm.name, nm
 
     for name, named_module in subset.items():
+        # Launch processing for every module in the subset; tasks may run in
+        # parallel as allowed by the device thread pool.
         tgt_dev = quant_target_devices.get(name, cur_layer_device)
         futures.append(
             DEVICE_THREAD_POOL.submit(
@@ -440,6 +454,8 @@ def run_subset_stage(
         )
 
     for fut in futures:
+        # Collect results in submission order so the final subset map preserves
+        # deterministic iteration for downstream consumers.
         name, named_module = fut.result()
         processed_subset[name] = named_module
     torch_sync()

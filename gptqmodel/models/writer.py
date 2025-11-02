@@ -241,7 +241,11 @@ def ModelWriter(cls):
             for attr in ("attn_implementation", "_attn_implementation"):
                 if hasattr(target, attr):
                     removed[attr] = getattr(target, attr)
-                    delattr(target, attr)
+                    # Avoid AttributeError: property '_attn_implementation' of 'Qwen2Config' object has no deleter
+                    try:
+                        delattr(target, attr)
+                    except Exception:
+                        pass
             return removed
 
         generation_config = getattr(self.model, "generation_config", None)
