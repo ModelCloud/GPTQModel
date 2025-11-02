@@ -100,9 +100,26 @@ def test_hessian_chunk_invocations_and_workspace_shape():
     large_gptq.process_batch(calib.clone())
     assert large_gptq._chunk_invocations == 1
 
+    large_summary = getattr(large_gptq, "_borrow_workspace_last_summary", None)
+    assert large_summary is not None
+    assert large_summary["requests"] == 1
+    assert large_summary["materialized_hits"] == 0
+    assert large_summary["materialized_misses"] == 1
+    assert large_summary["staging_misses"] == 1
+
     small_gptq.process_batch(calib.clone())
     expected_chunks = math.ceil(calib.shape[0] / small_cfg.hessian_chunk_size)
     assert small_gptq._chunk_invocations == expected_chunks
+
+    small_summary = getattr(small_gptq, "_borrow_workspace_last_summary", None)
+    assert small_summary is not None
+    assert small_summary["requests"] == expected_chunks
+    assert small_summary["materialized_hits"] + small_summary["materialized_misses"] == expected_chunks
+    assert small_summary["materialized_hits"] >= expected_chunks - 1
+    assert pytest.approx(
+        small_summary["hit_rate"],
+        rel=1e-6,
+    ) == small_summary["materialized_hits"] / expected_chunks
 
     device = torch.device(base.weight.device)
     cache_key = gptq_impl._workspace_cache_key(device)

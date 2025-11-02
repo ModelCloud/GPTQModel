@@ -216,6 +216,9 @@ class GPTQ:
             "materialized_hits": 0,
             "materialized_misses": 0,
         }
+        self._borrow_workspace_last_summary: Optional[Dict[str, object]] = None
+        self._borrow_workspace_stage_dtype: Optional[torch.dtype] = None
+        self._borrow_workspace_last_chunk_rows: Optional[int] = None
 
     @staticmethod
     def validate_module(module):
@@ -400,6 +403,8 @@ class GPTQ:
 
         stage_dtype = self.preferred_staging_dtype(matrix.dtype, matrix.device)
         chunk_size = self.resolve_hessian_chunk_size(rows, stage_dtype)
+        self._borrow_workspace_stage_dtype = stage_dtype
+        self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
@@ -501,6 +506,7 @@ class GPTQ:
             xtx = xtx.detach()
             del reshaped_inp
 
+        self.emit_borrow_workspace_stats(context="process_batch")
         return batch_token_size, xtx, canonical_device
 
     def _select_hessian_target_device(self, requested: Optional[torch.device]) -> torch.device:
@@ -1020,6 +1026,42 @@ class GPTQ:
             for key in self._borrow_workspace_stats:
                 self._borrow_workspace_stats[key] = 0
         return stats
+
+    def emit_borrow_workspace_stats(self, *, context: str) -> None:
+        stats = self.borrow_materialized_chunk_stats(reset=True)
+        total_requests = int(stats.get("requests", 0) or 0)
+        if total_requests == 0:
+            return
+
+        materialized_hits = int(stats.get("materialized_hits", 0) or 0)
+        materialized_misses = int(stats.get("materialized_misses", 0) or 0)
+        staging_hits = int(stats.get("staging_hits", 0) or 0)
+        staging_misses = int(stats.get("staging_misses", 0) or 0)
+        chunk_rows = self._borrow_workspace_last_chunk_rows
+        stage_dtype = self._borrow_workspace_stage_dtype
+        stage_dtype_str = str(stage_dtype) if stage_dtype is not None else "n/a"
+        hit_rate = materialized_hits / total_requests if total_requests else 0.0
+
+        summary = {
+            "context": context,
+            "requests": total_requests,
+            "materialized_hits": materialized_hits,
+            "materialized_misses": materialized_misses,
+            "staging_hits": staging_hits,
+            "staging_misses": staging_misses,
+            "chunk_rows": chunk_rows,
+            "staging_dtype": stage_dtype_str,
+            "hit_rate": hit_rate,
+        }
+        self._borrow_workspace_last_summary = summary
+
+        rows_label = chunk_rows if chunk_rows is not None else "n/a"
+        log.info(
+            f"GPTQ workspace cache [{context}]: module={getattr(self, 'name', '<unknown>')} "
+            f"rows={rows_label} staging_dtype={stage_dtype_str} requests={total_requests} "
+            f"hits={materialized_hits} misses={materialized_misses} hit_rate={hit_rate:.2%} "
+            f"staging_hits={staging_hits} staging_misses={staging_misses}"
+        )
 
     def free(self):
         if hasattr(self, "H"):

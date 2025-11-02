@@ -5,7 +5,6 @@
 
 import contextlib
 import copy
-import logging
 import threading
 import time
 from typing import Callable, Dict, Optional, Tuple
@@ -186,23 +185,7 @@ class GPTQProcessor(LoopProcessor):
 
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 
-        borrow_stats = g.borrow_materialized_chunk_stats(reset=True)
-        if borrow_stats.get("requests"):
-            module_label = getattr(module, "full_name", module.name)
-            log_level = logging.INFO if borrow_stats.get("materialized_misses") else logging.DEBUG
-            log.log(
-                log_level,
-                (
-                    "GPTQ borrow_materialized_chunk_fp32: module=%s requests=%d hits=%d misses=%d "
-                    "staging_hits=%d staging_misses=%d"
-                ),
-                module_label,
-                borrow_stats.get("requests", 0),
-                borrow_stats.get("materialized_hits", 0),
-                borrow_stats.get("materialized_misses", 0),
-                borrow_stats.get("staging_hits", 0),
-                borrow_stats.get("staging_misses", 0),
-            )
+        workspace_summary = getattr(g, "_borrow_workspace_last_summary", None)
 
         module.stream_state_payload_to_cpu(
             {
@@ -253,6 +236,17 @@ class GPTQProcessor(LoopProcessor):
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
             PROCESS_USED_MEMORY: self.device_memory_report(),
         }
+
+        if workspace_summary:
+            requests = int(workspace_summary.get("requests", 0) or 0)
+            if requests:
+                hit_rate = float(workspace_summary.get("hit_rate", 0.0) or 0.0)
+                chunk_rows = workspace_summary.get("chunk_rows")
+                stat["workspace_cache_requests"] = str(requests)
+                stat["workspace_cache_hit_rate"] = f"{hit_rate:.1%}"
+                stat["workspace_stage_dtype"] = workspace_summary.get("staging_dtype", "")
+                if chunk_rows is not None:
+                    stat["workspace_chunk_rows"] = str(chunk_rows)
 
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
