@@ -186,6 +186,7 @@ class GPTQProcessor(LoopProcessor):
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 
         workspace_summary = getattr(g, "_borrow_workspace_last_summary", None)
+        workspace_totals = getattr(g, "_borrow_workspace_totals", None)
 
         module.stream_state_payload_to_cpu(
             {
@@ -247,6 +248,14 @@ class GPTQProcessor(LoopProcessor):
                 stat["workspace_stage_dtype"] = workspace_summary.get("staging_dtype", "")
                 if chunk_rows is not None:
                     stat["workspace_chunk_rows"] = str(chunk_rows)
+        if workspace_totals:
+            total_requests = int(workspace_totals.get("requests", 0) or 0)
+            if total_requests:
+                cumulative_hit_rate = (
+                    float(workspace_totals.get("materialized_hits", 0) or 0.0) / total_requests
+                )
+                stat["workspace_total_requests"] = str(total_requests)
+                stat["workspace_total_hit_rate"] = f"{cumulative_hit_rate:.1%}"
 
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
@@ -256,6 +265,8 @@ class GPTQProcessor(LoopProcessor):
 
         # Log the new row
         self.log_new_row(stat)
+
+        g.log_workspace_stats(context="gptq_process")
 
         if self.calculate_w_wq_diff:
             # diff in float32

@@ -216,6 +216,13 @@ class GPTQ:
             "materialized_hits": 0,
             "materialized_misses": 0,
         }
+        self._borrow_workspace_totals = {
+            "requests": 0,
+            "materialized_hits": 0,
+            "materialized_misses": 0,
+            "staging_hits": 0,
+            "staging_misses": 0,
+        }
         self._borrow_workspace_last_summary: Optional[Dict[str, object]] = None
         self._borrow_workspace_stage_dtype: Optional[torch.dtype] = None
         self._borrow_workspace_last_chunk_rows: Optional[int] = None
@@ -506,7 +513,7 @@ class GPTQ:
             xtx = xtx.detach()
             del reshaped_inp
 
-        self.emit_borrow_workspace_stats(context="process_batch")
+        self._snapshot_borrow_workspace_stats(context="process_batch")
         return batch_token_size, xtx, canonical_device
 
     def _select_hessian_target_device(self, requested: Optional[torch.device]) -> torch.device:
@@ -1027,7 +1034,7 @@ class GPTQ:
                 self._borrow_workspace_stats[key] = 0
         return stats
 
-    def emit_borrow_workspace_stats(self, *, context: str) -> None:
+    def _snapshot_borrow_workspace_stats(self, *, context: str) -> None:
         stats = self.borrow_materialized_chunk_stats(reset=True)
         total_requests = int(stats.get("requests", 0) or 0)
         if total_requests == 0:
@@ -1055,13 +1062,62 @@ class GPTQ:
         }
         self._borrow_workspace_last_summary = summary
 
-        rows_label = chunk_rows if chunk_rows is not None else "n/a"
+        totals = self._borrow_workspace_totals
+        totals["requests"] += total_requests
+        totals["materialized_hits"] += materialized_hits
+        totals["materialized_misses"] += materialized_misses
+        totals["staging_hits"] += staging_hits
+        totals["staging_misses"] += staging_misses
+
+    def log_workspace_stats(self, *, context: str, reset: bool = True) -> None:
+        totals = self._borrow_workspace_totals
+        total_requests = int(totals.get("requests", 0) or 0)
+        if total_requests == 0:
+            if reset:
+                self.reset_workspace_stats()
+            return
+
+        total_hits = int(totals.get("materialized_hits", 0) or 0)
+        total_misses = int(totals.get("materialized_misses", 0) or 0)
+        total_hit_rate = total_hits / total_requests if total_requests else 0.0
+
+        last = self._borrow_workspace_last_summary or {}
+        last_requests = int(last.get("requests", 0) or 0)
+        last_hits = int(last.get("materialized_hits", 0) or 0)
+        last_misses = int(last.get("materialized_misses", 0) or 0)
+        last_hit_rate = float(last.get("hit_rate", 0.0) or 0.0)
+        rows_label = last.get("chunk_rows", "n/a")
+        stage_dtype = last.get("staging_dtype", "n/a")
+
         log.info(
-            f"GPTQ workspace cache [{context}]: module={getattr(self, 'name', '<unknown>')} "
-            f"rows={rows_label} staging_dtype={stage_dtype_str} requests={total_requests} "
-            f"hits={materialized_hits} misses={materialized_misses} hit_rate={hit_rate:.2%} "
-            f"staging_hits={staging_hits} staging_misses={staging_misses}"
+            "GPTQ workspace cache [%s]: module=%s rows=%s staging_dtype=%s "
+            "requests=%d hits=%d misses=%d hit_rate=%.2f total_requests=%d "
+            "total_hits=%d total_misses=%d total_hit_rate=%.2f",
+            context,
+            getattr(self, "name", "<unknown>"),
+            rows_label,
+            stage_dtype,
+            last_requests,
+            last_hits,
+            last_misses,
+            last_hit_rate,
+            total_requests,
+            total_hits,
+            total_misses,
+            total_hit_rate,
         )
+
+        if reset:
+            self.reset_workspace_stats()
+
+    def reset_workspace_stats(self) -> None:
+        for key in self._borrow_workspace_stats:
+            self._borrow_workspace_stats[key] = 0
+        for key in self._borrow_workspace_totals:
+            self._borrow_workspace_totals[key] = 0
+        self._borrow_workspace_last_summary = None
+        self._borrow_workspace_stage_dtype = None
+        self._borrow_workspace_last_chunk_rows = None
 
     def free(self):
         if hasattr(self, "H"):
