@@ -88,6 +88,29 @@ def run_subset_stage(
         layer_module=module,
     )
 
+    # TODO FIXME: If a full layer has no module to quantize a simple forward() is enough and output is captured 
+    # to be used as next layer's input. So one pass forward (entire layer simple forward wihout need of dealing 
+    # with subset loops and micro forward loops, just full layer, usally XXXDecodeLayer.forward(). 
+    # So output = current_layer.forward() is enough or sometimes just calling the layer callable like layer() 
+    # which same as layer.forward().
+    #
+    # Assume layer 2 has no modules to quantize. At beginniing loop for layer 2, we have layer_output 
+    # from completed forward_replay() of layer 1. Then pass this to layer 2 (as a whole) as layer_input 
+    # and store ouput, then immediately loop to layer 3 without any further subset work that is only necessary 
+    # if we need to quantize part of a layer.
+    #
+    # if len(subset) == 0:
+    #     if logger.isEnabledFor(logging.DEBUG):
+    #         logger.debug(
+    #             "StageSubset: layer=%s subset=%s/%s processor=%s produced empty subset (names=%s)",
+    #             layer_index,
+    #             subset_index + 1,
+    #             subset_total,
+    #             processor_name,
+    #             subset_names,
+    #         )
+    #     return SubsetStageResult(processed_subset={}, layer_inputs=layer_inputs, forward_context=None)
+
     if is_awq_processor:
         logger.info(
             "StageSubset[awq]: layer=%s subset=%s/%s modules=%s sample=%s",
