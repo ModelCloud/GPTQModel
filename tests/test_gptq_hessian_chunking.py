@@ -67,7 +67,7 @@ def _run_add_batch(
     activation_mb = (batch_size * seq_len * hidden_dim * 2) / (1024**2)
     peak_delta_mb = max(0.0, (peak_alloc - baseline_alloc) / (1024**2))
 
-    chunk_rows = gptq._resolve_hessian_chunk_size(batch_size * seq_len, torch.float32)
+    chunk_rows = gptq.resolve_hessian_chunk_size(batch_size * seq_len, torch.float32)
 
     return {
         "chunk_bytes": chunk_bytes,

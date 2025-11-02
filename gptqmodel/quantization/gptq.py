@@ -172,7 +172,7 @@ class GPTQ:
         else:
             self._final_hessian_device_hint = torch.device(module_device)
 
-        self._validate_module(self.module)
+        self.validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
 
@@ -197,7 +197,7 @@ class GPTQ:
         self._hessian_dirty: bool = False
 
     @staticmethod
-    def _validate_module(module):
+    def validate_module(module):
         assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
                                    transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
 
@@ -213,14 +213,14 @@ class GPTQ:
         else:
             return (0, 0)
 
-    def _mock_hessian_inverse(self, H: torch.Tensor):
+    def mock_hessian_inverse(self, H: torch.Tensor):
         """Mock hessian inverse for fast testing"""
         damp = self.qcfg.damp_percent
         # Return identity matrix instead of complex inversion
         identity = torch.eye(H.shape[0], dtype=torch.float32, device=H.device)
         return identity, damp
 
-    def _clone_module(self, copy=True, device: torch.device = None):
+    def clone_module(self, copy=True, device: torch.device = None):
         if not device:
             device = self.module.weight.data.device
 
@@ -243,7 +243,7 @@ class GPTQ:
         return clone.float()
 
     @staticmethod
-    def _truncate_last_dim(tensor: torch.Tensor, length: int) -> torch.Tensor:
+    def truncate_last_dim(tensor: torch.Tensor, length: int) -> torch.Tensor:
         if tensor.dim() == 0:
             return tensor
 
@@ -274,7 +274,7 @@ class GPTQ:
             self.nsamples += batch_token_size
             self._hessian_dirty = True
 
-    def _preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
+    def preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
         device = torch.device(device)
 
         if not self.qcfg.hessian_use_bfloat16_staging:
@@ -288,7 +288,7 @@ class GPTQ:
 
         return torch.bfloat16
 
-    def _resolve_hessian_chunk_size(self, rows: int, stage_dtype: torch.dtype) -> Optional[int]:
+    def resolve_hessian_chunk_size(self, rows: int, stage_dtype: torch.dtype) -> Optional[int]:
         if rows == 0:
             return None
 
@@ -308,7 +308,7 @@ class GPTQ:
         return None
 
     @contextlib.contextmanager
-    def _borrow_materialized_chunk_fp32(
+    def borrow_materialized_chunk_fp32(
         self,
         chunk: torch.Tensor,
         rows: int,
@@ -318,7 +318,7 @@ class GPTQ:
             return
 
         device = chunk.device
-        stage_dtype = self._preferred_staging_dtype(chunk.dtype, device)
+        stage_dtype = self.preferred_staging_dtype(chunk.dtype, device)
 
         with _lease_workspace(device, stage_dtype, self.columns, rows) as staging_workspace:
             staging_view = staging_workspace[:rows, :]
@@ -340,13 +340,13 @@ class GPTQ:
                         if device.type == "cuda":
                             torch.cuda.current_stream(device).synchronize()
 
-    def _compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
+    def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]
         if rows == 0:
             return torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
-        stage_dtype = self._preferred_staging_dtype(matrix.dtype, matrix.device)
-        chunk_size = self._resolve_hessian_chunk_size(rows, stage_dtype)
+        stage_dtype = self.preferred_staging_dtype(matrix.dtype, matrix.device)
+        chunk_size = self.resolve_hessian_chunk_size(rows, stage_dtype)
 
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
@@ -359,7 +359,7 @@ class GPTQ:
         for start in range(0, rows, chunk_size):
             rows_this = min(chunk_size, rows - start)
             source = matrix[start:start + rows_this]
-            with self._borrow_materialized_chunk_fp32(source, rows_this) as materialized:
+            with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
                 materialized32 = materialized
                 xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
 
@@ -423,7 +423,7 @@ class GPTQ:
             return 0, None, canonical_device
 
         try:
-            xtx = self._compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
+            xtx = self.compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
         except RuntimeError as exc:
             if (
                 torch.device(inp_device).type == "cuda"
@@ -438,7 +438,7 @@ class GPTQ:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 canonical_device = torch.device("cpu")
-                xtx = self._compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
+                xtx = self.compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
                 xtx = xtx.detach()
                 del reshaped_inp_cpu
             else:
@@ -665,7 +665,7 @@ class GPTQ:
 
         if self.qcfg.mock_quantization:
             # Use simplified hessian inverse (identity matrix)
-            self.hessian_inverse = self._mock_hessian_inverse
+            self.hessian_inverse = self.mock_hessian_inverse
 
         # if self.device.type not in ["mps", "cpu"]:
         #     self.module.weight.data = self.module.weight.data.cpu()
@@ -677,7 +677,7 @@ class GPTQ:
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module(device=self.H.device)
+            W = self.clone_module(device=self.H.device)
         else:
             W = self.module_copy.to(device=self.H.device)
             del self.module_copy
@@ -952,8 +952,8 @@ class GPTQ:
 
         if self._tp_pad_cols:
             valid_cols = self._original_columns
-            scale = self._truncate_last_dim(scale, valid_cols)
-            zero = self._truncate_last_dim(zero, valid_cols)
+            scale = self.truncate_last_dim(scale, valid_cols)
+            zero = self.truncate_last_dim(zero, valid_cols)
 
         Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
 

@@ -40,7 +40,7 @@ def _clone_module(module: torch.nn.Module) -> torch.nn.Module:
 
 
 def _instrument_chunks(gptq: GPTQ) -> None:
-    original = gptq._borrow_materialized_chunk_fp32
+    original = gptq.borrow_materialized_chunk_fp32
 
     @contextlib.contextmanager
     def wrapped(self, chunk, rows):
@@ -49,7 +49,7 @@ def _instrument_chunks(gptq: GPTQ) -> None:
             yield materialized
 
     gptq._chunk_invocations = 0
-    gptq._borrow_materialized_chunk_fp32 = types.MethodType(wrapped, gptq)
+    gptq.borrow_materialized_chunk_fp32 = types.MethodType(wrapped, gptq)
 
 
 def test_hessian_chunk_consistency_matches_full_precision():
@@ -116,7 +116,7 @@ def test_hessian_chunk_invocations_and_workspace_shape():
     small_workspace = gptq_impl._WORKSPACE_CACHE[cache_key]
     assert small_workspace is large_workspace
 
-    staging_dtype = small_gptq._preferred_staging_dtype(calib.dtype, device)
+    staging_dtype = small_gptq.preferred_staging_dtype(calib.dtype, device)
     if staging_dtype == torch.bfloat16:
         staged_workspace = gptq_impl._WORKSPACE_CACHE[cache_key]
         assert staged_workspace.dtype == torch.bfloat16
@@ -188,7 +188,7 @@ def test_hessian_workspace_thread_safety_cuda():
     assert cached_workspace.shape[0] >= expected_rows
     assert cached_workspace.shape[1] == cols
 
-    stage_dtype = gptq_workers[0]._preferred_staging_dtype(torch.float16, device)
+    stage_dtype = gptq_workers[0].preferred_staging_dtype(torch.float16, device)
     if stage_dtype == torch.bfloat16:
         assert cached_workspace.dtype == torch.bfloat16
     else:

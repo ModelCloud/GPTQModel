@@ -135,7 +135,7 @@ class GPTQv2(GPTQ):
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module(device=self.H.device)
+            W = self.clone_module(device=self.H.device)
         else:
             W = self.module_copy
             self.module_copy = None
