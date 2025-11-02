@@ -698,6 +698,19 @@ class AWQProcessor(LoopProcessor):
         assert org_w_shape[0] % oc_batch_size == 0
         w_all = w
         best_max_val_all = []
+        device = w_all.device
+        tokens = input_feat.shape[1]
+        num_groups = input_feat.shape[2]
+
+        scratch_clamp = torch.empty((oc_batch_size, 1, num_groups, group_size), device=device, dtype=w_all.dtype)
+        scratch_quant = torch.empty_like(scratch_clamp)
+        scratch_org_out = torch.empty((oc_batch_size, tokens, num_groups), device=device, dtype=w_all.dtype)
+        scratch_cur_out = torch.empty_like(scratch_org_out)
+        input_feat = input_feat.to(device)
+        grouped_inputs = [
+            input_feat[0, :, g, :].T.contiguous()
+            for g in range(num_groups)
+        ]
 
         for i_b in range(org_w_shape[0] // oc_batch_size):
             w = w_all[i_b * oc_batch_size: (i_b + 1) * oc_batch_size]
@@ -706,20 +719,37 @@ class AWQProcessor(LoopProcessor):
 
             best_max_val = org_max_val.clone()
             min_errs = torch.ones_like(org_max_val) * 1e9
-            input_feat = input_feat.to(w.device)
-            org_out = (input_feat * w).sum(dim=-1)  # co, n_token, n_group
+            batch = w.shape[0]
+            clamp_slice = scratch_clamp[:batch]
+            quant_slice = scratch_quant[:batch]
+            org_out_slice = scratch_org_out[:batch]
+            cur_out_slice = scratch_cur_out[:batch]
+
+            w_groups = w.view(batch, num_groups, group_size)
+            for g, input_group in enumerate(grouped_inputs):
+                org_out_slice[:, :, g] = torch.matmul(w_groups[:, g, :], input_group)
+
+            org_out = org_out_slice
 
             for i_s in range(int(max_shrink * n_grid)):
                 max_val = org_max_val * (1 - i_s / n_grid)
                 min_val = -max_val
-                cur_w = torch.clamp(w, min_val, max_val)
-                q_w = self.pseudo_quantize_tensor(cur_w)[0]
-                cur_out = (input_feat * q_w).sum(dim=-1)
+                torch.clamp(
+                    w_groups,
+                    min_val.view(batch, num_groups, 1),
+                    max_val.view(batch, num_groups, 1),
+                    out=clamp_slice.view(batch, num_groups, group_size),
+                )
+                self._pseudo_quantize_tensor_into(
+                    clamp_slice,
+                    quant_slice,
+                )
+                quant_groups = quant_slice.view(batch, num_groups, group_size)
+                for g, input_group in enumerate(grouped_inputs):
+                    cur_out_slice[:, :, g] = torch.matmul(quant_groups[:, g, :], input_group)
 
                 # co, 1, n_group, 1
-                err = (cur_out - org_out).pow(2).mean(dim=1).view(min_errs.shape)
-                del cur_w
-                del cur_out
+                err = (cur_out_slice - org_out).pow(2).mean(dim=1).view(min_errs.shape)
                 cur_best_idx = err < min_errs
                 min_errs[cur_best_idx] = err[cur_best_idx]
                 best_max_val[cur_best_idx] = max_val[cur_best_idx]
@@ -767,6 +797,44 @@ class AWQProcessor(LoopProcessor):
         w = w.reshape(org_w_shape)
 
         return w, scales, zeros
+
+    @torch.inference_mode()
+    def _pseudo_quantize_tensor_into(self, src: torch.Tensor, dst: torch.Tensor) -> None:
+        org_shape = src.shape
+        if self.qcfg.group_size > 0:
+            src_view = src.view(-1, self.qcfg.group_size)
+            dst_view = dst.view(-1, self.qcfg.group_size)
+        else:
+            src_view = src.reshape(org_shape[0], -1)
+            dst_view = dst.reshape_as(src_view)
+
+        if self.qcfg.zero_point:
+            max_val = src_view.amax(dim=1, keepdim=True)
+            min_val = src_view.amin(dim=1, keepdim=True)
+            max_int = 2 ** self.qcfg.bits - 1
+            min_int = 0
+            scales = (max_val - min_val).clamp(min=1e-5) / max_int
+            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
+
+            dst_view.copy_(src_view)
+            dst_view.div_(scales)
+            torch.round(dst_view, out=dst_view)
+            dst_view.add_(zeros)
+            dst_view.clamp_(min_int, max_int)
+            dst_view.sub_(zeros)
+            dst_view.mul_(scales)
+        else:
+            max_val = src_view.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
+            max_int = 2 ** (self.qcfg.bits - 1) - 1
+            min_int = -(2 ** (self.qcfg.bits - 1))
+            scales = max_val / max_int
+
+            dst_view.copy_(src_view)
+            dst_view.div_(scales)
+            torch.round(dst_view, out=dst_view)
+            dst_view.clamp_(min_int, max_int)
+            dst_view.mul_(scales)
+
 
     def _compute_best_scale(
         self,
