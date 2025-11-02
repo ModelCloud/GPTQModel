@@ -350,7 +350,9 @@ class GPTQ:
 
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
-            return torch.matmul(mat32.T, mat32)
+            xtx = torch.matmul(mat32.T, mat32)
+            torch_sync(device=xtx.device)
+            return xtx
 
         xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
@@ -361,6 +363,7 @@ class GPTQ:
                 materialized32 = materialized
                 xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
 
+        torch_sync(device=xtx_accum.device)
         return xtx_accum
 
     def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
@@ -501,10 +504,6 @@ class GPTQ:
 
             for partial_device, partial in self._device_hessian_partials.items():
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
-                    # TODO: each partial sync should be done at the partial and not here
-                    # partials done on background threads, make sure partial is ready for consumption
-                    torch_sync(partial.device)
-
                     result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
                 else:
                     result_accum.add_(partial)
