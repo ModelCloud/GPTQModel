@@ -576,19 +576,34 @@ class AWQProcessor(LoopProcessor):
         inp = inp.to(next(module2inspect.parameters()).device)
 
         # [STEP 1]: Compute per-channel mean of normalised weights
-        # All layer weights are concatted together
-        weight = torch.cat([_m.weight for _m in layers], dim=0)
-        org_shape = weight.shape
-        # The weights are reshaped to be organised by quantization group
-        weight = weight.view(-1, self.qcfg.group_size)
-        # Calculates the relative magnitude of the weights within each of the quantization groups,
-        # and rescales each group individually so that each group has weights on a 0-1 scale.
-        w_scale = weight.abs() / (weight.abs().amax(dim=1, keepdim=True) + 1e-6)
-        # Resizes the rescaled weight matrix back up to its original dimensions
-        w_scale = w_scale.view(org_shape)
-        # Gets the average rescaled magnitude for each output channel
-        w_mean = w_scale.mean(0)
-        del weight
+        # Accumulate statistics per-layer to avoid concatenating large tensors
+        first_weight = layers[0].weight
+        weight_dtype = first_weight.dtype
+        weight_device = first_weight.device
+        num_channels = first_weight.shape[1]
+        w_sum = torch.zeros(num_channels, dtype=torch.float32, device=weight_device)
+        row_count = 0
+
+        for layer in layers:
+            weight = layer.weight
+            if weight.shape[1] != num_channels:
+                raise ValueError(
+                    f"Expected consistent in_features across layers ({num_channels}), "
+                    f"got {weight.shape[1]} for layer {layer}."
+                )
+            org_shape = weight.shape
+            weight_abs = weight.abs()
+            weight_group = weight_abs.view(-1, self.qcfg.group_size)
+            group_scale = weight_group.amax(dim=1, keepdim=True) + 1e-6
+            normalized = weight_group / group_scale
+            normalized = normalized.view(org_shape)
+            w_sum += normalized.sum(dim=0, dtype=torch.float32)
+            row_count += org_shape[0]
+
+        if row_count == 0:
+            w_mean = torch.zeros(num_channels, dtype=weight_dtype, device=weight_device)
+        else:
+            w_mean = (w_sum / row_count).to(weight_dtype)
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
         # move inp to cpu to avoid memory leak
