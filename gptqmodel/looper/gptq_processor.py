@@ -5,6 +5,7 @@
 
 import contextlib
 import copy
+import logging
 import threading
 import time
 from typing import Callable, Dict, Optional, Tuple
@@ -184,6 +185,24 @@ class GPTQProcessor(LoopProcessor):
                 )
 
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+
+        borrow_stats = g.borrow_materialized_chunk_stats(reset=True)
+        if borrow_stats.get("requests"):
+            module_label = getattr(module, "full_name", module.name)
+            log_level = logging.INFO if borrow_stats.get("materialized_misses") else logging.DEBUG
+            log.log(
+                log_level,
+                (
+                    "GPTQ borrow_materialized_chunk_fp32: module=%s requests=%d hits=%d misses=%d "
+                    "staging_hits=%d staging_misses=%d"
+                ),
+                module_label,
+                borrow_stats.get("requests", 0),
+                borrow_stats.get("materialized_hits", 0),
+                borrow_stats.get("materialized_misses", 0),
+                borrow_stats.get("staging_hits", 0),
+                borrow_stats.get("staging_misses", 0),
+            )
 
         module.stream_state_payload_to_cpu(
             {

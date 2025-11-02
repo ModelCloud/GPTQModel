@@ -71,16 +71,27 @@ def _needs_workspace_resize(
 
 
 @contextlib.contextmanager
-def _lease_workspace(device: torch.device, dtype: torch.dtype, cols: int, required_rows: int):
+def _lease_workspace(
+    device: torch.device,
+    dtype: torch.dtype,
+    cols: int,
+    required_rows: int,
+) -> Tuple[torch.Tensor, bool]:
     key = _workspace_cache_key(device)
     lock = _WORKSPACE_LOCKS.setdefault(key, threading.Lock())
     with lock:
         workspace = _WORKSPACE_CACHE.pop(key, None)
-        if _needs_workspace_resize(workspace, dtype, required_rows, cols):
+        reused = workspace is not None and not _needs_workspace_resize(
+            workspace,
+            dtype,
+            required_rows,
+            cols,
+        )
+        if not reused:
             rows = max(required_rows, 1)
             workspace = torch.empty((rows, cols), dtype=dtype, device=device)
     try:
-        yield workspace
+        yield workspace, reused
     finally:
         with lock:
             _WORKSPACE_CACHE[key] = workspace
@@ -195,6 +206,16 @@ class GPTQ:
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
         self._hessian_dirty: bool = False
+
+        self._borrow_workspace_stats = {
+            "requests": 0,
+            "staging_requests": 0,
+            "staging_hits": 0,
+            "staging_misses": 0,
+            "materialized_requests": 0,
+            "materialized_hits": 0,
+            "materialized_misses": 0,
+        }
 
     @staticmethod
     def validate_module(module):
@@ -320,18 +341,50 @@ class GPTQ:
         device = chunk.device
         stage_dtype = self.preferred_staging_dtype(chunk.dtype, device)
 
-        with _lease_workspace(device, stage_dtype, self.columns, rows) as staging_workspace:
+        stats = self._borrow_workspace_stats
+        stats["requests"] += 1
+
+        with _lease_workspace(device, stage_dtype, self.columns, rows) as (
+            staging_workspace,
+            staging_reused,
+        ):
+            stats["staging_requests"] += 1
+            if staging_reused:
+                stats["staging_hits"] += 1
+            else:
+                stats["staging_misses"] += 1
+
             staging_view = staging_workspace[:rows, :]
             staging_view.copy_(chunk.to(dtype=stage_dtype))
 
             if stage_dtype == torch.float32:
+                stats["materialized_requests"] += 1
+                if staging_reused:
+                    stats["materialized_hits"] += 1
+                else:
+                    stats["materialized_misses"] += 1
+
                 try:
                     yield staging_view
                 finally:
                     if device.type == "cuda":
                         torch.cuda.current_stream(device).synchronize()
             else:
-                with _lease_workspace(device, torch.float32, self.columns, rows) as fp32_workspace:
+                with _lease_workspace(
+                    device,
+                    torch.float32,
+                    self.columns,
+                    rows,
+                ) as (
+                    fp32_workspace,
+                    fp32_reused,
+                ):
+                    stats["materialized_requests"] += 1
+                    if fp32_reused:
+                        stats["materialized_hits"] += 1
+                    else:
+                        stats["materialized_misses"] += 1
+
                     try:
                         fp32_view = fp32_workspace[:rows, :]
                         fp32_view.copy_(staging_view.to(torch.float32))
@@ -960,6 +1013,13 @@ class GPTQ:
         duration = time.time() - start
 
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
+
+    def borrow_materialized_chunk_stats(self, reset: bool = False) -> Dict[str, int]:
+        stats = dict(self._borrow_workspace_stats)
+        if reset:
+            for key in self._borrow_workspace_stats:
+                self._borrow_workspace_stats[key] = 0
+        return stats
 
     def free(self):
         if hasattr(self, "H"):
