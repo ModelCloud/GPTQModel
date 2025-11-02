@@ -114,6 +114,7 @@ class ModelTest(unittest.TestCase):
     DAMP_PERCENT = 0.05
     MSE = 0.0
     DYNAMIC = None
+    HESSIAN_CHUNK_SIZE = None
 
     SAVE_PATH = None  # default is temp folder
 
@@ -790,6 +791,7 @@ class ModelTest(unittest.TestCase):
             damp_percent=self.DAMP_PERCENT,
             mse=self.MSE,
             dynamic=self.DYNAMIC,
+            hessian_chunk_size=self.HESSIAN_CHUNK_SIZE,
         )
 
         log.info(f"Quant config: {quantize_config}")

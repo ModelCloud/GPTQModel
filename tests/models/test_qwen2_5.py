@@ -16,6 +16,7 @@ from gptqmodel.utils.eval import EVAL
 # | gsm8k_plat :: exact,flexible   |   0.2963 |
 class TestQwen2_5(ModelTest):
     GROUP_SIZE = 32
+    HESSIAN_CHUNK_SIZE = 256 * 1024 * 1024
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048

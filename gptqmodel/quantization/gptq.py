@@ -71,16 +71,27 @@ def _needs_workspace_resize(
 
 
 @contextlib.contextmanager
-def _lease_workspace(device: torch.device, dtype: torch.dtype, cols: int, required_rows: int):
+def _lease_workspace(
+    device: torch.device,
+    dtype: torch.dtype,
+    cols: int,
+    required_rows: int,
+) -> Tuple[torch.Tensor, bool]:
     key = _workspace_cache_key(device)
     lock = _WORKSPACE_LOCKS.setdefault(key, threading.Lock())
     with lock:
         workspace = _WORKSPACE_CACHE.pop(key, None)
-        if _needs_workspace_resize(workspace, dtype, required_rows, cols):
+        reused = workspace is not None and not _needs_workspace_resize(
+            workspace,
+            dtype,
+            required_rows,
+            cols,
+        )
+        if not reused:
             rows = max(required_rows, 1)
             workspace = torch.empty((rows, cols), dtype=dtype, device=device)
     try:
-        yield workspace
+        yield workspace, reused
     finally:
         with lock:
             _WORKSPACE_CACHE[key] = workspace
@@ -172,7 +183,7 @@ class GPTQ:
         else:
             self._final_hessian_device_hint = torch.device(module_device)
 
-        self._validate_module(self.module)
+        self.validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
 
@@ -196,8 +207,28 @@ class GPTQ:
         self._device_sample_counts: Dict[torch.device, int] = {}
         self._hessian_dirty: bool = False
 
+        self._borrow_workspace_stats = {
+            "requests": 0,
+            "staging_requests": 0,
+            "staging_hits": 0,
+            "staging_misses": 0,
+            "materialized_requests": 0,
+            "materialized_hits": 0,
+            "materialized_misses": 0,
+        }
+        self._borrow_workspace_totals = {
+            "requests": 0,
+            "materialized_hits": 0,
+            "materialized_misses": 0,
+            "staging_hits": 0,
+            "staging_misses": 0,
+        }
+        self._borrow_workspace_last_summary: Optional[Dict[str, object]] = None
+        self._borrow_workspace_stage_dtype: Optional[torch.dtype] = None
+        self._borrow_workspace_last_chunk_rows: Optional[int] = None
+
     @staticmethod
-    def _validate_module(module):
+    def validate_module(module):
         assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
                                    transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
 
@@ -213,14 +244,14 @@ class GPTQ:
         else:
             return (0, 0)
 
-    def _mock_hessian_inverse(self, H: torch.Tensor):
+    def mock_hessian_inverse(self, H: torch.Tensor):
         """Mock hessian inverse for fast testing"""
         damp = self.qcfg.damp_percent
         # Return identity matrix instead of complex inversion
         identity = torch.eye(H.shape[0], dtype=torch.float32, device=H.device)
         return identity, damp
 
-    def _clone_module(self, copy=True, device: torch.device = None):
+    def clone_module(self, copy=True, device: torch.device = None):
         if not device:
             device = self.module.weight.data.device
 
@@ -243,7 +274,7 @@ class GPTQ:
         return clone.float()
 
     @staticmethod
-    def _truncate_last_dim(tensor: torch.Tensor, length: int) -> torch.Tensor:
+    def truncate_last_dim(tensor: torch.Tensor, length: int) -> torch.Tensor:
         if tensor.dim() == 0:
             return tensor
 
@@ -274,7 +305,7 @@ class GPTQ:
             self.nsamples += batch_token_size
             self._hessian_dirty = True
 
-    def _preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
+    def preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
         device = torch.device(device)
 
         if not self.qcfg.hessian_use_bfloat16_staging:
@@ -288,7 +319,7 @@ class GPTQ:
 
         return torch.bfloat16
 
-    def _resolve_hessian_chunk_size(self, rows: int, stage_dtype: torch.dtype) -> Optional[int]:
+    def resolve_hessian_chunk_size(self, rows: int, stage_dtype: torch.dtype) -> Optional[int]:
         if rows == 0:
             return None
 
@@ -308,7 +339,7 @@ class GPTQ:
         return None
 
     @contextlib.contextmanager
-    def _borrow_materialized_chunk_fp32(
+    def borrow_materialized_chunk_fp32(
         self,
         chunk: torch.Tensor,
         rows: int,
@@ -318,20 +349,52 @@ class GPTQ:
             return
 
         device = chunk.device
-        stage_dtype = self._preferred_staging_dtype(chunk.dtype, device)
+        stage_dtype = self.preferred_staging_dtype(chunk.dtype, device)
 
-        with _lease_workspace(device, stage_dtype, self.columns, rows) as staging_workspace:
+        stats = self._borrow_workspace_stats
+        stats["requests"] += 1
+
+        with _lease_workspace(device, stage_dtype, self.columns, rows) as (
+            staging_workspace,
+            staging_reused,
+        ):
+            stats["staging_requests"] += 1
+            if staging_reused:
+                stats["staging_hits"] += 1
+            else:
+                stats["staging_misses"] += 1
+
             staging_view = staging_workspace[:rows, :]
             staging_view.copy_(chunk.to(dtype=stage_dtype))
 
             if stage_dtype == torch.float32:
+                stats["materialized_requests"] += 1
+                if staging_reused:
+                    stats["materialized_hits"] += 1
+                else:
+                    stats["materialized_misses"] += 1
+
                 try:
                     yield staging_view
                 finally:
                     if device.type == "cuda":
                         torch.cuda.current_stream(device).synchronize()
             else:
-                with _lease_workspace(device, torch.float32, self.columns, rows) as fp32_workspace:
+                with _lease_workspace(
+                    device,
+                    torch.float32,
+                    self.columns,
+                    rows,
+                ) as (
+                    fp32_workspace,
+                    fp32_reused,
+                ):
+                    stats["materialized_requests"] += 1
+                    if fp32_reused:
+                        stats["materialized_hits"] += 1
+                    else:
+                        stats["materialized_misses"] += 1
+
                     try:
                         fp32_view = fp32_workspace[:rows, :]
                         fp32_view.copy_(staging_view.to(torch.float32))
@@ -340,13 +403,15 @@ class GPTQ:
                         if device.type == "cuda":
                             torch.cuda.current_stream(device).synchronize()
 
-    def _compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
+    def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]
         if rows == 0:
             return torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
-        stage_dtype = self._preferred_staging_dtype(matrix.dtype, matrix.device)
-        chunk_size = self._resolve_hessian_chunk_size(rows, stage_dtype)
+        stage_dtype = self.preferred_staging_dtype(matrix.dtype, matrix.device)
+        chunk_size = self.resolve_hessian_chunk_size(rows, stage_dtype)
+        self._borrow_workspace_stage_dtype = stage_dtype
+        self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
@@ -359,7 +424,7 @@ class GPTQ:
         for start in range(0, rows, chunk_size):
             rows_this = min(chunk_size, rows - start)
             source = matrix[start:start + rows_this]
-            with self._borrow_materialized_chunk_fp32(source, rows_this) as materialized:
+            with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
                 materialized32 = materialized
                 xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
 
@@ -423,7 +488,7 @@ class GPTQ:
             return 0, None, canonical_device
 
         try:
-            xtx = self._compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
+            xtx = self.compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
         except RuntimeError as exc:
             if (
                 torch.device(inp_device).type == "cuda"
@@ -438,7 +503,7 @@ class GPTQ:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 canonical_device = torch.device("cpu")
-                xtx = self._compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
+                xtx = self.compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
                 xtx = xtx.detach()
                 del reshaped_inp_cpu
             else:
@@ -448,6 +513,7 @@ class GPTQ:
             xtx = xtx.detach()
             del reshaped_inp
 
+        self._snapshot_borrow_workspace_stats(context="process_batch")
         return batch_token_size, xtx, canonical_device
 
     def _select_hessian_target_device(self, requested: Optional[torch.device]) -> torch.device:
@@ -665,7 +731,7 @@ class GPTQ:
 
         if self.qcfg.mock_quantization:
             # Use simplified hessian inverse (identity matrix)
-            self.hessian_inverse = self._mock_hessian_inverse
+            self.hessian_inverse = self.mock_hessian_inverse
 
         # if self.device.type not in ["mps", "cpu"]:
         #     self.module.weight.data = self.module.weight.data.cpu()
@@ -677,7 +743,7 @@ class GPTQ:
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module(device=self.H.device)
+            W = self.clone_module(device=self.H.device)
         else:
             W = self.module_copy.to(device=self.H.device)
             del self.module_copy
@@ -952,14 +1018,106 @@ class GPTQ:
 
         if self._tp_pad_cols:
             valid_cols = self._original_columns
-            scale = self._truncate_last_dim(scale, valid_cols)
-            zero = self._truncate_last_dim(zero, valid_cols)
+            scale = self.truncate_last_dim(scale, valid_cols)
+            zero = self.truncate_last_dim(zero, valid_cols)
 
         Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
 
         duration = time.time() - start
 
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
+
+    def borrow_materialized_chunk_stats(self, reset: bool = False) -> Dict[str, int]:
+        stats = dict(self._borrow_workspace_stats)
+        if reset:
+            for key in self._borrow_workspace_stats:
+                self._borrow_workspace_stats[key] = 0
+        return stats
+
+    def _snapshot_borrow_workspace_stats(self, *, context: str) -> None:
+        stats = self.borrow_materialized_chunk_stats(reset=True)
+        total_requests = int(stats.get("requests", 0) or 0)
+        if total_requests == 0:
+            return
+
+        materialized_hits = int(stats.get("materialized_hits", 0) or 0)
+        materialized_misses = int(stats.get("materialized_misses", 0) or 0)
+        staging_hits = int(stats.get("staging_hits", 0) or 0)
+        staging_misses = int(stats.get("staging_misses", 0) or 0)
+        chunk_rows = self._borrow_workspace_last_chunk_rows
+        stage_dtype = self._borrow_workspace_stage_dtype
+        stage_dtype_str = str(stage_dtype) if stage_dtype is not None else "n/a"
+        hit_rate = materialized_hits / total_requests if total_requests else 0.0
+
+        summary = {
+            "context": context,
+            "requests": total_requests,
+            "materialized_hits": materialized_hits,
+            "materialized_misses": materialized_misses,
+            "staging_hits": staging_hits,
+            "staging_misses": staging_misses,
+            "chunk_rows": chunk_rows,
+            "staging_dtype": stage_dtype_str,
+            "hit_rate": hit_rate,
+        }
+        self._borrow_workspace_last_summary = summary
+
+        totals = self._borrow_workspace_totals
+        totals["requests"] += total_requests
+        totals["materialized_hits"] += materialized_hits
+        totals["materialized_misses"] += materialized_misses
+        totals["staging_hits"] += staging_hits
+        totals["staging_misses"] += staging_misses
+
+    def log_workspace_stats(self, *, context: str, reset: bool = True) -> None:
+        totals = self._borrow_workspace_totals
+        total_requests = int(totals.get("requests", 0) or 0)
+        if total_requests == 0:
+            if reset:
+                self.reset_workspace_stats()
+            return
+
+        total_hits = int(totals.get("materialized_hits", 0) or 0)
+        total_misses = int(totals.get("materialized_misses", 0) or 0)
+        total_hit_rate = total_hits / total_requests if total_requests else 0.0
+
+        last = self._borrow_workspace_last_summary or {}
+        last_requests = int(last.get("requests", 0) or 0)
+        last_hits = int(last.get("materialized_hits", 0) or 0)
+        last_misses = int(last.get("materialized_misses", 0) or 0)
+        last_hit_rate = float(last.get("hit_rate", 0.0) or 0.0)
+        rows_label = last.get("chunk_rows", "n/a")
+        stage_dtype = last.get("staging_dtype", "n/a")
+
+        log.info(
+            "GPTQ workspace cache [%s]: module=%s rows=%s staging_dtype=%s "
+            "requests=%d hits=%d misses=%d hit_rate=%.2f total_requests=%d "
+            "total_hits=%d total_misses=%d total_hit_rate=%.2f",
+            context,
+            getattr(self, "name", "<unknown>"),
+            rows_label,
+            stage_dtype,
+            last_requests,
+            last_hits,
+            last_misses,
+            last_hit_rate,
+            total_requests,
+            total_hits,
+            total_misses,
+            total_hit_rate,
+        )
+
+        if reset:
+            self.reset_workspace_stats()
+
+    def reset_workspace_stats(self) -> None:
+        for key in self._borrow_workspace_stats:
+            self._borrow_workspace_stats[key] = 0
+        for key in self._borrow_workspace_totals:
+            self._borrow_workspace_totals[key] = 0
+        self._borrow_workspace_last_summary = None
+        self._borrow_workspace_stage_dtype = None
+        self._borrow_workspace_last_chunk_rows = None
 
     def free(self):
         if hasattr(self, "H"):

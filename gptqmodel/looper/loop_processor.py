@@ -439,9 +439,11 @@ class LoopProcessor:
             return "n/a"
 
         def _format_gib(value: float) -> str:
-            text = f"{value:.1f}"
-            if text.endswith(".0"):
+            text = f"{value:.2f}"
+            if text.endswith("00"):
                 text = text[:-2]
+            elif text.endswith("0"):
+                text = text[:-1]
             return f"{text}G"
 
         grouped: Dict[str, List[Tuple[str, float, int]]] = {}
