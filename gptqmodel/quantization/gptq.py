@@ -570,7 +570,16 @@ class GPTQ:
 
             for partial_device, partial in self._device_hessian_partials.items():
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
-                    result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                    # TODO FIXME multi-3090 using P2P is revaling an issue where result_accum and/or partial is not ready for consolidation on the main thread
+                    # when parials are calculated on the individual 
+                    try:                    
+                        result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                    except:
+                        log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to in 0.25s")
+                        time.sleep(0.25)
+                        tmp = partial.to(device=result_accum.device, dtype=torch.float32)
+                        result_accum.add_(tmp)
+                        del tmp                        
                 else:
                     result_accum.add_(partial)
 
