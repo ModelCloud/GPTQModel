@@ -96,6 +96,7 @@ class ModelTest(unittest.TestCase):
     DATASET_SORT = "desc"
     DELETE_QUANTIZED_MODEL = True
     EVAL_TASKS = None
+    EVAL_SINGLE_GPU = True
     LOAD_MODEL_EXTRA_ARGS: Dict[str, Any] = {}
 
     KERNEL_QUANT = {}  # kernel sets
@@ -478,8 +479,12 @@ class ModelTest(unittest.TestCase):
 
         for backend in compare_backends:
             log.info(f"Loading post-quant model with backend `{backend.name}`")
-            # Pin post-quant loads to the first CUDA device to avoid auto sharding across GPUs.
-            use_cuda_map = torch.cuda.is_available() and backend != BACKEND.TORCH_FUSED
+            # When EVAL_SINGLE_GPU is enabled, pin post-quant loads to the first CUDA device to avoid auto sharding.
+            use_cuda_map = (
+                self.EVAL_SINGLE_GPU
+                and torch.cuda.is_available()
+                and backend != BACKEND.TORCH_FUSED
+            )
             if use_cuda_map:
                 model = self.loadQuantModel(
                     model_path,
@@ -932,8 +937,12 @@ class ModelTest(unittest.TestCase):
 
                     q_model = reuse_candidates.pop(target_backend, None)
                     if q_model is None:
-                        # Ensure the post-quant reload stays on a single CUDA device when available.
-                        use_cuda_map = torch.cuda.is_available() and target_backend != BACKEND.TORCH_FUSED
+                        # When single-GPU evaluation is requested, keep the reload scoped to cuda:0.
+                        use_cuda_map = (
+                            self.EVAL_SINGLE_GPU
+                            and torch.cuda.is_available()
+                            and target_backend != BACKEND.TORCH_FUSED
+                        )
                         if use_cuda_map:
                             q_model = self.loadQuantModel(
                                 path,
@@ -1010,7 +1019,8 @@ class ModelTest(unittest.TestCase):
                 multi_device = False
 
             if multi_device:
-                load_kwargs["device_map"] = {"": "cuda:0"}
+                if self.EVAL_SINGLE_GPU:
+                    load_kwargs["device_map"] = {"": "cuda:0"}
 
         model = GPTQModel.load(
             model_id_or_path,
@@ -1032,11 +1042,18 @@ class ModelTest(unittest.TestCase):
                     model_path = model
 
                 if self.USE_VLLM:
+                    tensor_parallel = 1
+                    if not self.EVAL_SINGLE_GPU:
+                        try:
+                            candidate = torch.cuda.device_count()
+                        except Exception:
+                            candidate = 1
+                        tensor_parallel = max(1, candidate)
                     model_args = {
                         "pretrained": model_path,
                         "dtype": "auto", #"float16",
                         "gpu_memory_utilization": 0.8,
-                        "tensor_parallel_size": 1,
+                        "tensor_parallel_size": tensor_parallel,
                         "trust_remote_code": trust_remote_code,
                         "max_model_len": self.MODEL_MAX_LEN
                     }

@@ -11,10 +11,10 @@ from gptqmodel.utils.eval import EVAL
 
 # | Metric                         |   MARLIN |
 # |--------------------------------|----------|
-# | arc_challenge :: acc,none      |   0.3106 |
-# | arc_challenge :: acc_norm,none |   0.3532 |
+# | arc_challenge :: acc,none      |   0.3131 |
+# | arc_challenge :: acc_norm,none |   0.3379 |
 # | mmlu_stem :: acc,none          |   0.3527 |
-# | gsm8k_plat :: exact,flexible   |   0.2192 |
+# | gsm8k_plat :: exact,flexible   |   0.2754 |
 class TestLlama3_2_awq(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
@@ -24,18 +24,18 @@ class TestLlama3_2_awq(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.2192,
+                "value": 0.2754,
                 "floor_pct": 0.04,
             },
         },
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
-                "value": 0.3106,
+                "value": 0.3131,
                 "floor_pct": 0.04,
             },
             "acc_norm": {
-                "value": 0.3532,
+                "value": 0.3379,
                 "floor_pct": 0.04,
             },
         },
