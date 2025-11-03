@@ -189,6 +189,7 @@ class AWQProcessor(LoopProcessor):
                 continue
             try:
                 features[name] = torch.cat(tensors, dim=0)
+                entry["inputs"] = [features[name]]
             except RuntimeError:
                 features[name] = tensors[0]
             root = name.split(".", 1)[0]
