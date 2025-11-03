@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 
-from .. import DEVICE_THREAD_POOL
+from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.awq_processor import AWQProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
@@ -107,25 +107,26 @@ def run_layer_stage(
             for index, names in enumerate(modules):
                 # Process the layer in smaller subsets so attention groups or
                 # MoE experts can be quantized independently within a layer.
-                if isinstance(processor, AWQProcessor):
-                    log.info(
-                        "StageLayer[awq]: layer=%s subset=%s/%s size=%s names=%s",
-                        layer_index,
-                        index + 1,
-                        subset_total,
-                        len(names),
-                        names[:5],
-                    )
-                elif log.isEnabledFor(logging.DEBUG):
-                    log.debug(
-                        "StageLayer: layer=%s subset=%s/%s processor=%s size=%s names=%s",
-                        layer_index,
-                        index + 1,
-                        subset_total,
-                        processor.name(),
-                        len(names),
-                        names[:8],
-                    )
+                if DEBUG_ON and log.isEnabledFor(logging.DEBUG):
+                    if isinstance(processor, AWQProcessor):
+                        log.debug(
+                            "StageLayer[awq]: layer=%s subset=%s/%s size=%s names=%s",
+                            layer_index,
+                            index + 1,
+                            subset_total,
+                            len(names),
+                            names[:5],
+                        )
+                    else:
+                        log.debug(
+                            "StageLayer: layer=%s subset=%s/%s processor=%s size=%s names=%s",
+                            layer_index,
+                            index + 1,
+                            subset_total,
+                            processor.name(),
+                            len(names),
+                            names[:8],
+                        )
                 subset_result = run_subset_stage(
                     looper,
                     processor=processor,
