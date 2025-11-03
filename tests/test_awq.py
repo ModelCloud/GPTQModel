@@ -57,12 +57,13 @@ class TestGroupSize(unittest.TestCase):
                 except Exception:
                     total_mem_gb = 0
 
-            if total_mem_gb >= 80:
-                sample_count = 1024
-            elif total_mem_gb >= 48:
-                sample_count = 512
-            else:
-                sample_count = 192
+            # if total_mem_gb >= 80:
+            #     sample_count = 1024
+            # elif total_mem_gb >= 48:
+            #     sample_count = 512
+            # else:
+            #     sample_count = 192
+            sample_count = 512
 
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
                                  split="train")

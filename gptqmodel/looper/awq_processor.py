@@ -180,7 +180,8 @@ class AWQProcessor(LoopProcessor):
     def _layer_input_features(self, state: _AWQLayerState) -> Dict[str, torch.Tensor]:
         features: Dict[str, torch.Tensor] = {}
         root_buckets: Dict[str, List[torch.Tensor]] = {}
-        for name in state.modules:
+        # Iterate over a snapshot since quantization may mutate state.modules concurrently
+        for name in list(state.modules):
             entry = self.tasks.get(name) or {}
             tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
             if not tensors:
@@ -188,6 +189,7 @@ class AWQProcessor(LoopProcessor):
                 continue
             try:
                 features[name] = torch.cat(tensors, dim=0)
+                entry["inputs"] = [features[name]]
             except RuntimeError:
                 features[name] = tensors[0]
             root = name.split(".", 1)[0]
@@ -576,38 +578,57 @@ class AWQProcessor(LoopProcessor):
         inp = inp.to(next(module2inspect.parameters()).device)
 
         # [STEP 1]: Compute per-channel mean of normalised weights
-        # All layer weights are concatted together
-        weight = torch.cat([_m.weight for _m in layers], dim=0)
-        org_shape = weight.shape
-        # The weights are reshaped to be organised by quantization group
-        weight = weight.view(-1, self.qcfg.group_size)
-        # Calculates the relative magnitude of the weights within each of the quantization groups,
-        # and rescales each group individually so that each group has weights on a 0-1 scale.
-        w_scale = weight.abs() / (weight.abs().amax(dim=1, keepdim=True) + 1e-6)
-        # Resizes the rescaled weight matrix back up to its original dimensions
-        w_scale = w_scale.view(org_shape)
-        # Gets the average rescaled magnitude for each output channel
-        w_mean = w_scale.mean(0)
-        del weight
+        # Accumulate statistics per-layer to avoid concatenating large tensors
+        # (original implementation materialized a giant cat() that doubled VRAM usage)
+        first_weight = layers[0].weight
+        weight_dtype = first_weight.dtype
+        weight_device = first_weight.device
+        num_channels = first_weight.shape[1]
+        w_sum = torch.zeros(num_channels, dtype=torch.float32, device=weight_device)
+        row_count = 0
+
+        for layer in layers:
+            weight = layer.weight
+            if weight.shape[1] != num_channels:
+                raise ValueError(
+                    f"Expected consistent in_features across layers ({num_channels}), "
+                    f"got {weight.shape[1]} for layer {layer}."
+                )
+            org_shape = weight.shape
+            weight_abs = weight.abs()
+            weight_group = weight_abs.view(-1, self.qcfg.group_size)
+            group_scale = weight_group.amax(dim=1, keepdim=True) + 1e-6
+            normalized = weight_group / group_scale
+            normalized = normalized.view(org_shape)
+            w_sum += normalized.sum(dim=0, dtype=torch.float32)
+            row_count += org_shape[0]
+
+        if row_count == 0:
+            w_mean = torch.zeros(num_channels, dtype=weight_dtype, device=weight_device)
+        else:
+            w_mean = (w_sum / row_count).to(weight_dtype)
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
-        # move inp to cpu to avoid memory leak
-        inp_flat = inp.cpu().abs().view(-1, inp.shape[-1])
+        # Stream directly on the source device to avoid creating full CPU copies
+        inp_flat = inp.abs().view(-1, inp.shape[-1])
         num_elements = inp_flat.size(0)
         num_channels = inp_flat.size(1)
-        element_size_bytes = inp_flat.element_size() * 2  # multiplied by 2 for FP32
+        float32_size = torch.tensor([], dtype=torch.float32).element_size()
+        element_size_bytes = float32_size  # accumulation happens in FP32
 
         # Calculate chunk size dynamically based on max_chunk_memory
         chunk_size = int(self.max_chunk_memory // (element_size_bytes * num_channels))
         chunk_size = min(chunk_size, num_elements)
+        chunk_size = max(chunk_size, 1)
 
         # Use float32 for sum calculation
         x_sum = torch.zeros(num_channels, dtype=torch.float32, device=inp.device)
 
         for i in range(0, num_elements, chunk_size):
             end = min(i + chunk_size, num_elements)
-            chunk_sum = inp_flat[i:end].to(torch.float32).sum(dim=0)
-            x_sum += chunk_sum.to(inp.device)
+            chunk = inp_flat[i:end]
+            chunk_sum = chunk.to(torch.float32).sum(dim=0)
+            x_sum += chunk_sum
 
         x_mean = (x_sum / num_elements).to(inp.dtype)
         del x_sum
@@ -683,6 +704,11 @@ class AWQProcessor(LoopProcessor):
         assert org_w_shape[0] % oc_batch_size == 0
         w_all = w
         best_max_val_all = []
+        device = w_all.device
+        # Pre-allocate scratch buffers so the inner loop never allocates large temporaries
+        scratch_clamp = torch.empty_like(w_all[:oc_batch_size])
+        scratch_quant = torch.empty_like(scratch_clamp)
+        input_feat = input_feat.to(device)
 
         for i_b in range(org_w_shape[0] // oc_batch_size):
             w = w_all[i_b * oc_batch_size: (i_b + 1) * oc_batch_size]
@@ -691,20 +717,19 @@ class AWQProcessor(LoopProcessor):
 
             best_max_val = org_max_val.clone()
             min_errs = torch.ones_like(org_max_val) * 1e9
-            input_feat = input_feat.to(w.device)
-            org_out = (input_feat * w).sum(dim=-1)  # co, n_token, n_group
+            clamp_slice = scratch_clamp[: w.shape[0]]
+            quant_slice = scratch_quant[: w.shape[0]]
+
+            org_out = (input_feat * w).sum(dim=-1)
 
             for i_s in range(int(max_shrink * n_grid)):
                 max_val = org_max_val * (1 - i_s / n_grid)
                 min_val = -max_val
-                cur_w = torch.clamp(w, min_val, max_val)
-                q_w = self.pseudo_quantize_tensor(cur_w)[0]
-                cur_out = (input_feat * q_w).sum(dim=-1)
+                torch.clamp(w, min_val, max_val, out=clamp_slice)
+                self._pseudo_quantize_tensor_into(clamp_slice, quant_slice)
+                cur_out = (input_feat * quant_slice).sum(dim=-1)
 
-                # co, 1, n_group, 1
                 err = (cur_out - org_out).pow(2).mean(dim=1).view(min_errs.shape)
-                del cur_w
-                del cur_out
                 cur_best_idx = err < min_errs
                 min_errs[cur_best_idx] = err[cur_best_idx]
                 best_max_val[cur_best_idx] = max_val[cur_best_idx]
@@ -753,6 +778,45 @@ class AWQProcessor(LoopProcessor):
 
         return w, scales, zeros
 
+    @torch.inference_mode()
+    def _pseudo_quantize_tensor_into(self, src: torch.Tensor, dst: torch.Tensor) -> None:
+        # Quantize `src` into `dst` without allocating a new tensor (mirrors pseudo_quantize_tensor)
+        org_shape = src.shape
+        if self.qcfg.group_size > 0:
+            src_view = src.view(-1, self.qcfg.group_size)
+            dst_view = dst.view(-1, self.qcfg.group_size)
+        else:
+            src_view = src.reshape(org_shape[0], -1)
+            dst_view = dst.reshape_as(src_view)
+
+        if self.qcfg.zero_point:
+            max_val = src_view.amax(dim=1, keepdim=True)
+            min_val = src_view.amin(dim=1, keepdim=True)
+            max_int = 2 ** self.qcfg.bits - 1
+            min_int = 0
+            scales = (max_val - min_val).clamp(min=1e-5) / max_int
+            zeros = (-torch.round(min_val / scales)).clamp_(min_int, max_int)
+
+            dst_view.copy_(src_view)
+            dst_view.div_(scales)
+            torch.round(dst_view, out=dst_view)
+            dst_view.add_(zeros)
+            dst_view.clamp_(min_int, max_int)
+            dst_view.sub_(zeros)
+            dst_view.mul_(scales)
+        else:
+            max_val = src_view.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
+            max_int = 2 ** (self.qcfg.bits - 1) - 1
+            min_int = -(2 ** (self.qcfg.bits - 1))
+            scales = max_val / max_int
+
+            dst_view.copy_(src_view)
+            dst_view.div_(scales)
+            torch.round(dst_view, out=dst_view)
+            dst_view.clamp_(min_int, max_int)
+            dst_view.mul_(scales)
+
+
     def _compute_best_scale(
         self,
         x: torch.Tensor,
@@ -778,7 +842,12 @@ class AWQProcessor(LoopProcessor):
         best_scales = None
         best_error = float("inf")
 
-        org_sd = {k: v.cpu() for k, v in module2inspect.state_dict().items()}
+        # Clone the original FP weights to CPU once so we can mutate/restore without load_state_dict overhead
+        orig_weights_cpu: Dict[nn.Linear, torch.Tensor] = {
+            # stash a contiguous FP32 master copy on CPU; avoids tying up GPU memory between ratios
+            fc: fc.weight.detach().to(torch.float32).cpu().contiguous()
+            for fc in linears2scale
+        }
 
         device = x.device
         x_mean = x_mean.view(-1).to(device)
@@ -807,9 +876,8 @@ class AWQProcessor(LoopProcessor):
             # Q(W * s)
             for fc in linears2scale:
                 fc.weight.mul_(scales_view)
-                fc.weight.data = (
-                    self.pseudo_quantize_tensor(fc.weight.data)[0] / scales_view
-                )
+                self._pseudo_quantize_tensor_into(fc.weight, fc.weight)
+                fc.weight.div_(scales_view)
 
             # W * X
             int_w_output = self._module_forward(x, module2inspect, kwargs)
@@ -823,7 +891,12 @@ class AWQProcessor(LoopProcessor):
                 best_error = loss
                 best_ratio = ratio
                 best_scales = scales.clone()
-            module2inspect.load_state_dict(org_sd)
+            for fc in linears2scale:
+                fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
+
+        for fc in linears2scale:
+            fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
+        orig_weights_cpu.clear()
 
         if best_ratio == -1:
             log.debug(history)
