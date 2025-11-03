@@ -1,3 +1,8 @@
+import os
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7" #"expandable_segments:True"
+
 import time
 import torch
 import pytest
@@ -175,9 +180,34 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
     fast_time = _time_it(lambda: _compute_fast_w_mean(layers, group_size))
     legacy_time = _time_it(lambda: _compute_legacy_w_mean(layers, group_size))
 
-    print(f"AWQ weight mean timing [{param_name}] fast={fast_time*1e3:.3f} ms legacy={legacy_time*1e3:.3f} ms")
-    # Allow a little slack, but ensure the optimized path is not significantly slower
-    assert fast_time <= legacy_time * 1.20, (
+    GREEN = "\033[32m"
+    RED = "\033[31m"
+    YELLOW = "\033[33m"
+    RESET = "\033[0m"
+
+    delta_ms = (fast_time - legacy_time) * 1e3
+    rel = (fast_time / legacy_time) if legacy_time > 0 else float("inf")
+    if rel <= 1.0:
+        color = GREEN
+        verdict = "faster"
+    elif rel <= 1.05:
+        color = YELLOW
+        verdict = "≈ parity"
+    else:
+        color = RED
+        verdict = "slower"
+
+    print(f"AWQ weight mean timing [{param_name}]")
+    print("+----------------+------------+--------------+-------------+---------------+")
+    print("| Metric         | Fast (ms)  | Legacy (ms)  | Delta (ms)  | Relative      |")
+    print("+----------------+------------+--------------+-------------+---------------+")
+    print(
+        f"| runtime        | {fast_time*1e3:10.3f} | {legacy_time*1e3:12.3f} | "
+        f"{delta_ms:11.3f} | {color}{rel:>11.3%} {verdict:<7}{RESET}|"
+    )
+    print("+----------------+------------+--------------+-------------+---------------+")
+
+    assert fast_time <= legacy_time * 1.05, (
         f"Streaming mean slower than legacy for {param_name}: "
         f"{fast_time*1e3:.3f} ms vs {legacy_time*1e3:.3f} ms"
     )
