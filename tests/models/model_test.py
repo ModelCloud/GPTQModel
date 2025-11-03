@@ -154,6 +154,30 @@ class ModelTest(unittest.TestCase):
 
         return _StopAfterLayer(layer_idx)
 
+    def _debug_layer_stop_triggered(self) -> bool:
+        if not DEBUG_ON:
+            return False
+        callback = getattr(self, "_layer_stop_callback", None)
+        return bool(callback and getattr(callback, "_triggered", False))
+
+    def _finalize_quant_debug_path(
+        self,
+        *,
+        model,
+        tokenizer,
+        processor,
+        need_create_processor: bool,
+        cleanup_callback,
+    ):
+        if cleanup_callback is not None:
+            try:
+                cleanup_callback()
+            except Exception:
+                pass
+        if need_create_processor:
+            return model, tokenizer, processor
+        return model, tokenizer
+
     def _normalize_task_identifier(self, task):
         if isinstance(task, Enum):
             return task.value
@@ -842,6 +866,7 @@ class ModelTest(unittest.TestCase):
         tokenizer = model.tokenizer
         self._post_quant_eval_records = {}
         self._effective_load_backend = None
+        processor = None
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
@@ -857,6 +882,8 @@ class ModelTest(unittest.TestCase):
         # ovis cannot load processor
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
+
+        debug_short_circuit = False
         if not is_quantized:
             save_context = None
             planned_save_path = None
@@ -874,6 +901,20 @@ class ModelTest(unittest.TestCase):
                 )
 
                 self.check_kernel(model, self.KERNEL_QUANT)
+
+                debug_short_circuit = self._debug_layer_stop_triggered()
+                if debug_short_circuit:
+                    log.info(
+                        "DEBUG mode: layer stop triggered at %s; skipping post-quant save and evaluation pipeline.",
+                        self.STOP_AFTER_LAYER,
+                    )
+                    return self._finalize_quant_debug_path(
+                        model=model,
+                        tokenizer=tokenizer,
+                        processor=None,
+                        need_create_processor=need_create_processor,
+                        cleanup_callback=cleanup_callback,
+                    )
 
                 # TODO: make into shared method
                 with save_context as path:
@@ -1116,6 +1157,10 @@ class ModelTest(unittest.TestCase):
             self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
+
+        if self._debug_layer_stop_triggered():
+            log.info("DEBUG mode: skipping lm_eval and baseline checks after early layer stop.")
+            return
 
         eval_records = getattr(self, "_post_quant_eval_records", {})
         target_backend = self._current_load_backend()

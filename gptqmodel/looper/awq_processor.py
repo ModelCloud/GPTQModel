@@ -578,8 +578,10 @@ class AWQProcessor(LoopProcessor):
         inp = inp.to(next(module2inspect.parameters()).device)
 
         # [STEP 1]: Compute per-channel mean of normalised weights
-        # Accumulate statistics per-layer to avoid concatenating large tensors
-        # (original implementation materialized a giant cat() that doubled VRAM usage)
+        # Stream across each Linear instead of concatenating all weights at once. This mirrors the
+        # previous cat()+view pipeline while keeping peak memory low: for every group we normalise
+        # |w| by its per-group max so the values land on a [0, 1] scale, then accumulate the totals
+        # per output channel so the mean can be computed without allocating the combined tensor.
         first_weight = layers[0].weight
         weight_dtype = first_weight.dtype
         weight_device = first_weight.device
@@ -609,14 +611,15 @@ class AWQProcessor(LoopProcessor):
             w_mean = (w_sum / row_count).to(weight_dtype)
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
-        # Stream directly on the source device to avoid creating full CPU copies
+        # Stream directly on the source device to avoid creating full CPU copies while still enforcing
+        # a predictable memory bound derived from max_chunk_memory.
         inp_flat = inp.abs().view(-1, inp.shape[-1])
         num_elements = inp_flat.size(0)
         num_channels = inp_flat.size(1)
         float32_size = torch.tensor([], dtype=torch.float32).element_size()
         element_size_bytes = float32_size  # accumulation happens in FP32
 
-        # Calculate chunk size dynamically based on max_chunk_memory
+        # Calculate chunk size dynamically based on the available memory budget (default 1 GiB).
         chunk_size = int(self.max_chunk_memory // (element_size_bytes * num_channels))
         chunk_size = min(chunk_size, num_elements)
         chunk_size = max(chunk_size, 1)
@@ -627,6 +630,7 @@ class AWQProcessor(LoopProcessor):
         for i in range(0, num_elements, chunk_size):
             end = min(i + chunk_size, num_elements)
             chunk = inp_flat[i:end]
+            # Accumulate each chunk in FP32 to balance precision and memory usage.
             chunk_sum = chunk.to(torch.float32).sum(dim=0)
             x_sum += chunk_sum
 
@@ -705,7 +709,7 @@ class AWQProcessor(LoopProcessor):
         w_all = w
         best_max_val_all = []
         device = w_all.device
-        # Pre-allocate scratch buffers so the inner loop never allocates large temporaries
+        # Pre-allocate scratch buffers so the inner clamp loop never allocates large temporaries.
         scratch_clamp = torch.empty_like(w_all[:oc_batch_size])
         scratch_quant = torch.empty_like(scratch_clamp)
         input_feat = input_feat.to(device)
@@ -713,14 +717,14 @@ class AWQProcessor(LoopProcessor):
         for i_b in range(org_w_shape[0] // oc_batch_size):
             w = w_all[i_b * oc_batch_size: (i_b + 1) * oc_batch_size]
 
-            org_max_val = w.abs().amax(dim=-1, keepdim=True)  # co, 1, n_group, 1
+            org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
             best_max_val = org_max_val.clone()
             min_errs = torch.ones_like(org_max_val) * 1e9
             clamp_slice = scratch_clamp[: w.shape[0]]
             quant_slice = scratch_quant[: w.shape[0]]
 
-            org_out = (input_feat * w).sum(dim=-1)
+            org_out = (input_feat * w).sum(dim=-1)  # [co_batch, n_token, n_group]
 
             for i_s in range(int(max_shrink * n_grid)):
                 max_val = org_max_val * (1 - i_s / n_grid)
@@ -729,6 +733,7 @@ class AWQProcessor(LoopProcessor):
                 self._pseudo_quantize_tensor_into(clamp_slice, quant_slice)
                 cur_out = (input_feat * quant_slice).sum(dim=-1)
 
+                # Evaluate the reconstruction error for the current clamp ratio and keep the best one.
                 err = (cur_out - org_out).pow(2).mean(dim=1).view(min_errs.shape)
                 cur_best_idx = err < min_errs
                 min_errs[cur_best_idx] = err[cur_best_idx]
@@ -874,6 +879,8 @@ class AWQProcessor(LoopProcessor):
             scales[torch.isnan(scales)] = 1
 
             # Q(W * s)
+            # Temporarily apply the candidate scale, quantize the in-flight weights without allocating,
+            # and rely on the CPU master copy to restore the original FP values after evaluation.
             for fc in linears2scale:
                 fc.weight.mul_(scales_view)
                 self._pseudo_quantize_tensor_into(fc.weight, fc.weight)
@@ -894,6 +901,7 @@ class AWQProcessor(LoopProcessor):
             for fc in linears2scale:
                 fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
 
+        # Reset weights one final time so callers always see the pristine FP copy.
         for fc in linears2scale:
             fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
         orig_weights_cpu.clear()
