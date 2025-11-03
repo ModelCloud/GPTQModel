@@ -861,7 +861,9 @@ class AWQProcessor(LoopProcessor):
         best_scales = None
         best_error = float("inf")
 
-        org_sd = {k: v.cpu() for k, v in module2inspect.state_dict().items()}
+        orig_weights: Dict[nn.Linear, torch.Tensor] = {
+            fc: fc.weight.detach().clone() for fc in linears2scale
+        }
 
         device = x.device
         x_mean = x_mean.view(-1).to(device)
@@ -906,7 +908,12 @@ class AWQProcessor(LoopProcessor):
                 best_error = loss
                 best_ratio = ratio
                 best_scales = scales.clone()
-            module2inspect.load_state_dict(org_sd)
+            for fc in linears2scale:
+                fc.weight.copy_(orig_weights[fc])
+
+        for fc in linears2scale:
+            fc.weight.copy_(orig_weights[fc])
+        orig_weights.clear()
 
         if best_ratio == -1:
             log.debug(history)
