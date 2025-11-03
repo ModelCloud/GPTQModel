@@ -24,7 +24,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:2
 
 from enum import Enum  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Any, Dict, List  # noqa: E402
+from typing import Any, Dict, List, Optional  # noqa: E402
 
 from logbar import LogBar  # noqa: E402
 from tabulate import tabulate  # noqa: E402
@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover - availability check
     def is_flash_attn_2_available():  # type: ignore
         return False
 
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, DEBUG_ON, GPTQModel  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
@@ -65,6 +65,7 @@ from gptqmodel.quantization.config import QuantizeConfig, VRAMStrategy  # noqa: 
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 
 
 RAND_SEED = 898
@@ -95,6 +96,7 @@ class ModelTest(unittest.TestCase):
     DATASET_SORT = "desc"
     DELETE_QUANTIZED_MODEL = True
     EVAL_TASKS = None
+    EVAL_SINGLE_GPU = True
     LOAD_MODEL_EXTRA_ARGS: Dict[str, Any] = {}
 
     KERNEL_QUANT = {}  # kernel sets
@@ -127,6 +129,7 @@ class ModelTest(unittest.TestCase):
 
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
     EXPECT_LM_HEAD_LOSS = None
+    STOP_AFTER_LAYER: Optional[int] = None
 
     GENERIC_TEST_PROMPTS = [
         {"prompt": "Which city is the capital city of France?", "keywords": ["paris"]},
@@ -135,6 +138,46 @@ class ModelTest(unittest.TestCase):
         {"prompt": "What gas do plants primarily absorb from the atmosphere during photosynthesis?", "keywords": ["carbon dioxide"]},
         {"prompt": "Name the largest ocean on Earth.", "keywords": ["pacific"]},
     ]
+
+    @staticmethod
+    def _build_layer_stop_callback(layer_idx: int):
+        class _StopAfterLayer:
+            def __init__(self, target: int):
+                self._target = target
+                self._triggered = False
+
+            def layer_complete(self, *, layer_idx: int, submodule_finalized: bool):
+                if self._triggered:
+                    return None
+                if layer_idx > self._target or (submodule_finalized and layer_idx >= self._target):
+                    self._triggered = True
+                    raise StopMainLoop
+
+        return _StopAfterLayer(layer_idx)
+
+    def _debug_layer_stop_triggered(self) -> bool:
+        if not DEBUG_ON:
+            return False
+        callback = getattr(self, "_layer_stop_callback", None)
+        return bool(callback and getattr(callback, "_triggered", False))
+
+    def _finalize_quant_debug_path(
+        self,
+        *,
+        model,
+        tokenizer,
+        processor,
+        need_create_processor: bool,
+        cleanup_callback,
+    ):
+        if cleanup_callback is not None:
+            try:
+                cleanup_callback()
+            except Exception:
+                pass
+        if need_create_processor:
+            return model, tokenizer, processor
+        return model, tokenizer
 
     def _normalize_task_identifier(self, task):
         if isinstance(task, Enum):
@@ -436,8 +479,12 @@ class ModelTest(unittest.TestCase):
 
         for backend in compare_backends:
             log.info(f"Loading post-quant model with backend `{backend.name}`")
-            # Pin post-quant loads to the first CUDA device to avoid auto sharding across GPUs.
-            use_cuda_map = torch.cuda.is_available() and backend != BACKEND.TORCH_FUSED
+            # When EVAL_SINGLE_GPU is enabled, pin post-quant loads to the first CUDA device to avoid auto sharding.
+            use_cuda_map = (
+                self.EVAL_SINGLE_GPU
+                and torch.cuda.is_available()
+                and backend != BACKEND.TORCH_FUSED
+            )
             if use_cuda_map:
                 model = self.loadQuantModel(
                     model_path,
@@ -816,9 +863,15 @@ class ModelTest(unittest.TestCase):
             **args,
         )
 
+        self._layer_stop_callback = None
+        if DEBUG_ON and self.STOP_AFTER_LAYER is not None:
+            self._layer_stop_callback = self._build_layer_stop_callback(self.STOP_AFTER_LAYER)
+            model.layer_callback = self._layer_stop_callback
+
         tokenizer = model.tokenizer
         self._post_quant_eval_records = {}
         self._effective_load_backend = None
+        processor = None
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
@@ -834,6 +887,8 @@ class ModelTest(unittest.TestCase):
         # ovis cannot load processor
         is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
         need_create_processor = is_image_to_text_model and not is_ovis_model
+
+        debug_short_circuit = False
         if not is_quantized:
             save_context = None
             planned_save_path = None
@@ -852,6 +907,20 @@ class ModelTest(unittest.TestCase):
 
                 self.check_kernel(model, self.KERNEL_QUANT)
 
+                debug_short_circuit = self._debug_layer_stop_triggered()
+                if debug_short_circuit:
+                    log.info(
+                        "DEBUG mode: layer stop triggered at %s; skipping post-quant save and evaluation pipeline.",
+                        self.STOP_AFTER_LAYER,
+                    )
+                    return self._finalize_quant_debug_path(
+                        model=model,
+                        tokenizer=tokenizer,
+                        processor=None,
+                        need_create_processor=need_create_processor,
+                        cleanup_callback=cleanup_callback,
+                    )
+
                 # TODO: make into shared method
                 with save_context as path:
                     cleanup_callback = None
@@ -868,8 +937,12 @@ class ModelTest(unittest.TestCase):
 
                     q_model = reuse_candidates.pop(target_backend, None)
                     if q_model is None:
-                        # Ensure the post-quant reload stays on a single CUDA device when available.
-                        use_cuda_map = torch.cuda.is_available() and target_backend != BACKEND.TORCH_FUSED
+                        # When single-GPU evaluation is requested, keep the reload scoped to cuda:0.
+                        use_cuda_map = (
+                            self.EVAL_SINGLE_GPU
+                            and torch.cuda.is_available()
+                            and target_backend != BACKEND.TORCH_FUSED
+                        )
                         if use_cuda_map:
                             q_model = self.loadQuantModel(
                                 path,
@@ -946,7 +1019,8 @@ class ModelTest(unittest.TestCase):
                 multi_device = False
 
             if multi_device:
-                load_kwargs["device_map"] = {"": "cuda:0"}
+                if self.EVAL_SINGLE_GPU:
+                    load_kwargs["device_map"] = {"": "cuda:0"}
 
         model = GPTQModel.load(
             model_id_or_path,
@@ -968,11 +1042,18 @@ class ModelTest(unittest.TestCase):
                     model_path = model
 
                 if self.USE_VLLM:
+                    tensor_parallel = 1
+                    if not self.EVAL_SINGLE_GPU:
+                        try:
+                            candidate = torch.cuda.device_count()
+                        except Exception:
+                            candidate = 1
+                        tensor_parallel = max(1, candidate)
                     model_args = {
                         "pretrained": model_path,
                         "dtype": "auto", #"float16",
                         "gpu_memory_utilization": 0.8,
-                        "tensor_parallel_size": 1,
+                        "tensor_parallel_size": tensor_parallel,
                         "trust_remote_code": trust_remote_code,
                         "max_model_len": self.MODEL_MAX_LEN
                     }
@@ -1093,6 +1174,10 @@ class ModelTest(unittest.TestCase):
             self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
+
+        if self._debug_layer_stop_triggered():
+            log.info("DEBUG mode: skipping lm_eval and baseline checks after early layer stop.")
+            return
 
         eval_records = getattr(self, "_post_quant_eval_records", {})
         target_backend = self._current_load_backend()

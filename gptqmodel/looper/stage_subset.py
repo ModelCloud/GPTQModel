@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 
-from .. import DEVICE_THREAD_POOL
+from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
@@ -111,25 +111,26 @@ def run_subset_stage(
     #         )
     #     return SubsetStageResult(processed_subset={}, layer_inputs=layer_inputs, forward_context=None)
 
-    if is_awq_processor:
-        logger.info(
-            "StageSubset[awq]: layer=%s subset=%s/%s modules=%s sample=%s",
-            layer_index,
-            subset_index + 1,
-            subset_total,
-            len(subset),
-            list(subset.keys())[:8],
-        )
-    elif logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "StageSubset: layer=%s subset=%s/%s processor=%s created %s modules (sample=%s)",
-            layer_index,
-            subset_index + 1,
-            subset_total,
-            processor_name,
-            len(subset),
-            list(subset.keys())[:8],
-        )
+    if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
+        if is_awq_processor:
+            logger.debug(
+                "StageSubset[awq]: layer=%s subset=%s/%s modules=%s sample=%s",
+                layer_index,
+                subset_index + 1,
+                subset_total,
+                len(subset),
+                list(subset.keys())[:8],
+            )
+        else:
+            logger.debug(
+                "StageSubset: layer=%s subset=%s/%s processor=%s created %s modules (sample=%s)",
+                layer_index,
+                subset_index + 1,
+                subset_total,
+                processor_name,
+                len(subset),
+                list(subset.keys())[:8],
+            )
 
     moe_group_keys_all: List[str] = []
     forward_device_map: Dict[str, torch.device] = {}
@@ -242,23 +243,24 @@ def run_subset_stage(
                 looper._masked_hook_wrapper(processor, original_hook, hook_source)
             ))
 
-    if is_awq_processor:
-        logger.info(
-            "StageSubset[awq]: layer=%s subset=%s/%s registering hooks for %s modules",
-            layer_index,
-            subset_index + 1,
-            subset_total,
-            len(subset),
-        )
-    elif logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            "StageSubset: layer=%s subset=%s/%s processor=%s registering hooks for %s modules",
-            layer_index,
-            subset_index + 1,
-            subset_total,
-            processor_name,
-            len(subset),
-        )
+    if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
+        if is_awq_processor:
+            logger.debug(
+                "StageSubset[awq]: layer=%s subset=%s/%s registering hooks for %s modules",
+                layer_index,
+                subset_index + 1,
+                subset_total,
+                len(subset),
+            )
+        else:
+            logger.debug(
+                "StageSubset: layer=%s subset=%s/%s processor=%s registering hooks for %s modules",
+                layer_index,
+                subset_index + 1,
+                subset_total,
+                processor_name,
+                len(subset),
+            )
 
     fwd_start = time.perf_counter()
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
@@ -410,26 +412,27 @@ def run_subset_stage(
         timer = getattr(looper.gptq_model, "quant_region_timer", None)
         start = time.perf_counter() if timer else None
         try:
-            if is_awq_processor:
-                logger.info(
-                    "StageSubsetWorker[awq]: layer=%s subset=%s/%s module=%s previous_subset=%s",
-                    getattr(nm, "layer_index", None),
-                    subset_idx + 1,
-                    subset_total_count,
-                    module_label,
-                    bool(previous_subset_ref),
-                )
-            elif logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "StageSubsetWorker: processor=%s layer=%s subset=%s/%s module=%s running on %s (previous_subset=%s)",
-                    proc_name,
-                    getattr(nm, "layer_index", None),
-                    subset_idx + 1,
-                    subset_total_count,
-                    module_label,
-                    expected_device,
-                    bool(previous_subset_ref),
-                )
+            if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
+                if is_awq_processor:
+                    logger.debug(
+                        "StageSubsetWorker[awq]: layer=%s subset=%s/%s module=%s previous_subset=%s",
+                        getattr(nm, "layer_index", None),
+                        subset_idx + 1,
+                        subset_total_count,
+                        module_label,
+                        bool(previous_subset_ref),
+                    )
+                else:
+                    logger.debug(
+                        "StageSubsetWorker: processor=%s layer=%s subset=%s/%s module=%s running on %s (previous_subset=%s)",
+                        proc_name,
+                        getattr(nm, "layer_index", None),
+                        subset_idx + 1,
+                        subset_total_count,
+                        module_label,
+                        expected_device,
+                        bool(previous_subset_ref),
+                    )
             proc.process(
                 module=nm,
                 subset=subset_ref,
