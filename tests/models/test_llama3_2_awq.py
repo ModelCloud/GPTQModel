@@ -19,6 +19,7 @@ class TestLlama3_2_awq(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048 # new
+    # STOP_AFTER_LAYER = 0
     EVAL_TASKS = {
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,

@@ -24,7 +24,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:2
 
 from enum import Enum  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Any, Dict, List  # noqa: E402
+from typing import Any, Dict, List, Optional  # noqa: E402
 
 from logbar import LogBar  # noqa: E402
 from tabulate import tabulate  # noqa: E402
@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover - availability check
     def is_flash_attn_2_available():  # type: ignore
         return False
 
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, DEBUG_ON, GPTQModel  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
@@ -65,6 +65,7 @@ from gptqmodel.quantization.config import QuantizeConfig, VRAMStrategy  # noqa: 
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 
 
 RAND_SEED = 898
@@ -127,6 +128,7 @@ class ModelTest(unittest.TestCase):
 
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
     EXPECT_LM_HEAD_LOSS = None
+    STOP_AFTER_LAYER: Optional[int] = None
 
     GENERIC_TEST_PROMPTS = [
         {"prompt": "Which city is the capital city of France?", "keywords": ["paris"]},
@@ -135,6 +137,22 @@ class ModelTest(unittest.TestCase):
         {"prompt": "What gas do plants primarily absorb from the atmosphere during photosynthesis?", "keywords": ["carbon dioxide"]},
         {"prompt": "Name the largest ocean on Earth.", "keywords": ["pacific"]},
     ]
+
+    @staticmethod
+    def _build_layer_stop_callback(layer_idx: int):
+        class _StopAfterLayer:
+            def __init__(self, target: int):
+                self._target = target
+                self._triggered = False
+
+            def layer_complete(self, *, layer_idx: int, submodule_finalized: bool):
+                if self._triggered:
+                    return None
+                if layer_idx > self._target or (submodule_finalized and layer_idx >= self._target):
+                    self._triggered = True
+                    raise StopMainLoop
+
+        return _StopAfterLayer(layer_idx)
 
     def _normalize_task_identifier(self, task):
         if isinstance(task, Enum):
@@ -815,6 +833,11 @@ class ModelTest(unittest.TestCase):
             device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.TORCH_FUSED else "auto",
             **args,
         )
+
+        self._layer_stop_callback = None
+        if DEBUG_ON and self.STOP_AFTER_LAYER is not None:
+            self._layer_stop_callback = self._build_layer_stop_callback(self.STOP_AFTER_LAYER)
+            model.layer_callback = self._layer_stop_callback
 
         tokenizer = model.tokenizer
         self._post_quant_eval_records = {}
