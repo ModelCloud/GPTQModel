@@ -704,8 +704,6 @@ class AWQProcessor(LoopProcessor):
 
         scratch_clamp = torch.empty((oc_batch_size, 1, num_groups, group_size), device=device, dtype=w_all.dtype)
         scratch_quant = torch.empty_like(scratch_clamp)
-        scratch_org_out = torch.empty((oc_batch_size, tokens, num_groups), device=device, dtype=w_all.dtype)
-        scratch_cur_out = torch.empty_like(scratch_org_out)
         input_feat = input_feat.to(device)
         grouped_inputs = [
             input_feat[0, :, g, :].T.contiguous()
@@ -722,34 +720,17 @@ class AWQProcessor(LoopProcessor):
             batch = w.shape[0]
             clamp_slice = scratch_clamp[:batch]
             quant_slice = scratch_quant[:batch]
-            org_out_slice = scratch_org_out[:batch]
-            cur_out_slice = scratch_cur_out[:batch]
 
-            w_groups = w.view(batch, num_groups, group_size)
-            for g, input_group in enumerate(grouped_inputs):
-                org_out_slice[:, :, g] = torch.matmul(w_groups[:, g, :], input_group)
-
-            org_out = org_out_slice
+            org_out = (input_feat * w).sum(dim=-1)
 
             for i_s in range(int(max_shrink * n_grid)):
                 max_val = org_max_val * (1 - i_s / n_grid)
                 min_val = -max_val
-                torch.clamp(
-                    w_groups,
-                    min_val.view(batch, num_groups, 1),
-                    max_val.view(batch, num_groups, 1),
-                    out=clamp_slice.view(batch, num_groups, group_size),
-                )
-                self._pseudo_quantize_tensor_into(
-                    clamp_slice,
-                    quant_slice,
-                )
-                quant_groups = quant_slice.view(batch, num_groups, group_size)
-                for g, input_group in enumerate(grouped_inputs):
-                    cur_out_slice[:, :, g] = torch.matmul(quant_groups[:, g, :], input_group)
+                torch.clamp(w, min_val, max_val, out=clamp_slice)
+                self._pseudo_quantize_tensor_into(clamp_slice, quant_slice)
+                cur_out = (input_feat * quant_slice).sum(dim=-1)
 
-                # co, 1, n_group, 1
-                err = (cur_out_slice - org_out).pow(2).mean(dim=1).view(min_errs.shape)
+                err = (cur_out - org_out).pow(2).mean(dim=1).view(min_errs.shape)
                 cur_best_idx = err < min_errs
                 min_errs[cur_best_idx] = err[cur_best_idx]
                 best_max_val[cur_best_idx] = max_val[cur_best_idx]
