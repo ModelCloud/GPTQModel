@@ -608,23 +608,26 @@ class AWQProcessor(LoopProcessor):
             w_mean = (w_sum / row_count).to(weight_dtype)
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
-        # move inp to cpu to avoid memory leak
-        inp_flat = inp.cpu().abs().view(-1, inp.shape[-1])
+        # Stream directly on the source device to avoid creating full CPU copies
+        inp_flat = inp.abs().view(-1, inp.shape[-1])
         num_elements = inp_flat.size(0)
         num_channels = inp_flat.size(1)
-        element_size_bytes = inp_flat.element_size() * 2  # multiplied by 2 for FP32
+        float32_size = torch.tensor([], dtype=torch.float32).element_size()
+        element_size_bytes = float32_size  # accumulation happens in FP32
 
         # Calculate chunk size dynamically based on max_chunk_memory
         chunk_size = int(self.max_chunk_memory // (element_size_bytes * num_channels))
         chunk_size = min(chunk_size, num_elements)
+        chunk_size = max(chunk_size, 1)
 
         # Use float32 for sum calculation
         x_sum = torch.zeros(num_channels, dtype=torch.float32, device=inp.device)
 
         for i in range(0, num_elements, chunk_size):
             end = min(i + chunk_size, num_elements)
-            chunk_sum = inp_flat[i:end].to(torch.float32).sum(dim=0)
-            x_sum += chunk_sum.to(inp.device)
+            chunk = inp_flat[i:end]
+            chunk_sum = chunk.to(torch.float32).sum(dim=0)
+            x_sum += chunk_sum
 
         x_mean = (x_sum / num_elements).to(inp.dtype)
         del x_sum
