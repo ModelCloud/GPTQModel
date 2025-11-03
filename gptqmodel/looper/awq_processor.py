@@ -841,9 +841,10 @@ class AWQProcessor(LoopProcessor):
         best_scales = None
         best_error = float("inf")
 
-        # Clone the original FP weights once so we can mutate/restore without load_state_dict overhead
-        orig_weights: Dict[nn.Linear, torch.Tensor] = {
-            fc: fc.weight.detach().clone() for fc in linears2scale
+        # Clone the original FP weights to CPU once so we can mutate/restore without load_state_dict overhead
+        orig_weights_cpu: Dict[nn.Linear, torch.Tensor] = {
+            fc: fc.weight.detach().to(torch.float32).cpu().contiguous()
+            for fc in linears2scale
         }
 
         device = x.device
@@ -890,11 +891,11 @@ class AWQProcessor(LoopProcessor):
                 best_ratio = ratio
                 best_scales = scales.clone()
             for fc in linears2scale:
-                fc.weight.copy_(orig_weights[fc])
+                fc.weight.copy_(orig_weights_cpu[fc].to(dtype=fc.weight.dtype))
 
         for fc in linears2scale:
-            fc.weight.copy_(orig_weights[fc])
-        orig_weights.clear()
+            fc.weight.copy_(orig_weights_cpu[fc].to(dtype=fc.weight.dtype))
+        orig_weights_cpu.clear()
 
         if best_ratio == -1:
             log.debug(history)
