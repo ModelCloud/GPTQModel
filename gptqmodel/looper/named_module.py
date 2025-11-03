@@ -54,12 +54,14 @@ class NamedModule(torch.nn.Module):
             in_features = module.weight.shape[0]
             out_features = module.weight.shape[1]
         else:
-            raise NotImplementedError(f"Unsupported module.module type: `{type(module)}`")
+            in_features = None
+            out_features = None
 
-        self.state.update({
-            "in_features": in_features,
-            "out_features": out_features,
-        })
+        if in_features and out_features:
+            self.state.update({
+                "in_features": in_features,
+                "out_features": out_features,
+            })
 
     def parameters(self, recurse: bool = True):
         return self.module.parameters(recurse=recurse)
