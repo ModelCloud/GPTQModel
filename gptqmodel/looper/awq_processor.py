@@ -180,7 +180,8 @@ class AWQProcessor(LoopProcessor):
     def _layer_input_features(self, state: _AWQLayerState) -> Dict[str, torch.Tensor]:
         features: Dict[str, torch.Tensor] = {}
         root_buckets: Dict[str, List[torch.Tensor]] = {}
-        for name in state.modules:
+        # Iterate over a snapshot since quantization may mutate state.modules concurrently
+        for name in list(state.modules):
             entry = self.tasks.get(name) or {}
             tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
             if not tensors:
