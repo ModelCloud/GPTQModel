@@ -844,6 +844,7 @@ class AWQProcessor(LoopProcessor):
 
         # Clone the original FP weights to CPU once so we can mutate/restore without load_state_dict overhead
         orig_weights_cpu: Dict[nn.Linear, torch.Tensor] = {
+            # stash a contiguous FP32 master copy on CPU; avoids tying up GPU memory between ratios
             fc: fc.weight.detach().to(torch.float32).cpu().contiguous()
             for fc in linears2scale
         }
@@ -875,9 +876,8 @@ class AWQProcessor(LoopProcessor):
             # Q(W * s)
             for fc in linears2scale:
                 fc.weight.mul_(scales_view)
-                fc.weight.data = (
-                    self.pseudo_quantize_tensor(fc.weight.data)[0] / scales_view
-                )
+                self._pseudo_quantize_tensor_into(fc.weight, fc.weight)
+                fc.weight.div_(scales_view)
 
             # W * X
             int_w_output = self._module_forward(x, module2inspect, kwargs)
@@ -892,10 +892,10 @@ class AWQProcessor(LoopProcessor):
                 best_ratio = ratio
                 best_scales = scales.clone()
             for fc in linears2scale:
-                fc.weight.copy_(orig_weights_cpu[fc].to(dtype=fc.weight.dtype))
+                fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
 
         for fc in linears2scale:
-            fc.weight.copy_(orig_weights_cpu[fc].to(dtype=fc.weight.dtype))
+            fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
         orig_weights_cpu.clear()
 
         if best_ratio == -1:

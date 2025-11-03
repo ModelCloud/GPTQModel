@@ -1,3 +1,4 @@
+import time
 import torch
 import pytest
 
@@ -19,6 +20,28 @@ def _compute_legacy_w_mean(layers, group_size):
     w_scale = weight.abs() / (weight.abs().amax(dim=1, keepdim=True) + 1e-6)
     w_scale = w_scale.view(org_shape)
     return w_scale.mean(0)
+
+def _compute_fast_w_mean(layers, group_size):
+    first_weight = layers[0].weight
+    num_channels = first_weight.shape[1]
+    device = first_weight.device
+    dtype = first_weight.dtype
+    w_sum = torch.zeros(num_channels, dtype=torch.float32, device=device)
+    row_count = 0
+
+    for layer in layers:
+        weight = layer.weight
+        org_shape = weight.shape
+        weight_abs = weight.abs()
+        weight_group = weight_abs.view(-1, group_size)
+        group_scale = weight_group.amax(dim=1, keepdim=True) + 1e-6
+        normalized = (weight_group / group_scale).view(org_shape)
+        w_sum += normalized.sum(dim=0, dtype=torch.float32)
+        row_count += org_shape[0]
+
+    if row_count == 0:
+        return torch.zeros(num_channels, dtype=dtype, device=device)
+    return (w_sum / row_count).to(dtype)
 
 
 class _DummyQwen3SelfAttention(nn.Module):
@@ -136,3 +159,25 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
     print(separator)
 
     assert torch.allclose(fast, baseline, rtol=rtol, atol=atol)
+
+    def _time_it(fn, runs=5, warmup=2):
+        for _ in range(warmup):
+            fn()
+        if device == "cuda":
+            torch.cuda.synchronize(device_str)
+        start = time.perf_counter()
+        for _ in range(runs):
+            fn()
+        if device == "cuda":
+            torch.cuda.synchronize(device_str)
+        return (time.perf_counter() - start) / runs
+
+    fast_time = _time_it(lambda: _compute_fast_w_mean(layers, group_size))
+    legacy_time = _time_it(lambda: _compute_legacy_w_mean(layers, group_size))
+
+    print(f"AWQ weight mean timing [{param_name}] fast={fast_time*1e3:.3f} ms legacy={legacy_time*1e3:.3f} ms")
+    # Allow a little slack, but ensure the optimized path is not significantly slower
+    assert fast_time <= legacy_time * 1.20, (
+        f"Streaming mean slower than legacy for {param_name}: "
+        f"{fast_time*1e3:.3f} ms vs {legacy_time*1e3:.3f} ms"
+    )
