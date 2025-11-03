@@ -75,6 +75,7 @@ def test_awq_clip_consistency(device_name: str, device_str: str):
     tokens = 1024
     input_feat = torch.randn(tokens, in_features, dtype=dtype, device=device_str)
 
+    # Compare the streaming implementation against the legacy tensor-per-iter path
     expected = _legacy_clip(processor, w.clone(), input_feat.clone())
     actual = processor._compute_best_clip(w, input_feat)
 

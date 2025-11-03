@@ -577,6 +577,7 @@ class AWQProcessor(LoopProcessor):
 
         # [STEP 1]: Compute per-channel mean of normalised weights
         # Accumulate statistics per-layer to avoid concatenating large tensors
+        # (original implementation materialized a giant cat() that doubled VRAM usage)
         first_weight = layers[0].weight
         weight_dtype = first_weight.dtype
         weight_device = first_weight.device
@@ -699,16 +700,10 @@ class AWQProcessor(LoopProcessor):
         w_all = w
         best_max_val_all = []
         device = w_all.device
-        tokens = input_feat.shape[1]
-        num_groups = input_feat.shape[2]
-
-        scratch_clamp = torch.empty((oc_batch_size, 1, num_groups, group_size), device=device, dtype=w_all.dtype)
+        # Pre-allocate scratch buffers so the inner loop never allocates large temporaries
+        scratch_clamp = torch.empty_like(w_all[:oc_batch_size])
         scratch_quant = torch.empty_like(scratch_clamp)
         input_feat = input_feat.to(device)
-        grouped_inputs = [
-            input_feat[0, :, g, :].T.contiguous()
-            for g in range(num_groups)
-        ]
 
         for i_b in range(org_w_shape[0] // oc_batch_size):
             w = w_all[i_b * oc_batch_size: (i_b + 1) * oc_batch_size]
@@ -717,9 +712,8 @@ class AWQProcessor(LoopProcessor):
 
             best_max_val = org_max_val.clone()
             min_errs = torch.ones_like(org_max_val) * 1e9
-            batch = w.shape[0]
-            clamp_slice = scratch_clamp[:batch]
-            quant_slice = scratch_quant[:batch]
+            clamp_slice = scratch_clamp[: w.shape[0]]
+            quant_slice = scratch_quant[: w.shape[0]]
 
             org_out = (input_feat * w).sum(dim=-1)
 
@@ -781,6 +775,7 @@ class AWQProcessor(LoopProcessor):
 
     @torch.inference_mode()
     def _pseudo_quantize_tensor_into(self, src: torch.Tensor, dst: torch.Tensor) -> None:
+        # Quantize `src` into `dst` without allocating a new tensor (mirrors pseudo_quantize_tensor)
         org_shape = src.shape
         if self.qcfg.group_size > 0:
             src_view = src.view(-1, self.qcfg.group_size)
@@ -842,6 +837,7 @@ class AWQProcessor(LoopProcessor):
         best_scales = None
         best_error = float("inf")
 
+        # Clone the original FP weights once so we can mutate/restore without load_state_dict overhead
         orig_weights: Dict[nn.Linear, torch.Tensor] = {
             fc: fc.weight.detach().clone() for fc in linears2scale
         }
