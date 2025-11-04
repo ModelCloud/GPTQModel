@@ -231,9 +231,11 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
             expert_layer = self.experts[expert_idx]
             idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
             token_states = hidden_states.index_select(0, top_x)
-            expert_output = expert_layer(token_states) * routing_weights[top_x, idx].unsqueeze(-1)
+            expert_output = expert_layer(token_states)
+            weights = routing_weights[top_x, idx].unsqueeze(-1)
+            expert_output.mul_(weights)
             final_hidden_states.index_add_(0, top_x, expert_output.to(final_hidden_states.dtype))
-            del expert_output, token_states, idx, top_x
+            del expert_output, token_states, idx, top_x, weights
         final_hidden_states = final_hidden_states.view(batch_size, seq_len, hidden_dim)
         return final_hidden_states, router_logits
 
