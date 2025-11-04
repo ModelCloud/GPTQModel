@@ -127,6 +127,8 @@ def apply_module_tree_override(module_tree, override):
 
 
 NOT_QUANTIZE_FLAG = ":!"
+CAPTURE_ONLY_FLAG = ":?"
+NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 
 
 # Fix cpu memory leak.
@@ -362,7 +364,11 @@ class BaseQModel(nn.Module):
     @classmethod
     def filter_not_quantize_module(cls, layer_modules, quantize_config):
         layer_modules = [
-            [name for name in block if NOT_QUANTIZE_FLAG not in name]
+            [
+                name
+                for name in block
+                if all(flag not in name for flag in NON_QUANTIZE_FLAGS)
+            ]
             for block in layer_modules
         ]
         layer_modules = [block for block in layer_modules if block]  # 去掉空 block
@@ -960,19 +966,19 @@ class BaseQModel(nn.Module):
         if self.model.config is not None and self.dynamic_expert_index is not None:
             num_experts = self.get_num_experts(self.model.config)
 
-        def strip_not_quantize_flag(module_name):
-            if NOT_QUANTIZE_FLAG in module_name:
-                return module_name[:module_name.find(NOT_QUANTIZE_FLAG)]
-            else:
-                return module_name
+        def strip_non_quantize_flags(module_name):
+            for flag in NON_QUANTIZE_FLAGS:
+                if flag in module_name:
+                    module_name = module_name.replace(flag, "")
+            return module_name
 
         def _select_feature_name(names):
             """Return the first quantized child that has captured activations."""
             for raw in names:
-                stripped = strip_not_quantize_flag(raw)
+                stripped = strip_non_quantize_flags(raw)
                 if stripped in input_feat:
                     return stripped
-            return strip_not_quantize_flag(names[0]) if names else None
+            return strip_non_quantize_flags(names[0]) if names else None
 
         def _try_update_last_module(candidate_name: str) -> bool:
             nonlocal last_module, last_module_name, last_module_root
@@ -994,16 +1000,16 @@ class BaseQModel(nn.Module):
 
         full_layer_modules = self.full_layer_modules(self.model.config, is_awq_quantize=True)
         for i, block in enumerate(full_layer_modules):
-            not_quantized = all(NOT_QUANTIZE_FLAG in name for name in block)
+            not_quantized = all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in block)
             if not_quantized:
                 # If both the current block and the previous one are marked as not quantized,
                 # skip remembering the current block. This ensures that when two consecutive
                 # blocks are not quantized, only the first one is remembered as last_module.
-                if i > 0 and all(NOT_QUANTIZE_FLAG in name for name in full_layer_modules[i - 1]):
+                if i > 0 and all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in full_layer_modules[i - 1]):
                     continue
 
                 # Remember the latest norm (use the last entry if multiple are present)
-                candidate_name = strip_not_quantize_flag(block[-1])
+                candidate_name = strip_non_quantize_flags(block[-1])
                 _try_update_last_module(candidate_name)
                 continue
 
@@ -1034,7 +1040,7 @@ class BaseQModel(nn.Module):
                 subset = []  # preserve execution order while collecting quantizable modules
                 skip = False
                 for name in block:
-                    if NOT_QUANTIZE_FLAG not in name:
+                    if all(flag not in name for flag in NON_QUANTIZE_FLAGS):
                         m, _ = get_module_by_name_prefix(module, name)
                         # If the Model uses GQA (Grouped Query Attention), attention out will be skipped.
                         # Please refer to https://github.com/mit-han-lab/llm-awq/pull/67#issue-1850622696
@@ -1060,7 +1066,7 @@ class BaseQModel(nn.Module):
                     continue
 
                 # Match the activation bucket to the first quantized child in this block
-                feature_name = _select_feature_name(block) or strip_not_quantize_flag(block[0])
+                feature_name = _select_feature_name(block) or strip_non_quantize_flags(block[0])
                 root_split = feature_name.split(".")
                 module2inspect = None
                 if len(root_split) >= 2:
@@ -1091,7 +1097,7 @@ class BaseQModel(nn.Module):
                 nodes.append(n)
 
             # Update tracker to the LAST item of this block
-            candidate_name = strip_not_quantize_flag(block[-1])
+            candidate_name = strip_non_quantize_flags(block[-1])
             _try_update_last_module(candidate_name)
 
         import torch
@@ -1311,6 +1317,7 @@ class BaseQModel(nn.Module):
           [<model_name>, <submodule>, "#", { parent_module: ( "child[:!][:grp]", ... ), ... }]
         Rules:
           - ':!' means participates in inference but is NOT quantized; keep this marker in output.
+          - ':?' marks capture-only nodes; activations are recorded but the module is not quantized.
           - ':<digit>' means grouping; children with the same group id are emitted in the same block.
           - Both can appear together, e.g. 'module_name:!:2'.
           - Supports nested dict structures for MoE models with experts.
@@ -1329,57 +1336,78 @@ class BaseQModel(nn.Module):
 
         out_blocks = []
 
-        def process_entries(parent, entries, parent_group_offset=0):
+        def _parse_token(token: str) -> tuple[str, List[str]]:
+            parts = token.split(":")
+            name = parts[0]
+            flags = [p for p in parts[1:] if p]
+            return name, flags
+
+        def _group_from_flags(flags: List[str]) -> int:
+            for flag in flags:
+                if flag.isdigit():
+                    return int(flag)
+            return 0
+
+        def process_entries(parent_token: str, entries, parent_group_offset: int = 0):
             """Process entries recursively to handle nested dict structures for MoE"""
-            groups = defaultdict(list)
+            groups: defaultdict[int, List[tuple[str, bool, bool]]] = defaultdict(list)
+
+            parent_name, parent_flags = _parse_token(parent_token)
+            parent_group = parent_group_offset + _group_from_flags(parent_flags)
+            parent_has_bang = "!" in parent_flags
+            parent_capture_only = "?" in parent_flags
+
+            child_group_offset = parent_group_offset
+            if parent_has_bang or parent_capture_only:
+                groups[parent_group].append((parent_name, parent_has_bang, parent_capture_only))
+                child_group_offset = max(child_group_offset, parent_group + 1)
 
             # Handle tuple/list of strings (traditional format)
             if isinstance(entries, (tuple, list)):
                 for ent in entries:
-                    parts = ent.split(':')
-                    child = parts[0]
+                    child_name, child_flags = _parse_token(ent)
 
-                    flags = parts[1:]
-                    has_bang = ('!' in flags)
+                    has_bang = "!" in child_flags
+                    capture_only = "?" in child_flags
                     # first numeric tag is the group id; default 0
-                    grp = next((int(p) for p in flags if p.isdigit()), 0)
+                    grp = child_group_offset + _group_from_flags(child_flags)
                     # Apply parent group offset to avoid conflicts between different nesting levels
-                    grp += parent_group_offset
-
                     # Store the full path including parent for later use
-                    # Special case: if parent ends with the same name as child, don't duplicate
-                    if parent.endswith(f".{child}"):
-                        full_path = parent
+                    if parent_name.endswith(f".{child_name}") or parent_name == child_name:
+                        full_path = parent_name
+                    elif parent_name:
+                        full_path = f"{parent_name}.{child_name}"
                     else:
-                        full_path = f"{parent}.{child}" if parent != child else child
-                    groups[grp].append((full_path, has_bang))
+                        full_path = child_name
 
-            # Handle nested dict structure (MoE format)
+                    groups[grp].append((full_path, has_bang, capture_only))
+
             elif isinstance(entries, dict):
                 # Calculate max group number used at current level to avoid conflicts
                 max_current_group = 0
                 for sub_parent, sub_entries in entries.items():
                     if isinstance(sub_entries, (tuple, list)):
                         for ent in sub_entries:
-                            parts = ent.split(':')
-                            flags = parts[1:]
-                            grp = next((int(p) for p in flags if p.isdigit()), 0)
-                            max_current_group = max(max_current_group, grp)
+                            _, ent_flags = _parse_token(ent)
+                            max_current_group = max(max_current_group, _group_from_flags(ent_flags))
 
                 # Process nested entries with appropriate group offset
-                current_offset = parent_group_offset
+                current_offset = child_group_offset
                 for sub_parent, sub_entries in entries.items():
                     if sub_parent == "#":
                         # Special case: "#" means expert index placeholder
                         # Create a template path that will be expanded later by simple_layer_modules
-                        template_parent = f"{parent}.{EXPERT_INDEX_PLACEHOLDER}"
+                        template_parent = (
+                            f"{parent_name}.{EXPERT_INDEX_PLACEHOLDER}"
+                            if parent_name else EXPERT_INDEX_PLACEHOLDER
+                        )
                         # Use a higher offset for expert modules to avoid conflicts with parent level
                         expert_offset = current_offset + max_current_group + 100  # Large offset to avoid conflicts
 
                         # Handle special case where sub_entries is ("#",) or "#" - this means use the parent path directly
                         if (isinstance(sub_entries, (tuple, list)) and len(sub_entries) == 1 and sub_entries[0] == "#") or sub_entries == "#":
                             # For ("#",) or "#" format, use the template_parent directly with default group 0
-                            groups[expert_offset].append((template_parent, False))
+                            groups[expert_offset].append((template_parent, False, False))
                         else:
                             sub_groups = process_entries(template_parent, sub_entries, expert_offset)
                             for grp, items in sub_groups.items():
@@ -1388,9 +1416,12 @@ class BaseQModel(nn.Module):
                         # Nested structure: process recursively with full path
                         # Special case: empty string key means use parent path directly
                         if sub_parent == "":
-                            full_sub_parent = parent
+                            full_sub_parent = parent_name
                         else:
-                            full_sub_parent = f"{parent}.{sub_parent}"
+                            full_sub_parent = (
+                                f"{parent_name}.{sub_parent}"
+                                if parent_name else sub_parent
+                            )
                         sub_groups = process_entries(full_sub_parent, sub_entries, current_offset)
                         for grp, items in sub_groups.items():
                             groups[grp].extend(items)
@@ -1412,11 +1443,14 @@ class BaseQModel(nn.Module):
                 #     continue
 
                 block = []
-                for full_path, has_bang in items:
+                for full_path, has_bang, capture_only in items:
                     # The full path is already constructed in process_entries
+                    name = full_path
                     if has_bang:
-                        full_path += NOT_QUANTIZE_FLAG
-                    block.append(full_path)
+                        name += NOT_QUANTIZE_FLAG
+                    if capture_only:
+                        name += CAPTURE_ONLY_FLAG
+                    block.append(name)
 
                 out_blocks.append(block)
 
@@ -1458,8 +1492,8 @@ class BaseQModel(nn.Module):
     def generate_layers_modules_tree_simple(self, node):
         """
         Recursively walk a nested list/dict structure and:
-          1. Drop dict entries where *all* values are ':!' flagged.
-          2. Remove ':!' and ':<digit>' markers from strings.
+          1. Drop dict entries where *all* values are ':!' or ':?' flagged.
+          2. Remove ':!' / ':?' and ':<digit>' markers from strings.
         """
 
         # If it's a list, recurse into each element
@@ -1473,7 +1507,7 @@ class BaseQModel(nn.Module):
                 # Expand tuple-of-strings blocks (special handling)
                 if isinstance(v, (tuple, list)) and all(isinstance(x, str) for x in v):
                     # Rule 1: check if ALL entries are :!
-                    if all(any(p == "!" for p in x.split(":")[1:]) for x in v):
+                    if all(any(p in {"!", "?"} for p in x.split(":")[1:]) for x in v):
                         continue  # skip this parent entirely
 
                     # Rule 2: strip :! and :digit markers
