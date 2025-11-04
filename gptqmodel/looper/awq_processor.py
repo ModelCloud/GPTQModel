@@ -76,6 +76,7 @@ class AWQProcessor(LoopProcessor):
             require_fwd=require_fwd,
             fwd_after_process=True,
             subset_forward_early_stop=True,
+            enable_activation_capture_flag=True,
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
