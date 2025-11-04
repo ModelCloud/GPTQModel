@@ -220,21 +220,6 @@ def run_subset_stage(
     if len(forward_row_counts) < batch_count:
         forward_row_counts.extend([1] * (batch_count - len(forward_row_counts)))
 
-    if is_awq_processor:
-        model_type = looper.gptq_model.model.config.model_type
-        if model_type == "mixtral":
-            subset['block_sparse_moe'] = NamedModule(module.mlp, name="block_sparse_moe",
-                                                     full_name=f"model.layers.{layer_index}.block_sparse_moe",
-                                                     layer_index=layer_index)
-
-        if model_type == "deepseek_v2" or model_type == "deepseek_v3":
-            subset['mlp'] = NamedModule(module.mlp, name="mlp", full_name=f"model.layers.{layer_index}.mlp",
-                                        layer_index=layer_index)
-
-        if model_type == "qwen2_moe" or model_type == "qwen3_moe":
-            subset['mlp'] = NamedModule(module.mlp, name="mlp", full_name=f"model.layers.{layer_index}.mlp",
-                                        layer_index=layer_index)
-
     subset_size = len(subset)
     for idx, (name, m) in enumerate(subset.items()):
         # Register the forward hook that captures activations for quantization.

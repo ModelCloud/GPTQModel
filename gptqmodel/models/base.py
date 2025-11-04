@@ -1305,7 +1305,7 @@ class BaseQModel(nn.Module):
     #     else:
     #         log.info(f"{self.__class__.__name__}: `MODEL switching to eval mode.")
     @classmethod
-    def build_layer_modules(cls, tree):
+    def build_layer_modules(cls, tree, is_awq_quantize):
         """
         tree format:
           [<model_name>, <submodule>, "#", { parent_module: ( "child[:!][:grp]", ... ), ... }]
@@ -1329,9 +1329,16 @@ class BaseQModel(nn.Module):
 
         out_blocks = []
 
-        def process_entries(parent, entries, parent_group_offset=0):
+        def process_entries(parent_name, entries, parent_group_offset=0):
             """Process entries recursively to handle nested dict structures for MoE"""
             groups = defaultdict(list)
+
+            parent = parent_name.split(":", 1)[0]
+            if is_awq_quantize:
+                has_question = ('?' in parent_name)
+                # process moe block
+                if has_question:
+                    out_blocks.append([parent])
 
             # Handle tuple/list of strings (traditional format)
             if isinstance(entries, (tuple, list)):
