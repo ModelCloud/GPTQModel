@@ -326,14 +326,14 @@ class BaseQModel(nn.Module):
             num_experts = cls.get_num_experts(model_config)
 
             moe_simple = []
-            capture_only_modules = []
+            capture_only_modules = None
             for names in layer_modules:
                 moe_simple.append([])
 
                 has_expert = all(EXPERT_INDEX_PLACEHOLDER in n for n in names)
                 has_capture_only = all(CAPTURE_ONLY_FLAG in n for n in names)
                 if has_capture_only:
-                    capture_only_modules.append(names)
+                    capture_only_modules = names
                     continue
 
                 if not has_expert:
@@ -346,9 +346,10 @@ class BaseQModel(nn.Module):
                     for index in range(num_experts):
                         for n in names:
                             moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
-                    if capture_only_modules:
+                    # Currently, only need to add `capture_only_modules` to `[mlp.experts.0.gate_proj', 'mlp.experts.0.up_proj'...]`.
+                    if len(names) == 2 and capture_only_modules:
                         # Extend all elements in capture_only_modules
-                        moe_simple[-1].extend(sum(capture_only_modules, []))
+                        moe_simple[-1].extend(capture_only_modules)
                 else:
                     # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.up_proj', ...]
                     for n in names:
@@ -1083,7 +1084,8 @@ class BaseQModel(nn.Module):
                         last_module_root = root
                         module2inspect, _ = get_module_by_name_prefix(module, root)
 
-                if num_experts is not None and len(block) == 2 * num_experts and module2inspect is not None:
+                # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
+                if num_experts is not None and len(block) == 2 * num_experts + 1 and module2inspect is not None:
                     if last_module_root not in input_feat:
                         log.debug(
                             "awq_get_modules_for_scaling: missing input feature for `%s` while processing experts block (layer block size=%s)",
