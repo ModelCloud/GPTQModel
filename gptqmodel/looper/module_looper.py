@@ -1129,10 +1129,14 @@ class ModuleLooper():
             region_timer.flush()
 
         is_awq_quantize = any(isinstance(proc, AWQProcessor) for proc in self.processors)
+        requires_activation_capture = any(
+            getattr(proc, "enable_activation_capture", False) for proc in self.processors
+        )
         layer_modules = self.gptq_model.simple_layer_modules(
             model_config=self.gptq_model.model.config,
             quantize_config=self.gptq_model.quantize_config,
             is_awq_quantize=is_awq_quantize,
+            include_capture_only=requires_activation_capture,
         )
 
         # true-sequential will replay the quantized activations after each subset has been quantized to be used for next subset quantization

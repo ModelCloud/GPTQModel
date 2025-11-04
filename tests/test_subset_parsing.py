@@ -56,10 +56,20 @@ def test_mlp_capture_flag_propagates_to_layer_modules():
     model_config = cfg
     quant_cfg = SimpleNamespace(dynamic=None)
 
-    tree = Qwen3MoeQModel.build_layer_modules(Qwen3MoeQModel.module_tree)
+    tree = Qwen3MoeQModel.build_layer_modules(
+        Qwen3MoeQModel.module_tree,
+        include_capture_only=True,
+    )
     assert any("mlp:?" in group for group in tree)
 
-    full = Qwen3MoeQModel.full_layer_modules(model_config=model_config, is_awq_quantize=True)
+    baseline_tree = Qwen3MoeQModel.build_layer_modules(Qwen3MoeQModel.module_tree)
+    assert all(":?" not in name for block in baseline_tree for name in block)
+
+    full = Qwen3MoeQModel.full_layer_modules(
+        model_config=model_config,
+        is_awq_quantize=True,
+        include_capture_only=True,
+    )
     capture_blocks = [block for block in full if any(":?" in name for name in block)]
     assert capture_blocks and capture_blocks[0] == ["mlp:?"]
 

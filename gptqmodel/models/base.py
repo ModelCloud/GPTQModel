@@ -390,8 +390,8 @@ class BaseQModel(nn.Module):
     # List them in the order executed in model forward() code
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
     @classmethod
-    def simple_layer_modules(cls, model_config, quantize_config, is_awq_quantize: bool = False):
-        layer_modules = cls.build_layer_modules(cls.module_tree)
+    def simple_layer_modules(cls, model_config, quantize_config, is_awq_quantize: bool = False, include_capture_only: bool = False):
+        layer_modules = cls.build_layer_modules(cls.module_tree, include_capture_only=include_capture_only)
 
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
@@ -401,8 +401,8 @@ class BaseQModel(nn.Module):
         return layer_modules
 
     @classmethod
-    def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False):
-        full = cls.build_layer_modules(cls.module_tree)
+    def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False, include_capture_only: bool = False):
+        full = cls.build_layer_modules(cls.module_tree, include_capture_only=include_capture_only)
         full = cls.build_moe_modules_if_need(model_config, full, is_awq_quantize)
         # print(f"full layer_modules: {full}")
         return full
@@ -998,7 +998,11 @@ class BaseQModel(nn.Module):
                 last_module_root = candidate_name.split(".", 1)[0]
             return True
 
-        full_layer_modules = self.full_layer_modules(self.model.config, is_awq_quantize=True)
+        full_layer_modules = self.full_layer_modules(
+            self.model.config,
+            is_awq_quantize=True,
+            include_capture_only=True,
+        )
         for i, block in enumerate(full_layer_modules):
             not_quantized = all(any(flag in name for flag in NON_QUANTIZE_FLAGS) for name in block)
             if not_quantized:
@@ -1311,7 +1315,7 @@ class BaseQModel(nn.Module):
     #     else:
     #         log.info(f"{self.__class__.__name__}: `MODEL switching to eval mode.")
     @classmethod
-    def build_layer_modules(cls, tree):
+    def build_layer_modules(cls, tree, include_capture_only: bool = False):
         """
         tree format:
           [<model_name>, <submodule>, "#", { parent_module: ( "child[:!][:grp]", ... ), ... }]
@@ -1358,7 +1362,8 @@ class BaseQModel(nn.Module):
             parent_capture_only = "?" in parent_flags
 
             child_group_offset = parent_group_offset
-            if parent_has_bang or parent_capture_only:
+            add_parent = parent_has_bang or (parent_capture_only and include_capture_only)
+            if add_parent:
                 groups[parent_group].append((parent_name, parent_has_bang, parent_capture_only))
                 child_group_offset = max(child_group_offset, parent_group + 1)
 
@@ -1380,6 +1385,8 @@ class BaseQModel(nn.Module):
                     else:
                         full_path = child_name
 
+                    if capture_only and not include_capture_only:
+                        continue
                     groups[grp].append((full_path, has_bang, capture_only))
 
             elif isinstance(entries, dict):
@@ -1448,7 +1455,7 @@ class BaseQModel(nn.Module):
                     name = full_path
                     if has_bang:
                         name += NOT_QUANTIZE_FLAG
-                    if capture_only:
+                    if capture_only and include_capture_only:
                         name += CAPTURE_ONLY_FLAG
                     block.append(name)
 

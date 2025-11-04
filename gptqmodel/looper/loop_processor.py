@@ -63,6 +63,7 @@ class LoopProcessor:
             fwd_after_process: bool = True,
             fwd_all_modules_in_single_pass: bool = False,
             subset_forward_early_stop: bool = False,
+            enable_activation_capture_flag: bool = False,
     ):
         # process level lock
         self.lock = threading.Lock()
@@ -91,6 +92,8 @@ class LoopProcessor:
         self.fwd_all_modules_in_single_pass = fwd_all_modules_in_single_pass # default False
         # when True, stop the layer forward immediately after the final module in a subset fires
         self.subset_forward_early_stop = subset_forward_early_stop
+        # enable capture-only hooks (e.g. ':?') for processors that require activations
+        self.enable_activation_capture = enable_activation_capture_flag
 
         self.inputs_cache: InputCache = InputCache(None, None, None, None)
         self.tasks = {}
