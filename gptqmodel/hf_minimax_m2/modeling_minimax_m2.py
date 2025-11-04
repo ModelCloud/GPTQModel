@@ -126,9 +126,9 @@ class MiniMaxM2MLP(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate = self.act_fn(self.w1(hidden_states))
         up = self.w3(hidden_states)
-        hidden_states = gate * up
-        hidden_states = self.w2(hidden_states)
-        return hidden_states
+        gate.mul_(up)
+        del up
+        return self.w2(gate)
 
 
 class MiniMaxM2SparseMoeBlock(nn.Module):
@@ -233,7 +233,7 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
             token_states = hidden_states.index_select(0, top_x)
             expert_output = expert_layer(token_states) * routing_weights[top_x, idx].unsqueeze(-1)
             final_hidden_states.index_add_(0, top_x, expert_output.to(final_hidden_states.dtype))
-
+            del expert_output, token_states, idx, top_x
         final_hidden_states = final_hidden_states.view(batch_size, seq_len, hidden_dim)
         return final_hidden_states, router_logits
 
@@ -302,10 +302,12 @@ class MiniMaxM2Attention(nn.Module):
         output_attentions: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         bsz, q_len, _ = hidden_states.size()
+        device = hidden_states.device
 
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        del hidden_states
 
         if self.use_qk_norm:
             q_flat = query_states.transpose(1, 2).reshape(bsz * q_len, -1)
@@ -333,28 +335,55 @@ class MiniMaxM2Attention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(-2, -1)) * self.scaling
+        query_dtype = query_states.dtype
+        key_states_shape_2 = key_states.shape[-2]
+
+        attn_weights = torch.empty(
+            (bsz, self.num_heads, q_len, key_states_shape_2), device=device, dtype=query_dtype
+        )
+        for i in range(self.num_heads):
+            attn_weights[:, i, :, :] = torch.matmul(
+                query_states[:, i, :, :], key_states[:, i, :, :].transpose(-2, -1)
+            )
+
+        attn_weights *= self.scaling
+        del query_states, key_states
+
         if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
+            attn_weights.add_(attention_mask)
 
         if self.sliding_window is not None and past_key_values is None:
-            query_positions = torch.arange(q_len, device=hidden_states.device).view(1, 1, q_len, 1)
-            key_positions = torch.arange(key_states.shape[-2], device=hidden_states.device).view(1, 1, 1, -1)
+            query_positions = torch.arange(q_len, device=device).view(1, 1, q_len, 1)
+            key_positions = torch.arange(key_states_shape_2, device=device).view(1, 1, 1, -1)
             window_mask = key_positions < (query_positions - self.sliding_window)
             if window_mask.any():
-                attn_weights = attn_weights.masked_fill(window_mask, float("-inf"))
+                attn_weights.masked_fill_(window_mask, float("-inf"))
+            del query_positions, key_positions, window_mask
 
-        attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        for i in range(self.num_heads):
+            attn_weights[:, i, :, :] = torch.softmax(
+                attn_weights[:, i, :, :], dim=-1, dtype=torch.float32
+            ).to(query_dtype)
+
         if self.training and self.attention_dropout > 0:
             attn_weights = F.dropout(attn_weights, p=self.attention_dropout)
 
-        attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = torch.empty(
+            (bsz, self.num_heads, q_len, self.head_dim), device=attn_weights.device, dtype=attn_weights.dtype
+        )
+        for i in range(self.num_heads):
+            attn_output[:, i, :, :] = torch.matmul(attn_weights[:, i, :, :], value_states[:, i, :, :])
+
+        del value_states
+
         attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, q_len, -1)
         attn_output = self.o_proj(attn_output)
 
-        if not output_attentions:
-            attn_weights = None
-        return attn_output, attn_weights
+        if output_attentions:
+            return attn_output, attn_weights
+
+        del attn_weights
+        return attn_output, None
 
 
 class MiniMaxM2LogitsProcessor(nn.Module):
