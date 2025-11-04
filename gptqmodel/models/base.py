@@ -397,12 +397,12 @@ class BaseQModel(nn.Module):
     @classmethod
     def simple_layer_modules(cls, model_config, quantize_config, is_awq_quantize: bool = False, include_capture_only: bool = False):
         layer_modules = cls.build_layer_modules(cls.module_tree, include_capture_only=include_capture_only)
-        print(f"simple_layer_modules build_layer_modules: {layer_modules}")
+
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
-        print(f"simple_layer_modules build_moe_modules_if_need: {layer_modules}")
+
         layer_modules = cls.filter_not_quantize_module(layer_modules, quantize_config)
 
-        print(f"simple_layer_modules layer_modules: {layer_modules}")
+        # print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 
     @classmethod
