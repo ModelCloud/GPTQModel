@@ -75,6 +75,12 @@ class NamedModule(torch.nn.Module):
     def named_buffers(self, prefix: str = "", recurse: bool = True):
         return self.module.named_buffers(prefix=prefix, recurse=recurse)
 
+    def register_forward_hook(
+        self, *args, **kwargs
+    ):
+        with self._parent_lock:
+            return self.module.register_forward_hook(*args, **kwargs)
+
     def register_buffer(
         self, name: str, tensor: Optional[Tensor], persistent: bool = True
     ) -> None:
