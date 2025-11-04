@@ -32,17 +32,17 @@ class Qwen2MoeQModel(BaseQModel):
         }
     ]
 
-    module_tree_overrides = {
-        METHOD.AWQ: [
-            {
-                "mlp:?": {
-                    "gate": ("gate:!",),
-                    "shared_expert": None,
-                    "experts": {
-                        "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
-                    },
-                },
-            }
-        ]
-    }
+    # module_tree_overrides = {
+    #     METHOD.AWQ: [
+    #         {
+    #             "mlp:?": {
+    #                 "gate": ("gate:!",),
+    #                 "shared_expert": None,
+    #                 "experts": {
+    #                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+    #                 },
+    #             },
+    #         }
+    #     ]
+    # }
 
