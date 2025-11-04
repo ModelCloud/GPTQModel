@@ -326,10 +326,15 @@ class BaseQModel(nn.Module):
             num_experts = cls.get_num_experts(model_config)
 
             moe_simple = []
+            capture_only_modules = []
             for names in layer_modules:
                 moe_simple.append([])
 
                 has_expert = all(EXPERT_INDEX_PLACEHOLDER in n for n in names)
+                has_capture_only = all(CAPTURE_ONLY_FLAG in n for n in names)
+                if has_capture_only:
+                    capture_only_modules.append(names)
+                    continue
 
                 if not has_expert:
                     moe_simple[-1].extend(names)
@@ -341,6 +346,9 @@ class BaseQModel(nn.Module):
                     for index in range(num_experts):
                         for n in names:
                             moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                    if capture_only_modules:
+                        # Extend all elements in capture_only_modules
+                        moe_simple[-1].extend(sum(capture_only_modules, []))
                 else:
                     # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.up_proj', ...]
                     for n in names:
