@@ -11,6 +11,7 @@ import re
 import threading
 import time
 from collections import defaultdict
+from itertools import count
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
 
@@ -333,7 +334,8 @@ class BaseQModel(nn.Module):
                 has_expert = all(EXPERT_INDEX_PLACEHOLDER in n for n in names)
                 has_capture_only = all(CAPTURE_ONLY_FLAG in n for n in names)
                 if has_capture_only:
-                    capture_only_modules = names
+                    capture_only_modules = list(names)
+                    moe_simple[-1].extend(capture_only_modules)
                     continue
 
                 if not has_expert:
@@ -1345,6 +1347,10 @@ class BaseQModel(nn.Module):
             raise ValueError("Mapping configuration not found in the tree.")
 
         out_blocks = []
+        alias_groups: Dict[tuple[str | None, int], List[tuple[str, bool, bool]]] = {}
+        alias_meta: Dict[tuple[str | None, int], Dict[str, int]] = {}
+        alias_seq = count()
+        group_seq = count()
 
         def _parse_token(token: str) -> tuple[str, List[str]]:
             parts = token.split(":")
@@ -1358,19 +1364,46 @@ class BaseQModel(nn.Module):
                     return int(flag)
             return 0
 
-        def process_entries(parent_token: str, entries, parent_group_offset: int = 0):
+        def _has_numeric_flag(flags: List[str]) -> bool:
+            return any(flag.isdigit() for flag in flags)
+
+        def _get_scope(parent_name: str) -> str | None:
+            if not parent_name:
+                return None
+            return parent_name.split(".", 1)[0]
+
+        def process_entries(parent_token: str, entries, parent_group_offset: int = 0, scope_key: str | None = None):
             """Process entries recursively to handle nested dict structures for MoE"""
-            groups: defaultdict[int, List[tuple[str, bool, bool]]] = defaultdict(list)
+            groups: defaultdict[int, List[tuple]] = defaultdict(list)
 
             parent_name, parent_flags = _parse_token(parent_token)
-            parent_group = parent_group_offset + _group_from_flags(parent_flags)
+            parent_rel_group = _group_from_flags(parent_flags)
+            parent_group = parent_group_offset + parent_rel_group
             parent_has_bang = "!" in parent_flags
             parent_capture_only = "?" in parent_flags
+            parent_has_numeric = _has_numeric_flag(parent_flags)
+
+            scope = scope_key if scope_key is not None else _get_scope(parent_name)
+            parent_alias_scope = scope if parent_has_numeric else parent_name
+
+            def _make_entry(full_path: str, has_bang: bool, capture_only: bool, *, alias_base: int, alias_rel: int, alias_scope: str | None) -> tuple:
+                return (full_path, has_bang, capture_only, alias_scope, (alias_base, alias_rel))
 
             child_group_offset = parent_group_offset
             add_parent = parent_has_bang or (parent_capture_only and include_capture_only)
             if add_parent:
-                groups[parent_group].append((parent_name, parent_has_bang, parent_capture_only))
+                alias_base = parent_rel_group if parent_has_numeric else parent_group
+                parent_entry_scope = f"{parent_alias_scope}.__parent__" if parent_alias_scope is not None else None
+                groups[parent_group].append(
+                    _make_entry(
+                        parent_name,
+                        parent_has_bang,
+                        parent_capture_only,
+                        alias_base=alias_base,
+                        alias_rel=0,
+                        alias_scope=parent_entry_scope,
+                    )
+                )
                 child_group_offset = max(child_group_offset, parent_group + 1)
 
             # Handle tuple/list of strings (traditional format)
@@ -1381,7 +1414,8 @@ class BaseQModel(nn.Module):
                     has_bang = "!" in child_flags
                     capture_only = "?" in child_flags
                     # first numeric tag is the group id; default 0
-                    grp = child_group_offset + _group_from_flags(child_flags)
+                    child_rel_group = _group_from_flags(child_flags)
+                    grp = child_group_offset + child_rel_group
                     # Apply parent group offset to avoid conflicts between different nesting levels
                     # Store the full path including parent for later use
                     if parent_name.endswith(f".{child_name}") or parent_name == child_name:
@@ -1393,7 +1427,19 @@ class BaseQModel(nn.Module):
 
                     if capture_only and not include_capture_only:
                         continue
-                    groups[grp].append((full_path, has_bang, capture_only))
+                    alias_scope = scope if parent_has_numeric else parent_name
+                    alias_base = parent_rel_group if parent_has_numeric else grp
+                    alias_rel = child_rel_group if parent_has_numeric else 0
+                    groups[grp].append(
+                        _make_entry(
+                            full_path,
+                            has_bang,
+                            capture_only,
+                            alias_base=alias_base,
+                            alias_rel=alias_rel,
+                            alias_scope=alias_scope,
+                        )
+                    )
 
             elif isinstance(entries, dict):
                 # Calculate max group number used at current level to avoid conflicts
@@ -1414,15 +1460,31 @@ class BaseQModel(nn.Module):
                             f"{parent_name}.{EXPERT_INDEX_PLACEHOLDER}"
                             if parent_name else EXPERT_INDEX_PLACEHOLDER
                         )
+                        template_parent_token = (
+                            f"{template_parent}:{parent_rel_group}"
+                            if parent_has_numeric
+                            else template_parent
+                        )
                         # Use a higher offset for expert modules to avoid conflicts with parent level
                         expert_offset = current_offset + max_current_group + 100  # Large offset to avoid conflicts
 
                         # Handle special case where sub_entries is ("#",) or "#" - this means use the parent path directly
                         if (isinstance(sub_entries, (tuple, list)) and len(sub_entries) == 1 and sub_entries[0] == "#") or sub_entries == "#":
                             # For ("#",) or "#" format, use the template_parent directly with default group 0
-                            groups[expert_offset].append((template_parent, False, False))
+                            alias_scope = scope if parent_has_numeric else template_parent
+                            alias_base = parent_rel_group if parent_has_numeric else expert_offset
+                            groups[expert_offset].append(
+                                _make_entry(
+                                    template_parent,
+                                    False,
+                                    False,
+                                    alias_base=alias_base,
+                                    alias_rel=0,
+                                    alias_scope=alias_scope,
+                                )
+                            )
                         else:
-                            sub_groups = process_entries(template_parent, sub_entries, expert_offset)
+                            sub_groups = process_entries(template_parent_token, sub_entries, expert_offset, scope)
                             for grp, items in sub_groups.items():
                                 groups[grp].extend(items)
                     else:
@@ -1435,7 +1497,7 @@ class BaseQModel(nn.Module):
                                 f"{parent_name}.{sub_parent}"
                                 if parent_name else sub_parent
                             )
-                        sub_groups = process_entries(full_sub_parent, sub_entries, current_offset)
+                        sub_groups = process_entries(full_sub_parent, sub_entries, current_offset, scope)
                         for grp, items in sub_groups.items():
                             groups[grp].extend(items)
                         # Update offset for next sibling to avoid conflicts
@@ -1444,28 +1506,47 @@ class BaseQModel(nn.Module):
 
             return groups
 
+        def _register_alias(order_idx: int, item: tuple[str, bool, bool, str | None, tuple[int, int]]):
+            full_path, has_bang, capture_only, scope, alias_parts = item
+            if capture_only and not include_capture_only:
+                return
+            alias_scope = scope
+            alias_base, alias_rel = alias_parts
+            alias_index = alias_base + alias_rel
+            key = (alias_scope, alias_index)
+            meta = alias_meta.get(key)
+            if meta is None:
+                alias_meta[key] = {"order": order_idx, "seq": next(alias_seq)}
+                alias_groups[key] = [(full_path, has_bang, capture_only)]
+            else:
+                meta["order"] = min(meta["order"], order_idx)
+                alias_groups[key].append((full_path, has_bang, capture_only))
+
         for parent, entries in mapping.items():
             groups = process_entries(parent, entries)
 
-            # Emit per-group, skipping pure-:! blocks (norm-only), but
-            # preserving :! markers on mixed blocks if they ever occur.
             for g in sorted(groups):
+                order_idx = next(group_seq)
                 items = groups[g]
-                # if every entry is :!, skip this block (matches your expected output)
-                # if all(has_bang for _, has_bang in items):
-                #     continue
+                for item in items:
+                    if len(item) == 3:
+                        full_path, has_bang, capture_only = item
+                        scope = full_path
+                        alias_parts = (g, 0)
+                        _register_alias(order_idx, (full_path, has_bang, capture_only, scope, alias_parts))
+                    else:
+                        _register_alias(order_idx, item)
 
-                block = []
-                for full_path, has_bang, capture_only in items:
-                    # The full path is already constructed in process_entries
-                    name = full_path
-                    if has_bang:
-                        name += NOT_QUANTIZE_FLAG
-                    if capture_only and include_capture_only:
-                        name += CAPTURE_ONLY_FLAG
-                    block.append(name)
-
-                out_blocks.append(block)
+        for key in sorted(alias_groups.keys(), key=lambda k: (alias_meta[k]["order"], alias_meta[k]["seq"])):
+            block = []
+            for full_path, has_bang, capture_only in alias_groups[key]:
+                name = full_path
+                if has_bang:
+                    name += NOT_QUANTIZE_FLAG
+                if capture_only and include_capture_only:
+                    name += CAPTURE_ONLY_FLAG
+                block.append(name)
+            out_blocks.append(block)
 
         return out_blocks
 
