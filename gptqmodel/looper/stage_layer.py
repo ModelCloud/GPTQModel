@@ -128,7 +128,7 @@ def run_layer_stage(
                             names[:8],
                         )
                 subset_result = run_subset_stage(
-                    looper,
+                    looper=looper,
                     processor=processor,
                     module=module,
                     layer_inputs=layer_inputs,
@@ -151,6 +151,7 @@ def run_layer_stage(
                     log=log,
                     region_timer=region_timer,
                     previous_processed_subset=previous_subset_processed,
+                    subset_event_cb=looper._subset_event_dispatch,
                 )
 
                 layer_inputs = subset_result.layer_inputs
