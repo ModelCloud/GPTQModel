@@ -12,6 +12,7 @@ import torch
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
+
 repo_root = Path(__file__).resolve().parents[1]
 repo_str = str(repo_root)
 if repo_str not in sys.path:
@@ -20,14 +21,14 @@ if repo_str not in sys.path:
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
-from gptqmodel.looper.stage_subset import run_subset_stage
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.quantization import FORMAT, METHOD
-from gptqmodel.quantization.config import QuantizeConfig, VRAMStrategy
-from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
-from gptqmodel.utils.model import find_modules, get_module_by_name_prefix
+from gptqmodel.looper.stage_subset import run_subset_stage
 from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
+from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
+from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization.config import QuantizeConfig, VRAMStrategy
+from gptqmodel.utils.model import find_modules, get_module_by_name_prefix
 
 
 # honour the request to bind the test harness to GPU index 5 when CUDA is available
@@ -187,14 +188,14 @@ class _SubsetRecorder:
         processor: str,
     ):
         self.events.append(
-            dict(
-                stage=stage,
-                layer_idx=layer_idx,
-                subset_index=subset_index,
-                subset_total=subset_total,
-                module_names=module_names,
-                processor=processor,
-            )
+            {
+                "stage": stage,
+                "layer_idx": layer_idx,
+                "subset_index": subset_index,
+                "subset_total": subset_total,
+                "module_names": module_names,
+                "processor": processor,
+            }
         )
 
 

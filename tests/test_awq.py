@@ -47,15 +47,14 @@ class TestGroupSize(unittest.TestCase):
         if requested_samples is not None:
             sample_count = max(1, int(requested_samples))
         else:
-            total_mem_gb = 0
             if torch.cuda.is_available():
                 try:
-                    total_mem_gb = (
+                    (
                         torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
                         / (1024 ** 3)
                     )
                 except Exception:
-                    total_mem_gb = 0
+                    pass
 
             # if total_mem_gb >= 80:
             #     sample_count = 1024

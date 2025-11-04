@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ...quantization import METHOD
 
 
 class Qwen2MoeQModel(BaseQModel):
