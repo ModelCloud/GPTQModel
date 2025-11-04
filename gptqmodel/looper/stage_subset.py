@@ -79,6 +79,7 @@ def run_subset_stage(
     is_awq_processor = processor_name_lower.startswith("awq")
 
     subset = looper.crate_named_modules(
+        module=module,
         full=full,
         is_lm_head_module=is_lm_head_module,
         layer_index=layer_index,

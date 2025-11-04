@@ -364,11 +364,7 @@ class BaseQModel(nn.Module):
     @classmethod
     def filter_not_quantize_module(cls, layer_modules, quantize_config):
         layer_modules = [
-            [
-                name
-                for name in block
-                if all(flag not in name for flag in NON_QUANTIZE_FLAGS)
-            ]
+            [name for name in block if NOT_QUANTIZE_FLAG not in name]
             for block in layer_modules
         ]
         layer_modules = [block for block in layer_modules if block]  # 去掉空 block

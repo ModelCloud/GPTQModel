@@ -33,6 +33,7 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
+from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
 from ..quantization.config import VRAMStrategy
@@ -1251,11 +1252,15 @@ class ModuleLooper():
 
         return total_log
 
-    def crate_named_modules(self, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe, layer_module=None) -> Dict[str, NamedModule]:
+    def crate_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe, layer_module=None) -> Dict[str, NamedModule]:
         subset = {}
         for n in names:
             if n in full:
                 subset[n] = full[n]
+            elif n.endswith(CAPTURE_ONLY_FLAG):
+                # Obtain the CAPTURE_ONLY_FLAG Module separately
+                n = n.split(CAPTURE_ONLY_FLAG, 1)[0]
+                subset[n], _ = get_module_by_name_prefix(module, module_name=n)
             # some modules have layer_modules that are dynamic based on config
             # ref: deepseek v2/v3/r1
             elif self.gptq_model.layer_modules_strict:
