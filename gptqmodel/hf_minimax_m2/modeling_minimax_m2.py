@@ -168,7 +168,8 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
                 1.0 - self.jitter_noise,
                 1.0 + self.jitter_noise,
             )
-            hidden_states = hidden_states * noise
+            hidden_states.mul_(noise)
+            del noise
 
         hidden_states = hidden_states.view(-1, hidden_dim)
         gate_dtype = self.gate.weight.dtype
@@ -188,7 +189,7 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
 
         if correction_bias is not None:
             original_scores = scores
-            scores = scores + correction_bias
+            scores.add_(correction_bias)
         else:
             original_scores = scores
         topk_scores: torch.Tensor
@@ -216,26 +217,42 @@ class MiniMaxM2SparseMoeBlock(nn.Module):
             routing_weights = original_scores.gather(1, selected_experts)
         else:
             routing_weights = topk_scores
+        del scores, original_scores, topk_scores
 
-        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+        routing_weights.div_(routing_weights.sum(dim=-1, keepdim=True).clamp(min=1e-12))
         if self.routed_scaling_factor != 1.0:
-            routing_weights = routing_weights * self.routed_scaling_factor
+            routing_weights.mul_(self.routed_scaling_factor)
         routing_weights = routing_weights.to(hidden_states.dtype)
         selected_experts = selected_experts.to(torch.long)
 
         final_hidden_states = torch.zeros_like(hidden_states)
         expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+        del selected_experts
         expert_hit = torch.nonzero(expert_mask.sum(dim=(-1, -2)) > 0, as_tuple=False).flatten()
+
+        # To further reduce memory, process tokens routed to each expert in chunks
+        # instead of all at once. A chunk size of 1024 is a reasonable default.
+        EXPERT_CHUNK_SIZE = 1024
 
         for expert_idx in expert_hit.tolist():
             expert_layer = self.experts[expert_idx]
-            idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
-            token_states = hidden_states.index_select(0, top_x)
-            expert_output = expert_layer(token_states)
-            weights = routing_weights[top_x, idx].unsqueeze(-1)
-            expert_output.mul_(weights)
-            final_hidden_states.index_add_(0, top_x, expert_output.to(final_hidden_states.dtype))
-            del expert_output, token_states, idx, top_x, weights
+            idx_full, top_x_full = torch.where(expert_mask[expert_idx].squeeze(0))
+
+            for i in range(0, top_x_full.size(0), EXPERT_CHUNK_SIZE):
+                top_x = top_x_full[i : i + EXPERT_CHUNK_SIZE]
+                idx = idx_full[i : i + EXPERT_CHUNK_SIZE]
+
+                token_states = hidden_states.index_select(0, top_x)
+                expert_output = expert_layer(token_states)
+
+                weights = routing_weights[top_x, idx].unsqueeze(-1)
+                expert_output.mul_(weights)
+
+                final_hidden_states.index_add_(0, top_x, expert_output.to(final_hidden_states.dtype))
+                del expert_output, token_states, idx, top_x, weights
+
+            del idx_full, top_x_full
+        del hidden_states, routing_weights, expert_mask, expert_hit
         final_hidden_states = final_hidden_states.view(batch_size, seq_len, hidden_dim)
         return final_hidden_states, router_logits
 
