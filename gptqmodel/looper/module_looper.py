@@ -132,6 +132,7 @@ class ModuleLooper():
             vram_strategy = VRAMStrategy.EXCLUSIVE
         self._vram_strategy = vram_strategy
         self._moe_subset_threshold = 16
+        self._subset_callback = getattr(self.gptq_model, "subset_callback", None)
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
@@ -140,6 +141,10 @@ class ModuleLooper():
         """Register or replace the layer-complete callback target."""
         self._layer_callback = callback
 
+    def register_subset_callback(self, callback) -> None:
+        """Register or replace the subset event callback target."""
+        self._subset_callback = callback
+
     def _resolve_layer_callback(self):
         for candidate in (
             getattr(self, "_layer_callback", None),
@@ -147,6 +152,16 @@ class ModuleLooper():
             getattr(self.gptq_model, "layer_callback", None),
             getattr(self.gptq_model, "callbackup", None),
             getattr(self.gptq_model, "callback", None),
+        ):
+            if candidate is not None:
+                return candidate
+        return None
+
+    def _resolve_subset_callback(self):
+        for candidate in (
+            getattr(self, "_subset_callback", None),
+            getattr(self, "subset_callback", None),
+            getattr(self.gptq_model, "subset_callback", None),
         ):
             if candidate is not None:
                 return candidate
@@ -173,6 +188,26 @@ class ModuleLooper():
             raise result
         return result
 
+    def _subset_event_dispatch(
+        self,
+        *,
+        stage: str,
+        layer_idx: int,
+        subset_index: int,
+        subset_total: int,
+        module_names: List[str],
+        processor: str,
+    ) -> None:
+        self._emit_subset_event(
+            stage=stage,
+            layer_idx=layer_idx,
+            subset_index=subset_index,
+            subset_total=subset_total,
+            module_names=module_names,
+            processor=processor,
+            raise_in_place=True,
+        )
+
     def _request_loop_stop(self, exc: Optional[BaseException]) -> None:
         with self.lock:
             if self._loop_stop_exc is None and exc is not None:
@@ -188,6 +223,60 @@ class ModuleLooper():
         if self._loop_stop_exc is not None:
             raise self._loop_stop_exc
         return True
+
+    def _emit_subset_event(
+        self,
+        *,
+        stage: str,
+        layer_idx: int,
+        subset_index: int,
+        subset_total: int,
+        module_names: List[str],
+        processor: str,
+        raise_in_place: bool,
+    ) -> None:
+        callback = self._resolve_subset_callback()
+        if callback is None:
+            return
+
+        handler = getattr(callback, "subset_event", None)
+        if handler is None and callable(callback):
+            handler = callback
+        if handler is None:
+            return
+
+        try:
+            result = handler(
+                stage=stage,
+                layer_idx=layer_idx,
+                subset_index=subset_index,
+                subset_total=subset_total,
+                module_names=module_names,
+                processor=processor,
+            )
+        except StopMainLoop as exc:
+            self._request_loop_stop(exc)
+            if raise_in_place:
+                raise
+            return
+        except BaseException as exc:
+            self._request_loop_stop(exc)
+            if raise_in_place:
+                raise
+            return
+
+        if result is StopMainLoop:
+            exc = StopMainLoop(f"Subset callback requested stop at layer {layer_idx} subset {subset_index}")
+            self._request_loop_stop(exc)
+            if raise_in_place:
+                raise exc
+            return
+
+        if isinstance(result, StopMainLoop):
+            self._request_loop_stop(result)
+            if raise_in_place:
+                raise result
+            return
 
     def _emit_layer_complete(
         self,
@@ -266,11 +355,14 @@ class ModuleLooper():
 
     def _resolve_batch_total(self, raw_count, fallback_sequence) -> int:
         count = self._coerce_to_int(raw_count)
-        if count is not None and count > 0:
-            return count
-
         fallback_len = self._safe_len(fallback_sequence)
         fallback = self._coerce_to_int(fallback_len)
+
+        if count is not None and count > 0:
+            if fallback is not None and fallback >= 0:
+                return min(count, fallback)
+            return count
+
         if fallback is not None:
             return max(fallback, 0)
 
@@ -1037,10 +1129,14 @@ class ModuleLooper():
             region_timer.flush()
 
         is_awq_quantize = any(isinstance(proc, AWQProcessor) for proc in self.processors)
+        requires_activation_capture = any(
+            getattr(proc, "enable_activation_capture", False) for proc in self.processors
+        )
         layer_modules = self.gptq_model.simple_layer_modules(
             model_config=self.gptq_model.model.config,
             quantize_config=self.gptq_model.quantize_config,
             is_awq_quantize=is_awq_quantize,
+            include_capture_only=requires_activation_capture,
         )
 
         # true-sequential will replay the quantized activations after each subset has been quantized to be used for next subset quantization

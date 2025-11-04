@@ -11,7 +11,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 import torch
 
@@ -69,6 +69,7 @@ def run_subset_stage(
     log=None,
     region_timer=None,
     previous_processed_subset: Optional[Dict[str, NamedModule]] = None,
+    subset_event_cb: Optional[Callable[..., None]] = None,
 ) -> SubsetStageResult:
     """Process a single subset of modules within the layer quantization loop."""
     logger = log or setup_logger()
@@ -87,6 +88,18 @@ def run_subset_stage(
         fail_safe=fail_safe,
         layer_module=module,
     )
+
+    def emit_subset_event(stage: str) -> None:
+        if subset_event_cb is None:
+            return
+        subset_event_cb(
+            stage=stage,
+            layer_idx=layer_index,
+            subset_index=subset_index,
+            subset_total=subset_total,
+            module_names=list(subset.keys()),
+            processor=processor_name,
+        )
 
     # TODO FIXME: If a full layer has no module to quantize a simple forward() is enough and output is captured 
     # to be used as next layer's input. So one pass forward (entire layer simple forward wihout need of dealing 
@@ -235,7 +248,8 @@ def run_subset_stage(
         if hasattr(subset[name], 'forward_hook'):
             original_hook = processor.pre_process_fwd_hook(name)
             subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
-            if is_last and processor.fwd_after_process:
+            enable_stop = processor.fwd_after_process or getattr(processor, "subset_forward_early_stop", False)
+            if is_last and enable_stop:
                 subset[name].forward_hook_last = True
         else:
             original_hook = processor.pre_process_fwd_hook(name)
@@ -261,6 +275,8 @@ def run_subset_stage(
                 processor_name,
                 len(subset),
             )
+
+    emit_subset_event("forward_start")
 
     fwd_start = time.perf_counter()
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
@@ -325,6 +341,7 @@ def run_subset_stage(
         processor.receive_layer_inputs(forward_outputs)
         layer_inputs = processor.inputs_cache.layer_inputs
         del forward_outputs
+    emit_subset_event("forward_end")
 
     fwd_time = time.perf_counter() - fwd_start
     processor.set_fwd_time(fwd_time)
@@ -386,6 +403,8 @@ def run_subset_stage(
 
     processed_subset: Dict[str, NamedModule] = {}
     futures = []
+
+    emit_subset_event("quant_start")
 
     @torch.inference_mode()
     def _process_on_worker(
@@ -473,6 +492,8 @@ def run_subset_stage(
         name, named_module = fut.result()
         processed_subset[name] = named_module
     torch_sync()
+
+    emit_subset_event("quant_complete")
 
     context = SubsetForwardContext(
         subset=subset,
