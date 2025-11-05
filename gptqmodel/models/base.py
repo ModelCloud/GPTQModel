@@ -331,11 +331,10 @@ class BaseQModel(nn.Module):
             for names in layer_modules:
                 moe_simple.append([])
 
-                has_expert = all(EXPERT_INDEX_PLACEHOLDER in n for n in names)
+                has_expert = any(EXPERT_INDEX_PLACEHOLDER in n for n in names)
                 has_capture_only = all(CAPTURE_ONLY_FLAG in n for n in names)
                 if has_capture_only:
                     capture_only_modules = list(names)
-                    moe_simple[-1].extend(capture_only_modules)
                     continue
 
                 if not has_expert:
@@ -347,9 +346,16 @@ class BaseQModel(nn.Module):
                     # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.1.up_proj', ...]
                     for index in range(num_experts):
                         for n in names:
-                            moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
-                    # Currently, only need to add `capture_only_modules` to `[mlp.experts.0.gate_proj', 'mlp.experts.0.up_proj'...]`.
-                    if len(names) == 2 and capture_only_modules:
+                            if EXPERT_INDEX_PLACEHOLDER in n:
+                                moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                    # added 'mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj'
+                    for n in names:
+                        if EXPERT_INDEX_PLACEHOLDER not in n:
+                            moe_simple[-1].append(n)
+                    # Currently, only need to add `capture_only_modules` to `['mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']`
+                    # or ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
+                    add_capture_only_module = len(names) == (4 if any("shared_expert" in n for n in names) else 2)
+                    if add_capture_only_module and capture_only_modules:
                         # Extend all elements in capture_only_modules
                         moe_simple[-1].extend(capture_only_modules)
                 else:
@@ -399,12 +405,13 @@ class BaseQModel(nn.Module):
     @classmethod
     def simple_layer_modules(cls, model_config, quantize_config, is_awq_quantize: bool = False, include_capture_only: bool = False):
         layer_modules = cls.build_layer_modules(cls.module_tree, include_capture_only=include_capture_only)
-
+        print(f"simple_layer_modules build_layer_modules: {layer_modules}")
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
-
+        print(f"simple_layer_modules build_moe_modules_if_need: {layer_modules}")
         layer_modules = cls.filter_not_quantize_module(layer_modules, quantize_config)
 
-        # print(f"simple_layer_modules layer_modules: {layer_modules}")
+        print(f"simple_layer_modules layer_modules: {layer_modules}")
+
         return layer_modules
 
     @classmethod
