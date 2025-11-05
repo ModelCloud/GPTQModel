@@ -204,13 +204,13 @@ class AWQProcessor(LoopProcessor):
                 #     tuple(features[name].shape),
                 # )
 
-        for root, tensors in root_buckets.items():
-            if not tensors or root in features:
-                continue
-            try:
-                features[root] = torch.cat(tensors, dim=0)
-            except RuntimeError:
-                features[root] = tensors[0]
+        # for root, tensors in root_buckets.items():
+        #     if not tensors or root in features:
+        #         continue
+        #     try:
+        #         features[root] = torch.cat(tensors, dim=0)
+        #     except RuntimeError:
+        #         features[root] = tensors[0]
         return features
 
     def _refresh_forward_kwargs_from_cache(self) -> None:
@@ -1233,7 +1233,7 @@ class AWQProcessor(LoopProcessor):
         def hook(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             if not inp:
                 return
-            feature = inp[0]
+            feature = inp
             if isinstance(feature, (tuple, list)) and feature:
                 feature = feature[0]
             self._record_input_feature(name, feature)

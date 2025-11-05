@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import os
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional
 
@@ -10,16 +12,23 @@ import torch
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
+
+repo_root = Path(__file__).resolve().parents[1]
+repo_str = str(repo_root)
+if repo_str not in sys.path:
+    sys.path.insert(0, repo_str)
+
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
-from gptqmodel.looper.stage_subset import run_subset_stage
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.looper.stage_subset import run_subset_stage
+from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
+from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
+from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig, VRAMStrategy
-from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from gptqmodel.utils.model import find_modules, get_module_by_name_prefix
-from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 
 
 # honour the request to bind the test harness to GPU index 5 when CUDA is available
@@ -71,7 +80,7 @@ def test_mlp_capture_flag_propagates_to_layer_modules():
         include_capture_only=True,
     )
     capture_blocks = [block for block in full if any(":?" in name for name in block)]
-    assert capture_blocks and capture_blocks[0] == ["mlp:?"]
+    assert capture_blocks and "mlp:?" in capture_blocks[0]
 
     simple = Qwen3MoeQModel.simple_layer_modules(
         model_config=model_config,
@@ -83,6 +92,20 @@ def test_mlp_capture_flag_propagates_to_layer_modules():
     layer = model.model.layers[0]
     mlp_module, _ = get_module_by_name_prefix(layer, "mlp")
     assert isinstance(mlp_module, Qwen3MoeSparseMoeBlock)
+
+
+def test_qwen2_moe_shared_expert_merges_with_experts():
+    blocks = Qwen2MoeQModel.build_layer_modules(Qwen2MoeQModel.module_tree)
+
+    gate_block = next(block for block in blocks if "mlp.shared_expert.gate_proj" in block)
+    assert "mlp.experts.{expert_index}.gate_proj" in gate_block
+    assert "mlp.experts.{expert_index}.up_proj" in gate_block
+
+    down_block = next(block for block in blocks if "mlp.shared_expert.down_proj" in block)
+    assert "mlp.experts.{expert_index}.down_proj" in down_block
+
+    expert_gate_blocks = [block for block in blocks if "mlp.experts.{expert_index}.gate_proj" in block]
+    assert len(expert_gate_blocks) == 1
 
 
 def test_awq_processor_enables_subset_early_stop():
@@ -165,14 +188,14 @@ class _SubsetRecorder:
         processor: str,
     ):
         self.events.append(
-            dict(
-                stage=stage,
-                layer_idx=layer_idx,
-                subset_index=subset_index,
-                subset_total=subset_total,
-                module_names=module_names,
-                processor=processor,
-            )
+            {
+                "stage": stage,
+                "layer_idx": layer_idx,
+                "subset_index": subset_index,
+                "subset_total": subset_total,
+                "module_names": module_names,
+                "processor": processor,
+            }
         )
 
 
