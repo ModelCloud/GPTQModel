@@ -1031,7 +1031,9 @@ class BaseQModel(nn.Module):
                 _try_update_last_module(candidate_name)
                 continue
 
-            if num_experts is not None and len(block) == num_experts and last_module is not None and last_module_name is not None:
+            is_down_proj_block = (num_experts is not None and
+                                  len(block) == (num_experts + 1 if any("shared_expert" in n for n in block) else num_experts))
+            if is_down_proj_block and last_module is not None and last_module_name is not None:
                 # mlp.experts.0.down_proj
                 target_suffix = last_module_name.split(".")[-1]
                 for name in block:
@@ -1094,7 +1096,9 @@ class BaseQModel(nn.Module):
                         module2inspect, _ = get_module_by_name_prefix(module, root)
 
                 # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
-                if num_experts is not None and len(block) == 2 * num_experts + 1 and module2inspect is not None:
+                is_gate_up_proj_block = (num_experts is not None and
+                                         len(block) == (2 * num_experts + 2 if any("shared_expert" in n for n in block) else 2 * num_experts) + 1)
+                if is_gate_up_proj_block and module2inspect is not None:
                     if last_module_root not in input_feat:
                         log.debug(
                             "awq_get_modules_for_scaling: missing input feature for `%s` while processing experts block (layer block size=%s)",
