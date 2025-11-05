@@ -380,28 +380,49 @@ class MiniMaxM2Attention(nn.Module):
             k = key_states[:, h, :, :]
             v = value_states[:, h, :, :]
 
-            attn = torch.matmul(q, k.transpose(-2, -1))
-            attn.mul_(self.scaling)
+            # Chunked attention computation to reduce peak memory usage
+            out_parts = []
+            attn_parts = [] if output_attentions else None
+            
+            # A smaller chunk size reduces memory but may be slightly slower
+            chunk_size = 1024
+            for i in range(0, q.size(1), chunk_size):
+                q_chunk = q[:, i:i + chunk_size, :]
 
-            # shape (bsz, 1, q_len, key_len) -> (bsz, q_len, key_len)
-            if attention_mask is not None:
-                attn.add_(attention_mask.squeeze(1))
+                # attn_chunk has shape (bsz, chunk_size, key_len)
+                attn_chunk = torch.matmul(q_chunk, k.transpose(-2, -1))
+                attn_chunk.mul_(self.scaling)
 
-            if window_mask is not None:
-                attn.masked_fill_(window_mask, float("-inf"))
+                # Apply masks to the chunk
+                if attention_mask is not None:
+                    attn_chunk.add_(attention_mask.squeeze(1)[:, i:i + chunk_size, :])
 
-            attn = torch.softmax(attn, dim=-1, dtype=torch.float32).to(query_dtype)
+                if window_mask is not None:
+                    attn_chunk.masked_fill_(window_mask[:, i:i + chunk_size, :], float("-inf"))
+                
+                attn_chunk = torch.softmax(attn_chunk, dim=-1, dtype=torch.float32).to(query_dtype)
 
-            if self.training and self.attention_dropout > 0:
-                attn = F.dropout(attn, p=self.attention_dropout, training=True)
+                if self.training and self.attention_dropout > 0:
+                    attn_chunk = F.dropout(attn_chunk, p=self.attention_dropout, training=True)
+                
+                if output_attentions:
+                    attn_parts.append(attn_chunk)
 
-            if output_attentions:
-                attn_weights_list.append(attn)
+                # output_chunk has shape (bsz, chunk_size, head_dim)
+                out_chunk = torch.matmul(attn_chunk, v)
+                out_parts.append(out_chunk)
 
-            out = torch.matmul(attn, v)
+                del q_chunk, attn_chunk, out_chunk
+            
+            out = torch.cat(out_parts, dim=1)
             attn_output_parts.append(out)
 
-            del q, k, v, attn, out
+            if output_attentions:
+                attn = torch.cat(attn_parts, dim=1)
+                attn_weights_list.append(attn)
+                del attn, attn_parts
+
+            del q, k, v, out, out_parts
 
         attn_output = torch.stack(attn_output_parts, dim=1)
         del attn_output_parts, query_states, key_states, value_states
