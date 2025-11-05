@@ -405,13 +405,12 @@ class BaseQModel(nn.Module):
     @classmethod
     def simple_layer_modules(cls, model_config, quantize_config, is_awq_quantize: bool = False, include_capture_only: bool = False):
         layer_modules = cls.build_layer_modules(cls.module_tree, include_capture_only=include_capture_only)
-        print(f"simple_layer_modules build_layer_modules: {layer_modules}")
+
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
-        print(f"simple_layer_modules build_moe_modules_if_need: {layer_modules}")
+
         layer_modules = cls.filter_not_quantize_module(layer_modules, quantize_config)
 
-        print(f"simple_layer_modules layer_modules: {layer_modules}")
-
+        # print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
 
     @classmethod
@@ -1031,8 +1030,11 @@ class BaseQModel(nn.Module):
                 _try_update_last_module(candidate_name)
                 continue
 
+            has_shared_expert = any("shared_expert" in n for n in block)
             is_down_proj_block = (num_experts is not None and
-                                  len(block) == (num_experts + 1 if any("shared_expert" in n for n in block) else num_experts))
+                                  len(block) == (num_experts + 1 if has_shared_expert else num_experts))
+            is_gate_up_proj_block = (num_experts is not None and
+                                     len(block) == (2 * num_experts + 2 if has_shared_expert else 2 * num_experts) + 1)
             if is_down_proj_block and last_module is not None and last_module_name is not None:
                 # mlp.experts.0.down_proj
                 target_suffix = last_module_name.split(".")[-1]
@@ -1096,8 +1098,6 @@ class BaseQModel(nn.Module):
                         module2inspect, _ = get_module_by_name_prefix(module, root)
 
                 # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
-                is_gate_up_proj_block = (num_experts is not None and
-                                         len(block) == (2 * num_experts + 2 if any("shared_expert" in n for n in block) else 2 * num_experts) + 1)
                 if is_gate_up_proj_block and module2inspect is not None:
                     if last_module_root not in input_feat:
                         log.debug(
@@ -1120,7 +1120,13 @@ class BaseQModel(nn.Module):
                 nodes.append(n)
 
             # Update tracker to the LAST item of this block
-            candidate_name = strip_non_quantize_flags(block[-1])
+            if is_gate_up_proj_block:
+                # The block content is [...,  mlp.experts.{last_index}.up_proj, shared_expert.gate_proj, shared_expert.up_proj, mlp]
+                # mlp.experts.{last_index}.up_proj should be selected as last_module
+                offset_from_end = 4 if has_shared_expert else 2
+            else:
+                offset_from_end = 1
+            candidate_name = strip_non_quantize_flags(block[-offset_from_end])
             _try_update_last_module(candidate_name)
 
         import torch
