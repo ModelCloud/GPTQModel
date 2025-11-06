@@ -17,6 +17,7 @@ from torch.nn import Module
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
+from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
@@ -332,7 +333,12 @@ class AWQProcessor(LoopProcessor):
                 return
 
         with state.lock:
-            named_childs = dict(state.modules)
+            # Filtering MLP modules like Qwen3MoeSparseMoeBlock
+            named_childs = {
+                name: module
+                for name, module in state.modules.items()
+                if isinstance(module, tuple(SUPPORTS_MODULE_TYPES))
+            }
 
         module_kwargs_global = dict(self._module_forward_kwargs)
 

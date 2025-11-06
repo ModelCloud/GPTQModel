@@ -203,9 +203,9 @@ class BaseQModel(nn.Module):
 
     server = None
 
-    support_batch_quantize = True
-
     support_offload_to_disk = True
+
+    moe_expert_module_name_prefixes = [".expert"]
 
     ATTENTION_MASKS_DTYPE = torch.bool # default to bool
 
@@ -1030,32 +1030,10 @@ class BaseQModel(nn.Module):
                 _try_update_last_module(candidate_name)
                 continue
 
-            has_shared_expert = any("shared_expert" in n for n in block)
-
-            # Determine if this block is a down_proj block:
-            # - If a shared_expert exists, the block will include an additional shared_expert.down_proj,
-            #   so its length becomes num_experts + 1.
-            # - Otherwise, the length is num_experts.
-            # - Additionally, the block must contain at least one item whose name includes "down".
-            is_down_proj_block = (
-                    num_experts is not None
-                    and len(block) == (num_experts + 1 if has_shared_expert else num_experts)
-                    and any("down" in name for name in block)
-            )
-
-            # Determine if this block is a gate_up_proj block:
-            # - If a shared_expert exists, the block will include shared_expert.gate_proj and shared_expert.up_proj,
-            #   so its length becomes 2 * num_experts + 2.
-            # - Otherwise, the length is 2 * num_experts.
-            # - The additional +1 accounts for an extra MLP layer appended to this block.
-            # - The block must contain at least one item with "gate" in its name and one with "up" in its name.
-            is_gate_up_proj_block = (
-                    num_experts is not None
-                    and len(block) == (2 * num_experts + 2 if has_shared_expert else 2 * num_experts) + 1
-                    and any("gate" in name for name in block)
-                    and any("up" in name for name in block)
-            )
-            if is_down_proj_block and last_module is not None and last_module_name is not None:
+            is_moe_block = any(any(k in name for k in self.moe_expert_module_name_prefixes) for name in block)
+            is_moe_down_block = is_moe_block and any("down" in name for name in block)
+            is_moe_gate_up_block = is_moe_block and any("gate" in name for name in block) and any("up" in name for name in block)
+            if is_moe_down_block and last_module is not None and last_module_name is not None:
                 # mlp.experts.0.down_proj
                 target_suffix = last_module_name.split(".")[-1]
                 for name in block:
@@ -1118,7 +1096,7 @@ class BaseQModel(nn.Module):
                         module2inspect, _ = get_module_by_name_prefix(module, root)
 
                 # process ['mlp.experts.#.gate_proj', 'mlp.experts.#.gup_proj']
-                if is_gate_up_proj_block and module2inspect is not None:
+                if is_moe_gate_up_block and module2inspect is not None:
                     if last_module_root not in input_feat:
                         log.debug(
                             "awq_get_modules_for_scaling: missing input feature for `%s` while processing experts block (layer block size=%s)",
@@ -1140,12 +1118,21 @@ class BaseQModel(nn.Module):
                 nodes.append(n)
 
             # Update tracker to the LAST item of this block
-            if is_gate_up_proj_block:
+            if is_moe_gate_up_block:
                 # The block content is [...,  mlp.experts.{last_index}.up_proj, shared_expert.gate_proj, shared_expert.up_proj, mlp]
                 # mlp.experts.{last_index}.up_proj should be selected as last_module
-                last_up_proj_index = 2 * num_experts - 1
+                # Find all indices that contain both ".experts" and "gate_proj"/"up_proj"
+                gate_up_proj_indices = [
+                    i for i, name in enumerate(block)
+                    if any(k in name for k in self.moe_expert_module_name_prefixes) and ("gate" in name or "up" in name)
+                ]
+
+                # Use the last one if any exist
+                assert len(gate_up_proj_indices) > 0, "No expert gate_proj/up_proj found in block."
+                last_up_proj_index = gate_up_proj_indices[-1]
+
                 candidate_name = strip_non_quantize_flags(block[last_up_proj_index])
-                assert "up" in candidate_name
+                assert "gate" in candidate_name or "up" in candidate_name
             else:
                 candidate_name = strip_non_quantize_flags(block[-1])
             _try_update_last_module(candidate_name)
