@@ -12,7 +12,8 @@ import threading
 import time
 from concurrent.futures import as_completed
 from typing import TYPE_CHECKING, Dict, List, Optional
-
+from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
+from ..nn_modules.converter import MODULE_CONVERTER_MAP
 import torch
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
@@ -69,6 +70,14 @@ def run_layer_stage(
 
         module = looper.gptq_model.pre_quantize(module)
 
+        model_type = looper.gptq_model.model.config.model_type
+        if model_type in MODULE_CONVERTER_MAP:
+            converter = MODULE_CONVERTER_MAP[model_type]
+            module = converter(module, looper.gptq_model.model.config)
+
+        replace_module_with_hooked_legacy(module, quant_lm_head=looper.gptq_model.quantize_config.lm_head)
+
+        layers[layer_index] = module
         if is_lm_head_module:
             layer_descriptor = looper.gptq_model.lm_head
         elif layers_prefix:
