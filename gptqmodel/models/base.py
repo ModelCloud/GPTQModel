@@ -206,7 +206,6 @@ class BaseQModel(nn.Module):
     support_offload_to_disk = True
 
     moe_expert_module_name_prefixes = [".expert"]
-    moe_shared_expert_module_name_prefixes = [".shared_expert"]
 
     ATTENTION_MASKS_DTYPE = torch.bool # default to bool
 
@@ -1122,9 +1121,18 @@ class BaseQModel(nn.Module):
             if is_moe_gate_up_block:
                 # The block content is [...,  mlp.experts.{last_index}.up_proj, shared_expert.gate_proj, shared_expert.up_proj, mlp]
                 # mlp.experts.{last_index}.up_proj should be selected as last_module
-                last_up_proj_index = 2 * num_experts - 1
+                # Find all indices that contain both ".experts" and "gate_proj"/"up_proj"
+                gate_up_proj_indices = [
+                    i for i, name in enumerate(block)
+                    if any(k in name for k in self.moe_expert_module_name_prefixes) and ("gate" in name or "up" in name)
+                ]
+
+                # Use the last one if any exist
+                assert len(gate_up_proj_indices) > 0, "No expert gate_proj/up_proj found in block."
+                last_up_proj_index = gate_up_proj_indices[-1]
+
                 candidate_name = strip_non_quantize_flags(block[last_up_proj_index])
-                assert "up" in candidate_name
+                assert "gate" in candidate_name or "up" in candidate_name
             else:
                 candidate_name = strip_non_quantize_flags(block[-1])
             _try_update_last_module(candidate_name)
