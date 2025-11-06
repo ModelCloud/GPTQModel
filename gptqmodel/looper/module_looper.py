@@ -1156,8 +1156,6 @@ class ModuleLooper():
 
         shared_kv_cache_dict = {}
 
-        replace_module_with_hooked_legacy(self.gptq_model.model, quant_lm_head=self.gptq_model.quantize_config.lm_head)
-
         if self.gptq_model.quantize_config.lm_head:
             lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
             if lm_head_module and isinstance(lm_head_module, torch.nn.Linear):
