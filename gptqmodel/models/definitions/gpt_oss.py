@@ -126,8 +126,6 @@ class GptOssTopKRouterNew(nn.Module):
         return router_scores, router_indices
 
 class GPTOSSGPTQ(BaseQModel):
-    support_offload_to_disk = False
-
     dynamic_expert_index = "num_local_experts"
 
     pre_lm_head_norm_module = "model.norm"
@@ -155,41 +153,3 @@ class GPTOSSGPTQ(BaseQModel):
 
             gpt_oss_modeling.GptOssExperts = GptOssExpertsNew
             gpt_oss_modeling.GptOssTopKRouter = GptOssTopKRouterNew
-
-    def after_model_load(self, model, load_quantized_model=False):
-        if load_quantized_model:
-            return model
-
-        import os
-        from concurrent.futures import ThreadPoolExecutor
-        from functools import partial
-
-        import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_modeling
-        from transformers.integrations.hub_kernels import use_kernel_forward_from_hub
-
-        @use_kernel_forward_from_hub("MegaBlocksMoeMLP")
-        class GptOssMLPNew(nn.Module):
-            def __init__(self, config, ori_mlp=None):
-                super().__init__()
-                self.router = ori_mlp.router
-                experts_new = GptOssExpertsNew(config, ori_mlp.experts)
-                self.experts = experts_new
-
-            def forward(self, hidden_states):
-                router_scores, router_indices = self.router(hidden_states)  # (num_experts, seq_len)
-                routed_out = self.experts(hidden_states, router_indices=router_indices, routing_weights=router_scores)
-                return routed_out, router_scores
-
-        model = model.to("cpu")
-        def process_module(name, module, model, config):
-            if isinstance(module, gpt_oss_modeling.GptOssMLP):
-                new_module = GptOssMLPNew(config=config, ori_mlp=module)
-                parent, child = name.rsplit(".", maxsplit=1)
-                parent = model.get_submodule(parent)
-                setattr(parent, child, new_module)
-
-        with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-            process_fn = partial(process_module, model=model, config=model.config)
-            list(executor.map(lambda x: process_fn(x[0], x[1]), model.named_modules()))
-
-        return model
