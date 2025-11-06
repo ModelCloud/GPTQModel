@@ -37,8 +37,8 @@ def pack_scales_and_zeros(scales, zeros):
 class Int4PackedOp(torch.nn.Module):
     def __init__(self, qweight_uint8, scales_and_zeros, group_size):
         super().__init__()
-        self.qweight_uint8 = qweight_uint8
-        self.scales_and_zeros = scales_and_zeros
+        self.register_buffer("qweight_uint8", qweight_uint8, persistent=False)
+        self.register_buffer("scales_and_zeros", scales_and_zeros, persistent=False)
         self.group_size = group_size
 
     def forward(self, x):
@@ -224,9 +224,10 @@ class TorchFusedQuantLinear(PackableQuantLinear):
                 import torch._inductor.config as config
                 config.freezing = True
                 config.max_autotune = True
-                self.torch_fused_op.forward = torch.compile(
-                    self.torch_fused_op.forward, options={"max_autotune": True}
-                )
+                # Need to compile the whole model to get optimized performance for CPU
+                # self.torch_fused_op.forward = torch.compile(
+                #     self.torch_fused_op.forward, options={"max_autotune": True}
+                # )
 
         if self.transformed:
             out = self._fused_op_forward(x).reshape(out_shape)
