@@ -34,6 +34,20 @@ def pack_scales_and_zeros(scales, zeros):
         .contiguous()
     )
 
+class Int4PackedOp(torch.nn.Module):
+    def __init__(self, qweight_uint8, scales_and_zeros, group_size):
+        super().__init__()
+        self.qweight_uint8 = qweight_uint8
+        self.scales_and_zeros = scales_and_zeros
+        self.group_size = group_size
+
+    def forward(self, x):
+        out = torch.ops.aten._weight_int4pack_mm_for_cpu(
+            x, self.qweight_uint8, self.group_size, self.scales_and_zeros
+        )
+        return out
+
+
 class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
@@ -199,41 +213,48 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        out = self._forward(x, out_shape)
-        return out
-
-    def _forward(self, x, out_shape):
-        num_itr = self.g_idx.shape[0] // x.shape[-1]
-
         if not self.training and not self.transformed and TORCH_HAS_FUSED_OPS:
             # one-time transform per module for xpu aten fused ops
             self.transform(x.dtype, x.device.type)
             self.transformed = True
+            if x.device.type == "cpu":
+                self.torch_fused_op = Int4PackedOp(
+                    self.qweight, self.scales_and_zeros, self.group_size
+                ).eval()
+                import torch._inductor.config as config
+                config.freezing = True
+                config.max_autotune = True
+                self.torch_fused_op.forward = torch.compile(
+                    self.torch_fused_op.forward, options={"max_autotune": True}
+                )
 
         if self.transformed:
-            x = x[:, self.ret_idx].contiguous()
-            # fused ops optimized for xpu using torch.ops
-            # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
-            if x.device.type == "xpu":
-                out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
-                    x, self.qweight, self.group_size, self.scales, self.qzeros
-                ).reshape(out_shape)
-            elif x.device.type == "cpu":
-                out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-                    x, self.qweight, self.group_size, self.scales_and_zeros
-                ).reshape(out_shape)
-            else:
-                raise NotImplementedError
+            out = self._fused_op_forward(x).reshape(out_shape)
         else:
             # make sure dequant dtype matches input x
+            num_itr = self.g_idx.shape[0] // x.shape[-1]
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
             out = torch.matmul(x, weights).reshape(out_shape)
+            if self.bias is not None:
+                out.add_(self.bias)
+            if self.adapter:
+                out = self.adapter.apply(x=x, out=out)
 
-        if self.bias is not None:
-            out.add_(self.bias)
+        return out
 
-        if self.adapter:
-            out = self.adapter.apply(x=x, out=out)
+    @torch.no_grad
+    def _fused_op_forward(self, x):
+        x = x[:, self.ret_idx].contiguous()
+        # fused ops optimized for xpu using torch.ops
+        # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
+        if x.device.type == "xpu":
+            out = torch.ops.aten._weight_int4pack_mm_with_scales_and_zeros(
+                x, self.qweight, self.group_size, self.scales, self.qzeros
+            )
+        elif x.device.type == "cpu":
+            out = self.torch_fused_op(x)
+        else:
+            raise NotImplementedError
 
         return out
 
