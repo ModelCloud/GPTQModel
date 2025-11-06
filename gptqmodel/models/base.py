@@ -1143,10 +1143,11 @@ class BaseQModel(nn.Module):
             if is_gate_up_proj_block:
                 # The block content is [...,  mlp.experts.{last_index}.up_proj, shared_expert.gate_proj, shared_expert.up_proj, mlp]
                 # mlp.experts.{last_index}.up_proj should be selected as last_module
-                offset_from_end = 4 if has_shared_expert else 2
+                last_up_proj_index = 2 * num_experts - 1
+                candidate_name = strip_non_quantize_flags(block[last_up_proj_index])
+                assert "up" in candidate_name
             else:
-                offset_from_end = 1
-            candidate_name = strip_non_quantize_flags(block[-offset_from_end])
+                candidate_name = strip_non_quantize_flags(block[-1])
             _try_update_last_module(candidate_name)
 
         import torch
