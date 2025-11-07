@@ -17,8 +17,7 @@
 </p>
 
 ## Latest News
-* 10/30/2025 5.1.0-dev: +Marin model. +AWQ Torch reference kernel. Fix AWQ Marlin kernel for bf16. Fix GLM 4.5/4.6 MoE missing `mtp` layers on model save (HF bug). Modular refractor. 
-* 10/28/2025 5.1.0-dev: Minimax M2 support with [ModelCloud BF16 M2 Model](https://huggingface.co/ModelCloud/MiniMax-M2-BF16). New `VramStrategy.Balanced` quantization property for reduced memory usage for large MoE on multi-3090 (24GB) devices.
+* 11/3/2025 [5.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.2.0): 🎉Minimax M2 support with [ModelCloud BF16 M2 Model](https://huggingface.co/ModelCloud/MiniMax-M2-BF16). New `VramStrategy.Balanced` quantization property for reduced memory usage for large MoE on multi-3090 (24GB) devices. ✨Marin model. New AWQ Torch reference kernel. Fix AWQ Marlin kernel for bf16. Fix GLM 4.5/4.6 MoE missing `mtp` layers on model save (HF bug). Modular refractor.  🎉AWQ support out of beta with full feature support in including multi-gpu quant and MoE vram saving.  ✨Brumby (attention free) model support. ✨Brumby (attention free) model support. ✨IBM Granite Nano support. New `calibration_concat_separator` config option.
 * 10/24/2025 [5.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.0.0): 🎉 Data-parallel quant support for `MoE` models on multi-gpu using `nogil` Python. `offload_to_disk` support enabled by 
 default to massively reduce `cpu` ram usage. New `Intel` and `AMD` cpu hw accelerated `TorchFused` kernel. Packing stage is now 4x faster and now inlined with quantization. `Vram` pressure for large models reduced during quantization.
 `act_group_aware` is  16k+ times faster and now the default when `desc_act=False` for higher quality recovery without inference penalty of `desc_act=True`. New beta quality `AWQ` support with full `gemm`, 
@@ -127,20 +126,18 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 ## What is GPT-QModel?
 GPT-QModel is a production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF Transformers, vLLM, and SGLang.
 
-Public and ModelCloud's internal tests have shown that GPTQ is on-par and/or exceeds other 4bit quantization methods in terms of both quality recovery and production-level inference speed for token latency and rps. GPTQ has the optimal blend of quality and inference speed you need in a real-world production deployment. 
-
-GPT-QModel not only supports GPTQ but also QQQ, GPTQv2, Eora with more quantization methods and enhancements planned. 
+GPT-QModel currently supports GPTQ, AWQ, QQQ, GPTAQ, EoRa, GAR with more quantization methods and enhancements planned. 
 
 ## Quantization Support
 
 GPT-QModel is a modular design supporting multiple quantization methods and feature extensions.
 
-| Quantization Feature      | GPT-QModel | Transformers | vLLM  | SGLang | Lora Training |
+| Quantization Feature      | GPT-QModel | Transformers | vLLM | SGLang | Lora Training |
 |---------------------------|------------|---|---|---|---------------|
 | GPTQ                      | ✅          | ✅ | ✅ | ✅ | ✅             | 
+| AWQ                       | ✅          | ✅ | ✅ | ✅ | ✅             |
 | EoRA                      | ✅          | ✅ | ✅ | ✅ | x             | 
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
-| AWQ                       | ✅          | ✅* | ✅* | ✅* | ✅*             | 
 | QQQ                       | ✅          | x | x | x | x             | 
 | Rotation                  | ✅          | x | x | x | x             |  
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             | 
@@ -180,20 +177,21 @@ Native support support some of the most popular multi-modal models:
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
 ## Model Support  
-| Model             |   |                   |   |                |   |                |   |                     |   |
-|-------------------|---|-------------------|---|----------------|---|----------------|---|---------------------|---|
-| Apertus           | ✅ | EXAONE 3.0        | ✅ | InternLM 1/2.5 | ✅ | Mixtral        | ✅ | Qwen 2/3 (Next/MoE) | ✅ |
-| Baichuan          | ✅ | Falcon (H1)       | ✅ | Kimi K2        | ✅ | MobileLLM      | ✅ | Qwen 2/2.5 VL       | ✅ |
-| Bloom             | ✅ | FastVLM           | ✅ | Klear          | ✅ | MOSS           | ✅ | Qwen 2.5/3 Omni     | ✅ |
-| ChatGLM           | ✅ | Gemma 1/2/3       | ✅ | LING/RING      | ✅ | MPT            | ✅ | RefinedWeb          | ✅ |
-| CodeGen           | ✅ | GPTBigCod         | ✅ | Llama 1-3.3    | ✅ | Nemotron H     | ✅ | StableLM            | ✅ |
-| Cohere 1-2        | ✅ | GPTQ-Neo/GPT-NeoX | ✅ | Llama 3.2 VL   | ✅ | Nemotron Ultra | ✅ | StarCoder2          | ✅ |
-| DBRX Converted    | ✅ | GPT-2             | ✅ | Llama 4        | ✅ | OPT            | ✅ | TeleChat2           | ✅ |
-| Deci              | ✅ | GPT-J             | ✅ | LongCatFlash   | ✅ | OLMo2          | ✅ | Yi                  | ✅ |
-| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS           | ✅ | LongLLaMA      | ✅ | Ovis 1.6/2     | ✅ | Seed-OSS            | ✅ |
-| DeepSeek-V2-Lite  | ✅ | Granite           | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | XVERSE              | ✅ |
-| Dream             | ✅ | GRIN-MoE          | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ |                     |   |
-| ERNIE 4.5         | ✅ | Hymba             | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ |                     |   |
+| Model             |   |             |   |               |  |           |  |                 |  |
+|-------------------|---|-------------|---|---------------|--|-----------|--|-----------------|--|
+| Apertus           | ✅ | EXAONE 3.0  | ✅ | InternLM 1/2.5 | ✅ | Mixtral   | ✅ | Qwen 2/3 (Next/MoE) | ✅ |
+| Baichuan          | ✅ | Falcon (H1) | ✅ | Kimi K2       | ✅ | MobileLLM | ✅ | Qwen 2/2.5/3 VL | ✅ |
+| Bloom             | ✅ | FastVLM     | ✅ | Klear         | ✅ | MOSS      | ✅ | Qwen 2.5/3 Omni | ✅ |
+| ChatGLM           | ✅ | Gemma 1/2/3 | ✅ | LING/RING     | ✅ | MPT       | ✅ | RefinedWeb      | ✅ |
+| CodeGen           | ✅ | GPTBigCod   | ✅ | Llama 1-3.3   | ✅ | Nemotron H | ✅ | StableLM        | ✅ |
+| Cohere 1-2        | ✅ | GPTQ-Neo(X) | ✅ | Llama 3.2 VL  | ✅ | Nemotron Ultra | ✅ | StarCoder2      | ✅ |
+| DBRX Converted    | ✅ | GPT-2       | ✅ | Llama 4       | ✅ | OPT       | ✅ | TeleChat2       | ✅ |
+| Deci              | ✅ | GPT-J       | ✅ | LongCatFlash  | ✅ | OLMo2     | ✅ | Yi              | ✅ |
+| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS     | ✅ | LongLLaMA     | ✅ | Ovis 1.6/2 | ✅ | Seed-OSS        | ✅ |
+| DeepSeek-V2-Lite  | ✅ | Granite     | ✅ | Instella      | ✅ | Phi 1-4   | ✅ | XVERSE          | ✅ |
+| Dream             | ✅ | GRIN-MoE    | ✅ | MiniCPM3      | ✅ | PanGu-α   | ✅ | Minimax M2      | ✅ |
+| ERNIE 4.5         | ✅ | Hymba       | ✅ | Mistral       | ✅ | Qwen 1/2/3 | ✅ | GLM 4.X         | ✅ |
+| Brumby            | ✅ |             |   |               |  |      |  |              |  |
 
 
 ## Platform and HW Support 
@@ -470,6 +468,14 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
   
 }
 
+# AWQ
+@article{lin2023awq,
+  title={AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration},
+  author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song},
+  journal={arXiv},
+  year={2023}
+}
+
 # EoRA
 @article{liu2024eora,
   title={EoRA: Training-free Compensation for Compressed LLM with Eigenspace Low-Rank Approximation},
@@ -500,14 +506,6 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
       author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
       journal={arXiv preprint arXiv:2406.09904},
       year={2024}
-}
-
-# AWQ
-@article{lin2023awq,
-  title={AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration},
-  author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song},
-  journal={arXiv},
-  year={2023}
 }
 
 # GPTAQ

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 
@@ -28,7 +28,15 @@ class DequantizeProcessor(LoopProcessor):
         self.num_batches = 0
 
     # de-quantize weights
-    def process(self, module: NamedModule):
+    def process(
+        self,
+        module: NamedModule,
+        device: torch.device = None,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        previous_subset: Optional[Dict[str, NamedModule]] = None,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ):
         device = module.weight.device
 
         # TODO fix num_itr param..need to calculate this before dequant

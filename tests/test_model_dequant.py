@@ -4,7 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import json
+import sys
 from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import pytest
 import torch
@@ -187,3 +193,136 @@ def test_dequantize_model_awq(tmp_path):
     new_index = json.loads((output_dir / "model.safetensors.index.json").read_text())
     assert "layer.weight" in new_index["weight_map"]
     assert "layer.qweight" not in new_index["weight_map"]
+
+
+def test_dequantize_model_compressed_tensors_pack(tmp_path):
+    pytest.importorskip("compressed_tensors")
+    pytest.importorskip("transformers")
+
+    from compressed_tensors.compressors.quantized_compressors.pack_quantized import pack_to_int32
+    from compressed_tensors.quantization.lifecycle.forward import dequantize, quantize
+    from compressed_tensors.quantization.quant_args import QuantizationArgs
+    from compressed_tensors.quantization.utils import calculate_qparams
+    from transformers import LlamaConfig
+
+    model_dir = tmp_path / "compressed_model"
+    output_dir = tmp_path / "compressed_output"
+    model_dir.mkdir()
+
+    config = LlamaConfig(
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_hidden_layers=1,
+        rms_norm_eps=1e-5,
+    )
+
+    quant_cfg = {
+        "config_groups": {
+            "group_0": {
+                "input_activations": None,
+                "output_activations": None,
+                "targets": ["Linear"],
+                "weights": {
+                    "actorder": None,
+                    "block_structure": None,
+                    "dynamic": False,
+                    "group_size": 32,
+                    "num_bits": 4,
+                    "observer": "minmax",
+                    "observer_kwargs": {},
+                    "strategy": "group",
+                    "symmetric": True,
+                    "type": "int",
+                },
+            }
+        },
+        "format": "pack-quantized",
+        "ignore": ["lm_head"],
+        "kv_cache_scheme": None,
+        "quant_method": "compressed-tensors",
+        "quantization_status": "compressed",
+    }
+
+    config_dict = config.to_dict()
+    config_dict["quantization_config"] = quant_cfg
+    (model_dir / "config.json").write_text(json.dumps(config_dict))
+
+    weight_cfg = quant_cfg["config_groups"]["group_0"]["weights"]
+    quant_args = QuantizationArgs(**weight_cfg)
+
+    def compress_weight(prefix: str, weight: torch.Tensor) -> tuple[dict, torch.Tensor]:
+        rows, cols = weight.shape
+        group_size = quant_args.group_size or cols
+        groups = cols // group_size
+        reshaped = weight.view(rows, groups, group_size)
+        min_vals = reshaped.amin(dim=-1)
+        max_vals = reshaped.amax(dim=-1)
+        scales, zero_points = calculate_qparams(min_vals, max_vals, quant_args)
+
+        quantized = quantize(
+            weight,
+            scale=scales,
+            zero_point=zero_points,
+            args=quant_args,
+            dtype=torch.int8,
+        )
+        packed = pack_to_int32(quantized, quant_args.num_bits)
+        expected = dequantize(
+            quantized,
+            scale=scales,
+            zero_point=zero_points,
+            args=quant_args,
+            dtype=torch.float32,
+        )
+        payload = {
+            f"{prefix}.weight_packed": packed,
+            f"{prefix}.weight_scale": scales,
+            f"{prefix}.weight_shape": torch.tensor(weight.shape, dtype=torch.int32),
+        }
+        return payload, expected
+
+    prefix_q = "model.layers.0.self_attn.q_proj"
+    prefix_k = "model.layers.0.self_attn.k_proj"
+
+    hidden = config.hidden_size
+    base_weight = torch.linspace(-0.75, 0.75, steps=hidden * hidden, dtype=torch.float32).view(
+        hidden, hidden
+    )
+    payload_q, expected_q = compress_weight(prefix_q, base_weight)
+    payload_k, expected_k = compress_weight(prefix_k, base_weight.neg())
+
+    shard_name = "model.safetensors"
+    tensors = {**payload_q, **payload_k}
+    save_file(tensors, str(model_dir / shard_name))
+    write_index(model_dir, shard_name, list(tensors.keys()))
+
+    import gptqmodel.utils.model_dequant as model_dequant_module
+    from gptqmodel.utils.model_dequant import detect_format, load_json
+
+    module_path = Path(model_dequant_module.__file__).resolve()
+    assert REPO_ROOT in module_path.parents
+    detected = detect_format(model_dir, load_json(model_dir / "config.json"))
+    assert detected == "compressed-pack"
+
+    dequantize_model(model_dir, output_dir, target_dtype=torch.float32, device="cpu")
+
+    with safe_open(output_dir / shard_name, framework="pt", device="cpu") as reader:
+        keys = set(reader.keys())
+        assert f"{prefix_q}.weight" in keys
+        assert f"{prefix_k}.weight" in keys
+        assert all(not key.endswith(("_packed", "_scale", "_shape")) for key in keys)
+
+        weight_q = reader.get_tensor(f"{prefix_q}.weight")
+        weight_k = reader.get_tensor(f"{prefix_k}.weight")
+
+        torch.testing.assert_close(weight_q, expected_q)
+        torch.testing.assert_close(weight_k, expected_k)
+
+    updated_config = json.loads((output_dir / "config.json").read_text())
+    assert "quantization_config" not in updated_config
+
+    new_index = json.loads((output_dir / "model.safetensors.index.json").read_text())
+    assert f"{prefix_q}.weight" in new_index["weight_map"]
+    assert f"{prefix_k}.weight" in new_index["weight_map"]
+    assert f"{prefix_q}.weight_scale" not in new_index["weight_map"]

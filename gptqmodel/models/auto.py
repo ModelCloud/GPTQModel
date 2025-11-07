@@ -74,6 +74,7 @@ from .definitions.apertus import ApertusQModel  # noqa: E402
 from .definitions.baichuan import BaiChuanQModel  # noqa: E402
 from .definitions.bailing_moe import BailingMoeQModel  # noqa: E402
 from .definitions.bloom import BloomQModel  # noqa: E402
+from .definitions.brumby import BrumbyQModel  # noqa: E402
 from .definitions.chatglm import ChatGLMQModel  # noqa: E402
 from .definitions.codegen import CodeGenQModel  # noqa: E402
 from .definitions.dbrx import DbrxQModel  # noqa: E402
@@ -96,6 +97,7 @@ from .definitions.gpt_neo import GptNeoQModel  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXQModel  # noqa: E402
 from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 from .definitions.gptj import GptJQModel  # noqa: E402
+from .definitions.granitemoehybrid import GraniteMoeHybridQModel
 from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
@@ -134,6 +136,7 @@ from .definitions.qwen3 import Qwen3QModel  # noqa: E402
 from .definitions.qwen3_moe import Qwen3MoeQModel  # noqa: E402
 from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
+from .definitions.qwen3_vl import Qwen3_VLQModel
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
@@ -149,6 +152,7 @@ MODEL_MAP = {
     "apertus": ApertusQModel,
     "dream": DreamQModel,
     "bloom": BloomQModel,
+    "brumby": BrumbyQModel,
     "gpt_neo": GptNeoQModel,
     "kimi_k2": DeepSeekV3QModel, # 100% DeepSeekV3QModel clone
     "klear": KlearQModel,
@@ -208,6 +212,7 @@ MODEL_MAP = {
     "qwen2_5_vl_text": Qwen2_5_VLQModel,
     "qwen2_5_omni": Qwen2_5_OmniGPTQ,
     "qwen3_omni_moe": Qwen3OmniMoeGPTQ,
+    "qwen3_vl": Qwen3_VLQModel,
     "dbrx": DbrxQModel,
     "dbrx_converted": DbrxConvertedQModel,
     "deepseek_v2": DeepSeekV2QModel,
@@ -217,6 +222,7 @@ MODEL_MAP = {
     "mllama": MLlamaQModel,
     "marin": Qwen3QModel,
     "granite": LlamaQModel, # 100% llama clone
+    "granitemoehybrid": GraniteMoeHybridQModel,
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
     "olmo2": LlamaQModel, # 100% llama clone
@@ -688,6 +694,7 @@ class GPTQModel:
             calibration_dataset_sort: Optional[str] = None,
             batch_size: Optional[int] = 1,
             tokenizer: Optional[PreTrainedTokenizerBase] = None,
+            calibration_concat_separator: Optional[str] = None,
             # pass-through vars for load()
             trust_remote_code: bool = False,
             dtype: Optional[Union[str, torch.dtype]] = None,
@@ -732,5 +739,6 @@ class GPTQModel:
                 calibration_dataset_sort=calibration_dataset_sort,
                 batch_size=batch_size,
                 tokenizer=tokenizer,
+                calibration_concat_separator=calibration_concat_separator,
             )
             return

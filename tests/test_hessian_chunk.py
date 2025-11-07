@@ -40,7 +40,7 @@ def _clone_module(module: torch.nn.Module) -> torch.nn.Module:
 
 
 def _instrument_chunks(gptq: GPTQ) -> None:
-    original = gptq._borrow_materialized_chunk_fp32
+    original = gptq.borrow_materialized_chunk_fp32
 
     @contextlib.contextmanager
     def wrapped(self, chunk, rows):
@@ -49,7 +49,7 @@ def _instrument_chunks(gptq: GPTQ) -> None:
             yield materialized
 
     gptq._chunk_invocations = 0
-    gptq._borrow_materialized_chunk_fp32 = types.MethodType(wrapped, gptq)
+    gptq.borrow_materialized_chunk_fp32 = types.MethodType(wrapped, gptq)
 
 
 def test_hessian_chunk_consistency_matches_full_precision():
@@ -100,9 +100,36 @@ def test_hessian_chunk_invocations_and_workspace_shape():
     large_gptq.process_batch(calib.clone())
     assert large_gptq._chunk_invocations == 1
 
+    large_summary = getattr(large_gptq, "_borrow_workspace_last_summary", None)
+    assert large_summary is not None
+    assert large_summary["requests"] == 1
+    assert large_summary["materialized_hits"] == 0
+    assert large_summary["materialized_misses"] == 1
+    assert large_summary["staging_misses"] == 1
+    large_totals = getattr(large_gptq, "_borrow_workspace_totals", {})
+    assert large_totals.get("requests") == 1
+    assert large_totals.get("materialized_misses") == 1
+    large_gptq.log_workspace_stats(context="test_hessian_chunk", reset=True)
+    assert getattr(large_gptq, "_borrow_workspace_totals", {}).get("requests") == 0
+
     small_gptq.process_batch(calib.clone())
     expected_chunks = math.ceil(calib.shape[0] / small_cfg.hessian_chunk_size)
     assert small_gptq._chunk_invocations == expected_chunks
+
+    small_summary = getattr(small_gptq, "_borrow_workspace_last_summary", None)
+    assert small_summary is not None
+    assert small_summary["requests"] == expected_chunks
+    assert small_summary["materialized_hits"] + small_summary["materialized_misses"] == expected_chunks
+    assert small_summary["materialized_hits"] >= expected_chunks - 1
+    assert pytest.approx(
+        small_summary["hit_rate"],
+        rel=1e-6,
+    ) == small_summary["materialized_hits"] / expected_chunks
+    small_totals = getattr(small_gptq, "_borrow_workspace_totals", {})
+    assert small_totals.get("requests") == expected_chunks
+    assert small_totals.get("materialized_hits") >= expected_chunks - 1
+    small_gptq.log_workspace_stats(context="test_hessian_chunk", reset=True)
+    assert getattr(small_gptq, "_borrow_workspace_totals", {}).get("requests") == 0
 
     device = torch.device(base.weight.device)
     cache_key = gptq_impl._workspace_cache_key(device)
@@ -116,7 +143,7 @@ def test_hessian_chunk_invocations_and_workspace_shape():
     small_workspace = gptq_impl._WORKSPACE_CACHE[cache_key]
     assert small_workspace is large_workspace
 
-    staging_dtype = small_gptq._preferred_staging_dtype(calib.dtype, device)
+    staging_dtype = small_gptq.preferred_staging_dtype(calib.dtype, device)
     if staging_dtype == torch.bfloat16:
         staged_workspace = gptq_impl._WORKSPACE_CACHE[cache_key]
         assert staged_workspace.dtype == torch.bfloat16
@@ -188,7 +215,7 @@ def test_hessian_workspace_thread_safety_cuda():
     assert cached_workspace.shape[0] >= expected_rows
     assert cached_workspace.shape[1] == cols
 
-    stage_dtype = gptq_workers[0]._preferred_staging_dtype(torch.float16, device)
+    stage_dtype = gptq_workers[0].preferred_staging_dtype(torch.float16, device)
     if stage_dtype == torch.bfloat16:
         assert cached_workspace.dtype == torch.bfloat16
     else:

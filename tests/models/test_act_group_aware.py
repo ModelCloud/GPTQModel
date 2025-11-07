@@ -17,7 +17,7 @@ class TestHybridActOrder(ModelTest):
             "acc_norm": {"value": 0.3439, "floor_pct": 0.05},
         },
     }
-    V2 = False
+    GPTQA = False
     ACT_GROUP_AWARE = True
 
     def test_llama3_2(self):

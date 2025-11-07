@@ -54,12 +54,14 @@ class NamedModule(torch.nn.Module):
             in_features = module.weight.shape[0]
             out_features = module.weight.shape[1]
         else:
-            raise NotImplementedError(f"Unsupported module.module type: `{type(module)}`")
+            in_features = None
+            out_features = None
 
-        self.state.update({
-            "in_features": in_features,
-            "out_features": out_features,
-        })
+        if in_features and out_features:
+            self.state.update({
+                "in_features": in_features,
+                "out_features": out_features,
+            })
 
     def parameters(self, recurse: bool = True):
         return self.module.parameters(recurse=recurse)
@@ -72,6 +74,12 @@ class NamedModule(torch.nn.Module):
 
     def named_buffers(self, prefix: str = "", recurse: bool = True):
         return self.module.named_buffers(prefix=prefix, recurse=recurse)
+
+    def register_forward_hook(
+        self, *args, **kwargs
+    ):
+        with self._parent_lock:
+            return self.module.register_forward_hook(*args, **kwargs)
 
     def register_buffer(
         self, name: str, tensor: Optional[Tensor], persistent: bool = True

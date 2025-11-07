@@ -47,22 +47,22 @@ class TestGroupSize(unittest.TestCase):
         if requested_samples is not None:
             sample_count = max(1, int(requested_samples))
         else:
-            total_mem_gb = 0
             if torch.cuda.is_available():
                 try:
-                    total_mem_gb = (
+                    (
                         torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
                         / (1024 ** 3)
                     )
                 except Exception:
-                    total_mem_gb = 0
+                    pass
 
-            if total_mem_gb >= 80:
-                sample_count = 1024
-            elif total_mem_gb >= 48:
-                sample_count = 512
-            else:
-                sample_count = 192
+            # if total_mem_gb >= 80:
+            #     sample_count = 1024
+            # elif total_mem_gb >= 48:
+            #     sample_count = 512
+            # else:
+            #     sample_count = 192
+            sample_count = 512
 
         traindata = load_dataset("json", data_files="/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
                                  split="train")

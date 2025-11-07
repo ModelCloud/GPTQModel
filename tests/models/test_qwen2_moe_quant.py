@@ -17,8 +17,6 @@ class TestQwen2_5_Moe(ModelTest):
             "acc_norm": {"value": 0.3055, "floor_pct": 0.2},
         },
     }
-    TRUST_REMOTE_CODE = False
-    EVAL_BATCH_SIZE = 6
 
     def test_qwen2_5(self):
         self.quant_lm_eval()

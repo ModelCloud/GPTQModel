@@ -10,6 +10,7 @@ from .llama import LlamaQModel
 # other model
 from .baichuan import BaiChuanQModel
 from .bloom import BloomQModel
+from .brumby import BrumbyQModel
 from .chatglm import ChatGLMQModel
 from .codegen import CodeGenQModel
 from .dbrx import DbrxQModel
@@ -54,6 +55,7 @@ from .qwen2_moe import Qwen2MoeQModel
 from .qwen2_vl import Qwen2VLQModel
 from .qwen3 import Qwen3QModel
 from .qwen3_moe import Qwen3MoeQModel
+from .qwen3_vl import Qwen3_VLQModel
 from .rw import RwgQModel
 from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel

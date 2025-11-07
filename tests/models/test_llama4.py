@@ -18,6 +18,7 @@ class TestLlama4(ModelTest):
         },
     }
     TRUST_REMOTE_CODE = False
+    USE_FLASH_ATTN = False
 
     def test_llama4(self):
         self.quant_lm_eval()

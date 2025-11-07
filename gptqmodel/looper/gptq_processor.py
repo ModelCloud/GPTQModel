@@ -7,7 +7,7 @@ import contextlib
 import copy
 import threading
 import time
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 import torch
 from torch.nn import Module
@@ -31,15 +31,33 @@ log = setup_logger()
 lock = threading.Lock()
 
 class GPTQProcessor(LoopProcessor):
-    def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration, prepare_dataset_func,
-                 calibration_concat_size: Optional[int], calibration_sort: Optional[str], batch_size: int,
-                 require_fwd: bool = True, calculate_w_wq_diff: bool = False):
+    def __init__(
+        self,
+        tokenizer,
+        qcfg: QuantizeConfig,
+        calibration,
+        prepare_dataset_func,
+        calibration_concat_size: Optional[int],
+        calibration_sort: Optional[str],
+        batch_size: int,
+        require_fwd: bool = True,
+        calculate_w_wq_diff: bool = False,
+        calibration_concat_separator: Optional[str] = None,
+    ):
 
-        super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration=calibration,
-                         calibration_concat_size=calibration_concat_size,
-                         calibration_sort=calibration_sort,
-                         prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
-                         require_fwd=require_fwd)
+        super().__init__(
+            tokenizer=tokenizer,
+            qcfg=qcfg,
+            calibration=calibration,
+            calibration_concat_size=calibration_concat_size,
+            calibration_sort=calibration_sort,
+            calibration_concat_separator=calibration_concat_separator,
+            prepare_dataset_func=prepare_dataset_func,
+            batch_size=batch_size,
+            require_fwd=require_fwd,
+            fwd_after_process=True,
+            subset_forward_early_stop=True,
+        )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
@@ -69,15 +87,15 @@ class GPTQProcessor(LoopProcessor):
                 qcfg_clone.act_group_aware = act_group_aware_override
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
-            qcfg_clone.v2 = self.qcfg.dynamic_get(module.full_name, "v2", qcfg_clone.v2)
-            qcfg_clone.v2_alpha = self.qcfg.dynamic_get(module.full_name, "v2_alpha", qcfg_clone.v2_alpha)
+            qcfg_clone.gptaq = self.qcfg.dynamic_get(module.full_name, "gptaq", qcfg_clone.gptaq)
+            qcfg_clone.gptaq_alpha = self.qcfg.dynamic_get(module.full_name, "gptaq_alpha", qcfg_clone.gptaq_alpha)
 
             qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
 
         # store last used qcfg_dynamic
         self.qcfg_dynamic = qcfg_clone
 
-        if qcfg_clone.v2 is True:
+        if qcfg_clone.gptaq is True:
             tmp = GPTQv2(module=module, qcfg=qcfg_clone)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
@@ -104,7 +122,15 @@ class GPTQProcessor(LoopProcessor):
             del inp, out
         return tmp
 
-    def process(self, module: NamedModule):
+    def process(
+        self,
+        module: NamedModule,
+        device: torch.device = None,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        previous_subset: Optional[Dict[str, NamedModule]] = None,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ):
         # Reset peak memory stats
         #torch.cuda.reset_peak_memory_stats()
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
@@ -161,6 +187,9 @@ class GPTQProcessor(LoopProcessor):
 
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
 
+        workspace_summary = getattr(g, "_borrow_workspace_last_summary", None)
+        workspace_totals = getattr(g, "_borrow_workspace_totals", None)
+
         module.stream_state_payload_to_cpu(
             {
                 "q_scales": q_scales,
@@ -211,6 +240,25 @@ class GPTQProcessor(LoopProcessor):
             PROCESS_USED_MEMORY: self.device_memory_report(),
         }
 
+        if workspace_summary:
+            requests = int(workspace_summary.get("requests", 0) or 0)
+            if requests:
+                hit_rate = float(workspace_summary.get("hit_rate", 0.0) or 0.0)
+                chunk_rows = workspace_summary.get("chunk_rows")
+                stat["workspace_cache_requests"] = str(requests)
+                stat["workspace_cache_hit_rate"] = f"{hit_rate:.1%}"
+                stat["workspace_stage_dtype"] = workspace_summary.get("staging_dtype", "")
+                if chunk_rows is not None:
+                    stat["workspace_chunk_rows"] = str(chunk_rows)
+        if workspace_totals:
+            total_requests = int(workspace_totals.get("requests", 0) or 0)
+            if total_requests:
+                cumulative_hit_rate = (
+                    float(workspace_totals.get("materialized_hits", 0) or 0.0) / total_requests
+                )
+                stat["workspace_total_requests"] = str(total_requests)
+                stat["workspace_total_hit_rate"] = f"{cumulative_hit_rate:.1%}"
+
         if self.qcfg.dynamic is not None:
             stat["dynamic"] = self.qcfg.dynamic_get(layer_name=module.full_name)
 
@@ -219,6 +267,8 @@ class GPTQProcessor(LoopProcessor):
 
         # Log the new row
         self.log_new_row(stat)
+
+        g.log_workspace_stats(context="gptq_process")
 
         if self.calculate_w_wq_diff:
             # diff in float32
@@ -359,4 +409,4 @@ class GPTQProcessor(LoopProcessor):
     def name(self) -> str:
         # TODO fix me..this hacks inherited base class logic, why not override name in gptqv2?
         qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
-        return "gptq v2" if qcfg.v2 else "gptq"
+        return "gptaq" if qcfg.gptaq else "gptq"

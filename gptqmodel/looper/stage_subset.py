@@ -7,14 +7,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 import torch
 
-from .. import DEVICE_THREAD_POOL
+from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
@@ -67,11 +68,18 @@ def run_subset_stage(
     pb,
     log=None,
     region_timer=None,
+    previous_processed_subset: Optional[Dict[str, NamedModule]] = None,
+    subset_event_cb: Optional[Callable[..., None]] = None,
 ) -> SubsetStageResult:
     """Process a single subset of modules within the layer quantization loop."""
     logger = log or setup_logger()
 
+    processor_name = processor.name() if hasattr(processor, "name") else type(processor).__name__
+    processor_name_lower = processor_name.lower()
+    is_awq_processor = processor_name_lower.startswith("awq")
+
     subset = looper.crate_named_modules(
+        module=module,
         full=full,
         is_lm_head_module=is_lm_head_module,
         layer_index=layer_index,
@@ -79,10 +87,64 @@ def run_subset_stage(
         names=subset_names,
         processor=processor,
         fail_safe=fail_safe,
+        layer_module=module,
     )
 
-    if len(subset) == 0:
-        return SubsetStageResult(processed_subset={}, layer_inputs=layer_inputs, forward_context=None)
+    def emit_subset_event(stage: str) -> None:
+        if subset_event_cb is None:
+            return
+        subset_event_cb(
+            stage=stage,
+            layer_idx=layer_index,
+            subset_index=subset_index,
+            subset_total=subset_total,
+            module_names=list(subset.keys()),
+            processor=processor_name,
+        )
+
+    # TODO FIXME: If a full layer has no module to quantize a simple forward() is enough and output is captured 
+    # to be used as next layer's input. So one pass forward (entire layer simple forward wihout need of dealing 
+    # with subset loops and micro forward loops, just full layer, usally XXXDecodeLayer.forward(). 
+    # So output = current_layer.forward() is enough or sometimes just calling the layer callable like layer() 
+    # which same as layer.forward().
+    #
+    # Assume layer 2 has no modules to quantize. At beginniing loop for layer 2, we have layer_output 
+    # from completed forward_replay() of layer 1. Then pass this to layer 2 (as a whole) as layer_input 
+    # and store ouput, then immediately loop to layer 3 without any further subset work that is only necessary 
+    # if we need to quantize part of a layer.
+    #
+    # if len(subset) == 0:
+    #     if logger.isEnabledFor(logging.DEBUG):
+    #         logger.debug(
+    #             "StageSubset: layer=%s subset=%s/%s processor=%s produced empty subset (names=%s)",
+    #             layer_index,
+    #             subset_index + 1,
+    #             subset_total,
+    #             processor_name,
+    #             subset_names,
+    #         )
+    #     return SubsetStageResult(processed_subset={}, layer_inputs=layer_inputs, forward_context=None)
+
+    if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
+        if is_awq_processor:
+            logger.debug(
+                "StageSubset[awq]: layer=%s subset=%s/%s modules=%s sample=%s",
+                layer_index,
+                subset_index + 1,
+                subset_total,
+                len(subset),
+                list(subset.keys())[:8],
+            )
+        else:
+            logger.debug(
+                "StageSubset: layer=%s subset=%s/%s processor=%s created %s modules (sample=%s)",
+                layer_index,
+                subset_index + 1,
+                subset_total,
+                processor_name,
+                len(subset),
+                list(subset.keys())[:8],
+            )
 
     moe_group_keys_all: List[str] = []
     forward_device_map: Dict[str, torch.device] = {}
@@ -112,6 +174,8 @@ def run_subset_stage(
                     combined_names.append(candidate)
 
         for sub_name in combined_names:
+            # Group every expert (including ones outside the current subset) so
+            # load balancing decisions can span the full MoE family.
             group_key = looper._extract_moe_group_key(sub_name)
             if group_key is None:
                 continue
@@ -172,6 +236,9 @@ def run_subset_stage(
 
     subset_size = len(subset)
     for idx, (name, m) in enumerate(subset.items()):
+        # Register the forward hook that captures activations for quantization.
+        # The final module optionally flips a flag so processors can trigger
+        # once-per-subset logic after the forward pass.
         is_last = (idx == subset_size - 1)
         hook_source = getattr(m, "full_name", None)
         if hook_source is None:
@@ -182,13 +249,35 @@ def run_subset_stage(
         if hasattr(subset[name], 'forward_hook'):
             original_hook = processor.pre_process_fwd_hook(name)
             subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
-            if is_last and processor.fwd_after_process:
+            enable_stop = processor.fwd_after_process or getattr(processor, "subset_forward_early_stop", False)
+            if is_last and enable_stop:
                 subset[name].forward_hook_last = True
         else:
             original_hook = processor.pre_process_fwd_hook(name)
             handle.append(subset[name].register_forward_hook(
                 looper._masked_hook_wrapper(processor, original_hook, hook_source)
             ))
+
+    if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
+        if is_awq_processor:
+            logger.debug(
+                "StageSubset[awq]: layer=%s subset=%s/%s registering hooks for %s modules",
+                layer_index,
+                subset_index + 1,
+                subset_total,
+                len(subset),
+            )
+        else:
+            logger.debug(
+                "StageSubset: layer=%s subset=%s/%s processor=%s registering hooks for %s modules",
+                layer_index,
+                subset_index + 1,
+                subset_total,
+                processor_name,
+                len(subset),
+            )
+
+    emit_subset_event("forward_start")
 
     fwd_start = time.perf_counter()
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
@@ -253,6 +342,7 @@ def run_subset_stage(
         processor.receive_layer_inputs(forward_outputs)
         layer_inputs = processor.inputs_cache.layer_inputs
         del forward_outputs
+    emit_subset_event("forward_end")
 
     fwd_time = time.perf_counter() - fwd_start
     processor.set_fwd_time(fwd_time)
@@ -266,9 +356,12 @@ def run_subset_stage(
     pb.title(layer_title).subtitle("").draw()
 
     for h in handle:
+        # Detach temporary hooks to avoid leaking state into future passes.
         h.remove()
 
     for name in subset:
+        # Reset inline hook attributes on NamedModule wrappers so future passes
+        # do not reuse state from this subset run.
         if hasattr(subset[name], 'forward_hook'):
             subset[name].forward_hook = None
             subset[name].forward_hook_last = False
@@ -276,6 +369,8 @@ def run_subset_stage(
     moe_skip_modules = []
     if isinstance(processor, GPTQProcessor):
         for name in subset:
+            # Skip MoE experts that never fired; they likely lacked calibration
+            # traffic and would produce invalid statistics.
             if processor.tasks[name].fwd_counter == 0:
                 logger.error(f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it.")
                 moe_skip_modules.append(name)
@@ -289,6 +384,8 @@ def run_subset_stage(
 
     quant_target_devices: Dict[str, torch.device] = {}
     for name, named_module in subset.items():
+        # Ensure each module has a matching processor task before sending it to
+        # the worker pool; otherwise freeze it on the current device.
         task_map = getattr(processor, "tasks", None)
         has_task = bool(task_map and task_map.get(name) is not None)
 
@@ -308,13 +405,20 @@ def run_subset_stage(
     processed_subset: Dict[str, NamedModule] = {}
     futures = []
 
+    emit_subset_event("quant_start")
+
     @torch.inference_mode()
     def _process_on_worker(
         proc: LoopProcessor,
         nm: NamedModule,
         expected_device: torch.device,
+        subset_ref: Dict[str, NamedModule],
+        previous_subset_ref: Optional[Dict[str, NamedModule]],
+        subset_idx: int,
+        subset_total_count: int,
     ):
         module_label = getattr(nm, "full_name", getattr(nm, "name", repr(nm)))
+        proc_name = proc.name() if hasattr(proc, "name") else type(proc).__name__
         module_ref = nm.module if isinstance(nm, NamedModule) else nm
         module_weight = getattr(module_ref, "weight", None)
         if module_weight is not None and expected_device is not None:
@@ -328,7 +432,34 @@ def run_subset_stage(
         timer = getattr(looper.gptq_model, "quant_region_timer", None)
         start = time.perf_counter() if timer else None
         try:
-            proc.process(module=nm)
+            if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
+                if is_awq_processor:
+                    logger.debug(
+                        "StageSubsetWorker[awq]: layer=%s subset=%s/%s module=%s previous_subset=%s",
+                        getattr(nm, "layer_index", None),
+                        subset_idx + 1,
+                        subset_total_count,
+                        module_label,
+                        bool(previous_subset_ref),
+                    )
+                else:
+                    logger.debug(
+                        "StageSubsetWorker: processor=%s layer=%s subset=%s/%s module=%s running on %s (previous_subset=%s)",
+                        proc_name,
+                        getattr(nm, "layer_index", None),
+                        subset_idx + 1,
+                        subset_total_count,
+                        module_label,
+                        expected_device,
+                        bool(previous_subset_ref),
+                    )
+            proc.process(
+                module=nm,
+                subset=subset_ref,
+                previous_subset=previous_subset_ref,
+                subset_index=subset_idx,
+                subset_total=subset_total_count,
+            )
         finally:
             if timer is not None and start is not None:
                 timer.record(
@@ -339,15 +470,31 @@ def run_subset_stage(
         return nm.name, nm
 
     for name, named_module in subset.items():
+        # Launch processing for every module in the subset; tasks may run in
+        # parallel as allowed by the device thread pool.
         tgt_dev = quant_target_devices.get(name, cur_layer_device)
         futures.append(
-            DEVICE_THREAD_POOL.submit(tgt_dev, _process_on_worker, processor, named_module, tgt_dev)
+            DEVICE_THREAD_POOL.submit(
+                tgt_dev,
+                _process_on_worker,
+                processor,
+                named_module,
+                tgt_dev,
+                subset,
+                previous_processed_subset,
+                subset_index,
+                subset_total,
+            )
         )
 
     for fut in futures:
+        # Collect results in submission order so the final subset map preserves
+        # deterministic iteration for downstream consumers.
         name, named_module = fut.result()
         processed_subset[name] = named_module
     torch_sync()
+
+    emit_subset_event("quant_complete")
 
     context = SubsetForwardContext(
         subset=subset,

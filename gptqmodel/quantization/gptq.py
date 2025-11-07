@@ -23,6 +23,7 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
+from ..utils.torch import torch_sync
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -70,16 +71,27 @@ def _needs_workspace_resize(
 
 
 @contextlib.contextmanager
-def _lease_workspace(device: torch.device, dtype: torch.dtype, cols: int, required_rows: int):
+def _lease_workspace(
+    device: torch.device,
+    dtype: torch.dtype,
+    cols: int,
+    required_rows: int,
+) -> Tuple[torch.Tensor, bool]:
     key = _workspace_cache_key(device)
     lock = _WORKSPACE_LOCKS.setdefault(key, threading.Lock())
     with lock:
         workspace = _WORKSPACE_CACHE.pop(key, None)
-        if _needs_workspace_resize(workspace, dtype, required_rows, cols):
+        reused = workspace is not None and not _needs_workspace_resize(
+            workspace,
+            dtype,
+            required_rows,
+            cols,
+        )
+        if not reused:
             rows = max(required_rows, 1)
             workspace = torch.empty((rows, cols), dtype=dtype, device=device)
     try:
-        yield workspace
+        yield workspace, reused
     finally:
         with lock:
             _WORKSPACE_CACHE[key] = workspace
@@ -171,7 +183,7 @@ class GPTQ:
         else:
             self._final_hessian_device_hint = torch.device(module_device)
 
-        self._validate_module(self.module)
+        self.validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
 
@@ -195,8 +207,28 @@ class GPTQ:
         self._device_sample_counts: Dict[torch.device, int] = {}
         self._hessian_dirty: bool = False
 
+        self._borrow_workspace_stats = {
+            "requests": 0,
+            "staging_requests": 0,
+            "staging_hits": 0,
+            "staging_misses": 0,
+            "materialized_requests": 0,
+            "materialized_hits": 0,
+            "materialized_misses": 0,
+        }
+        self._borrow_workspace_totals = {
+            "requests": 0,
+            "materialized_hits": 0,
+            "materialized_misses": 0,
+            "staging_hits": 0,
+            "staging_misses": 0,
+        }
+        self._borrow_workspace_last_summary: Optional[Dict[str, object]] = None
+        self._borrow_workspace_stage_dtype: Optional[torch.dtype] = None
+        self._borrow_workspace_last_chunk_rows: Optional[int] = None
+
     @staticmethod
-    def _validate_module(module):
+    def validate_module(module):
         assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
                                    transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
 
@@ -212,14 +244,14 @@ class GPTQ:
         else:
             return (0, 0)
 
-    def _mock_hessian_inverse(self, H: torch.Tensor):
+    def mock_hessian_inverse(self, H: torch.Tensor):
         """Mock hessian inverse for fast testing"""
         damp = self.qcfg.damp_percent
         # Return identity matrix instead of complex inversion
         identity = torch.eye(H.shape[0], dtype=torch.float32, device=H.device)
         return identity, damp
 
-    def _clone_module(self, copy=True, device: torch.device = None):
+    def clone_module(self, copy=True, device: torch.device = None):
         if not device:
             device = self.module.weight.data.device
 
@@ -242,7 +274,7 @@ class GPTQ:
         return clone.float()
 
     @staticmethod
-    def _truncate_last_dim(tensor: torch.Tensor, length: int) -> torch.Tensor:
+    def truncate_last_dim(tensor: torch.Tensor, length: int) -> torch.Tensor:
         if tensor.dim() == 0:
             return tensor
 
@@ -273,7 +305,7 @@ class GPTQ:
             self.nsamples += batch_token_size
             self._hessian_dirty = True
 
-    def _preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
+    def preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
         device = torch.device(device)
 
         if not self.qcfg.hessian_use_bfloat16_staging:
@@ -287,7 +319,7 @@ class GPTQ:
 
         return torch.bfloat16
 
-    def _resolve_hessian_chunk_size(self, rows: int, stage_dtype: torch.dtype) -> Optional[int]:
+    def resolve_hessian_chunk_size(self, rows: int, stage_dtype: torch.dtype) -> Optional[int]:
         if rows == 0:
             return None
 
@@ -307,7 +339,7 @@ class GPTQ:
         return None
 
     @contextlib.contextmanager
-    def _borrow_materialized_chunk_fp32(
+    def borrow_materialized_chunk_fp32(
         self,
         chunk: torch.Tensor,
         rows: int,
@@ -317,20 +349,52 @@ class GPTQ:
             return
 
         device = chunk.device
-        stage_dtype = self._preferred_staging_dtype(chunk.dtype, device)
+        stage_dtype = self.preferred_staging_dtype(chunk.dtype, device)
 
-        with _lease_workspace(device, stage_dtype, self.columns, rows) as staging_workspace:
+        stats = self._borrow_workspace_stats
+        stats["requests"] += 1
+
+        with _lease_workspace(device, stage_dtype, self.columns, rows) as (
+            staging_workspace,
+            staging_reused,
+        ):
+            stats["staging_requests"] += 1
+            if staging_reused:
+                stats["staging_hits"] += 1
+            else:
+                stats["staging_misses"] += 1
+
             staging_view = staging_workspace[:rows, :]
             staging_view.copy_(chunk.to(dtype=stage_dtype))
 
             if stage_dtype == torch.float32:
+                stats["materialized_requests"] += 1
+                if staging_reused:
+                    stats["materialized_hits"] += 1
+                else:
+                    stats["materialized_misses"] += 1
+
                 try:
                     yield staging_view
                 finally:
                     if device.type == "cuda":
                         torch.cuda.current_stream(device).synchronize()
             else:
-                with _lease_workspace(device, torch.float32, self.columns, rows) as fp32_workspace:
+                with _lease_workspace(
+                    device,
+                    torch.float32,
+                    self.columns,
+                    rows,
+                ) as (
+                    fp32_workspace,
+                    fp32_reused,
+                ):
+                    stats["materialized_requests"] += 1
+                    if fp32_reused:
+                        stats["materialized_hits"] += 1
+                    else:
+                        stats["materialized_misses"] += 1
+
                     try:
                         fp32_view = fp32_workspace[:rows, :]
                         fp32_view.copy_(staging_view.to(torch.float32))
@@ -339,27 +403,32 @@ class GPTQ:
                         if device.type == "cuda":
                             torch.cuda.current_stream(device).synchronize()
 
-    def _compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
+    def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]
         if rows == 0:
             return torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
-        stage_dtype = self._preferred_staging_dtype(matrix.dtype, matrix.device)
-        chunk_size = self._resolve_hessian_chunk_size(rows, stage_dtype)
+        stage_dtype = self.preferred_staging_dtype(matrix.dtype, matrix.device)
+        chunk_size = self.resolve_hessian_chunk_size(rows, stage_dtype)
+        self._borrow_workspace_stage_dtype = stage_dtype
+        self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
-            return torch.matmul(mat32.T, mat32)
+            xtx = torch.matmul(mat32.T, mat32)
+            torch_sync(device=xtx.device)
+            return xtx
 
         xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
 
         for start in range(0, rows, chunk_size):
             rows_this = min(chunk_size, rows - start)
             source = matrix[start:start + rows_this]
-            with self._borrow_materialized_chunk_fp32(source, rows_this) as materialized:
+            with self.borrow_materialized_chunk_fp32(source, rows_this) as materialized:
                 materialized32 = materialized
                 xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
 
+        torch_sync(device=xtx_accum.device)
         return xtx_accum
 
     def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
@@ -419,7 +488,7 @@ class GPTQ:
             return 0, None, canonical_device
 
         try:
-            xtx = self._compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
+            xtx = self.compute_hessian_xtx(reshaped_inp).to(dtype=torch.float32)
         except RuntimeError as exc:
             if (
                 torch.device(inp_device).type == "cuda"
@@ -434,7 +503,7 @@ class GPTQ:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 canonical_device = torch.device("cpu")
-                xtx = self._compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
+                xtx = self.compute_hessian_xtx(reshaped_inp_cpu).to(dtype=torch.float32)
                 xtx = xtx.detach()
                 del reshaped_inp_cpu
             else:
@@ -444,6 +513,7 @@ class GPTQ:
             xtx = xtx.detach()
             del reshaped_inp
 
+        self._snapshot_borrow_workspace_stats(context="process_batch")
         return batch_token_size, xtx, canonical_device
 
     def _select_hessian_target_device(self, requested: Optional[torch.device]) -> torch.device:
@@ -460,7 +530,7 @@ class GPTQ:
 
         return torch.device("cpu")
 
-    def _materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
+    def materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
         device = self._select_hessian_target_device(target_device)
 
         with self.lock:
@@ -500,9 +570,19 @@ class GPTQ:
 
             for partial_device, partial in self._device_hessian_partials.items():
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
-                    tmp = partial.to(device=result_accum.device, dtype=torch.float32)
-                    result_accum.add_(tmp)
-                    del tmp
+                    # TODO FIXME multi-3090 using P2P is revaling an issue where result_accum and/or partial is not ready for consolidation on the main thread
+                    # when parials are calculated on the individual
+                    try:
+                        result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                    except:
+                        log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 1/2 in 0.25s")
+                        time.sleep(0.25)
+                        try:
+                            result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                        except:
+                            log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 2/2 in 0.75s")
+                            time.sleep(0.75)
+                            result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
                 else:
                     result_accum.add_(partial)
 
@@ -517,7 +597,7 @@ class GPTQ:
             del result_accum
 
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
-        self._materialize_global_hessian(target_device=target_device)
+        self.materialize_global_hessian(target_device=target_device)
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self._select_hessian_target_device(target_device))
         return self.H
@@ -559,35 +639,90 @@ class GPTQ:
 
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
-        damp = self.qcfg.damp_percent
-        mean = torch.mean(torch.diag(H))
+        # Capture a writable view of the Hessian diagonal so we can restore it between attempts.
+        diag_view = H.diagonal()
+        orig_diag = diag_view.clone()
 
-        orig_diag = H.diag().clone()
-        while 0 < damp < 1:
-            try:
-                H.diagonal().add_(damp * mean)
-                H2 = torch.linalg.cholesky(H)
-                Hinv = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
-                H.diagonal().copy_(orig_diag)
-                del H2
-                break
-            except torch._C._LinAlgError as e:
-                H.diagonal().copy_(orig_diag)
-                if self.qcfg.damp_auto_increment != 0:
+        # When a block is numerically singular, pure damping can stall at 1.0.
+        # Prepare a tiny diagonal floor (relative to the largest entry) that we
+        # only inject if the normal damping loop fails. Keeping the scale near 1e-6
+        # of the dominant entry keeps the bias negligible for healthy layers while
+        # still rescuing pathological Hessian blocks.
+        base_abs_max = torch.max(orig_diag.abs()).item()
+        if not math.isfinite(base_abs_max) or base_abs_max == 0.0:
+            base_abs_max = 1.0
+        floor_base = base_abs_max * 1e-6
+        max_floor_attempts = 6
+        used_damp = self.qcfg.damp_percent
+        last_error = None
+
+        attempt = 0
+        while attempt <= max_floor_attempts:
+            if attempt == 0:
+                current_diag = orig_diag
+            else:
+                floor_increment = floor_base * math.pow(10.0, attempt - 1)
+                current_diag = torch.clamp(orig_diag + floor_increment, min=floor_increment)
+                if attempt == 1:
                     log.warn(
-                        f"Quantization: Module `{self.name}` -> Current `damp_percent = {damp:.5f}` is too low, auto-incrementing by `{self.qcfg.damp_auto_increment:.5f}`")
-                    damp += self.qcfg.damp_auto_increment
+                        f"Quantization: Module `{self.name}` -> Applying Hessian diagonal floor (+{floor_increment:.2e}) to recover positive definiteness.")
                 else:
                     log.warn(
-                        "Quantization: Module `{self.name}` -> Please increase damp or nsamples for calibration data to avoid the following quant error: current damp_percent=`{damp:.5f}`")
-                    raise e
+                        f"Quantization: Module `{self.name}` -> Increasing Hessian diagonal floor to +{floor_increment:.2e}.")
 
-        if not (0 < damp < 1):
-            log.error(
-                f"Quantization: Module `{self.name}` -> `damp_percent` must between 0 and 1. current is {damp}. Module cannot be correctly processed.")
-            return None, 1.0
+            diag_view.copy_(current_diag)
+            mean = torch.mean(current_diag)
+            damp = self.qcfg.damp_percent
 
-        return Hinv, damp
+            damp_recovery_started = False
+            recovery_initial_damp = None
+            recovery_last_damp = None
+
+            while 0 < damp < 1:
+                try:
+                    diag_view.add_(damp * mean)
+                    H2 = torch.linalg.cholesky(H)
+                    Hinv_result = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
+                    diag_view.copy_(current_diag)
+                    del H2
+                    used_damp = damp
+                    if damp_recovery_started:
+                        log.warn(
+                            f"Quantization: Module `{self.name}` -> Damp recovery succeeded at `damp_percent={damp:.5f}` "
+                            f"(started at {recovery_initial_damp:.5f})."
+                        )
+                    return Hinv_result, used_damp
+                except torch._C._LinAlgError as e:
+                    last_error = e
+                    diag_view.copy_(current_diag)
+                    if self.qcfg.damp_auto_increment != 0:
+                        if not damp_recovery_started:
+                            damp_recovery_started = True
+                            recovery_initial_damp = damp
+                            log.warn(
+                                f"Quantization: Module `{self.name}` -> Starting damp recovery at "
+                                f"`damp_percent={damp:.5f}`, increment step `{self.qcfg.damp_auto_increment:.5f}`."
+                            )
+                        damp += self.qcfg.damp_auto_increment
+                        recovery_last_damp = damp
+                    else:
+                        log.warn(
+                            f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with `damp_percent={damp:.5f}` and no auto increment configured.")
+                        break
+
+            if damp_recovery_started:
+                final_damp = recovery_last_damp if recovery_last_damp is not None else damp
+                log.warn(
+                    f"Quantization: Module `{self.name}` -> Damp recovery failed after reaching `damp_percent={final_damp:.5f}`."
+                )
+
+            attempt += 1
+
+        log.error(
+            f"Quantization: Module `{self.name}` -> Hessian remained non positive-definite after diagonal floor attempts. Last `damp_percent` tried = {damp:.5f}.")
+        if last_error is not None:
+            log.debug(f"Hessian failure detail: {last_error}")
+        return None, 1.0
 
     @torch.inference_mode()
     def quantize(
@@ -608,7 +743,7 @@ class GPTQ:
 
         if self.qcfg.mock_quantization:
             # Use simplified hessian inverse (identity matrix)
-            self.hessian_inverse = self._mock_hessian_inverse
+            self.hessian_inverse = self.mock_hessian_inverse
 
         # if self.device.type not in ["mps", "cpu"]:
         #     self.module.weight.data = self.module.weight.data.cpu()
@@ -620,7 +755,7 @@ class GPTQ:
 
         if self.module_copy is None:
             # log.info("copy W to cuda_1")
-            W = self._clone_module(device=self.H.device)
+            W = self.clone_module(device=self.H.device)
         else:
             W = self.module_copy.to(device=self.H.device)
             del self.module_copy
@@ -895,14 +1030,106 @@ class GPTQ:
 
         if self._tp_pad_cols:
             valid_cols = self._original_columns
-            scale = self._truncate_last_dim(scale, valid_cols)
-            zero = self._truncate_last_dim(zero, valid_cols)
+            scale = self.truncate_last_dim(scale, valid_cols)
+            zero = self.truncate_last_dim(zero, valid_cols)
 
         Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
 
         duration = time.time() - start
 
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
+
+    def borrow_materialized_chunk_stats(self, reset: bool = False) -> Dict[str, int]:
+        stats = dict(self._borrow_workspace_stats)
+        if reset:
+            for key in self._borrow_workspace_stats:
+                self._borrow_workspace_stats[key] = 0
+        return stats
+
+    def _snapshot_borrow_workspace_stats(self, *, context: str) -> None:
+        stats = self.borrow_materialized_chunk_stats(reset=True)
+        total_requests = int(stats.get("requests", 0) or 0)
+        if total_requests == 0:
+            return
+
+        materialized_hits = int(stats.get("materialized_hits", 0) or 0)
+        materialized_misses = int(stats.get("materialized_misses", 0) or 0)
+        staging_hits = int(stats.get("staging_hits", 0) or 0)
+        staging_misses = int(stats.get("staging_misses", 0) or 0)
+        chunk_rows = self._borrow_workspace_last_chunk_rows
+        stage_dtype = self._borrow_workspace_stage_dtype
+        stage_dtype_str = str(stage_dtype) if stage_dtype is not None else "n/a"
+        hit_rate = materialized_hits / total_requests if total_requests else 0.0
+
+        summary = {
+            "context": context,
+            "requests": total_requests,
+            "materialized_hits": materialized_hits,
+            "materialized_misses": materialized_misses,
+            "staging_hits": staging_hits,
+            "staging_misses": staging_misses,
+            "chunk_rows": chunk_rows,
+            "staging_dtype": stage_dtype_str,
+            "hit_rate": hit_rate,
+        }
+        self._borrow_workspace_last_summary = summary
+
+        totals = self._borrow_workspace_totals
+        totals["requests"] += total_requests
+        totals["materialized_hits"] += materialized_hits
+        totals["materialized_misses"] += materialized_misses
+        totals["staging_hits"] += staging_hits
+        totals["staging_misses"] += staging_misses
+
+    def log_workspace_stats(self, *, context: str, reset: bool = True) -> None:
+        totals = self._borrow_workspace_totals
+        total_requests = int(totals.get("requests", 0) or 0)
+        if total_requests == 0:
+            if reset:
+                self.reset_workspace_stats()
+            return
+
+        total_hits = int(totals.get("materialized_hits", 0) or 0)
+        total_misses = int(totals.get("materialized_misses", 0) or 0)
+        total_hit_rate = total_hits / total_requests if total_requests else 0.0
+
+        last = self._borrow_workspace_last_summary or {}
+        last_requests = int(last.get("requests", 0) or 0)
+        last_hits = int(last.get("materialized_hits", 0) or 0)
+        last_misses = int(last.get("materialized_misses", 0) or 0)
+        last_hit_rate = float(last.get("hit_rate", 0.0) or 0.0)
+        rows_label = last.get("chunk_rows", "n/a")
+        stage_dtype = last.get("staging_dtype", "n/a")
+
+        log.info(
+            "GPTQ workspace cache [%s]: module=%s rows=%s staging_dtype=%s "
+            "requests=%d hits=%d misses=%d hit_rate=%.2f total_requests=%d "
+            "total_hits=%d total_misses=%d total_hit_rate=%.2f",
+            context,
+            getattr(self, "name", "<unknown>"),
+            rows_label,
+            stage_dtype,
+            last_requests,
+            last_hits,
+            last_misses,
+            last_hit_rate,
+            total_requests,
+            total_hits,
+            total_misses,
+            total_hit_rate,
+        )
+
+        if reset:
+            self.reset_workspace_stats()
+
+    def reset_workspace_stats(self) -> None:
+        for key in self._borrow_workspace_stats:
+            self._borrow_workspace_stats[key] = 0
+        for key in self._borrow_workspace_totals:
+            self._borrow_workspace_totals[key] = 0
+        self._borrow_workspace_last_summary = None
+        self._borrow_workspace_stage_dtype = None
+        self._borrow_workspace_last_chunk_rows = None
 
     def free(self):
         if hasattr(self, "H"):

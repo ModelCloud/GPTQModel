@@ -117,6 +117,9 @@ class StageInputsCapture:
                     one_kwargs[k] = nested_move_to(v, device=data_device)
             layer_input_kwargs.append(one_kwargs)
 
+            # In normal repeating layer/sbuset early stop happens on the last module forward
+            # but the first model input embedding call we use a simple model register forwar hook
+            # and wait for the first instance this callback is called
             raise STOP_FORWARD_EXCEPTION
 
         if cur_layer_device == META:

@@ -9,6 +9,9 @@ from gptqmodel.utils.eval import EVAL
 
 
 class TestGlm4Moe(ModelTest):
+    # FORMAT = FORMAT.GEMM
+    # METHOD = METHOD.AWQ
+
     NATIVE_MODEL_ID = "/monster/data/model/GLM-4.6/"
     DELETE_QUANTIZED_MODEL = False
     DATASET_SIZE = 512

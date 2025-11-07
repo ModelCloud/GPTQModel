@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import contextlib
-import inspect
 import os
 import queue
 import sys
@@ -28,6 +27,7 @@ except Exception:  # pragma: no cover - defensive: optional dependency may be un
 from .. import DEBUG_ON
 from ..utils.ctx import ctx
 from ..utils.logger import setup_logger
+from ..utils.torch import torch_empty_cache_any
 
 
 log = setup_logger()
@@ -51,76 +51,7 @@ def _mps_available() -> bool:
     )
 
 
-# --- HARD COPIES of original empty_cache callables (never auto-switched) ---
-# IMPORTANT: Do NOT “optimize” these by directly calling torch.*.empty_cache.
-# We intentionally capture a snapshot of the original functions to defend against
-# later code mutating those attributes to a no-op. The janitor will prefer the
-# *live* attribute if callable (so monkeypatching works), but falls back to these
-# hard copies if the live attr is missing or non-callable.
-TORCH_CUDA_EMPTY_CACHE: Optional[Callable[[], None]] = None
-TORCH_XPU_EMPTY_CACHE: Optional[Callable[[], None]] = None
-TORCH_MPS_EMPTY_CACHE: Optional[Callable[[], None]] = None
-
-try:
-    TORCH_CUDA_EMPTY_CACHE = getattr(torch.cuda, "empty_cache", None) if hasattr(torch, "cuda") else None
-    if TORCH_CUDA_EMPTY_CACHE is not None and not callable(TORCH_CUDA_EMPTY_CACHE):
-        TORCH_CUDA_EMPTY_CACHE = None
-except Exception:
-    # If introspection fails, we keep the hard copy as None.
-    TORCH_CUDA_EMPTY_CACHE = None
-
-try:
-    TORCH_XPU_EMPTY_CACHE = getattr(torch.xpu, "empty_cache", None) if hasattr(torch, "xpu") else None
-    if TORCH_XPU_EMPTY_CACHE is not None and not callable(TORCH_XPU_EMPTY_CACHE):
-        TORCH_XPU_EMPTY_CACHE = None
-except Exception:
-    TORCH_XPU_EMPTY_CACHE = None
-
-try:
-    TORCH_MPS_EMPTY_CACHE = getattr(torch.mps, "empty_cache", None) if hasattr(torch, "mps") else None
-    if TORCH_MPS_EMPTY_CACHE is not None and not callable(TORCH_MPS_EMPTY_CACHE):
-        TORCH_MPS_EMPTY_CACHE = None
-except Exception:
-    TORCH_MPS_EMPTY_CACHE = None
-
-
 # --------------------------- Device coercion & context helpers ---------------------------
-
-_EMPTY_CACHE_SIGNATURE_CACHE: Dict[int, Tuple[bool, bool]] = {}
-
-
-def _analyze_empty_cache_callable(fn: Callable[..., Any]) -> Tuple[bool, bool]:
-    """
-    Inspect an empty_cache callable and determine whether it accepts a `device`
-    keyword argument or at least one positional argument. Results are memoized.
-    """
-    cache_key = id(fn)
-    cached = _EMPTY_CACHE_SIGNATURE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-
-    supports_kw = False
-    supports_pos = False
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):
-        _EMPTY_CACHE_SIGNATURE_CACHE[cache_key] = (supports_kw, supports_pos)
-        return supports_kw, supports_pos
-
-    for param in sig.parameters.values():
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            supports_kw = True
-        elif param.kind == inspect.Parameter.VAR_POSITIONAL:
-            supports_pos = True
-        elif param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-            supports_pos = True
-            if param.name == "device":
-                supports_kw = True
-        elif param.kind == inspect.Parameter.KEYWORD_ONLY and param.name == "device":
-            supports_kw = True
-
-    _EMPTY_CACHE_SIGNATURE_CACHE[cache_key] = (supports_kw, supports_pos)
-    return supports_kw, supports_pos
 
 def _coerce_device(d: DeviceLike) -> torch.device:
     """
@@ -1453,70 +1384,21 @@ class DeviceThreadPool:
         """
         return getattr(self, "_virtual_to_parent", {}).get(key, key)
 
-    def _invoke_empty_cache(self, fn: Callable[..., Any], dev: torch.device) -> None:
-        """
-        Call an empty_cache-like callable, preferring a `device` argument when
-        supported and falling back to positional or zero-arg variants.
-        """
-        supports_kw, supports_pos = _analyze_empty_cache_callable(fn)
-        if supports_kw:
-            try:
-                fn(device=dev)
-                return
-            except TypeError:
-                if DEBUG_ON:
-                    log.debug("empty_cache callable rejected keyword arg; retrying positional (%s)", fn)
-        if supports_pos:
-            try:
-                fn(dev)
-                return
-            except TypeError:
-                if DEBUG_ON:
-                    log.debug("empty_cache callable rejected positional arg; retrying no-arg (%s)", fn)
-        fn()
-
     def _run_empty_cache_for_device(self, key: str, dev: torch.device) -> Optional[float]:
         """
         Execute an empty_cache call for the given device. Returns execution time in seconds.
         """
         start = time.time()
-        if dev.type == "cuda":
-            live = getattr(torch.cuda, "empty_cache", None) if hasattr(torch, "cuda") else None
-            use_fn = live if callable(live) else TORCH_CUDA_EMPTY_CACHE
-            if use_fn is None:
-                if DEBUG_ON:
-                    log.debug("DP-Janitor: no empty_cache callable available for %s", key)
-                return None
-            target = dev if dev.index is not None else "cuda"
-            with torch.cuda.device(target):
-                self._invoke_empty_cache(use_fn, dev)
-            return time.time() - start
-
-        if dev.type == "xpu" and hasattr(torch, "xpu"):
-            live = getattr(torch.xpu, "empty_cache", None)
-            use_fn = live if callable(live) else TORCH_XPU_EMPTY_CACHE
-            if use_fn is None:
-                if DEBUG_ON:
-                    log.debug("DP-Janitor: no empty_cache callable available for %s", key)
-                return None
-            target = dev if dev.index is not None else "xpu"
-            with torch.xpu.device(target):
-                self._invoke_empty_cache(use_fn, dev)
-            return time.time() - start
-
-        if dev.type == "mps" and hasattr(torch, "mps"):
-            live = getattr(torch.mps, "empty_cache", None)
-            use_fn = live if callable(live) else TORCH_MPS_EMPTY_CACHE
-            if use_fn is None:
-                if DEBUG_ON:
-                    log.debug("DP-Janitor: no empty_cache callable available for %s", key)
-                return None
-            self._invoke_empty_cache(use_fn, dev)
-            return time.time() - start
-
-        if DEBUG_ON:
+        try:
+            success = torch_empty_cache_any(device=dev, gc=False)
+        except Exception as exc:
+            if DEBUG_ON:
+                log.debug("DP-Janitor: empty_cache failed for %s (%s)", key, exc)
+            return None
+        if not success and DEBUG_ON:
             log.debug("DP-Janitor: unsupported device type '%s' for key %s", dev.type, key)
-        return None
+            return None
+        return time.time() - start
 
     @staticmethod
     def _format_gib_value(value: float) -> str:
@@ -2103,29 +1985,5 @@ class DeviceThreadPool:
                 if any(count > 0 for count in pending_map.values()):
                     self._gc_event.set()
 
-    # Legacy helper (not used by janitor). Kept for compatibility with any
-    # external callers that previously expected a "clear everything" helper.
     def _empty_all_caches(self):
-        """
-        Call the captured originals if available. This does not consult the live
-        attribute and therefore does not pick up monkeypatching. Prefer the janitor’s
-        per-device logic for production use.
-        """
-        if TORCH_CUDA_EMPTY_CACHE is not None:
-            for key in self._ordered_keys:
-                dev = self._devices_by_key[key]
-                if dev.type != "cuda":
-                    continue
-                with torch.cuda.device(dev.index):
-                    TORCH_CUDA_EMPTY_CACHE()
-        if TORCH_XPU_EMPTY_CACHE is not None:
-            for key in self._ordered_keys:
-                dev = self._devices_by_key[key]
-                if dev.type != "xpu":
-                    continue
-                with torch.xpu.device(dev.index):
-                    TORCH_XPU_EMPTY_CACHE()
-        if TORCH_MPS_EMPTY_CACHE is not None:
-            has_mps_device = any(self._devices_by_key[k].type == "mps" for k in self._ordered_keys)
-            if has_mps_device:
-                TORCH_MPS_EMPTY_CACHE()
+        torch_empty_cache_any(gc=False)

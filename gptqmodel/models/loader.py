@@ -8,19 +8,18 @@ from __future__ import annotations
 import os
 import time
 from importlib.metadata import PackageNotFoundError, version
+from itertools import chain
 from typing import Dict, List, Optional, Union
 
 import torch
 import transformers
 
+from ..utils.modelscope import ensure_modelscope_available
 from ..utils.structure import print_module_tree
 
 
-if os.getenv('GPTQMODEL_USE_MODELSCOPE', 'False').lower() in ['true', '1']:
-    try:
-        from modelscope import snapshot_download
-    except Exception:
-        raise ModuleNotFoundError("env `GPTQMODEL_USE_MODELSCOPE` used but modelscope pkg is not found: please install with `pip install modelscope`.")
+if ensure_modelscope_available():
+    from modelscope import snapshot_download
 else:
     from huggingface_hub import snapshot_download
 
@@ -36,6 +35,7 @@ from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
+from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
 from ..utils.machete import _validate_machete_device_support
 from ..utils.marlin import _validate_marlin_device_support
@@ -57,6 +57,8 @@ from ._const import DEVICE, normalize_device
 log = setup_logger()
 
 ATTN_IMPLEMENTATION = "attn_implementation"
+
+
 def parse_version_string(version_str: str):
     try:
         return Version(version_str)
@@ -106,12 +108,15 @@ def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
     if is_local:
         return os.path.normpath(pretrained_model_id_or_path)
-    else:
-        # Clone kwargs before modifying
-        download_kwargs = kwargs.copy()
-        download_kwargs.pop("attn_implementation", None)
-        download_kwargs.pop("use_flash_attention_2", None)
-        return snapshot_download(pretrained_model_id_or_path, **download_kwargs)
+    def _log_removed(removed: list[str]):
+        log.debug("Loader: dropping unsupported snapshot_download kwargs: %s", ", ".join(removed))
+
+    return safe_kwargs_call(
+        snapshot_download,
+        pretrained_model_id_or_path,
+        kwargs=kwargs,
+        on_removed=_log_removed,
+    )
 
 
 def ModelLoader(cls):
@@ -561,9 +566,6 @@ def ModelLoader(cls):
                 )
 
 
-
-        import torch
-
         def build_layerwise_device_map(
                 model,
                 device,
@@ -617,20 +619,48 @@ def ModelLoader(cls):
             # 1–3. Assign input embeddings, layers, and ignored modules
             # -------------------------------------------------------------
             # Input embeddings → GPU 0
-            in_emb = model.get_input_embeddings() if hasattr(model, "get_input_embeddings") else None
+            try:
+                in_emb = model.get_input_embeddings()
+            except NotImplementedError:
+                log.warning("Model does not implement get_input_embeddings. Skipping input embeddings assignment.")
+                in_emb = None
             assign(in_emb, device_ids[0])
 
             # Alternating layers
+            layer_name2devid: Dict[str, int] = {}
+
             for i, layer in enumerate(layers):
                 gpu = device_ids[i % num_gpus]
                 assign(layer, gpu)
+                lname = mod2name.get(layer)
+                if lname is not None:
+                    layer_name2devid[lname] = gpu
 
             # Ignored modules - skip input embeddings to avoid overriding GPU 0 assignment
+            # Iterate over modules that should be ignored during default layer-wise mapping
             for mod in ignore_modules:
+                # Preserve GPU-0 placement for the input embedding module if it exists
                 if in_emb is not None and mod is in_emb:
                     continue  # Skip input embedding to preserve GPU 0 assignment
-                assign(mod, device_ids[-1])
-
+                # Retrieve the module’s fully-qualified name
+                name = mod2name.get(mod)
+                if name is None:
+                    continue
+                # Walk up the module hierarchy to find the closest ancestor that already has a device assignment
+                owner = name
+                dev_id = None
+                while owner:
+                    if owner in layer_name2devid:
+                        dev_id = layer_name2devid[owner]
+                        break
+                    if "." not in owner:
+                        break
+                    owner = owner.rsplit(".", 1)[0]
+                # If no ancestor is found, fall back to the last GPU
+                if dev_id is None:
+                    dev_id = device_ids[-1]
+                # Assign the current module to the determined device
+                assign(mod, dev_id)
             # -------------------------------------------------------------
             # 4. Handle lm_head / output projection explicitly
             # -------------------------------------------------------------
@@ -656,7 +686,7 @@ def ModelLoader(cls):
             # 5. Safety check: ensure all params are covered
             # -------------------------------------------------------------
             missing = [
-                n for n, _ in model.named_parameters()
+                n for n, _ in chain(model.named_parameters(), model.named_buffers())
                 if not any(n == k or n.startswith(k + ".") for k in device_map)
             ]
             module_names = set(mod2name.values())
@@ -690,6 +720,27 @@ def ModelLoader(cls):
                     log.info(f"Loader: dropping parent '{name}' from device_map to preserve child placements.")
                     device_map.pop(name, None)
 
+            # Collect parameters/buffers that were not assigned to any device in the current device_map
+            missing_after_prune = [
+                n for n, _ in chain(model.named_parameters(), model.named_buffers())
+                if not any(n == k or n.startswith(k + ".") for k in device_map)
+            ]
+            # If any tensors remain unmapped, assign them to the last GPU as a fallback
+            if missing_after_prune:
+                fallback_device = device_ids[-1]
+                for param_name in missing_after_prune:
+                    # Walk up the module tree until we find a module name that exists in module_names
+                    owner = param_name
+                    while owner and owner not in module_names:
+                        if "." not in owner:
+                            owner = ""
+                        else:
+                            owner = owner.rsplit(".", 1)[0]
+                    # Map the closest owning module to the fallback device
+                    if owner:
+                        device_map.setdefault(owner, device_strs[fallback_device])
+                    else:
+                        log.info(f"Loader: unable to map param '{param_name}' to a module; skipping fallback assignment.")
             # optional logging for debug
             log.info(f"Loader: Built map across {num_gpus} GPU(s), "
                   f"{len(device_map)} entries. First 8: {list(device_map.items())[:8]}")
@@ -723,7 +774,7 @@ def ModelLoader(cls):
 
             if qcfg.format == FORMAT.GPTQ:
                 # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
-                if not qcfg.sym and not qcfg.is_quantized_by_v2():
+                if not qcfg.sym and not qcfg.is_quantized_by_gptaq():
                     raise ValueError(
                         f"Format: Loading of a sym=False model with format={FORMAT.GPTQ} is only supported if produced by gptqmodel version >= {MIN_VERSION_WITH_V2}"
                     )

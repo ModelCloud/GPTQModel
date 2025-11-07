@@ -57,10 +57,13 @@ class LoopProcessor:
             prepare_dataset_func: Optional[Callable] = None,
             calibration_concat_size: Optional[int] = None,
             calibration_sort: Optional[str] = None,
+            calibration_concat_separator: Optional[str] = None,
             batch_size: int = 1,
             require_fwd: bool = True,
             fwd_after_process: bool = True,
             fwd_all_modules_in_single_pass: bool = False,
+            subset_forward_early_stop: bool = False,
+            enable_activation_capture_flag: bool = False,
     ):
         # process level lock
         self.lock = threading.Lock()
@@ -78,7 +81,7 @@ class LoopProcessor:
         # looper should bypass generate + hooks if this is false
         self.require_fwd = require_fwd # default True
 
-        # after process(), do we need to forward again? paried with require_fwd == True
+        # after process(), do we need to forward again? paired with require_fwd == True
         # if true, forward output is captured post process() and saved for next loop as input
         # if false, forward output before process() call is saved for next loop as input
         self.fwd_after_process = fwd_after_process # default True
@@ -87,6 +90,10 @@ class LoopProcessor:
         # if true, fwd is repeated based on module dep sub-groups
         # if false, sub-module groups are merged as one and fwd happens in one pass
         self.fwd_all_modules_in_single_pass = fwd_all_modules_in_single_pass # default False
+        # when True, stop the layer forward immediately after the final module in a subset fires
+        self.subset_forward_early_stop = subset_forward_early_stop
+        # enable capture-only hooks (e.g. ':?') for processors that require activations
+        self.enable_activation_capture = enable_activation_capture_flag
 
         self.inputs_cache: InputCache = InputCache(None, None, None, None)
         self.tasks = {}
@@ -128,10 +135,13 @@ class LoopProcessor:
             if prepare_dataset_func is None:
                 raise ValueError("prepare_dataset_func must be provided when calibration data is supplied.")
 
-            calibration = prepare_dataset_func(calibration_dataset=calibration,
-                                               calibration_dataset_concat_size=calibration_concat_size,
-                                               calibration_dataset_sort=calibration_sort,
-                                               batch_size=batch_size)
+            calibration = prepare_dataset_func(
+                calibration_dataset=calibration,
+                calibration_dataset_concat_size=calibration_concat_size,
+                calibration_dataset_sort=calibration_sort,
+                batch_size=batch_size,
+                calibration_concat_separator=calibration_concat_separator,
+            )
 
             # Calculate the average length of the average input_ids
             total_input_ids_length = 0
@@ -435,9 +445,11 @@ class LoopProcessor:
             return "n/a"
 
         def _format_gib(value: float) -> str:
-            text = f"{value:.1f}"
-            if text.endswith(".0"):
+            text = f"{value:.2f}"
+            if text.endswith("00"):
                 text = text[:-2]
+            elif text.endswith("0"):
+                text = text[:-1]
             return f"{text}G"
 
         grouped: Dict[str, List[Tuple[str, float, int]]] = {}
@@ -545,7 +557,15 @@ class LoopProcessor:
         pass
 
     # do work and return processor.self state which will updated/merged
-    def process(self, module: NamedModule, device: torch.device = None):
+    def process(
+            self,
+            module: NamedModule,
+            device: torch.device = None,
+            subset: Optional[Dict[str, NamedModule]] = None,
+            previous_subset: Optional[Dict[str, NamedModule]] = None,
+            subset_index: Optional[int] = None,
+            subset_total: Optional[int] = None,
+    ):
         pass
 
     # last step, after all loop processor is called

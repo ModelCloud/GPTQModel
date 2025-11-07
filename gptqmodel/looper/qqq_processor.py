@@ -5,7 +5,7 @@
 
 import contextlib
 import copy
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 import torch
 from torch.nn import Module
@@ -26,14 +26,31 @@ from ..utils.torch import CPU, DEVICE_0, tf32_disable_guard, torch_streamCtx, to
 log = setup_logger()
 
 class QQQProcessor(LoopProcessor):
-    def __init__(self, tokenizer, qcfg: QuantizeConfig, calibration, prepare_dataset_func,
-                 calibration_concat_size: Optional[int], calibration_sort: Optional[str], batch_size: int,
-                 require_fwd: bool = True, calculate_w_wq_diff: bool = False):
+    def __init__(
+        self,
+        tokenizer,
+        qcfg: QuantizeConfig,
+        calibration,
+        prepare_dataset_func,
+        calibration_concat_size: Optional[int],
+        calibration_sort: Optional[str],
+        batch_size: int,
+        require_fwd: bool = True,
+        calculate_w_wq_diff: bool = False,
+        calibration_concat_separator: Optional[str] = None,
+    ):
 
-        super().__init__(tokenizer=tokenizer, qcfg=qcfg, calibration=calibration,
-                         calibration_concat_size=calibration_concat_size, calibration_sort=calibration_sort,
-                         prepare_dataset_func=prepare_dataset_func, batch_size=batch_size,
-                         require_fwd=require_fwd)
+        super().__init__(
+            tokenizer=tokenizer,
+            qcfg=qcfg,
+            calibration=calibration,
+            calibration_concat_size=calibration_concat_size,
+            calibration_sort=calibration_sort,
+            calibration_concat_separator=calibration_concat_separator,
+            prepare_dataset_func=prepare_dataset_func,
+            batch_size=batch_size,
+            require_fwd=require_fwd,
+        )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
@@ -100,7 +117,15 @@ class QQQProcessor(LoopProcessor):
             q.add_batch(inp[0].data, out.data)  # noqa: F821
         return tmp
 
-    def process(self, module: NamedModule):
+    def process(
+        self,
+        module: NamedModule,
+        device: torch.device = None,
+        subset: Optional[Dict[str, NamedModule]] = None,
+        previous_subset: Optional[Dict[str, NamedModule]] = None,
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ):
         self.pb.title(f"Quantizing {module.name} in layer ").draw()
         qqq = self.tasks
 

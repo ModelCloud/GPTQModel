@@ -19,7 +19,7 @@ class TestLing(ModelTest):
     }
     TRUST_REMOTE_CODE = True
     # EVAL_BATCH_SIZE = 6
-    V2 = False
+    GPTQA = False
     DEBUG = True
     ACT_GROUP_AWARE = True
     DESC_ACT = False
