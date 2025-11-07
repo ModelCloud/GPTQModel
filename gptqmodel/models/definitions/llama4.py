@@ -81,4 +81,3 @@ class Llama4QModel(BaseQModel):
                     return out, router_logits
 
             llama4_modeling.Llama4TextMoe = SequentialLlama4TextMoe
-            

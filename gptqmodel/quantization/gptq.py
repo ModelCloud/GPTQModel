@@ -577,7 +577,7 @@ class GPTQ:
                     except:
                         log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 1/2 in 0.25s")
                         time.sleep(0.25)
-                        try:                    
+                        try:
                             result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
                         except:
                             log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 2/2 in 0.75s")
