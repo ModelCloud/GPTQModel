@@ -12,7 +12,7 @@ import logging
 import shutil
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple
 
 import torch
 from safetensors import safe_open
@@ -82,12 +82,12 @@ def normalize_device(device: Optional[str]) -> Optional[str]:
 
 def _get_compressed_tensors_dependencies() -> dict:
     try:
-        from compressed_tensors.quantization import QuantizationConfig
-        from compressed_tensors.quantization.lifecycle.apply import apply_quantization_config
         from compressed_tensors.compressors.base import BaseCompressor
         from compressed_tensors.compressors.model_compressors.model_compressor import (
             map_module_to_scheme,
         )
+        from compressed_tensors.quantization import QuantizationConfig
+        from compressed_tensors.quantization.lifecycle.apply import apply_quantization_config
     except ImportError as exc:  # pragma: no cover - exercised when dependency missing
         raise RuntimeError(
             "Support for compressed-tensors quantized models requires the "
@@ -190,7 +190,7 @@ def _discover_compressed_tensors_module_schemes(
 
 def _prepare_compressed_tensors_context(
     model_path: Path, quant_cfg: dict
-) -> tuple["QuantizationConfig", Dict[str, "QuantizationScheme"], "BaseCompressor"]:
+) -> tuple["QuantizationConfig", Dict[str, "QuantizationScheme"], "BaseCompressor"]: # noqa
     deps = _get_compressed_tensors_dependencies()
 
     QuantizationConfig = deps["QuantizationConfig"]

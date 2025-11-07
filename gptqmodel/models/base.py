@@ -975,9 +975,8 @@ class BaseQModel(nn.Module):
         last_module_name = None
         last_module_root = None  # self_attn.* has root == self_attn, mlp.* has root == mlp
 
-        num_experts = None
         if self.model.config is not None and self.dynamic_expert_index is not None:
-            num_experts = self.get_num_experts(self.model.config)
+            self.get_num_experts(self.model.config)
 
         def strip_non_quantize_flags(module_name):
             for flag in NON_QUANTIZE_FLAGS:

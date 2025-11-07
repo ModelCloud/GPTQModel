@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -199,8 +200,8 @@ def test_dequantize_model_compressed_tensors_pack(tmp_path):
     pytest.importorskip("transformers")
 
     from compressed_tensors.compressors.quantized_compressors.pack_quantized import pack_to_int32
-    from compressed_tensors.quantization.quant_args import QuantizationArgs
     from compressed_tensors.quantization.lifecycle.forward import dequantize, quantize
+    from compressed_tensors.quantization.quant_args import QuantizationArgs
     from compressed_tensors.quantization.utils import calculate_qparams
     from transformers import LlamaConfig
 
@@ -296,8 +297,8 @@ def test_dequantize_model_compressed_tensors_pack(tmp_path):
     save_file(tensors, str(model_dir / shard_name))
     write_index(model_dir, shard_name, list(tensors.keys()))
 
-    from gptqmodel.utils.model_dequant import detect_format, load_json
     import gptqmodel.utils.model_dequant as model_dequant_module
+    from gptqmodel.utils.model_dequant import detect_format, load_json
 
     module_path = Path(model_dequant_module.__file__).resolve()
     assert REPO_ROOT in module_path.parents
