@@ -5,6 +5,7 @@
 
 """Straightforward monkey patch helpers for nogil runtimes."""
 
+import importlib
 import threading
 import time
 from importlib.metadata import version
@@ -43,7 +44,13 @@ def patch_triton_autotuner() -> None:
     except ImportError:
         return
 
-    triton_version_str = version("triton")
+    try:
+        triton_version_str = version("triton")
+    except importlib.metadata.PackageNotFoundError:
+        try:
+            triton_version_str = version("pytorch_triton_xpu")
+        except Exception:
+            raise ValueError("Can't get triton version")
 
     try:
         triton_ver = Version(triton_version_str)
