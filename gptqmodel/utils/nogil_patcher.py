@@ -5,9 +5,9 @@
 
 """Straightforward monkey patch helpers for nogil runtimes."""
 
+import importlib
 import threading
 import time
-import importlib
 from importlib.metadata import version
 
 from packaging.version import InvalidVersion, Version
