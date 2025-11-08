@@ -72,9 +72,9 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             **kwargs,
         )
         if register_buffers:
-            qweight_shape = self._awq_qweight_shape()
+            qweight_shape = self.awq_qweight_shape()
             group_size = max(int(self.group_size), 1)
-            group_rows = self._awq_group_count()
+            group_rows = self.awq_group_count()
             pack_cols = qweight_shape[1]
 
             self.register_buffer(
@@ -96,44 +96,13 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             else:
                 self.bias = None
 
-    def _awq_qweight_shape(self):
+    def awq_qweight_shape(self):
         pack_cols = max(1, self.out_features // self.pack_factor)
         return self.in_features, pack_cols
 
-    def _awq_group_count(self):
+    def awq_group_count(self):
         group_size = max(int(self.group_size), 1)
         return max(1, math.ceil(self.in_features / group_size))
-
-    # def _load_from_state_dict(
-    #     self,
-    #     state_dict,
-    #     prefix,
-    #     local_metadata,
-    #     strict,
-    #     missing_keys,
-    #     unexpected_keys,
-    #     error_msgs,
-    # ):
-    #     self.register_awq_buffers()
-    #     super()._load_from_state_dict(
-    #         state_dict,
-    #         prefix,
-    #         local_metadata,
-    #         strict,
-    #         missing_keys,
-    #         unexpected_keys,
-    #         error_msgs,
-    #     )
-    #     qweight = getattr(self, "qweight", None)
-    #     if torch.is_tensor(qweight):
-    #         expected_shape = self._awq_qweight_shape()
-    #         if tuple(qweight.shape) != expected_shape:
-    #             raise ValueError(
-    #                 f"{self.__class__.__name__} only loads AWQ-formatted qweight tensors with "
-    #                 f"shape {expected_shape}, but received {tuple(qweight.shape)}."
-    #             )
-    #         if qweight.dtype != self.pack_dtype:
-    #             self.qweight = qweight.to(dtype=self.pack_dtype).contiguous()
 
     def transform_cpu_awq(self, dtype):
         src_scales = self.scales
@@ -141,7 +110,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             src_scales = src_scales.to(torch.float16)
         src_scales = src_scales.contiguous()
 
-        # Cache unpacked AWQ tensors
+        # Unpack AWQ tensors
         iweight, izeros = unpack_awq(self.qweight, self.qzeros, self.bits)
         iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
         max_val = (1 << self.bits) - 1
