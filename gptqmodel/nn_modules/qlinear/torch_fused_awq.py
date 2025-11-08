@@ -186,12 +186,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
         self._assert_supported_dtype(x_flat.dtype)
-        if (
-            not self.training
-            and not self.transformed
-            and TORCH_HAS_FUSED_OPS
-            and not self._uses_awq_layout()
-        ):
+        if not self.training and not self.transformed and TORCH_HAS_FUSED_OPS:
             self.transform(x_flat.dtype, x_flat.device.type)
             self.transformed = True
             if x_flat.device.type == "cpu":
