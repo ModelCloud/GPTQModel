@@ -27,7 +27,7 @@ def pack_awq(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
 
 
 @pytest.mark.skipif(not TORCH_HAS_FUSED_OPS, reason="Torch fused ops require PyTorch>=2.8")
-@pytest.mark.parametrize("dtype", [torch.float16], ids=["float16"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["float16", "bfloat16"])
 def test_torch_fused_awq_matches_baseline_torch_kernel(dtype):
     torch.manual_seed(0)
 
