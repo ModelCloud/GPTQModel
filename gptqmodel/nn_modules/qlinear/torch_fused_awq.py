@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import math
+
 import torch
 
 from ...adapter.adapter import Adapter
@@ -21,7 +23,7 @@ log = setup_logger()
 
 
 class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
-    """Torch fused AWQ variant that reuses the GPTQ fused kernels via CPU int4 packing."""
+    """Torch fused AWQ variant based on GPTQ fused kernels via CPU int4 packing."""
 
     QUANT_TYPE = "torch_fused_awq"
     SUPPORTS_BITS = TorchFusedQuantLinear.SUPPORTS_BITS
@@ -66,62 +68,72 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             adapter=adapter,
-            register_buffers=register_buffers,
+            register_buffers=False,
             **kwargs,
         )
+        if register_buffers:
+            qweight_shape = self._awq_qweight_shape()
+            group_size = max(int(self.group_size), 1)
+            group_rows = self._awq_group_count()
+            pack_cols = qweight_shape[1]
 
-    def _load_from_state_dict(
-        self,
-        state_dict,
-        prefix,
-        local_metadata,
-        strict,
-        missing_keys,
-        unexpected_keys,
-        error_msgs,
-    ):
-        qweight_key = prefix + "qweight"
-        awq_tensor = None
-        if qweight_key in state_dict:
-            candidate = state_dict[qweight_key]
-            if not torch.is_tensor(candidate):
-                raise TypeError(f"{qweight_key} must be a tensor to load AWQ weights.")
-            awq_tensor = candidate.to(self.pack_dtype).clone()
-            expected_rows = self.in_features
-            expected_cols = max(1, self.out_features // self.pack_factor)
-            if awq_tensor.shape != (expected_rows, expected_cols):
-                raise ValueError(
-                    f"{self.__class__.__name__} expects AWQ qweight shape "
-                    f"{(expected_rows, expected_cols)}, but received {tuple(awq_tensor.shape)}."
-                )
-            placeholder = getattr(self, "qweight", None)
-            if isinstance(placeholder, torch.Tensor) and placeholder.numel() == awq_tensor.numel():
-                state_dict[qweight_key] = torch.zeros_like(placeholder)
-            else:
-                rows = max(1, self.in_features // self.pack_factor)
-                cols = self.out_features
-                state_dict[qweight_key] = torch.zeros(
-                    (rows, cols),
-                    dtype=self.pack_dtype,
-                    device=awq_tensor.device,
-                )
-        super()._load_from_state_dict(
-            state_dict,
-            prefix,
-            local_metadata,
-            strict,
-            missing_keys,
-            unexpected_keys,
-            error_msgs,
-        )
-        if awq_tensor is not None:
-            state_dict[qweight_key] = awq_tensor
-            device = getattr(self, "qweight", awq_tensor).device
             self.register_buffer(
                 "qweight",
-                awq_tensor.to(device=device, dtype=self.pack_dtype).contiguous(),
-                persistent=True,
+                torch.zeros(qweight_shape, dtype=self.pack_dtype),
             )
+            self.register_buffer(
+                "qzeros",
+                torch.zeros((group_rows, pack_cols), dtype=self.pack_dtype),
+            )
+            self.register_buffer(
+                "scales",
+                torch.zeros((group_rows, self.out_features), dtype=torch.float16),
+            )
+            g_idx = torch.arange(self.in_features, dtype=torch.int32) // group_size
+            self.register_buffer("g_idx", g_idx)
+            if bias:
+                self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16))
+            else:
+                self.bias = None
+
+    def _awq_qweight_shape(self):
+        pack_cols = max(1, self.out_features // self.pack_factor)
+        return self.in_features, pack_cols
+
+    def _awq_group_count(self):
+        group_size = max(int(self.group_size), 1)
+        return max(1, math.ceil(self.in_features / group_size))
+
+    # def _load_from_state_dict(
+    #     self,
+    #     state_dict,
+    #     prefix,
+    #     local_metadata,
+    #     strict,
+    #     missing_keys,
+    #     unexpected_keys,
+    #     error_msgs,
+    # ):
+    #     self.register_awq_buffers()
+    #     super()._load_from_state_dict(
+    #         state_dict,
+    #         prefix,
+    #         local_metadata,
+    #         strict,
+    #         missing_keys,
+    #         unexpected_keys,
+    #         error_msgs,
+    #     )
+    #     qweight = getattr(self, "qweight", None)
+    #     if torch.is_tensor(qweight):
+    #         expected_shape = self._awq_qweight_shape()
+    #         if tuple(qweight.shape) != expected_shape:
+    #             raise ValueError(
+    #                 f"{self.__class__.__name__} only loads AWQ-formatted qweight tensors with "
+    #                 f"shape {expected_shape}, but received {tuple(qweight.shape)}."
+    #             )
+    #         if qweight.dtype != self.pack_dtype:
+    #             self.qweight = qweight.to(dtype=self.pack_dtype).contiguous()
 
     def transform_cpu_awq(self, dtype):
         src_scales = self.scales

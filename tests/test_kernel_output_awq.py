@@ -22,6 +22,7 @@ from gptqmodel.nn_modules.qlinear.awq_marlin import (
     marlin_import_exception,
 )
 from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
 from gptqmodel.utils.marlin import marlin_make_workspace_new
 
 
@@ -30,6 +31,7 @@ os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 log = LogBar.shared()
 
 DEVICE = torch.device("cuda:0")
+CPU_DEVICE = torch.device("cpu")
 
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -50,6 +52,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         (BACKEND.GEMM, torch.float16, 0.004),
         # (BACKEND.GEMM, torch.bfloat16, 0.05),
         (BACKEND.MARLIN, torch.float16, 0.006),
+        (BACKEND.TORCH_FUSED_AWQ, torch.float16, 0.004),
         # (BACKEND.MARLIN, torch.bfloat16, 0.05),
     ]
 
@@ -91,6 +94,16 @@ class TestAwqKernelOutput(unittest.TestCase):
         cls.modules[BACKEND.MARLIN] = cls._build_marlin_module(
             qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
         )
+
+        try:
+            cls.modules[BACKEND.TORCH_FUSED_AWQ] = cls._build_torch_fused_awq_module(
+                qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
+            )
+        except Exception as exc:
+            cls.backend_skip_reason[BACKEND.TORCH_FUSED_AWQ] = (
+                f"Torch fused AWQ kernel unavailable: {exc}"
+            )
+            cls.modules[BACKEND.TORCH_FUSED_AWQ] = None
 
         base_inputs = cls._generate_inputs()
         cls.inputs: Dict[torch.dtype, List[torch.Tensor]] = {}
@@ -248,6 +261,35 @@ class TestAwqKernelOutput(unittest.TestCase):
         return module
 
     @classmethod
+    def _build_torch_fused_awq_module(
+        cls,
+        qweight_cpu: torch.Tensor,
+        qzeros_cpu: torch.Tensor,
+        scales_cpu: torch.Tensor,
+        bias_cpu: torch.Tensor,
+    ) -> TorchFusedAwqQuantLinear:
+        module = TorchFusedAwqQuantLinear(
+            bits=cls.BITS,
+            group_size=cls.GROUP_SIZE,
+            sym=True,
+            desc_act=False,
+            in_features=cls.in_features,
+            out_features=cls.out_features,
+            bias=True,
+            adapter=None,
+            register_buffers=True,
+        ).to(CPU_DEVICE)
+
+        module.qweight.copy_(qweight_cpu.to(CPU_DEVICE))
+        module.qzeros.copy_(qzeros_cpu.to(CPU_DEVICE))
+        module.scales.copy_(scales_cpu.to(torch.float16).to(CPU_DEVICE))
+        module.bias.copy_(bias_cpu.to(torch.float16).to(CPU_DEVICE))
+
+        module.eval()
+        module.post_init()
+        return module
+
+    @classmethod
     def _generate_inputs(cls) -> List[torch.Tensor]:
         large_shapes = [(4, 32), (2, 64), (1, 96)]
         medium_shapes = [(2, 32), (1, 48), (1, 32)]
@@ -288,18 +330,36 @@ class TestAwqKernelOutput(unittest.TestCase):
         *,
         compute_dtype: Optional[torch.dtype] = None,
         output_dtype: Optional[torch.dtype] = None,
+        target_device: Optional[torch.device] = None,
     ) -> List[torch.Tensor]:
+        if target_device is None:
+            target_device = cls._infer_module_device(module)
         outputs: List[torch.Tensor] = []
         with torch.inference_mode():
             for tensor in inputs:
                 local_tensor = tensor
-                if compute_dtype is not None and tensor.dtype != compute_dtype:
-                    local_tensor = tensor.to(dtype=compute_dtype)
+                if local_tensor.device != target_device:
+                    local_tensor = local_tensor.to(device=target_device)
+                if compute_dtype is not None and local_tensor.dtype != compute_dtype:
+                    local_tensor = local_tensor.to(dtype=compute_dtype)
                 result = module(local_tensor)
                 if output_dtype is not None and result.dtype != output_dtype:
                     result = result.to(dtype=output_dtype)
                 outputs.append(result.detach().cpu())
         return outputs
+
+    @staticmethod
+    def _infer_module_device(module: torch.nn.Module) -> torch.device:
+        try:
+            tensor = next(module.parameters())
+            return tensor.device
+        except StopIteration:
+            pass
+        try:
+            tensor = next(module.buffers())
+            return tensor.device
+        except StopIteration:
+            return torch.device("cpu")
 
     def _maybe_skip_backend(self, backend: BACKEND) -> None:
         reason = self.backend_skip_reason.get(backend)
