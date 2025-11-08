@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import torch
 from safetensors import safe_open
+from tabulate import tabulate
 
 from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
@@ -141,4 +142,19 @@ def test_torch_fused_awq_matches_checkpoint_module():
     fused_out = fused_module(x)
 
     tol = 5e-3
+    abs_diff = (fused_out - baseline).abs()
+    rel_diff = abs_diff / baseline.abs().clamp_min(1e-6)
+    summary = tabulate(
+        [
+            [
+                str(dtype),
+                f"{tol:.4g}",
+                f"{tol:.4g}",
+                f"{abs_diff.max().item():.4e}",
+                f"{rel_diff.max().item():.4e}",
+            ]
+        ],
+        headers=["dtype", "rtol", "atol", "abs_max", "rel_max"],
+    )
+    print(summary)
     torch.testing.assert_close(fused_out, baseline, rtol=tol, atol=tol)
