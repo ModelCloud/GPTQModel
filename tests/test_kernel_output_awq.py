@@ -38,6 +38,10 @@ RED = "\033[31m"
 RESET = "\033[0m"
 
 
+def _xpu_available() -> bool:
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
 class TestAwqKernelOutput(unittest.TestCase):
     MODEL_PATH = Path("/monster/data/model/deepseek-r1-distill-qwen-7b-awq")
     TARGET = "model.layers.20.self_attn.v_proj"
@@ -58,13 +62,14 @@ class TestAwqKernelOutput(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        if not torch.cuda.is_available():
-            raise unittest.SkipTest("CUDA is required for AWQ kernel output checks.")
-
-        cls.device = DEVICE
+        cls.cuda_available = torch.cuda.is_available()
+        cls.device = DEVICE if cls.cuda_available else CPU_DEVICE
         cls.log = log
         cls._weight_map = cls._load_weight_map()
         cls.backend_skip_reason: Dict[BACKEND, str] = {}
+        if not cls.cuda_available:
+            cls.backend_skip_reason[BACKEND.GEMM] = "CUDA is required for GEMM backend."
+            cls.backend_skip_reason[BACKEND.MARLIN] = "CUDA is required for AWQ Marlin kernel."
 
         try:
             tensors = cls._load_awq_tensors(cls.TARGET)
@@ -77,6 +82,10 @@ class TestAwqKernelOutput(unittest.TestCase):
             scales_cpu,
             bias_cpu,
         ) = tensors
+        cls.qweight_cpu = qweight_cpu
+        cls.qzeros_cpu = qzeros_cpu
+        cls.scales_cpu = scales_cpu
+        cls.bias_cpu = bias_cpu
 
         cls.in_features = qweight_cpu.shape[0]
         cls.out_features = qweight_cpu.shape[1] * (32 // cls.BITS)
@@ -87,12 +96,16 @@ class TestAwqKernelOutput(unittest.TestCase):
             qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
         )
 
-        cls.modules[BACKEND.GEMM] = cls._build_gemm_module(
-            qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
+        cls.modules[BACKEND.GEMM] = (
+            cls._build_gemm_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+            if cls.cuda_available
+            else None
         )
 
-        cls.modules[BACKEND.MARLIN] = cls._build_marlin_module(
-            qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
+        cls.modules[BACKEND.MARLIN] = (
+            cls._build_marlin_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+            if cls.cuda_available
+            else None
         )
 
         try:
@@ -136,7 +149,8 @@ class TestAwqKernelOutput(unittest.TestCase):
         for module in getattr(cls, "modules", {}).values():
             if module is not None:
                 del module
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     @classmethod
     def _load_weight_map(cls) -> Dict[str, str]:
@@ -267,6 +281,8 @@ class TestAwqKernelOutput(unittest.TestCase):
         qzeros_cpu: torch.Tensor,
         scales_cpu: torch.Tensor,
         bias_cpu: torch.Tensor,
+        *,
+        device: torch.device = CPU_DEVICE,
     ) -> TorchFusedAwqQuantLinear:
         module = TorchFusedAwqQuantLinear(
             bits=cls.BITS,
@@ -278,12 +294,12 @@ class TestAwqKernelOutput(unittest.TestCase):
             bias=True,
             adapter=None,
             register_buffers=True,
-        ).to(CPU_DEVICE)
+        ).to(device)
 
-        module.qweight.copy_(qweight_cpu.to(CPU_DEVICE))
-        module.qzeros.copy_(qzeros_cpu.to(CPU_DEVICE))
-        module.scales.copy_(scales_cpu.to(torch.float16).to(CPU_DEVICE))
-        module.bias.copy_(bias_cpu.to(torch.float16).to(CPU_DEVICE))
+        module.qweight.copy_(qweight_cpu.to(device))
+        module.qzeros.copy_(qzeros_cpu.to(device))
+        module.scales.copy_(scales_cpu.to(torch.float16).to(device))
+        module.bias.copy_(bias_cpu.to(torch.float16).to(device))
 
         module.eval()
         module.post_init()
@@ -295,13 +311,15 @@ class TestAwqKernelOutput(unittest.TestCase):
         medium_shapes = [(2, 32), (1, 48), (1, 32)]
         small_shapes = [(1, 32), (1, 24), (1, 16)]
 
-        try:
-            total_mem_gb = (
-                torch.cuda.get_device_properties(cls.device).total_memory
-                / (1024 ** 3)
-            )
-        except Exception:  # pragma: no cover
-            total_mem_gb = 0.0
+        total_mem_gb = 0.0
+        if cls.device.type == "cuda":
+            try:
+                total_mem_gb = (
+                    torch.cuda.get_device_properties(cls.device).total_memory
+                    / (1024 ** 3)
+                )
+            except Exception:  # pragma: no cover
+                total_mem_gb = 0.0
 
         if os.getenv("GPTQMODEL_FAST_TESTS", "0") == "1":
             shapes = small_shapes
@@ -457,3 +475,41 @@ class TestAwqKernelOutput(unittest.TestCase):
             title=f"AWQ Kernel Output {dtype}",
             reference_label="Torch AWQ output",
         )
+
+    @parameterized.expand(
+        [
+            ("cpu", "cpu"),
+            ("xpu", "xpu:0"),
+        ]
+    )
+    def test_torch_fused_awq_devices(self, _label: str, device_str: str) -> None:
+        self._maybe_skip_backend(BACKEND.TORCH_FUSED_AWQ)
+        if device_str.startswith("xpu") and not _xpu_available():
+            self.skipTest("Torch fused AWQ XPU test requires Intel XPU runtime.")
+
+        device = torch.device(device_str)
+        module = self._build_torch_fused_awq_module(
+            self.qweight_cpu,
+            self.qzeros_cpu,
+            self.scales_cpu,
+            self.bias_cpu,
+            device=device,
+        )
+
+        try:
+            actual_outputs = self._forward(
+                module,
+                self.inputs[torch.float16],
+                target_device=device,
+            )
+            self._summarize_results(
+                reference_outputs=self.reference_outputs[torch.float16],
+                actual_outputs=actual_outputs,
+                backend=BACKEND.TORCH_FUSED_AWQ,
+                dtype=torch.float16,
+                atol=0.004,
+                title=f"Torch Fused AWQ Device {device_str}",
+                reference_label="Torch AWQ output",
+            )
+        finally:
+            del module
