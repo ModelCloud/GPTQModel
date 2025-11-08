@@ -140,11 +140,11 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         self.qweight = gptq_qweight.contiguous()
 
         # Reuse the GPTQ CPU transformation to convert into int4pack layout.
-        super().transform_cpu(dtype)
+        super().transform_cpu(dtype, do_scales_and_zeros=False)
 
-        # Restore AWQ-specific scale/zero metadata for the fused op.
-        self.scales = scale_fp16.to(dtype=dtype)
-        self.qzeros = zeros_fp16.to(dtype=dtype)
+        # AWQ-specific scale/zero metadata for the fused op.
+        self.scales = scale_fp16.to(dtype=dtype).contiguous()
+        self.qzeros = zeros_fp16.to(dtype=dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
     def awq_weight_dequantize(self, device, dtype):
