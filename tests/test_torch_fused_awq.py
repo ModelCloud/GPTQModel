@@ -27,9 +27,9 @@ def pack_awq(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
 
 
 @pytest.mark.skipif(not TORCH_HAS_FUSED_OPS, reason="Torch fused ops require PyTorch>=2.8")
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["float16", "bfloat16"])
-def test_torch_fused_awq_matches_baseline_torch_kernel(dtype):
+def test_torch_fused_awq_matches_baseline_torch_kernel():
     torch.manual_seed(0)
+    dtype = torch.float16
 
     bits = 4
     in_features = 64
@@ -82,14 +82,10 @@ def test_torch_fused_awq_matches_baseline_torch_kernel(dtype):
     fused_module.eval()
 
     x = torch.randn(batch, in_features, dtype=dtype)
-    baseline = awq_module(x.to(torch.float16)).to(dtype)
+    baseline = awq_module(x)
     fused_out = fused_module(x)
 
-    tol_map = {
-        torch.float16: 5e-3,
-        torch.bfloat16: 1.1,
-    }
-    tol = tol_map[dtype]
+    tol = 5e-3
     abs_diff = (fused_out - baseline).abs()
     rel_diff = abs_diff / baseline.abs().clamp_min(1e-6)
 

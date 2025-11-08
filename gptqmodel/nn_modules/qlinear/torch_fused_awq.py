@@ -239,6 +239,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
+        self._assert_supported_dtype(x_flat.dtype)
         if not self.training and not self.transformed and TORCH_HAS_FUSED_OPS:
             self.transform(x_flat.dtype, x_flat.device.type)
             self.transformed = True
@@ -273,10 +274,16 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         awq_active = self._uses_awq_layout()
         use_awq_fallback = awq_active and x.device.type == "cpu"
         if use_awq_fallback:
-            compute_dtype = torch.float16 if x.dtype == torch.bfloat16 else x.dtype
-            weight = self._awq_weight_dense(device=x.device, dtype=compute_dtype)
-            return torch.matmul(x.to(compute_dtype), weight).to(x.dtype)
+            weight = self._awq_weight_dense(device=x.device, dtype=x.dtype)
+            return torch.matmul(x, weight)
         return super()._fused_op_forward(x)
+
+    def _assert_supported_dtype(self, dtype: torch.dtype):
+        if dtype not in self.SUPPORTS_DTYPES:
+            supported = ", ".join(str(d) for d in self.SUPPORTS_DTYPES)
+            raise TypeError(
+                f"{self.__class__.__name__} only supports input dtypes [{supported}], but received {dtype}."
+            )
 
 
 __all__ = ["TorchFusedAwqQuantLinear"]
