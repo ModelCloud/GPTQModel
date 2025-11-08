@@ -226,10 +226,10 @@ in the final storage type, accompanying metadata, and fused operator ABI.
 
 `TorchFusedAwqQuantLinear` (`gptqmodel/nn_modules/qlinear/torch_fused_awq.py`)
 reuses the CPU fused kernel while accepting checkpoints emitted by the AWQ
-tooling. An "AWQ layout" is detected whenever `qweight` has shape
-`[in_features, out_features / pack_factor]` (i.e., rows are raw input channels
-instead of packed groups). When that layout is present, `_transform_cpu_awq`
-performs an extra shim before the standard CPU packing runs:
+tooling. The module always expects `qweight` to be stored in the AWQ layout
+`[in_features, out_features / pack_factor]`, meaning each row corresponds to a
+single logical input channel. `transform_cpu_awq` performs a fixed shim before
+the standard CPU packing runs:
 
 1. **Unpack AWQ rows** – `unpack_awq` expands each column lane into eight
    outputs, yielding `iweight[int8][I, O]` and `izeros[int8][G, O]`. Both
@@ -237,7 +237,7 @@ performs an extra shim before the standard CPU packing runs:
    `quantization.awq.utils.packing_utils.AWQ_ORDER`) so the columns match the
    logical transformer layout expected by GPTQ.
 2. **Normalize zero codes** – AWQ stores integer zero points per output channel.
-   `_transform_cpu_awq` converts them into floating offsets compatible with the
+   `transform_cpu_awq` converts them into floating offsets compatible with the
    fused kernel using
    `zeros_fp16 = (2^{bits-1} - izeros) * scales_fp32`, keeping the result in
    `float16` so the metadata matches the original AWQ calibration statistics.
@@ -257,10 +257,10 @@ performs an extra shim before the standard CPU packing runs:
    calibration solved for.
 
 Because the shim runs entirely on the CPU path, `TorchFusedAwqQuantLinear`
-currently raises `NotImplementedError` when asked to transform an AWQ layout on
-`xpu` devices. Inference still benefits from the fused CPU kernel; if the module
-cannot be transformed (e.g., due to dtype mismatch or missing fused ops) it
-falls back to the dense AWQ matmul defined in `_awq_weight_dense`.
+currently raises `NotImplementedError` when asked to run the fused transform on
+`xpu` devices. If the module has not been transformed yet (or fused ops are
+unavailable), inference falls back to the dense AWQ matmul computed by
+`awq_weight_dequantize`, which simply dequantizes the cached AWQ tensors on the fly.
 
 ## Quick reference
 
