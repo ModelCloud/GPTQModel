@@ -55,7 +55,9 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         register_buffers: bool = True,
         **kwargs,
     ):
-        self._awq_buffers_ready = False
+        self._awq_qweight = None
+        self._awq_qzeros = None
+        self._awq_scales = None
 
         kwargs.setdefault("backend", BACKEND.TORCH_FUSED_AWQ)
         super().__init__(
@@ -71,20 +73,16 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        self.register_buffer("awq_qweight_src", None, persistent=False)
-        self.register_buffer("awq_qzeros_src", None, persistent=False)
-        self.register_buffer("awq_scales_src", None, persistent=False)
-        self._awq_buffers_ready = True
-        self._update_awq_buffers()
+        self._refresh_awq_cache()
 
     def post_init(self):
         super().post_init()
-        self._update_awq_buffers()
+        self._refresh_awq_cache()
 
     def register_buffer(self, name, tensor, persistent=True):
         super().register_buffer(name, tensor, persistent=persistent)
-        if getattr(self, "_awq_buffers_ready", False) and name in {"qweight", "qzeros", "scales"}:
-            self._update_awq_buffers()
+        if name in {"qweight", "qzeros", "scales"}:
+            self._refresh_awq_cache()
 
     def optimize(self):
         if self.optimized:
@@ -108,7 +106,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             candidate = state_dict[qweight_key]
             if self._is_awq_qweight_tensor(candidate):
                 awq_tensor = candidate.to(self.pack_dtype).clone()
-                self.awq_qweight_src = awq_tensor.clone()
+                self._awq_qweight = awq_tensor.clone()
                 placeholder = getattr(self, "qweight", None)
                 if isinstance(placeholder, torch.Tensor) and placeholder.numel() == awq_tensor.numel():
                     state_dict[qweight_key] = torch.zeros_like(placeholder)
@@ -137,7 +135,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
                 awq_tensor.to(device=device, dtype=self.pack_dtype).contiguous(),
                 persistent=True,
             )
-            self._update_awq_buffers()
+            self._refresh_awq_cache()
 
     def _awq_qweight_shape(self):
         pack_cols = self.out_features // self.pack_factor
@@ -150,12 +148,15 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         exp_rows, exp_cols = self._awq_qweight_shape()
         return rows == exp_rows and cols == exp_cols
 
-    def _update_awq_buffers(self):
-        if not getattr(self, "_awq_buffers_ready", False):
-            return
+    def _refresh_awq_cache(self):
         qweight = getattr(self, "qweight", None)
         qzeros = getattr(self, "qzeros", None)
         scales = getattr(self, "scales", None)
+        if (
+            self._awq_qweight is not None
+            and (not torch.is_tensor(qweight) or not self._is_awq_qweight_tensor(qweight))
+        ):
+            return
         if (
             qweight is None
             or qzeros is None
@@ -165,27 +166,30 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             or not torch.is_tensor(scales)
             or not self._is_awq_qweight_tensor(qweight)
         ):
+            self._awq_qweight = None
+            self._awq_qzeros = None
+            self._awq_scales = None
             return
-        self.awq_qweight_src = qweight.clone()
-        self.awq_qzeros_src = qzeros.clone()
+        self._awq_qweight = qweight.clone()
+        self._awq_qzeros = qzeros.clone()
         scale_clone = scales.clone()
         if scale_clone.dtype != torch.float16:
             scale_clone = scale_clone.to(torch.float16)
-        self.awq_scales_src = scale_clone
+        self._awq_scales = scale_clone
 
     def _uses_awq_layout(self) -> bool:
-        return self.awq_qweight_src is not None
+        return self._awq_qweight is not None
 
     def _transform_cpu_awq(self, dtype):
         if (
-            self.awq_qweight_src is None
-            or self.awq_qzeros_src is None
-            or self.awq_scales_src is None
+            self._awq_qweight is None
+            or self._awq_qzeros is None
+            or self._awq_scales is None
         ):
             raise RuntimeError("AWQ state unavailable for CPU transform.")
-        self.scales = self.awq_scales_src.clone().to(dtype).contiguous()
-        scale_fp32 = self.awq_scales_src.to(torch.float32)
-        iweight, izeros = unpack_awq(self.awq_qweight_src, self.awq_qzeros_src, self.bits)
+        self.scales = self._awq_scales.clone().to(dtype).contiguous()
+        scale_fp32 = self._awq_scales.to(torch.float32)
+        iweight, izeros = unpack_awq(self._awq_qweight, self._awq_qzeros, self.bits)
         iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
         max_val = (1 << self.bits) - 1
         iweight = torch.bitwise_and(iweight, max_val)
@@ -207,15 +211,15 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
 
     def _awq_weight_dense(self, device, dtype):
         if (
-            self.awq_qweight_src is None
-            or self.awq_qzeros_src is None
-            or self.awq_scales_src is None
+            self._awq_qweight is None
+            or self._awq_qzeros is None
+            or self._awq_scales is None
         ):
             raise RuntimeError("AWQ dense weight requested without cached tensors.")
         dense = dequantize_gemm(
-            self.awq_qweight_src,
-            self.awq_qzeros_src,
-            self.awq_scales_src,
+            self._awq_qweight,
+            self._awq_qzeros,
+            self._awq_scales,
             self.bits,
             self.group_size,
         ).to(device=device, dtype=torch.float32)
