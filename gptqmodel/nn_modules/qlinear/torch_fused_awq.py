@@ -98,7 +98,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             else:
                 self.bias = None
 
-    def _prepare_awq_fused_tensors(self):
+    def prepare_awq_fused_tensors(self, need_zeros_fp16: bool = True):
         src_scales = self.scales
         if src_scales.dtype != torch.float16:
             src_scales = src_scales.to(torch.float16)
@@ -114,15 +114,17 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
 
         scale_fp16 = src_scales
         scale_fp32 = scale_fp16.to(torch.float32)
-        zero_offset = 1 << (self.bits - 1)
-        zeros_fp16 = (zero_offset - izeros.reshape_as(scale_fp32)).to(dtype=scale_fp32.dtype)
-        zeros_fp16 = (zeros_fp16 * scale_fp32).to(torch.float16)
 
-        gptq_qweight = self._pack_awq_qweight(iweight)
-        gptq_qzeros = self._pack_awq_qzeros(izeros)
-        return gptq_qweight, gptq_qzeros, scale_fp16, zeros_fp16
+        if need_zeros_fp16:
+            zero_offset = 1 << (self.bits - 1)
+            zeros_fp16 = (zero_offset - izeros.reshape_as(scale_fp32)).to(dtype=scale_fp32.dtype)
+            zeros_fp16 = (zeros_fp16 * scale_fp32).to(torch.float16)
 
-    def _pack_awq_qweight(self, iweight: torch.Tensor) -> torch.Tensor:
+        gptq_qweight = self.pack_awq_qweight(iweight)
+        gptq_qzeros = self.pack_awq_qzeros(izeros)
+        return gptq_qweight, gptq_qzeros, scale_fp16, zeros_fp16 if need_zeros_fp16 else None
+
+    def pack_awq_qweight(self, iweight: torch.Tensor) -> torch.Tensor:
         in_features, out_features = iweight.shape
         pack_factor = int(self.pack_factor)
         if in_features % pack_factor != 0:
@@ -140,7 +142,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             packed |= rows[:, lane, :].to(torch.int32) << shift
         return packed.contiguous()
 
-    def _pack_awq_qzeros(self, izeros: torch.Tensor) -> torch.Tensor:
+    def pack_awq_qzeros(self, izeros: torch.Tensor) -> torch.Tensor:
         pack_factor = int(self.pack_factor)
         if izeros.shape[1] % pack_factor != 0:
             raise ValueError(
@@ -158,7 +160,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         return packed.contiguous()
 
     def transform_cpu_awq(self, dtype):
-        gptq_qweight, gptq_qzeros, scale_fp16, zeros_fp16 = self._prepare_awq_fused_tensors()
+        gptq_qweight, gptq_qzeros, scale_fp16, zeros_fp16 = self.prepare_awq_fused_tensors()
         self.qweight = gptq_qweight
         self.qzeros = gptq_qzeros
         super().transform_cpu(dtype, do_scales_and_zeros=False)
@@ -168,7 +170,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
     def transform_xpu_awq(self, dtype):
-        gptq_qweight, gptq_qzeros, scale_fp16, _ = self._prepare_awq_fused_tensors()
+        gptq_qweight, gptq_qzeros, scale_fp16, _ = self.prepare_awq_fused_tensors(need_zeros_fp16=False)
         self.qweight = gptq_qweight
         self.qzeros = gptq_qzeros
         super().transform_xpu(dtype)
