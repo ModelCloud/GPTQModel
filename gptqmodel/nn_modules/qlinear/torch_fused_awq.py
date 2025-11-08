@@ -168,13 +168,12 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
     def transform_xpu_awq(self, dtype):
-        gptq_qweight, gptq_qzeros, scale_fp16, zeros_fp16 = self._prepare_awq_fused_tensors()
+        gptq_qweight, gptq_qzeros, scale_fp16, _zeros_fp16 = self._prepare_awq_fused_tensors()
         self.qweight = gptq_qweight
         self.qzeros = gptq_qzeros
         super().transform_xpu(dtype)
         device = self.qweight.device
         self.scales = scale_fp16.to(device=device, dtype=dtype).contiguous()
-        self.qzeros = zeros_fp16.to(device=device, dtype=dtype).contiguous()
 
     def transform_cpu(self, dtype):
         self.transform_cpu_awq(dtype)
