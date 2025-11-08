@@ -72,10 +72,12 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             **kwargs,
         )
         if register_buffers:
-            qweight_shape = self.awq_qweight_shape()
+            # AWQ packs each input row into pack_factor-wide columns for int4 lanes.
+            pack_cols = max(1, self.out_features // self.pack_factor)
+            qweight_shape = (self.in_features, pack_cols)
             group_size = max(int(self.group_size), 1)
-            group_rows = self.awq_group_count()
-            pack_cols = qweight_shape[1]
+            # Each group holds group_size input rows; ceil ensures trailing rows are captured.
+            group_rows = max(1, math.ceil(self.in_features / group_size))
 
             self.register_buffer(
                 "qweight",
@@ -95,14 +97,6 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
                 self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16))
             else:
                 self.bias = None
-
-    def awq_qweight_shape(self):
-        pack_cols = max(1, self.out_features // self.pack_factor)
-        return self.in_features, pack_cols
-
-    def awq_group_count(self):
-        group_size = max(int(self.group_size), 1)
-        return max(1, math.ceil(self.in_features / group_size))
 
     def transform_cpu_awq(self, dtype):
         src_scales = self.scales
