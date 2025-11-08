@@ -76,7 +76,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             pack_cols = max(1, self.out_features // self.pack_factor)
             qweight_shape = (self.in_features, pack_cols)
             group_size = max(int(self.group_size), 1)
-            # Each group holds group_size input rows; ceil ensures trailing rows are captured.
+            # Each group holds group_size input rows; ceil ensures remaining rows are included.
             group_rows = max(1, math.ceil(self.in_features / group_size))
 
             self.register_buffer(
@@ -112,7 +112,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         if izeros is not None:
             izeros = torch.bitwise_and(izeros, max_val)
 
-        # Precompute the per-group zero offsets (kept in float16 for parity with AWQ reference)
+        # Precompute the per-group zero offsets
         scale_fp16 = src_scales.clone()
         scale_fp32 = scale_fp16.to(torch.float32)
         zero_offset = 1 << (self.bits - 1)
@@ -140,7 +140,6 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         self.qweight = gptq_qweight.contiguous()
 
         # Reuse the GPTQ CPU transformation to convert into int4pack layout.
-        self.scales = scale_fp16.clone()
         super().transform_cpu(dtype)
 
         # Restore AWQ-specific scale/zero metadata for the fused op.

@@ -173,7 +173,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         return super().train(mode=mode)
 
     def transform_xpu(self, dtype):
-        self.scales = self.scales.clone().to(dtype).contiguous()
+        self.scales = self.scales.to(dtype).contiguous()
         # Unpack qzeros
         zeros = torch.bitwise_right_shift(
             torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
@@ -201,7 +201,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         self.qzeros = zeros.contiguous()
 
     def transform_cpu(self, dtype):
-        self.scales = self.scales.clone().to(dtype).contiguous()
+        self.scales = self.scales.to(dtype).contiguous()
         # Unpack and reorder qweight
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(
