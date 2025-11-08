@@ -184,10 +184,10 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
                 config.max_autotune = True
 
         if self.transformed:
-            log.debug("awq calling fused op")
+            # log.debug("awq calling fused op")
             out = self._fused_op_forward(x_flat)
         else:
-            log.debug("awq dense path")
+            # log.debug("awq dense path")
             weight = self.awq_weight_dequantize(device=x_flat.device, dtype=x_flat.dtype)
             out = torch.matmul(x_flat, weight)
 
