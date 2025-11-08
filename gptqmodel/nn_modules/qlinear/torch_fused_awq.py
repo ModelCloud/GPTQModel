@@ -112,8 +112,8 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         if izeros is not None:
             izeros = torch.bitwise_and(izeros, max_val)
 
-        # Precompute the per-group zero offsets
-        scale_fp16 = src_scales.clone()
+        # Precompute the per-group zero offsets; reuse the contiguous fp16 copy to avoid extra clones.
+        scale_fp16 = src_scales
         scale_fp32 = scale_fp16.to(torch.float32)
         zero_offset = 1 << (self.bits - 1)
         zeros_fp16 = (zero_offset - izeros.reshape_as(scale_fp32)).to(dtype=scale_fp32.dtype)
@@ -148,18 +148,18 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
     def awq_weight_dequantize(self, device, dtype):
-        dense = dequantize_gemm(
+        return dequantize_gemm(
             self.qweight,
             self.qzeros,
             self.scales,
             self.bits,
             self.group_size,
-        ).to(device=device, dtype=torch.float32)
-        return dense.to(device=device, dtype=dtype)
+        ).to(device=device, dtype=dtype)
 
     def transform_cpu(self, dtype):
         self.transform_cpu_awq(dtype)
 
+    # TODO: add XPU
     def transform(self, dtype, device):
         if device != "cpu":
             raise NotImplementedError(
@@ -167,6 +167,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             )
         self.transform_cpu(dtype)
 
+    # TODO: add XPU
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
