@@ -222,6 +222,46 @@ CPU:  | uint8 lane | = [w1][w0]
 Both forms originate from the same `[O, I]` intermediate; the divergence is only
 in the final storage type, accompanying metadata, and fused operator ABI.
 
+## AWQ compatibility (`torch_fused_awq.py`)
+
+`TorchFusedAwqQuantLinear` (`gptqmodel/nn_modules/qlinear/torch_fused_awq.py`)
+reuses the CPU fused kernel while accepting checkpoints emitted by the AWQ
+tooling. An "AWQ layout" is detected whenever `qweight` has shape
+`[in_features, out_features / pack_factor]` (i.e., rows are raw input channels
+instead of packed groups). When that layout is present, `_transform_cpu_awq`
+performs an extra shim before the standard CPU packing runs:
+
+1. **Unpack AWQ rows** – `unpack_awq` expands each column lane into eight
+   outputs, yielding `iweight[int8][I, O]` and `izeros[int8][G, O]`. Both
+   tensors are then permuted with `reverse_awq_order` (the inverse of
+   `quantization.awq.utils.packing_utils.AWQ_ORDER`) so the columns match the
+   logical transformer layout expected by GPTQ.
+2. **Normalize zero codes** – AWQ stores integer zero points per output channel.
+   `_transform_cpu_awq` converts them into floating offsets compatible with the
+   fused kernel using
+   `zeros_fp16 = (2^{bits-1} - izeros) * scales_fp32`, keeping the result in
+   `float16` so the metadata matches the original AWQ calibration statistics.
+3. **Repack into GPTQ lanes** – The unpacked `iweight` matrix is reshaped to
+   `[I / pack_factor, pack_factor, O]` and re-packed along the `pack_factor`
+   dimension so each row once again represents eight inputs inside a 32-bit
+   lane. After this step `self.qweight` is indistinguishable from a GPTQ v2
+   tensor, which means the regular `transform_cpu` logic can run unchanged.
+4. **Delegate to the base CPU transform** – Calling `super().transform_cpu`
+   converts the temporary GPTQ-formatted `qweight` into the `[O, I/2]` `uint8`
+   int4pack layout and produces `scales_and_zeros` from the (temporarily zeroed)
+   metadata.
+5. **Restore AWQ metadata** – Immediately afterward, the AWQ shim reinstates
+   the real `float16` scales and the converted zero offsets, then rebuilds
+   `scales_and_zeros = pack_scales_and_zeros(scales, zeros_fp16)`. This ensures
+   `_weight_int4pack_mm_for_cpu` receives the same affine parameters the AWQ
+   calibration solved for.
+
+Because the shim runs entirely on the CPU path, `TorchFusedAwqQuantLinear`
+currently raises `NotImplementedError` when asked to transform an AWQ layout on
+`xpu` devices. Inference still benefits from the fused CPU kernel; if the module
+cannot be transformed (e.g., due to dtype mismatch or missing fused ops) it
+falls back to the dense AWQ matmul defined in `_awq_weight_dense`.
+
 ## Quick reference
 
 | Stage                          | Shape / dtype (int4)                                      | Notes                                          |
@@ -232,6 +272,9 @@ in the final storage type, accompanying metadata, and fused operator ABI.
 | Packed CPU `qweight`           | `[O, I / 2]`, `uint8`                                     | High nibble = odd input, low nibble = even     |
 | `qzeros` (post-XPU transform)  | `[G, O]`, matches `scales`                                | Passed separately to the XPU fused op          |
 | `scales_and_zeros` (CPU only)  | `[G, O, 2]`, float                                        | `[..., 0] = scale`, `[..., 1] = zero`          |
+| Raw AWQ `qweight`              | `[I, O / 8]`, `int32`                                     | Rows are single inputs packed across outputs   |
+| Unpacked AWQ weights/zeros     | `iweight[I, O]`, `izeros[G, O]`, `int8`                    | Produced by `unpack_awq` + `reverse_awq_order` |
+| AWQ zero offsets (final)       | `[G, O]`, `float16`                                       | `(2^{bits-1} - izeros) * scales`; merged via `pack_scales_and_zeros` |
 
 These details mirror the expectations of the Intel XPU and CPU fused matmul
 kernels, and the ASCII layouts above describe how rows/columns line up inside
