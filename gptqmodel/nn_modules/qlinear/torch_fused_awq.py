@@ -137,26 +137,49 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         if src_scales.dtype != torch.float16:
             src_scales = src_scales.to(torch.float16)
         src_scales = src_scales.contiguous()
-        self.scales = src_scales.clone().to(dtype).contiguous()
-        scale_fp32 = src_scales.to(torch.float32)
+
+        # Cache unpacked AWQ tensors
         iweight, izeros = unpack_awq(self.qweight, self.qzeros, self.bits)
         iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
         max_val = (1 << self.bits) - 1
         iweight = torch.bitwise_and(iweight, max_val)
         if izeros is not None:
             izeros = torch.bitwise_and(izeros, max_val)
-        ret_idx = self._build_ret_idx()
-        weight = iweight.index_select(0, ret_idx).t().contiguous()
-        self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(weight.int(), 1).contiguous()
 
-        if izeros is None:
-            zeros = torch.zeros_like(scale_fp32)
-        else:
-            zero_offset = 1 << (self.bits - 1)
-            zeros = (zero_offset - izeros.reshape_as(scale_fp32)).to(dtype=scale_fp32.dtype)
-            zeros = zeros * scale_fp32
-        self.scales = scale_fp32.to(dtype=dtype)
-        self.qzeros = zeros.to(dtype=dtype)
+        # Precompute the per-group zero offsets (kept in float16 for parity with AWQ reference)
+        scale_fp16 = src_scales.clone()
+        scale_fp32 = scale_fp16.to(torch.float32)
+        zero_offset = 1 << (self.bits - 1)
+        zeros_fp16 = (zero_offset - izeros.reshape_as(scale_fp32)).to(dtype=scale_fp32.dtype)
+        zeros_fp16 = (zeros_fp16 * scale_fp32).to(torch.float16)
+
+        # Repack AWQ-per-output rows into GPTQ-style per-input packs so the base
+        # TorchFusedQuantLinear path can handle the conversion to int4pack.
+        in_features, out_features = iweight.shape
+        pack_factor = int(self.pack_factor)
+        if in_features % pack_factor != 0:
+            raise ValueError(
+                f"AWQ in_features={in_features} must be divisible by pack_factor={pack_factor}."
+            )
+
+        rows = iweight.view(in_features // pack_factor, pack_factor, out_features)
+        gptq_qweight = torch.zeros(
+            (rows.shape[0], out_features),
+            dtype=self.pack_dtype,
+            device=iweight.device,
+        )
+        bit_shifts = list(range(0, pack_factor * self.bits, self.bits))
+        for lane, shift in enumerate(bit_shifts):
+            gptq_qweight |= rows[:, lane, :].to(torch.int32) << shift
+        self.qweight = gptq_qweight.contiguous()
+
+        # Reuse the GPTQ CPU transformation to convert into int4pack layout.
+        self.scales = scale_fp16.clone()
+        super().transform_cpu(dtype)
+
+        # Restore AWQ-specific scale/zero metadata for the fused op.
+        self.scales = scale_fp16.to(dtype=dtype)
+        self.qzeros = zeros_fp16.to(dtype=dtype)
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
     def _awq_weight_dense(self, device, dtype):

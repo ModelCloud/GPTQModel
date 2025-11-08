@@ -3,49 +3,99 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import json
+import os
+from functools import lru_cache
+from pathlib import Path
+
 import pytest
 import torch
+from safetensors import safe_open
 
 from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
 from gptqmodel.utils.torch import TORCH_HAS_FUSED_OPS
 
 
-def pack_awq(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
+CHECKPOINT_DIR = Path("/monster/data/model/deepseek-r1-distill-qwen-7b-awq")
+CHECKPOINT_MODULE = os.environ.get(
+    "GPTQMODEL_AWQ_TEST_MODULE", "model.layers.0.mlp.up_proj"
+)
+
+
+@lru_cache(maxsize=1)
+def _load_awq_checkpoint_module():
+    if not CHECKPOINT_DIR.exists():
+        pytest.skip(f"AWQ checkpoint not available at {CHECKPOINT_DIR}")
+
+    index_path = CHECKPOINT_DIR / "model.safetensors.index.json"
+    if not index_path.exists():
+        pytest.skip(f"Missing model index at {index_path}")
+
+    with index_path.open("r", encoding="utf-8") as fh:
+        index_data = json.load(fh)
+    weight_map = index_data["weight_map"]
+
+    config_path = CHECKPOINT_DIR / "config.json"
+    with config_path.open("r", encoding="utf-8") as fh:
+        config = json.load(fh)
+    quant_cfg = config.get("quantization_config", {})
+    bits = int(quant_cfg.get("bits", 4))
+    group_size = int(quant_cfg.get("group_size", 128))
+
+    suffixes = ["qweight", "qzeros", "scales", "bias"]
+    tensors = {}
+    file_to_keys = {}
+    for suffix in suffixes:
+        full_key = f"{CHECKPOINT_MODULE}.{suffix}"
+        filename = weight_map.get(full_key)
+        if filename is None:
+            if suffix == "bias":
+                continue
+            raise KeyError(f"Missing tensor '{full_key}' in checkpoint index.")
+        file_to_keys.setdefault(filename, []).append(full_key)
+
+    for filename, keys in file_to_keys.items():
+        tensor_path = CHECKPOINT_DIR / filename
+        with safe_open(tensor_path, framework="pt", device="cpu") as handle:
+            for key in keys:
+                tensors[key] = handle.get_tensor(key).clone()
+
+    qweight = tensors[f"{CHECKPOINT_MODULE}.qweight"].to(torch.int32).contiguous()
+    qzeros = tensors[f"{CHECKPOINT_MODULE}.qzeros"].to(torch.int32).contiguous()
+    scales = tensors[f"{CHECKPOINT_MODULE}.scales"].to(torch.float16).contiguous()
+    bias_key = f"{CHECKPOINT_MODULE}.bias"
+    bias = tensors.get(bias_key)
+    if bias is not None:
+        bias = bias.to(torch.float16).contiguous()
+
     pack_factor = 32 // bits
-    order_map = [0, 2, 4, 6, 1, 3, 5, 7]
-    assert unpacked.shape[1] % pack_factor == 0
-    packed = torch.zeros(
-        (unpacked.shape[0], unpacked.shape[1] // pack_factor),
-        dtype=torch.int32,
-    )
-    for col in range(unpacked.shape[1] // pack_factor):
-        for i, order in enumerate(order_map):
-            value = unpacked[:, col * pack_factor + order].to(torch.int32)
-            packed[:, col] |= value << (i * bits)
-    return packed
+    in_features = qweight.shape[0]
+    out_features = qweight.shape[1] * pack_factor
+
+    return {
+        "bits": bits,
+        "group_size": group_size,
+        "in_features": in_features,
+        "out_features": out_features,
+        "qweight": qweight,
+        "qzeros": qzeros,
+        "scales": scales,
+        "bias": bias,
+    }
 
 
 @pytest.mark.skipif(not TORCH_HAS_FUSED_OPS, reason="Torch fused ops require PyTorch>=2.8")
-def test_torch_fused_awq_matches_baseline_torch_kernel():
-    torch.manual_seed(0)
-    dtype = torch.float16
-
-    bits = 4
-    in_features = 64
-    out_features = 128
-    group_size = 32
-    batch = 4
-
-    groups = in_features // group_size
-
-    int_weight = torch.randint(0, 2**bits, size=(in_features, out_features), dtype=torch.int32)
-    zero_points = torch.randint(0, 2**bits, size=(groups, out_features), dtype=torch.int32)
-    scales = (torch.rand(groups, out_features, dtype=torch.float16) * 1.5) + 0.25
-    bias = torch.randn(out_features, dtype=torch.float16)
-
-    qweight = pack_awq(int_weight, bits)
-    qzeros = pack_awq(zero_points, bits)
+def test_torch_fused_awq_matches_checkpoint_module():
+    module_data = _load_awq_checkpoint_module()
+    bits = module_data["bits"]
+    group_size = module_data["group_size"]
+    in_features = module_data["in_features"]
+    out_features = module_data["out_features"]
+    qweight = module_data["qweight"]
+    qzeros = module_data["qzeros"]
+    scales = module_data["scales"]
+    bias = module_data["bias"]
 
     awq_module = AwqTorchQuantLinear(
         bits=bits,
@@ -54,16 +104,9 @@ def test_torch_fused_awq_matches_baseline_torch_kernel():
         desc_act=False,
         in_features=in_features,
         out_features=out_features,
-        bias=True,
+        bias=bias is not None,
         register_buffers=True,
     )
-    awq_module.qweight.copy_(qweight)
-    awq_module.qzeros.copy_(qzeros)
-    awq_module.scales.copy_(scales)
-    awq_module.bias.copy_(bias)
-    awq_module.post_init()
-    awq_module.eval()
-
     fused_module = TorchFusedAwqQuantLinear(
         bits=bits,
         group_size=group_size,
@@ -71,26 +114,31 @@ def test_torch_fused_awq_matches_baseline_torch_kernel():
         desc_act=False,
         in_features=in_features,
         out_features=out_features,
-        bias=True,
+        bias=bias is not None,
         register_buffers=True,
     )
+
+    awq_module.qweight.copy_(qweight)
+    awq_module.qzeros.copy_(qzeros)
+    awq_module.scales.copy_(scales)
+    if bias is not None:
+        awq_module.bias.copy_(bias)
+    awq_module.post_init()
+    awq_module.eval()
+
     fused_module.register_buffer("qweight", qweight.clone(), persistent=True)
     fused_module.qzeros.copy_(qzeros)
     fused_module.scales.copy_(scales)
-    fused_module.bias.copy_(bias)
+    if bias is not None:
+        fused_module.bias.copy_(bias)
     fused_module.post_init()
     fused_module.eval()
 
+    dtype = torch.float16
+    batch = 4
     x = torch.randn(batch, in_features, dtype=dtype)
     baseline = awq_module(x)
     fused_out = fused_module(x)
 
     tol = 5e-3
-    abs_diff = (fused_out - baseline).abs()
-    rel_diff = abs_diff / baseline.abs().clamp_min(1e-6)
-
     torch.testing.assert_close(fused_out, baseline, rtol=tol, atol=tol)
-
-    header = f"{'dtype':<10} {'rtol':<10} {'atol':<10} {'abs_max':<12} {'rel_max':<12}"
-    row = f"{str(dtype):<10} {tol:<10.4g} {tol:<10.4g} {abs_diff.max().item():<12.4e} {rel_diff.max().item():<12.4e}"
-    print(f"{header}\n{row}")
