@@ -9,6 +9,7 @@ import torch
 from logbar import LogBar
 from parameterized import parameterized
 from torch import Tensor
+from tabulate import tabulate
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
@@ -17,6 +18,10 @@ from gptqmodel.utils.model import find_modules
 
 
 log = LogBar.shared()
+
+
+def _xpu_available() -> bool:
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 class TestKernelOutput(unittest.TestCase):
@@ -88,3 +93,115 @@ class TestKernelOutputXPU(TestKernelOutput):
 
 class TestKernelOutputXPUBFloat16(TestKernelOutputXPU):
     dtype = torch.bfloat16
+
+
+class TestTorchFusedKernelDevices(unittest.TestCase):
+    model_path = TestKernelOutput.model_path
+    target_qliner_map = TestKernelOutput.target_qliner_map
+    target = TestKernelOutput.target
+    dtype = torch.float16
+    m = [1, 16, 64, 256]
+    k = 2048
+    input_samples_each_size = 5
+    r_tolerance = 0.0
+    a_tolerance = 0.01
+    reference_backend = BACKEND.TORCH
+    reference_device = "cpu"
+
+    @classmethod
+    def setUpClass(cls):
+        torch.manual_seed(0)
+        cls.inputs = []
+        for dim_0 in cls.m:
+            for _ in range(cls.input_samples_each_size):
+                cls.inputs.append(torch.rand((dim_0, cls.k), dtype=cls.dtype))
+
+        reference_model = GPTQModel.load(
+            cls.model_path,
+            backend=cls.reference_backend,
+            device=cls.reference_device,
+            dtype=cls.dtype,
+        )
+        cls.reference_outputs = [
+            cls.forward(reference_model, sample, cls.reference_backend)
+            for sample in cls.inputs
+        ]
+        del reference_model
+
+    @classmethod
+    def forward(cls, model, x, backend: BACKEND):
+        target_qlinear_cls = cls.target_qliner_map[backend]
+        modules = find_modules(model.model, layers=[target_qlinear_cls])
+        result = None
+        for name, module in modules.items():
+            if name == cls.target:
+                result = module(x.to(model.device))
+                break
+
+        assert result is not None
+        return result
+
+    def assert_on_mismatch(self, a: Tensor, b: Tensor, rtol=0.00005, atol=0.00005):
+        torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
+
+    @parameterized.expand([
+        ("cpu", "cpu"),
+        ("xpu", "xpu:0"),
+    ])
+    def test_torch_fused_matches_cpu_reference(self, _name: str, device: str):
+        if device.startswith("xpu") and not _xpu_available():
+            self.skipTest("Test requires XPU")
+
+        model = GPTQModel.load(
+            self.model_path,
+            backend=BACKEND.TORCH_FUSED,
+            device=device,
+            dtype=self.dtype,
+        )
+        failures = []
+        for idx, sample in enumerate(self.inputs):
+            model_input = sample.to(model.device)
+            fused_out = self.forward(model, model_input, BACKEND.TORCH_FUSED)
+            reference = self.reference_outputs[idx]
+            try:
+                self.assert_on_mismatch(
+                    reference.to("cpu"),
+                    fused_out.to("cpu"),
+                    self.r_tolerance,
+                    self.a_tolerance,
+                )
+            except AssertionError as exc:
+                failures.append(f"Sample {idx}: {str(exc).splitlines()[0]}")
+
+        status = "PASS" if not failures else "FAIL"
+        table = tabulate(
+            [
+                [
+                    BACKEND.TORCH_FUSED.name,
+                    str(self.dtype),
+                    device,
+                    len(self.inputs),
+                    f"{self.r_tolerance:.2e}",
+                    f"{self.a_tolerance:.2e}",
+                    status,
+                    len(failures),
+                    "\n\n".join(failures) if failures else "-",
+                ]
+            ],
+            headers=[
+                "Backend",
+                "DType",
+                "Device",
+                "Samples",
+                "RTol",
+                "ATol",
+                "Status",
+                "Failures",
+                "Details",
+            ],
+            tablefmt="github",
+        )
+        log.info("\nTorch Fused vs CPU Reference\n" + table)
+
+        if failures:
+            raise AssertionError(f"{len(failures)} mismatched samples on device {device}")

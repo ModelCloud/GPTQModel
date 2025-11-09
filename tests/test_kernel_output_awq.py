@@ -22,6 +22,7 @@ from gptqmodel.nn_modules.qlinear.awq_marlin import (
     marlin_import_exception,
 )
 from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
 from gptqmodel.utils.marlin import marlin_make_workspace_new
 
 
@@ -30,10 +31,15 @@ os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 log = LogBar.shared()
 
 DEVICE = torch.device("cuda:0")
+CPU_DEVICE = torch.device("cpu")
 
 GREEN = "\033[32m"
 RED = "\033[31m"
 RESET = "\033[0m"
+
+
+def _xpu_available() -> bool:
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 class TestAwqKernelOutput(unittest.TestCase):
@@ -50,18 +56,20 @@ class TestAwqKernelOutput(unittest.TestCase):
         (BACKEND.GEMM, torch.float16, 0.004),
         # (BACKEND.GEMM, torch.bfloat16, 0.05),
         (BACKEND.MARLIN, torch.float16, 0.006),
+        (BACKEND.TORCH_FUSED_AWQ, torch.float16, 0.004),
         # (BACKEND.MARLIN, torch.bfloat16, 0.05),
     ]
 
     @classmethod
     def setUpClass(cls) -> None:
-        if not torch.cuda.is_available():
-            raise unittest.SkipTest("CUDA is required for AWQ kernel output checks.")
-
-        cls.device = DEVICE
+        cls.cuda_available = torch.cuda.is_available()
+        cls.device = DEVICE if cls.cuda_available else CPU_DEVICE
         cls.log = log
         cls._weight_map = cls._load_weight_map()
         cls.backend_skip_reason: Dict[BACKEND, str] = {}
+        if not cls.cuda_available:
+            cls.backend_skip_reason[BACKEND.GEMM] = "CUDA is required for GEMM backend."
+            cls.backend_skip_reason[BACKEND.MARLIN] = "CUDA is required for AWQ Marlin kernel."
 
         try:
             tensors = cls._load_awq_tensors(cls.TARGET)
@@ -74,6 +82,10 @@ class TestAwqKernelOutput(unittest.TestCase):
             scales_cpu,
             bias_cpu,
         ) = tensors
+        cls.qweight_cpu = qweight_cpu
+        cls.qzeros_cpu = qzeros_cpu
+        cls.scales_cpu = scales_cpu
+        cls.bias_cpu = bias_cpu
 
         cls.in_features = qweight_cpu.shape[0]
         cls.out_features = qweight_cpu.shape[1] * (32 // cls.BITS)
@@ -84,13 +96,27 @@ class TestAwqKernelOutput(unittest.TestCase):
             qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
         )
 
-        cls.modules[BACKEND.GEMM] = cls._build_gemm_module(
-            qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
+        cls.modules[BACKEND.GEMM] = (
+            cls._build_gemm_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+            if cls.cuda_available
+            else None
         )
 
-        cls.modules[BACKEND.MARLIN] = cls._build_marlin_module(
-            qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
+        cls.modules[BACKEND.MARLIN] = (
+            cls._build_marlin_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+            if cls.cuda_available
+            else None
         )
+
+        try:
+            cls.modules[BACKEND.TORCH_FUSED_AWQ] = cls._build_torch_fused_awq_module(
+                qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu
+            )
+        except Exception as exc:
+            cls.backend_skip_reason[BACKEND.TORCH_FUSED_AWQ] = (
+                f"Torch fused AWQ kernel unavailable: {exc}"
+            )
+            cls.modules[BACKEND.TORCH_FUSED_AWQ] = None
 
         base_inputs = cls._generate_inputs()
         cls.inputs: Dict[torch.dtype, List[torch.Tensor]] = {}
@@ -123,7 +149,8 @@ class TestAwqKernelOutput(unittest.TestCase):
         for module in getattr(cls, "modules", {}).values():
             if module is not None:
                 del module
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     @classmethod
     def _load_weight_map(cls) -> Dict[str, str]:
@@ -248,18 +275,51 @@ class TestAwqKernelOutput(unittest.TestCase):
         return module
 
     @classmethod
+    def _build_torch_fused_awq_module(
+        cls,
+        qweight_cpu: torch.Tensor,
+        qzeros_cpu: torch.Tensor,
+        scales_cpu: torch.Tensor,
+        bias_cpu: torch.Tensor,
+        *,
+        device: torch.device = CPU_DEVICE,
+    ) -> TorchFusedAwqQuantLinear:
+        module = TorchFusedAwqQuantLinear(
+            bits=cls.BITS,
+            group_size=cls.GROUP_SIZE,
+            sym=True,
+            desc_act=False,
+            in_features=cls.in_features,
+            out_features=cls.out_features,
+            bias=True,
+            adapter=None,
+            register_buffers=True,
+        ).to(device)
+
+        module.qweight.copy_(qweight_cpu.to(device))
+        module.qzeros.copy_(qzeros_cpu.to(device))
+        module.scales.copy_(scales_cpu.to(torch.float16).to(device))
+        module.bias.copy_(bias_cpu.to(torch.float16).to(device))
+
+        module.eval()
+        module.post_init()
+        return module
+
+    @classmethod
     def _generate_inputs(cls) -> List[torch.Tensor]:
         large_shapes = [(4, 32), (2, 64), (1, 96)]
         medium_shapes = [(2, 32), (1, 48), (1, 32)]
         small_shapes = [(1, 32), (1, 24), (1, 16)]
 
-        try:
-            total_mem_gb = (
-                torch.cuda.get_device_properties(cls.device).total_memory
-                / (1024 ** 3)
-            )
-        except Exception:  # pragma: no cover
-            total_mem_gb = 0.0
+        total_mem_gb = 0.0
+        if cls.device.type == "cuda":
+            try:
+                total_mem_gb = (
+                    torch.cuda.get_device_properties(cls.device).total_memory
+                    / (1024 ** 3)
+                )
+            except Exception:  # pragma: no cover
+                total_mem_gb = 0.0
 
         if os.getenv("GPTQMODEL_FAST_TESTS", "0") == "1":
             shapes = small_shapes
@@ -288,18 +348,36 @@ class TestAwqKernelOutput(unittest.TestCase):
         *,
         compute_dtype: Optional[torch.dtype] = None,
         output_dtype: Optional[torch.dtype] = None,
+        target_device: Optional[torch.device] = None,
     ) -> List[torch.Tensor]:
+        if target_device is None:
+            target_device = cls._infer_module_device(module)
         outputs: List[torch.Tensor] = []
         with torch.inference_mode():
             for tensor in inputs:
                 local_tensor = tensor
-                if compute_dtype is not None and tensor.dtype != compute_dtype:
-                    local_tensor = tensor.to(dtype=compute_dtype)
+                if local_tensor.device != target_device:
+                    local_tensor = local_tensor.to(device=target_device)
+                if compute_dtype is not None and local_tensor.dtype != compute_dtype:
+                    local_tensor = local_tensor.to(dtype=compute_dtype)
                 result = module(local_tensor)
                 if output_dtype is not None and result.dtype != output_dtype:
                     result = result.to(dtype=output_dtype)
                 outputs.append(result.detach().cpu())
         return outputs
+
+    @staticmethod
+    def _infer_module_device(module: torch.nn.Module) -> torch.device:
+        try:
+            tensor = next(module.parameters())
+            return tensor.device
+        except StopIteration:
+            pass
+        try:
+            tensor = next(module.buffers())
+            return tensor.device
+        except StopIteration:
+            return torch.device("cpu")
 
     def _maybe_skip_backend(self, backend: BACKEND) -> None:
         reason = self.backend_skip_reason.get(backend)
@@ -315,6 +393,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         atol: float,
         title: str,
         reference_label: str,
+        device: Optional[torch.device] = None,
     ) -> None:
         failures = []
         total = len(actual_outputs)
@@ -341,12 +420,14 @@ class TestAwqKernelOutput(unittest.TestCase):
         status = f"{GREEN}PASS{RESET}" if not failures else f"{RED}FAIL{RESET}"
         avg_abs_diff = mean_abs_diff / total if total else 0.0
         details = "\n\n".join(str(detail) for detail in failures) if failures else "-"
+        device_label = str(device) if device is not None else "-"
 
         table = tabulate(
             [
                 [
                     backend.name,
                     str(dtype),
+                    device_label,
                     total,
                     f"{max_abs_diff:.6f}",
                     f"{avg_abs_diff:.6f}",
@@ -358,6 +439,7 @@ class TestAwqKernelOutput(unittest.TestCase):
             headers=[
                 "Backend",
                 "DType",
+                "Device",
                 "Samples",
                 "MaxAbsDiff",
                 "MeanAbsDiff",
@@ -397,3 +479,42 @@ class TestAwqKernelOutput(unittest.TestCase):
             title=f"AWQ Kernel Output {dtype}",
             reference_label="Torch AWQ output",
         )
+
+    @parameterized.expand(
+        [
+            ("cpu", "cpu"),
+            ("xpu", "xpu:0"),
+        ]
+    )
+    def test_torch_fused_awq_devices(self, _label: str, device_str: str) -> None:
+        self._maybe_skip_backend(BACKEND.TORCH_FUSED_AWQ)
+        if device_str.startswith("xpu") and not _xpu_available():
+            self.skipTest("Torch fused AWQ XPU test requires Intel XPU runtime.")
+
+        device = torch.device(device_str)
+        module = self._build_torch_fused_awq_module(
+            self.qweight_cpu,
+            self.qzeros_cpu,
+            self.scales_cpu,
+            self.bias_cpu,
+            device=device,
+        )
+
+        try:
+            actual_outputs = self._forward(
+                module,
+                self.inputs[torch.float16],
+                target_device=device,
+            )
+            self._summarize_results(
+                reference_outputs=self.reference_outputs[torch.float16],
+                actual_outputs=actual_outputs,
+                backend=BACKEND.TORCH_FUSED_AWQ,
+                dtype=torch.float16,
+                atol=0.004,
+                title=f"Torch Fused AWQ Device {device_str}",
+                reference_label="Torch AWQ output",
+                device=device,
+            )
+        finally:
+            del module

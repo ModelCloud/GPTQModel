@@ -30,6 +30,7 @@ from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
+from ..nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT, METHOD
 from ..utils.logger import setup_logger
@@ -70,6 +71,7 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.GEMM: AwqGEMMQuantLinear,
         BACKEND.GEMV: AwqGEMVQuantLinear,
         BACKEND.GEMV_FAST: AwqGEMVFastQuantLinear,
+        BACKEND.TORCH_FUSED_AWQ: TorchFusedAwqQuantLinear,
         BACKEND.TORCH_AWQ: AwqTorchQuantLinear,
     }),
 }
@@ -85,7 +87,15 @@ SUPPORTS_BACKEND_MAP = {
         FORMAT.QQQ: [BACKEND.QQQ],
     },
     METHOD.AWQ: {
-        FORMAT.GEMM: [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.GEMM, BACKEND.TORCH_AWQ],
+        FORMAT.GEMM: [
+            BACKEND.MACHETE,
+            BACKEND.MARLIN,
+            BACKEND.EXLLAMA_V2,
+            BACKEND.EXLLAMA_V1,
+            BACKEND.GEMM,
+            BACKEND.TORCH_FUSED_AWQ,
+            BACKEND.TORCH_AWQ,
+        ],
         FORMAT.GEMV: [BACKEND.GEMV],
         FORMAT.GEMV_FAST: [BACKEND.GEMV_FAST],
         FORMAT.MARLIN: [BACKEND.MACHETE, BACKEND.MARLIN],

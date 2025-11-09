@@ -111,6 +111,38 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
         super().optimize()
 
+    def _build_ret_idx(self) -> torch.Tensor:
+        existing = getattr(self, "ret_idx", None)
+        total = self.g_idx.shape[0]
+        if isinstance(existing, torch.Tensor) and existing.numel() == total:
+            return existing
+
+        device = self.g_idx.device
+        ret_idx = torch.zeros(total, dtype=torch.int32, device=device)
+        group_size = max(int(self.group_size), 1)
+        groups = total // group_size
+        remainder = total % group_size
+        g_idx = self.g_idx.to(torch.int32)
+        g_idx_2 = g_idx * group_size
+
+        if remainder > 0:
+            mask = g_idx == groups
+            if mask.any():
+                g_idx_2[mask] += torch.arange(remainder, device=device, dtype=torch.int32)
+
+        if groups > 0:
+            base = torch.arange(group_size, device=device, dtype=torch.int32)
+            for i in range(groups):
+                mask = g_idx == i
+                if not mask.any():
+                    continue
+                count = int(mask.sum().item())
+                g_idx_2[mask] += base[:count]
+
+        ret_idx[g_idx_2] = torch.arange(total, device=device, dtype=torch.int32)
+        self.ret_idx = ret_idx
+        return ret_idx
+
     def train(self, mode: bool = True):
         old_train = self.training
         if mode == old_train:
@@ -141,7 +173,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         return super().train(mode=mode)
 
     def transform_xpu(self, dtype):
-        self.scales = self.scales.clone().to(dtype).contiguous()
+        self.scales = self.scales.to(dtype).contiguous()
         # Unpack qzeros
         zeros = torch.bitwise_right_shift(
             torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
@@ -156,17 +188,8 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             ).to(self.dequant_dtype),
             self.maxq
         )
-        self.ret_idx = torch.zeros(self.g_idx.shape[0], dtype=torch.int32).to(self.g_idx.device)
-        groups = self.g_idx.shape[0] // self.group_size
-        remainder = self.g_idx.shape[0] % self.group_size
-        g_idx_2 = self.g_idx * self.group_size
-        if remainder > 0:
-            g_idx_2[self.g_idx == groups] += torch.arange(remainder).to(self.g_idx_2.device).to(self.g_idx_2.dtype)
-        arange_tensor = torch.arange(self.group_size).to(self.g_idx.device).to(self.g_idx.dtype)
-        for i in range(groups):
-            g_idx_2[self.g_idx == i] += arange_tensor
-        self.ret_idx[g_idx_2] = torch.arange(self.g_idx.shape[0]).to(self.ret_idx.device).to(self.ret_idx.dtype)
-        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).index_select(0, self.ret_idx).t()
+        ret_idx = self._build_ret_idx()
+        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).index_select(0, ret_idx).t()
         # Pack qweight
         packed = torch.zeros(weight.shape[0], weight.shape[1] // self.pack_factor, dtype=torch.int32, device=weight.device)
         for col in range(weight.shape[1] // self.pack_factor):
@@ -177,8 +200,8 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         self.qweight = packed.contiguous()
         self.qzeros = zeros.contiguous()
 
-    def transform_cpu(self, dtype):
-        self.scales = self.scales.clone().to(dtype).contiguous()
+    def transform_cpu(self, dtype, do_scales_and_zeros: bool = True):
+        self.scales = self.scales.to(dtype).contiguous()
         # Unpack and reorder qweight
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(
@@ -187,20 +210,13 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             ).to(self.dequant_dtype),
             self.maxq
         )
-        self.ret_idx = torch.zeros(self.g_idx.shape[0], dtype=torch.int32).to(self.g_idx.device)
-        groups = self.g_idx.shape[0] // self.group_size
-        remainder = self.g_idx.shape[0] % self.group_size
-        g_idx_2 = self.g_idx * self.group_size
-        if remainder > 0:
-            g_idx_2[self.g_idx == groups] += torch.arange(remainder).to(self.g_idx_2.device).to(self.g_idx_2.dtype)
-        arange_tensor = torch.arange(self.group_size).to(self.g_idx.device).to(self.g_idx.dtype)
-        for i in range(groups):
-            g_idx_2[self.g_idx == i] += arange_tensor
-        self.ret_idx[g_idx_2] = torch.arange(self.g_idx.shape[0]).to(self.ret_idx.device).to(self.ret_idx.dtype)
-        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).index_select(0, self.ret_idx).t()
+        ret_idx = self._build_ret_idx()
+        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2]).index_select(0, ret_idx).t()
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(weight.int(), 1).contiguous()
-        self.qzeros = torch.zeros_like(self.scales).contiguous()
-        self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+
+        if do_scales_and_zeros:
+            self.qzeros = torch.zeros_like(self.scales).contiguous()
+            self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
     def transform(self, dtype, device):
         if device == "xpu":
