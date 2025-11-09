@@ -9,6 +9,7 @@ import torch
 from logbar import LogBar
 from parameterized import parameterized
 from torch import Tensor
+from tabulate import tabulate
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
@@ -157,13 +158,50 @@ class TestTorchFusedKernelDevices(unittest.TestCase):
             device=device,
             dtype=self.dtype,
         )
+        failures = []
         for idx, sample in enumerate(self.inputs):
             model_input = sample.to(model.device)
             fused_out = self.forward(model, model_input, BACKEND.TORCH_FUSED)
             reference = self.reference_outputs[idx]
-            self.assert_on_mismatch(
-                reference.to("cpu"),
-                fused_out.to("cpu"),
-                self.r_tolerance,
-                self.a_tolerance,
-            )
+            try:
+                self.assert_on_mismatch(
+                    reference.to("cpu"),
+                    fused_out.to("cpu"),
+                    self.r_tolerance,
+                    self.a_tolerance,
+                )
+            except AssertionError as exc:
+                failures.append(f"Sample {idx}: {str(exc).splitlines()[0]}")
+
+        status = "PASS" if not failures else "FAIL"
+        table = tabulate(
+            [
+                [
+                    BACKEND.TORCH_FUSED.name,
+                    str(self.dtype),
+                    device,
+                    len(self.inputs),
+                    f"{self.r_tolerance:.2e}",
+                    f"{self.a_tolerance:.2e}",
+                    status,
+                    len(failures),
+                    "\n\n".join(failures) if failures else "-",
+                ]
+            ],
+            headers=[
+                "Backend",
+                "DType",
+                "Device",
+                "Samples",
+                "RTol",
+                "ATol",
+                "Status",
+                "Failures",
+                "Details",
+            ],
+            tablefmt="github",
+        )
+        log.info("\nTorch Fused vs CPU Reference\n" + table)
+
+        if failures:
+            raise AssertionError(f"{len(failures)} mismatched samples on device {device}")
