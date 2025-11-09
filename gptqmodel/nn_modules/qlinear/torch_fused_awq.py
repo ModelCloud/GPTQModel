@@ -26,6 +26,8 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
     """Torch fused AWQ variant based on GPTQ fused kernels via CPU int4 packing."""
 
     QUANT_TYPE = "torch_fused_awq"
+
+    # inherit from torch fused
     SUPPORTS_BITS = TorchFusedQuantLinear.SUPPORTS_BITS
     SUPPORTS_GROUP_SIZE = TorchFusedQuantLinear.SUPPORTS_GROUP_SIZE
     SUPPORTS_DESC_ACT = TorchFusedQuantLinear.SUPPORTS_DESC_ACT
@@ -39,9 +41,10 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
     SUPPORTS_PLATFORM = TorchFusedQuantLinear.SUPPORTS_PLATFORM
     SUPPORTS_PACK_DTYPES = TorchFusedQuantLinear.SUPPORTS_PACK_DTYPES
     SUPPORTS_ADAPTERS = TorchFusedQuantLinear.SUPPORTS_ADAPTERS
+    REQUIRES_FORMAT_V2 = TorchFusedQuantLinear.REQUIRES_FORMAT_V2
 
+    # AWQ kernels are only accuracy validate for float16 for now
     SUPPORTS_DTYPES = [torch.float16]
-    REQUIRES_FORMAT_V2 = False
 
     def __init__(
         self,
@@ -68,9 +71,12 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             bias=bias,
             pack_dtype=pack_dtype,
             adapter=adapter,
+            # Skip base buffer init, we need to manually init buffers for awq
             register_buffers=False,
             **kwargs,
         )
+
+        # Create awq buffers
         if register_buffers:
             # AWQ packs each input row into pack_factor-wide columns for int4 lanes.
             pack_cols = max(1, self.out_features // self.pack_factor)
@@ -83,26 +89,26 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
                 "qweight",
                 torch.zeros(qweight_shape, dtype=self.pack_dtype),
             )
+
             self.register_buffer(
                 "qzeros",
                 torch.zeros((group_rows, pack_cols), dtype=self.pack_dtype),
             )
+
             self.register_buffer(
                 "scales",
                 torch.zeros((group_rows, self.out_features), dtype=torch.float16),
             )
-            g_idx = torch.arange(self.in_features, dtype=torch.int32) // group_size
-            self.register_buffer("g_idx", g_idx)
+
+            self.register_buffer("g_idx", torch.arange(self.in_features, dtype=torch.int32) // group_size)
+
             if bias:
                 self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16))
             else:
                 self.bias = None
 
-    def prepare_awq_fused_tensors(self, need_zeros_fp16: bool = True):
-        src_scales = self.scales
-        if src_scales.dtype != torch.float16:
-            src_scales = src_scales.to(torch.float16)
-        src_scales = src_scales.contiguous()
+    def prepare_awq_fused_tensors(self, need_zeros: bool = True):
+        self.scales.to(torch.float16).contiguous()
 
         iweight, izeros = unpack_awq(self.qweight, self.qzeros, self.bits)
         iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
@@ -112,17 +118,13 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             raise RuntimeError("AWQ fused kernel requires zero points.")
         izeros = torch.bitwise_and(izeros, max_val)
 
-        scale_fp16 = src_scales
-        scale_fp32 = scale_fp16.to(torch.float32)
-
-        if need_zeros_fp16:
+        if need_zeros:
             zero_offset = 1 << (self.bits - 1)
-            zeros_fp16 = (zero_offset - izeros.reshape_as(scale_fp32)).to(dtype=scale_fp32.dtype)
-            zeros_fp16 = (zeros_fp16 * scale_fp32).to(torch.float16)
+            zeros = (zero_offset - izeros.reshape_as(self.scales)) * self.scales
 
         gptq_qweight = self.pack_awq_qweight(iweight)
         gptq_qzeros = self.pack_awq_qzeros(izeros)
-        return gptq_qweight, gptq_qzeros, scale_fp16, zeros_fp16 if need_zeros_fp16 else None
+        return gptq_qweight, gptq_qzeros, self.scales, zeros if need_zeros else None
 
     def pack_awq_qweight(self, iweight: torch.Tensor) -> torch.Tensor:
         in_features, out_features = iweight.shape
@@ -160,22 +162,20 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         return packed.contiguous()
 
     def transform_cpu_awq(self, dtype):
-        gptq_qweight, gptq_qzeros, scale_fp16, zeros_fp16 = self.prepare_awq_fused_tensors()
-        self.qweight = gptq_qweight
-        self.qzeros = gptq_qzeros
+        self.qweight, self.qzeros, scales, zeros = self.prepare_awq_fused_tensors()
+
         super().transform_cpu(dtype, do_scales_and_zeros=False)
-        device = self.qweight.device
-        self.scales = scale_fp16.to(device=device, dtype=dtype).contiguous()
-        self.qzeros = zeros_fp16.to(device=device, dtype=dtype).contiguous()
+
+        self.scales = scales.to(device=self.qweight.device, dtype=dtype).contiguous()
+        self.qzeros = zeros.to(device=self.qweight.device, dtype=dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
 
     def transform_xpu_awq(self, dtype):
-        gptq_qweight, gptq_qzeros, scale_fp16, _ = self.prepare_awq_fused_tensors(need_zeros_fp16=False)
-        self.qweight = gptq_qweight
-        self.qzeros = gptq_qzeros
+        self.qweight, self.qzeros, scales, _ = self.prepare_awq_fused_tensors(need_zeros=False)
+
         super().transform_xpu(dtype)
-        device = self.qweight.device
-        self.scales = scale_fp16.to(device=device, dtype=dtype).contiguous()
+
+        self.scales = scales.to(device=self.qweight.device, dtype=dtype).contiguous()
 
     def transform_cpu(self, dtype):
         self.transform_cpu_awq(dtype)

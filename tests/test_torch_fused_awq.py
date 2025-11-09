@@ -24,6 +24,10 @@ CHECKPOINT_MODULE = os.environ.get(
 )
 
 
+def _xpu_available() -> bool:
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
 @lru_cache(maxsize=1)
 def _load_awq_checkpoint_module():
     if not CHECKPOINT_DIR.exists():
@@ -87,7 +91,20 @@ def _load_awq_checkpoint_module():
 
 
 @pytest.mark.skipif(not TORCH_HAS_FUSED_OPS, reason="Torch fused ops require PyTorch>=2.8")
-def test_torch_fused_awq_matches_checkpoint_module():
+@pytest.mark.parametrize(
+    "device_str",
+    [
+        pytest.param("cpu", id="cpu"),
+        pytest.param(
+            "xpu:0",
+            id="xpu",
+            marks=pytest.mark.skipif(
+                not _xpu_available(), reason="Torch fused AWQ XPU test requires Intel XPU runtime."
+            ),
+        ),
+    ],
+)
+def test_torch_fused_awq_matches_checkpoint_module(device_str: str):
     module_data = _load_awq_checkpoint_module()
     bits = module_data["bits"]
     group_size = module_data["group_size"]
@@ -97,6 +114,8 @@ def test_torch_fused_awq_matches_checkpoint_module():
     qzeros = module_data["qzeros"]
     scales = module_data["scales"]
     bias = module_data["bias"]
+
+    device = torch.device(device_str)
 
     awq_module = AwqTorchQuantLinear(
         bits=bits,
@@ -135,26 +154,32 @@ def test_torch_fused_awq_matches_checkpoint_module():
     fused_module.post_init()
     fused_module.eval()
 
+    awq_module.to(device)
+    fused_module.to(device)
+
     dtype = torch.float16
     batch = 4
-    x = torch.randn(batch, in_features, dtype=dtype)
+    x = torch.randn(batch, in_features, dtype=dtype, device=device)
     baseline = awq_module(x)
     fused_out = fused_module(x)
 
-    tol = 5e-3
+    rtol = 5e-3
+    atol = 5e-3
     abs_diff = (fused_out - baseline).abs()
     rel_diff = abs_diff / baseline.abs().clamp_min(1e-6)
     summary = tabulate(
         [
             [
+                device_str,
                 str(dtype),
-                f"{tol:.4g}",
-                f"{tol:.4g}",
+                f"{rtol:.4g}",
+                f"{atol:.4g}",
                 f"{abs_diff.max().item():.4e}",
                 f"{rel_diff.max().item():.4e}",
             ]
         ],
-        headers=["dtype", "rtol", "atol", "abs_max", "rel_max"],
+        headers=["Device", "DType", "RTol", "ATol", "AbsMaxDiff", "RelMaxDiff"],
+        tablefmt="github",
     )
     print(summary)
-    torch.testing.assert_close(fused_out, baseline, rtol=tol, atol=tol)
+    torch.testing.assert_close(fused_out, baseline, rtol=rtol, atol=atol)

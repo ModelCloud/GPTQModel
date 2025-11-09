@@ -393,6 +393,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         atol: float,
         title: str,
         reference_label: str,
+        device: Optional[torch.device] = None,
     ) -> None:
         failures = []
         total = len(actual_outputs)
@@ -419,12 +420,14 @@ class TestAwqKernelOutput(unittest.TestCase):
         status = f"{GREEN}PASS{RESET}" if not failures else f"{RED}FAIL{RESET}"
         avg_abs_diff = mean_abs_diff / total if total else 0.0
         details = "\n\n".join(str(detail) for detail in failures) if failures else "-"
+        device_label = str(device) if device is not None else "-"
 
         table = tabulate(
             [
                 [
                     backend.name,
                     str(dtype),
+                    device_label,
                     total,
                     f"{max_abs_diff:.6f}",
                     f"{avg_abs_diff:.6f}",
@@ -436,6 +439,7 @@ class TestAwqKernelOutput(unittest.TestCase):
             headers=[
                 "Backend",
                 "DType",
+                "Device",
                 "Samples",
                 "MaxAbsDiff",
                 "MeanAbsDiff",
@@ -510,6 +514,7 @@ class TestAwqKernelOutput(unittest.TestCase):
                 atol=0.004,
                 title=f"Torch Fused AWQ Device {device_str}",
                 reference_label="Torch AWQ output",
+                device=device,
             )
         finally:
             del module
