@@ -62,6 +62,9 @@ dependencies = [
 # "flash-attn>=2.8.3", <-- install for lower vram usage
 ]
 
+[project.scripts]
+gptqmodel = "gptqmodel.cli.gptqmodel:main"
+
 [project.urls]
 Homepage = "https://github.com/ModelCloud/GPTQModel"
 
