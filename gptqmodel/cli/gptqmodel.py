@@ -3,6 +3,7 @@ from typing import Iterable
 
 from gptqmodel.cli.env import _handle_env_command
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gptqmodel", description="Utilities for GPTQModel")
     subparsers = parser.add_subparsers(dest="command")
