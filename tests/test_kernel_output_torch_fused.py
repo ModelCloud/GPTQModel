@@ -8,8 +8,8 @@ import unittest
 import torch
 from logbar import LogBar
 from parameterized import parameterized
-from torch import Tensor
 from tabulate import tabulate
+from torch import Tensor
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
