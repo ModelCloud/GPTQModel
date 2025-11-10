@@ -208,29 +208,74 @@ def get_nvidia_driver_version(run_lambda):
 
 
 def get_gpu_info(run_lambda):
-    if get_platform() == "darwin" or (
-        TORCH_AVAILABLE
-        and hasattr(torch.version, "hip")
-        and torch.version.hip is not None
-    ):
-        if TORCH_AVAILABLE and torch.cuda.is_available():
-            if torch.version.hip is not None:
-                prop = torch.cuda.get_device_properties(0)
-                if hasattr(prop, "gcnArchName"):
-                    gcnArch = " ({})".format(prop.gcnArchName)
+    """
+    Collect and return GPU/XPU device information.
+    - Supports CUDA and Intel XPU coexistence.
+    - Reports device name and total memory in GiB.
+    """
+
+    def mib_to_gib(mib: float) -> float:
+        """Convert MiB to GiB."""
+        return mib / 1024.0  # 1 GiB = 1024 MiB
+
+    info_lines = []
+
+    # ─────────────────────────────────────────────
+    # CUDA devices (NVIDIA)
+    # ─────────────────────────────────────────────
+    if hasattr(torch, "cuda") and torch.cuda.is_available():
+        try:
+            smi = get_nvidia_smi()
+            uuid_regex = re.compile(r" \(UUID: .+?\)")
+            rc, out, _ = run_lambda(smi + " -L")
+
+            if rc == 0 and out:
+                out = re.sub(uuid_regex, "", out)
+                # Query GPU memory (MiB)
+                rc2, mem_info, _ = run_lambda(
+                    smi + " --query-gpu=memory.total --format=csv,noheader,nounits"
+                )
+                if rc2 == 0 and mem_info:
+                    mems = [
+                        f"{mib_to_gib(float(m.strip())):.1f} GiB"
+                        for m in mem_info.strip().splitlines()
+                    ]
+                    out_lines = out.strip().splitlines()
+                    info_lines.append("CUDA devices:")
+                    for i, line in enumerate(out_lines):
+                        mem_str = mems[i] if i < len(mems) else "?"
+                        info_lines.append(f" - {line.strip()} ({mem_str})")
                 else:
-                    gcnArch = "NoGCNArchNameOnOldPyTorch"
+                    info_lines.append("CUDA devices detected, but memory info unavailable.")
             else:
-                gcnArch = ""
-            return torch.cuda.get_device_name(None) + gcnArch
-        return None
-    smi = get_nvidia_smi()
-    uuid_regex = re.compile(r" \(UUID: .+?\)")
-    rc, out, _ = run_lambda(smi + " -L")
-    if rc != 0:
-        return None
-    # Anonymize GPUs by removing their UUID
-    return re.sub(uuid_regex, "", out)
+                # fallback to torch cuda properties
+                info_lines.append("CUDA devices:")
+                for i in range(torch.cuda.device_count()):
+                    prop = torch.cuda.get_device_properties(i)
+                    mem_gib = prop.total_memory / (1024**3)
+                    info_lines.append(f" - GPU {i}: {prop.name} ({mem_gib:.1f} GiB)")
+        except Exception as e:
+            info_lines.append(f"CUDA info error: {e}")
+    else:
+        info_lines.append("CUDA stats not collected (CUDA not available)")
+
+    # ─────────────────────────────────────────────
+    # XPU devices (Intel GPU / NPU)
+    # ─────────────────────────────────────────────
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        try:
+            info_lines.append("\nXPU devices:")
+            for i in range(torch.xpu.device_count()):
+                dev_name = torch.xpu.get_device_name(i)
+                dev_prop = torch.xpu.get_device_properties(i)
+                mem_gib = getattr(dev_prop, "total_memory", 0) / (1024**3)
+                info_lines.append(f" - XPU {i}: {dev_name} ({mem_gib:.1f} GiB)")
+        except Exception as e:
+            info_lines.append(f"XPU detected, but unable to read properties ({e})")
+    else:
+        info_lines.append("XPU stats not collected (XPU not available)")
+
+    return "\n".join(info_lines)
 
 
 def get_running_cuda_version(run_lambda):
