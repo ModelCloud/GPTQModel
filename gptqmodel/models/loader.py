@@ -534,7 +534,6 @@ def ModelLoader(cls):
             ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
 
             embeddings_module_quantized = is_embeddings_module_quantized(model_local_path)
-            print("embeddings_module_quantized", embeddings_module_quantized)
             for name in list(modules.keys()):
                 # allow loading of quantized lm_head
                 if embeddings_module_quantized and name == cls.lm_head:

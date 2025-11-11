@@ -51,7 +51,7 @@ from ..utils.model import (
     get_state_dict_for_save,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
-    streaming_state_dict_to_shards,
+    streaming_state_dict_to_shards, is_embeddings_module_quantized,
 )
 from ..utils.structure import alias_all_from_turtle_if_meta
 from ..utils.torch import torch_empty_cache
@@ -535,9 +535,10 @@ def ModelWriter(cls):
             modules = find_modules(model)
             ignore_modules = [self.lm_head] + self.get_base_modules(model)
 
+            embeddings_module_quantized = is_embeddings_module_quantized(model_id_or_path)
             for name in list(modules.keys()):
                 # allow loading of quantized lm_head
-                if qcfg.lm_head and name == self.lm_head:
+                if embeddings_module_quantized and name == self.lm_head:
                     continue
 
                 if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(

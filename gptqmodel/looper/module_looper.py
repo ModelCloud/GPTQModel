@@ -1107,7 +1107,7 @@ class ModuleLooper():
                 self.gptq_model.quantize_config.dynamic[output_embeddings_name] = embeddings_quant_config
 
             # skip everything except input_embeddings and output_embeddings
-            self.gptq_model.output_embeddings.dynamic[rf"-:^(?!{input_embeddings_name}|{output_embeddings_name}).*$"] = {}
+            self.gptq_model.quantize_config.dynamic[rf"-:^(?!{input_embeddings_name}|{output_embeddings_name}).*$"] = {}
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
