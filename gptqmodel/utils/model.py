@@ -187,7 +187,8 @@ def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.M
     if not layers:
         layers = SUPPORTS_MODULE_TYPES
 
-    if isinstance(module, tuple(layers)):
+    # TODO For testing purposes, we'll temporarily use the class name to determine this.
+    if isinstance(module, tuple(layers)) or type(module).__name__ == "MarlinQuantLinear":
        return {name: module}
 
     res = {}

@@ -259,8 +259,8 @@ def _replace_module(module, child, name, level: int = 0, debug: bool = False) ->
     elif isinstance(child, nn.Conv2d):
         setattr(module, name, HookedConv2d.from_conv2d(child))
     else:
-        if debug:
-            log.error(f"{level_indent} Hook: execute_replace but layer skipped due to type not supported: {name}")
+        # if debug:
+        #     log.error(f"{level_indent} Hook: execute_replace but layer skipped due to type not supported: {name}")
         return False
 
     return True

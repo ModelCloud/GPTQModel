@@ -1098,7 +1098,7 @@ class ModuleLooper():
                                           f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
 
             # TODO input_embeddings/output_embeddings use different config?
-            embeddings_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
+            embeddings_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "act_group_aware": True, "mse": 2.4}
             output_embeddings_name = self.gptq_model.get_output_embeddings_name()
             if self.gptq_model.quantize_config.dynamic is None:
                 self.gptq_model.quantize_config.dynamic = {output_embeddings_name: embeddings_quant_config}

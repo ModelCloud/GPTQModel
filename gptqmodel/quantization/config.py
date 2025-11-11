@@ -447,6 +447,8 @@ class QuantizeConfig():
 
     def dynamic_get(self, layer_name: str, key: str = None, default: Union[int, bool, float] = None, sub_key: str = None
                     ) -> Union[Dict, int, bool, float]:
+        # TODO For testing, only lm_head is quantized.
+        return layer_name == "lm_head"
         return dynamic_get(self.dynamic, layer_name, key, default, sub_key)
 
     # versionable is a meta.property that pairs value with version i.e "value:1.0.0"

@@ -56,8 +56,9 @@ def run_layer_stage(
             break
 
         if only_quant_embeddings:
-            is_input_embeddings_module = layer_index == 0
-            is_output_embeddings_module = layer_index == layer_count + 1
+            # is_input_embeddings_module = layer_index == 0
+            is_input_embeddings_module = False
+            is_output_embeddings_module = layer_index == layer_count
         else:
             is_input_embeddings_module = False
             is_output_embeddings_module = False
@@ -87,12 +88,12 @@ def run_layer_stage(
 
         replace_module_with_hooked_legacy(module, quant_embeddings=looper.only_quant_embeddings)
 
-        layers[layer_index] = module
         if is_input_embeddings_module:
             layer_descriptor = looper.gptq_model.get_input_embeddings_name()
         elif is_output_embeddings_module:
             layer_descriptor = looper.gptq_model.get_output_embeddings_name()
         elif layers_prefix:
+            layers[layer_index] = module
             layer_descriptor = f"{layers_prefix}.{layer_index}"
         else:
             layer_descriptor = str(layer_index)
@@ -276,7 +277,7 @@ def run_layer_stage(
                         position_ids=position_ids,
                         attention_masks=attention_masks,
                         cur_layer_device=cur_layer_device,
-                        is_lm_head_module=is_lm_head_module,
+                        is_lm_head_module=is_output_embeddings_module,
                         shared_kv_cache_dict=shared_kv_cache_dict,
                         layer_index=layer_index,
                         need_outputs=True,
@@ -309,7 +310,7 @@ def run_layer_stage(
             if p_index == len(looper.processors) - 1:
                 torch_sync()
 
-                if not is_lm_head_module:
+                if not is_output_embeddings_module:
                     layers[layer_index] = looper.gptq_model.post_quantize(module)
                 else:
                     looper.gptq_model.post_quantize(module)
