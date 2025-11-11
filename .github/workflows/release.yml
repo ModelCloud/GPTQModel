@@ -319,9 +319,7 @@ jobs:
 
       - name: Compile
         if: env.SHOULD_RUN == 1
-        run: |
-          pip install nvidia-cutlass
-          python setup.py bdist_wheel
+        run: python -m build --no-isolation
 
       - name: Test install
         if: env.SHOULD_RUN == 1
