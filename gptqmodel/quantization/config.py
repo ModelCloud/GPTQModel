@@ -194,8 +194,6 @@ class QuantizeConfig():
     sym: bool = field(default=True)
     true_sequential: bool = field(default=True)
 
-    lm_head: bool = field(default=False)
-
     quant_method: METHOD = field(default=METHOD.GPTQ)
 
     # default to gptq v1 format for maximum compat with 3rd party inference libs with minimal loss vs v2
@@ -617,7 +615,6 @@ class QuantizeConfig():
             "group_size": self.group_size,
             "desc_act": self.desc_act,
             "sym": self.sym,
-            "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_CHECKPOINT: self.format,
             # torch.dtype convert to string

@@ -50,6 +50,7 @@ from ..utils.model import (
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
     simple_dispatch_model,
+    is_embeddings_module_quantized,
 )
 from ._const import DEVICE, normalize_device
 
@@ -527,14 +528,14 @@ def ModelLoader(cls):
             # Get the first layer to determine layer type
             layers, _ = get_module_by_name_prefix(model, cls.extract_layers_node())
 
-            layers[0]
-
             modules = find_modules(model)
             ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
 
+            embeddings_module_quantized = is_embeddings_module_quantized(model_local_path)
+            print("embeddings_module_quantized", embeddings_module_quantized)
             for name in list(modules.keys()):
                 # allow loading of quantized lm_head
-                if qcfg.lm_head and name == cls.lm_head:
+                if embeddings_module_quantized and name == cls.lm_head:
                     continue
 
                 if not any(name.startswith(prefix) for prefix in cls.extract_layers_node()) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(

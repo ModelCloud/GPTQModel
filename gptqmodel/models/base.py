@@ -50,7 +50,7 @@ from ..utils.device import get_device
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
-from ..utils.model import MODALITY, find_modules, get_module_by_name_prefix, move_to
+from ..utils.model import MODALITY, find_modules, get_module_by_name_prefix, move_to, get_module_name
 from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
@@ -226,6 +226,7 @@ class BaseQModel(nn.Module):
         # turtle model is a sympathetic model used to reduce cpu ram usage
         # during quantization stage.
         turtle_model: Optional[PreTrainedModel] = None,
+        embeddings_module_quantized: bool = False,
     ):
         super().__init__()
 
@@ -253,6 +254,8 @@ class BaseQModel(nn.Module):
 
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
         self.turtle_model = turtle_model
+
+        self.embeddings_module_quantized = embeddings_module_quantized
 
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
@@ -461,6 +464,7 @@ class BaseQModel(nn.Module):
         # minimum length of calibration data, default is 10
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
+        only_quant_embeddings: bool = False,
     ) -> Dict[str, List[Dict[str, str]]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -666,7 +670,7 @@ class BaseQModel(nn.Module):
             )
 
         # prepare processor worker (looper)
-        module_looper = ModuleLooper(self, processors=processors)
+        module_looper = ModuleLooper(self, processors=processors, quant_embeddings=only_quant_embeddings)
 
         result = module_looper.loop(
             backend=backend,
@@ -678,6 +682,27 @@ class BaseQModel(nn.Module):
             timer.flush()
 
         return result
+
+    def requantize(
+        self,
+        calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        only_quant_embeddings: bool,
+        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
+        calibration_concat_size: Optional[int] = None,
+        calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle
+        batch_size: int = 1,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+        # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
+        adapter: Adapter = None,
+        adapter_calibration_dataset: Union[
+            List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
+        # minimum length of calibration data, default is 10
+        calibration_data_min_length: int = 10,
+        calibration_concat_separator: Optional[str] = None,
+    ) -> Dict[str, List[Dict[str, str]]]:
+        self.quantize(calibration, calibration_concat_size, calibration_sort, batch_size, tokenizer, backend, adapter, adapter_calibration_dataset, calibration_data_min_length, calibration_concat_separator, only_quant_embeddings)
+
 
     def _eora_generate(
         self,
@@ -1645,6 +1670,19 @@ class BaseQModel(nn.Module):
 
     def tied_word_embedding(self) -> bool:
         return getattr(self.model.config, "tie_word_embeddings", False)
+
+    def get_input_embeddings(self) -> nn.Module:
+        return self.model.get_input_embeddings()
+
+    def get_input_embeddings_name(self) -> nn.Module:
+        return get_module_name(self.gptqmodel.model, self.get_input_embeddings())
+
+    def get_output_embeddings(self) -> nn.Module:
+        return self.model.get_output_embeddings()
+
+    def get_output_embeddings_name(self) -> nn.Module:
+        return get_module_name(self.gptqmodel.model, self.get_output_embeddings())
+
 
     def __getattr__(self, item):
         try:

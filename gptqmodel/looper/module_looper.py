@@ -50,7 +50,8 @@ from ..utils.looper_helpers import (
     rehome_module_to_device,
     select_forward_devices,
 )
-from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
+from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to, \
+    untie_word_embeddings
 from ..utils.offload import offload_to_disk
 from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
 from .. import DEVICE_THREAD_POOL
@@ -82,9 +83,10 @@ class ModuleLooper():
     instance so tasks such as module reloading, forward passes, and finalisation
     reuse the same worker threads.
     """
-    def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
+    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], quant_embeddings: bool = False):
         self.processors = processors
         self.gptq_model = model
+        self.quant_embeddings = quant_embeddings # Only quantize input_embedding/output_embedding
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
         self._layer_callback = getattr(model, "layer_callback", None)
@@ -1076,26 +1078,32 @@ class ModuleLooper():
 
     @torch.inference_mode()
     def _loop_impl(self, fail_safe: bool = False, **kwargs):
-        if self.gptq_model.quantize_config.lm_head:
-            if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
-                tied_keys = self.gptq_model.model._tied_weights_keys
-                for item in tied_keys:
-                    if self.gptq_model.lm_head in item:
-                        raise NotImplementedError("quantization of `lm_head` layer with `tied_weights=True` model state is not supported. Please check model has `tied_weights=False`.")
+        input_embeddings_module = None
+        output_embeddings_module = None
+        if self.quant_embeddings:
+            self.gptq_model.model = untie_word_embeddings(self.gptq_model.model)
 
-            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
-            if get_module(self.gptq_model.model, key=self.gptq_model.lm_head) is None:
-                raise ValueError(f"could not find layer {self.gptq_model.lm_head} in the model, exit...")
+            input_embeddings_module = self.gptq_model.get_input_embeddings()
+            output_embeddings_module = self.gptq_model.get_output_embeddings()
+            if input_embeddings_module is None:
+                raise ValueError("could not find input_embeddings_module in the model, exit...")
+            if output_embeddings_module is None:
+                raise ValueError("could not find output_embeddings_module in the model, exit...")
 
-            if not isinstance(lm_head_module, tuple(SUPPORTS_MODULE_TYPES)):
-                raise NotImplementedError(f"This type({type(lm_head_module)}) of lm_head quantization is currently not "
+            if not isinstance(input_embeddings_module, tuple(SUPPORTS_MODULE_TYPES)):
+                raise NotImplementedError(f"This type({type(input_embeddings_module)}) of input_embeddings quantization is currently not "
+                                          f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
+            if not isinstance(output_embeddings_module, tuple(SUPPORTS_MODULE_TYPES)):
+                raise NotImplementedError(f"This type({type(output_embeddings_module)}) of output_embeddings quantization is currently not "
                                           f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
 
-            lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
+            # TODO input_embeddings/output_embeddings use different config?
+            embeddings_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
+            output_embeddings_name = self.gptq_model.get_output_embeddings_name()
             if self.gptq_model.quantize_config.dynamic is None:
-                self.gptq_model.quantize_config.dynamic = {self.gptq_model.lm_head: lm_head_quant_config}
-            elif self.gptq_model.quantize_config.dynamic_get(self.gptq_model.lm_head, default=None) is None:
-                self.gptq_model.quantize_config.dynamic[self.gptq_model.lm_head] = lm_head_quant_config
+                self.gptq_model.quantize_config.dynamic = {output_embeddings_name: embeddings_quant_config}
+            elif self.gptq_model.quantize_config.dynamic_get(output_embeddings_name, default=None) is None:
+                self.gptq_model.quantize_config.dynamic[output_embeddings_name] = embeddings_quant_config
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
@@ -1133,22 +1141,25 @@ class ModuleLooper():
         requires_activation_capture = any(
             getattr(proc, "enable_activation_capture", False) for proc in self.processors
         )
-        layer_modules = self.gptq_model.simple_layer_modules(
-            model_config=self.gptq_model.model.config,
-            quantize_config=self.gptq_model.quantize_config,
-            is_awq_quantize=is_awq_quantize,
-            include_capture_only=requires_activation_capture,
-        )
+
+        if self.quant_embeddings:
+            layer_modules = [[input_embeddings_module], [output_embeddings_module]]
+            layer_count = 2
+        else:
+            layer_modules = self.gptq_model.simple_layer_modules(
+                model_config=self.gptq_model.model.config,
+                quantize_config=self.gptq_model.quantize_config,
+                is_awq_quantize=is_awq_quantize,
+                include_capture_only=requires_activation_capture,
+            )
+            layer_count = len(layers)
 
         # true-sequential will replay the quantized activations after each subset has been quantized to be used for next subset quantization
         # this should always be true for gptq unless you want lower but misleading error_loss that is misleading and will lead to lower post-quantized model
         if not self.gptq_model.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
 
-        layer_count = len(layers)
-        pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
-                            .manual()
-                            .set(left_steps_offset=1))
+        pb = (log.pb(layer_count).manual().set(left_steps_offset=1))
 
         for processor in self.processors:
             processor.layer_count = layer_count
@@ -1156,15 +1167,9 @@ class ModuleLooper():
 
         shared_kv_cache_dict = {}
 
-        if self.gptq_model.quantize_config.lm_head:
-            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
-            if lm_head_module and isinstance(lm_head_module, torch.nn.Linear):
-                hooked_lm_head = HookedLinear.from_linear(lm_head_module)
-                module_path = self.gptq_model.lm_head.split('.')
-                parent = self.gptq_model.model
-                for part in module_path[:-1]:
-                    parent = getattr(parent, part)
-                setattr(parent, module_path[-1], hooked_lm_head)
+        if self.quant_embeddings:
+            self.hook_embeddings_module(input_embeddings_module)
+            self.hook_embeddings_module(output_embeddings_module)
 
         run_layer_stage(
             self,
@@ -1177,6 +1182,7 @@ class ModuleLooper():
             layer_count=layer_count,
             region_timer=region_timer,
             finalize_progress_cls=FinalizeProgressInfo,
+            is_embeddings_modules=self.quant_embeddings,
             logger=log,
         )
 
@@ -1249,6 +1255,15 @@ class ModuleLooper():
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
 
         return total_log
+
+    def hook_embeddings_module(self, module):
+        if module and isinstance(module, torch.nn.Linear):
+            hooked_lm_head = HookedLinear.from_linear(module)
+            module_path = self.gptq_model.lm_head.split('.')
+            parent = self.gptq_model.model
+            for part in module_path[:-1]:
+                parent = getattr(parent, part)
+            setattr(parent, module_path[-1], hooked_lm_head)
 
     def crate_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe, layer_module=None) -> Dict[str, NamedModule]:
         subset = {}

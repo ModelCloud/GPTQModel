@@ -1629,3 +1629,94 @@ def find_config_seq_len(config_dict, target_keys):
             if found is not None:
                 return found
     return None
+
+
+def get_module_name(module, child_module):
+    for name, m in module.named_modules():
+        if m is child_module:
+            return name
+    raise ValueError(f"Cannot find child_module {child_module} in module {module}")
+
+
+def untie_word_embeddings(model: nn.Module) -> nn.Module:
+    """
+    Detach the input and output word embedding weights in a Hugging Face causal language model.
+
+    This function:
+    - Sets `tie_word_embeddings` to False in the model configuration.
+    - Creates a new, independent output projection layer (`lm_head`).
+    - Initializes the new output layer weights by cloning the input embedding matrix.
+
+    Args:
+        model (nn.Module): A pretrained model instance (e.g., LLaMA, GPT, etc.)
+
+    Returns:
+        nn.Module: The modified model with untied input/output embeddings.
+    """
+
+    if model.config.tie_word_embeddings:
+        return model
+
+    # Ensure configuration flag is updated
+    model.config.tie_word_embeddings = False
+
+    # Extract dimensionality
+    hidden_size = model.config.hidden_size
+    vocab_size = model.config.vocab_size
+
+    # Create a new output projection layer
+    new_head = nn.Linear(hidden_size, vocab_size, bias=False).to(model.device)
+
+    # Initialize weights by cloning from the embedding layer
+    new_head.weight.data = model.model.embed_tokens.weight.data.clone()
+
+    # Replace the existing lm_head with the new one
+    model.lm_head = new_head
+
+    log.info("Word embeddings successfully untied.")
+    log.info(f"tie_word_embeddings: {model.config.tie_word_embeddings}")
+    log.info(f"lm_head and embed_tokens share weights: {model.lm_head.weight is model.model.embed_tokens.weight}")
+
+    return model
+
+
+def is_embeddings_module_quantized(model_dir: str) -> bool:
+    """
+    Check whether the lm_head in a GPTQ model is quantized,
+    without loading any model weights into memory.
+
+    Supports both single-file and multi-shard safetensors models.
+    """
+
+    index_path = os.path.join(model_dir, "model.safetensors.index.json")
+    safetensor_files = []
+
+    #1. If index.json exists, check its weight_map directly
+    if os.path.exists(index_path):
+        with open(index_path, "r") as f:
+            index = json.load(f)
+
+        for key in index.get("weight_map", {}):
+            if key.startswith("lm_head.") and (".qweight" in key or ".qzeros" in key or ".scales" in key):
+                return True
+        return False
+
+    #2. Otherwise, list all .safetensors files in the directory
+    for fn in os.listdir(model_dir):
+        if fn.endswith(".safetensors"):
+            safetensor_files.append(os.path.join(model_dir, fn))
+
+    #3. Iterate over safetensors shards and check only metadata (no tensor data is loaded)
+    for safefile in safetensor_files:
+        try:
+            with safe_open(safefile, framework="pt") as f:
+                for key in f.keys():
+                    # If lm_head has quantized tensors, it will include .qweight / .qzeros / .scales
+                    if key.startswith("lm_head.") and (".qweight" in key or ".qzeros" in key or ".scales" in key):
+                        return True
+        except Exception as e:
+            print(f"[WARN] Failed to read {safefile}: {e}")
+            continue
+
+    #4. No quantized lm_head found
+    return False

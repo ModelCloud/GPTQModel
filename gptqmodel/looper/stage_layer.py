@@ -44,6 +44,7 @@ def run_layer_stage(
     layer_count: int,
     region_timer,
     finalize_progress_cls,
+    is_embeddings_modules,
     logger=None,
 ) -> None:
     """Execute the main per-layer quantization loop."""
@@ -53,7 +54,7 @@ def run_layer_stage(
         # progress-bar controlled units of work.
         if looper._check_loop_stop():
             break
-        is_lm_head_module = layer_index >= layer_count
+        is_lm_head_module = is_embeddings_modules
 
         if is_lm_head_module:
             layer_title = "Quantizing lm_head"
@@ -75,7 +76,7 @@ def run_layer_stage(
             converter = MODULE_CONVERTER_MAP[model_type]
             module = converter(module, looper.gptq_model.model.config)
 
-        replace_module_with_hooked_legacy(module, quant_lm_head=looper.gptq_model.quantize_config.lm_head)
+        replace_module_with_hooked_legacy(module, quant_embeddings=looper.quant_embeddings)
 
         layers[layer_index] = module
         if is_lm_head_module:
