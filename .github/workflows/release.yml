@@ -320,7 +320,7 @@ jobs:
       - name: Compile
         if: env.SHOULD_RUN == 1
         run: |
-          pip install nvidia-cutlass
+          pip install setuptools
           python -m build --no-isolation
 
       - name: Test install
