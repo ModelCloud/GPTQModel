@@ -1098,12 +1098,16 @@ class ModuleLooper():
                                           f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
 
             # TODO input_embeddings/output_embeddings use different config?
-            embeddings_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "act_group_aware": True, "mse": 2.4}
+            embeddings_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
+            input_embeddings_name = self.gptq_model.get_input_embeddings_name()
             output_embeddings_name = self.gptq_model.get_output_embeddings_name()
             if self.gptq_model.quantize_config.dynamic is None:
                 self.gptq_model.quantize_config.dynamic = {output_embeddings_name: embeddings_quant_config}
             elif self.gptq_model.quantize_config.dynamic_get(output_embeddings_name, default=None) is None:
                 self.gptq_model.quantize_config.dynamic[output_embeddings_name] = embeddings_quant_config
+
+            # skip everything except input_embeddings and output_embeddings
+            self.gptq_model.output_embeddings.dynamic[rf"-:^(?!{input_embeddings_name}|{output_embeddings_name}).*$"] = {}
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
@@ -1284,6 +1288,9 @@ class ModuleLooper():
             if not isinstance(subset[name], NamedModule):
                 named_module = NamedModule(subset[name], name=name, full_name=layer_name,
                                            layer_index=layer_index)
+                if is_lm_head_module:
+                    named_module.is_output_embeddings = True
+
                 if isinstance(processor, EoraProcessor):
                     named_module.state.update({
                         "wq": processor.quantized_weights[layer_name],
@@ -1294,10 +1301,12 @@ class ModuleLooper():
                 if layer_module is not None:
                     named_module.state.setdefault("layer_module", layer_module)
 
-            if isinstance(processor, GPTQProcessor):
-                processor.preprocess(subset[name], fail_safe=fail_safe)
-            else:
-                processor.preprocess(subset[name])
+            if not is_lm_head_module:
+                if isinstance(processor, GPTQProcessor):
+                    processor.preprocess(subset[name], fail_safe=fail_safe)
+                else:
+                    processor.preprocess(subset[name])
+
             # some modules are skipped
             if processor.is_skipped(subset[name]):
                 skipped_modules.append(name)
