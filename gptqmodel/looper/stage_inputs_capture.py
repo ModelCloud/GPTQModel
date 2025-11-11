@@ -122,6 +122,7 @@ class StageInputsCapture:
             # and wait for the first instance this callback is called
             raise STOP_FORWARD_EXCEPTION
 
+        print("layers",layers)
         if cur_layer_device == META:
             layers[0] = self.gptq_model.shell_module_materialize(
                 target_submodule=layers[0],

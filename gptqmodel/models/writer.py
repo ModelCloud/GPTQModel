@@ -39,7 +39,7 @@ from ..quantization.config import (
     META_FIELD_URI,
     META_QUANTIZER_GPTQMODEL,
     META_VALUE_URI,
-    MIN_VERSION_WITH_V2, META_FIELD_QUANT_EMBEDDINGS,
+    MIN_VERSION_WITH_V2,
 )
 from ..utils.backend import BACKEND
 from ..utils.hf import sanitize_generation_config_file

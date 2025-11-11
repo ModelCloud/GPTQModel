@@ -83,10 +83,10 @@ class ModuleLooper():
     instance so tasks such as module reloading, forward passes, and finalisation
     reuse the same worker threads.
     """
-    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], quant_embeddings: bool = False):
+    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], only_quant_embeddings: bool = False):
         self.processors = processors
         self.gptq_model = model
-        self.quant_embeddings = quant_embeddings # Only quantize input_embedding/output_embedding
+        self.only_quant_embeddings = only_quant_embeddings
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
         self._layer_callback = getattr(model, "layer_callback", None)
@@ -1080,7 +1080,7 @@ class ModuleLooper():
     def _loop_impl(self, fail_safe: bool = False, **kwargs):
         input_embeddings_module = None
         output_embeddings_module = None
-        if self.quant_embeddings:
+        if self.only_quant_embeddings:
             self.gptq_model.model = untie_word_embeddings(self.gptq_model.model)
 
             input_embeddings_module = self.gptq_model.get_input_embeddings()
@@ -1142,24 +1142,22 @@ class ModuleLooper():
             getattr(proc, "enable_activation_capture", False) for proc in self.processors
         )
 
-        if self.quant_embeddings:
-            layer_modules = [[input_embeddings_module], [output_embeddings_module]]
-            layer_count = 2
-        else:
-            layer_modules = self.gptq_model.simple_layer_modules(
-                model_config=self.gptq_model.model.config,
-                quantize_config=self.gptq_model.quantize_config,
-                is_awq_quantize=is_awq_quantize,
-                include_capture_only=requires_activation_capture,
-            )
-            layer_count = len(layers)
+        layer_modules = self.gptq_model.simple_layer_modules(
+            model_config=self.gptq_model.model.config,
+            quantize_config=self.gptq_model.quantize_config,
+            is_awq_quantize=is_awq_quantize,
+            include_capture_only=requires_activation_capture,
+        )
 
         # true-sequential will replay the quantized activations after each subset has been quantized to be used for next subset quantization
         # this should always be true for gptq unless you want lower but misleading error_loss that is misleading and will lead to lower post-quantized model
         if not self.gptq_model.quantize_config.true_sequential:
             layer_modules = [sum(layer_modules, [])]
 
-        pb = (log.pb(layer_count).manual().set(left_steps_offset=1))
+        layer_count = len(layers)
+        pb = (log.pb(layer_count + 1 if self.only_quant_embeddings else layer_count)
+                            .manual()
+                            .set(left_steps_offset=1))
 
         for processor in self.processors:
             processor.layer_count = layer_count
@@ -1167,8 +1165,8 @@ class ModuleLooper():
 
         shared_kv_cache_dict = {}
 
-        if self.quant_embeddings:
-            self.hook_embeddings_module(input_embeddings_module)
+        if self.only_quant_embeddings:
+            # self.hook_embeddings_module(input_embeddings_module)
             self.hook_embeddings_module(output_embeddings_module)
 
         run_layer_stage(
@@ -1182,7 +1180,7 @@ class ModuleLooper():
             layer_count=layer_count,
             region_timer=region_timer,
             finalize_progress_cls=FinalizeProgressInfo,
-            is_embeddings_modules=self.quant_embeddings,
+            only_quant_embeddings=self.only_quant_embeddings,
             logger=log,
         )
 

@@ -44,7 +44,7 @@ def run_layer_stage(
     layer_count: int,
     region_timer,
     finalize_progress_cls,
-    is_embeddings_modules,
+    only_quant_embeddings,
     logger=None,
 ) -> None:
     """Execute the main per-layer quantization loop."""
@@ -54,11 +54,20 @@ def run_layer_stage(
         # progress-bar controlled units of work.
         if looper._check_loop_stop():
             break
-        is_lm_head_module = is_embeddings_modules
 
-        if is_lm_head_module:
-            layer_title = "Quantizing lm_head"
-            module = get_module(looper.gptq_model.model, key=looper.gptq_model.lm_head)
+        if only_quant_embeddings:
+            is_input_embeddings_module = layer_index == 0
+            is_output_embeddings_module = layer_index == layer_count + 1
+        else:
+            is_input_embeddings_module = False
+            is_output_embeddings_module = False
+
+        if is_input_embeddings_module:
+            layer_title = "Quantizing input embeddings"
+            module = looper.gptq_model.get_input_embeddings()
+        elif is_output_embeddings_module:
+            layer_title = "Quantizing output embeddings"
+            module = looper.gptq_model.get_output_embeddings()
         else:
             layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
             module = layers[layer_index]
@@ -76,18 +85,27 @@ def run_layer_stage(
             converter = MODULE_CONVERTER_MAP[model_type]
             module = converter(module, looper.gptq_model.model.config)
 
-        replace_module_with_hooked_legacy(module, quant_embeddings=looper.quant_embeddings)
+        replace_module_with_hooked_legacy(module, quant_embeddings=looper.only_quant_embeddings)
 
         layers[layer_index] = module
-        if is_lm_head_module:
-            layer_descriptor = looper.gptq_model.lm_head
+        if is_input_embeddings_module:
+            layer_descriptor = looper.gptq_model.get_input_embeddings_name()
+        elif is_output_embeddings_module:
+            layer_descriptor = looper.gptq_model.get_output_embeddings_name()
         elif layers_prefix:
             layer_descriptor = f"{layers_prefix}.{layer_index}"
         else:
             layer_descriptor = str(layer_index)
 
         cur_layer_device = get_device(module)
-        full = find_modules(module, name=looper.gptq_model.lm_head if is_lm_head_module else "")
+        if is_input_embeddings_module:
+            name = looper.gptq_model.get_input_embeddings_name()
+        elif is_output_embeddings_module:
+            name = looper.gptq_model.get_output_embeddings_name()
+        else:
+            name = ""
+        full = find_modules(module, name=name)
+
 
         for p_index, processor in enumerate(looper.processors):
             # Each processor contributes a quantization phase; walk them in
@@ -95,7 +113,12 @@ def run_layer_stage(
             processor.log_call_count = 0  # reset
             processor.collect_memory_info(layer_index)
 
-            modules = [[looper.gptq_model.lm_head]] if is_lm_head_module else layer_modules
+            if is_input_embeddings_module:
+                modules = [[looper.gptq_model.get_input_embeddings_name()]]
+            elif is_output_embeddings_module:
+                modules = [[looper.gptq_model.get_output_embeddings_name()]]
+            else:
+                modules = layer_modules
 
             # for NativeProcessor we process one time forward on all grouped module subsets
             if processor.fwd_all_modules_in_single_pass:
@@ -103,7 +126,8 @@ def run_layer_stage(
                 modules = [sum(modules, [])]
 
             layer_inputs = processor.inputs_cache.layer_inputs
-            if is_lm_head_module:
+            # TODO input?
+            if is_output_embeddings_module:
                 layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
             position_ids = processor.inputs_cache.position_ids
@@ -146,7 +170,7 @@ def run_layer_stage(
                     position_ids=position_ids,
                     attention_masks=attention_masks,
                     cur_layer_device=cur_layer_device,
-                    is_lm_head_module=is_lm_head_module,
+                    is_lm_head_module=is_output_embeddings_module,
                     layer_descriptor=layer_descriptor,
                     layer_title=layer_title,
                     layer_index=layer_index,

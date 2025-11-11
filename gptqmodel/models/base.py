@@ -466,7 +466,7 @@ class BaseQModel(nn.Module):
         calibration_concat_separator: Optional[str] = None,
         only_quant_embeddings: bool = False,
     ) -> Dict[str, List[Dict[str, str]]]:
-        if self.quantized:
+        if not only_quant_embeddings and self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
         timer = getattr(self, "quant_region_timer", None)
@@ -670,7 +670,7 @@ class BaseQModel(nn.Module):
             )
 
         # prepare processor worker (looper)
-        module_looper = ModuleLooper(self, processors=processors, quant_embeddings=only_quant_embeddings)
+        module_looper = ModuleLooper(self, processors=processors, only_quant_embeddings=only_quant_embeddings)
 
         result = module_looper.loop(
             backend=backend,
@@ -701,7 +701,7 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
-        self.quantize(calibration, calibration_concat_size, calibration_sort, batch_size, tokenizer, backend, adapter, adapter_calibration_dataset, calibration_data_min_length, calibration_concat_separator, only_quant_embeddings)
+        return self.quantize(calibration, calibration_concat_size, calibration_sort, batch_size, tokenizer, backend, adapter, adapter_calibration_dataset, calibration_data_min_length, calibration_concat_separator, only_quant_embeddings)
 
 
     def _eora_generate(
@@ -1675,13 +1675,13 @@ class BaseQModel(nn.Module):
         return self.model.get_input_embeddings()
 
     def get_input_embeddings_name(self) -> nn.Module:
-        return get_module_name(self.gptqmodel.model, self.get_input_embeddings())
+        return get_module_name(self.model, self.get_input_embeddings())
 
     def get_output_embeddings(self) -> nn.Module:
         return self.model.get_output_embeddings()
 
     def get_output_embeddings_name(self) -> nn.Module:
-        return get_module_name(self.gptqmodel.model, self.get_output_embeddings())
+        return get_module_name(self.model, self.get_output_embeddings())
 
 
     def __getattr__(self, item):
