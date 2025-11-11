@@ -373,6 +373,7 @@ def ModelLoader(cls):
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
         qcfg.device = device
+        qcfg.offload_to_disk = False
 
         if qcfg.quant_method == METHOD.AWQ and qcfg.format in [FORMAT.GEMV_FAST]:
             # GEMV_FAST only supports torch.float16
