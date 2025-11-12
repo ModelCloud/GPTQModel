@@ -128,6 +128,8 @@ def get_number_of_rows_and_cols(layer: nn.Module):
     if isinstance(layer, transformers.Conv1D):
         # transformers.Conv1D: weight shape is (n_in, n_out)
         return layer.weight.shape[1], layer.weight.shape[0]
+    elif type(layer).__name__ == "MarlinQuantLinear":
+        return layer.in_features, layer.out_features
     else:
         # weight shape is (n_out, n_in)
         return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
@@ -229,8 +231,9 @@ class GPTQ:
 
     @staticmethod
     def validate_module(module):
-        assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
-                                   transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
+        pass
+        # assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
+        #                            transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
 
     # def has_hessian_issues(self) -> bool:
     #     return any([self.issue_zero_samples, self.issue_nan_hessian, self.issue_non_invertible])
