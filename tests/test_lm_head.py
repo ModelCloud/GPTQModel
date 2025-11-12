@@ -9,6 +9,8 @@ import tempfile
 
 from datasets import load_dataset
 
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 from models.model_test import ModelTest  # noqa: E402
@@ -17,28 +19,28 @@ from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 
 
-# class TestLmHeadLoad(ModelTest):
-#     NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"  # "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"
-#     DEVICE = "cuda:0"
-#     EVAL_TASKS = {
-#         EVAL.LM_EVAL.ARC_CHALLENGE: {
-#             "acc": {"value": 0.2799, "floor_pct": 0.2},
-#             "acc_norm": {"value": 0.3046, "floor_pct": 0.2},
-#         },
-#     }
-#
-#     def test_load(self):
-#         model = GPTQModel.load(self.NATIVE_MODEL_ID, device=self.DEVICE)
-#
-#         # validate lm_head is loaded as quantized layer
-#         assert isinstance(model.model.lm_head, BaseQuantLinear)
-#
-#     def test_eval(self):
-#         self.quant_lm_eval()
+class TestLmHeadLoad(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"  # "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"
+    DEVICE = "cuda:0"
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.2799, "floor_pct": 0.2},
+            "acc_norm": {"value": 0.3046, "floor_pct": 0.2},
+        },
+    }
+
+    def test_load(self):
+        model = GPTQModel.load(self.NATIVE_MODEL_ID, device=self.DEVICE)
+
+        # validate lm_head is loaded as quantized layer
+        assert isinstance(model.model.lm_head, BaseQuantLinear)
+
+    def test_eval(self):
+        self.quant_lm_eval()
 
 
 class TestLmHeadQuant(ModelTest):
-    EXPECT_LM_HEAD_LOSS = 0.0094
+    EXPECT_LM_HEAD_LOSS = 0.0001418623
 
     sample_length = 1024
     samples = 128
@@ -54,40 +56,6 @@ class TestLmHeadQuant(ModelTest):
         # Truncating sample text to reduce memory usage
         cls.calibration_dataset = [c[:cls.sample_length] for c in calibration_dataset]
 
-    # def test_quant_lm_head(self):
-    #     self.EVAL_TASKS = {
-    #         EVAL.LM_EVAL.ARC_CHALLENGE: {
-    #             "chat_template": True,
-    #             "acc": {"value": 0.3148464163822526, "floor_pct": 0.2},
-    #             "acc_norm": {"value": 0.3310580204778157, "floor_pct": 0.2},
-    #         },
-    #     }
-    #
-    #     quant_config = QuantizeConfig(bits=4, group_size=32, lm_head=True)
-    #
-    #     model = GPTQModel.load(self.model_id, quant_config)
-    #
-    #     model.quantize(self.calibration_dataset, batch_size=8)
-    #
-    #     self.check_lm_head_loss(model.quant_log)
-    #
-    #     with tempfile.TemporaryDirectory() as tmp_dir:
-    #         model.tokenizer.save_pretrained(tmp_dir)
-    #         model.save(tmp_dir)
-    #
-    #         del model.tokenizer
-    #         del model
-    #
-    #         model = GPTQModel.load(
-    #             tmp_dir,
-    #             device_map="auto",
-    #         )
-    #
-    #         task_results = self.lm_eval(model=model,
-    #                                     trust_remote_code=self.TRUST_REMOTE_CODE,
-    #                                     delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
-    #         self.check_results(task_results)
-
     def test_requantize_lm_head(self):
         self.EVAL_TASKS = {
             EVAL.LM_EVAL.ARC_CHALLENGE: {
@@ -100,6 +68,8 @@ class TestLmHeadQuant(ModelTest):
         model = GPTQModel.load("/monster/data/model/Qwen1.5-1.8B-Chat-GPTQ-4bits", device_map="auto")
         calibration = self.load_dataset(model.tokenizer, self.DATASET_SIZE)
         model.requantize(calibration=calibration, only_quant_embeddings=True)
+
+        self.check_lm_head_loss(model.quant_log)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.tokenizer.save_pretrained(tmp_dir)
