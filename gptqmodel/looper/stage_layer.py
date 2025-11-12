@@ -63,6 +63,8 @@ def run_layer_stage(
             is_input_embeddings_module = False
             is_output_embeddings_module = False
 
+        is_embeddings_module = is_input_embeddings_module or is_output_embeddings_module
+
         if is_input_embeddings_module:
             layer_title = "Quantizing input embeddings"
             module = looper.gptq_model.get_input_embeddings()
@@ -171,7 +173,8 @@ def run_layer_stage(
                     position_ids=position_ids,
                     attention_masks=attention_masks,
                     cur_layer_device=cur_layer_device,
-                    is_lm_head_module=is_output_embeddings_module,
+                    is_embeddings_module=is_embeddings_module,
+                    only_quant_embeddings=only_quant_embeddings,
                     layer_descriptor=layer_descriptor,
                     layer_title=layer_title,
                     layer_index=layer_index,
@@ -277,7 +280,7 @@ def run_layer_stage(
                         position_ids=position_ids,
                         attention_masks=attention_masks,
                         cur_layer_device=cur_layer_device,
-                        is_lm_head_module=is_output_embeddings_module,
+                        is_embeddings_module=is_embeddings_module,
                         shared_kv_cache_dict=shared_kv_cache_dict,
                         layer_index=layer_index,
                         need_outputs=True,
@@ -310,10 +313,10 @@ def run_layer_stage(
             if p_index == len(looper.processors) - 1:
                 torch_sync()
 
-                if not is_output_embeddings_module:
-                    layers[layer_index] = looper.gptq_model.post_quantize(module)
-                else:
+                if is_embeddings_module:
                     looper.gptq_model.post_quantize(module)
+                else:
+                    layers[layer_index] = looper.gptq_model.post_quantize(module)
 
                 for finalized in processed_subset.values():
                     # Reset finalized modules to CPU to guarantee deterministic

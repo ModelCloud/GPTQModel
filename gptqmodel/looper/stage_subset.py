@@ -54,7 +54,8 @@ def run_subset_stage(
     position_ids: List[torch.Tensor],
     attention_masks: List[torch.Tensor],
     cur_layer_device: torch.device,
-    is_lm_head_module: bool,
+    is_embeddings_module: bool,
+    only_quant_embeddings: bool,
     layer_descriptor: str,
     layer_title: str,
     layer_index: int,
@@ -81,7 +82,6 @@ def run_subset_stage(
     subset = looper.crate_named_modules(
         module=module,
         full=full,
-        is_lm_head_module=is_lm_head_module,
         layer_index=layer_index,
         layers_prefix=layers_prefix,
         names=subset_names,
@@ -235,28 +235,35 @@ def run_subset_stage(
         forward_row_counts.extend([1] * (batch_count - len(forward_row_counts)))
 
     subset_size = len(subset)
-    for idx, (name, m) in enumerate(subset.items()):
-        # Register the forward hook that captures activations for quantization.
-        # The final module optionally flips a flag so processors can trigger
-        # once-per-subset logic after the forward pass.
-        is_last = (idx == subset_size - 1)
-        hook_source = getattr(m, "full_name", None)
-        if hook_source is None:
-            hook_source = getattr(m, "name", name)
-        if hook_source is None:
-            hook_source = str(name)
 
-        if hasattr(subset[name], 'forward_hook'):
-            original_hook = processor.pre_process_fwd_hook(name)
-            subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
-            enable_stop = processor.fwd_after_process or getattr(processor, "subset_forward_early_stop", False)
-            if is_last and enable_stop:
-                subset[name].forward_hook_last = True
-        else:
-            original_hook = processor.pre_process_fwd_hook(name)
-            handle.append(subset[name].register_forward_hook(
-                looper._masked_hook_wrapper(processor, original_hook, hook_source)
-            ))
+    # When only_quant_embeddings=False → all modules execute pre_process_fwd_hook.
+    # When only_quant_embeddings=True → Only execute pre_process_fwd_hook if is_embeddings_module=True.
+    if (not only_quant_embeddings) or is_embeddings_module:
+        for idx, (name, m) in enumerate(subset.items()):
+            # Register the forward hook that captures activations for quantization.
+            # The final module optionally flips a flag so processors can trigger
+            # once-per-subset logic after the forward pass.
+            is_last = (idx == subset_size - 1)
+            hook_source = getattr(m, "full_name", None)
+            if hook_source is None:
+                hook_source = getattr(m, "name", name)
+            if hook_source is None:
+                hook_source = str(name)
+
+            if hasattr(subset[name], 'forward_hook'):
+                original_hook = processor.pre_process_fwd_hook(name)
+                subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
+                enable_stop = processor.fwd_after_process or getattr(processor, "subset_forward_early_stop", False)
+                if is_last and enable_stop:
+                    subset[name].forward_hook_last = True
+            else:
+                original_hook = processor.pre_process_fwd_hook(name)
+                handle.append(subset[name].register_forward_hook(
+                    looper._masked_hook_wrapper(processor, original_hook, hook_source)
+                ))
+    else:
+        for name in list(subset.keys()):
+            pop_task(name, processor, subset)
 
     if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
         if is_awq_processor:
@@ -316,7 +323,7 @@ def run_subset_stage(
             position_ids=position_ids,
             attention_masks=attention_masks,
             cur_layer_device=cur_layer_device,
-            is_lm_head_module=is_lm_head_module,
+            is_embeddings_module=is_embeddings_module,
             shared_kv_cache_dict=shared_kv_cache_dict,
             layer_index=layer_index,
             need_outputs=need_outputs,
@@ -377,10 +384,7 @@ def run_subset_stage(
 
         if not fail_safe:
             for name in moe_skip_modules:
-                subset.pop(name)
-                task_map = getattr(processor, "tasks", None)
-                if task_map is not None:
-                    task_map.pop(name, None)
+                pop_task(name, processor, subset)
 
     quant_target_devices: Dict[str, torch.device] = {}
     for name, named_module in subset.items():
@@ -509,3 +513,10 @@ def run_subset_stage(
         layer_inputs=layer_inputs,
         forward_context=context,
     )
+
+
+def pop_task(name, processor, subset):
+    subset.pop(name)
+    task_map = getattr(processor, "tasks", None)
+    if task_map is not None:
+        task_map.pop(name, None)
