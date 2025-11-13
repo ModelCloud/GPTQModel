@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional, Union
 
 import pcre as re
 import torch
+from torch import nn
 import transformers
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -25,6 +26,7 @@ from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
+from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization.config import (
     FORMAT,
     META_FIELD_ACT_GROUP_AWARE,
@@ -229,6 +231,7 @@ def ModelWriter(cls):
             self.model = self.get_model_with_quantize(
                 qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,
+                output_embeddings=self.model.get_output_embeddings(),
             )
 
         # --- start config save block ---
@@ -512,7 +515,7 @@ def ModelWriter(cls):
 
     cls.save_quantized = save_quantized
 
-    def get_model_with_quantize(self, qcfg, model_id_or_path):
+    def get_model_with_quantize(self, qcfg, model_id_or_path, output_embeddings: nn.Module):
 
         config = AutoConfig.from_pretrained(
             model_id_or_path,
@@ -568,6 +571,11 @@ def ModelWriter(cls):
             # offload_state_dict=True,
             # offload_buffers=True,
         )
+
+        # Set the quantized embeddings module
+        if isinstance(output_embeddings, BaseQuantLinear):
+            model.set_output_embeddings(output_embeddings)
+
         torch_empty_cache()
         return model
 
