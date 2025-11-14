@@ -199,6 +199,7 @@ jobs:
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /home/ci/models/pyenv:/opt/pyenv
+        - /home/ci/models/dist:/opt/dist
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
 
@@ -274,9 +275,14 @@ jobs:
           echo "hash=$sha256"
           echo "SOURCE_HASH=$sha256" >> $GITHUB_ENV
 
-      - name: Upload source to local
-        continue-on-error: true
-        run: curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://$RUNNER/gpu/whl/upload
+
+#      - name: Upload source to local
+#        continue-on-error: true
+#        run: |
+##         curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://$RUNNER/gpu/whl/upload
+#          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
+#          [ -d $DIR ] || mkdir -p $DIR
+#          cp dist/gptqmodel_source.tar.gz $DIR/
 
       - name: Upload source to github artifact
         uses: actions/upload-artifact@v5
@@ -318,7 +324,10 @@ jobs:
         run: |
           WHEEL="$(readlink -f dist/*.whl)"
           SHA256="$(sha256sum "$WHEEL" | awk '{print $1}')"
-          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=$SHA256" -F "file=@${WHEEL};type=application/octet-stream" http://$RUNNER/gpu/whl/upload
+
+          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
+          [ -d $DIR ] || mkdir -p $DIR
+          cp $WHEEL $DIR/
 
       - name: Upload wheel to github artifact
         if: github.event.inputs.artifact_id == '' && !cancelled()
@@ -345,6 +354,7 @@ jobs:
         - /home/ci/models:/monster/data/model
         - /home/ci/models/huggingface:/github/home/.cache/huggingface
         - /home/ci/models/pyenv:/opt/pyenv
+        - /home/ci/models/dist:/opt/dist
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
@@ -413,14 +423,14 @@ jobs:
 #        run: |
 #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
 
-      - name: Download source from local
-        continue-on-error: true
-        run: |
-          curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
-          ls -ahl .
-          sha256=$(sha256sum $file_name)
-          echo "sha256=$sha256"
-          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
+#      - name: Download source from local
+#        continue-on-error: true
+#        run: |
+#          curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
+#          ls -ahl .
+#          sha256=$(sha256sum $file_name)
+#          echo "sha256=$sha256"
+#          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
 
       # - name: Download source from github
       #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
@@ -440,19 +450,29 @@ jobs:
       - name: Download wheel from local
         continue-on-error: true
         run: |
-          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://$RUNNER/gpu/whl/download")
+          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
+          [ -d $DIR ] || exit 1
+          echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
 
-          echo "file_name=$file_name"
+          ls -ahl $DIR
+          
+          mkdir dist || true
 
-          if echo "$file_name" | grep -q "gptqmodel"; then
-              mkdir dist || true
-              cd dist
-              curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/$file_name
-              ls -ahl .
-              sha256=$(sha256sum $file_name)
-              echo "sha256=$sha256"
-              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
-          fi
+          cp $DIR/*.whl dist/
+
+#          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://$RUNNER/gpu/whl/download")
+
+#          echo "file_name=$file_name"
+#
+#          if echo "$file_name" | grep -q "gptqmodel"; then
+#              mkdir dist || true
+#              cd dist
+#              curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/$file_name
+#              ls -ahl .
+#              sha256=$(sha256sum $file_name)
+#              echo "sha256=$sha256"
+#              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
+#          fi
 
       - name: Download artifact from github
         if: env.WHL_DOWNLOADED == '' && !cancelled()
@@ -464,6 +484,7 @@ jobs:
 
       - name: Install wheel
         run: |
+          uv pip uninstall gptqmodel
           uv pip install -U transformers tabulate
           if [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
              [ "${{ matrix.test_script }}" == "test_inference_speed" ] || \
