@@ -1655,7 +1655,7 @@ def untie_word_embeddings(model: nn.Module) -> nn.Module:
         nn.Module: The modified model with untied input/output embeddings.
     """
 
-    if model.config.tie_word_embeddings:
+    if not model.config.tie_word_embeddings:
         return model
 
     # Ensure configuration flag is updated
