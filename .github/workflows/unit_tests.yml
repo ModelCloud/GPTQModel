@@ -454,7 +454,7 @@ jobs:
           [ -d $DIR ] || exit 1
           echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
 
-          ls $DIR
+          ls -ahl $DIR
           
           mkdir dist || true
 
