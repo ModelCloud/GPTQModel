@@ -220,6 +220,14 @@ jobs:
 
       - name: Print Env
         run: |
+          echo "::group::nvidia packages"
+          dpkg -l | grep nvidia
+          echo "::endgroup::"
+
+          echo "::group::cuda packages"
+          dpkg -l | grep cuda
+          echo "::endgroup::"
+
           echo "::group::pyenv versions"
           pyenv versions
           echo "::endgroup::"
