@@ -1282,7 +1282,8 @@ class ModuleLooper():
         for name in subset:
             is_input_embeddings_module = name == self.input_embeddings_name
             is_output_embeddings_module = name == self.output_embeddings_name
-            layer_name = name if is_input_embeddings_module or is_output_embeddings_module else f"{layers_prefix}.{layer_index}.{name}"
+            is_embeddings_module = is_input_embeddings_module or is_output_embeddings_module
+            layer_name = name if is_embeddings_module else f"{layers_prefix}.{layer_index}.{name}"
 
             # gptq task is created and stored inside processor
             if not isinstance(subset[name], NamedModule):
@@ -1298,14 +1299,15 @@ class ModuleLooper():
                 if layer_module is not None:
                     named_module.state.setdefault("layer_module", layer_module)
 
-            if isinstance(processor, GPTQProcessor):
-                processor.preprocess(subset[name], fail_safe=fail_safe)
-            else:
-                processor.preprocess(subset[name])
-
             # some modules are skipped
-            if processor.is_skipped(subset[name]):
+            skipped = (self.only_quant_embeddings and not is_embeddings_module) or processor.is_skipped(subset[name])
+            if skipped:
                 skipped_modules.append(name)
+            else:
+                if isinstance(processor, GPTQProcessor):
+                    processor.preprocess(subset[name], fail_safe=fail_safe)
+                else:
+                    processor.preprocess(subset[name])
 
         for name in skipped_modules:
             subset.pop(name)
