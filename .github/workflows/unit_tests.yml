@@ -276,13 +276,13 @@ jobs:
           echo "SOURCE_HASH=$sha256" >> $GITHUB_ENV
 
 
-      - name: Upload source to local
-        continue-on-error: true
-        run: |
-#         curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://$RUNNER/gpu/whl/upload
-          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
-          [ -d $DIR ] || mkdir -p $DIR
-          cp dist/gptqmodel_source.tar.gz $DIR/
+#      - name: Upload source to local
+#        continue-on-error: true
+#        run: |
+##         curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://$RUNNER/gpu/whl/upload
+#          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
+#          [ -d $DIR ] || mkdir -p $DIR
+#          cp dist/gptqmodel_source.tar.gz $DIR/
 
       - name: Upload source to github artifact
         uses: actions/upload-artifact@v5
