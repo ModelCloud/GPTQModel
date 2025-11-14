@@ -324,7 +324,6 @@ jobs:
         run: |
           WHEEL="$(readlink -f dist/*.whl)"
           SHA256="$(sha256sum "$WHEEL" | awk '{print $1}')"
-#          curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=$SHA256" -F "file=@${WHEEL};type=application/octet-stream" http://$RUNNER/gpu/whl/upload
 
           DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
           [ -d $DIR ] || mkdir -p $DIR
