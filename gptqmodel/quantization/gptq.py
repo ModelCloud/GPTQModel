@@ -128,6 +128,11 @@ def get_number_of_rows_and_cols(layer: nn.Module):
     if isinstance(layer, transformers.Conv1D):
         # transformers.Conv1D: weight shape is (n_in, n_out)
         return layer.weight.shape[1], layer.weight.shape[0]
+    elif isinstance(layer, nn.Embedding):
+        # Treat embeddings as linear layers with one-hot inputs. The logical
+        # weight layout for GPTQ is (out_features, in_features) so we report
+        # rows as embedding_dim and columns as vocab size.
+        return layer.embedding_dim, layer.num_embeddings
     elif type(layer).__name__ == "MarlinQuantLinear":
         return layer.in_features, layer.out_features
     else:
@@ -158,6 +163,7 @@ class GPTQ:
             self.name = HF_OPTIMUM
             self.module = module
             self._named_module = None
+        self._is_embedding = isinstance(self.module, nn.Embedding)
 
         self._original_rows = self.rows
         self._original_columns = self.columns
@@ -206,6 +212,7 @@ class GPTQ:
         # Store per-device Hessian contributions so multi-GPU calibration can
         # keep local accumulators and merge only once when quantization begins.
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
+        self._device_embedding_counts: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
         self._hessian_dirty: bool = False
 
@@ -260,6 +267,11 @@ class GPTQ:
 
         clone = self.module.weight.data.to(copy=copy, device=device)
 
+        if self._is_embedding:
+            # Convert embedding weights to (out_features, in_features) layout
+            # expected by GPTQ quantization routines.
+            clone = clone.t()
+
         if isinstance(self.module, _ConvNd):
             clone = clone.flatten(1)
 
@@ -297,12 +309,43 @@ class GPTQ:
         with self.lock:
             self.fwd_counter += 1
 
-            existing = self._device_hessian_partials.get(dev)
-            if existing is None:
-                self._device_hessian_partials[dev] = xtx
+            if self._is_embedding:
+                existing = self._device_embedding_counts.get(dev)
+                if existing is None:
+                    self._device_embedding_counts[dev] = xtx
+                else:
+                    if existing.dim() != 1:
+                        log.warn(
+                            "GPTQ module `%s` found unexpected embedding accumulator shape %s; flattening to a 1D count vector.",
+                            getattr(self, "name", "<unknown>"),
+                            tuple(existing.shape),
+                        )
+                        if existing.shape[0] == existing.shape[-1]:
+                            existing = existing.diagonal().clone()
+                        else:
+                            existing = existing.reshape(-1)
+                        self._device_embedding_counts[dev] = existing
+
+                    if existing.numel() != xtx.numel():
+                        log.warn(
+                            "GPTQ module `%s` encountered embedding count size mismatch; resizing accumulators (%d -> %d).",
+                            getattr(self, "name", "<unknown>"),
+                            existing.numel(),
+                            xtx.numel(),
+                        )
+                        resized = xtx.new_zeros(xtx.numel())
+                        copy_len = min(existing.numel(), xtx.numel())
+                        resized[:copy_len] = existing.reshape(-1)[:copy_len]
+                        self._device_embedding_counts[dev] = existing = resized
+                    existing.add_(xtx)
+                    del xtx
             else:
-                existing.add_(xtx)
-                del xtx
+                existing = self._device_hessian_partials.get(dev)
+                if existing is None:
+                    self._device_hessian_partials[dev] = xtx
+                else:
+                    existing.add_(xtx)
+                    del xtx
 
             self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
             self.nsamples += batch_token_size
@@ -435,14 +478,49 @@ class GPTQ:
         return xtx_accum
 
     def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
-        # print(f"inp = {inp}")
+        print(f"inp = {inp.shape}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
         inp_device = get_device(inp)
 
         #inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
-        # input reshaping
-        if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
+        if isinstance(self.module, nn.Embedding):
+            # Embedding inputs are integer token ids representing one-hot vectors
+            # of length `num_embeddings`. The Hessian X^T X for one-hot inputs is
+            # diagonal with counts for each id, which we can accumulate without
+            # materializing the dense matrix.
+            flat_ids = inp.reshape(-1)
+            batch_token_size = flat_ids.numel()
+
+            if batch_token_size == 0:
+                return 0, None, torch.device(inp_device)
+
+            counts = torch.bincount(flat_ids, minlength=self.columns).to(torch.float32)
+
+            # Some models or calibration sets can surface token ids larger than
+            # the declared vocabulary size (self.columns). Clamp the histogram to
+            # the expected width so accumulation stays shape-consistent.
+            if counts.numel() != self.columns:
+                if counts.numel() > self.columns:
+                    log.warn(
+                        "GPTQ module `%s` observed embedding ids beyond vocab size %d; trimming counts to fit.",
+                        getattr(self, "name", "<unknown>"),
+                        self.columns,
+                    )
+                    counts = counts.narrow(0, 0, self.columns)
+                else:
+                    padded = torch.zeros(
+                        (self.columns,), dtype=counts.dtype, device=counts.device
+                    )
+                    padded[: counts.numel()] = counts
+                    counts = padded
+
+            canonical_device = torch.device(inp_device)
+
+            self._snapshot_borrow_workspace_stats(context="process_batch")
+            return batch_token_size, counts, canonical_device
+
+        if isinstance(self.module, (nn.Linear, transformers.Conv1D, nn.Embedding)):
             reshaped_inp = inp.reshape(-1, inp.shape[-1])
         else:
             if isinstance(self.module, nn.Conv1d):
@@ -517,6 +595,7 @@ class GPTQ:
             del reshaped_inp
 
         self._snapshot_borrow_workspace_stats(context="process_batch")
+        print("xtx", xtx.shape)
         return batch_token_size, xtx, canonical_device
 
     def _select_hessian_target_device(self, requested: Optional[torch.device]) -> torch.device:
@@ -571,23 +650,37 @@ class GPTQ:
                 self._device_sample_counts.clear()
                 return
 
-            for partial_device, partial in self._device_hessian_partials.items():
-                if partial.device != result_accum.device or partial.dtype != torch.float32:
-                    # TODO FIXME multi-3090 using P2P is revaling an issue where result_accum and/or partial is not ready for consolidation on the main thread
-                    # when parials are calculated on the individual
-                    try:
-                        result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
-                    except:
-                        log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 1/2 in 0.25s")
-                        time.sleep(0.25)
+            if self._is_embedding:
+                counts_accum = torch.zeros(
+                    (self.columns,), dtype=torch.float32, device=result_accum.device
+                )
+                for partial_device, partial in self._device_embedding_counts.items():
+                    if partial.device != counts_accum.device or partial.dtype != torch.float32:
+                        counts_accum.add_(
+                            partial.to(device=counts_accum.device, dtype=torch.float32)
+                        )
+                    else:
+                        counts_accum.add_(partial)
+
+                result_accum.copy_(torch.diag(counts_accum))
+            else:
+                for partial_device, partial in self._device_hessian_partials.items():
+                    if partial.device != result_accum.device or partial.dtype != torch.float32:
+                        # TODO FIXME multi-3090 using P2P is revaling an issue where result_accum and/or partial is not ready for consolidation on the main thread
+                        # when parials are calculated on the individual
                         try:
                             result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
                         except:
-                            log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 2/2 in 0.75s")
-                            time.sleep(0.75)
-                            result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
-                else:
-                    result_accum.add_(partial)
+                            log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 1/2 in 0.25s")
+                            time.sleep(0.25)
+                            try:
+                                result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                            except:
+                                log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 2/2 in 0.75s")
+                                time.sleep(0.75)
+                                result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                    else:
+                        result_accum.add_(partial)
 
             result_accum.mul_(2.0 / float(total_samples))
 
@@ -1017,6 +1110,9 @@ class GPTQ:
             g_idx = g_idx[:valid_cols]
 
         if isinstance(self.module, transformers.Conv1D):
+            Q = Q.t()
+        elif self._is_embedding:
+            # Transpose back to (num_embeddings, embedding_dim) for the module
             Q = Q.t()
 
         if Q.shape != self.module.weight.shape:
