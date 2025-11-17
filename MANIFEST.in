@@ -2,7 +2,7 @@ recursive-include gptqmodel_ext/awq *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/exllama *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/exllamav2 *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/exllama_eora/eora *.h *.cuh *.cu *.cpp *.py
-recursive-include gptqmodel_ext/marlin *.h *.cuh *.cu *.cpp
+recursive-include gptqmodel_ext/marlin *.h *.cuh *.cu *.cpp *.hpp
 recursive-include gptqmodel_ext/machete *.h *.hpp *.cuh *.cu *.cpp *.py
 recursive-include gptqmodel_ext/cutlass_extensions *.h *.hpp *.cuh *.cu *.cpp *.py
 recursive-include gptqmodel_ext/qqq *.h *.cuh *.cu *.cpp
