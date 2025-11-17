@@ -95,7 +95,7 @@ class LoopProcessor:
         # enable capture-only hooks (e.g. ':?') for processors that require activations
         self.enable_activation_capture = enable_activation_capture_flag
 
-        self.inputs_cache: InputCache = InputCache(None, None, None, None)
+        self.inputs_cache: InputCache = InputCache(None, None, None, None, None)
         self.tasks = {}
 
         self.pb = None

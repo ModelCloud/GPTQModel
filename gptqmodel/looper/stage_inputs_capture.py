@@ -39,7 +39,9 @@ class StageInputsCapture:
         layers: Sequence[torch.nn.Module],
         calibration_data: Iterable[Dict[str, torch.Tensor]],
         use_cache: bool,
+        only_quant_embeddings: bool,
     ) -> InputCache:
+        src_inputs: List[List[torch.Tensor]] = []
         layer_inputs: List[List[torch.Tensor]] = []
         attention_masks: List[torch.Tensor | None] = []
         position_ids: List[torch.Tensor] = []
@@ -155,6 +157,9 @@ class StageInputsCapture:
         try:
             for batch_index, example in enumerate(calibration_data, start=1):
                 for k, v in example.items():
+                    if only_quant_embeddings and k == "input_ids":
+                        src_inputs.append([move_to(v, device=data_device)])
+
                     if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
                         data_device = self.gptq_model.quantize_config.device
                     else:
@@ -220,6 +225,7 @@ class StageInputsCapture:
         handle.remove()
 
         result = InputCache(
+            src_inputs=src_inputs,
             layer_inputs=layer_inputs,
             layer_input_kwargs=layer_input_kwargs,
             position_ids=position_ids,

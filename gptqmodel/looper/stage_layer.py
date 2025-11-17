@@ -56,9 +56,9 @@ def run_layer_stage(
             break
 
         if only_quant_embeddings:
-            # is_input_embeddings_module = layer_index == 0
-            is_input_embeddings_module = False
-            is_output_embeddings_module = layer_index == layer_count
+            # is_input_embeddings_module = False
+            is_input_embeddings_module = layer_index == 0
+            is_output_embeddings_module = layer_index == layer_count + 1
         else:
             is_input_embeddings_module = False
             is_output_embeddings_module = False
@@ -128,10 +128,14 @@ def run_layer_stage(
                 # merge all subsets into one
                 modules = [sum(modules, [])]
 
-            layer_inputs = processor.inputs_cache.layer_inputs
             # TODO input?
-            if is_output_embeddings_module:
+            if is_input_embeddings_module:
+                layer_inputs = processor.inputs_cache.src_inputs
+            elif is_output_embeddings_module:
                 layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
+            else:
+                layer_inputs = processor.inputs_cache.layer_inputs
+            # print("layer_inputs",layer_inputs)
             layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
             position_ids = processor.inputs_cache.position_ids
             attention_masks = processor.inputs_cache.attention_masks

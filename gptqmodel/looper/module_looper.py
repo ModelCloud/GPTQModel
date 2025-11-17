@@ -717,6 +717,7 @@ class ModuleLooper():
         progress_total_rows: Optional[int] = None,
         preserve_module_devices: bool = False,
     ) -> List[List[torch.Tensor]]:
+        print("_run_forward_batches_single module", module)
         """Sequential fallback when only one forward device is in use."""
         outputs: List[List[torch.Tensor]] = []
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
@@ -775,6 +776,7 @@ class ModuleLooper():
                 module_output = None
                 try:
                     if is_embeddings_module:
+                        # print("_run_forward_batches_single is_embeddings_module", module, layer_input)
                         module_output = module(*layer_input)
                     else:
                         module_output = module(*layer_input, **additional_inputs)
@@ -1079,6 +1081,7 @@ class ModuleLooper():
             layers=layers,
             calibration_data=calibration_data,
             use_cache=use_cache,
+            only_quant_embeddings=self.only_quant_embeddings,
         )
 
     def loop(self, fail_safe: bool = False, **kwargs):
@@ -1168,7 +1171,7 @@ class ModuleLooper():
         shared_kv_cache_dict = {}
 
         if self.only_quant_embeddings:
-            # self.hook_embeddings_module(self.input_embeddings_module)
+            self.hook_embeddings_module(self.input_embeddings_module)
             self.hook_embeddings_module(self.output_embeddings_module)
 
         run_layer_stage(
