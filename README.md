@@ -226,8 +226,8 @@ uv pip install -v gptqmodel --no-build-isolation
 # clone repo
 git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
-# python3-dev is required, ninja is to speed up compile
-apt install python3-dev ninja
+# python3-dev is required, ninja is to speed up compile, need to upgrade to latest `setuptools` to avoid errors
+apt install python3-dev ninja setuptools -U
 
 # pip: compile and install
 # You can install optional modules like  vllm, sglang, bitblas.
