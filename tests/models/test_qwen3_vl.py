@@ -5,11 +5,11 @@
 
 from model_test import ModelTest
 
-from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
+from gptqmodel.models.definitions.qwen3_vl import Qwen3_VLQModel
 from gptqmodel.utils.eval import EVAL
 
 
-class TestQwen2_VL(ModelTest):
+class TestQwen3_VL(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-VL-2B-Instruct/"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
@@ -43,7 +43,7 @@ class TestQwen2_VL(ModelTest):
             messages, tokenize=False, add_generation_prompt=True
         )
 
-        image_inputs = Qwen2VLQModel.process_vision_info(messages)
+        image_inputs = Qwen3_VLQModel.process_vision_info(messages)
         inputs = processor(
             text=[text],
             images=image_inputs,
