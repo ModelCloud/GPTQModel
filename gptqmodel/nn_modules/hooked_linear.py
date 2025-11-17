@@ -259,23 +259,23 @@ def _replace_module(module, child, name, level: int = 0, debug: bool = False) ->
     elif isinstance(child, nn.Conv2d):
         setattr(module, name, HookedConv2d.from_conv2d(child))
     else:
-        if debug:
-            log.error(f"{level_indent} Hook: execute_replace but layer skipped due to type not supported: {name}")
+        # if debug:
+        #     log.error(f"{level_indent} Hook: execute_replace but layer skipped due to type not supported: {name}")
         return False
 
     return True
 
 
-def replace_module_with_hooked_legacy(module, level: int = 0, quant_lm_head: bool = False):
+def replace_module_with_hooked_legacy(module, level: int = 0, quant_embeddings: bool = False):
     # if level == 0:
     #     log.info("Hooked Modules: Using legacy based config for targeting of modules")
 
     for name, child in module.named_children():
-        if not quant_lm_head and hasattr(module, "get_output_embeddings") and child == module.get_output_embeddings():
+        if not quant_embeddings and hasattr(module, "get_output_embeddings") and child == module.get_output_embeddings():
             continue
 
-        if not _replace_module(module, child, name, level, quant_lm_head):
-            replace_module_with_hooked_legacy(child, level=level+1, quant_lm_head=quant_lm_head)
+        if not _replace_module(module, child, name, level, quant_embeddings):
+            replace_module_with_hooked_legacy(child, level=level+1, quant_embeddings=quant_embeddings)
 
 # deprecated features
 def replace_module_with_hooked_tree(module, tree: Union[List,Dict] = [], level: int = 0, debug: bool = False):

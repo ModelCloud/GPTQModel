@@ -360,7 +360,7 @@ def forward_batch_worker(
     position_ids: Optional[torch.Tensor],
     *,
     support_batch_quantize: bool,
-    is_lm_head_module: bool,
+    is_embeddings_module: bool,
     need_output: bool,
     reuse_kv: bool,
     prev_kv,
@@ -401,7 +401,7 @@ def forward_batch_worker(
     module_output = None
     kv_next = None
     try:
-        if is_lm_head_module:
+        if is_embeddings_module:
             module_output = module(*inputs)
         else:
             module_output = module(*inputs, **additional_inputs)

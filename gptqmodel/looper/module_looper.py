@@ -50,7 +50,8 @@ from ..utils.looper_helpers import (
     rehome_module_to_device,
     select_forward_devices,
 )
-from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
+from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to, \
+    untie_word_embeddings
 from ..utils.offload import offload_to_disk
 from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
 from .. import DEVICE_THREAD_POOL
@@ -82,9 +83,10 @@ class ModuleLooper():
     instance so tasks such as module reloading, forward passes, and finalisation
     reuse the same worker threads.
     """
-    def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
+    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], only_quant_embeddings: bool = False):
         self.processors = processors
         self.gptq_model = model
+        self.only_quant_embeddings = only_quant_embeddings
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
         self._layer_callback = getattr(model, "layer_callback", None)
@@ -137,6 +139,15 @@ class ModuleLooper():
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
+
+        if self.only_quant_embeddings:
+            self.gptq_model.model = untie_word_embeddings(self.gptq_model.model)
+
+        self.input_embeddings_name = self.gptq_model.get_input_embeddings_name()
+        self.output_embeddings_name = self.gptq_model.get_output_embeddings_name()
+
+        self.input_embeddings_module = self.gptq_model.get_input_embeddings()
+        self.output_embeddings_module = self.gptq_model.get_output_embeddings()
 
     def register_layer_callback(self, callback) -> None:
         """Register or replace the layer-complete callback target."""
@@ -597,7 +608,7 @@ class ModuleLooper():
         position_ids: List[torch.Tensor],
         attention_masks: List[torch.Tensor],
         cur_layer_device: torch.device,
-        is_lm_head_module: bool,
+        is_embeddings_module: bool,
         shared_kv_cache_dict: Dict[int, torch.Tensor],
         layer_index: int,
         need_outputs: bool,
@@ -626,7 +637,7 @@ class ModuleLooper():
                 position_ids=position_ids,
                 attention_masks=attention_masks,
                 cur_layer_device=cur_layer_device,
-                is_lm_head_module=is_lm_head_module,
+                is_embeddings_module=is_embeddings_module,
                 shared_kv_cache_dict=shared_kv_cache_dict,
                 layer_index=layer_index,
                 need_outputs=need_outputs,
@@ -650,7 +661,7 @@ class ModuleLooper():
                 position_ids=position_ids,
                 attention_masks=attention_masks,
                 cur_layer_device=cur_layer_device,
-                is_lm_head_module=is_lm_head_module,
+                is_embeddings_module=is_embeddings_module,
                 shared_kv_cache_dict=shared_kv_cache_dict,
                 layer_index=layer_index,
                 need_outputs=need_outputs,
@@ -671,7 +682,7 @@ class ModuleLooper():
             position_ids=position_ids,
             attention_masks=attention_masks,
             cur_layer_device=cur_layer_device,
-            is_lm_head_module=is_lm_head_module,
+            is_embeddings_module=is_embeddings_module,
             shared_kv_cache_dict=shared_kv_cache_dict,
             layer_index=layer_index,
             need_outputs=need_outputs,
@@ -694,7 +705,7 @@ class ModuleLooper():
         position_ids: List[torch.Tensor],
         attention_masks: List[torch.Tensor],
         cur_layer_device: torch.device,
-        is_lm_head_module: bool,
+        is_embeddings_module: bool,
         shared_kv_cache_dict: Dict[int, torch.Tensor],
         layer_index: int,
         need_outputs: bool,
@@ -763,7 +774,7 @@ class ModuleLooper():
 
                 module_output = None
                 try:
-                    if is_lm_head_module:
+                    if is_embeddings_module:
                         module_output = module(*layer_input)
                     else:
                         module_output = module(*layer_input, **additional_inputs)
@@ -814,7 +825,7 @@ class ModuleLooper():
         position_ids: List[torch.Tensor],
         attention_masks: List[torch.Tensor],
         cur_layer_device: torch.device,
-        is_lm_head_module: bool,
+        is_embeddings_module: bool,
         shared_kv_cache_dict: Dict[int, torch.Tensor],
         layer_index: int,
         need_outputs: bool,
@@ -962,7 +973,7 @@ class ModuleLooper():
                         attention_masks[batch_idx],
                         position_ids[batch_idx] if position_ids else None,
                         support_batch_quantize=self.support_batch_quantize,
-                        is_lm_head_module=is_lm_head_module,
+                        is_embeddings_module=is_embeddings_module,
                         need_output=need_outputs,
                         reuse_kv=reuse_kv,
                         prev_kv=prev_kv,
@@ -1076,26 +1087,25 @@ class ModuleLooper():
 
     @torch.inference_mode()
     def _loop_impl(self, fail_safe: bool = False, **kwargs):
-        if self.gptq_model.quantize_config.lm_head:
-            if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
-                tied_keys = self.gptq_model.model._tied_weights_keys
-                for item in tied_keys:
-                    if self.gptq_model.lm_head in item:
-                        raise NotImplementedError("quantization of `lm_head` layer with `tied_weights=True` model state is not supported. Please check model has `tied_weights=False`.")
+        if self.only_quant_embeddings:
+            if self.input_embeddings_module is None:
+                raise ValueError("could not find input_embeddings_module in the model, exit...")
+            if self.output_embeddings_module is None:
+                raise ValueError("could not find output_embeddings_module in the model, exit...")
 
-            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
-            if get_module(self.gptq_model.model, key=self.gptq_model.lm_head) is None:
-                raise ValueError(f"could not find layer {self.gptq_model.lm_head} in the model, exit...")
-
-            if not isinstance(lm_head_module, tuple(SUPPORTS_MODULE_TYPES)):
-                raise NotImplementedError(f"This type({type(lm_head_module)}) of lm_head quantization is currently not "
+            if not isinstance(self.input_embeddings_module, tuple(SUPPORTS_MODULE_TYPES)):
+                raise NotImplementedError(f"This type({type(self.input_embeddings_module)}) of input_embeddings quantization is currently not "
+                                          f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
+            if not isinstance(self.output_embeddings_module, tuple(SUPPORTS_MODULE_TYPES)):
+                raise NotImplementedError(f"This type({type(self.output_embeddings_module)}) of output_embeddings quantization is currently not "
                                           f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
 
-            lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
+            # TODO input_embeddings/output_embeddings use different config?
+            embeddings_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
             if self.gptq_model.quantize_config.dynamic is None:
-                self.gptq_model.quantize_config.dynamic = {self.gptq_model.lm_head: lm_head_quant_config}
-            elif self.gptq_model.quantize_config.dynamic_get(self.gptq_model.lm_head, default=None) is None:
-                self.gptq_model.quantize_config.dynamic[self.gptq_model.lm_head] = lm_head_quant_config
+                self.gptq_model.quantize_config.dynamic = {self.output_embeddings_name: embeddings_quant_config}
+            elif self.gptq_model.quantize_config.dynamic_get(self.output_embeddings_name, default=None) is None:
+                self.gptq_model.quantize_config.dynamic[self.output_embeddings_name] = embeddings_quant_config
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
         self.gptq_model.model.config.use_cache = False
@@ -1133,6 +1143,7 @@ class ModuleLooper():
         requires_activation_capture = any(
             getattr(proc, "enable_activation_capture", False) for proc in self.processors
         )
+
         layer_modules = self.gptq_model.simple_layer_modules(
             model_config=self.gptq_model.model.config,
             quantize_config=self.gptq_model.quantize_config,
@@ -1146,7 +1157,7 @@ class ModuleLooper():
             layer_modules = [sum(layer_modules, [])]
 
         layer_count = len(layers)
-        pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
+        pb = (log.pb(layer_count + 1 if self.only_quant_embeddings else layer_count)
                             .manual()
                             .set(left_steps_offset=1))
 
@@ -1156,15 +1167,9 @@ class ModuleLooper():
 
         shared_kv_cache_dict = {}
 
-        if self.gptq_model.quantize_config.lm_head:
-            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
-            if lm_head_module and isinstance(lm_head_module, torch.nn.Linear):
-                hooked_lm_head = HookedLinear.from_linear(lm_head_module)
-                module_path = self.gptq_model.lm_head.split('.')
-                parent = self.gptq_model.model
-                for part in module_path[:-1]:
-                    parent = getattr(parent, part)
-                setattr(parent, module_path[-1], hooked_lm_head)
+        if self.only_quant_embeddings:
+            # self.hook_embeddings_module(self.input_embeddings_module)
+            self.hook_embeddings_module(self.output_embeddings_module)
 
         run_layer_stage(
             self,
@@ -1177,6 +1182,7 @@ class ModuleLooper():
             layer_count=layer_count,
             region_timer=region_timer,
             finalize_progress_cls=FinalizeProgressInfo,
+            only_quant_embeddings=self.only_quant_embeddings,
             logger=log,
         )
 
@@ -1250,7 +1256,16 @@ class ModuleLooper():
 
         return total_log
 
-    def crate_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe, layer_module=None) -> Dict[str, NamedModule]:
+    def hook_embeddings_module(self, module):
+        if module and isinstance(module, torch.nn.Linear):
+            hooked_lm_head = HookedLinear.from_linear(module)
+            module_path = self.gptq_model.lm_head.split('.')
+            parent = self.gptq_model.model
+            for part in module_path[:-1]:
+                parent = getattr(parent, part)
+            setattr(parent, module_path[-1], hooked_lm_head)
+
+    def crate_named_modules(self, module, full, layer_index, layers_prefix, names, processor, fail_safe, layer_module=None) -> Dict[str, NamedModule]:
         subset = {}
         for n in names:
             if n in full:
@@ -1265,7 +1280,9 @@ class ModuleLooper():
                 raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
         skipped_modules = []
         for name in subset:
-            layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{name}"
+            is_input_embeddings_module = name == self.input_embeddings_name
+            is_output_embeddings_module = name == self.output_embeddings_name
+            layer_name = name if is_input_embeddings_module or is_output_embeddings_module else f"{layers_prefix}.{layer_index}.{name}"
 
             # gptq task is created and stored inside processor
             if not isinstance(subset[name], NamedModule):
@@ -1285,6 +1302,7 @@ class ModuleLooper():
                 processor.preprocess(subset[name], fail_safe=fail_safe)
             else:
                 processor.preprocess(subset[name])
+
             # some modules are skipped
             if processor.is_skipped(subset[name]):
                 skipped_modules.append(name)
