@@ -236,12 +236,13 @@ class BaseQModel(nn.Module):
             # setting cls.module_tree
             type(self).module_tree = apply_module_tree_override(self.module_tree, self.module_tree_overrides[quant_method])
 
+        if quant_method == METHOD.GPTQ and type(self).module_tree is None:
+            type(self).module_tree = self._auto_detect_module_tree(model)
+        
+        # If module_tree is still None after auto-detection, raise an error indicating unsupported model type
         if type(self).module_tree is None:
-            auto_module_tree = self._auto_detect_module_tree(model)
-            if auto_module_tree is None:
-                raise ValueError(f"Unsupport model_type {model.config.model_type}, and failed to auto-detect module tree for model {model}")
-
-            type(self).module_tree = auto_module_tree
+            raise ValueError(f"Unsupport model_type {model.config.model_type}, and failed to auto-detect module tree for model {model}")
+            
 
         # record configuration early so model lifecycle hooks can rely on them
         self.compiled = False  # set to True while compile() is triggered successfully
