@@ -717,7 +717,6 @@ class ModuleLooper():
         progress_total_rows: Optional[int] = None,
         preserve_module_devices: bool = False,
     ) -> List[List[torch.Tensor]]:
-        print("total_batches", module)
         """Sequential fallback when only one forward device is in use."""
         outputs: List[List[torch.Tensor]] = []
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
@@ -734,7 +733,6 @@ class ModuleLooper():
         total_rows = max(total_rows, 1)
         processed_rows = 0
         stage_label = progress_stage or "Forward"
-        print("total_batches", total_batches)
         for batch_idx in range(total_batches):
             processor._set_current_batch_index(batch_idx)
             try:

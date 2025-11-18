@@ -79,7 +79,6 @@ def run_subset_stage(
     processor_name_lower = processor_name.lower()
     is_awq_processor = processor_name_lower.startswith("awq")
 
-    print("full", module, full)
     subset = looper.crate_named_modules(
         module=module,
         full=full,
