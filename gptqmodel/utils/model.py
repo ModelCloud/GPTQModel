@@ -345,8 +345,8 @@ def create_quant_module(
         in_features = submodule.in_features
         out_features = submodule.out_features
     elif isinstance(submodule, nn.Embedding):
-        in_features = submodule.embedding_dim
-        out_features = submodule.num_embeddings
+        in_features = submodule.num_embeddings
+        out_features = submodule.embedding_dim
     elif isinstance(submodule, _ConvNd):
         in_features = submodule.in_channels
         out_features = submodule.out_channels

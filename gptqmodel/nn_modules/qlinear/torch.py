@@ -571,8 +571,8 @@ class TorchQuantEmbeddings(PackableQuantLinear):
             group_size=group_size,
             sym=sym,
             desc_act=desc_act,
-            in_features=in_features,
-            out_features=out_features,
+            in_features=in_features, # num_embeddings
+            out_features=out_features, # embedding_dim
             bias=bias,
             pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.TORCH),
@@ -580,8 +580,10 @@ class TorchQuantEmbeddings(PackableQuantLinear):
             register_buffers=register_buffers,
             **kwargs)
 
+        self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
+
     def forward(self, input_ids: torch.Tensor):
-        weights = self.dequantize_weight().t()
+        weights = self.dequantize_weight()
         return F.embedding(input_ids, weights)
 
 
