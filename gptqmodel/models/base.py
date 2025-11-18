@@ -236,6 +236,13 @@ class BaseQModel(nn.Module):
             # setting cls.module_tree
             type(self).module_tree = apply_module_tree_override(self.module_tree, self.module_tree_overrides[quant_method])
 
+        if type(self).module_tree is None:
+            auto_module_tree = self._auto_detect_module_tree(model)
+            if auto_module_tree is None:
+                raise ValueError(f"Unsupport model_type {model.config.model_type}, and failed to auto-detect module tree for model {model}")
+
+            type(self).module_tree = auto_module_tree
+
         # record configuration early so model lifecycle hooks can rely on them
         self.compiled = False  # set to True while compile() is triggered successfully
         self.quantized = quantized
@@ -1656,6 +1663,86 @@ class BaseQModel(nn.Module):
             if model is not None and item != "model":
                 return getattr(model, item)
             raise exc
+
+    def _auto_detect_module_tree(self, model: PreTrainedModel):
+        def _get(path):
+            base = model
+            for p in path.split("."):
+                base = getattr(base, p, None)
+                if base is None:
+                    log.debug(f"_get: path='{path}' stopped at '{p}', returning None")
+                    return None
+            log.debug(f"_get: path='{path}' resolved successfully, returning {type(base).__name__}")
+            return base
+
+        candidates = [
+            "model.layers",
+            "language_model.layers",
+            "model.decoder.layers",
+            "transformer.h",
+            "transformer.blocks",
+            "layers",
+            "blocks",
+            "model.blocks",
+        ]
+        log.debug(f"Trying candidate paths: {candidates}")
+        chosen = None
+        for c in candidates:
+            m = _get(c)
+            if isinstance(m, (nn.ModuleList, list, tuple)) and len(m) > 0 and isinstance(m[0], nn.Module):
+                chosen = c
+                log.debug(f"Matched candidate path '{c}', type={type(m).__name__}, length={len(m)}")
+                break
+            else:
+                log.debug(f"Candidate path '{c}' invalid: type={type(m).__name__ if m is not None else None}, length={len(m) if hasattr(m, '__len__') else 'N/A'}")
+        if chosen is None:
+            log.debug("All candidate paths invalid, returning empty mapping")
+            names = []
+            mapping = {"": tuple(names)}
+            return ["", "#", mapping]
+
+        layer0 = _get(chosen)[0]
+        log.debug(f"Using layer0: {type(layer0).__name__}")
+
+        def _linear_names(module):
+            mods = find_modules(module, layers=[nn.Linear])
+            log.debug(f"_linear_names: found {len(mods)} Linear modules in {type(module).__name__}")
+            return list(mods.keys())
+
+        all_linear = _linear_names(layer0)
+        log.debug(f"All Linear names in layer0: {all_linear}")
+
+        mapping = {}
+
+        def _find_parents(module, possible_names):
+            found = set()
+            for n, _ in module.named_children():
+                l = n.lower()
+                if any(k in l for k in possible_names):
+                    found.add(n)
+            return found
+
+        def _leaf_tokens(prefix):
+            return tuple(x.split(".")[-1] for x in all_linear if x.startswith(f"{prefix}."))
+
+        possible_parent = ["attn", "attention", "self_attn", "mlp", "ffn", "feed", "dense"]
+        
+        found_parents = _find_parents(layer0, possible_parent)
+
+        for p in found_parents:
+            t = _leaf_tokens(p)
+            if t:
+                mapping[p] = t
+
+        if not mapping:
+            blocks = tuple(n.split(".")[-1] for n in all_linear)
+            mapping[""] = blocks
+            log.debug(f"Mapping empty, using all Linear as fallback: {blocks}")
+
+        parts = chosen.split(".")
+        tree = parts + ["#", mapping]
+        log.debug(f"Final module_tree: {tree}")
+        return tree
 
 __all__ = ["BaseQModel"]
 
