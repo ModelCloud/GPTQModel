@@ -271,12 +271,15 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     return False
 
 
-def check_and_get_model_type(model_dir, trust_remote_code=False):
+def check_and_get_model_definition(model_dir, trust_remote_code=False):
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
-    if config.model_type.lower() not in SUPPORTED_MODELS:
-        raise TypeError(f"{config.model_type} isn't supported yet.")
-    model_type = config.model_type
-    return model_type.lower()
+    model_type = config.model_type.lower()
+
+    # if model_type is not supported, use BaseQModel, will use auto_detect_module_tree to generate module tree
+    if model_type not in SUPPORTED_MODELS:
+        return BaseQModel
+
+    return MODEL_MAP[model_type]
 
 class GPTQModel:
     def __init__(self):
@@ -372,8 +375,9 @@ class GPTQModel:
             log.warn(
                 "GPTQModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
 
-        model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
-        return MODEL_MAP[model_type].from_pretrained(
+        model_definition = check_and_get_model_definition(model_id_or_path, trust_remote_code)
+
+        return model_definition.from_pretrained(
             pretrained_model_id_or_path=model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
@@ -395,12 +399,12 @@ class GPTQModel:
         adapter = normalize_adapter(adapter)
 
         print(f"from_quantized: adapter: {adapter}")
-        model_type = check_and_get_model_type(model_id_or_path, trust_remote_code)
+        model_definition = check_and_get_model_definition(model_id_or_path, trust_remote_code)
 
         if isinstance(backend, str):
             backend = BACKEND(backend)
 
-        return MODEL_MAP[model_type].from_quantized(
+        return model_definition.from_quantized(
             model_id_or_path=model_id_or_path,
             device_map=device_map,
             device=device,
