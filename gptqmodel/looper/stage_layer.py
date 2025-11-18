@@ -72,6 +72,7 @@ def run_layer_stage(
             layer_title = "Quantizing output embeddings"
             module = looper.gptq_model.get_output_embeddings()
         else:
+            layer_index = layer_index - 1
             layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
             module = layers[layer_index]
 

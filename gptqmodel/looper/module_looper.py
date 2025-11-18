@@ -1160,7 +1160,7 @@ class ModuleLooper():
             layer_modules = [sum(layer_modules, [])]
 
         layer_count = len(layers)
-        pb = (log.pb(layer_count + 1 if self.only_quant_embeddings else layer_count)
+        pb = (log.pb(layer_count + 2 if self.only_quant_embeddings else layer_count)
                             .manual()
                             .set(left_steps_offset=1))
 
