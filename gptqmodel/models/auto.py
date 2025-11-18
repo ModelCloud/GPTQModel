@@ -405,6 +405,17 @@ class GPTQModel:
         if isinstance(backend, str):
             backend = BACKEND(backend)
 
+        if model_type is None:
+            return BaseQModel.from_quantized(
+                model_id_or_path=model_id_or_path,
+                device_map=device_map,
+                device=device,
+                backend=backend,
+                trust_remote_code=trust_remote_code,
+                adapter=adapter,
+                **kwargs,
+            )
+
         return MODEL_MAP[model_type].from_quantized(
             model_id_or_path=model_id_or_path,
             device_map=device_map,
