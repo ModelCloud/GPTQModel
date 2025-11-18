@@ -34,7 +34,7 @@ class TestAutoDetectModuleTree(unittest.TestCase):
     def test_layers_with_parents(self):
         model = DummyModel()
         base = BaseQModel.__new__(BaseQModel)
-        tree = base._auto_detect_module_tree(model)
+        tree = base._auto_detect_module_tree(model, quant_method="gptq")
         self.assertEqual(tree[0], "layers")
         self.assertEqual(tree[1], "#")
         mapping = tree[2]

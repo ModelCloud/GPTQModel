@@ -236,8 +236,8 @@ class BaseQModel(nn.Module):
             # setting cls.module_tree
             type(self).module_tree = apply_module_tree_override(self.module_tree, self.module_tree_overrides[quant_method])
 
-        if quant_method == METHOD.GPTQ and type(self).module_tree is None:
-            type(self).module_tree = self._auto_detect_module_tree(model)
+        if type(self).module_tree is None:
+            type(self).module_tree = self._auto_detect_module_tree(model, quant_method)
         
         # If module_tree is still None after auto-detection, raise an error indicating unsupported model type
         if type(self).module_tree is None:
@@ -1665,8 +1665,12 @@ class BaseQModel(nn.Module):
                 return getattr(model, item)
             raise exc
 
-    def _auto_detect_module_tree(self, model: PreTrainedModel):
+    def _auto_detect_module_tree(self, model: PreTrainedModel, quant_method: METHOD):
         log.warn("Model not yet support, attempting Module Tree AutoCompat:...")
+
+        if quant_method != METHOD.GPTQ:
+            log.warn(f"Module Tree AutoCompat: Failed, quant_method={quant_method}, only support GPTQ")
+            return None
 
         def _get(path):
             base = model
