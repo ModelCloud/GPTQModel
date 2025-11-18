@@ -1706,12 +1706,12 @@ class BaseQModel(nn.Module):
         log.debug(f"Using layer0: {type(layer0).__name__}")
 
         def _linear_names(module):
-            mods = find_modules(module, layers=[nn.Linear])
-            log.debug(f"_linear_names: found {len(mods)} Linear modules in {type(module).__name__}")
+            mods = find_modules(module, layers=[nn.Linear, nn.Conv1d, nn.Conv2d])
+            log.debug(f"_linear_names: found {len(mods)} Linear/Conv modules in {type(module).__name__}")
             return list(mods.keys())
 
         all_linear = _linear_names(layer0)
-        log.debug(f"All Linear names in layer0: {all_linear}")
+        log.debug(f"All Linear/Conv names in layer0: {all_linear}")
 
         mapping = {}
 
