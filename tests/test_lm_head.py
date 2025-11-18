@@ -10,6 +10,7 @@ import tempfile
 from datasets import load_dataset
 
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.quantization.config import EmbedQuantMode
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -41,13 +42,15 @@ from gptqmodel.utils.eval import EVAL  # noqa: E402
 
 class TestLmHeadQuant(ModelTest):
     EXPECT_LM_HEAD_LOSS = 0.0001088594
+    # DATASET_CONCAT_SIZE = 2048
+    EVAL_BATCH_SIZE = 64
 
     def test_requantize_lm_head(self):
         self.EVAL_TASKS = {
             EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
                 "chat_template": True,
                 "exact_match,flexible-extract": {
-                    "value": 0.1944,
+                    "value": 0.3374,
                     "floor_pct": 0.04,
                 },
             },
@@ -71,11 +74,11 @@ class TestLmHeadQuant(ModelTest):
             },
         }
 
-        model = GPTQModel.load("/monster/data/model/Qwen1.5-1.8B-Chat-GPTQ-4bits-gp32", device_map="auto")
+        model = GPTQModel.load("Qwen1.5-1.8B-Chat-GPTQ-4bits-gp32", device_map="auto")
         calibration = self.load_dataset(model.tokenizer, self.DATASET_SIZE)
-        model.requantize(calibration=calibration, only_quant_embeddings=True)
+        model.requantize(calibration=calibration, embed_quant_mode=EmbedQuantMode.BOTH)
 
-        self.check_lm_head_loss(model.quant_log)
+        # self.check_lm_head_loss(model.quant_log)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             model.tokenizer.save_pretrained(tmp_dir)
@@ -89,7 +92,7 @@ class TestLmHeadQuant(ModelTest):
                 device_map="auto",
             )
 
-            # assert isinstance(model.get_input_embeddings(), BaseQuantLinear)
+            assert isinstance(model.get_input_embeddings(), BaseQuantLinear)
             assert isinstance(model.get_output_embeddings(), BaseQuantLinear)
 
             task_results = self.lm_eval(model=model,

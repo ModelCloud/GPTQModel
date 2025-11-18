@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import copy
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple, Union, Optional
 
 import torch
 import transformers
 from torch import nn
 
+from ..quantization.config import EmbedQuantMode
 from ..utils.logger import setup_logger
 
 
@@ -266,16 +267,16 @@ def _replace_module(module, child, name, level: int = 0, debug: bool = False) ->
     return True
 
 
-def replace_module_with_hooked_legacy(module, level: int = 0, quant_embeddings: bool = False):
+def replace_module_with_hooked_legacy(module, level: int = 0, embed_quant_mode: Optional[EmbedQuantMode] = None):
     # if level == 0:
     #     log.info("Hooked Modules: Using legacy based config for targeting of modules")
 
     for name, child in module.named_children():
-        if not quant_embeddings and hasattr(module, "get_output_embeddings") and child == module.get_output_embeddings():
+        if embed_quant_mode is not None and hasattr(module, "get_output_embeddings") and child == module.get_output_embeddings():
             continue
 
-        if not _replace_module(module, child, name, level, quant_embeddings):
-            replace_module_with_hooked_legacy(child, level=level+1, quant_embeddings=quant_embeddings)
+        if not _replace_module(module, child, name, level, embed_quant_mode is not None):
+            replace_module_with_hooked_legacy(child, level=level+1, embed_quant_mode=embed_quant_mode)
 
 # deprecated features
 def replace_module_with_hooked_tree(module, tree: Union[List,Dict] = [], level: int = 0, debug: bool = False):

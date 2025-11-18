@@ -36,7 +36,7 @@ from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
-from ..quantization.config import VRAMStrategy
+from ..quantization.config import VRAMStrategy, EmbedQuantMode
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
@@ -83,10 +83,10 @@ class ModuleLooper():
     instance so tasks such as module reloading, forward passes, and finalisation
     reuse the same worker threads.
     """
-    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], only_quant_embeddings: bool = False):
+    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], embed_quant_mode: Optional[EmbedQuantMode] = None):
         self.processors = processors
         self.gptq_model = model
-        self.only_quant_embeddings = only_quant_embeddings
+        self.embed_quant_mode = embed_quant_mode
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
         self._layer_callback = getattr(model, "layer_callback", None)
@@ -140,7 +140,7 @@ class ModuleLooper():
         for processor in self.processors:
             self._processor_mask_tls(processor)
 
-        if self.only_quant_embeddings:
+        if self.embed_quant_mode == EmbedQuantMode.INPUT or self.embed_quant_mode == EmbedQuantMode.BOTH:
             self.gptq_model.model = untie_word_embeddings(self.gptq_model.model)
 
         self.input_embeddings_name = self.gptq_model.get_input_embeddings_name()
@@ -717,7 +717,7 @@ class ModuleLooper():
         progress_total_rows: Optional[int] = None,
         preserve_module_devices: bool = False,
     ) -> List[List[torch.Tensor]]:
-        print("_run_forward_batches_single module", module)
+        print("total_batches", module)
         """Sequential fallback when only one forward device is in use."""
         outputs: List[List[torch.Tensor]] = []
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
@@ -734,7 +734,7 @@ class ModuleLooper():
         total_rows = max(total_rows, 1)
         processed_rows = 0
         stage_label = progress_stage or "Forward"
-
+        print("total_batches", total_batches)
         for batch_idx in range(total_batches):
             processor._set_current_batch_index(batch_idx)
             try:
@@ -776,7 +776,6 @@ class ModuleLooper():
                 module_output = None
                 try:
                     if is_embeddings_module:
-                        # print("_run_forward_batches_single is_embeddings_module", module, layer_input)
                         module_output = module(*layer_input)
                     else:
                         module_output = module(*layer_input, **additional_inputs)
@@ -1081,7 +1080,7 @@ class ModuleLooper():
             layers=layers,
             calibration_data=calibration_data,
             use_cache=use_cache,
-            only_quant_embeddings=self.only_quant_embeddings,
+            embed_quant_mode=self.embed_quant_mode,
         )
 
     def loop(self, fail_safe: bool = False, **kwargs):
@@ -1090,7 +1089,7 @@ class ModuleLooper():
 
     @torch.inference_mode()
     def _loop_impl(self, fail_safe: bool = False, **kwargs):
-        if self.only_quant_embeddings:
+        if self.embed_quant_mode is not None:
             if self.input_embeddings_module is None:
                 raise ValueError("could not find input_embeddings_module in the model, exit...")
             if self.output_embeddings_module is None:
@@ -1160,9 +1159,13 @@ class ModuleLooper():
             layer_modules = [sum(layer_modules, [])]
 
         layer_count = len(layers)
-        pb = (log.pb(layer_count + 2 if self.only_quant_embeddings else layer_count)
-                            .manual()
-                            .set(left_steps_offset=1))
+        if self.embed_quant_mode == EmbedQuantMode.INPUT or self.embed_quant_mode == EmbedQuantMode.OUTPUT:
+            pb_size = layer_count + 1
+        elif self.embed_quant_mode == EmbedQuantMode.BOTH:
+            pb_size = layer_count + 2
+        else:
+            pb_size = layer_count
+        pb = log.pb(pb_size).manual().set(left_steps_offset=1)
 
         for processor in self.processors:
             processor.layer_count = layer_count
@@ -1170,7 +1173,11 @@ class ModuleLooper():
 
         shared_kv_cache_dict = {}
 
-        if self.only_quant_embeddings:
+        if self.embed_quant_mode == EmbedQuantMode.INPUT:
+            self.hook_embeddings_module(self.input_embeddings_module)
+        elif self.embed_quant_mode == EmbedQuantMode.OUTPUT:
+            self.hook_embeddings_module(self.output_embeddings_module)
+        elif self.embed_quant_mode == EmbedQuantMode.BOTH:
             self.hook_embeddings_module(self.input_embeddings_module)
             self.hook_embeddings_module(self.output_embeddings_module)
 
@@ -1185,7 +1192,7 @@ class ModuleLooper():
             layer_count=layer_count,
             region_timer=region_timer,
             finalize_progress_cls=FinalizeProgressInfo,
-            only_quant_embeddings=self.only_quant_embeddings,
+            embed_quant_mode=self.embed_quant_mode,
             logger=log,
         )
 

@@ -82,6 +82,11 @@ class VRAMStrategy(str, Enum):
     EXCLUSIVE = "exclusive"
     BALANCED = "balanced"
 
+class EmbedQuantMode(str, Enum):
+    INPUT  = "input"     # quantize input embedding only
+    OUTPUT = "output"    # quantize lm_head only
+    BOTH   = "both"      # quantize input embedding and lm_head
+
 
 QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.GPTQ: {

@@ -131,7 +131,7 @@ def get_number_of_rows_and_cols(layer: nn.Module):
     elif isinstance(layer, nn.Embedding):
         V, D = layer.weight.shape
         return D, V  # rows = embedding_dim, cols = vocab_size (token axis)
-    elif type(layer).__name__ == "MarlinQuantLinear":
+    elif "QuantLinear" in type(layer).__name__:
         return layer.in_features, layer.out_features
     else:
         # weight shape is (n_out, n_in)
