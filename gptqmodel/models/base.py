@@ -1671,9 +1671,9 @@ class BaseQModel(nn.Module):
             for p in path.split("."):
                 base = getattr(base, p, None)
                 if base is None:
-                    log.debug(f"_get: path='{path}' stopped at '{p}', returning None")
+                    log.warn(f"_get: path='{path}' stopped at '{p}', returning None")
                     return None
-            log.debug(f"_get: path='{path}' resolved successfully, returning {type(base).__name__}")
+            log.warn(f"_get: path='{path}' resolved successfully, returning {type(base).__name__}")
             return base
 
         candidates = [
@@ -1686,32 +1686,32 @@ class BaseQModel(nn.Module):
             "blocks",
             "model.blocks",
         ]
-        log.debug(f"Trying candidate paths: {candidates}")
+        log.warn(f"Trying candidate paths: {candidates}")
         chosen = None
         for c in candidates:
             m = _get(c)
             if isinstance(m, (nn.ModuleList, list, tuple)) and len(m) > 0 and isinstance(m[0], nn.Module):
                 chosen = c
-                log.debug(f"Matched candidate path '{c}', type={type(m).__name__}, length={len(m)}")
+                log.warn(f"Matched candidate path '{c}', type={type(m).__name__}, length={len(m)}")
                 break
             else:
-                log.debug(f"Candidate path '{c}' invalid: type={type(m).__name__ if m is not None else None}, length={len(m) if hasattr(m, '__len__') else 'N/A'}")
+                log.warn(f"Candidate path '{c}' invalid: type={type(m).__name__ if m is not None else None}, length={len(m) if hasattr(m, '__len__') else 'N/A'}")
         if chosen is None:
-            log.debug("All candidate paths invalid, returning empty mapping")
+            log.warn("All candidate paths invalid, returning empty mapping")
             names = []
             mapping = {"": tuple(names)}
             return ["", "#", mapping]
 
         layer0 = _get(chosen)[0]
-        log.debug(f"Using layer0: {type(layer0).__name__}")
+        log.warn(f"Using layer0: {type(layer0).__name__}")
 
         def _linear_names(module):
             mods = find_modules(module, layers=[nn.Linear, nn.Conv1d, nn.Conv2d])
-            log.debug(f"_linear_names: found {len(mods)} Linear/Conv modules in {type(module).__name__}")
+            log.warn(f"_linear_names: found {len(mods)} Linear/Conv modules in {type(module).__name__}")
             return list(mods.keys())
 
         all_linear = _linear_names(layer0)
-        log.debug(f"All Linear/Conv names in layer0: {all_linear}")
+        log.warn(f"All Linear/Conv names in layer0: {all_linear}")
 
         mapping = {}
 
@@ -1738,11 +1738,11 @@ class BaseQModel(nn.Module):
         if not mapping:
             blocks = tuple(n.split(".")[-1] for n in all_linear)
             mapping[""] = blocks
-            log.debug(f"Mapping empty, using all Linear as fallback: {blocks}")
+            log.warn(f"Mapping empty, using all Linear as fallback: {blocks}")
 
         parts = chosen.split(".")
         tree = parts + ["#", mapping]
-        log.debug(f"Final module_tree: {tree}")
+        log.warn(f"Final module_tree: {tree}")
         return tree
 
 __all__ = ["BaseQModel"]
