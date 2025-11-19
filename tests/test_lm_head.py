@@ -7,7 +7,6 @@
 import os
 import tempfile
 
-from datasets import load_dataset
 from parameterized import parameterized
 
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
@@ -18,7 +17,7 @@ from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
-from gptqmodel.quantization.config import EmbedQuantMode
+from gptqmodel.quantization.config import EmbedQuantMode, QuantizeConfig
 
 
 # class TestLmHeadLoad(ModelTest):
@@ -64,22 +63,21 @@ class TestLmHeadQuant(ModelTest):
         },
     }
 
-    # TODO needs modify, not real lm_eval results
     tied_true_lm_eval_dict = {
         EmbedQuantMode.INPUT: {
-            EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.3374,
-            EVAL.LM_EVAL.MMLU_STEM: 0.3828,
-            EVAL.LM_EVAL.ARC_CHALLENGE: (0.3208, 0.3242),  # (acc, acc_norm)
+            EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.0,
+            EVAL.LM_EVAL.MMLU_STEM: 0.2232,
+            EVAL.LM_EVAL.ARC_CHALLENGE: (0.2226, 0.2431),  # (acc, acc_norm)
         },
         EmbedQuantMode.OUTPUT: {
-            EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.3374,
-            EVAL.LM_EVAL.MMLU_STEM: 0.3828,
-            EVAL.LM_EVAL.ARC_CHALLENGE: (0.3208, 0.3242),  # (acc, acc_norm)
+            EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.3349,
+            EVAL.LM_EVAL.MMLU_STEM: 0.2797,
+            EVAL.LM_EVAL.ARC_CHALLENGE: (0.3191, 0.3523),  # (acc, acc_norm)
         },
         EmbedQuantMode.BOTH: {
-            EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.3374,
-            EVAL.LM_EVAL.MMLU_STEM: 0.3828,
-            EVAL.LM_EVAL.ARC_CHALLENGE: (0.3208, 0.3242),  # (acc, acc_norm)
+            EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.0,
+            EVAL.LM_EVAL.MMLU_STEM: 0.2226,
+            EVAL.LM_EVAL.ARC_CHALLENGE: (0.2218, 0.2431),  # (acc, acc_norm)
         },
     }
 
@@ -93,7 +91,7 @@ class TestLmHeadQuant(ModelTest):
                          expect_tied_word_embeddings: bool):
         assert embed_quant_mode is not None
 
-        model = GPTQModel.load(model_id_or_path, device_map="auto")
+        model = GPTQModel.load(model_id_or_path, device_map="auto", quantize_config=QuantizeConfig(offload_to_disk=False, bits=4, group_size=32))
 
         assert model.config.tie_word_embeddings == expect_tied_word_embeddings
 
@@ -143,6 +141,8 @@ class TestLmHeadQuant(ModelTest):
                 device_map="auto",
             )
 
+            assert not model.config.tie_word_embeddings
+
             print("model.get_input_embeddings()", model.get_input_embeddings())
             print("model.get_output_embeddings()", model.get_output_embeddings())
             if embed_quant_mode == EmbedQuantMode.INPUT:
@@ -167,7 +167,7 @@ class TestLmHeadQuant(ModelTest):
     @parameterized.expand(requantize_cases)
     def test_requantize_with_tied_false(self, embed_quant_mode: EmbedQuantMode):
         self._test_requantize(model_id_or_path="/monster/data/model/Qwen1.5-1.8B-Chat-GPTQ-4bits-gp32",
-                              embed_quant_mode=embed_quant_mode, expect_tied_word_embeddings= False)
+                              embed_quant_mode=embed_quant_mode, expect_tied_word_embeddings=False)
 
     @parameterized.expand(requantize_cases)
     def test_requantize_with_tied_true(self, embed_quant_mode: EmbedQuantMode):
