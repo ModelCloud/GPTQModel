@@ -11,13 +11,14 @@ from parameterized import parameterized
 
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.quantization.config import EmbedQuantMode, QuantizeConfig
+from gptqmodel.utils.eval import EVAL  # noqa: E402
 
 
 # class TestLmHeadLoad(ModelTest):

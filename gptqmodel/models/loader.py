@@ -46,11 +46,12 @@ from ..utils.model import (
     find_modules,
     get_checkpoints,
     get_module_by_name_prefix,
+    get_module_name,
     gptqmodel_post_init,
+    is_embeddings_module_quantized,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
     simple_dispatch_model,
-    is_embeddings_module_quantized, get_module_name,
 )
 from ._const import DEVICE, normalize_device
 

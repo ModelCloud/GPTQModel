@@ -9,8 +9,8 @@ import os
 from collections.abc import Iterable
 
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora

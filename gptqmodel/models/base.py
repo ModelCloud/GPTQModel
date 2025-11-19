@@ -42,7 +42,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, VRAMStrategy, dynamic_get, EmbedQuantMode
+from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, EmbedQuantMode, VRAMStrategy, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.calibration import prepare_calibration_dataset
@@ -50,7 +50,7 @@ from ..utils.device import get_device
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
-from ..utils.model import MODALITY, find_modules, get_module_by_name_prefix, move_to, get_module_name
+from ..utils.model import MODALITY, find_modules, get_module_by_name_prefix, get_module_name, move_to
 from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
@@ -703,7 +703,7 @@ class BaseQModel(nn.Module):
     ) -> Dict[str, List[Dict[str, str]]]:
         if not self.quantized:
             raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
-        
+
         return self.quantize(calibration, calibration_concat_size, calibration_sort, batch_size, tokenizer, backend, adapter, adapter_calibration_dataset, calibration_data_min_length, calibration_concat_separator, embed_quant_mode)
 
 
