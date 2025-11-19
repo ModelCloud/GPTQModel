@@ -1103,8 +1103,13 @@ class ModuleLooper():
             # TODO input_embeddings/output_embeddings use different config?
             embeddings_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
             if self.gptq_model.quantize_config.dynamic is None:
-                self.gptq_model.quantize_config.dynamic = {self.output_embeddings_name: embeddings_quant_config}
-            elif self.gptq_model.quantize_config.dynamic_get(self.output_embeddings_name, default=None) is None:
+                self.gptq_model.quantize_config.dynamic = {
+                    self.input_embeddings_name: embeddings_quant_config,
+                    self.output_embeddings_name: embeddings_quant_config
+                }
+            if self.gptq_model.quantize_config.dynamic_get(self.input_embeddings_name, default=None) is None:
+                self.gptq_model.quantize_config.dynamic[self.input_embeddings_name] = embeddings_quant_config
+            if self.gptq_model.quantize_config.dynamic_get(self.output_embeddings_name, default=None) is None:
                 self.gptq_model.quantize_config.dynamic[self.output_embeddings_name] = embeddings_quant_config
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
