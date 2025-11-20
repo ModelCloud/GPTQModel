@@ -545,7 +545,7 @@ class PackableQuantLinear(BaseQuantLinear):
 
         # small buffers
         self.register_buffer("scales", scales.to(dtype=t.float16))
-        if linear.bias is not None:
+        if hasattr(linear, "bias") and linear.bias is not None:
             self.register_buffer("bias", linear.bias.detach().to("cpu", dtype=t.float16))
 
         # ---------- constants ----------

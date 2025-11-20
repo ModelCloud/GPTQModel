@@ -468,7 +468,7 @@ class GPTQ:
         return xtx_accum
 
     def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
-        print(f"inp = {inp.shape}")
+        # print(f"inp = {inp.shape}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
         inp_device = get_device(inp)
 

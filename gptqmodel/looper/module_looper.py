@@ -140,7 +140,7 @@ class ModuleLooper():
         for processor in self.processors:
             self._processor_mask_tls(processor)
 
-        if self.embed_quant_mode == EmbedQuantMode.INPUT or self.embed_quant_mode == EmbedQuantMode.BOTH:
+        if self.embed_quant_mode is not None:
             self.gptq_model.model = untie_word_embeddings(self.gptq_model.model)
 
         self.input_embeddings_name = self.gptq_model.get_input_embeddings_name()

@@ -46,6 +46,11 @@ class TestLmHeadQuant(ModelTest):
     # DATASET_CONCAT_SIZE = 2048
     EVAL_BATCH_SIZE = 64
 
+    # "/monster/data/model/Qwen1.5-1.8B-Chat-GPTQ-4bits-gp32"
+    # lm_eval result:
+    # GSM8K_PLATINUM_COT: 0.3259
+    # MMLU_STEM: 0.3869
+    # ARC_CHALLENGE: 0.3294, 0.3217 # (acc, acc_norm)
     tied_false_lm_eval_dict = {
         EmbedQuantMode.INPUT: {
             EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.3358,
@@ -64,9 +69,14 @@ class TestLmHeadQuant(ModelTest):
         },
     }
 
+    # "/monster/data/model/Llama-3.2-1B-Instruct-GPTQ-4bits-gp32"
+    # lm_eval result:
+    # GSM8K_PLATINUM_COT: 0.0802
+    # MMLU_STEM: 0.3587
+    # ARC_CHALLENGE: 0.314, 0.3643 # (acc, acc_norm)
     tied_true_lm_eval_dict = {
         EmbedQuantMode.INPUT: {
-            EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.0173,
+            EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.0363,
             EVAL.LM_EVAL.MMLU_STEM: 0.3403,
             EVAL.LM_EVAL.ARC_CHALLENGE: (0.3054, 0.3430),  # (acc, acc_norm)
         },
@@ -142,7 +152,7 @@ class TestLmHeadQuant(ModelTest):
                 device_map="auto",
             )
 
-            # assert not model.config.tie_word_embeddings
+            assert not model.config.tie_word_embeddings
 
             print("model.get_input_embeddings()", model.get_input_embeddings())
             print("model.get_output_embeddings()", model.get_output_embeddings())
