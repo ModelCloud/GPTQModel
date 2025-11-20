@@ -42,7 +42,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, VRAMStrategy, dynamic_get
+from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, QuantizeEmbed, VRAMStrategy, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.calibration import prepare_calibration_dataset
@@ -50,7 +50,7 @@ from ..utils.device import get_device
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
-from ..utils.model import MODALITY, find_modules, get_module_by_name_prefix, move_to, get_module_name
+from ..utils.model import MODALITY, find_modules, get_module_by_name_prefix, get_module_name, move_to
 from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
@@ -464,9 +464,9 @@ class BaseQModel(nn.Module):
         # minimum length of calibration data, default is 10
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
-        only_quant_embeddings: bool = False,
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
-        if not only_quant_embeddings and self.quantized:
+        if embed_quant_mode is None and self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
         timer = getattr(self, "quant_region_timer", None)
@@ -670,7 +670,7 @@ class BaseQModel(nn.Module):
             )
 
         # prepare processor worker (looper)
-        module_looper = ModuleLooper(self, processors=processors, only_quant_embeddings=only_quant_embeddings)
+        module_looper = ModuleLooper(self, processors=processors, embed_quant_mode=embed_quant_mode)
 
         result = module_looper.loop(
             backend=backend,
@@ -686,7 +686,7 @@ class BaseQModel(nn.Module):
     def requantize(
         self,
         calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-        only_quant_embeddings: bool,
+        embed_quant_mode: QuantizeEmbed,
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
         calibration_concat_size: Optional[int] = None,
         calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle
@@ -701,7 +701,10 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
-        return self.quantize(calibration, calibration_concat_size, calibration_sort, batch_size, tokenizer, backend, adapter, adapter_calibration_dataset, calibration_data_min_length, calibration_concat_separator, only_quant_embeddings)
+        if not self.quantized:
+            raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
+
+        return self.quantize(calibration, calibration_concat_size, calibration_sort, batch_size, tokenizer, backend, adapter, adapter_calibration_dataset, calibration_data_min_length, calibration_concat_separator, embed_quant_mode)
 
 
     def _eora_generate(

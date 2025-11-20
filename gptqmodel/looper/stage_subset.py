@@ -19,7 +19,7 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
-from ..quantization.config import VRAMStrategy
+from ..quantization.config import VRAMStrategy, QuantizeEmbed
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
@@ -55,7 +55,7 @@ def run_subset_stage(
     attention_masks: List[torch.Tensor],
     cur_layer_device: torch.device,
     is_embeddings_module: bool,
-    only_quant_embeddings: bool,
+    embed_quant_mode: Optional[QuantizeEmbed],
     layer_descriptor: str,
     layer_title: str,
     layer_index: int,
@@ -239,9 +239,9 @@ def run_subset_stage(
 
         subset_size = len(subset)
 
-        # When only_quant_embeddings=False → all modules execute pre_process_fwd_hook.
-        # When only_quant_embeddings=True → Only execute pre_process_fwd_hook if is_embeddings_module=True.
-        if (not only_quant_embeddings) or is_embeddings_module:
+        # When embed_quant_mode is None → all modules execute pre_process_fwd_hook.
+        # When embed_quant_mode is not None → Only execute pre_process_fwd_hook if is_embeddings_module=True.
+        if embed_quant_mode is None or is_embeddings_module:
             for idx, (name, m) in enumerate(subset.items()):
                 # Register the forward hook that captures activations for quantization.
                 # The final module optionally flips a flag so processors can trigger

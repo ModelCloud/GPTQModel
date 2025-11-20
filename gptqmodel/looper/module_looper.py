@@ -36,7 +36,7 @@ from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
-from ..quantization.config import VRAMStrategy
+from ..quantization.config import VRAMStrategy, QuantizeEmbed
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
@@ -83,10 +83,10 @@ class ModuleLooper():
     instance so tasks such as module reloading, forward passes, and finalisation
     reuse the same worker threads.
     """
-    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], only_quant_embeddings: bool = False):
+    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], embed_quant_mode: Optional[QuantizeEmbed] = None):
         self.processors = processors
         self.gptq_model = model
-        self.only_quant_embeddings = only_quant_embeddings
+        self.embed_quant_mode = embed_quant_mode
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
         self._layer_callback = getattr(model, "layer_callback", None)
@@ -140,7 +140,7 @@ class ModuleLooper():
         for processor in self.processors:
             self._processor_mask_tls(processor)
 
-        if self.only_quant_embeddings:
+        if self.embed_quant_mode is not None:
             self.gptq_model.model = untie_word_embeddings(self.gptq_model.model)
 
         self.input_embeddings_name = self.gptq_model.get_input_embeddings_name()
@@ -733,7 +733,6 @@ class ModuleLooper():
         total_rows = max(total_rows, 1)
         processed_rows = 0
         stage_label = progress_stage or "Forward"
-
         for batch_idx in range(total_batches):
             processor._set_current_batch_index(batch_idx)
             try:
@@ -1079,6 +1078,7 @@ class ModuleLooper():
             layers=layers,
             calibration_data=calibration_data,
             use_cache=use_cache,
+            embed_quant_mode=self.embed_quant_mode,
         )
 
     def loop(self, fail_safe: bool = False, **kwargs):
@@ -1087,7 +1087,7 @@ class ModuleLooper():
 
     @torch.inference_mode()
     def _loop_impl(self, fail_safe: bool = False, **kwargs):
-        if self.only_quant_embeddings:
+        if self.embed_quant_mode is not None:
             if self.input_embeddings_module is None:
                 raise ValueError("could not find input_embeddings_module in the model, exit...")
             if self.output_embeddings_module is None:
@@ -1103,8 +1103,13 @@ class ModuleLooper():
             # TODO input_embeddings/output_embeddings use different config?
             embeddings_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
             if self.gptq_model.quantize_config.dynamic is None:
-                self.gptq_model.quantize_config.dynamic = {self.output_embeddings_name: embeddings_quant_config}
-            elif self.gptq_model.quantize_config.dynamic_get(self.output_embeddings_name, default=None) is None:
+                self.gptq_model.quantize_config.dynamic = {
+                    self.input_embeddings_name: embeddings_quant_config,
+                    self.output_embeddings_name: embeddings_quant_config
+                }
+            if self.gptq_model.quantize_config.dynamic_get(self.input_embeddings_name, default=None) is None:
+                self.gptq_model.quantize_config.dynamic[self.input_embeddings_name] = embeddings_quant_config
+            if self.gptq_model.quantize_config.dynamic_get(self.output_embeddings_name, default=None) is None:
                 self.gptq_model.quantize_config.dynamic[self.output_embeddings_name] = embeddings_quant_config
 
         forward_pass_use_cache = self.gptq_model.model.config.use_cache if hasattr(self.gptq_model.model.config, "use_cache") else False
@@ -1157,9 +1162,13 @@ class ModuleLooper():
             layer_modules = [sum(layer_modules, [])]
 
         layer_count = len(layers)
-        pb = (log.pb(layer_count + 1 if self.only_quant_embeddings else layer_count)
-                            .manual()
-                            .set(left_steps_offset=1))
+        if self.embed_quant_mode == QuantizeEmbed.INPUT or self.embed_quant_mode == QuantizeEmbed.OUTPUT:
+            pb_size = layer_count + 1
+        elif self.embed_quant_mode == QuantizeEmbed.BOTH:
+            pb_size = layer_count + 2
+        else:
+            pb_size = layer_count
+        pb = log.pb(pb_size).manual().set(left_steps_offset=1)
 
         for processor in self.processors:
             processor.layer_count = layer_count
@@ -1167,8 +1176,12 @@ class ModuleLooper():
 
         shared_kv_cache_dict = {}
 
-        if self.only_quant_embeddings:
-            # self.hook_embeddings_module(self.input_embeddings_module)
+        if self.embed_quant_mode == QuantizeEmbed.INPUT:
+            self.hook_embeddings_module(self.input_embeddings_module)
+        elif self.embed_quant_mode == QuantizeEmbed.OUTPUT:
+            self.hook_embeddings_module(self.output_embeddings_module)
+        elif self.embed_quant_mode == QuantizeEmbed.BOTH:
+            self.hook_embeddings_module(self.input_embeddings_module)
             self.hook_embeddings_module(self.output_embeddings_module)
 
         run_layer_stage(
@@ -1182,7 +1195,7 @@ class ModuleLooper():
             layer_count=layer_count,
             region_timer=region_timer,
             finalize_progress_cls=FinalizeProgressInfo,
-            only_quant_embeddings=self.only_quant_embeddings,
+            embed_quant_mode=self.embed_quant_mode,
             logger=log,
         )
 

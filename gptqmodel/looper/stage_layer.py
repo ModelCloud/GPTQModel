@@ -21,6 +21,7 @@ from ..looper.awq_processor import AWQProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
 from ..looper.qqq_processor import QQQProcessor
+from ..quantization.config import QuantizeEmbed
 from ..utils.device import get_device, get_device_new
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import find_modules, get_module
@@ -44,7 +45,7 @@ def run_layer_stage(
     layer_count: int,
     region_timer,
     finalize_progress_cls,
-    only_quant_embeddings,
+    embed_quant_mode: Optional[QuantizeEmbed],
     logger=None,
 ) -> None:
     """Execute the main per-layer quantization loop."""
@@ -55,10 +56,15 @@ def run_layer_stage(
         if looper._check_loop_stop():
             break
 
-        if only_quant_embeddings:
-            # is_input_embeddings_module = layer_index == 0
+        if embed_quant_mode == QuantizeEmbed.INPUT:
+            is_input_embeddings_module = layer_index == 0
+            is_output_embeddings_module = False
+        elif embed_quant_mode == QuantizeEmbed.OUTPUT:
             is_input_embeddings_module = False
             is_output_embeddings_module = layer_index == layer_count
+        elif embed_quant_mode == QuantizeEmbed.BOTH:
+            is_input_embeddings_module = layer_index == 0
+            is_output_embeddings_module = layer_index == layer_count + 1
         else:
             is_input_embeddings_module = False
             is_output_embeddings_module = False
@@ -72,6 +78,8 @@ def run_layer_stage(
             layer_title = "Quantizing output embeddings"
             module = looper.gptq_model.get_output_embeddings()
         else:
+            if embed_quant_mode == QuantizeEmbed.INPUT or embed_quant_mode == QuantizeEmbed.BOTH:
+                layer_index = layer_index - 1
             layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
             module = layers[layer_index]
 
@@ -88,7 +96,7 @@ def run_layer_stage(
             converter = MODULE_CONVERTER_MAP[model_type]
             module = converter(module, looper.gptq_model.model.config)
 
-        replace_module_with_hooked_legacy(module, quant_embeddings=looper.only_quant_embeddings)
+        replace_module_with_hooked_legacy(module, embed_quant_mode=looper.embed_quant_mode)
 
         if is_input_embeddings_module:
             layer_descriptor = looper.gptq_model.get_input_embeddings_name()
@@ -101,6 +109,7 @@ def run_layer_stage(
             layer_descriptor = str(layer_index)
 
         cur_layer_device = get_device(module)
+        print("find_modules", is_input_embeddings_module, is_output_embeddings_module)
         if is_input_embeddings_module:
             name = looper.gptq_model.get_input_embeddings_name()
         elif is_output_embeddings_module:
@@ -128,10 +137,14 @@ def run_layer_stage(
                 # merge all subsets into one
                 modules = [sum(modules, [])]
 
-            layer_inputs = processor.inputs_cache.layer_inputs
-            # TODO input?
-            if is_output_embeddings_module:
+            if is_input_embeddings_module:
+                layer_inputs = processor.inputs_cache.src_inputs
+            elif is_output_embeddings_module:
+                layer_inputs = processor.inputs_cache.layer_inputs
                 layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
+            else:
+                layer_inputs = processor.inputs_cache.layer_inputs
+
             layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
             position_ids = processor.inputs_cache.position_ids
             attention_masks = processor.inputs_cache.attention_masks
@@ -174,7 +187,7 @@ def run_layer_stage(
                     attention_masks=attention_masks,
                     cur_layer_device=cur_layer_device,
                     is_embeddings_module=is_embeddings_module,
-                    only_quant_embeddings=only_quant_embeddings,
+                    embed_quant_mode=embed_quant_mode,
                     layer_descriptor=layer_descriptor,
                     layer_title=layer_title,
                     layer_index=layer_index,

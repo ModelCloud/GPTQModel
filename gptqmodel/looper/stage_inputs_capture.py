@@ -8,13 +8,14 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Sequence, Optional
 
 import torch
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
 from ..nn_modules.hooked_linear import STOP_FORWARD_EXCEPTION, StopForward
+from ..quantization.config import QuantizeEmbed
 from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.looper_helpers import device_ctx
@@ -39,7 +40,9 @@ class StageInputsCapture:
         layers: Sequence[torch.nn.Module],
         calibration_data: Iterable[Dict[str, torch.Tensor]],
         use_cache: bool,
+        embed_quant_mode: Optional[QuantizeEmbed],
     ) -> InputCache:
+        src_inputs: List[List[torch.Tensor]] = []
         layer_inputs: List[List[torch.Tensor]] = []
         attention_masks: List[torch.Tensor | None] = []
         position_ids: List[torch.Tensor] = []
@@ -155,6 +158,9 @@ class StageInputsCapture:
         try:
             for batch_index, example in enumerate(calibration_data, start=1):
                 for k, v in example.items():
+                    if (embed_quant_mode == QuantizeEmbed.INPUT or embed_quant_mode == QuantizeEmbed.BOTH) and k == "input_ids":
+                        src_inputs.append([move_to(v, device=data_device)])
+
                     if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
                         data_device = self.gptq_model.quantize_config.device
                     else:
@@ -220,6 +226,7 @@ class StageInputsCapture:
         handle.remove()
 
         result = InputCache(
+            src_inputs=src_inputs,
             layer_inputs=layer_inputs,
             layer_input_kwargs=layer_input_kwargs,
             position_ids=position_ids,

@@ -128,7 +128,10 @@ def get_number_of_rows_and_cols(layer: nn.Module):
     if isinstance(layer, transformers.Conv1D):
         # transformers.Conv1D: weight shape is (n_in, n_out)
         return layer.weight.shape[1], layer.weight.shape[0]
-    elif type(layer).__name__ == "MarlinQuantLinear":
+    elif isinstance(layer, nn.Embedding):
+        V, D = layer.weight.shape
+        return D, V  # rows = embedding_dim, cols = vocab_size (token axis)
+    elif "QuantLinear" in type(layer).__name__:
         return layer.in_features, layer.out_features
     else:
         # weight shape is (n_out, n_in)
@@ -191,7 +194,6 @@ class GPTQ:
 
         self.module_copy = None
 
-        self.H = None
         self.nsamples = 0
 
         self.quantizer = self.create_quantizer(name=self.name)
@@ -201,11 +203,17 @@ class GPTQ:
 
         self.fail_safe = False
 
+        # For non-Embedding modules: dense Hessian (columns x columns)
         self.H: Optional[torch.Tensor] = None
+        # For Embedding modules: diagonal Hessian stored as 1D vector (length = vocab_size)
+        self._H_diag: Optional[torch.Tensor] = None
 
         # Store per-device Hessian contributions so multi-GPU calibration can
         # keep local accumulators and merge only once when quantization begins.
+        # For non-Embedding modules: map device -> 2D partial (columns x columns)
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
+        # For Embedding modules: map device -> 1D token frequency vector (length = vocab)
+        self._device_embedding_counts: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
         self._hessian_dirty: bool = False
 
@@ -260,6 +268,10 @@ class GPTQ:
 
         clone = self.module.weight.data.to(copy=copy, device=device)
 
+        if isinstance(self.module, nn.Embedding):
+            # Embedding weight is [V, D] -> we operate on [D, V]
+            clone = clone.t()
+
         if isinstance(self.module, _ConvNd):
             clone = clone.flatten(1)
 
@@ -288,6 +300,27 @@ class GPTQ:
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
+        # Embedding: accumulate token counts only (1D)
+        if isinstance(self.module, nn.Embedding):
+            ids = inp.reshape(-1).to(torch.long)
+            dev = torch.device(get_device(ids))
+            counts = torch.bincount(ids, minlength=self.columns).to(torch.float32).to(dev)
+
+            with self.lock:
+                self.fwd_counter += 1
+                existing = self._device_embedding_counts.get(dev)
+                if existing is None:
+                    self._device_embedding_counts[dev] = counts
+                else:
+                    existing.add_(counts)
+                    del counts
+                tok_n = ids.numel()
+                self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + tok_n
+                self.nsamples += tok_n
+                self._hessian_dirty = True
+            return
+
+        # Non-Embedding: original 2D path
         batch_token_size, xtx, device = self.process_batch(inp)
         if batch_token_size == 0 or xtx is None:
             return
@@ -435,13 +468,17 @@ class GPTQ:
         return xtx_accum
 
     def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
-        # print(f"inp = {inp}")
+        # print(f"inp = {inp.shape}")
         # print(f"self.module = {self.module} device = {self.module.target_device}")
         inp_device = get_device(inp)
 
         #inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
-        # input reshaping
+        if isinstance(self.module, nn.Embedding):
+            ids = inp.reshape(-1).to(torch.long)
+            counts = torch.bincount(ids, minlength=self.columns).to(torch.float32)
+            return ids.numel(), counts, torch.device(inp_device)
+
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
             reshaped_inp = inp.reshape(-1, inp.shape[-1])
         else:
@@ -527,8 +564,12 @@ class GPTQ:
         if hint is not None:
             return torch.device(hint)
 
+        # Prefer a device that already has partials
         if self._device_hessian_partials:
             partial_device = next(iter(self._device_hessian_partials.keys()))
+            return torch.device(partial_device)
+        if self._device_embedding_counts:
+            partial_device = next(iter(self._device_embedding_counts.keys()))
             return torch.device(partial_device)
 
         return torch.device("cpu")
@@ -537,6 +578,37 @@ class GPTQ:
         device = self._select_hessian_target_device(target_device)
 
         with self.lock:
+            # Embedding path: merge 1D counts
+            if isinstance(self.module, nn.Embedding):
+                total_tokens = sum(self._device_sample_counts.values())
+
+                # Reuse buffer if possible
+                if self._H_diag is not None and self._H_diag.shape == (self.columns,) and self._H_diag.device == device:
+                    diag = self._H_diag
+                    diag.zero_()
+                else:
+                    diag = torch.zeros(self.columns, dtype=torch.float32, device=device)
+
+                for partial_device, counts in self._device_embedding_counts.items():
+                    diag.add_(counts.to(device=device, dtype=torch.float32))
+
+                if total_tokens > 0:
+                    diag.mul_(2.0 / float(total_tokens))
+                # Apply a tiny floor to avoid zeros for unseen tokens (stabilizes inverse)
+                abs_max = max(diag.max().item(), 1.0)
+                floor = abs_max * 1e-6
+                torch.maximum(diag, torch.tensor(floor, dtype=diag.dtype, device=diag.device), out=diag)
+
+                self._H_diag = diag
+                self.H = None  # No dense matrix for Embedding
+                self.nsamples = total_tokens
+                self._hessian_dirty = False
+                self._final_hessian_device_hint = device
+                self._device_embedding_counts.clear()
+                self._device_sample_counts.clear()
+                return
+
+            # Non-Embedding path: original dense merge
             if not self._hessian_dirty and self.H is not None:
                 if self.H.device != device:
                     self.H = self.H.to(device=device)
@@ -573,8 +645,6 @@ class GPTQ:
 
             for partial_device, partial in self._device_hessian_partials.items():
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
-                    # TODO FIXME multi-3090 using P2P is revaling an issue where result_accum and/or partial is not ready for consolidation on the main thread
-                    # when parials are calculated on the individual
                     try:
                         result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
                     except:
@@ -601,6 +671,10 @@ class GPTQ:
 
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
         self.materialize_global_hessian(target_device=target_device)
+        if isinstance(self.module, nn.Embedding):
+            # For Embedding, the Hessian is diagonal-only (stored in self._H_diag).
+            # Keep self.H as None to avoid accidental dense use.
+            return torch.tensor([])  # unused by Embedding quantize path
         if self.H is None:
             self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self._select_hessian_target_device(target_device))
         return self.H
@@ -728,6 +802,27 @@ class GPTQ:
         return None, 1.0
 
     @torch.inference_mode()
+    def hessian_inverse_diag(self, h_diag: torch.Tensor):
+        """
+        Embedding-only: returns the inverse of a damped diagonal Hessian.
+
+        We compute:
+            h_eff = clamp(h_diag, min=floor) + damp * mean(h_diag)
+            Hinv_diag = 1.0 / h_eff
+
+        This keeps the behavior aligned with dense-path damping, without building VxV.
+        """
+        assert h_diag.dim() == 1, "Embedding Hessian diagonal must be a 1D vector."
+        damp = self.qcfg.damp_percent
+        mean = torch.mean(h_diag)
+        # Apply a small floor to stabilize inverse for rare/unseen tokens
+        abs_max = max(h_diag.max().item(), 1.0)
+        floor = abs_max * 1e-6
+        h_eff = torch.clamp(h_diag, min=floor) + damp * mean
+        Hinv_diag = 1.0 / h_eff
+        return Hinv_diag, damp
+
+    @torch.inference_mode()
     def quantize(
             self,
             blocksize=128,
@@ -756,8 +851,221 @@ class GPTQ:
             raise RuntimeError(
                 "For MacOS you must set env `PYTORCH_ENABLE_MPS_FALLBACK=1` before running quantization.")
 
+        # -----------------------------
+        # Embedding-specialized path
+        # -----------------------------
+        if isinstance(self.module, nn.Embedding):
+            # Clone weight as [D, V] (columns == tokens)
+            if self.module_copy is None:
+                W = self.clone_module(device=self._final_hessian_device_hint)
+            else:
+                W = self.module_copy.to(device=self._final_hessian_device_hint)
+                del self.module_copy
+
+            # Prepare diagonal Hessian inverse
+            if self._H_diag is None:
+                # No samples? fall back to uniform diag
+                self._H_diag = torch.ones(self.columns, dtype=torch.float32, device=W.device)
+            Hinv_diag, damp = self.hessian_inverse_diag(self._H_diag)
+
+            # Optional activation ordering (desc_act) or group-aware ordering using diagonal values
+            # Note: we reuse the same logic/perm utilities as dense path, but with diag only.
+            if self.qcfg.desc_act:
+                perm = torch.argsort(self._H_diag, descending=True)
+                W = W[:, perm]
+                invperm = torch.argsort(perm)
+
+            elif self.qcfg.act_group_aware:
+                diag_h = self._H_diag
+                local_perms, local_values = compute_local_perms(
+                    diag_h, self.qcfg.group_size, return_values=True
+                )
+                global_perm = compute_global_perm(
+                    diag_h,
+                    self.qcfg.group_size,
+                    precomputed_values=local_values,
+                )
+                del local_values
+                final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
+                W = W[:, final_perm]
+
+            # Vectorized weight-only quantization over columns (tokens)
+            scale = []
+            zero = []
+            now_idx = 1
+
+            Losses = torch.zeros_like(W)  # we keep losses for avg_loss computation
+            Q = torch.zeros_like(W)
+
+            # Fast vectorized path (no cross-column error feedback for Embedding)
+            for i1 in range(0, self.columns, blocksize):
+                i2 = min(i1 + blocksize, self.columns)
+                count = i2 - i1
+
+                W1 = W[:, i1:i2]
+                Q1 = torch.zeros_like(W1)
+                Losses1 = torch.zeros_like(W1)
+
+                if self.qcfg.group_size != -1:
+                    # Group-wise parameter finding across columns
+                    group_start_cols = list(range(i1, i2, self.qcfg.group_size))
+                    for group_start in group_start_cols:
+                        group_end = min(group_start + self.qcfg.group_size, self.columns)
+                        if group_start < group_end:
+                            self.quantizer.find_params(W[:, group_start:group_end], weight=True)
+                            scale.append(self.quantizer.scale)
+                            zero.append(self.quantizer.zero)
+                            now_idx += 1
+
+                    # Use the latest computed scale/zero to quantize this block vectorized
+                    if len(scale) > 0 and len(zero) > 0:
+                        latest_scale = scale[-1]
+                        latest_zero = zero[-1]
+
+                        if latest_scale.dim() == 1:
+                            latest_scale = latest_scale.view(-1, 1)
+                        if latest_zero.dim() == 1:
+                            latest_zero = latest_zero.view(-1, 1)
+
+                        maxq_val = 2 ** self.qcfg.bits - 1
+                        if self.qcfg.sym:
+                            Q1 = latest_scale * torch.clamp(
+                                torch.round(W1 / latest_scale),
+                                -(maxq_val // 2),
+                                maxq_val // 2
+                            )
+                        else:
+                            quantized = torch.clamp(
+                                torch.round(W1 / latest_scale) + latest_zero,
+                                0,
+                                maxq_val
+                            )
+                            Q1 = latest_scale * (quantized - latest_zero)
+                    else:
+                        # Fallback per-column
+                        for i in range(count):
+                            w = W1[:, i]
+                            q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                            Q1[:, i] = q
+                else:
+                    # No grouping -> parameterize once and quantize vectorized
+                    self.quantizer.find_params(W, weight=True)
+                    latest_scale = self.quantizer.scale
+                    latest_zero = self.quantizer.zero
+                    if latest_scale.dim() == 1:
+                        latest_scale = latest_scale.view(-1, 1)
+                    if latest_zero.dim() == 1:
+                        latest_zero = latest_zero.view(-1, 1)
+
+                    maxq_val = 2 ** self.qcfg.bits - 1
+                    if self.qcfg.sym:
+                        Q1 = latest_scale * torch.clamp(
+                            torch.round(W1 / latest_scale),
+                            -(maxq_val // 2),
+                            maxq_val // 2
+                        )
+                    else:
+                        quantized = torch.clamp(
+                            torch.round(W1 / latest_scale) + latest_zero,
+                            0,
+                            maxq_val
+                        )
+                        Q1 = latest_scale * (quantized - latest_zero)
+
+                # Fill losses using diagonal inverse (no cross-column update)
+                # d = 1 / h_eff (see hessian_inverse_diag); we use it to scale the loss similarly to dense path.
+                for i in range(count):
+                    col_idx = i1 + i
+                    d = Hinv_diag[col_idx]
+                    if d > 0:
+                        Losses1[:, i] = (W1[:, i] - Q1[:, i]) ** 2 / (d ** 2)
+
+                Q[:, i1:i2] = Q1
+                Losses[:, i1:i2] = Losses1 / 2
+
+            # Undo permutations if applied
+            if self.qcfg.desc_act:
+                Q = Q[:, invperm]
+                # g_idx and scales/zeros will be re-ordered below once concatenated
+            elif self.qcfg.act_group_aware:
+                inv_final = invert_perm(final_perm)
+                Q = Q[:, inv_final]
+                inv_global_perm = invert_perm(global_perm)
+                inv_global_perm_list = inv_global_perm.tolist()
+                # Note: if you need to keep per-group scale/zero in act_group_aware mode,
+                # reorder them following the dense path approach (shown below after concatenation).
+
+            # Prepare g_idx (group indices per column)
+            group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
+            g_idx = [i // group_size for i in range(self.columns)]
+            g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
+
+            # Finalize scale/zero concatenation
+            if scale == []:
+                # Ensure we have valid scale/zero if group_size == -1
+                self.quantizer.find_params(Q, weight=True)
+                scale.append(self.quantizer.scale)
+                zero.append(self.quantizer.zero)
+
+            scale = torch.cat(scale, dim=1)
+            zero = torch.cat(zero, dim=1)
+
+            # Reorder scale/zero/g_idx if we used permutations
+            if self.qcfg.desc_act:
+                scale = scale[:, invperm]
+                zero = zero[:, invperm]
+                g_idx = g_idx[invperm]
+            elif self.qcfg.act_group_aware:
+                # Reorder scale/zero with inverse global perm (same as dense path)
+                inv_global_perm = invert_perm(global_perm)
+                inv_global_perm_list = inv_global_perm.tolist()
+                temp_scale = [scale[:, i:i+1] for i in inv_global_perm_list]
+                scale = torch.cat(temp_scale, dim=1)
+                temp_zero = [zero[:, i:i+1] for i in inv_global_perm_list]
+                zero = torch.cat(temp_zero, dim=1)
+
+            # Cropping if TP padding existed
+            if self._tp_pad_cols:
+                valid_cols = self._original_columns
+                Q = Q[:, :valid_cols]
+                g_idx = g_idx[:valid_cols]
+                scale = self.truncate_last_dim(scale, valid_cols)
+                zero = self.truncate_last_dim(zero, valid_cols)
+
+            # Convert back to original embedding weight shape [V, D]
+            Q_out = Q.t()
+            if Q_out.shape != self.module.weight.shape:
+                Q_out = Q_out.reshape(self.module.weight.shape).to(self.module.weight.dtype)
+            else:
+                Q_out = Q_out.to(self.module.weight.dtype)
+
+            duration = time.time() - start
+            # Compute avg_loss
+            if self.nsamples != 0:
+                avg_loss = torch.sum(Losses).item() / self.nsamples
+                if math.isnan(avg_loss):
+                    if self.fail_safe:
+                        log.info(f"Quantization: Failed due to NaN loss for `{self.name}`, retry with mock quantization.")
+                        self.qcfg.mock_quantization = True
+                        return self.quantize(blocksize=blocksize)
+                    else:
+                        raise ValueError(
+                            f"Quantization: NaN loss for `{self.name}`; increase calibration or enable fail_safe."
+                        )
+            else:
+                if self.fail_safe:
+                    log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check calibration sufficiency.")
+                else:
+                    log.warn(f"Quantization: `{self.name}` may be inactive due to model inference logic.")
+                avg_loss = 999999999
+
+            return Q_out.to(device=self.module.weight.data.device, non_blocking=False), scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
+
+        # -----------------------------
+        # Original dense path (non-Embedding)
+        # -----------------------------
+
         if self.module_copy is None:
-            # log.info("copy W to cuda_1")
             W = self.clone_module(device=self.H.device)
         else:
             W = self.module_copy.to(device=self.H.device)
@@ -1137,6 +1445,8 @@ class GPTQ:
     def free(self):
         if hasattr(self, "H"):
             del self.H
+        if hasattr(self, "_H_diag"):
+            del self._H_diag
         del self.quantizer
         if hasattr(self, "module_copy"):
             del self.module_copy

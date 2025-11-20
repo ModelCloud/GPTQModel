@@ -10,6 +10,7 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
@@ -524,4 +525,66 @@ def dequantize_model(model: PreTrainedModel):
     return model
 
 
-__all__ = ["TorchQuantLinear", "dequantize_model"]
+class TorchQuantEmbeddings(PackableQuantLinear):
+    """Quantized Embedding layer backed by the Torch GPTQ kernel.
+
+    The class reuses the packing/dequantization logic from
+    :class:`PackableQuantLinear` but overrides ``forward`` to perform
+    embedding lookups instead of matrix multiplication.
+    """
+
+    SUPPORTS_BITS = [2, 3, 4, 8]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = True
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+
+    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int8, torch.int16, torch.int32]
+    SUPPORTS_ADAPTERS = []
+
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    QUANT_TYPE = "torch"
+
+    def __init__(
+        self,
+        bits: int,
+        group_size: int,
+        sym: bool,
+        desc_act: bool,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        pack_dtype: torch.dtype = torch.int32,
+        adapter: Adapter = None,
+        register_buffers: bool = True,
+        **kwargs,
+    ):
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features, # num_embeddings
+            out_features=out_features, # embedding_dim
+            bias=bias,
+            pack_dtype=pack_dtype,
+            backend=kwargs.pop("backend", BACKEND.TORCH),
+            adapter=adapter,
+            register_buffers=register_buffers,
+            **kwargs)
+
+        self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
+
+    def forward(self, input_ids: torch.Tensor):
+        weights = self.dequantize_weight()
+        return F.embedding(input_ids, weights)
+
+
+__all__ = ["TorchQuantLinear", "dequantize_model", "TorchQuantEmbeddings"]

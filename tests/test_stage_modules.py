@@ -126,7 +126,7 @@ def test_stage_inputs_capture_collects_real_inputs():
         }
     ]
 
-    cache = stage.cache_inputs(layers=[gptq_model.layer], calibration_data=dataset, use_cache=False)
+    cache = stage.cache_inputs(layers=[gptq_model.layer], calibration_data=dataset, use_cache=False, embed_quant_mode=None)
 
     assert len(cache.layer_inputs) == 1
     assert torch.equal(cache.layer_inputs[0][0], hidden)

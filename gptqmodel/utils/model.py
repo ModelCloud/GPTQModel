@@ -49,6 +49,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, dynamic_get
 from . import has_gil_disabled
@@ -188,7 +189,7 @@ def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.M
         layers = SUPPORTS_MODULE_TYPES
 
     # TODO For testing purposes, we'll temporarily use the class name to determine this.
-    if isinstance(module, tuple(layers)) or type(module).__name__ == "MarlinQuantLinear":
+    if isinstance(module, tuple(layers)) or "QuantLinear" in type(module).__name__:
        return {name: module}
 
     res = {}
@@ -343,6 +344,9 @@ def create_quant_module(
     elif isinstance(submodule, nn.Linear):
         in_features = submodule.in_features
         out_features = submodule.out_features
+    elif isinstance(submodule, nn.Embedding):
+        in_features = submodule.num_embeddings
+        out_features = submodule.embedding_dim
     elif isinstance(submodule, _ConvNd):
         in_features = submodule.in_channels
         out_features = submodule.out_channels
@@ -356,7 +360,7 @@ def create_quant_module(
     else:
         raise NotImplementedError(f"Unsupported module {submodule}")
 
-    bias = submodule.bias is not None
+    bias = submodule.bias is not None if hasattr(submodule, "bias") else False
 
     # need copies as dynamic config may override these in for loop
     tmp_bits = bits
@@ -438,9 +442,13 @@ def create_quant_layer(
         if name not in quant_result:
             continue
 
+        qlinear_cls = linear_cls
+        if name == "model.embed_tokens":
+            qlinear_cls = TorchQuantEmbeddings
+
         create_quant_module(
             name=name,
-            linear_cls=linear_cls,
+            linear_cls=qlinear_cls,
             bits=bits,
             desc_act=desc_act,
             dynamic=dynamic,
@@ -1681,43 +1689,82 @@ def untie_word_embeddings(model: nn.Module) -> nn.Module:
     return model
 
 
-def is_embeddings_module_quantized(model_dir: str) -> bool:
+def check_module_quantized_in_keys(keys, module_name: str) -> bool:
     """
-    Check whether the lm_head in a GPTQ model is quantized,
+    Check whether the given module is quantized based on tensor keys.
+    A quantized module will contain .qweight, .qzeros or .scales tensors.
+    """
+    for key in keys:
+        if key.startswith(module_name + ".") and \
+           (".qweight" in key or ".qzeros" in key or ".scales" in key):
+            return True
+    return False
+
+
+def is_embeddings_module_quantized(
+    model_dir: str,
+    input_embed_name: str,
+    output_embed_name: str
+) -> Tuple[bool, bool]:
+    """
+    Check whether input/output embedding modules in a GPTQ model are quantized,
     without loading any model weights into memory.
 
-    Supports both single-file and multi-shard safetensors models.
+    - Supports single-file and multi-shard safetensors
+    - Detects `.qweight`, `.qzeros`, `.scales`
     """
 
     index_path = os.path.join(model_dir, "model.safetensors.index.json")
     safetensor_files = []
 
-    #1. If index.json exists, check its weight_map directly
+    input_quantized = False
+    output_quantized = False
+
+    # ============================================================
+    # 1. If index.json exists, check its weight_map directly
+    # ============================================================
     if os.path.exists(index_path):
         with open(index_path, "r") as f:
             index = json.load(f)
+        weight_map = index.get("weight_map", {})
 
-        for key in index.get("weight_map", {}):
-            if key.startswith("lm_head.") and (".qweight" in key or ".qzeros" in key or ".scales" in key):
-                return True
-        return False
+        keys = weight_map.keys()
+        input_quantized = check_module_quantized_in_keys(keys, input_embed_name)
+        output_quantized = check_module_quantized_in_keys(keys, output_embed_name)
 
-    #2. Otherwise, list all .safetensors files in the directory
+        return input_quantized, output_quantized
+
+    # ============================================================
+    # 2. Otherwise, list all .safetensors shards
+    # ============================================================
     for fn in os.listdir(model_dir):
         if fn.endswith(".safetensors"):
             safetensor_files.append(os.path.join(model_dir, fn))
 
-    #3. Iterate over safetensors shards and check only metadata (no tensor data is loaded)
+    # ============================================================
+    # 3. Iterate over shards, inspect only metadata keys
+    # ============================================================
     for safefile in safetensor_files:
         try:
             with safe_open(safefile, framework="pt") as f:
-                for key in f.keys():
-                    # If lm_head has quantized tensors, it will include .qweight / .qzeros / .scales
-                    if key.startswith("lm_head.") and (".qweight" in key or ".qzeros" in key or ".scales" in key):
-                        return True
+                keys = list(f.keys())
+
+                # Only update when not found yet to avoid overwriting
+                if not input_quantized:
+                    input_quantized = check_module_quantized_in_keys(keys, input_embed_name)
+
+                if not output_quantized:
+                    output_quantized = check_module_quantized_in_keys(keys, output_embed_name)
+
+                # Early stop if both found
+                if input_quantized and output_quantized:
+                    break
+
         except Exception as e:
             print(f"[WARN] Failed to read {safefile}: {e}")
             continue
 
-    #4. No quantized lm_head found
-    return False
+    # ============================================================
+    # 4. Return detection result
+    # ============================================================
+    return input_quantized, output_quantized

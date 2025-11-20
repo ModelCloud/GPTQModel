@@ -15,10 +15,10 @@ from typing import Any, Dict, Optional, Union
 
 import pcre as re
 import torch
-from torch import nn
 import transformers
 from safetensors import safe_open
 from safetensors.torch import save_file
+from torch import nn
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.modeling_utils import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
@@ -50,10 +50,12 @@ from ..utils.model import (
     copy_py_files,
     find_modules,
     get_model_files_size,
+    get_module_name,
     get_state_dict_for_save,
+    is_embeddings_module_quantized,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
-    streaming_state_dict_to_shards, is_embeddings_module_quantized,
+    streaming_state_dict_to_shards,
 )
 from ..utils.structure import alias_all_from_turtle_if_meta
 from ..utils.torch import torch_empty_cache
@@ -231,6 +233,7 @@ def ModelWriter(cls):
             self.model = self.get_model_with_quantize(
                 qcfg=quantize_config,
                 model_id_or_path=self.model_local_path,
+                input_embeddings=self.model.get_input_embeddings(),
                 output_embeddings=self.model.get_output_embeddings(),
             )
 
@@ -515,7 +518,7 @@ def ModelWriter(cls):
 
     cls.save_quantized = save_quantized
 
-    def get_model_with_quantize(self, qcfg, model_id_or_path, output_embeddings: nn.Module):
+    def get_model_with_quantize(self, qcfg, model_id_or_path, input_embeddings: nn.Module, output_embeddings: nn.Module):
 
         config = AutoConfig.from_pretrained(
             model_id_or_path,
@@ -538,10 +541,17 @@ def ModelWriter(cls):
             modules = find_modules(model)
             ignore_modules = [self.lm_head] + self.get_base_modules(model)
 
-            embeddings_module_quantized = is_embeddings_module_quantized(model_id_or_path)
+            input_embed_name = get_module_name(model, model.get_input_embeddings())
+            output_embed_name = get_module_name(model, model.get_output_embeddings())
+            input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(model_dir=model_id_or_path,
+                                                                                           input_embed_name=input_embed_name,
+                                                                                           output_embed_name=output_embed_name)
             for name in list(modules.keys()):
-                # allow loading of quantized lm_head
-                if embeddings_module_quantized and name == self.lm_head:
+                # allow loading of quantized input_embed/output_embed
+                if input_embed_quantized and name == input_embed_name:
+                    continue
+
+                if output_embed_quantized and name == output_embed_name:
                     continue
 
                 if any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
@@ -573,6 +583,8 @@ def ModelWriter(cls):
         )
 
         # Set the quantized embeddings module
+        if isinstance(input_embeddings, BaseQuantLinear):
+            model.set_input_embeddings(input_embeddings)
         if isinstance(output_embeddings, BaseQuantLinear):
             model.set_output_embeddings(output_embeddings)
 

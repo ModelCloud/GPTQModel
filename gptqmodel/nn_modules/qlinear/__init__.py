@@ -545,7 +545,7 @@ class PackableQuantLinear(BaseQuantLinear):
 
         # small buffers
         self.register_buffer("scales", scales.to(dtype=t.float16))
-        if linear.bias is not None:
+        if hasattr(linear, "bias") and linear.bias is not None:
             self.register_buffer("bias", linear.bias.detach().to("cpu", dtype=t.float16))
 
         # ---------- constants ----------
@@ -931,6 +931,10 @@ class PackableQuantLinear(BaseQuantLinear):
                 W = W.flatten(1)
             if isinstance(linear, transformers.pytorch_utils.Conv1D):
                 W = W.T
+            # Embedding: weight is (V, D). We need (rows=D, cols=V), so transpose.
+            if isinstance(linear, nn.Embedding):
+                # After this, W is (D, V). Columns now index tokens and match g_idx semantics.
+                W = W.T
 
             # TODO why clone?
             # self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
@@ -944,7 +948,7 @@ class PackableQuantLinear(BaseQuantLinear):
             # self.scales = scales.clone().to(dtype=t.float16)
             self.register_buffer("scales", scales.to(dtype=t.float16))
 
-            if linear.bias is not None:
+            if hasattr(linear, "bias") and linear.bias is not None:
                 # TODO why clone?
                 # self.bias = linear.bias.clone().to(dtype=t.float16)
                 self.register_buffer("bias", linear.bias.to(dtype=t.float16))
