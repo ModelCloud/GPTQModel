@@ -21,7 +21,7 @@ from ..looper.awq_processor import AWQProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
 from ..looper.qqq_processor import QQQProcessor
-from ..quantization.config import EmbedQuantMode
+from ..quantization.config import QuantizeEmbed
 from ..utils.device import get_device, get_device_new
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import find_modules, get_module
@@ -45,7 +45,7 @@ def run_layer_stage(
     layer_count: int,
     region_timer,
     finalize_progress_cls,
-    embed_quant_mode: Optional[EmbedQuantMode],
+    embed_quant_mode: Optional[QuantizeEmbed],
     logger=None,
 ) -> None:
     """Execute the main per-layer quantization loop."""
@@ -56,13 +56,13 @@ def run_layer_stage(
         if looper._check_loop_stop():
             break
 
-        if embed_quant_mode == EmbedQuantMode.INPUT:
+        if embed_quant_mode == QuantizeEmbed.INPUT:
             is_input_embeddings_module = layer_index == 0
             is_output_embeddings_module = False
-        elif embed_quant_mode == EmbedQuantMode.OUTPUT:
+        elif embed_quant_mode == QuantizeEmbed.OUTPUT:
             is_input_embeddings_module = False
             is_output_embeddings_module = layer_index == layer_count
-        elif embed_quant_mode == EmbedQuantMode.BOTH:
+        elif embed_quant_mode == QuantizeEmbed.BOTH:
             is_input_embeddings_module = layer_index == 0
             is_output_embeddings_module = layer_index == layer_count + 1
         else:
@@ -78,7 +78,7 @@ def run_layer_stage(
             layer_title = "Quantizing output embeddings"
             module = looper.gptq_model.get_output_embeddings()
         else:
-            if embed_quant_mode == EmbedQuantMode.INPUT or embed_quant_mode == EmbedQuantMode.BOTH:
+            if embed_quant_mode == QuantizeEmbed.INPUT or embed_quant_mode == QuantizeEmbed.BOTH:
                 layer_index = layer_index - 1
             layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
             module = layers[layer_index]

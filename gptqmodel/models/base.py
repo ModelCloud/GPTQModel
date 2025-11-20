@@ -42,7 +42,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, EmbedQuantMode, VRAMStrategy, dynamic_get
+from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, QuantizeEmbed, VRAMStrategy, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.calibration import prepare_calibration_dataset
@@ -464,7 +464,7 @@ class BaseQModel(nn.Module):
         # minimum length of calibration data, default is 10
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
-        embed_quant_mode: Optional[EmbedQuantMode] = None,
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if embed_quant_mode is None and self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -686,7 +686,7 @@ class BaseQModel(nn.Module):
     def requantize(
         self,
         calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
-        embed_quant_mode: EmbedQuantMode,
+        embed_quant_mode: QuantizeEmbed,
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
         calibration_concat_size: Optional[int] = None,
         calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle

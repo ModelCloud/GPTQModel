@@ -9,7 +9,7 @@ import torch
 import transformers
 from torch import nn
 
-from ..quantization.config import EmbedQuantMode
+from ..quantization.config import QuantizeEmbed
 from ..utils.logger import setup_logger
 
 
@@ -267,7 +267,7 @@ def _replace_module(module, child, name, level: int = 0, debug: bool = False) ->
     return True
 
 
-def replace_module_with_hooked_legacy(module, level: int = 0, embed_quant_mode: Optional[EmbedQuantMode] = None):
+def replace_module_with_hooked_legacy(module, level: int = 0, embed_quant_mode: Optional[QuantizeEmbed] = None):
     # if level == 0:
     #     log.info("Hooked Modules: Using legacy based config for targeting of modules")
 

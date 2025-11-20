@@ -36,7 +36,7 @@ from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
-from ..quantization.config import VRAMStrategy, EmbedQuantMode
+from ..quantization.config import VRAMStrategy, QuantizeEmbed
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
@@ -83,7 +83,7 @@ class ModuleLooper():
     instance so tasks such as module reloading, forward passes, and finalisation
     reuse the same worker threads.
     """
-    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], embed_quant_mode: Optional[EmbedQuantMode] = None):
+    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], embed_quant_mode: Optional[QuantizeEmbed] = None):
         self.processors = processors
         self.gptq_model = model
         self.embed_quant_mode = embed_quant_mode
@@ -1162,9 +1162,9 @@ class ModuleLooper():
             layer_modules = [sum(layer_modules, [])]
 
         layer_count = len(layers)
-        if self.embed_quant_mode == EmbedQuantMode.INPUT or self.embed_quant_mode == EmbedQuantMode.OUTPUT:
+        if self.embed_quant_mode == QuantizeEmbed.INPUT or self.embed_quant_mode == QuantizeEmbed.OUTPUT:
             pb_size = layer_count + 1
-        elif self.embed_quant_mode == EmbedQuantMode.BOTH:
+        elif self.embed_quant_mode == QuantizeEmbed.BOTH:
             pb_size = layer_count + 2
         else:
             pb_size = layer_count
@@ -1176,11 +1176,11 @@ class ModuleLooper():
 
         shared_kv_cache_dict = {}
 
-        if self.embed_quant_mode == EmbedQuantMode.INPUT:
+        if self.embed_quant_mode == QuantizeEmbed.INPUT:
             self.hook_embeddings_module(self.input_embeddings_module)
-        elif self.embed_quant_mode == EmbedQuantMode.OUTPUT:
+        elif self.embed_quant_mode == QuantizeEmbed.OUTPUT:
             self.hook_embeddings_module(self.output_embeddings_module)
-        elif self.embed_quant_mode == EmbedQuantMode.BOTH:
+        elif self.embed_quant_mode == QuantizeEmbed.BOTH:
             self.hook_embeddings_module(self.input_embeddings_module)
             self.hook_embeddings_module(self.output_embeddings_module)
 

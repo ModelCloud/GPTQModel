@@ -19,7 +19,7 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
-from ..quantization.config import VRAMStrategy, EmbedQuantMode
+from ..quantization.config import VRAMStrategy, QuantizeEmbed
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
@@ -55,7 +55,7 @@ def run_subset_stage(
     attention_masks: List[torch.Tensor],
     cur_layer_device: torch.device,
     is_embeddings_module: bool,
-    embed_quant_mode: Optional[EmbedQuantMode],
+    embed_quant_mode: Optional[QuantizeEmbed],
     layer_descriptor: str,
     layer_title: str,
     layer_index: int,

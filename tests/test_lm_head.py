@@ -17,7 +17,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.quantization.config import EmbedQuantMode, QuantizeConfig
+from gptqmodel.quantization.config import QuantizeEmbed, QuantizeConfig
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 
 
@@ -52,17 +52,17 @@ class TestLmHeadQuant(ModelTest):
     # MMLU_STEM: 0.3869
     # ARC_CHALLENGE: 0.3294, 0.3217 # (acc, acc_norm)
     tied_false_lm_eval_dict = {
-        EmbedQuantMode.INPUT: {
+        QuantizeEmbed.INPUT: {
             EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.3358,
             EVAL.LM_EVAL.MMLU_STEM: 0.3815,
             EVAL.LM_EVAL.ARC_CHALLENGE: (0.3233, 0.3242),  # (acc, acc_norm)
         },
-        EmbedQuantMode.OUTPUT: {
+        QuantizeEmbed.OUTPUT: {
             EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.3639,
             EVAL.LM_EVAL.MMLU_STEM: 0.3935,
             EVAL.LM_EVAL.ARC_CHALLENGE: (0.3250, 0.3208),  # (acc, acc_norm)
         },
-        EmbedQuantMode.BOTH: {
+        QuantizeEmbed.BOTH: {
             EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.3374,
             EVAL.LM_EVAL.MMLU_STEM: 0.3828,
             EVAL.LM_EVAL.ARC_CHALLENGE: (0.3208, 0.3242),  # (acc, acc_norm)
@@ -75,17 +75,17 @@ class TestLmHeadQuant(ModelTest):
     # MMLU_STEM: 0.3587
     # ARC_CHALLENGE: 0.314, 0.3643 # (acc, acc_norm)
     tied_true_lm_eval_dict = {
-        EmbedQuantMode.INPUT: {
+        QuantizeEmbed.INPUT: {
             EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.0363,
             EVAL.LM_EVAL.MMLU_STEM: 0.3403,
             EVAL.LM_EVAL.ARC_CHALLENGE: (0.3054, 0.3430),  # (acc, acc_norm)
         },
-        EmbedQuantMode.OUTPUT: {
+        QuantizeEmbed.OUTPUT: {
             EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.0843,
             EVAL.LM_EVAL.MMLU_STEM: 0.3660,
             EVAL.LM_EVAL.ARC_CHALLENGE: (0.3139, 0.3634),  # (acc, acc_norm)
         },
-        EmbedQuantMode.BOTH: {
+        QuantizeEmbed.BOTH: {
             EVAL.LM_EVAL.GSM8K_PLATINUM_COT: 0.03473,
             EVAL.LM_EVAL.MMLU_STEM: 0.3235,
             EVAL.LM_EVAL.ARC_CHALLENGE: (0.3046, 0.3225),  # (acc, acc_norm)
@@ -93,12 +93,12 @@ class TestLmHeadQuant(ModelTest):
     }
 
     requantize_tied_false_cases = [
-        (EmbedQuantMode.INPUT, 0.0000),
+        (QuantizeEmbed.INPUT, 0.0000),
     ]
 
     # "/monster/data/model/Qwen1.5-1.8B-Chat-GPTQ-4bits-gp32"
     # @parameterized.expand(requantize_tied_false_cases)
-    def _test_requantize(self, model_id_or_path: str, embed_quant_mode: EmbedQuantMode,
+    def _test_requantize(self, model_id_or_path: str, embed_quant_mode: QuantizeEmbed,
                          expect_tied_word_embeddings: bool):
         assert embed_quant_mode is not None
 
@@ -156,11 +156,11 @@ class TestLmHeadQuant(ModelTest):
 
             print("model.get_input_embeddings()", model.get_input_embeddings())
             print("model.get_output_embeddings()", model.get_output_embeddings())
-            if embed_quant_mode == EmbedQuantMode.INPUT:
+            if embed_quant_mode == QuantizeEmbed.INPUT:
                 assert isinstance(model.get_input_embeddings(), BaseQuantLinear)
-            elif embed_quant_mode == EmbedQuantMode.OUTPUT:
+            elif embed_quant_mode == QuantizeEmbed.OUTPUT:
                 assert isinstance(model.get_output_embeddings(), BaseQuantLinear)
-            elif embed_quant_mode == EmbedQuantMode.BOTH:
+            elif embed_quant_mode == QuantizeEmbed.BOTH:
                 assert isinstance(model.get_input_embeddings(), BaseQuantLinear)
                 assert isinstance(model.get_output_embeddings(), BaseQuantLinear)
 
@@ -170,17 +170,17 @@ class TestLmHeadQuant(ModelTest):
             self.check_results(task_results)
 
     requantize_cases = [
-        (EmbedQuantMode.INPUT),
-        (EmbedQuantMode.OUTPUT),
-        (EmbedQuantMode.BOTH),
+        (QuantizeEmbed.INPUT),
+        (QuantizeEmbed.OUTPUT),
+        (QuantizeEmbed.BOTH),
     ]
 
     @parameterized.expand(requantize_cases)
-    def test_requantize_with_tied_false(self, embed_quant_mode: EmbedQuantMode):
+    def test_requantize_with_tied_false(self, embed_quant_mode: QuantizeEmbed):
         self._test_requantize(model_id_or_path="/monster/data/model/Qwen1.5-1.8B-Chat-GPTQ-4bits-gp32",
                               embed_quant_mode=embed_quant_mode, expect_tied_word_embeddings=False)
 
     @parameterized.expand(requantize_cases)
-    def test_requantize_with_tied_true(self, embed_quant_mode: EmbedQuantMode):
+    def test_requantize_with_tied_true(self, embed_quant_mode: QuantizeEmbed):
         self._test_requantize(model_id_or_path="/monster/data/model/Llama-3.2-1B-Instruct-GPTQ-4bits-gp32",
                               embed_quant_mode=embed_quant_mode, expect_tied_word_embeddings=True)
