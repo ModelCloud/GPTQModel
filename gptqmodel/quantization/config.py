@@ -528,6 +528,12 @@ class QuantizeConfig():
             # compat: default to gptq(v1) when loading models
             FORMAT_FIELD_CODE: format if format else FORMAT.GPTQ,
         }
+
+        version_val = quantize_cfg.get('version') if isinstance(quantize_cfg, dict) else getattr(quantize_cfg, 'version', None)
+
+        if version_val and version_val.lower() in QUANT_METHOD_FORMAT_MAPPING[METHOD.AWQ]:
+            normalized[QUANT_METHOD_FIELD] = METHOD.AWQ
+
         for key, val in quantize_cfg.items():
             key = key.lower()
 
