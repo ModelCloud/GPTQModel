@@ -128,7 +128,7 @@ jobs:
 
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -205,7 +205,7 @@ jobs:
 
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -363,7 +363,7 @@ jobs:
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-files != '[]'
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -651,7 +651,7 @@ jobs:
           ls -ahl .
 
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
