@@ -564,10 +564,8 @@ class QuantizeConfig():
         # fix method if format is not allowed for the method
         fmt = normalized.get(FORMAT_FIELD_CODE)
         method = normalized.get(QUANT_METHOD_FIELD)
-        log.debug(f"QuantizeConfig.from_quant_config: fmt={fmt}, method={method}")
         if fmt is not None:
             allowed_methods = [m for m, fmts in QUANT_METHOD_FORMAT_MAPPING.items() if fmt in fmts]
-            log.debug(f"QuantizeConfig.from_quant_config: allowed_methods for fmt={fmt} -> {allowed_methods}")
             if method not in allowed_methods:
                 if fmt in {FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST}:
                     new_method = METHOD.AWQ
@@ -579,7 +577,6 @@ class QuantizeConfig():
                     new_method = method if method in {METHOD.GPTQ, METHOD.AWQ} else METHOD.GPTQ
                 else:
                     new_method = allowed_methods[0] if allowed_methods else METHOD.GPTQ
-                log.debug(f"QuantizeConfig.from_quant_config: inferred new_method={new_method}")
                 if new_method != method:
                     log.warn(
                         f"QuantizeConfig: `{FORMAT_FIELD_CODE}`=`{fmt}` is incompatible with `{QUANT_METHOD_FIELD}`=`{method}`. Auto-fix method to `{new_method}`.")
