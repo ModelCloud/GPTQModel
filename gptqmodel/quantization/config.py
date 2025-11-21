@@ -529,11 +529,6 @@ class QuantizeConfig():
             FORMAT_FIELD_CODE: format if format else FORMAT.GPTQ,
         }
 
-        version_val = quantize_cfg.get('version') if isinstance(quantize_cfg, dict) else getattr(quantize_cfg, 'version', None)
-
-        if version_val and version_val.lower() in QUANT_METHOD_FORMAT_MAPPING[METHOD.AWQ]:
-            normalized[QUANT_METHOD_FIELD] = METHOD.AWQ
-
         for key, val in quantize_cfg.items():
             key = key.lower()
 
@@ -559,10 +554,36 @@ class QuantizeConfig():
                     raise ValueError(f"QuantizeConfig: Unknown quantization method: `{val}`.")
                 else:
                     normalized[QUANT_METHOD_FIELD] = val
+            elif key == FORMAT_FIELD_CODE:
+                normalized[key] = val.lower() if isinstance(val, str) else val
             elif key in field_names:
                 normalized[key] = val
             else:
                 log.info(f"QuantizeConfig: Ignoring unknown parameter in the quantization configuration: {key}.")
+
+        # fix method if format is not allowed for the method
+        fmt = normalized.get(FORMAT_FIELD_CODE)
+        method = normalized.get(QUANT_METHOD_FIELD)
+        log.debug(f"QuantizeConfig.from_quant_config: fmt={fmt}, method={method}")
+        if fmt is not None:
+            allowed_methods = [m for m, fmts in QUANT_METHOD_FORMAT_MAPPING.items() if fmt in fmts]
+            log.debug(f"QuantizeConfig.from_quant_config: allowed_methods for fmt={fmt} -> {allowed_methods}")
+            if method not in allowed_methods:
+                if fmt in {FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST}:
+                    new_method = METHOD.AWQ
+                elif fmt in {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.BITBLAS}:
+                    new_method = METHOD.GPTQ
+                elif fmt == FORMAT.QQQ:
+                    new_method = METHOD.QQQ
+                elif fmt == FORMAT.MARLIN:
+                    new_method = method if method in {METHOD.GPTQ, METHOD.AWQ} else METHOD.GPTQ
+                else:
+                    new_method = allowed_methods[0] if allowed_methods else METHOD.GPTQ
+                log.debug(f"QuantizeConfig.from_quant_config: inferred new_method={new_method}")
+                if new_method != method:
+                    log.warn(
+                        f"QuantizeConfig: `{FORMAT_FIELD_CODE}`=`{fmt}` is incompatible with `{QUANT_METHOD_FIELD}`=`{method}`. Auto-fix method to `{new_method}`.")
+                    normalized[QUANT_METHOD_FIELD] = new_method
 
         if format_auto_inferred:
             log.info(f"QuantizeConfig: `{FORMAT_FIELD_CHECKPOINT}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}")
