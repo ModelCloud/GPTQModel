@@ -1280,6 +1280,55 @@ def _split_parameter_path(full_name: str) -> Tuple[str, str]:
     return module_path, leaf
 
 
+def _generate_offload_search_paths(offload_root, module_path):
+    """
+    Generate fallback paths:
+    'a.b.c' -> ['gptqmodel_offload/a.b.c', 'gptqmodel_offload/a.b', 'gptqmodel_offload/a', 'gptqmodel_offload/']
+    """
+    if not module_path:
+        return [offload_root]
+
+    parts = module_path.split(".")
+    paths = []
+
+    for i in range(len(parts), 0, -1):
+        sub = ".".join(parts[:i])
+        paths.append(os.path.join(offload_root, sub))
+
+    paths.append(os.path.join(offload_root, ""))
+
+    return paths
+
+
+def _generate_entry_keys(module_path, leaf):
+    """
+        Generate fallback entry keys for lookup inside `index`.
+
+        Given:
+            module_path = "code2wav.upsample.0.1"
+            leaf = "gamma"
+
+        This function produces a list of possible lookup keys, ordered from
+        least specific to most specific, so that the caller can try them in order.
+
+        Example output:
+            [
+                "gamma",
+                "1.gamma",
+                "0.1.gamma",
+                "upsample.0.1.gamma",
+                "code2wav.upsample.0.1.gamma",
+            ]
+    """
+    keys = [leaf]
+    if module_path:
+        parts = module_path.split(".")
+        for i in range(len(parts)-1, -1, -1):
+            suffix = ".".join(parts[i:])
+            keys.append(f"{suffix}.{leaf}")
+    return keys
+
+
 def _resolve_offload_entry(
     offload_root: str,
     module_path: str,
@@ -1292,20 +1341,34 @@ def _resolve_offload_entry(
         return None
 
     module_dir = os.path.join(offload_root, module_path) if module_path else offload_root
-    index = index_cache.get(module_dir)
-    if index is None:
+    search_paths = _generate_offload_search_paths(offload_root, module_path)
+    index = None
+    for module_dir in search_paths:
+        index = index_cache.get(module_dir)
+        if index is not None:
+            break
+
         index_path = os.path.join(module_dir, "index.json")
         if not os.path.isfile(index_path):
             index_cache[module_dir] = None
-            return None
+            continue
+
+        # load index.json
         with open(index_path, "r", encoding="utf-8") as fh:
             index = json.load(fh)
+
         index_cache[module_dir] = index
+        break
 
     if not index:
         return None
 
-    entry = index.get(leaf) or index.get(f"{module_path}.{leaf}")
+    keys = _generate_entry_keys(module_path, leaf)
+    entry = None
+    for key in keys:
+        entry = index.get(key)
+        if entry is not None:
+            break
     if entry is None:
         return None
 
