@@ -1340,7 +1340,6 @@ def _resolve_offload_entry(
     if not offload_root:
         return None
 
-    module_dir = os.path.join(offload_root, module_path) if module_path else offload_root
     search_paths = _generate_offload_search_paths(offload_root, module_path)
     index = None
     for module_dir in search_paths:
