@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from gptqmodel.quantization.awq.utils.module import try_import
 from gptqmodel.quantization.awq.utils.packing_utils import unpack_reorder_pack
-
+from gptqmodel.nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 
 exlv2_ext, msg = try_import("gptqmodel_exlv2_kernels")
 
@@ -182,7 +182,7 @@ def exllamav2_post_init(model, max_input_len: int = 2048, max_batch_size: int = 
     # we search for the maximum number of bytes required for each device's scratch space
     fixed_bytes: Dict[torch.device, int] = {}
     for _, submodule in model.named_modules():
-        if isinstance(submodule, WQLinear_ExllamaV2):
+        if isinstance(submodule, AwqExllamaV2QuantLinear):
             device = submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed(
                 max_input_len=max_input_len, max_batch_size=max_batch_size
@@ -195,7 +195,7 @@ def exllamav2_post_init(model, max_input_len: int = 2048, max_batch_size: int = 
         model.scratch_spaces[device] = ScratchSpace(scratch_bytes, device)
 
     for _, submodule in model.named_modules():
-        if isinstance(submodule, WQLinear_ExllamaV2):
+        if isinstance(submodule, AwqExllamaV2QuantLinear):
             device = submodule.qweight.device
             submodule.post_init(scratch_space=model.scratch_spaces[device])
 
