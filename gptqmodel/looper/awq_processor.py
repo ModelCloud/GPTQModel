@@ -20,10 +20,10 @@ from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
-from ..nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
-from ..nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
-from ..nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
+from ..nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
+from ..nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
+from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
+from ..nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_GEMVFast, WQLinear_Marlin
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name, set_op_by_name
