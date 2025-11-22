@@ -133,7 +133,6 @@ class WQLinear_ExllamaV2(nn.Module):
     def forward(self, x):
         assert self.q_handle is not None, (
             "module.post_init() must be called before module.forward(). "
-            "Use exllamav2_post_init() on the whole model."
         )
         if exlv2_ext is None:
             raise ModuleNotFoundError("External ExLlamaV2 kernels are not properly installed." + msg)
@@ -160,47 +159,3 @@ class WQLinear_ExllamaV2(nn.Module):
             out.add_(self.bias)
 
         return out.view(out_shape)
-
-
-class ScratchSpace:
-    def __init__(self, scratch_bytes, dev):
-        self.scratch_bytes = scratch_bytes
-        self.scratch = torch.empty(
-            self.scratch_bytes // 2,
-            dtype=torch.float16,
-            device=dev,
-        )
-
-    def get_slice(self, size_bytes):
-        size_halfs = next_multiple(size_bytes, 128) // 2
-        scratch_slice = self.scratch.narrow(0, 0, size_halfs)
-
-        return scratch_slice
-
-
-def exllamav2_post_init(model, max_input_len: int = 2048, max_batch_size: int = 8):
-    # we search for the maximum number of bytes required for each device's scratch space
-    fixed_bytes: Dict[torch.device, int] = {}
-    for _, submodule in model.named_modules():
-        if isinstance(submodule, AwqExllamaV2QuantLinear):
-            device = submodule.qweight.device
-            scratch_fixed = submodule.scratch_space_fixed(
-                max_input_len=max_input_len, max_batch_size=max_batch_size
-            )
-            fixed_bytes[device] = max(fixed_bytes.get(device, 0), scratch_fixed)
-
-    # we allocate a model-persistent scratch space for each device
-    model.scratch_spaces: Dict[torch.device, ScratchSpace] = {}
-    for device, scratch_bytes in fixed_bytes.items():
-        model.scratch_spaces[device] = ScratchSpace(scratch_bytes, device)
-
-    for _, submodule in model.named_modules():
-        if isinstance(submodule, AwqExllamaV2QuantLinear):
-            device = submodule.qweight.device
-            submodule.post_init(scratch_space=model.scratch_spaces[device])
-
-    return model
-
-
-def next_multiple(x, multiple):
-    return ((x + multiple - 1) // multiple) * multiple

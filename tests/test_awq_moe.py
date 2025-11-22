@@ -14,7 +14,7 @@ from datasets import load_dataset
 from parameterized import parameterized
 from transformers import AutoTokenizer
 
-from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
+from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.torch import torch_empty_cache
 

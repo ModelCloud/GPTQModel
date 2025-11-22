@@ -46,7 +46,7 @@ from ..models._const import (
     SUPPORTS_MODULE_TYPES,
 )
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
+from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig

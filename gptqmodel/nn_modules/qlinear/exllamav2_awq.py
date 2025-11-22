@@ -118,7 +118,6 @@ class AwqExllamaV2QuantLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         assert self.q_handle is not None, (
             "module.post_init() must be called before module.forward(). "
-            "Use exllamav2_post_init() on the whole model."
         )
         if exlv2_ext is None:
             raise ModuleNotFoundError("External ExLlamaV2 kernels are not properly installed." + msg)

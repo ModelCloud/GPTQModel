@@ -133,10 +133,3 @@ class WQLinear_Exllama(nn.Module):
 
         return out.view(out_shape)
 
-
-def exllama_post_init(model):
-    for _, submodule in model.named_modules():
-        if isinstance(submodule, WQLinear_Exllama):
-            submodule.post_init()
-
-    return model

@@ -13,7 +13,7 @@ import torch
 from safetensors import safe_open
 from tabulate import tabulate
 
-from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
 from gptqmodel.utils.torch import TORCH_HAS_FUSED_OPS
 

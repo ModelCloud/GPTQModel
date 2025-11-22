@@ -16,12 +16,12 @@ from safetensors.torch import safe_open
 from tabulate import tabulate
 
 from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
-from gptqmodel.nn_modules.qlinear.awq_marlin import (
+from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin_awq import (
     AwqMarlinQuantLinear,
     marlin_import_exception,
 )
-from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
 from gptqmodel.utils.marlin import marlin_make_workspace_new
 

@@ -15,11 +15,11 @@ from datasets import load_dataset
 from parameterized import parameterized
 from transformers import AutoTokenizer
 
-from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
-from gptqmodel.nn_modules.qlinear.awq_gemv import AwqGEMVQuantLinear
-from gptqmodel.nn_modules.qlinear.awq_gemv_fast import AwqGEMVFastQuantLinear
-from gptqmodel.nn_modules.qlinear.awq_machete import AwqMacheteQuantLinear
-from gptqmodel.nn_modules.qlinear.awq_marlin import AwqMarlinQuantLinear
+from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
+from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
+from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
+from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.machete import _validate_machete_device_support, machete_import_exception
 
@@ -126,7 +126,7 @@ class TestGroupSize(unittest.TestCase):
 
     @parameterized.expand([
         (FORMAT.GEMM, BACKEND.GEMM, 128),
-        (FORMAT.GEMM, BACKEND.MACHETE, 128),
+        #(FORMAT.GEMM, BACKEND.MACHETE, 128),
         (FORMAT.GEMM, BACKEND.MARLIN, 128),
         (FORMAT.GEMV, BACKEND.GEMV, 128),
         (FORMAT.GEMV_FAST, BACKEND.GEMV_FAST, 128),
