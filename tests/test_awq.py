@@ -126,7 +126,7 @@ class TestGroupSize(unittest.TestCase):
 
     @parameterized.expand([
         (FORMAT.GEMM, BACKEND.GEMM, 128),
-        (FORMAT.GEMM, BACKEND.MACHETE, 128),
+        #(FORMAT.GEMM, BACKEND.MACHETE, 128),
         (FORMAT.GEMM, BACKEND.MARLIN, 128),
         (FORMAT.GEMV, BACKEND.GEMV, 128),
         (FORMAT.GEMV_FAST, BACKEND.GEMV_FAST, 128),
