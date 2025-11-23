@@ -21,6 +21,67 @@ awq_ext, msg = try_import("gptqmodel_awq_kernels")
 user_has_been_warned = False
 
 
+class AwqGemmFn(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        qweight,
+        qzeros,
+        scales,
+        w_bit=4,
+        group_size=128,
+        bias=None,
+        out_features=0,
+        prefer_backend=None,
+    ):
+        if awq_ext is None:
+            raise ValueError(msg or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
+
+        ctx.save_for_backward(x, qweight, qzeros, scales, bias)
+        ctx.out_features = out_features
+
+        out_shape = x.shape[:-1] + (out_features,)
+        x = x.to(torch.float16)
+        if x.shape[0] == 0:
+            return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
+
+        FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
+        if FP16_MATMUL_HEURISTIC_CONDITION:
+            out = awq_ext.dequantize_weights_cuda(qweight, scales, qzeros, 0, 0, 0, False)
+            out = torch.matmul(x, out)
+        else:
+            out = awq_ext.gemm_forward_cuda(
+                x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, 8
+            )
+
+        out = out + bias if bias is not None else out
+        out = out.reshape(out_shape)
+
+        if len(out.shape) == 2:
+            out = out.unsqueeze(0)
+
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, qweight, qzeros, scales, bias = ctx.saved_tensors
+
+        if awq_ext is None:
+            raise ValueError(msg or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
+
+        weights = awq_ext.dequantize_weights_cuda(
+            qweight, scales, qzeros, 1, 0, 0, False
+        ).to(grad_output.dtype)
+
+        grad_input = None
+        if ctx.needs_input_grad[0]:
+            batch_size = grad_output.shape[0]
+            grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
+
+        return grad_input, None, None, None, None, None, None, None, None
+
+
 class AwqGEMMQuantLinear(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
@@ -43,66 +104,6 @@ class AwqGEMMQuantLinear(AWQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemm"
-
-    class _Function(torch.autograd.Function):
-        @staticmethod
-        def forward(
-            ctx,
-            x,
-            qweight,
-            qzeros,
-            scales,
-            w_bit=4,
-            group_size=128,
-            bias=None,
-            out_features=0,
-            prefer_backend=None,
-        ):
-            if awq_ext is None:
-                raise ValueError(msg or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
-
-            ctx.save_for_backward(x, qweight, qzeros, scales, bias)
-            ctx.out_features = out_features
-
-            out_shape = x.shape[:-1] + (out_features,)
-            x = x.to(torch.float16)
-            if x.shape[0] == 0:
-                return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
-
-            FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
-            if FP16_MATMUL_HEURISTIC_CONDITION:
-                out = awq_ext.dequantize_weights_cuda(qweight, scales, qzeros, 0, 0, 0, False)
-                out = torch.matmul(x, out)
-            else:
-                out = awq_ext.gemm_forward_cuda(
-                    x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, 8
-                )
-
-            out = out + bias if bias is not None else out
-            out = out.reshape(out_shape)
-
-            if len(out.shape) == 2:
-                out = out.unsqueeze(0)
-
-            return out
-
-        @staticmethod
-        def backward(ctx, grad_output):
-            input, qweight, qzeros, scales, bias = ctx.saved_tensors
-
-            if awq_ext is None:
-                raise ValueError(msg or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
-
-            weights = awq_ext.dequantize_weights_cuda(
-                qweight, scales, qzeros, 1, 0, 0, False
-            ).to(grad_output.dtype)
-
-            grad_input = None
-            if ctx.needs_input_grad[0]:
-                batch_size = grad_output.shape[0]
-                grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
-
-            return grad_input, None, None, None, None, None, None, None, None
 
     @classmethod
     def validate(cls, **args):
@@ -166,7 +167,7 @@ class AwqGEMMQuantLinear(AWQuantLinear):
 
         ctx = nullcontext() if self.training else torch.inference_mode()
         with ctx:
-            out = self._Function.apply(
+            out = AwqGemmFn.apply(
                 x,
                 self.qweight,
                 self.qzeros,
@@ -188,4 +189,7 @@ class AwqGEMMQuantLinear(AWQuantLinear):
 
 
 
-__all__ = ["AwqGEMMQuantLinear"]
+__all__ = [
+    "AwqGemmFn",
+    "AwqGEMMQuantLinear",
+]
