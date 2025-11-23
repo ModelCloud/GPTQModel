@@ -238,11 +238,11 @@ class BaseQModel(nn.Module):
 
         if type(self).module_tree is None:
             type(self).module_tree = self._auto_detect_module_tree(model, quant_method)
-        
+
         # If module_tree is still None after auto-detection, raise an error indicating unsupported model type
         if type(self).module_tree is None:
             raise ValueError(f"Unsupport model_type {model.config.model_type}, and failed to auto-detect module tree for model {model}")
-            
+
 
         # record configuration early so model lifecycle hooks can rely on them
         self.compiled = False  # set to True while compile() is triggered successfully
@@ -1690,7 +1690,7 @@ class BaseQModel(nn.Module):
             "blocks",
             "model.blocks",
         ]
-        
+
         chosen = None
         for c in candidates:
             m = _get(c)
@@ -1700,7 +1700,7 @@ class BaseQModel(nn.Module):
                 break
 
         if chosen is None:
-            log.warn("Module Tree AutoCompat: All candidate paths invalid, return None")    
+            log.warn("Module Tree AutoCompat: All candidate paths invalid, return None")
             return None
 
         layer0 = _get(chosen)[0]
@@ -1715,7 +1715,7 @@ class BaseQModel(nn.Module):
         if len(all_linear)>0:
             log.warn(f"Module Tree AutoCompat: found {len(all_linear)} Linear/Conv modules in {type(layer0).__name__}: {all_linear}")
         else:
-            log.warn(f"Module Tree AutoCompat: No Linear/Conv names in layer0, return None")
+            log.warn("Module Tree AutoCompat: No Linear/Conv names in layer0, return None")
             return None
 
         mapping = {}
@@ -1732,7 +1732,7 @@ class BaseQModel(nn.Module):
             return tuple(x.split(".")[-1] for x in all_linear if x.startswith(f"{prefix}."))
 
         possible_parent = ["attn", "attention", "self_attn", "mlp", "ffn", "feed", "dense"]
-        
+
         found_parents = _find_parents(layer0, possible_parent)
 
         for p in found_parents:

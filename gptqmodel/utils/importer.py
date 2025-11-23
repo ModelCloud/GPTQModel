@@ -13,22 +13,22 @@ from gptqmodel.adapter.adapter import Adapter
 
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
+from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllama_awq import AwqExllamaQuantLinear
+from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
+from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
-from ..nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
-from ..nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
-from ..nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
-from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
-from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
-from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
-from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.machete import MacheteQuantLinear
+from ..nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
+from ..nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
+from ..nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from ..nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear

@@ -8,6 +8,7 @@ from model_test import ModelTest
 from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
 from gptqmodel.utils.eval import EVAL
 
+
 class TestQwen2_5_VL(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-VL-3B-Instruct"
     EVAL_TASKS = {
