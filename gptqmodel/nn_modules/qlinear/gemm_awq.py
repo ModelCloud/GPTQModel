@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from contextlib import nullcontext
+
 import torch
 
 from ...adapter.adapter import Adapter, Lora
@@ -94,7 +96,8 @@ class AwqGEMMQuantLinear(AWQuantLinear):
         if input_dtype != torch.float16:
             x = x.half()
 
-        if self.training:
+        ctx = nullcontext() if self.training else torch.inference_mode()
+        with ctx:
             out = WQLinearMMFunction.apply(
                 x,
                 self.qweight,
@@ -105,18 +108,6 @@ class AwqGEMMQuantLinear(AWQuantLinear):
                 self.bias,
                 self.out_features,
             )
-        else:
-            with torch.inference_mode():
-                out = WQLinearMMFunction.apply(
-                    x,
-                    self.qweight,
-                    self.qzeros,
-                    self.scales,
-                    self.bits,
-                    self.group_size,
-                    self.bias,
-                    self.out_features,
-                )
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)
