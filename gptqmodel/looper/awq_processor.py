@@ -24,7 +24,7 @@ from ..nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
 from ..nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
-from ..quantization.awq.modules.linear import WQLinear_GEMM, WQLinear_GEMV, WQLinear_GEMVFast, WQLinear_Marlin
+from ..quantization.awq.modules.linear import WQLinear_GEMV, WQLinear_GEMVFast, WQLinear_Marlin
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name, set_op_by_name
 from ..quantization.awq.utils.utils import get_best_device

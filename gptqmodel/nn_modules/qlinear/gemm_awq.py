@@ -8,12 +8,16 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
-from ...quantization.awq.modules.linear.gemm import WQLinearMMFunction
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...quantization.awq.utils.module import try_import
+
 
 
 log = setup_logger()
+
+awq_ext, msg = try_import("gptqmodel_awq_kernels")
+
 
 class AwqGEMMQuantLinear(AWQuantLinear):
     SUPPORTS_BITS = [4]
@@ -122,4 +126,97 @@ class AwqGEMMQuantLinear(AWQuantLinear):
 
         return out.reshape(out_shape)
 
-__all__ = ["AwqGEMMQuantLinear"]
+# Adapted from https://github.com/compressa-ai/AutoAWQ/tree/dev
+class WQLinearMMFunction(torch.autograd.Function):
+    @staticmethod
+    # ctx is the first argument to forward
+    def forward(
+        ctx,
+        x,
+        qweight,
+        qzeros,
+        scales,
+        w_bit=4,
+        group_size=128,
+        bias=None,
+        out_features=0,
+    ):
+        # The forward pass can use ctx.
+        ctx.save_for_backward(x, qweight, qzeros, scales, bias)
+        ctx.out_features = out_features
+
+        out_shape = x.shape[:-1] + (out_features,)
+        x = x.to(torch.float16)
+        if x.shape[0] == 0:
+            return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
+
+        if awq_ext is not None:
+            FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
+
+            if FP16_MATMUL_HEURISTIC_CONDITION:
+                out = awq_ext.dequantize_weights_cuda(
+                    qweight, scales, qzeros, 0, 0, 0, False
+                )
+                out = torch.matmul(x, out)
+            else:
+                out = awq_ext.gemm_forward_cuda(
+                    x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, 8
+                )
+
+        elif TRITON_AVAILABLE:
+            FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
+
+            if FP16_MATMUL_HEURISTIC_CONDITION:
+                out = awq_dequantize_triton(qweight, scales, qzeros)
+                out = torch.matmul(x, out.to(x.dtype))
+            else:
+                out = awq_gemm_triton(
+                    x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, split_k_iters=8,
+                )
+
+        else:
+            global user_has_been_warned
+            if not user_has_been_warned:
+                warnings.warn("Using naive (slow) implementation." + msg)
+                user_has_been_warned = True
+            out = dequantize_gemm(qweight, qzeros, scales, w_bit, group_size)
+            out = torch.matmul(x, out)
+
+        out = out + bias if bias is not None else out
+        out = out.reshape(out_shape)
+
+        # always want 3D tensor if tensor is 2D
+        if len(out.shape) == 2:
+            out = out.unsqueeze(0)
+
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, qweight, qzeros, scales, bias = ctx.saved_tensors
+
+        if awq_ext is None and not TRITON_AVAILABLE:
+            raise ValueError(
+                "either triton or autoawq-kernels is needed to be installed to use `.backward()`. Make sure to install the auto-awq kernels"
+                " by following the installation guides in https://github.com/casper-hansen/AutoAWQ_kernels"
+            )
+
+        # Cast to correct dtype for mixed precision training
+        if awq_ext is not None:
+            weights = awq_ext.dequantize_weights_cuda(
+                qweight, scales, qzeros, 1, 0, 0, False
+            ).to(grad_output.dtype)
+        else:
+            weights = awq_dequantize_triton(
+                qweight, scales, qzeros
+            ).to(grad_output.dtype)
+
+        if ctx.needs_input_grad[0]:
+            # 3D matmul using torch.bmm: https://pytorch.org/docs/stable/generated/torch.bmm.html#torch.bmm
+            # to propagate gradient across all batch sizes.
+            batch_size = grad_output.shape[0]
+            grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
+
+        return grad_input, None, None, None, None, None, None, None
+
+__all__ = ["AwqGEMMQuantLinear", "WQLinearMMFunction"]
