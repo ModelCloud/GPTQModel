@@ -15,10 +15,6 @@ from . import tritonv2
 from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
 
 
-def triton_backend_available() -> bool:
-    return tritonv2.TRITON_AVAILABLE
-
-
 def triton_forward(x: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor, scales: torch.Tensor,
                    group_size: int, bias: torch.Tensor, out_features: int) -> torch.Tensor:
     FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
@@ -37,54 +33,6 @@ def triton_forward(x: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
 def triton_dequantize_weights(qweight: torch.Tensor, qzeros: torch.Tensor, scales: torch.Tensor,
                               dtype: torch.dtype) -> torch.Tensor:
     return awq_dequantize_triton(qweight, scales, qzeros).to(dtype)
-
-
-class WQLinearMMTritonFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx,
-        x,
-        qweight,
-        qzeros,
-        scales,
-        w_bit=4,
-        group_size=128,
-        bias=None,
-        out_features=0,
-        prefer_backend=None,
-    ):
-        if not triton_backend_available():
-            raise ValueError(tritonv2.TRITON_INSTALL_HINT)
-
-        ctx.save_for_backward(x, qweight, qzeros, scales, bias)
-        ctx.out_features = out_features
-
-        out_shape = x.shape[:-1] + (out_features,)
-        x = x.to(torch.float16)
-        if x.shape[0] == 0:
-            return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
-
-        out = triton_forward(x, qweight, qzeros, scales, group_size, bias, out_features)
-        out = out + bias if bias is not None else out
-        out = out.reshape(out_shape)
-        if len(out.shape) == 2:
-            out = out.unsqueeze(0)
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input, qweight, qzeros, scales, bias = ctx.saved_tensors
-        if not triton_backend_available():
-            raise ValueError(tritonv2.TRITON_INSTALL_HINT)
-
-        weights = triton_dequantize_weights(qweight, qzeros, scales, grad_output.dtype)
-
-        grad_input = None
-        if ctx.needs_input_grad[0]:
-            batch_size = grad_output.shape[0]
-            grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
-
-        return grad_input, None, None, None, None, None, None, None, None
 
 
 class AwqGEMMTritonQuantLinear(AWQuantLinear):
@@ -109,6 +57,60 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
 
     QUANT_TYPE = "awq_gemm_triton"
 
+    class _Function(torch.autograd.Function):
+        @staticmethod
+        def forward(
+            ctx,
+            x,
+            qweight,
+            qzeros,
+            scales,
+            w_bit=4,
+            group_size=128,
+            bias=None,
+            out_features=0,
+            prefer_backend=None,
+        ):
+            if not tritonv2.TRITON_AVAILABLE:
+                raise ValueError(tritonv2.TRITON_INSTALL_HINT)
+
+            ctx.save_for_backward(x, qweight, qzeros, scales, bias)
+            ctx.out_features = out_features
+
+            out_shape = x.shape[:-1] + (out_features,)
+            x = x.to(torch.float16)
+            if x.shape[0] == 0:
+                return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
+
+            out = triton_forward(x, qweight, qzeros, scales, group_size, bias, out_features)
+            out = out + bias if bias is not None else out
+            out = out.reshape(out_shape)
+            if len(out.shape) == 2:
+                out = out.unsqueeze(0)
+            return out
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            input, qweight, qzeros, scales, bias = ctx.saved_tensors
+            if not tritonv2.TRITON_AVAILABLE:
+                raise ValueError(tritonv2.TRITON_INSTALL_HINT)
+
+            weights = triton_dequantize_weights(qweight, qzeros, scales, grad_output.dtype)
+
+            grad_input = None
+            if ctx.needs_input_grad[0]:
+                batch_size = grad_output.shape[0]
+                grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
+
+            return grad_input, None, None, None, None, None, None, None, None
+
+    @classmethod
+    def validate(cls, **args):
+        if not tritonv2.TRITON_AVAILABLE:
+            return False, ValueError(tritonv2.TRITON_INSTALL_HINT)
+
+        return cls._validate(**args)
+
     def __init__(
         self,
         bits: int,
@@ -123,9 +125,6 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ):
-        if not triton_backend_available():
-            raise ValueError(tritonv2.TRITON_INSTALL_HINT)
-
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -154,7 +153,7 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
 
         ctx = nullcontext() if self.training else torch.inference_mode()
         with ctx:
-            out = WQLinearMMTritonFunction.apply(
+            out = self._Function.apply(
                 x,
                 self.qweight,
                 self.qzeros,
@@ -178,9 +177,7 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
 __all__ = [
     "awq_dequantize_triton",
     "awq_gemm_triton",
-    "triton_backend_available",
     "triton_forward",
     "triton_dequantize_weights",
     "AwqGEMMTritonQuantLinear",
-    "WQLinearMMTritonFunction",
 ]
