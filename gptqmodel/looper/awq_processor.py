@@ -101,7 +101,7 @@ class AWQProcessor(LoopProcessor):
         # This argument avoids real quantization by only applying the scales without quantizing down to FP16.
         self.export_compatible = False
 
-        self.version = qcfg.format
+        self.format = qcfg.format
 
         # Whether to scale using both w/x or just x.
         self.duo_scaling = True
@@ -1113,23 +1113,23 @@ class AWQProcessor(LoopProcessor):
 
             linear_layer.weight.data = wq
 
-            if self.version == "gemm":
+            if self.format == FORMAT.GEMM:
                 scales = scales.t().contiguous()
                 if zeros is not None:
                     zeros = zeros.t().contiguous()
                 q_linear_module = WQLinear_GEMM
 
-            elif self.version == "gemv":
+            elif self.format == FORMAT.GEMV:
                 q_linear_module = WQLinear_GEMV
 
-            elif self.version == "marlin":
+            elif self.format == FORMAT.MARLIN:
                 q_linear_module = WQLinear_Marlin
 
-            elif self.version == "gemv_fast":
+            elif self.format == FORMAT.GEMV_FAST:
                 q_linear_module = WQLinear_GEMVFast
 
             else:
-                raise ValueError(f"Unknown version {self.version}")
+                raise ValueError(f"Unknown version {self.format}")
 
             q_linear = q_linear_module.from_linear(
                 linear=linear_layer,
