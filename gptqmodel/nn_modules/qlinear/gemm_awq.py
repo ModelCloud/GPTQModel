@@ -7,7 +7,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, tritonv2
 from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -16,6 +16,7 @@ from ...utils.logger import setup_logger
 log = setup_logger()
 
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
+user_has_been_warned = False
 
 
 class AwqGEMMQuantLinear(AWQuantLinear):
@@ -162,7 +163,7 @@ class WQLinearMMFunction(torch.autograd.Function):
                     x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, 8
                 )
 
-        elif TRITON_AVAILABLE:
+        elif tritonv2.TRITON_AVAILABLE:
             FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
 
             if FP16_MATMUL_HEURISTIC_CONDITION:
@@ -176,7 +177,7 @@ class WQLinearMMFunction(torch.autograd.Function):
         else:
             global user_has_been_warned
             if not user_has_been_warned:
-                warnings.warn("Using naive (slow) implementation." + msg)
+                log.warn("Using naive (slow) implementation." + msg)
                 user_has_been_warned = True
             out = dequantize_gemm(qweight, qzeros, scales, w_bit, group_size)
             out = torch.matmul(x, out)
@@ -194,10 +195,9 @@ class WQLinearMMFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, qweight, qzeros, scales, bias = ctx.saved_tensors
 
-        if awq_ext is None and not TRITON_AVAILABLE:
+        if awq_ext is None and not tritonv2.TRITON_AVAILABLE:
             raise ValueError(
-                "either triton or autoawq-kernels is needed to be installed to use `.backward()`. Make sure to install the auto-awq kernels"
-                " by following the installation guides in https://github.com/casper-hansen/AutoAWQ_kernels"
+                "Please install required triton via `pip install -U triton`"
             )
 
         # Cast to correct dtype for mixed precision training
