@@ -9,7 +9,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear, tritonv2
+from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -19,6 +19,32 @@ log = setup_logger()
 
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
 user_has_been_warned = False
+
+
+def cuda_backend_available() -> bool:
+    return awq_ext is not None
+
+
+def cuda_forward(x: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor, scales: torch.Tensor,
+                 group_size: int, bias: torch.Tensor, out_features: int) -> torch.Tensor:
+    FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
+
+    if FP16_MATMUL_HEURISTIC_CONDITION:
+        out = awq_ext.dequantize_weights_cuda(qweight, scales, qzeros, 0, 0, 0, False)
+        out = torch.matmul(x, out)
+    else:
+        out = awq_ext.gemm_forward_cuda(
+            x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, 8
+        )
+
+    return out
+
+
+def cuda_dequantize_weights(qweight: torch.Tensor, qzeros: torch.Tensor, scales: torch.Tensor,
+                            dtype: torch.dtype) -> torch.Tensor:
+    return awq_ext.dequantize_weights_cuda(
+        qweight, scales, qzeros, 1, 0, 0, False
+    ).to(dtype)
 
 
 class AwqGEMMQuantLinear(AWQuantLinear):
@@ -58,6 +84,9 @@ class AwqGEMMQuantLinear(AWQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ):
+        if not cuda_backend_available():
+            raise ValueError("CUDA AWQ extension not available; cannot build AwqGEMMQuantLinear")
+
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -107,6 +136,7 @@ class AwqGEMMQuantLinear(AWQuantLinear):
                 self.group_size,
                 self.bias,
                 self.out_features,
+                "cuda",
             )
 
         if input_dtype != torch.float16:
@@ -131,6 +161,7 @@ class WQLinearMMFunction(torch.autograd.Function):
         group_size=128,
         bias=None,
         out_features=0,
+        prefer_backend=None,
     ):
         # The forward pass can use ctx.
         ctx.save_for_backward(x, qweight, qzeros, scales, bias)
@@ -141,37 +172,10 @@ class WQLinearMMFunction(torch.autograd.Function):
         if x.shape[0] == 0:
             return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
 
-        if awq_ext is not None:
-            FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
+        if not cuda_backend_available():
+            raise ValueError("CUDA AWQ extension not available for WQLinearMMFunction")
 
-            if FP16_MATMUL_HEURISTIC_CONDITION:
-                out = awq_ext.dequantize_weights_cuda(
-                    qweight, scales, qzeros, 0, 0, 0, False
-                )
-                out = torch.matmul(x, out)
-            else:
-                out = awq_ext.gemm_forward_cuda(
-                    x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, 8
-                )
-
-        elif tritonv2.TRITON_AVAILABLE:
-            FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
-
-            if FP16_MATMUL_HEURISTIC_CONDITION:
-                out = awq_dequantize_triton(qweight, scales, qzeros)
-                out = torch.matmul(x, out.to(x.dtype))
-            else:
-                out = awq_gemm_triton(
-                    x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, split_k_iters=8,
-                )
-
-        else:
-            global user_has_been_warned
-            if not user_has_been_warned:
-                log.warn("Using naive (slow) implementation." + msg)
-                user_has_been_warned = True
-            out = dequantize_gemm(qweight, qzeros, scales, w_bit, group_size)
-            out = torch.matmul(x, out)
+        out = cuda_forward(x, qweight, qzeros, scales, group_size, bias, out_features)
 
         out = out + bias if bias is not None else out
         out = out.reshape(out_shape)
@@ -186,20 +190,11 @@ class WQLinearMMFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, qweight, qzeros, scales, bias = ctx.saved_tensors
 
-        if awq_ext is None and not tritonv2.TRITON_AVAILABLE:
-            raise ValueError(
-                "Please install required triton via `pip install -U triton`"
-            )
+        if not cuda_backend_available():
+            raise ValueError("CUDA AWQ extension not available for WQLinearMMFunction")
 
         # Cast to correct dtype for mixed precision training
-        if awq_ext is not None:
-            weights = awq_ext.dequantize_weights_cuda(
-                qweight, scales, qzeros, 1, 0, 0, False
-            ).to(grad_output.dtype)
-        else:
-            weights = awq_dequantize_triton(
-                qweight, scales, qzeros
-            ).to(grad_output.dtype)
+        weights = cuda_dequantize_weights(qweight, qzeros, scales, grad_output.dtype)
 
         if ctx.needs_input_grad[0]:
             # 3D matmul using torch.bmm: https://pytorch.org/docs/stable/generated/torch.bmm.html#torch.bmm
@@ -207,6 +202,8 @@ class WQLinearMMFunction(torch.autograd.Function):
             batch_size = grad_output.shape[0]
             grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
 
-        return grad_input, None, None, None, None, None, None, None
+        return grad_input, None, None, None, None, None, None, None, None
+
+
 
 __all__ = ["AwqGEMMQuantLinear", "WQLinearMMFunction"]
