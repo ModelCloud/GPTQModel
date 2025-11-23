@@ -15,27 +15,46 @@ def _fake_quant_tensors(in_features: int = 32, out_features: int = 8, group_size
     return qweight, scales, qzeros
 
 
-def _patch_for_triton(monkeypatch, calls):
-    monkeypatch.setattr(gemm_awq, "awq_ext", None)
+def _patch_backend(monkeypatch, backend: str, calls):
+    if backend == "triton":
+        monkeypatch.setattr(gemm_awq, "awq_ext", None)
 
-    monkeypatch.setattr(gemm_awq_triton.tritonv2, "TRITON_AVAILABLE", True)
+        monkeypatch.setattr(gemm_awq_triton.tritonv2, "TRITON_AVAILABLE", True)
 
-    def fake_dequant(qweight, scales, qzeros):
-        calls["dequant"] += 1
-        return torch.ones(qweight.shape[0], qweight.shape[1] * 8, dtype=torch.float16)
+        def fake_dequant(qweight, scales, qzeros):
+            calls["dequant"] += 1
+            return torch.ones(qweight.shape[0], qweight.shape[1] * 8, dtype=torch.float16)
 
-    def fake_gemm(input, qweight, scales, qzeros, split_k_iters, **_):
-        calls["gemm"] += 1
-        out_features = qweight.shape[1] * 8
-        return torch.ones(input.shape[0], out_features, device=input.device, dtype=input.dtype)
+        def fake_gemm(input, qweight, scales, qzeros, split_k_iters, **_):
+            calls["gemm"] += 1
+            out_features = qweight.shape[1] * 8
+            return torch.ones(input.shape[0], out_features, device=input.device, dtype=input.dtype)
 
-    monkeypatch.setattr(gemm_awq_triton, "awq_dequantize_triton", fake_dequant, raising=False)
-    monkeypatch.setattr(gemm_awq_triton, "awq_gemm_triton", fake_gemm, raising=False)
+        monkeypatch.setattr(gemm_awq_triton, "awq_dequantize_triton", fake_dequant, raising=False)
+        monkeypatch.setattr(gemm_awq_triton, "awq_gemm_triton", fake_gemm, raising=False)
+
+        return gemm_awq_triton.AwqGemmTritonFn
+
+    # Stub the compiled AWQ extension so we can count which path is taken.
+    class FakeAwqExt:
+        def dequantize_weights_cuda(self, qweight, scales, qzeros, *_args):
+            calls["dequant"] += 1
+            return torch.ones(qweight.shape[0], qweight.shape[1] * 8, dtype=torch.float16)
+
+        def gemm_forward_cuda(self, input, qweight, scales, qzeros, _split_k_iters):
+            calls["gemm"] += 1
+            out_features = qweight.shape[1] * 8
+            return torch.ones(input.shape[0], out_features, device=input.device, dtype=input.dtype)
+
+    monkeypatch.setattr(gemm_awq, "awq_ext", FakeAwqExt())
+    monkeypatch.setattr(gemm_awq_triton.tritonv2, "TRITON_AVAILABLE", False)
+    return gemm_awq.AwqGemmFn
 
 
-def test_fp16_matmul_heuristic_prefers_dequant_for_large_matrices(monkeypatch):
+@pytest.mark.parametrize("backend", ["triton", "ext"], ids=["triton", "awq_ext"])
+def test_fp16_matmul_heuristic_prefers_dequant_for_large_matrices(monkeypatch, backend):
     calls = {"dequant": 0, "gemm": 0}
-    _patch_for_triton(monkeypatch, calls)
+    fn = _patch_backend(monkeypatch, backend, calls)
 
     group_size = 32
     out_features = 8
@@ -44,7 +63,7 @@ def test_fp16_matmul_heuristic_prefers_dequant_for_large_matrices(monkeypatch):
     # Large batch x sequence activates the dequantize-then-matmul path.
     x = torch.ones((33, 32, qweight.shape[0]), dtype=torch.float16)
 
-    out = gemm_awq_triton.AwqGemmTritonFn.apply(
+    out = fn.apply(
         x, qweight, qzeros, scales, 4, group_size, None, out_features,
     )
 
@@ -52,9 +71,10 @@ def test_fp16_matmul_heuristic_prefers_dequant_for_large_matrices(monkeypatch):
     assert out.shape == (33, 32, out_features)
 
 
-def test_fp16_matmul_heuristic_prefers_fused_gemm_for_small_matrices(monkeypatch):
+@pytest.mark.parametrize("backend", ["triton", "ext"], ids=["triton", "awq_ext"])
+def test_fp16_matmul_heuristic_prefers_fused_gemm_for_small_matrices(monkeypatch, backend):
     calls = {"dequant": 0, "gemm": 0}
-    _patch_for_triton(monkeypatch, calls)
+    fn = _patch_backend(monkeypatch, backend, calls)
 
     group_size = 32
     out_features = 8
@@ -63,12 +83,30 @@ def test_fp16_matmul_heuristic_prefers_fused_gemm_for_small_matrices(monkeypatch
     # Small batch x sequence stays on the fused GEMM kernel.
     x = torch.ones((1, 1, qweight.shape[0]), dtype=torch.float16)
 
-    out = gemm_awq_triton.AwqGemmTritonFn.apply(
+    out = fn.apply(
         x, qweight, qzeros, scales, 4, group_size, None, out_features,
     )
 
     assert calls == {"dequant": 0, "gemm": 1}
     assert out.shape == (1, 1, out_features)
+
+
+def _available_bench_backends():
+    backends = []
+    if gemm_awq.awq_ext is not None:
+        backends.append("awq_ext")
+    if gemm_awq_triton.tritonv2.TRITON_AVAILABLE:
+        backends.append("triton")
+    return backends
+
+
+_BACKEND_PARAMS = _available_bench_backends()
+if _BACKEND_PARAMS:
+    BACKEND_PARAMS = [pytest.param(backend, id=backend) for backend in _BACKEND_PARAMS]
+else:
+    BACKEND_PARAMS = [
+        pytest.param("missing", id="no_backend", marks=pytest.mark.skip(reason="No AWQ backend available for benchmark"))
+    ]
 
 
 SEQ_LENS = [128, 256, 512, 1024, 1280, 1536, 2048, 4096, 8192]
@@ -92,18 +130,14 @@ BENCH_CASES = [
     ids=[f"{case}_s{seq}" for (case, _, _, _) in BENCH_CASES for seq in SEQ_LENS],
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA backend required for AWQ benchmark")
-def test_fp16_matmul_heuristic_benchmark(case_name, batch, seq, in_features, out_features):
+@pytest.mark.parametrize("backend", BACKEND_PARAMS)
+def test_fp16_matmul_heuristic_benchmark(case_name, batch, seq, in_features, out_features, backend):
     if os.getenv("RUN_AWQ_FP16_HEURISTIC_BENCH") != "1":
         pytest.skip("Set RUN_AWQ_FP16_HEURISTIC_BENCH=1 to enable this benchmark")
 
     tabulate = pytest.importorskip("tabulate").tabulate
 
-    backend = None
-    if gemm_awq.awq_ext is not None:
-        backend = "awq_ext"
-    elif gemm_awq.tritonv2.TRITON_AVAILABLE:
-        backend = "triton"
-    else:
+    if backend not in {"awq_ext", "triton"}:
         pytest.skip("No AWQ backend available for benchmark")
 
     device = torch.device("cuda")
@@ -154,7 +188,7 @@ def test_fp16_matmul_heuristic_benchmark(case_name, batch, seq, in_features, out
 
     meets_condition = batch * seq >= 1024
     rows = [
-        [case_name, batch, seq, meets_condition, f"{in_features}->{out_features}", "condition=True (dequant+matmul)", f"{dequant_ms:.3f} ms"],
-        [case_name, batch, seq, meets_condition, f"{in_features}->{out_features}", "condition=False (fused gemm)", f"{fused_ms:.3f} ms"],
+        [case_name, backend, batch, seq, meets_condition, f"{in_features}->{out_features}", "condition=True (dequant+matmul)", f"{dequant_ms:.3f} ms"],
+        [case_name, backend, batch, seq, meets_condition, f"{in_features}->{out_features}", "condition=False (fused gemm)", f"{fused_ms:.3f} ms"],
     ]
-    print(tabulate(rows, headers=["case", "batch", "seq", "meets >=1024", "matmul (in->out)", "path", "avg latency"]))
+    print(tabulate(rows, headers=["case", "backend", "batch", "seq", "meets >=1024", "matmul (in->out)", "path", "avg latency"]))
