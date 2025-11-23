@@ -28,6 +28,7 @@ class BACKEND(str, Enum):
 
     # awq
     GEMM = "gemm"
+    GEMM_TRITON = "gemm_triton"
     GEMV = "gemv"
     GEMV_FAST = "gemv_fast"
     TORCH_AWQ = "torch_awq"

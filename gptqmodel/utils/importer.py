@@ -20,6 +20,7 @@ from ..nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
+from ..nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonQuantLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
 from ..nn_modules.qlinear.machete import MacheteQuantLinear
@@ -69,6 +70,7 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.EXLLAMA_V2: AwqExllamaV2QuantLinear,
         BACKEND.EXLLAMA_V1: AwqExllamaQuantLinear,
         BACKEND.GEMM: AwqGEMMQuantLinear,
+        BACKEND.GEMM_TRITON: AwqGEMMTritonQuantLinear,
         BACKEND.GEMV: AwqGEMVQuantLinear,
         BACKEND.GEMV_FAST: AwqGEMVFastQuantLinear,
         BACKEND.TORCH_FUSED_AWQ: TorchFusedAwqQuantLinear,
@@ -93,6 +95,7 @@ SUPPORTS_BACKEND_MAP = {
             BACKEND.EXLLAMA_V2,
             BACKEND.EXLLAMA_V1,
             BACKEND.GEMM,
+            BACKEND.GEMM_TRITON,
             BACKEND.TORCH_FUSED_AWQ,
             BACKEND.TORCH_AWQ,
         ],
@@ -412,6 +415,8 @@ def select_quant_linear(
         qlinear = QQQQuantLinear
     elif backend == BACKEND.GEMM:
         qlinear = AwqGEMMQuantLinear
+    elif backend == BACKEND.GEMM_TRITON:
+        qlinear = AwqGEMMTritonQuantLinear
     elif backend == BACKEND.GEMV:
         qlinear = AwqGEMVQuantLinear
     elif backend == BACKEND.GEMV_FAST:
