@@ -46,8 +46,9 @@ class AwqGemmFn(torch.autograd.Function):
         if x.shape[0] == 0:
             return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
 
-        FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
-        if FP16_MATMUL_HEURISTIC_CONDITION:
+        # Above compute density threshold it is faster to just dequantize the whole thing and do simple matmul
+        FULL_DEQUANT_MATMUL_THRESHOLD = x.shape[0] * x.shape[1] > 1024
+        if FULL_DEQUANT_MATMUL_THRESHOLD:
             out = awq_ext.dequantize_weights_cuda(qweight, scales, qzeros, 0, 0, 0, False)
             out = torch.matmul(x, out)
         else:

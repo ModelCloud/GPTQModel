@@ -44,7 +44,7 @@ def test_fp16_matmul_heuristic_prefers_dequant_for_large_matrices(monkeypatch):
     # Large batch x sequence activates the dequantize-then-matmul path.
     x = torch.ones((33, 32, qweight.shape[0]), dtype=torch.float16)
 
-    out = gemm_awq_triton.AwqGEMMTritonQuantLinear._Function.apply(
+    out = gemm_awq_triton.AwqGemmTritonFn.apply(
         x, qweight, qzeros, scales, 4, group_size, None, out_features,
     )
 
@@ -63,7 +63,7 @@ def test_fp16_matmul_heuristic_prefers_fused_gemm_for_small_matrices(monkeypatch
     # Small batch x sequence stays on the fused GEMM kernel.
     x = torch.ones((1, 1, qweight.shape[0]), dtype=torch.float16)
 
-    out = gemm_awq_triton.AwqGEMMTritonQuantLinear._Function.apply(
+    out = gemm_awq_triton.AwqGemmTritonFn.apply(
         x, qweight, qzeros, scales, 4, group_size, None, out_features,
     )
 
