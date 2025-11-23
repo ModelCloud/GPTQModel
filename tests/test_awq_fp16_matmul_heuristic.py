@@ -17,11 +17,8 @@ def _fake_quant_tensors(in_features: int = 32, out_features: int = 8, group_size
 
 def _patch_for_triton(monkeypatch, calls):
     monkeypatch.setattr(gemm_awq, "awq_ext", None)
-    monkeypatch.setattr(gemm_awq, "cuda_backend_available", lambda: False)
 
     monkeypatch.setattr(gemm_awq_triton.tritonv2, "TRITON_AVAILABLE", True)
-    monkeypatch.setattr(gemm_awq_triton, "triton_backend_available", lambda: True)
-    monkeypatch.setattr(gemm_awq, "triton_backend_available", lambda: True, raising=False)
 
     def fake_dequant(qweight, scales, qzeros):
         calls["dequant"] += 1
@@ -47,7 +44,7 @@ def test_fp16_matmul_heuristic_prefers_dequant_for_large_matrices(monkeypatch):
     # Large batch x sequence activates the dequantize-then-matmul path.
     x = torch.ones((33, 32, qweight.shape[0]), dtype=torch.float16)
 
-    out = gemm_awq_triton.WQLinearMMTritonFunction.apply(
+    out = gemm_awq_triton.AwqGEMMTritonQuantLinear._Function.apply(
         x, qweight, qzeros, scales, 4, group_size, None, out_features,
     )
 
@@ -66,7 +63,7 @@ def test_fp16_matmul_heuristic_prefers_fused_gemm_for_small_matrices(monkeypatch
     # Small batch x sequence stays on the fused GEMM kernel.
     x = torch.ones((1, 1, qweight.shape[0]), dtype=torch.float16)
 
-    out = gemm_awq_triton.WQLinearMMTritonFunction.apply(
+    out = gemm_awq_triton.AwqGEMMTritonQuantLinear._Function.apply(
         x, qweight, qzeros, scales, 4, group_size, None, out_features,
     )
 

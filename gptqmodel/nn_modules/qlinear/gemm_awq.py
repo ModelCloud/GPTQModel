@@ -21,32 +21,6 @@ awq_ext, msg = try_import("gptqmodel_awq_kernels")
 user_has_been_warned = False
 
 
-def cuda_backend_available() -> bool:
-    return awq_ext is not None
-
-
-def cuda_forward(x: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor, scales: torch.Tensor,
-                 group_size: int, bias: torch.Tensor, out_features: int) -> torch.Tensor:
-    FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
-
-    if FP16_MATMUL_HEURISTIC_CONDITION:
-        out = awq_ext.dequantize_weights_cuda(qweight, scales, qzeros, 0, 0, 0, False)
-        out = torch.matmul(x, out)
-    else:
-        out = awq_ext.gemm_forward_cuda(
-            x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, 8
-        )
-
-    return out
-
-
-def cuda_dequantize_weights(qweight: torch.Tensor, qzeros: torch.Tensor, scales: torch.Tensor,
-                            dtype: torch.dtype) -> torch.Tensor:
-    return awq_ext.dequantize_weights_cuda(
-        qweight, scales, qzeros, 1, 0, 0, False
-    ).to(dtype)
-
-
 class AwqGEMMQuantLinear(AWQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
@@ -70,6 +44,73 @@ class AwqGEMMQuantLinear(AWQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemm"
 
+    class _Function(torch.autograd.Function):
+        @staticmethod
+        def forward(
+            ctx,
+            x,
+            qweight,
+            qzeros,
+            scales,
+            w_bit=4,
+            group_size=128,
+            bias=None,
+            out_features=0,
+            prefer_backend=None,
+        ):
+            if awq_ext is None:
+                raise ValueError(msg or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
+
+            ctx.save_for_backward(x, qweight, qzeros, scales, bias)
+            ctx.out_features = out_features
+
+            out_shape = x.shape[:-1] + (out_features,)
+            x = x.to(torch.float16)
+            if x.shape[0] == 0:
+                return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
+
+            FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
+            if FP16_MATMUL_HEURISTIC_CONDITION:
+                out = awq_ext.dequantize_weights_cuda(qweight, scales, qzeros, 0, 0, 0, False)
+                out = torch.matmul(x, out)
+            else:
+                out = awq_ext.gemm_forward_cuda(
+                    x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, 8
+                )
+
+            out = out + bias if bias is not None else out
+            out = out.reshape(out_shape)
+
+            if len(out.shape) == 2:
+                out = out.unsqueeze(0)
+
+            return out
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            input, qweight, qzeros, scales, bias = ctx.saved_tensors
+
+            if awq_ext is None:
+                raise ValueError(msg or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
+
+            weights = awq_ext.dequantize_weights_cuda(
+                qweight, scales, qzeros, 1, 0, 0, False
+            ).to(grad_output.dtype)
+
+            grad_input = None
+            if ctx.needs_input_grad[0]:
+                batch_size = grad_output.shape[0]
+                grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
+
+            return grad_input, None, None, None, None, None, None, None, None
+
+    @classmethod
+    def validate(cls, **args):
+        if awq_ext is None:
+            return False, ValueError(msg or "CUDA AWQ extension not available; cannot select AwqGEMMQuantLinear")
+
+        return cls._validate(**args)
+
     def __init__(
         self,
         bits: int,
@@ -84,8 +125,6 @@ class AwqGEMMQuantLinear(AWQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ):
-        if not cuda_backend_available():
-            raise ValueError("CUDA AWQ extension not available; cannot build AwqGEMMQuantLinear")
 
         super().__init__(
             bits=bits,
@@ -127,7 +166,7 @@ class AwqGEMMQuantLinear(AWQuantLinear):
 
         ctx = nullcontext() if self.training else torch.inference_mode()
         with ctx:
-            out = WQLinearMMFunction.apply(
+            out = self._Function.apply(
                 x,
                 self.qweight,
                 self.qzeros,
@@ -147,63 +186,6 @@ class AwqGEMMQuantLinear(AWQuantLinear):
 
         return out.reshape(out_shape)
 
-# Adapted from https://github.com/compressa-ai/AutoAWQ/tree/dev
-class WQLinearMMFunction(torch.autograd.Function):
-    @staticmethod
-    # ctx is the first argument to forward
-    def forward(
-        ctx,
-        x,
-        qweight,
-        qzeros,
-        scales,
-        w_bit=4,
-        group_size=128,
-        bias=None,
-        out_features=0,
-        prefer_backend=None,
-    ):
-        # The forward pass can use ctx.
-        ctx.save_for_backward(x, qweight, qzeros, scales, bias)
-        ctx.out_features = out_features
-
-        out_shape = x.shape[:-1] + (out_features,)
-        x = x.to(torch.float16)
-        if x.shape[0] == 0:
-            return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
-
-        if not cuda_backend_available():
-            raise ValueError("CUDA AWQ extension not available for WQLinearMMFunction")
-
-        out = cuda_forward(x, qweight, qzeros, scales, group_size, bias, out_features)
-
-        out = out + bias if bias is not None else out
-        out = out.reshape(out_shape)
-
-        # always want 3D tensor if tensor is 2D
-        if len(out.shape) == 2:
-            out = out.unsqueeze(0)
-
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        input, qweight, qzeros, scales, bias = ctx.saved_tensors
-
-        if not cuda_backend_available():
-            raise ValueError("CUDA AWQ extension not available for WQLinearMMFunction")
-
-        # Cast to correct dtype for mixed precision training
-        weights = cuda_dequantize_weights(qweight, qzeros, scales, grad_output.dtype)
-
-        if ctx.needs_input_grad[0]:
-            # 3D matmul using torch.bmm: https://pytorch.org/docs/stable/generated/torch.bmm.html#torch.bmm
-            # to propagate gradient across all batch sizes.
-            batch_size = grad_output.shape[0]
-            grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
-
-        return grad_input, None, None, None, None, None, None, None, None
 
 
-
-__all__ = ["AwqGEMMQuantLinear", "WQLinearMMFunction"]
+__all__ = ["AwqGEMMQuantLinear"]
