@@ -334,10 +334,13 @@ class AWQProcessor(LoopProcessor):
 
         with state.lock:
             # Filtering MLP modules like Qwen3MoeSparseMoeBlock
+            def unwrap(m):
+                return m.module if isinstance(m, NamedModule) else m
+
             named_childs = {
                 name: module
                 for name, module in state.modules.items()
-                if isinstance(module, tuple(SUPPORTS_MODULE_TYPES))
+                if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
             }
 
         module_kwargs_global = dict(self._module_forward_kwargs)
@@ -1060,6 +1063,7 @@ class AWQProcessor(LoopProcessor):
 
     def _apply_quant(self, module, named_linears: Dict[str, NamedModule], start_time, scales_list):
         for name, named_module in named_linears.items():
+            print("app_quant", name)
             self.pb.title(f"Quantizing {named_module.name} in layer ").draw()
             linear_layer = named_module.module
             # NOTE: small regression in perplexity if linear layer uses .cpu().float()
