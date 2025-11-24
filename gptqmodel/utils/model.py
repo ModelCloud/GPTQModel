@@ -724,6 +724,19 @@ def pack_module(
             module_name=name,
         ):
             module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
+    if quant_linear_cls.QUANT_TYPE.startswith("awq_"):
+        packer_label = "module.pack"
+        with log_time_block(
+            packer_label,
+            logger=log,
+            module_name=name,
+        ):
+            module.pack(
+                linear=layer,
+                scales=q_scales,
+                zeros=q_zeros,
+                g_idx=q_g_idx,
+            )
     else:
         effective_impl = (pack_impl or "original").lower()
 
