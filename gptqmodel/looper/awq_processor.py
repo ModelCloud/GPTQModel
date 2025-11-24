@@ -334,10 +334,13 @@ class AWQProcessor(LoopProcessor):
 
         with state.lock:
             # Filtering MLP modules like Qwen3MoeSparseMoeBlock
+            def unwrap(m):
+                return m.module if isinstance(m, NamedModule) else m
+
             named_childs = {
                 name: module
                 for name, module in state.modules.items()
-                if isinstance(module, tuple(SUPPORTS_MODULE_TYPES))
+                if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
             }
 
         module_kwargs_global = dict(self._module_forward_kwargs)
