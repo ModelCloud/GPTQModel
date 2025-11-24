@@ -1063,7 +1063,7 @@ class AWQProcessor(LoopProcessor):
 
     def _apply_quant(self, module, named_linears: Dict[str, NamedModule], start_time, scales_list):
         for name, named_module in named_linears.items():
-            print("app_quant", name)
+            # print("app_quant", name)
             self.pb.title(f"Quantizing {named_module.name} in layer ").draw()
             linear_layer = named_module.module
             # NOTE: small regression in perplexity if linear layer uses .cpu().float()
