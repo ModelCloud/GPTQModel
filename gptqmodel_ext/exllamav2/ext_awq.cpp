@@ -1,7 +1,7 @@
 #include "ext_common.h"
 
-#include "cuda/q_matrix_awq.cuh"
-#include "cuda/q_gemm_awq.cuh"
+#include "cuda/q_matrix.cuh"
+#include "cuda/q_gemm.cuh"
 
 uintptr_t make_q_matrix(
     torch::Tensor q_weight,
