@@ -556,7 +556,7 @@ class AWQProcessor(LoopProcessor):
 
         if not self.export_compatible:
             start = time.time()
-            self._apply_quant(named_childs, start, scales_list)
+            self.pack_module(named_childs, start, scales_list)
 
         with state.lock:
             state.quantized = True
@@ -1071,7 +1071,7 @@ class AWQProcessor(LoopProcessor):
 
         return module_output
 
-    def _apply_quant(self, named_linears: Dict[str, NamedModule], start_time, scales_list):
+    def pack_module(self, named_linears: Dict[str, NamedModule], start_time, scales_list):
         for name, named_module in named_linears.items():
             self.pb.title(f"Quantizing {named_module.name} in layer ").draw()
             linear_layer = named_module.module
