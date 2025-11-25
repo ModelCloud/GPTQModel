@@ -41,7 +41,7 @@ class AwqGemmTritonFn(torch.autograd.Function):
             return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
 
         # Above compute density threshold it is faster to just dequantize the whole thing and do simple matmul
-        FULL_DEQUANT_MATMUL_THRESHOLD = x.shape[0] * x.shape[1] > 1024
+        FULL_DEQUANT_MATMUL_THRESHOLD = x.shape[0] * x.shape[1] > 128
         if FULL_DEQUANT_MATMUL_THRESHOLD:
             out = awq_dequantize_triton(qweight, scales, qzeros)
             out = torch.matmul(x, out.to(x.dtype))
