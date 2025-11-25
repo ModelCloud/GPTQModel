@@ -10,9 +10,9 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
+from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
 from ...utils.backend import BACKEND
 from . import tritonv2
-from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
 
 
 class AwqGemmTritonFn(torch.autograd.Function):
