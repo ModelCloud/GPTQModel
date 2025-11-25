@@ -719,7 +719,7 @@ if BUILD_CUDA_EXT == "1":
                         cpp_ext.CUDAExtension(
                             "gptqmodel_exllamav2_kernels",
                             [
-                                "gptqmodel_ext/exllamav2/ext.cpp",
+                                "gptqmodel_ext/exllamav2/ext_gptq.cpp",
                                 "gptqmodel_ext/exllamav2/cuda/q_matrix.cu",
                                 "gptqmodel_ext/exllamav2/cuda/q_gemm.cu",
                             ],
@@ -774,6 +774,16 @@ if BUILD_CUDA_EXT == "1":
                             extra_link_args=extra_link_args,
                             extra_compile_args=extra_compile_args,
                         ),
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_exllamav2_awq_kernels",
+                            [
+                                "gptqmodel_ext/exllamav2/ext_awq.cpp",
+                                "gptqmodel_ext/exllamav2/cuda/q_matrix_awq.cu",
+                                "gptqmodel_ext/exllamav2/cuda/q_gemm_awq.cu",
+                            ],
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                        )
                     ]
 
         # Ensure machete kernels are compiled before other extensions

@@ -226,8 +226,8 @@ uv pip install -v gptqmodel --no-build-isolation
 # clone repo
 git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
-# python3-dev is required, ninja is to speed up compile
-apt install python3-dev ninja
+# python3-dev is required, ninja is to speed up compile, need to upgrade to latest `setuptools` to avoid errors
+apt install python3-dev ninja setuptools -U
 
 # pip: compile and install
 # You can install optional modules like  vllm, sglang, bitblas.
@@ -292,12 +292,12 @@ model.save(quant_path)
 
 ### Quantization using GPTAQ (Experimental, not MoE compatible, and results may not be better than v1)
 
-Enable GPTAQ quantization by setting `v2 = True`.
+Enable GPTAQ quantization by setting `gptaq = True`.
 ```py
-# Note v2 is currently experimental, not MoE compatible, and requires 2-4x more vram to execute
-# We have many reports of v2 not working better or exceeding v1 so please use for testing only
+# Note GPTAQ is currently experimental, not MoE compatible, and requires 2-4x more vram to execute
+# We have many reports of GPTAQ not working better or exceeding GPTQ so please use for testing only
 # If oom on 1 gpu, please set CUDA_VISIBLE_DEVICES=0,1 to 2 gpu and gptqmodel will auto use second gpu
-quant_config = QuantizeConfig(bits=4, group_size=128, v2=True)
+quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=True)
 ```
 `Llama 3.1 8B-Instruct` quantized using `test/models/test_llama3_2.py`
 

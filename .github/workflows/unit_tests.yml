@@ -60,7 +60,7 @@ env:
   CUDA_VISIBLE_DEVICES: 0
   TORCH_CUDA_ARCH_LIST: '8.6 8.9 9.0 12.0'
   PYTORCH_ALLOC_CONF: 'expandable_segments:True'
-  MAX_JOBS: 4
+  MAX_JOBS: 8 # compile concurrency
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.249
   UV_INDEX_URL: http://10.0.14.249/simple
@@ -128,7 +128,7 @@ jobs:
 
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -205,7 +205,7 @@ jobs:
 
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -363,7 +363,7 @@ jobs:
     if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-files != '[]'
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -651,7 +651,7 @@ jobs:
           ls -ahl .
 
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}

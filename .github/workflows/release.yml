@@ -91,7 +91,7 @@ jobs:
     if: ${{ inputs.github_vm == false }}
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -262,7 +262,7 @@ jobs:
 
       - name: Checkout Codes
         if: env.SHOULD_RUN == 1
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -379,7 +379,7 @@ jobs:
       RELEASE_MODE: 0
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
@@ -480,7 +480,7 @@ jobs:
     if: ${{ inputs.github_vm == true }}
     steps:
       - name: Checkout Codes
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}

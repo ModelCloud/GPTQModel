@@ -17,7 +17,7 @@ from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-exlv2_ext, msg = try_import("gptqmodel_exllamav2_kernels")
+exlv2_ext, msg = try_import("gptqmodel_exllamav2_awq_kernels")
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
 none_tensor = torch.empty((1, 1), device="meta")
@@ -100,7 +100,7 @@ class AwqExllamaV2QuantLinear(AWQuantLinear):
 
         temp_dq_size = self.temp_dq_size()
         temp_dq = scratch_space.get_slice(temp_dq_size)
-        self.q_handle = exlv2_ext.make_q_matrix(
+        self.q_handle = exlv2_ext.make_q_matrix_awq(
             self.qweight,
             none_tensor,
             none_tensor,
@@ -136,7 +136,7 @@ class AwqExllamaV2QuantLinear(AWQuantLinear):
             dtype=torch.float16,
             device=x.device,
         )
-        exlv2_ext.gemm_half_q_half(x, self.q_handle, out, False)
+        exlv2_ext.gemm_half_q_half_awq(x, self.q_handle, out, False)
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)

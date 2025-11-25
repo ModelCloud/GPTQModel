@@ -179,3 +179,20 @@ class TestGroupSize(unittest.TestCase):
                 has_qqq = True
                 break
         self.assertTrue(has_qqq)
+
+
+class TestInferenceOnly(unittest.TestCase):
+
+    def test_inference_mistral_awq(self):
+        model = GPTQModel.load(
+            "TheBloke/Mistral-7B-v0.1-AWQ",
+            backend=BACKEND.GEMM,
+        )
+
+        tokens = model.generate("Capital of France is", max_new_tokens=64)[0]
+        result = model.tokenizer.decode(tokens)
+        if "paris" not in result.lower() and "city" not in result.lower():
+            raise AssertionError(" `paris` not found in `result`")
+
+        del model
+
