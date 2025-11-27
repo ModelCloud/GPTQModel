@@ -227,6 +227,8 @@ class BaseQuantLinear(nn.Module):
             in_features:int=None,
             out_features:int=None,
             pack_dtype:t.dtype=None,
+            dtype: Optional[t.dtype]=None,
+            zero_point: Optional[bool]=None,
             dynamic:Optional[dict]=None,
             device:Optional[DEVICE]=None,
             trainable:Optional[bool]=None,
@@ -235,6 +237,7 @@ class BaseQuantLinear(nn.Module):
         bool, Optional[Exception]]:
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
                              in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
+                             dtype=dtype, zero_point=zero_point,
                              dynamic=dynamic, device=device, trainable=trainable, adapter=adapter)
 
     @classmethod
@@ -274,7 +277,7 @@ class BaseQuantLinear(nn.Module):
             #     raise ValueError(f"{cls.__name__}.{name} cannot be an empty list.")
 
     @classmethod
-    def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dynamic:Optional[dict]=None, in_features:int=None,
+    def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, zero_point: Optional[bool]=None, dynamic:Optional[dict]=None, in_features:int=None,
                   out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
@@ -284,6 +287,10 @@ class BaseQuantLinear(nn.Module):
 
         if pack_dtype not in cls.SUPPORTS_PACK_DTYPES:
             err = f"{cls} does not support `pack_dtype`: {pack_dtype}"
+            return False, NotImplementedError(err)
+
+        if dtype is not None and dtype not in cls.SUPPORTS_DTYPES:
+            err = f"{cls} only supports `{cls.SUPPORTS_DTYPES}` dtype: actual dtype = `{dtype}`"
             return False, NotImplementedError(err)
 
         if PLATFORM.ALL not in cls.SUPPORTS_PLATFORM and sys.platform not in cls.SUPPORTS_PLATFORM:

@@ -659,6 +659,9 @@ class QuantizeConfig():
             out["zero_point"] = self.zero_point
             # awq compat with vllm/sglang/transformers loaders
             out["version"] = self.format
+            out[FORMAT_FIELD_CODE] = self.format
+        if self.quant_method == METHOD.GPTQ:
+            out[FORMAT_FIELD_CODE] = self.format
 
         dynamic = out["dynamic"]
         if dynamic:

@@ -46,9 +46,9 @@ from ..models._const import (
     SUPPORTS_MODULE_TYPES,
 )
 from ..nn_modules.qlinear import BaseQuantLinear
-from ..nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
+from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, dynamic_get
 from . import has_gil_disabled
@@ -724,6 +724,19 @@ def pack_module(
             module_name=name,
         ):
             module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
+    if quant_linear_cls.QUANT_TYPE.startswith("awq_"):
+        packer_label = "module.pack"
+        with log_time_block(
+            packer_label,
+            logger=log,
+            module_name=name,
+        ):
+            module.pack(
+                linear=layer,
+                scales=q_scales,
+                zeros=q_zeros,
+                g_idx=q_g_idx,
+            )
     else:
         effective_impl = (pack_impl or "original").lower()
 

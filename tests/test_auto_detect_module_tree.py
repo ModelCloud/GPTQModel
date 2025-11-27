@@ -1,4 +1,5 @@
 import unittest
+
 import torch.nn as nn
 
 from gptqmodel.models.base import BaseQModel

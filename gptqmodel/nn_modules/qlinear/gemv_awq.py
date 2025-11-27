@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch
+from torch import nn
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
@@ -147,6 +148,72 @@ class AwqGEMVQuantLinear(AWQuantLinear):
             out = self.adapter.apply(x=x, out=out)
 
         return out.reshape(out_shape)
+
+    def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor=None):
+        # need scales and zeros info for real quantization
+        assert scales is not None and zeros is not None
+        scale_zeros = zeros * scales
+
+        pack_num = 32 // self.bits
+        qscales = torch.zeros(
+            (
+                scales.shape[0],
+                calculate_zeros_width(linear.in_features, self.group_size) * pack_num,
+            ),
+            dtype=torch.float16,
+            device=scales.device,
+        )
+        qscales[:, : scales.shape[1]] = scales
+        self.register_buffer("scales", qscales)
+        if linear.bias is not None:
+            self.register_buffer("bias", linear.bias.clone().half())
+        else:
+            self.bias = None
+
+        intweight = []
+        for idx in range(self.in_features):
+            intweight.append(
+                torch.round(
+                    (linear.weight.data[:, idx] + scale_zeros[:, idx // self.group_size])
+                    / self.scales[:, idx // self.group_size]
+                ).to(torch.int)[:, None]
+            )
+        intweight = torch.cat(intweight, dim=1)
+        intweight = intweight.to(dtype=torch.int32)
+        qweight = torch.zeros(
+            (intweight.shape[0], intweight.shape[1] // 32 * self.bits),
+            dtype=torch.int32,
+            device=intweight.device,
+        )
+
+        for col in range(intweight.shape[1] // pack_num):
+            if self.bits == 4:
+                order_map = [0, 1, 2, 3, 4, 5, 6, 7]
+            else:
+                raise NotImplementedError("Only 4-bit are supported for now.")
+            for i in range(pack_num):
+                qweight_col = intweight[:, col * pack_num + order_map[i]]
+                qweight[:, col] |= qweight_col << (i * self.bits)
+        self.register_buffer("qweight", qweight)
+
+        zeros = zeros.to(dtype=torch.int32)
+        qzeros = torch.zeros(
+            (zeros.shape[0], calculate_zeros_width(linear.in_features, self.group_size)),
+            dtype=torch.int32,
+            device=zeros.device,
+        )
+
+        for col in range((zeros.shape[1] + pack_num - 1) // pack_num):
+            if self.bits == 4:
+                order_map = [0, 1, 2, 3, 4, 5, 6, 7]
+            else:
+                raise NotImplementedError("Only 4-bit are supported for now.")
+            for i in range(pack_num):
+                if col * pack_num + order_map[i] >= zeros.shape[1]:
+                    continue
+                qzero_col = zeros[:, col * pack_num + order_map[i]]
+                qzeros[:, col] |= qzero_col << (i * self.bits)
+        self.register_buffer("qzeros", qzeros)
 
     def extra_repr(self) -> str:
         return (

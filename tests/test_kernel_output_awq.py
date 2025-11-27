@@ -16,16 +16,24 @@ from safetensors.torch import safe_open
 from tabulate import tabulate
 
 from gptqmodel import BACKEND
-from gptqmodel.nn_modules.qlinear.awq_gemm import AwqGEMMQuantLinear
-from gptqmodel.nn_modules.qlinear.awq_marlin import (
+from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
+from gptqmodel.nn_modules.qlinear.marlin_awq import (
     AwqMarlinQuantLinear,
     marlin_import_exception,
 )
-from gptqmodel.nn_modules.qlinear.awq_exllama import AwqExllamaQuantLinear
-from gptqmodel.nn_modules.qlinear.awq_exllamav2 import AwqExllamaV2QuantLinear
-from gptqmodel.nn_modules.qlinear.awq_torch import AwqTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
 from gptqmodel.utils.marlin import marlin_make_workspace_new
+try:
+    from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonQuantLinear
+
+    awq_triton_import_exception: Optional[Exception] = None
+except Exception as exc:  # pragma: no cover - triton import may fail in CI
+    AwqGEMMTritonQuantLinear = None  # type: ignore[assignment]
+    awq_triton_import_exception = exc
+
+from gptqmodel.nn_modules.qlinear.exllama_awq import AwqExllamaQuantLinear
+from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from gptqmodel.utils.exllamav2 import ScratchSpace
 
 
@@ -58,6 +66,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         # (baseline_backend, torch.bfloat16, 0.0),
         (BACKEND.GEMM, torch.float16, 0.004),
         # (BACKEND.GEMM, torch.bfloat16, 0.05),
+        (BACKEND.TRITON, torch.float16, 0.004),
         (BACKEND.MARLIN, torch.float16, 0.006),
         (BACKEND.TORCH_FUSED_AWQ, torch.float16, 0.004),
         # (BACKEND.MARLIN, torch.bfloat16, 0.05),
@@ -74,9 +83,14 @@ class TestAwqKernelOutput(unittest.TestCase):
         cls.backend_skip_reason: Dict[BACKEND, str] = {}
         if not cls.cuda_available:
             cls.backend_skip_reason[BACKEND.GEMM] = "CUDA is required for GEMM backend."
+            cls.backend_skip_reason[BACKEND.TRITON] = "CUDA is required for AWQ Triton backend."
             cls.backend_skip_reason[BACKEND.MARLIN] = "CUDA is required for AWQ Marlin kernel."
             cls.backend_skip_reason[BACKEND.EXLLAMA_V1] = "CUDA is required for ExLlama v1 AWQ kernel."
             cls.backend_skip_reason[BACKEND.EXLLAMA_V2] = "CUDA is required for ExLlama v2 AWQ kernel."
+        if awq_triton_import_exception is not None:
+            cls.backend_skip_reason[BACKEND.TRITON] = (
+                f"AWQ Triton kernel unavailable: {awq_triton_import_exception}"
+            )
 
         try:
             tensors = cls._load_awq_tensors(cls.TARGET)
@@ -108,6 +122,16 @@ class TestAwqKernelOutput(unittest.TestCase):
             if cls.cuda_available
             else None
         )
+
+        try:
+            cls.modules[BACKEND.TRITON] = (
+                cls._build_gemm_triton_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+                if cls.cuda_available
+                else None
+            )
+        except Exception as exc:
+            cls.backend_skip_reason[BACKEND.TRITON] = f"AWQ Triton kernel unavailable: {exc}"
+            cls.modules[BACKEND.TRITON] = None
 
         cls.modules[BACKEND.MARLIN] = (
             cls._build_marlin_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
@@ -218,6 +242,37 @@ class TestAwqKernelOutput(unittest.TestCase):
         module.qzeros.copy_(qzeros_cpu.to(cls.device))
         module.scales.copy_(scales_cpu.to(cls.device))
         module.bias.copy_(bias_cpu.to(cls.device))
+
+        module.eval()
+        module.post_init()
+        return module
+
+    @classmethod
+    def _build_gemm_triton_module(
+        cls,
+        qweight_cpu: torch.Tensor,
+        qzeros_cpu: torch.Tensor,
+        scales_cpu: torch.Tensor,
+        bias_cpu: torch.Tensor,
+    ) -> AwqGEMMTritonQuantLinear:
+        if AwqGEMMTritonQuantLinear is None:
+            raise RuntimeError("AWQ Triton kernel not available.")
+        module = AwqGEMMTritonQuantLinear(
+            bits=cls.BITS,
+            group_size=cls.GROUP_SIZE,
+            sym=True,
+            desc_act=False,
+            in_features=cls.in_features,
+            out_features=cls.out_features,
+            bias=True,
+            adapter=None,
+            register_buffers=True,
+        ).to(cls.device)
+
+        module.qweight.copy_(qweight_cpu.to(cls.device))
+        module.qzeros.copy_(qzeros_cpu.to(cls.device))
+        module.scales.copy_(scales_cpu.to(torch.float16).to(cls.device))
+        module.bias.copy_(bias_cpu.to(torch.float16).to(cls.device))
 
         module.eval()
         module.post_init()
