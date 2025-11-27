@@ -1174,7 +1174,7 @@ class AWQProcessor(LoopProcessor):
                 f"{duration:.3f}",
             )
 
-            linear_layer = linear_layer.cpu()
+            linear_layer.cpu()
             scales = scales.cpu()
             zeros = zeros.cpu()
 

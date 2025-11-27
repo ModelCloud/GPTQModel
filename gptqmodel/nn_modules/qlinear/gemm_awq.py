@@ -14,13 +14,8 @@ from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.utils import get_best_device
 from ...utils.backend import BACKEND
-from ...utils.logger import setup_logger
-
-
-log = setup_logger()
 
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
-user_has_been_warned = False
 
 
 class AwqGemmFn(torch.autograd.Function):
