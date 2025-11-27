@@ -145,16 +145,6 @@ class AwqGEMMQuantLinear(AWQuantLinear):
             **kwargs)
 
     def post_init(self):
-        # if self.padded_infeatures != self.in_features:
-        #     self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
-        #     self.qzeros.resize_(
-        #         math.ceil(self.padded_infeatures / self.group_size),
-        #         self.out_features // self.pack_dtype_bits * self.bits
-        #     )
-        #     self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
-        #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
-        #                               device=self.g_idx.device)
-
         # awq only accepts float16
         if self.scales is not None:
             self.scales = self.scales.to(dtype=torch.float16)
