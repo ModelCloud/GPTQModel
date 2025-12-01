@@ -129,6 +129,9 @@ def apply_module_tree_override(module_tree, override):
 
 NOT_QUANTIZE_FLAG = ":!"
 CAPTURE_ONLY_FLAG = ":?"
+MOE_FLAG = ":moe"
+MOE_EXPERTS_FLAG = ":moeexp"
+MOE_SHARED_EXPERTS_FLAG = ":moeshexp"
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 
 
@@ -327,6 +330,262 @@ class BaseQModel(nn.Module):
                 break  # stop if unexpected nested structure
 
         return [".".join(prefix_parts)] if prefix_parts else []
+
+    @classmethod
+    def _parse_module_flags(cls, module_spec: str) -> tuple[str, List[str]]:
+        """
+        Parse a module specification into module name and flags.
+        Example: "gate:moe:!" -> ("gate", ["moe", "!"])
+        """
+        parts = module_spec.split(":") if isinstance(module_spec, str) else []
+        name = parts[0] if parts else module_spec
+        flags = [p for p in parts[1:] if p]
+        return name, flags
+    
+    @classmethod
+    def has_moe_flag(cls, module_spec: str) -> bool:
+        """
+        Check if a module specification has the :moe flag.
+        """
+        if not isinstance(module_spec, str):
+            return False
+        _, flags = cls._parse_module_flags(module_spec)
+        return "moe" in flags
+    
+    @classmethod
+    def _collect_moe_modules_from_tree(cls, tree_node, parent_path="") -> Set[str]:
+        """
+        Recursively collect all module paths that have the :moe flag.
+        Returns a set of full module paths (e.g., "mlp", "mlp.experts", "mlp.shared_experts").
+        """
+        moe_modules = set()
+        
+        if isinstance(tree_node, dict):
+            for key, value in tree_node.items():
+                # Skip the layer index placeholder
+                if key == "#":
+                    # Recursively process the value if it's a dict
+                    if isinstance(value, dict):
+                        moe_modules.update(cls._collect_moe_modules_from_tree(value, parent_path))
+                    continue
+                
+                # Build full path
+                if parent_path:
+                    full_path = f"{parent_path}.{key}"
+                else:
+                    full_path = key
+                
+                # Check if this key has :moe flag
+                if cls.has_moe_flag(key):
+                    # Extract just the module name without flags
+                    module_name, _ = cls._parse_module_flags(key)
+                    if parent_path:
+                        moe_modules.add(f"{parent_path}.{module_name}")
+                    else:
+                        moe_modules.add(module_name)
+                
+                # Recursively process nested structures
+                if isinstance(value, (dict, tuple, list)):
+                    moe_modules.update(cls._collect_moe_modules_from_tree(value, full_path.split(":")[0]))
+        
+        elif isinstance(tree_node, (tuple, list)):
+            for item in tree_node:
+                if isinstance(item, str) and cls.has_moe_flag(item):
+                    module_name, _ = cls._parse_module_flags(item) 
+                    if parent_path:
+                        moe_modules.add(f"{parent_path}.{module_name}")
+                    else:
+                        moe_modules.add(module_name)
+                elif isinstance(item, dict):
+                    moe_modules.update(cls._collect_moe_modules_from_tree(item, parent_path))
+        
+        return moe_modules
+    
+    @classmethod
+    def get_moe_modules(cls) -> Set[str]:
+        """
+        Get all MoE module paths from the model's module_tree.
+        Returns a set of module paths that have the :moe flag.
+        
+        Example: {"mlp", "mlp.experts", "mlp.shared_experts", "mlp.gate"}
+        """
+        if cls.module_tree is None:
+            return set()
+        
+        return cls._collect_moe_modules_from_tree(cls.module_tree)
+    
+    @classmethod
+    def is_moe_module(cls, module_path: str) -> bool:
+        """
+        Check if a given module path is an MoE module based on :moe flags.
+        
+        Args:
+            module_path: Full module path like "model.layers.0.mlp.experts.5.gate_proj"
+        
+        Returns:
+            True if any parent in the path is marked with :moe flag
+        """
+        moe_modules = cls.get_moe_modules()
+        
+        # Check if any MoE module is a prefix of this path
+        for moe_module in moe_modules:
+            # Handle layer index in path (e.g., "model.layers.0.mlp" should match "mlp")
+            if f".{moe_module}" in module_path or module_path.endswith(moe_module):
+                return True
+            # Also check for patterns like "mlp.experts.5" matching "mlp.experts"
+            path_parts = module_path.split(".")
+            for i in range(len(path_parts)):
+                partial_path = ".".join(path_parts[i:])
+                if partial_path.startswith(moe_module + ".") or partial_path == moe_module:
+                    return True
+        
+        return False
+    
+    @classmethod
+    def get_moe_module_name(cls) -> Optional[str]:
+        """
+        Get the name of the MoE module from module_tree.
+        
+        Each layer can have only ONE MoE module marked with :moe flag.
+        For example:
+        - GLM-4: "mlp:moe" -> returns "mlp"
+        - MiniMax-M2: "block_sparse_moe:moe" -> returns "block_sparse_moe"
+        
+        Returns:
+            The name of the MoE module (without flags), or None if no MoE module is defined
+        """
+        if cls.module_tree is None:
+            return None
+        
+        # Find the dict that represents layer structure (after "#")
+        layer_structure = None
+        found_hash = False
+        for item in cls.module_tree:
+            if item == "#":
+                found_hash = True
+                continue
+            if found_hash and isinstance(item, dict):
+                layer_structure = item
+                break
+        
+        if layer_structure is None:
+            return None
+        
+        # Look for a key with :moe flag at the top level of layer structure
+        for key in layer_structure.keys():
+            if cls.has_moe_flag(key):
+                # Extract module name without flags
+                module_name, _ = cls._parse_module_flags(key)
+                return module_name
+        
+        return None
+    
+    @classmethod
+    def get_experts_module_name(cls) -> Optional[str]:
+        """
+        Get the name of the experts module from module_tree.
+        
+        Looks for :moeexp flag within the MoE module structure.
+        For example:
+        - GLM-4: "experts:moeexp" -> returns "experts"
+        - MiniMax-M2: "experts:moeexp" -> returns "experts"
+        
+        Returns:
+            The name of the experts module (without flags), or None if not found
+        """
+        if cls.module_tree is None:
+            return None
+        
+        # Get the MoE module name first
+        moe_module_name = cls.get_moe_module_name()
+        if moe_module_name is None:
+            return None
+        
+        # Find the MoE module structure
+        layer_structure = None
+        found_hash = False
+        for item in cls.module_tree:
+            if item == "#":
+                found_hash = True
+                continue
+            if found_hash and isinstance(item, dict):
+                layer_structure = item
+                break
+        
+        if layer_structure is None:
+            return None
+        
+        # Find the MoE module key (with or without flags)
+        moe_module_dict = None
+        for key, value in layer_structure.items():
+            module_name, _ = cls._parse_module_flags(key)
+            if module_name == moe_module_name and isinstance(value, dict):
+                moe_module_dict = value
+                break
+        
+        if moe_module_dict is None:
+            return None
+        
+        # Look for :moeexp flag in MoE module structure
+        for key in moe_module_dict.keys():
+            if isinstance(key, str) and ":moeexp" in key:
+                module_name, _ = cls._parse_module_flags(key)
+                return module_name
+        
+        return None
+    
+    @classmethod
+    def get_shared_experts_module_name(cls) -> Optional[str]:
+        """
+        Get the name of the shared experts module from module_tree.
+        
+        Looks for :moeshexp flag within the MoE module structure.
+        For example:
+        - GLM-4: "shared_experts:moeshexp" -> returns "shared_experts"
+        
+        Returns:
+            The name of the shared experts module (without flags), or None if not found
+        """
+        if cls.module_tree is None:
+            return None
+        
+        # Get the MoE module name first
+        moe_module_name = cls.get_moe_module_name()
+        if moe_module_name is None:
+            return None
+        
+        # Find the MoE module structure
+        layer_structure = None
+        found_hash = False
+        for item in cls.module_tree:
+            if item == "#":
+                found_hash = True
+                continue
+            if found_hash and isinstance(item, dict):
+                layer_structure = item
+                break
+        
+        if layer_structure is None:
+            return None
+        
+        # Find the MoE module key (with or without flags)
+        moe_module_dict = None
+        for key, value in layer_structure.items():
+            module_name, _ = cls._parse_module_flags(key)
+            if module_name == moe_module_name and isinstance(value, dict):
+                moe_module_dict = value
+                break
+        
+        if moe_module_dict is None:
+            return None
+        
+        # Look for :moeshexp flag in MoE module structure
+        for key in moe_module_dict.keys():
+            if isinstance(key, str) and ":moeshexp" in key:
+                module_name, _ = cls._parse_module_flags(key)
+                return module_name
+        
+        return None
 
     @classmethod
     def build_moe_modules_if_need(cls, model_config, layer_modules, is_awq_quantize: bool = False):

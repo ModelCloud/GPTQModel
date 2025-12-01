@@ -262,6 +262,14 @@ class QuantizeConfig():
     # VRAM allocation strategy for MoE-heavy subsets
     vram_strategy: VRAMStrategy = field(default=VRAMStrategy.EXCLUSIVE)
 
+    # MoE quantization: forward whole calibration dataset to each expert instead of only routed data
+    # This ensures all experts receive sufficient calibration samples but increases quantization time
+    pass_whole_dataset_to_each_expert: bool = field(
+        default=False,
+        metadata={"help": "Forward entire calibration dataset to all MoE experts (not just routed experts)"}
+    )
+
+
     def __post_init__(self):
         fields_info = fields(self)
 
