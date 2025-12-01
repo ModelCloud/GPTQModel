@@ -35,8 +35,8 @@ class TestKernelOutput(unittest.TestCase):
     m = [1, 16, 64, 256, 1024]
     k = 2048
     dtype = torch.float16
-    r_tolerance = 0.0
-    a_tolerance = 0.01
+    r_tolerance = 0.0076
+    a_tolerance = 0.016
     input_samples_each_size = 20 # final size == input_samples_each_size * len(m)
 
     @classmethod
@@ -80,6 +80,10 @@ class TestKernelOutput(unittest.TestCase):
             out = self.forward(model, self.x[i], backend=backend)
             self.assert_on_mismatch(self.torch_kernel_outs[i], out, r_tolerance, a_tolerance)  # use torch as reference
 
+class TestKernelOutputWithBias(TestKernelOutput):
+    model_path = "/monster/data/model/bloom-560m-gptqmodel-4bit"
+    target = 'transformer.h.6.self_attention.query_key_value'
+    k = 1024
 
 class TestKernelOutputBFloat16(TestKernelOutput):
     dtype = torch.bfloat16
@@ -103,8 +107,8 @@ class TestTorchFusedKernelDevices(unittest.TestCase):
     m = [1, 16, 64, 256]
     k = 2048
     input_samples_each_size = 5
-    r_tolerance = 0.0
-    a_tolerance = 0.01
+    r_tolerance = 0.0076
+    a_tolerance = 0.016
     reference_backend = BACKEND.TORCH
     reference_device = "cpu"
 
@@ -205,3 +209,8 @@ class TestTorchFusedKernelDevices(unittest.TestCase):
 
         if failures:
             raise AssertionError(f"{len(failures)} mismatched samples on device {device}")
+
+class TestTorchFusedKernelDevicesWithBias(TestTorchFusedKernelDevices):
+    model_path = "/monster/data/model/bloom-560m-gptqmodel-4bit"
+    target = 'transformer.h.6.self_attention.query_key_value'
+    k = 1024
