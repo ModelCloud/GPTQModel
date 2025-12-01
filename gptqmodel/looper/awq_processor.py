@@ -47,6 +47,7 @@ class _AWQLayerState:
     quantized: bool = False
     pending_modules: Set[str] = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    quantizing: bool = False
 
 class AWQProcessor(LoopProcessor):
     def __init__(
@@ -280,7 +281,7 @@ class AWQProcessor(LoopProcessor):
 
     def _quantize_layer(self, layer_index: int, state: _AWQLayerState) -> None:
         with state.lock:
-            if state.quantized:
+            if state.quantized or state.quantizing:
                 return
 
             layer_module = state.layer_module
@@ -294,6 +295,7 @@ class AWQProcessor(LoopProcessor):
 
             if layer_module_ref is None:
                 raise RuntimeError(f"AWQProcessor: unable to resolve layer module for layer index {layer_index}")
+            state.quantizing = True
 
         log.info(
             "AWQProcessor: layer %s tracking %s modules before quantization (subsets processed=%s/%s); first modules=%s",
@@ -333,6 +335,7 @@ class AWQProcessor(LoopProcessor):
                 )
                 with state.lock:
                     state.quantized = True
+                    state.quantizing = False
                     state.processed_subsets.clear()
                     state.subset_total = None
                     state.previous_weight_scale = None
@@ -385,6 +388,7 @@ class AWQProcessor(LoopProcessor):
             )
             with state.lock:
                 state.quantized = True
+                state.quantizing = False
                 state.modules.clear()
                 state.pending_modules.clear()
                 state.layer_module = None
@@ -462,6 +466,7 @@ class AWQProcessor(LoopProcessor):
             )
             with state.lock:
                 state.quantized = True
+                state.quantizing = False
                 state.processed_subsets.clear()
                 state.subset_total = None
                 state.previous_weight_scale = None
@@ -489,8 +494,10 @@ class AWQProcessor(LoopProcessor):
             for layer in sanitized_module_config
         ]
 
+        parent_key = get_op_name(self.model, layer_module_ref)
         try:
-            apply_scale(layer_module_ref, scales_list, input_feat_dict=input_feat)
+            with parent_module_lock(parent_key):
+                apply_scale(layer_module_ref, scales_list, input_feat_dict=input_feat)
         except RuntimeError as exc:
             debug_entries = []
             for prev_op_name, layer_names, scales, _loss in scales_list:
@@ -533,6 +540,8 @@ class AWQProcessor(LoopProcessor):
                 exc,
                 debug_entries[:5],
             )
+            with state.lock:
+                state.quantizing = False
             raise
         scales_list = append_str_prefix(
             scales_list,
@@ -546,7 +555,8 @@ class AWQProcessor(LoopProcessor):
                 {name: named.module for name, named in named_childs.items()},
                 input_feat,
             )
-            apply_clip(layer_module_ref, clip_list)
+            with parent_module_lock(parent_key):
+                apply_clip(layer_module_ref, clip_list)
             clip_list = append_str_prefix(
                 clip_list,
                 get_op_name(self.model, layer_module_ref) + ".",
@@ -560,6 +570,7 @@ class AWQProcessor(LoopProcessor):
 
         with state.lock:
             state.quantized = True
+            state.quantizing = False
             state.modules.clear()
             state.pending_modules.clear()
             state.layer_module = None
@@ -577,7 +588,7 @@ class AWQProcessor(LoopProcessor):
             delattr(self._scale_context, "layer_index")
         if hasattr(self._scale_context, "prev_scale"):
             delattr(self._scale_context, "prev_scale")
-
+        
     @torch.inference_mode()
     def _search_best_scale(
             self,
@@ -1174,7 +1185,7 @@ class AWQProcessor(LoopProcessor):
                 f"{duration:.3f}",
             )
 
-            linear_layer.cpu()
+            linear_layer = linear_layer.cpu()
             scales = scales.cpu()
             zeros = zeros.cpu()
 
