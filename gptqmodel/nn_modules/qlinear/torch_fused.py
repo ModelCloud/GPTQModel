@@ -252,10 +252,12 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             num_itr = self.g_idx.shape[0] // x.shape[-1]
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
             out = torch.matmul(x, weights).reshape(out_shape)
-            if self.bias is not None:
-                out.add_(self.bias)
-            if self.adapter:
-                out = self.adapter.apply(x=x, out=out)
+
+        # Add bias and adapter
+        if self.bias is not None:
+            out.add_(self.bias)
+        if self.adapter:
+            out = self.adapter.apply(x=x, out=out)
 
         return out
 
