@@ -320,7 +320,34 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             
             # Skip expert forwarding if none of the expert modules are in current subset
             if not expert_modules_in_subset:
+                # Debug logging to understand what's in the subset
+                subset_info = []
+                for module in subset:
+                    module_info = f"{type(module).__name__}"
+                    if hasattr(module, 'name'):
+                        module_info += f" (name: {module.name})"
+                    elif hasattr(module, '_get_name'):
+                        module_info += f" (_get_name: {module._get_name()})"
+                    subset_info.append(module_info)
+                
+                experts_info = []
+                if experts_module is not None and hasattr(experts_module, '__iter__') and len(experts_module) > 0:
+                    first_expert = experts_module[0]
+                    for name in proj_names:
+                        if hasattr(first_expert, name):
+                            module = getattr(first_expert, name)
+                            experts_info.append(f"{type(first_expert).__name__}.{name} (id: {id(module)})")
+                            if module in subset:
+                                experts_info[-1] += " ✓ IN SUBSET"
+                            else:
+                                experts_info[-1] += " ✗ NOT IN SUBSET"
+                
                 log.info(f"[MOEDEBUG] No expert modules in current subset, skipping expert forwarding")
+                log.info(f"[MOEDEBUG] DEBUG: Current subset contains {len(subset)} modules: {subset_info}")
+                log.info(f"[MOEDEBUG] DEBUG: Checking expert modules: {experts_info}")
+                log.info(f"[MOEDEBUG] DEBUG: Expert projection names: {proj_names}")
+                log.info(f"[MOEDEBUG] DEBUG: Experts module type: {type(experts_module).__name__ if experts_module is not None else 'None'}")
+                log.info(f"[MOEDEBUG] DEBUG: Number of experts: {len(experts_module) if experts_module is not None and hasattr(experts_module, '__iter__') else 'N/A'}")
             else:
                 for idx, expert in enumerate(experts_module):
                     try:
