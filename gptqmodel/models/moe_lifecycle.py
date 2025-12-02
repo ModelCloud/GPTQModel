@@ -274,6 +274,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         stop_forward_raised = False
         proj_names = [self.gate_proj_name, self.up_proj_name, self.down_proj_name]
         
+        
         # Check if shared_experts modules are in subset
         shared_experts_in_subset = False
         if shared_experts_module is not None:
@@ -284,7 +285,25 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                         shared_experts_in_subset = True
                         break
         
+        # Pre-check which projection modules are in subset (all experts have same structure)
+        expert_modules_in_subset = set()
+        if experts_module is not None and hasattr(experts_module, '__iter__') and len(experts_module) > 0:
+            first_expert = experts_module[0]
+            for name in proj_names:
+                if hasattr(first_expert, name):
+                    module = getattr(first_expert, name)
+                    if module in subset:
+                        expert_modules_in_subset.add(name)
+        
+        # Optimization: If ONLY shared_experts in subset (no individual expert modules),
+        # skip manual forwarding and let original_forward handle it with hooks enabled.
+        # This avoids computing shared_experts twice.
+        if shared_experts_in_subset and not expert_modules_in_subset:
+            log.info(f"[MOEDEBUG] Only shared_experts in subset, using original_forward with hooks enabled")
+            return original_forward(hidden_states, **kwargs)
+        
         # Forward to shared experts if they exist AND if any of their modules are in subset
+        # (This path is only reached if individual expert modules are also in subset)
         if shared_experts_module is not None and shared_experts_in_subset:
             try:
                 if hasattr(shared_experts_module, self.gate_proj_name) and hasattr(shared_experts_module, self.up_proj_name):
@@ -316,17 +335,6 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                 hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
             else:
                 hidden_states_2d = hidden_states
-            
-            # Pre-check which projection modules are in subset (all experts have same structure)
-            # This avoids redundant checks inside the expert loop
-            expert_modules_in_subset = set()
-            if len(experts_module) > 0:
-                first_expert = experts_module[0]
-                for name in proj_names:
-                    if hasattr(first_expert, name):
-                        module = getattr(first_expert, name)
-                        if module in subset:
-                            expert_modules_in_subset.add(name)
             
             # Skip expert forwarding if none of the expert modules are in current subset
             if not expert_modules_in_subset:
