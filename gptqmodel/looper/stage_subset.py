@@ -238,6 +238,20 @@ def run_subset_stage(
             forward_row_counts.extend([1] * (batch_count - len(forward_row_counts)))
 
         subset_size = len(subset)
+        
+        # Determine MoE block name for hook selection
+        moe_block_name = None
+        if looper.gptq_model and hasattr(looper.gptq_model, 'moe_lifecycle_hooks'):
+            hooks = looper.gptq_model.moe_lifecycle_hooks
+            if hooks is not None:
+                moe_block = hooks.get_moe_block(module, looper.gptq_model.__class__)
+                if moe_block is not None:
+                    # Get the full name/path of the MoE block
+                    for mod_name, mod in module.named_modules():
+                        if mod is moe_block:
+                            moe_block_name = mod_name
+                            break
+        
         for idx, (name, m) in enumerate(subset.items()):
             # Register the forward hook that captures activations for quantization.
             # The final module optionally flips a flag so processors can trigger
@@ -248,18 +262,31 @@ def run_subset_stage(
                 hook_source = getattr(m, "name", name)
             if hook_source is None:
                 hook_source = str(name)
+            
+            # Determine if this module is part of MoE block (needs pre-hook to avoid StopForward)
+            is_moe_module = moe_block_name and name.startswith(moe_block_name + ".")
 
             if hasattr(subset[name], 'forward_hook'):
                 original_hook = processor.pre_process_fwd_hook(name)
-                subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
+                # Use pre-hook for MoE modules to fire before StopForward
+                if is_moe_module:
+                    subset[name].forward_hook = looper._masked_pre_hook_wrapper(processor, original_hook)
+                else:
+                    subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
                 enable_stop = processor.fwd_after_process or getattr(processor, "subset_forward_early_stop", False)
                 if is_last and enable_stop:
                     subset[name].forward_hook_last = True
             else:
                 original_hook = processor.pre_process_fwd_hook(name)
-                handle.append(subset[name].register_forward_hook(
-                    looper._masked_hook_wrapper(processor, original_hook, hook_source)
-                ))
+                # Use pre-hook registration for MoE modules
+                if is_moe_module:
+                    handle.append(subset[name].register_forward_hook(
+                        looper._masked_pre_hook_wrapper(processor, original_hook)
+                    ))
+                else:
+                    handle.append(subset[name].register_forward_hook(
+                        looper._masked_hook_wrapper(processor, original_hook, hook_source)
+                    ))
 
         if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
             if is_awq_processor:

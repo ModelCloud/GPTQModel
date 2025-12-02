@@ -130,8 +130,6 @@ def apply_module_tree_override(module_tree, override):
 NOT_QUANTIZE_FLAG = ":!"
 CAPTURE_ONLY_FLAG = ":?"
 MOE_FLAG = ":moe"
-MOE_EXPERTS_FLAG = ":moeexp"
-MOE_SHARED_EXPERTS_FLAG = ":moeshexp"
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 
 
@@ -480,113 +478,7 @@ class BaseQModel(nn.Module):
         
         return None
     
-    @classmethod
-    def get_experts_module_name(cls) -> Optional[str]:
-        """
-        Get the name of the experts module from module_tree.
-        
-        Looks for :moeexp flag within the MoE module structure.
-        For example:
-        - GLM-4: "experts:moeexp" -> returns "experts"
-        - MiniMax-M2: "experts:moeexp" -> returns "experts"
-        
-        Returns:
-            The name of the experts module (without flags), or None if not found
-        """
-        if cls.module_tree is None:
-            return None
-        
-        # Get the MoE module name first
-        moe_module_name = cls.get_moe_module_name()
-        if moe_module_name is None:
-            return None
-        
-        # Find the MoE module structure
-        layer_structure = None
-        found_hash = False
-        for item in cls.module_tree:
-            if item == "#":
-                found_hash = True
-                continue
-            if found_hash and isinstance(item, dict):
-                layer_structure = item
-                break
-        
-        if layer_structure is None:
-            return None
-        
-        # Find the MoE module key (with or without flags)
-        moe_module_dict = None
-        for key, value in layer_structure.items():
-            module_name, _ = cls._parse_module_flags(key)
-            if module_name == moe_module_name and isinstance(value, dict):
-                moe_module_dict = value
-                break
-        
-        if moe_module_dict is None:
-            return None
-        
-        # Look for :moeexp flag in MoE module structure
-        for key in moe_module_dict.keys():
-            if isinstance(key, str) and ":moeexp" in key:
-                module_name, _ = cls._parse_module_flags(key)
-                return module_name
-        
-        return None
     
-    @classmethod
-    def get_shared_experts_module_name(cls) -> Optional[str]:
-        """
-        Get the name of the shared experts module from module_tree.
-        
-        Looks for :moeshexp flag within the MoE module structure.
-        For example:
-        - GLM-4: "shared_experts:moeshexp" -> returns "shared_experts"
-        
-        Returns:
-            The name of the shared experts module (without flags), or None if not found
-        """
-        if cls.module_tree is None:
-            return None
-        
-        # Get the MoE module name first
-        moe_module_name = cls.get_moe_module_name()
-        if moe_module_name is None:
-            return None
-        
-        # Find the MoE module structure
-        layer_structure = None
-        found_hash = False
-        for item in cls.module_tree:
-            if item == "#":
-                found_hash = True
-                continue
-            if found_hash and isinstance(item, dict):
-                layer_structure = item
-                break
-        
-        if layer_structure is None:
-            return None
-        
-        # Find the MoE module key (with or without flags)
-        moe_module_dict = None
-        for key, value in layer_structure.items():
-            module_name, _ = cls._parse_module_flags(key)
-            if module_name == moe_module_name and isinstance(value, dict):
-                moe_module_dict = value
-                break
-        
-        if moe_module_dict is None:
-            return None
-        
-        # Look for :moeshexp flag in MoE module structure
-        for key in moe_module_dict.keys():
-            if isinstance(key, str) and ":moeshexp" in key:
-                module_name, _ = cls._parse_module_flags(key)
-                return module_name
-        
-        return None
-
     @classmethod
     def build_moe_modules_if_need(cls, model_config, layer_modules, is_awq_quantize: bool = False):
         # MoE models

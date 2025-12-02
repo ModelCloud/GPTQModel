@@ -134,6 +134,9 @@ class ModuleLooper():
         self._vram_strategy = vram_strategy
         self._moe_subset_threshold = 16
         self._subset_callback = getattr(self.gptq_model, "subset_callback", None)
+        
+        # Track current subset for MoE lifecycle hooks
+        self._current_subset: Optional[Dict[str, Any]] = None
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
@@ -429,6 +432,28 @@ class ModuleLooper():
         if lowered.endswith("attn") or lowered.endswith("attention"):
             return True
         return False
+    
+    def _should_use_moe_lifecycle(self, module: nn.Module, processor: LoopProcessor) -> bool:
+        """
+        Check if MoE lifecycle hooks should be used for this module.
+        
+        Returns True if:
+        - pass_whole_dataset_to_each_expert flag is enabled
+        - Model has lifecycle hooks configured
+        - Module contains an MoE block
+        """
+        # Check if feature is enabled
+        if not getattr(self.gptq_model.quantize_config, 'pass_whole_dataset_to_each_expert', False):
+            return False
+        
+        # Check if model has lifecycle hooks
+        hooks = getattr(self.gptq_model, 'moe_lifecycle_hooks', None)
+        if hooks is None:
+            return False
+        
+        # Check if this module contains an MoE block
+        moe_block = hooks.get_moe_block(module, self.gptq_model.__class__)
+        return moe_block is not None
 
     def _assign_quant_device_for_module(
         self,
@@ -741,7 +766,11 @@ class ModuleLooper():
                 if attn_tensor is not None:
                     seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
                     keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
+                
+                # Set mask for both TLS (post-hooks) and thread-safe attribute (pre-hooks)
                 self._set_processor_mask(processor, keep_mask)
+                with processor._hook_state_lock:
+                    processor.current_attention_mask = keep_mask
 
                 additional_inputs: Dict[str, torch.Tensor] = {}
                 if self.support_batch_quantize and attn_tensor is not None:
@@ -761,6 +790,33 @@ class ModuleLooper():
                 if not preserve_module_devices:
                     rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
+                # MoE lifecycle hooks integration
+                moe_forward_original = None
+                moe_block = None
+                if self._should_use_moe_lifecycle(module, processor):
+                    hooks = self.gptq_model.moe_lifecycle_hooks
+                    moe_block = hooks.get_moe_block(module, self.gptq_model.__class__)
+                    
+                    if moe_block is not None:
+                        # Save original forward method
+                        moe_forward_original = moe_block.forward
+                        
+                        # Create wrapper that forwards to all experts
+                        def moe_forward_wrapper(hidden_states, **kwargs):
+                            return hooks.forward_to_all_experts(
+                                moe_block=moe_block,
+                                hidden_states=hidden_states,
+                                processor=processor,
+                                subset=self._current_subset,
+                                original_forward=moe_forward_original,
+                                model_class=self.gptq_model.__class__,
+                                **kwargs
+                            )
+                        
+                        # Temporarily replace forward method
+                        moe_block.forward = moe_forward_wrapper
+                        log.debug(f"[MOEDEBUG] MoE lifecycle hooks activated for {type(moe_block).__name__}")
+
                 module_output = None
                 try:
                     if is_lm_head_module:
@@ -771,6 +827,11 @@ class ModuleLooper():
                     module_output = None
                 finally:
                     self._set_processor_mask(processor, None)
+                    
+                    # Restore original MoE forward method if we patched it
+                    if moe_forward_original is not None and moe_block is not None:
+                        moe_block.forward = moe_forward_original
+                        log.debug(f"[MOEDEBUG] MoE lifecycle hooks deactivated for {type(moe_block).__name__}")
 
                 if (
                     reuse_kv
@@ -1061,6 +1122,40 @@ class ModuleLooper():
                         source=hook_source,
                     )
         return hook
+    
+    def _masked_pre_hook_wrapper(self, processor: LoopProcessor, inner_hook):
+        """
+        Pre-forward hook wrapper for MoE expert modules.
+        This is called BEFORE forward executes to avoid StopForward issues.
+        Respects hooks_paused state to avoid double-counting during intermediate calculations.
+        """
+        def pre_hook(module, inputs, output):
+            # Thread-safe access to hook state
+            with processor._hook_state_lock:
+                if processor.hooks_paused:
+                    return
+                keep = processor.current_attention_mask
+
+            # Mask first tensor-like input if it's [B, S, ...]
+            new_inputs = inputs
+            try:
+                if isinstance(inputs, (tuple, list)) and len(inputs) > 0 and torch.is_tensor(inputs[0]):
+                    x = inputs[0]
+                    if keep is not None and x.dim() >= 3:
+                        xk = apply_keep_mask_bt(x, keep)
+                        if isinstance(inputs, tuple):
+                            new_inputs = (xk,) + tuple(inputs[1:])
+                        else:
+                            new_inputs = [xk] + list(inputs[1:])
+            except Exception as e:
+                # Never break the forward due to masking
+                log.warn(f"Masking failed for {module.__class__.__name__}: {e}")
+                new_inputs = inputs
+
+            # Call inner hook with inputs and output (GPTQ ignores output anyway)
+            inner_hook(module, new_inputs, output)
+            
+        return pre_hook
 
     def cache_inputs(self, layers, calibration_data, use_cache):
         capture_stage = StageInputsCapture(self, logger=log)

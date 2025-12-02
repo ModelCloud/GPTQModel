@@ -65,64 +65,51 @@ class MoELifecycleHooks:
     
     def get_experts_module(self, moe_block: nn.Module, model_class: type) -> Optional[nn.Module]:
         """
-        Extract experts module from MoE block using :moeexp flag from module_tree.
+        Extract experts module from MoE block by checking common attribute names.
         
         Args:
             moe_block: The MoE block module
-            model_class: The model class (to access module_tree)
+            model_class: The model class (for compatibility, unused)
         
         Returns:
             The experts module, or None if not found
         
         Example:
-            For GLM-4, module_tree has "experts:moeexp", so this returns moe_block.experts
-            For MiniMax-M2, module_tree has "experts:moeexp", so this returns moe_block.experts
+            Returns moe_block.experts if it exists
         """
-        experts_module_name = model_class.get_experts_module_name()
+        # Try common expert container attribute names
+        for name in ['experts', 'expert_list', 'expert_modules']:
+            experts_module = getattr(moe_block, name, None)
+            if experts_module is not None:
+                log.debug(f"[MOEDEBUG] Found experts module: {type(moe_block).__name__}.{name}")
+                return experts_module
         
-        if experts_module_name is None:
-            log.debug(f"[MOEDEBUG] No :moeexp flag found in module_tree for {model_class.__name__}")
-            return None
-        
-        experts_module = getattr(moe_block, experts_module_name, None)
-        
-        if experts_module is None:
-            log.debug(
-                f"[MOEDEBUG] Experts module '{experts_module_name}' not found in MoE block {type(moe_block).__name__}"
-            )
-        
-        return experts_module
+        log.debug(f"[MOEDEBUG] No experts module found in MoE block {type(moe_block).__name__}")
+        return None
     
     def get_shared_experts_module(self, moe_block: nn.Module, model_class: type) -> Optional[nn.Module]:
         """
-        Extract shared experts module from MoE block using :moeshexp flag from module_tree.
+        Extract shared experts module from MoE block by checking common attribute names.
         
         Args:
             moe_block: The MoE block module
-            model_class: The model class (to access module_tree)
+            model_class: The model class (for compatibility, unused)
         
         Returns:
             The shared experts module, or None if not found (shared experts are optional)
         
         Example:
-            For GLM-4, module_tree has "shared_experts:moeshexp", so this returns moe_block.shared_experts
-            For MiniMax-M2, no :moeshexp flag, so returns None
+            Returns moe_block.shared_experts or moe_block.shared_expert if either exists
         """
-        shared_experts_module_name = model_class.get_shared_experts_module_name()
+        # Try both singular and plural naming
+        for name in ['shared_experts', 'shared_expert']:
+            shared_experts_module = getattr(moe_block, name, None)
+            if shared_experts_module is not None:
+                log.debug(f"[MOEDEBUG] Found shared experts module: {type(moe_block).__name__}.{name}")
+                return shared_experts_module
         
-        if shared_experts_module_name is None:
-            # This is normal - not all MoE models have shared experts
-            return None
-        
-        shared_experts_module = getattr(moe_block, shared_experts_module_name, None)
-        
-        if shared_experts_module is None:
-            log.debug(
-                f"[MOEDEBUG] Shared experts module '{shared_experts_module_name}' not found in MoE block {type(moe_block).__name__}. "
-                f"This is normal for layers without shared experts."
-            )
-        
-        return shared_experts_module
+        # This is normal - not all MoE models have shared experts
+        return None
     
     def forward_to_all_experts(
         self,
