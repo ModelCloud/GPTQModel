@@ -5,7 +5,7 @@
 
 from parameterized import parameterized
 
-from gptqmodel import GPTQModel, QuantizeConfig, BACKEND
+from gptqmodel import GPTQModel, BACKEND
 from gptqmodel.models._const import DEVICE
 from model_test import ModelTest
 
