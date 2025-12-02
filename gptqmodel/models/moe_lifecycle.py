@@ -161,8 +161,8 @@ class MoELifecycleHooks:
         subset: Dict[str, Any],
         original_forward: callable,
         model_class: type,
+        module_looper: Any,
         moe_block_prefix: Optional[str] = None,
-        module_looper: Any = None,
         **kwargs
     ) -> torch.Tensor:
         """
@@ -267,6 +267,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         subset: Dict[str, Any],
         original_forward: callable,
         model_class: type,
+        module_looper: Any,  # Required for TLS-based hooks pausing
         moe_block_prefix: Optional[str] = None,
         **kwargs
     ) -> torch.Tensor:
