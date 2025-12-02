@@ -814,10 +814,6 @@ class ModuleLooper():
                         # Save original forward method
                         moe_forward_original = moe_block.forward
                         
-                        # Precompute subset_modules once (not per batch!)
-                        # subset is {name: NamedModule}, convert values to set for O(1) lookup
-                        subset_modules_cached = set(self._current_subset.values()) if self._current_subset else set()
-                        
                         # Create wrapper that forwards to all experts
                         def moe_forward_wrapper(hidden_states, **kwargs):
                             return hooks.forward_to_all_experts(
@@ -825,7 +821,6 @@ class ModuleLooper():
                                 hidden_states=hidden_states,
                                 processor=processor,
                                 subset=self._current_subset,
-                                subset_modules=subset_modules_cached,  # Pass precomputed set
                                 original_forward=moe_forward_original,
                                 model_class=self.gptq_model.__class__,
                                 **kwargs
@@ -978,10 +973,6 @@ class ModuleLooper():
                 # Save original forward method
                 moe_forward_original = moe_block.forward
                 
-                # Precompute subset_modules once (not per batch!)
-                # subset is {name: NamedModule}, convert values to set for O(1) lookup
-                subset_modules_cached = set(self._current_subset.values()) if self._current_subset else set()
-                
                 # Create wrapper that forwards to all experts
                 def moe_forward_wrapper(hidden_states, **kwargs):
                     return hooks.forward_to_all_experts(
@@ -989,7 +980,6 @@ class ModuleLooper():
                         hidden_states=hidden_states,
                         processor=processor,
                         subset=self._current_subset,
-                        subset_modules=subset_modules_cached,  # Pass precomputed set
                         original_forward=moe_forward_original,
                         model_class=self.gptq_model.__class__,
                         **kwargs

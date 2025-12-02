@@ -87,6 +87,28 @@ class MoELifecycleHooks:
         log.info(f"[MOEDEBUG] No experts module found in MoE block {type(moe_block).__name__}")
         return None
     
+    
+    def get_shared_experts_module_name(self, moe_block: nn.Module) -> Optional[str]:
+        """
+        Get the attribute name for shared experts module if it exists.
+        
+        Args:
+            moe_block: The MoE block module
+        
+        Returns:
+            The attribute name ('shared_experts', 'shared_expert', etc.) or None
+        
+        Example:
+            name = hooks.get_shared_experts_module_name(moe_block)
+            if name:
+                shared_experts = getattr(moe_block, name)
+        """
+        # Try both singular and plural naming
+        for name in ['shared_experts', 'shared_expert']:
+            if hasattr(moe_block, name):
+                return name
+        return None
+    
     def get_shared_experts_module(self, moe_block: nn.Module, model_class: type) -> Optional[nn.Module]:
         """
         Extract shared experts module from MoE block by checking common attribute names.
@@ -101,12 +123,12 @@ class MoELifecycleHooks:
         Example:
             Returns moe_block.shared_experts or moe_block.shared_expert if either exists
         """
-        # Try both singular and plural naming
-        for name in ['shared_experts', 'shared_expert']:
-            shared_experts_module = getattr(moe_block, name, None)
-            if shared_experts_module is not None:
-                log.info(f"[MOEDEBUG] Found shared experts module: {type(moe_block).__name__}.{name}")
-                return shared_experts_module
+        # Use the helper to get the attribute name
+        name = self.get_shared_experts_module_name(moe_block)
+        if name:
+            shared_experts_module = getattr(moe_block, name)
+            log.info(f"[MOEDEBUG] Found shared experts module: {type(moe_block).__name__}.{name}")
+            return shared_experts_module
         
         # This is normal - not all MoE models have shared experts
         return None
@@ -117,41 +139,31 @@ class MoELifecycleHooks:
         hidden_states: torch.Tensor,
         processor: Any,
         subset: Dict[str, Any],
-        subset_modules: Set[Any],  # Precomputed set(subset.values()) for performance
         original_forward: callable,
         model_class: type,
         **kwargs
     ) -> torch.Tensor:
         """
         Forward hidden states to all experts, bypassing routing.
-        
-        This is the core method for the "forward whole dataset to each expert" feature.
-        It should forward the input to all experts for activation collection, then
-        return the output from the original routed forward pass.
+        Subclasses should implement this with model-specific logic.
         
         Args:
             moe_block: The MoE block module
             hidden_states: Input tensor
-            processor: The quantization processor (needed for hook pausing)
-            subset: Dict[str, NamedModule] containing modules currently being calibrated
-            original_forward: Original forward function to call for final output
-            model_class: The model class (to access module_tree)
-            **kwargs: Additional arguments (attention_mask, etc.)
+            processor: The quantization processor
+            subset: Dict[str, NamedModule] being calibrated
+            original_forward: Original forward function
+            model_class: The model class
+            **kwargs: Additional arguments
         
         Returns:
-            Output tensor from original_forward (with proper routing)
-        
-        Note:
-            This method should be overridden by model-specific implementations.
-            The default implementation logs an error and falls back to normal forward.
+            Output tensor from routed forward pass
         """
         log.error(
             f"[MOEDEBUG] forward_to_all_experts not implemented for {type(moe_block).__name__}. "
-            f"Falling back to normal forward pass. Override MoELifecycleHooks.forward_to_all_experts() "
+            f"Falling back to normal forward. Override this method "
             f"for model-specific implementation."
         )
-        
-        # Fallback to normal forward
         return moe_block(hidden_states, **kwargs)
     
     def count_expert_activations(
@@ -231,7 +243,6 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         hidden_states: torch.Tensor,
         processor: Any,
         subset: Dict[str, Any],
-        subset_modules: Set[Any],  # Precomputed set(subset.values()) for performance
         original_forward: callable,
         model_class: type,
         **kwargs
@@ -244,7 +255,6 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             hidden_states: Input tensor
             processor: The quantization processor (needed for hook pausing)
             subset: Dict[str, NamedModule] containing modules currently being calibrated
-            subset_modules: Precomputed set(subset.values()) for O(1) lookup (avoids recomputing per batch)
             original_forward: Original forward function to call for final output
             model_class: The model class (to access module_tree)
             **kwargs: Additional arguments (attention_mask, etc.)
@@ -260,110 +270,75 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             log.warning("[MOEDEBUG] Missing processor or original_forward, falling back to normal forward")
             return moe_block(hidden_states, **kwargs)
         
-        # Get experts modules using flag-based detection
+        # Extract moe_block_prefix from first subset key
+        # Since .experts. always exists for MoE blocks, we only need to check for that
+        moe_block_prefix = None
+        if subset:
+            for key in subset.keys():
+                if ".experts." in key:
+                    moe_block_prefix = key.split(".experts.")[0]
+                    break
+        
+        if not moe_block_prefix:
+            log.warning("[MOEDEBUG] Could not extract moe_block_prefix from subset keys, falling back")
+            return moe_block(hidden_states, **kwargs)
+        
+        # Get experts modules and shared expert attribute name
         experts_module = self.get_experts_module(moe_block, model_class)
         shared_experts_module = self.get_shared_experts_module(moe_block, model_class)
+        shared_expert_attr_name = self.get_shared_experts_module_name(moe_block)  # e.g., "shared_experts" or "shared_expert"
         
         expert_count = 0
         stop_forward_raised = False
         proj_names = [self.gate_proj_name, self.up_proj_name, self.down_proj_name]
         
-        # DEBUG: Log subset structure
-        log.info(f"[MOEDEBUG] Subset keys: {list(subset.keys()) if subset else 'None'}")
-        log.info(f"[MOEDEBUG] Subset values type: {[type(v).__name__ for v in subset.values()] if subset else 'None'}")
-        log.info(f"[MOEDEBUG] Subset modules set size: {len(subset_modules)}")
-        
-        # Check if shared_experts modules are in subset by checking dictionary keys
-        shared_experts_in_subset = False
-        if shared_experts_module is not None:
-            log.info(f"[MOEDEBUG] Checking shared_experts module: {type(shared_experts_module).__name__}")
+        # Check which shared_expert projections are in subset using the detected attribute name
+        has_shared_experts = False
+        if shared_experts_module is not None and shared_expert_attr_name:
+            # Use the attribute name we already detected (e.g., "shared_experts" or "shared_expert")
             for name in proj_names:
-                if hasattr(shared_experts_module, name):
-                    module = getattr(shared_experts_module, name)
-                    log.info(f"[MOEDEBUG] shared_experts.{name} module: {type(module).__name__}, id: {id(module)}")
-                    log.info(f"[MOEDEBUG] shared_experts.{name} in subset_modules: {module in subset_modules}")
-                    if module in subset_modules:
-                        shared_experts_in_subset = True
-                        log.info(f"[MOEDEBUG] Found shared_experts.{name} in subset")
-                        break
-            if not shared_experts_in_subset:
-                log.info(f"[MOEDEBUG] No shared_experts projections found in subset")
+                key = f"{moe_block_prefix}.{shared_expert_attr_name}.{name}"
+                if key in subset:
+                    has_shared_experts = True
+                    break
         
-        # Pre-check which projection modules are in subset (all experts have same structure)
-        expert_proj_names_in_subset = set()  # Projection names like 'gate_proj', 'down_proj'
+        # Check if any expert projections are in subset
+        # Just check if first expert has modules - all experts share same structure
+        has_expert_projs = False
         if experts_module is not None and hasattr(experts_module, '__iter__') and len(experts_module) > 0:
-            first_expert = experts_module[0]
-            log.info(f"[MOEDEBUG] Checking expert projections using first expert: {type(first_expert).__name__}")
             for name in proj_names:
-                if hasattr(first_expert, name):
-                    module = getattr(first_expert, name)
-                    log.info(f"[MOEDEBUG] Expert {name} module: {type(module).__name__}, id: {id(module)}")
-                    log.info(f"[MOEDEBUG] Expert {name} in subset_modules: {module in subset_modules}")
-                    if module in subset_modules:
-                        expert_proj_names_in_subset.add(name)
-                        log.info(f"[MOEDEBUG] Found expert {name} projection in subset")
-            if not expert_proj_names_in_subset:
-                log.info(f"[MOEDEBUG] No expert projections found in subset")
-        else:
-            log.info(f"[MOEDEBUG] No experts module found or experts_module is not iterable: {experts_module}")
+                key = f"{moe_block_prefix}.experts.0.{name}"
+                if key in subset:
+                    has_expert_projs = True
+                    break
+        
+        log.info(f"[MOEDEBUG] has_shared_experts: {has_shared_experts}, has_expert_projs: {has_expert_projs}")
         
         # Optimization: If ONLY shared_experts in subset (no individual expert modules),
         # skip manual forwarding and let original_forward handle it with hooks enabled.
-        # This avoids computing shared_experts twice.
-        if shared_experts_in_subset and not expert_proj_names_in_subset:
+        if has_shared_experts and not has_expert_projs:
             log.info(f"[MOEDEBUG] Only shared_experts in subset, using original_forward with hooks enabled")
             return original_forward(hidden_states, **kwargs)
         
-        log.info(f"[MOEDEBUG] shared_experts_in_subset: {shared_experts_in_subset}")
-        log.info(f"[MOEDEBUG] expert_proj_names_in_subset: {expert_proj_names_in_subset}")
-        log.info(f"[MOEDEBUG] experts_module exists: {experts_module is not None}")
-        log.info(f"[MOEDEBUG] experts_module type: {type(experts_module).__name__ if experts_module else 'None'}")
-        
         # Forward to shared experts if they exist AND if any of their modules are in subset
-        # (This path is only reached if individual expert modules are also in subset)
-        if shared_experts_module is not None and shared_experts_in_subset:
-            log.info(f"[MOEDEBUG] Attempting to forward to shared_experts")
+        # Simply call the shared expert module's forward - hooks will fire for projections in subset
+        if has_shared_experts and shared_expert_attr_name:
+            log.info(f"[MOEDEBUG] Forwarding to {shared_expert_attr_name}")
             try:
-                if hasattr(shared_experts_module, self.gate_proj_name) and hasattr(shared_experts_module, self.up_proj_name):
-                    log.info(f"[MOEDEBUG] shared_experts has required projections")
-                    # Pause hooks to compute intermediate
-                    with processor._hook_state_lock:
-                        processor.hooks_paused = True
-                    try:
-                        gate_out = getattr(shared_experts_module, self.gate_proj_name)(hidden_states)
-                        up_out = getattr(shared_experts_module, self.up_proj_name)(hidden_states)
-                        intermediate = F.silu(gate_out) * up_out
-                        log.info(f"[MOEDEBUG] Computed shared_experts intermediate: {intermediate.shape if hasattr(intermediate, 'shape') else 'no shape'}")
-                    finally:
-                        with processor._hook_state_lock:
-                            processor.hooks_paused = False
-                    
-                    # Call down_proj with hooks enabled for activation collection
-                    down_result = getattr(shared_experts_module, self.down_proj_name)(intermediate)
-                    log.info(f"[MOEDEBUG] Called shared_experts down_proj: {type(down_result).__name__}")
-                    expert_count += 1
-                    log.info(f"[MOEDEBUG] Forwarded to shared_experts")
-                else:
-                    log.info(f"[MOEDEBUG] shared_experts missing required projections: has_gate={hasattr(shared_experts_module, self.gate_proj_name)}, has_up={hasattr(shared_experts_module, self.up_proj_name)}")
+                # Get the shared expert module and call its forward
+                shared_expert_module = getattr(moe_block, shared_expert_attr_name)
+                result = shared_expert_module(hidden_states)
+                expert_count += 1
+                log.info(f"[MOEDEBUG] {shared_expert_attr_name}: Forward complete")
             except Exception as e:
                 if "StopForward" in str(type(e).__name__):
                     stop_forward_raised = True
-                    log.info(f"[MOEDEBUG] StopForward raised during shared_experts forwarding")
+                    log.info(f"[MOEDEBUG] {shared_expert_attr_name}: StopForward raised")
                 else:
-                    log.info(f"[MOEDEBUG] Error forwarding to shared_experts: {e}")
-        
+                    log.info(f"[MOEDEBUG] {shared_expert_attr_name}: Error: {e}")
         
         # Forward to all individual experts
-        log.info(f"[MOEDEBUG] Checking if we should forward to individual experts:")
-        log.info(f"[MOEDEBUG]  - expert_proj_names_in_subset: {expert_proj_names_in_subset}")
-        log.info(f"[MOEDEBUG]  - experts_module is not None: {experts_module is not None}")
-        log.info(f"[MOEDEBUG]  - experts_module has __iter__: {hasattr(experts_module, '__iter__') if experts_module else False}")
-        if experts_module is not None:
-            log.info(f"[MOEDEBUG]  - experts_module type: {type(experts_module).__name__}")
-            if hasattr(experts_module, '__len__'):
-                log.info(f"[MOEDEBUG]  - experts_module length: {len(experts_module)}")
-        
-        if expert_proj_names_in_subset and experts_module is not None and hasattr(experts_module, '__iter__'):
+        if has_expert_projs and experts_module is not None and hasattr(experts_module, '__iter__'):
             # Reshape hidden_states from [B, S, H] to [B*S, H] for expert modules
             if hidden_states.dim() == 3:
                 hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
@@ -371,71 +346,65 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                 hidden_states_2d = hidden_states
             
             log.info(f"[MOEDEBUG] Starting to forward to {len(experts_module)} experts")
-            for idx, expert in enumerate(experts_module):
-                log.info(f"[MOEDEBUG] Processing expert {idx}: {type(expert).__name__}")
+            for expert_idx, expert in enumerate(experts_module):
+                # Construct keys for this expert's projections
+                gate_key = f"{moe_block_prefix}.experts.{expert_idx}.{self.gate_proj_name}"
+                up_key = f"{moe_block_prefix}.experts.{expert_idx}.{self.up_proj_name}"
+                down_key = f"{moe_block_prefix}.experts.{expert_idx}.{self.down_proj_name}"
+                
+                # Skip if none of this expert's projections are in subset
+                if gate_key not in subset and up_key not in subset and down_key not in subset:
+                    continue
+                
+                log.info(f"[MOEDEBUG] Processing expert {expert_idx}")
                 try:
                     # Strategy: If down_proj is in subset, compute intermediate on-the-fly
-                    if self.down_proj_name in expert_proj_names_in_subset and hasattr(expert, self.down_proj_name):
-                        log.info(f"[MOEDEBUG] Expert {idx}: down_proj in subset, has down_proj={hasattr(expert, self.down_proj_name)}")
-                        intermediate = None
-                        with processor._hook_state_lock:
-                            processor.hooks_paused = True
-                        try:
-                            gate_out = None
-                            up_out = None
-                            
-                            if hasattr(expert, self.gate_proj_name):
-                                gate_out = getattr(expert, self.gate_proj_name)(hidden_states_2d)
-                                log.info(f"[MOEDEBUG] Expert {idx}: Called {self.gate_proj_name}: {gate_out.shape if hasattr(gate_out, 'shape') else 'no shape'}")
-                            if hasattr(expert, self.up_proj_name):
-                                up_out = getattr(expert, self.up_proj_name)(hidden_states_2d)
-                                log.info(f"[MOEDEBUG] Expert {idx}: Called {self.up_proj_name}: {up_out.shape if hasattr(up_out, 'shape') else 'no shape'}")
-                            
-                            if gate_out is not None and up_out is not None:
-                                # Compute intermediate
-                                if hasattr(expert, 'act_fn'):
-                                    intermediate = expert.act_fn(gate_out) * up_out
-                                    log.info(f"[MOEDEBUG] Expert {idx}: Used expert.act_fn for intermediate")
-                                else:
-                                    intermediate = F.silu(gate_out) * up_out
-                                    log.info(f"[MOEDEBUG] Expert {idx}: Used F.silu for intermediate")
-                                log.info(f"[MOEDEBUG] Expert {idx}: Computed intermediate: {intermediate.shape if hasattr(intermediate, 'shape') else 'no shape'}")
-                        finally:
-                            with processor._hook_state_lock:
-                                processor.hooks_paused = False
+                    # Note: When down is in subset, gate/up are NOT in subset (separate subset groups)
+                    # We need to compute gate/up outputs to create the intermediate for down
+                    if down_key in subset:
+                        log.info(f"[MOEDEBUG] Expert {expert_idx}: Has down_proj in subset")
                         
-                        # Call down_proj with hooks enabled
-                        if intermediate is not None:
-                            down_result = getattr(expert, self.down_proj_name)(intermediate)
-                            log.info(f"[MOEDEBUG] Expert {idx}: Called {self.down_proj_name}: {type(down_result).__name__}")
-                            expert_count += 1
-                            log.info(f"[MOEDEBUG] Expert {idx}: Successfully forwarded (intermediate + down_proj path)")
+                        # Get gate/up modules directly from expert via getattr
+                        # This returns the UNWRAPPED modules (not NamedModule wrappers)
+                        # Hooks are only registered on NamedModule wrappers in subset,
+                        # so calling unwrapped modules means NO hooks fire automatically.
+                        gate_module = getattr(expert, self.gate_proj_name)
+                        up_module = getattr(expert, self.up_proj_name)
+                        
+                        # Compute intermediate (no hooks fire since modules are unwrapped)
+                        gate_out = gate_module(hidden_states_2d)
+                        up_out = up_module(hidden_states_2d)
+                        
+                        # Compute intermediate using expert's activation function
+                        if hasattr(expert, 'act_fn'):
+                            intermediate = expert.act_fn(gate_out) * up_out
+                        else:
+                            intermediate = F.silu(gate_out) * up_out
+                        
+                        # Call down_proj via wrapper with hooks enabled for activation collection
+                        down_result = subset[down_key](intermediate)
+                        expert_count += 1
+                        log.info(f"[MOEDEBUG] Expert {expert_idx}: Forwarded (intermediate + down_proj)")
                     else:
-                        log.info(f"[MOEDEBUG] Expert {idx}: Using direct projection calls")
-                        # For gate_proj/up_proj, just call them directly (hooks enabled)
+                        # For gate_proj/up_proj in subset, just call them directly via wrappers
+                        log.info(f"[MOEDEBUG] Expert {expert_idx}: Using direct projection calls")
                         called_any = False
-                        if self.gate_proj_name in expert_proj_names_in_subset and hasattr(expert, self.gate_proj_name):
-                            gate_result = getattr(expert, self.gate_proj_name)(hidden_states_2d)
-                            log.info(f"[MOEDEBUG] Expert {idx}: Directly called {self.gate_proj_name}: {type(gate_result).__name__}")
+                        if gate_key in subset:
+                            gate_result = subset[gate_key](hidden_states_2d)
                             called_any = True
-                        if self.up_proj_name in expert_proj_names_in_subset and hasattr(expert, self.up_proj_name):
-                            up_result = getattr(expert, self.up_proj_name)(hidden_states_2d)
-                            log.info(f"[MOEDEBUG] Expert {idx}: Directly called {self.up_proj_name}: {type(up_result).__name__}")
+                        if up_key in subset:
+                            up_result = subset[up_key](hidden_states_2d)
                             called_any = True
                         if called_any:
                             expert_count += 1
-                            log.info(f"[MOEDEBUG] Expert {idx}: Successfully forwarded (direct projection path)")
-                        else:
-                            log.info(f"[MOEDEBUG] Expert {idx}: No projections in subset or missing attributes")
+                            log.info(f"[MOEDEBUG] Expert {expert_idx}: Forwarded (direct)")
                 
                 except Exception as e:
                     if "StopForward" in str(type(e).__name__):
                         stop_forward_raised = True
-                        log.info(f"[MOEDEBUG] Expert {idx}: StopForward raised")
+                        log.info(f"[MOEDEBUG] Expert {expert_idx}: StopForward raised")
                     else:
-                        log.info(f"[MOEDEBUG] Expert {idx}: Error during forwarding: {e}")
-                        import traceback
-                        log.info(f"[MOEDEBUG] Expert {idx} traceback: {traceback.format_exc()}")
+                        log.info(f"[MOEDEBUG] Expert {expert_idx}: Error: {e}")
         
         log.info(f"[MOEDEBUG] Forwarded to {expert_count} experts for subset calibration")
         
