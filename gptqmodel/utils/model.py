@@ -897,8 +897,13 @@ def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
     device_map = dict(device_map)
-    if "" in device_map and len(device_map) == 1:
-        d = device_map[""]
+    single_root = "" in device_map and len(device_map) == 1
+    all_single_cpu_or_mps = all(
+        d in ("cpu", "mps") for d in device_map.values()
+    )
+    # CPU offload is unnecessary for all-CPU/MPS device maps and must be skipped.
+    if single_root or all_single_cpu_or_mps:
+        d = next(iter(device_map.values()))
         model = model.to(torch.device(d))
         model.hf_device_map = device_map
         return model
