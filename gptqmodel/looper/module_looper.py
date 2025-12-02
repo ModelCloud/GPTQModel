@@ -142,6 +142,57 @@ class ModuleLooper():
         for processor in self.processors:
             self._processor_mask_tls(processor)
 
+    class MoELifecycleContext:
+        """Context manager for MoE lifecycle hooks integration."""
+        
+        def __init__(self, module_looper, module, processor, current_subset):
+            self.module_looper = module_looper
+            self.module = module
+            self.processor = processor
+            self.current_subset = current_subset
+            self.moe_hooks_active = False
+            self.moe_block = None
+            self.moe_forward_original = None
+            
+        def __enter__(self):
+            """Set up MoE lifecycle hooks if applicable."""
+            if self.module_looper._should_use_moe_lifecycle(self.module, self.processor):
+                hooks = self.module_looper.gptq_model.moe_lifecycle_hooks
+                self.moe_block = hooks.get_moe_block(self.module, self.module_looper.gptq_model.__class__)
+                
+                if self.moe_block is not None:
+                    # Save original forward method
+                    self.moe_forward_original = self.moe_block.forward
+                    
+                    # Create wrapper that forwards to all experts
+                    moe_block_prefix = hooks._extract_moe_block_prefix(self.current_subset, self.moe_block)
+                    
+                    def moe_forward_wrapper(hidden_states, **kwargs):
+                        return hooks.forward_to_all_experts(
+                            moe_block=self.moe_block,
+                            hidden_states=hidden_states,
+                            processor=self.processor,
+                            subset=self.current_subset,
+                            original_forward=self.moe_forward_original,
+                            model_class=self.module_looper.gptq_model.__class__,
+                            moe_block_prefix=moe_block_prefix,
+                            **kwargs
+                        )
+                    
+                    # Temporarily replace forward method
+                    self.moe_block.forward = moe_forward_wrapper
+                    self.moe_hooks_active = True
+                    log.info(f"[MOEDEBUG] MoE lifecycle hooks activated for {type(self.moe_block).__name__}")
+            
+            return self
+        
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            """Restore original MoE forward method if it was patched."""
+            if self.moe_hooks_active and self.moe_forward_original is not None and self.moe_block is not None:
+                self.moe_block.forward = self.moe_forward_original
+                log.info(f"[MOEDEBUG] MoE lifecycle hooks deactivated for {type(self.moe_block).__name__}")
+            return False  # Don't suppress exceptions
+
     def register_layer_callback(self, callback) -> None:
         """Register or replace the layer-complete callback target."""
         self._layer_callback = callback
@@ -807,52 +858,18 @@ class ModuleLooper():
                 if not preserve_module_devices:
                     rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
-                # MoE lifecycle hooks integration
-                moe_forward_original = None
-                moe_block = None
-                if self._should_use_moe_lifecycle(module, processor):
-                    hooks = self.gptq_model.moe_lifecycle_hooks
-                    moe_block = hooks.get_moe_block(module, self.gptq_model.__class__)
-                    
-                    if moe_block is not None:
-                        # Save original forward method
-                        moe_forward_original = moe_block.forward
-                        
-                        # Create wrapper that forwards to all experts
-                        # Extract moe_block_prefix once to avoid repeated computation in loop
-                        moe_block_prefix = hooks._extract_moe_block_prefix(self._current_subset, moe_block)
-                        
-                        def moe_forward_wrapper(hidden_states, **kwargs):
-                            return hooks.forward_to_all_experts(
-                                moe_block=moe_block,
-                                hidden_states=hidden_states,
-                                processor=processor,
-                                subset=self._current_subset,
-                                original_forward=moe_forward_original,
-                                model_class=self.gptq_model.__class__,
-                                moe_block_prefix=moe_block_prefix,
-                                **kwargs
-                            )
-                        
-                        # Temporarily replace forward method
-                        moe_block.forward = moe_forward_wrapper
-                        log.info(f"[MOEDEBUG] MoE lifecycle hooks activated for {type(moe_block).__name__}")
-
-                module_output = None
-                try:
-                    if is_lm_head_module:
-                        module_output = module(*layer_input)
-                    else:
-                        module_output = module(*layer_input, **additional_inputs)
-                except StopForward:
+                # MoE lifecycle hooks integration - using context manager
+                with self.MoELifecycleContext(self, module, processor, self._current_subset):
                     module_output = None
-                finally:
-                    self._set_processor_mask(processor, None)
-                    
-                    # Restore original MoE forward method if we patched it
-                    if moe_forward_original is not None and moe_block is not None:
-                        moe_block.forward = moe_forward_original
-                        log.info(f"[MOEDEBUG] MoE lifecycle hooks deactivated for {type(moe_block).__name__}")
+                    try:
+                        if is_lm_head_module:
+                            module_output = module(*layer_input)
+                        else:
+                            module_output = module(*layer_input, **additional_inputs)
+                    except StopForward:
+                        module_output = None
+                    finally:
+                        self._set_processor_mask(processor, None)
 
                 if (
                     reuse_kv
@@ -968,61 +985,25 @@ class ModuleLooper():
 
         progress_cb = _replica_progress if progress_pb is not None else None
 
-        # Check if we need to apply MoE lifecycle hooks
-        moe_hooks_active = False
-        moe_block = None
-        moe_forward_original = None
-        
-        if self._should_use_moe_lifecycle(module, processor):
-            hooks = self.gptq_model.moe_lifecycle_hooks
-            moe_block = hooks.get_moe_block(module, self.gptq_model.__class__)
-            
-            if moe_block is not None:
-                # Save original forward method
-                moe_forward_original = moe_block.forward
-                
-                # Create wrapper that forwards to all experts
-                # Extract moe_block_prefix once to avoid repeated computation in loop
-                moe_block_prefix = hooks._extract_moe_block_prefix(self._current_subset, moe_block)
-                
-                def moe_forward_wrapper(hidden_states, **kwargs):
-                    return hooks.forward_to_all_experts(
-                        moe_block=moe_block,
-                        hidden_states=hidden_states,
-                        processor=processor,
-                        subset=self._current_subset,
-                        original_forward=moe_forward_original,
-                        model_class=self.gptq_model.__class__,
-                        moe_block_prefix=moe_block_prefix,
-                        **kwargs
-                    )
-                
-                # Apply the wrapper to the original module before cloning
-                moe_block.forward = moe_forward_wrapper
-                moe_hooks_active = True
-                log.info(f"[MOEDEBUG] MoE lifecycle hooks activated for parallel execution on {type(moe_block).__name__}")
+        # MoE lifecycle hooks integration - using context manager
+        with self.MoELifecycleContext(self, module, processor, self._current_subset):
+            # Ensure any async replication/memcpy ops are complete before threads start fanning out.
+            torch_sync()
 
-        # Ensure any async replication/memcpy ops are complete before threads start fanning out.
-        torch_sync()
-
-        try:
-            module_replicas = clone_module_for_devices(
-                module,
-                devices,
-                progress_callback=progress_cb,
-            )
-        finally:
-            # Restore original forward method on the original module if we modified it
-            if moe_hooks_active and moe_forward_original is not None and moe_block is not None:
-                moe_block.forward = moe_forward_original
-                log.info(f"[MOEDEBUG] MoE lifecycle hooks deactivated on original module")
-                
-            if replica_pb is not None:
-                replica_pb.close()
-            if progress_pb is not None:
-                progress_pb.title(effective_title).subtitle(
-                    f"{stage_label} rows 0/{total_rows}"
-                ).draw()
+            try:
+                module_replicas = clone_module_for_devices(
+                    module,
+                    devices,
+                    progress_callback=progress_cb,
+                )
+            finally:
+                # Context manager handles restoring the forward method on the original module
+                if replica_pb is not None:
+                    replica_pb.close()
+                if progress_pb is not None:
+                    progress_pb.title(effective_title).subtitle(
+                        f"{stage_label} rows 0/{total_rows}"
+                    ).draw()
 
         prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
 
@@ -1116,7 +1097,7 @@ class ModuleLooper():
         for dev in list(module_replicas.keys()):
             del module_replicas[dev]
             
-        # Note: We don't need to restore the forward method on replicas since they're being deleted
+        # Note: Context manager handles restoring the forward method
 
         if not need_outputs:
             return []
