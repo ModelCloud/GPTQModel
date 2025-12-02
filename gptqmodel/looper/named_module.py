@@ -188,7 +188,7 @@ class NamedModule(torch.nn.Module):
                 # If forward_hook_last is True, this should stop execution (like HookedLinear)
                 # The hook may raise StopForward, which should propagate
                 if self.forward_hook_last:
-                    from ..looper.loop_processor import StopForward  # Local import to avoid circular dependency
+                    from ..nn_modules.hooked_linear import StopForward  # Local import to avoid circular dependency
                     raise StopForward()
         
         return output
