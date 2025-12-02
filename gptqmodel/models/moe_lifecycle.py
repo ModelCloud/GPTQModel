@@ -379,14 +379,22 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             raise StopForward()
         
         # After forcing all experts to see the data for calibration,
-        # call the original forward to get proper output (pause hooks to avoid double-counting)
-        with processor._hook_state_lock:
-            processor.hooks_paused = True
-        try:
-            result = original_forward(hidden_states, **kwargs)
-        finally:
+        # call the original forward to get proper output.
+        # Only pause hooks if we actually forwarded through experts (expert_count > 0).
+        # For layers without experts (e.g., Layer 0 in GLM-4), hooks must remain active
+        # to collect calibration data from the standard MLP.
+        if expert_count > 0:
+            # Pause hooks to avoid double-counting (already collected from expert calls)
             with processor._hook_state_lock:
-                processor.hooks_paused = False
+                processor.hooks_paused = True
+            try:
+                result = original_forward(hidden_states, **kwargs)
+            finally:
+                with processor._hook_state_lock:
+                    processor.hooks_paused = False
+        else:
+            # No experts forwarded, let hooks fire normally for standard MLP
+            result = original_forward(hidden_states, **kwargs)
         
         return result
 
