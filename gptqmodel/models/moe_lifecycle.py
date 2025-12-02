@@ -161,6 +161,7 @@ class MoELifecycleHooks:
         subset: Dict[str, Any],
         original_forward: callable,
         model_class: type,
+        moe_block_prefix: Optional[str] = None,
         **kwargs
     ) -> torch.Tensor:
         """
@@ -174,6 +175,7 @@ class MoELifecycleHooks:
             subset: Dict[str, NamedModule] being calibrated
             original_forward: Original forward function
             model_class: The model class
+            moe_block_prefix: Optional prefix for MoE block modules (optimized parameter)
             **kwargs: Additional arguments
         
         Returns:
@@ -230,6 +232,31 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             )
     
     
+    def _extract_moe_block_prefix(self, subset: Dict[str, Any], moe_block: nn.Module) -> Optional[str]:
+        """
+        Extract moe_block_prefix from subset keys.
+        
+        Args:
+            subset: Dict[str, NamedModule] being calibrated
+            moe_block: The MoE block module
+            
+        Returns:
+            The moe_block_prefix string, or None if not found
+        """
+        if not subset:
+            return None
+            
+        experts_attr_name = self.get_experts_module_name(moe_block)
+        shared_expert_attr_name = self.get_shared_experts_module_name(moe_block)
+            
+        for key in subset.keys():
+            if experts_attr_name and f".{experts_attr_name}." in key:
+                return key.split(f".{experts_attr_name}.")[0]
+            if shared_expert_attr_name and f".{shared_expert_attr_name}." in key:
+                return key.split(f".{shared_expert_attr_name}.")[0]
+        
+        return None
+
     def forward_to_all_experts(
         self,
         moe_block: nn.Module,
@@ -238,6 +265,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         subset: Dict[str, Any],
         original_forward: callable,
         model_class: type,
+        moe_block_prefix: Optional[str] = None,
         **kwargs
     ) -> torch.Tensor:
         """
@@ -260,22 +288,9 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         import torch.nn.functional as F
         
         if not processor or not original_forward:
-            log.warning("[MOEDEBUG] Missing processor or original_forward, falling back to normal forward")
-            return moe_block(hidden_states, **kwargs)
-        
-        # Extract moe_block_prefix from first subset key
-        # We need to check for various expert module names (experts, expert_list, expert_modules)
-        moe_block_prefix = None
-        experts_attr_name = self.get_experts_module_name(moe_block)
-        if subset and experts_attr_name:
-            for key in subset.keys():
-                if f".{experts_attr_name}." in key:
-                    moe_block_prefix = key.split(f".{experts_attr_name}.")[0]
-                    break
-        
-        if not moe_block_prefix:
-            log.warning("[MOEDEBUG] Could not extract moe_block_prefix from subset keys, falling back")
-            return moe_block(hidden_states, **kwargs)
+            error_msg = "[MOEDEBUG] Missing processor or original_forward - this is an invalid operation that should never happen"
+            log.error(error_msg)
+            raise ValueError(error_msg)
         
         expert_count = 0
         stop_forward_raised = False
@@ -287,15 +302,11 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         shared_expert_attr_name = self.get_shared_experts_module_name(moe_block)  # e.g., "shared_experts" or "shared_expert"
         experts_attr_name = self.get_experts_module_name(moe_block)  # e.g., "experts", "expert_list", "expert_modules"
         
-        # Extract moe_block_prefix from first subset key
-        # We need to check for various expert module names (experts, expert_list, expert_modules)
-        moe_block_prefix = None
-        if subset and experts_attr_name:
-            for key in subset.keys():
-                if f".{experts_attr_name}." in key:
-                    moe_block_prefix = key.split(f".{experts_attr_name}.")[0]
-                    break
-        
+        if moe_block_prefix is None:
+            error_msg = "moe_block_prefix is None"
+            log.error(error_msg)
+            raise ValueError(error_msg)
+
         # Check which shared_expert projections are in subset using detected attribute name
         has_shared_experts = False
         if shared_experts_module is not None and shared_expert_attr_name and moe_block_prefix:
@@ -307,22 +318,21 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                     break
         
         # Check if any expert projections are in subset
-        # Just check if first expert has modules - all experts share same structure
+        # With VRAMStrategy.BALANCED, only part of expert projections might be loaded,
+        # so we need to check all subset keys instead of just the first expert
         has_expert_projs = False
         if experts_module is not None and hasattr(experts_module, '__iter__') and len(experts_module) > 0 and experts_attr_name and moe_block_prefix:
-            for name in proj_names:
-                key = f"{moe_block_prefix}.{experts_attr_name}.0.{name}"
-                if key in subset:
-                    has_expert_projs = True
-                    break
+            # Check all subset keys for any expert projections
+            expert_prefix = f"{moe_block_prefix}.{experts_attr_name}."
+            for key in subset.keys():
+                if key.startswith(expert_prefix):
+                    # Extract the expert index and projection name from the key
+                    parts = key[len(expert_prefix):].split('.')
+                    if len(parts) >= 2 and parts[1] in proj_names:
+                        has_expert_projs = True
+                        break
         
         log.info(f"[MOEDEBUG] has_shared_experts: {has_shared_experts}, has_expert_projs: {has_expert_projs}")
-        
-        # Optimization: If ONLY shared_experts in subset (no individual expert modules),
-        # skip manual forwarding and let original_forward handle it with hooks enabled.
-        if has_shared_experts and not has_expert_projs:
-            log.info(f"[MOEDEBUG] Only shared_experts in subset, using original_forward with hooks enabled")
-            return original_forward(hidden_states, **kwargs)
         
         # Forward to shared experts if they exist AND if any of their modules are in subset
         # Simply call the shared expert module's forward - hooks will fire for projections in subset

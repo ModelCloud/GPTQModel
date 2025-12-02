@@ -121,7 +121,7 @@ class GPTQProcessor(LoopProcessor):
             g.add_batch(inp[0].data, out.data, batch_index=batch_idx)  # noqa: F821
             # Check for any expert module name pattern (experts, expert_list, expert_modules)
             expert_module_patterns = [".experts.1.", ".expert_list.1.", ".expert_modules.1."]
-            if hasattr(module, 'layer_index') and module.layer_index == 0 and any(pattern in name for pattern in expert_module_patterns):
+            if hasattr(module, 'layer_index') and module.layer_index == 1 and any(pattern in name for pattern in expert_module_patterns):
                 log.info(f"[MOEDEBUG] Layer {module.layer_index}: GPTQ.add_batch called for {name}, inp shape: {inp[0].shape if inp else 'None'}")
             del inp, out
         return tmp

@@ -819,6 +819,9 @@ class ModuleLooper():
                         moe_forward_original = moe_block.forward
                         
                         # Create wrapper that forwards to all experts
+                        # Extract moe_block_prefix once to avoid repeated computation in loop
+                        moe_block_prefix = hooks._extract_moe_block_prefix(self._current_subset, moe_block)
+                        
                         def moe_forward_wrapper(hidden_states, **kwargs):
                             return hooks.forward_to_all_experts(
                                 moe_block=moe_block,
@@ -827,6 +830,7 @@ class ModuleLooper():
                                 subset=self._current_subset,
                                 original_forward=moe_forward_original,
                                 model_class=self.gptq_model.__class__,
+                                moe_block_prefix=moe_block_prefix,
                                 **kwargs
                             )
                         
@@ -978,6 +982,9 @@ class ModuleLooper():
                 moe_forward_original = moe_block.forward
                 
                 # Create wrapper that forwards to all experts
+                # Extract moe_block_prefix once to avoid repeated computation in loop
+                moe_block_prefix = hooks._extract_moe_block_prefix(self._current_subset, moe_block)
+                
                 def moe_forward_wrapper(hidden_states, **kwargs):
                     return hooks.forward_to_all_experts(
                         moe_block=moe_block,
@@ -986,6 +993,7 @@ class ModuleLooper():
                         subset=self._current_subset,
                         original_forward=moe_forward_original,
                         model_class=self.gptq_model.__class__,
+                        moe_block_prefix=moe_block_prefix,
                         **kwargs
                     )
                 
