@@ -443,17 +443,29 @@ class ModuleLooper():
         - Module contains an MoE block
         """
         # Check if feature is enabled
-        if not getattr(self.gptq_model.quantize_config, 'pass_whole_dataset_to_each_expert', False):
+        flag_enabled = self.gptq_model.quantize_config.pass_whole_dataset_to_each_expert
+        if not flag_enabled:
+            log.info(f"[MOEDEBUG] pass_whole_dataset_to_each_expert={flag_enabled}, skipping MoE lifecycle")
             return False
+        
+        log.info(f"[MOEDEBUG] pass_whole_dataset_to_each_expert=True, checking lifecycle hooks for {type(module).__name__}")
         
         # Check if model has lifecycle hooks
         hooks = getattr(self.gptq_model, 'moe_lifecycle_hooks', None)
         if hooks is None:
+            log.info(f"[MOEDEBUG] No moe_lifecycle_hooks on model {type(self.gptq_model).__name__}")
             return False
+        
+        log.info(f"[MOEDEBUG] Found hooks: {type(hooks).__name__}, calling get_moe_block")
         
         # Check if this module contains an MoE block
         moe_block = hooks.get_moe_block(module, self.gptq_model.__class__)
-        return moe_block is not None
+        if moe_block is None:
+            log.info(f"[MOEDEBUG] get_moe_block returned None for {type(module).__name__}")
+            return False
+        
+        log.info(f"[MOEDEBUG] Found MoE block: {type(moe_block).__name__}, will activate lifecycle hooks")
+        return True
 
     def _assign_quant_device_for_module(
         self,
