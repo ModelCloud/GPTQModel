@@ -16,7 +16,6 @@ import torch
 import torch.nn as nn
 
 from ..utils.logger import setup_logger
-from ..looper.loop_processor import StopForward
 
 log = setup_logger()
 
@@ -388,6 +387,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         
         if stop_forward_raised:
             # Re-raise StopForward if it was caught
+            from ..looper.loop_processor import StopForward  # Local import to avoid circular dependency
             raise StopForward()
         
         # After forcing all experts to see the data for calibration,
