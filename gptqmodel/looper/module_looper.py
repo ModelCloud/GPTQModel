@@ -815,7 +815,7 @@ class ModuleLooper():
                         
                         # Temporarily replace forward method
                         moe_block.forward = moe_forward_wrapper
-                        log.debug(f"[MOEDEBUG] MoE lifecycle hooks activated for {type(moe_block).__name__}")
+                        log.info(f"[MOEDEBUG] MoE lifecycle hooks activated for {type(moe_block).__name__}")
 
                 module_output = None
                 try:
@@ -831,7 +831,7 @@ class ModuleLooper():
                     # Restore original MoE forward method if we patched it
                     if moe_forward_original is not None and moe_block is not None:
                         moe_block.forward = moe_forward_original
-                        log.debug(f"[MOEDEBUG] MoE lifecycle hooks deactivated for {type(moe_block).__name__}")
+                        log.info(f"[MOEDEBUG] MoE lifecycle hooks deactivated for {type(moe_block).__name__}")
 
                 if (
                     reuse_kv

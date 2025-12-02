@@ -16,6 +16,7 @@ from ..utils.logger import setup_logger
 from ..utils.module_locks import get_parent_lock, parent_module_lock
 from ..utils.stream import stream_sync as stream_sync_events
 from ..utils.stream import stream_tensor_dict_to_cpu
+from ..looper.loop_processor import StopForward
 
 log = setup_logger()
 
@@ -184,6 +185,11 @@ class NamedModule(torch.nn.Module):
                 # Extract first positional arg as input for hook
                 input_tensor = args[0] if args else None
                 self.forward_hook(self, (input_tensor,), output)
+                
+                # If forward_hook_last is True, this should stop execution (like HookedLinear)
+                # The hook may raise StopForward, which should propagate
+                if self.forward_hook_last:
+                    raise StopForward()
         
         return output
 
