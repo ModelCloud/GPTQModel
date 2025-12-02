@@ -513,6 +513,7 @@ class BaseQModel(nn.Module):
                             moe_simple[-1].append(n)
                     # Currently, only need to add `capture_only_modules` to `['mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']`
                     # or ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
+                    # or ['mlp.shared_experts.gate_proj', 'mlp.shared_experts.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
                     add_capture_only_module = len(names) == (4 if any("shared_expert" in n for n in names) else 2)
                     if add_capture_only_module and capture_only_modules:
                         # Extend all elements in capture_only_modules

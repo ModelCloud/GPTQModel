@@ -419,6 +419,10 @@ class ModuleLooper():
             prefix, _ = module_name.split(".shared_experts.", 1)
             return f"{prefix}.shared_experts"
 
+        if ".shared_expert." in module_name:
+            prefix, _ = module_name.split(".shared_expert.", 1)
+            return f"{prefix}.shared_expert"
+
         return None
 
     def _is_attention_module_name(self, module_name: str) -> bool:

@@ -77,16 +77,36 @@ class MoELifecycleHooks:
         Example:
             Returns moe_block.experts if it exists
         """
-        # Try common expert container attribute names
-        for name in ['experts', 'expert_list', 'expert_modules']:
-            experts_module = getattr(moe_block, name, None)
-            if experts_module is not None:
-                log.info(f"[MOEDEBUG] Found experts module: {type(moe_block).__name__}.{name}")
-                return experts_module
+        # Use the helper to get the attribute name
+        name = self.get_experts_module_name(moe_block)
+        if name:
+            experts_module = getattr(moe_block, name)
+            log.info(f"[MOEDEBUG] Found experts module: {type(moe_block).__name__}.{name}")
+            return experts_module
         
         log.info(f"[MOEDEBUG] No experts module found in MoE block {type(moe_block).__name__}")
         return None
     
+    def get_experts_module_name(self, moe_block: nn.Module) -> Optional[str]:
+        """
+        Get the attribute name for experts module if it exists.
+        
+        Args:
+            moe_block: The MoE block module
+        
+        Returns:
+            The attribute name ('experts', 'expert_list', 'expert_modules', etc.) or None
+        
+        Example:
+            name = hooks.get_experts_module_name(moe_block)
+            if name:
+                experts = getattr(moe_block, name)
+        """
+        # Try common expert container attribute names
+        for name in ['experts', 'expert_list', 'expert_modules']:
+            if hasattr(moe_block, name):
+                return name
+        return None
     
     def get_shared_experts_module_name(self, moe_block: nn.Module) -> Optional[str]:
         """
@@ -165,33 +185,6 @@ class MoELifecycleHooks:
             f"for model-specific implementation."
         )
         return moe_block(hidden_states, **kwargs)
-    
-    def count_expert_activations(
-        self,
-        moe_block: nn.Module,
-        expert_counts: Optional[Dict[int, int]] = None
-    ) -> Dict[int, int]:
-        """
-        Count how many times each expert was activated.
-        
-        Args:
-            moe_block: The MoE block module
-            expert_counts: Existing counts dictionary to update (optional)
-        
-        Returns:
-            Dictionary mapping expert index to activation count
-        
-        Note:
-            This is used for debugging/logging purposes to verify that
-            all experts receive calibration data.
-        """
-        if expert_counts is None:
-            expert_counts = {}
-        
-        # Default implementation: no-op
-        # Model-specific implementations can track expert usage
-        return expert_counts
-
 
 class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
     """
@@ -271,30 +264,41 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             return moe_block(hidden_states, **kwargs)
         
         # Extract moe_block_prefix from first subset key
-        # Since .experts. always exists for MoE blocks, we only need to check for that
+        # We need to check for various expert module names (experts, expert_list, expert_modules)
         moe_block_prefix = None
-        if subset:
+        experts_attr_name = self.get_experts_module_name(moe_block)
+        if subset and experts_attr_name:
             for key in subset.keys():
-                if ".experts." in key:
-                    moe_block_prefix = key.split(".experts.")[0]
+                if f".{experts_attr_name}." in key:
+                    moe_block_prefix = key.split(f".{experts_attr_name}.")[0]
                     break
         
         if not moe_block_prefix:
             log.warning("[MOEDEBUG] Could not extract moe_block_prefix from subset keys, falling back")
             return moe_block(hidden_states, **kwargs)
         
-        # Get experts modules and shared expert attribute name
-        experts_module = self.get_experts_module(moe_block, model_class)
-        shared_experts_module = self.get_shared_experts_module(moe_block, model_class)
-        shared_expert_attr_name = self.get_shared_experts_module_name(moe_block)  # e.g., "shared_experts" or "shared_expert"
-        
         expert_count = 0
         stop_forward_raised = False
         proj_names = [self.gate_proj_name, self.up_proj_name, self.down_proj_name]
         
-        # Check which shared_expert projections are in subset using the detected attribute name
+        # Get experts modules and shared expert attribute name
+        experts_module = self.get_experts_module(moe_block, model_class)
+        shared_experts_module = self.get_shared_experts_module(moe_block, model_class)
+        shared_expert_attr_name = self.get_shared_experts_module_name(moe_block)  # e.g., "shared_experts" or "shared_expert"
+        experts_attr_name = self.get_experts_module_name(moe_block)  # e.g., "experts", "expert_list", "expert_modules"
+        
+        # Extract moe_block_prefix from first subset key
+        # We need to check for various expert module names (experts, expert_list, expert_modules)
+        moe_block_prefix = None
+        if subset and experts_attr_name:
+            for key in subset.keys():
+                if f".{experts_attr_name}." in key:
+                    moe_block_prefix = key.split(f".{experts_attr_name}.")[0]
+                    break
+        
+        # Check which shared_expert projections are in subset using detected attribute name
         has_shared_experts = False
-        if shared_experts_module is not None and shared_expert_attr_name:
+        if shared_experts_module is not None and shared_expert_attr_name and moe_block_prefix:
             # Use the attribute name we already detected (e.g., "shared_experts" or "shared_expert")
             for name in proj_names:
                 key = f"{moe_block_prefix}.{shared_expert_attr_name}.{name}"
@@ -305,9 +309,9 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         # Check if any expert projections are in subset
         # Just check if first expert has modules - all experts share same structure
         has_expert_projs = False
-        if experts_module is not None and hasattr(experts_module, '__iter__') and len(experts_module) > 0:
+        if experts_module is not None and hasattr(experts_module, '__iter__') and len(experts_module) > 0 and experts_attr_name and moe_block_prefix:
             for name in proj_names:
-                key = f"{moe_block_prefix}.experts.0.{name}"
+                key = f"{moe_block_prefix}.{experts_attr_name}.0.{name}"
                 if key in subset:
                     has_expert_projs = True
                     break
@@ -338,7 +342,7 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                     log.info(f"[MOEDEBUG] {shared_expert_attr_name}: Error: {e}")
         
         # Forward to all individual experts
-        if has_expert_projs and experts_module is not None and hasattr(experts_module, '__iter__'):
+        if has_expert_projs and experts_module is not None and hasattr(experts_module, '__iter__') and experts_attr_name:
             # Reshape hidden_states from [B, S, H] to [B*S, H] for expert modules
             if hidden_states.dim() == 3:
                 hidden_states_2d = hidden_states.reshape(-1, hidden_states.shape[-1])
@@ -347,10 +351,10 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             
             log.info(f"[MOEDEBUG] Starting to forward to {len(experts_module)} experts")
             for expert_idx, expert in enumerate(experts_module):
-                # Construct keys for this expert's projections
-                gate_key = f"{moe_block_prefix}.experts.{expert_idx}.{self.gate_proj_name}"
-                up_key = f"{moe_block_prefix}.experts.{expert_idx}.{self.up_proj_name}"
-                down_key = f"{moe_block_prefix}.experts.{expert_idx}.{self.down_proj_name}"
+                # Construct keys for this expert's projections using the detected attribute name
+                gate_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.gate_proj_name}"
+                up_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.up_proj_name}"
+                down_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.down_proj_name}"
                 
                 # Skip if none of this expert's projections are in subset
                 if gate_key not in subset and up_key not in subset and down_key not in subset:
