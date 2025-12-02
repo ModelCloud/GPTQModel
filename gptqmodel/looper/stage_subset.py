@@ -338,6 +338,8 @@ def run_subset_stage(
             )
 
         try:
+            # Set the current subset for MoE lifecycle hooks
+            looper._current_subset = subset
             forward_outputs = looper._run_forward_batches(
                 module=module,
                 processor=processor,

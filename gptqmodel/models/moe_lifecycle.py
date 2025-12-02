@@ -223,23 +223,6 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                 f"Got: gate={self.gate_proj_name}, up={self.up_proj_name}, down={self.down_proj_name}"
             )
     
-    def get_experts_module(self, moe_block: nn.Module, model_class: type) -> Optional[nn.Module]:
-        """Extract experts module using :moeexp flag from module_tree."""
-        experts_module_name = model_class.get_experts_module_name()
-        if experts_module_name is None:
-            log.info(f"[MOEDEBUG] No :moeexp flag found in module_tree")
-            return None
-        
-        return getattr(moe_block, experts_module_name, None)
-    
-    def get_shared_experts_module(self, moe_block: nn.Module, model_class: type) -> Optional[nn.Module]:
-        """Extract shared experts module using :moeshexp flag from module_tree."""
-        shared_experts_module_name = model_class.get_shared_experts_module_name()
-        if shared_experts_module_name is None:
-            # Shared experts are optional
-            return None
-        
-        return getattr(moe_block, shared_experts_module_name, None)
     
     def forward_to_all_experts(
         self,

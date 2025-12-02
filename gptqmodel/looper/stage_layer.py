@@ -243,6 +243,8 @@ def run_layer_stage(
                 #     )
 
                 try:
+                    # Set current subset for MoE lifecycle hooks
+                    looper._current_subset = subset_for_overrides
                     layer_outputs = looper._run_forward_batches(
                         module=module,
                         processor=processor,
