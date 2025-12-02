@@ -279,21 +279,20 @@ class AWQProcessor(LoopProcessor):
         self._module_forward_kwargs = refreshed
 
     def _quantize_layer(self, layer_index: int, state: _AWQLayerState) -> None:
-        with state.lock:
-            if state.quantized:
-                return
+        if state.quantized:
+            return
 
-            layer_module = state.layer_module
-            if layer_module is None and state.modules:
-                sample_module = next(iter(state.modules.values()))
-                layer_path = sample_module.full_name.rsplit(".", 1)[0]
-                layer_module, _ = get_module_by_name_prefix(self.gptq_model.model, layer_path)
-                state.layer_module = layer_module
+        layer_module = state.layer_module
+        if layer_module is None and state.modules:
+            sample_module = next(iter(state.modules.values()))
+            layer_path = sample_module.full_name.rsplit(".", 1)[0]
+            layer_module, _ = get_module_by_name_prefix(self.gptq_model.model, layer_path)
+            state.layer_module = layer_module
 
-            layer_module_ref = state.layer_module
+        layer_module_ref = state.layer_module
 
-            if layer_module_ref is None:
-                raise RuntimeError(f"AWQProcessor: unable to resolve layer module for layer index {layer_index}")
+        if layer_module_ref is None:
+            raise RuntimeError(f"AWQProcessor: unable to resolve layer module for layer index {layer_index}")
 
         log.info(
             "AWQProcessor: layer %s tracking %s modules before quantization (subsets processed=%s/%s); first modules=%s",
@@ -331,27 +330,25 @@ class AWQProcessor(LoopProcessor):
                     "AWQProcessor: layer %s has no modules with captured activations; marking quantized.",
                     layer_index,
                 )
-                with state.lock:
-                    state.quantized = True
-                    state.processed_subsets.clear()
-                    state.subset_total = None
-                    state.previous_weight_scale = None
+                state.quantized = True
+                state.processed_subsets.clear()
+                state.subset_total = None
+                state.previous_weight_scale = None
                 if hasattr(self._scale_context, "layer_index"):
                     delattr(self._scale_context, "layer_index")
                 if hasattr(self._scale_context, "prev_scale"):
                     delattr(self._scale_context, "prev_scale")
                 return
 
-        with state.lock:
-            # Filtering MLP modules like Qwen3MoeSparseMoeBlock
-            def unwrap(m):
-                return m.module if isinstance(m, NamedModule) else m
+        # Filtering MLP modules like Qwen3MoeSparseMoeBlock
+        def unwrap(m):
+            return m.module if isinstance(m, NamedModule) else m
 
-            named_childs = {
-                name: module
-                for name, module in state.modules.items()
-                if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
-            }
+        named_childs = {
+            name: module
+            for name, module in state.modules.items()
+            if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
+        }
 
         module_kwargs_global = dict(self._module_forward_kwargs)
 
@@ -558,14 +555,13 @@ class AWQProcessor(LoopProcessor):
             start = time.time()
             self.pack_module(named_childs, start, scales_list)
 
-        with state.lock:
-            state.quantized = True
-            state.modules.clear()
-            state.pending_modules.clear()
-            state.layer_module = None
-            state.processed_subsets.clear()
-            state.subset_total = None
-            state.previous_weight_scale = None
+        state.quantized = True
+        state.modules.clear()
+        state.pending_modules.clear()
+        state.layer_module = None
+        state.processed_subsets.clear()
+        state.subset_total = None
+        state.previous_weight_scale = None
 
         with self.lock:
             for name in named_childs:
@@ -1345,8 +1341,8 @@ class AWQProcessor(LoopProcessor):
                 )
             )
 
-        if should_quantize:
-            self._quantize_layer(layer_index, state)
+            if should_quantize:
+                self._quantize_layer(layer_index, state)
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
