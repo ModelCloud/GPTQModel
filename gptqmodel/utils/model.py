@@ -901,6 +901,7 @@ def simple_dispatch_model(model, device_map):
     all_single_cpu_or_mps = all(
         d in ("cpu", "mps") for d in device_map.values()
     )
+    # CPU offload is unnecessary for all-CPU/MPS device maps and must be skipped.
     if single_root or all_single_cpu_or_mps:
         d = next(iter(device_map.values()))
         model = model.to(torch.device(d))
