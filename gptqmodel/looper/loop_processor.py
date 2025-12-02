@@ -98,12 +98,6 @@ class LoopProcessor:
         self.inputs_cache: InputCache = InputCache(None, None, None, None)
         self.tasks = {}
         
-        # Thread-safe hook state for MoE lifecycle hooks
-        # Set dynamically per batch to control hook behavior and mask application
-        self.hooks_paused: bool = False  # Pause hook execution when computing intermediates
-        self.current_attention_mask: Optional[torch.Tensor] = None  # Current batch's keep-mask [B, S]
-        self._hook_state_lock = threading.Lock()  # Lock for thread-safe access to hook state
-
         self.pb = None
         self.fwd_time = None
         self.layer_count = None

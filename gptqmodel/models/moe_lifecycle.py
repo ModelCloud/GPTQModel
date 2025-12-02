@@ -162,6 +162,7 @@ class MoELifecycleHooks:
         original_forward: callable,
         model_class: type,
         moe_block_prefix: Optional[str] = None,
+        module_looper: Any = None,
         **kwargs
     ) -> torch.Tensor:
         """
@@ -176,6 +177,7 @@ class MoELifecycleHooks:
             original_forward: Original forward function
             model_class: The model class
             moe_block_prefix: Optional prefix for MoE block modules (optimized parameter)
+            module_looper: ModuleLooper instance for TLS-based hooks pausing
             **kwargs: Additional arguments
         
         Returns:
@@ -292,6 +294,10 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             log.error(error_msg)
             raise ValueError(error_msg)
         
+        if moe_block_prefix is None:
+            log.info(f"[MOEDEBUG] moe_block_prefix is None fallback to original forward")
+            return original_forward(hidden_states, **kwargs)
+
         expert_count = 0
         stop_forward_raised = False
         proj_names = [self.gate_proj_name, self.up_proj_name, self.down_proj_name]
@@ -301,11 +307,6 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         shared_experts_module = self.get_shared_experts_module(moe_block, model_class)
         shared_expert_attr_name = self.get_shared_experts_module_name(moe_block)  # e.g., "shared_experts" or "shared_expert"
         experts_attr_name = self.get_experts_module_name(moe_block)  # e.g., "experts", "expert_list", "expert_modules"
-        
-        if moe_block_prefix is None:
-            error_msg = "moe_block_prefix is None"
-            log.error(error_msg)
-            raise ValueError(error_msg)
 
         # Check which shared_expert projections are in subset using detected attribute name
         has_shared_experts = False
@@ -434,13 +435,12 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         # to collect calibration data from the standard MLP.
         if expert_count > 0:
             # Pause hooks to avoid double-counting (already collected from expert calls)
-            with processor._hook_state_lock:
-                processor.hooks_paused = True
+            # Use TLS-based pausing for thread safety in parallel execution (GIL-free safe)
+            module_looper._set_processor_hooks_paused(processor, True)
             try:
                 result = original_forward(hidden_states, **kwargs)
             finally:
-                with processor._hook_state_lock:
-                    processor.hooks_paused = False
+                module_looper._set_processor_hooks_paused(processor, False)
         else:
             # No experts forwarded, let hooks fire normally for standard MLP
             result = original_forward(hidden_states, **kwargs)

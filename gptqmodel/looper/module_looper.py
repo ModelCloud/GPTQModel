@@ -176,6 +176,7 @@ class ModuleLooper():
                             original_forward=self.moe_forward_original,
                             model_class=self.module_looper.gptq_model.__class__,
                             moe_block_prefix=moe_block_prefix,
+                            module_looper=self.module_looper,  # Pass for TLS-based hooks pausing
                             **kwargs
                         )
                     
@@ -364,6 +365,22 @@ class ModuleLooper():
             tls = threading.local()
             setattr(processor, "_mask_tls", tls)
         return tls
+
+    def _processor_hooks_paused_tls(self, processor):
+        """Get or create thread-local storage for hooks_paused flag."""
+        if not hasattr(processor, "_hooks_paused_tls"):
+            processor._hooks_paused_tls = threading.local()
+        return processor._hooks_paused_tls
+
+    def _set_processor_hooks_paused(self, processor: LoopProcessor, paused: bool):
+        """Set hooks paused state for current thread."""
+        tls = self._processor_hooks_paused_tls(processor)
+        tls.value = paused
+
+    def _get_processor_hooks_paused(self, processor: LoopProcessor) -> bool:
+        """Get hooks paused state for current thread (thread-safe)."""
+        tls = getattr(processor, "_hooks_paused_tls", None)
+        return getattr(tls, "value", False) if tls else False
 
     def _set_processor_mask(self, processor: LoopProcessor, mask):
         tls = self._processor_mask_tls(processor)
@@ -835,10 +852,8 @@ class ModuleLooper():
                     seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
                     keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
                 
-                # Set mask for both TLS (post-hooks) and thread-safe attribute (pre-hooks)
+                # Set mask using TLS (thread-safe)
                 self._set_processor_mask(processor, keep_mask)
-                with processor._hook_state_lock:
-                    processor.current_attention_mask = keep_mask
 
                 additional_inputs: Dict[str, torch.Tensor] = {}
                 if self.support_batch_quantize and attn_tensor is not None:
@@ -1120,6 +1135,10 @@ class ModuleLooper():
 
     def _masked_hook_wrapper(self, processor: LoopProcessor, inner_hook, hook_source: str):
         def hook(module, inputs, output):
+            # Thread-safe check if hooks are paused (TLS-based, per-thread)
+            if self._get_processor_hooks_paused(processor):
+                return
+            
             keep = self._get_processor_mask(processor)
 
             timer = getattr(self.gptq_model, "quant_region_timer", None)
@@ -1166,18 +1185,22 @@ class ModuleLooper():
                     )
         return hook
     
-    def _masked_pre_hook_wrapper(self, processor: LoopProcessor, inner_hook):
+    def _masked_pre_hook_wrapper(self, processor: LoopProcessor, inner_hook, hook_source: str):
         """
         Pre-forward hook wrapper for MoE expert modules.
-        This is called BEFORE forward executes to avoid StopForward issues.
+        This is called BEFORE forward executes (when used with HookedLinear.forward_hook).
         Respects hooks_paused state to avoid double-counting during intermediate calculations.
         """
         def pre_hook(module, inputs, output):
-            # Thread-safe access to hook state
-            with processor._hook_state_lock:
-                if processor.hooks_paused:
-                    return
-                keep = processor.current_attention_mask
+            # Thread-safe check if hooks are paused (TLS-based, per-thread)
+            if self._get_processor_hooks_paused(processor):
+                return
+            
+            # Get mask using TLS (thread-safe)
+            keep = self._get_processor_mask(processor)
+
+            timer = getattr(self.gptq_model, "quant_region_timer", None)
+            start = time.perf_counter() if timer else None
 
             # Mask first tensor-like input if it's [B, S, ...]
             new_inputs = inputs
@@ -1190,13 +1213,20 @@ class ModuleLooper():
                             new_inputs = (xk,) + tuple(inputs[1:])
                         else:
                             new_inputs = [xk] + list(inputs[1:])
-            except Exception as e:
+            except Exception:
                 # Never break the forward due to masking
-                log.warn(f"Masking failed for {module.__class__.__name__}: {e}")
                 new_inputs = inputs
 
             # Call inner hook with inputs and output (GPTQ ignores output anyway)
-            inner_hook(module, new_inputs, output)
+            try:
+                inner_hook(module, new_inputs, output)
+            finally:
+                if timer is not None and start is not None:
+                    timer.record(
+                        "forward_pre_hook",
+                        time.perf_counter() - start,
+                        source=hook_source,
+                    )
             
         return pre_hook
 
