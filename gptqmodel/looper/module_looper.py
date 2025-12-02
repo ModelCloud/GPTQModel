@@ -21,9 +21,10 @@ import time
 import logging
 from concurrent.futures import as_completed
 from contextlib import nullcontext
-from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, NamedTuple, Optional, TYPE_CHECKING
 
 import torch
+import torch.nn as nn
 
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
@@ -959,6 +960,36 @@ class ModuleLooper():
 
         progress_cb = _replica_progress if progress_pb is not None else None
 
+        # Check if we need to apply MoE lifecycle hooks
+        moe_hooks_active = False
+        moe_block = None
+        moe_forward_original = None
+        
+        if self._should_use_moe_lifecycle(module, processor):
+            hooks = self.gptq_model.moe_lifecycle_hooks
+            moe_block = hooks.get_moe_block(module, self.gptq_model.__class__)
+            
+            if moe_block is not None:
+                # Save original forward method
+                moe_forward_original = moe_block.forward
+                
+                # Create wrapper that forwards to all experts
+                def moe_forward_wrapper(hidden_states, **kwargs):
+                    return hooks.forward_to_all_experts(
+                        moe_block=moe_block,
+                        hidden_states=hidden_states,
+                        processor=processor,
+                        subset=self._current_subset,
+                        original_forward=moe_forward_original,
+                        model_class=self.gptq_model.__class__,
+                        **kwargs
+                    )
+                
+                # Apply the wrapper to the original module before cloning
+                moe_block.forward = moe_forward_wrapper
+                moe_hooks_active = True
+                log.info(f"[MOEDEBUG] MoE lifecycle hooks activated for parallel execution on {type(moe_block).__name__}")
+
         # Ensure any async replication/memcpy ops are complete before threads start fanning out.
         torch_sync()
 
@@ -969,6 +1000,11 @@ class ModuleLooper():
                 progress_callback=progress_cb,
             )
         finally:
+            # Restore original forward method on the original module if we modified it
+            if moe_hooks_active and moe_forward_original is not None and moe_block is not None:
+                moe_block.forward = moe_forward_original
+                log.info(f"[MOEDEBUG] MoE lifecycle hooks deactivated on original module")
+                
             if replica_pb is not None:
                 replica_pb.close()
             if progress_pb is not None:
@@ -1067,6 +1103,8 @@ class ModuleLooper():
         # ensure replicas release promptly and free GPU memory
         for dev in list(module_replicas.keys()):
             del module_replicas[dev]
+            
+        # Note: We don't need to restore the forward method on replicas since they're being deleted
 
         if not need_outputs:
             return []
