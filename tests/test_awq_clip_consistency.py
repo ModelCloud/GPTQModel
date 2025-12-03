@@ -2,7 +2,7 @@ import torch
 from parameterized import parameterized
 
 from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 
 
 class _ClipTestAWQProcessor(AWQProcessor):
@@ -67,7 +67,7 @@ def test_awq_clip_consistency(device_name: str, device_str: str):
         raise AssertionError("CUDA is not available for clip consistency test")
 
     dtype = torch.float32 if device_name == "cpu" else torch.float16
-    processor = _ClipTestAWQProcessor(QuantizeConfig(group_size=128))
+    processor = _ClipTestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
 
     out_features = 256
     in_features = 3584

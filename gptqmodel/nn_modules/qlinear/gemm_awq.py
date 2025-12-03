@@ -15,6 +15,7 @@ from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.utils import get_best_device
 from ...utils.backend import BACKEND
 
+
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
 
