@@ -24,7 +24,7 @@ import time
 
 import torch
 
-from tests.models.model_test import ModelTest
+from models.model_test import ModelTest
 
 
 def gib_to_elems_fp16(gib: float) -> int:
