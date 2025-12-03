@@ -503,18 +503,36 @@ def run_layer_stage(
                         )
 
                 if finalize_futures_snapshot:
-                    # Drain finalize futures asynchronously so the main loop can continue scheduling work.
-                    threading.Thread(
-                        target=_drain_finalize_futures,
-                        args=(
+                    # Check if we should wait for layer completion before proceeding to next layer
+                    wait_for_completion = getattr(
+                        looper.gptq_model.quantize_config,
+                        'wait_for_layer_completion',
+                        False
+                    )
+
+                    if wait_for_completion:
+                        # Synchronous: wait for all finalization to complete before proceeding to next layer
+                        # This ensures all packing and writing tasks are done
+                        _drain_finalize_futures(
                             [future for future, *_ in finalize_futures_snapshot],
                             finalize_pb,
                             finalize_count,
                             layer_index,
-                        ),
-                        name="SubmoduleFinalizeWatcher",
-                        daemon=True,
-                    ).start()
+                        )
+                    else:
+                        # Asynchronous (current/default behavior): drain in background thread
+                        # This allows next layer to start while current layer finalizes
+                        threading.Thread(
+                            target=_drain_finalize_futures,
+                            args=(
+                                [future for future, *_ in finalize_futures_snapshot],
+                                finalize_pb,
+                                finalize_count,
+                                layer_index,
+                            ),
+                            name="SubmoduleFinalizeWatcher",
+                            daemon=True,
+                        ).start()
                 else:
                     looper._emit_layer_complete(
                         layer_idx=layer_index,

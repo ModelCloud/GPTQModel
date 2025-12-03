@@ -269,6 +269,13 @@ class QuantizeConfig():
         metadata={"help": "Forward entire calibration dataset to all MoE experts (not just routed experts)"}
     )
 
+    # Control whether to wait for layer finalization (packing, writing) before proceeding to next layer
+    # Default False preserves current behavior (async finalization in background while next layer starts)
+    wait_for_layer_completion: bool = field(
+        default=False,
+        metadata={"help": "Wait for all layer finalization tasks (packing, writing) to complete before proceeding to next layer"}
+    )
+
 
     def __post_init__(self):
         fields_info = fields(self)

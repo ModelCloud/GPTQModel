@@ -1011,7 +1011,6 @@ class ModuleLooper():
         # Apply MoE lifecycle hooks to ALL replicas (not just the original module)
         moe_contexts = []
         if self._should_use_moe_lifecycle(module, processor):
-            hooks = self.gptq_model.moe_lifecycle_hooks
             for device, replica in module_replicas.items():
                 # Create and activate context for each replica
                 ctx = self.MoELifecycleContext(self, replica, processor, self._current_subset)
