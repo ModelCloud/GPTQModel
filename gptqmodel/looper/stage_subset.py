@@ -270,7 +270,7 @@ def run_subset_stage(
                 original_hook = processor.pre_process_fwd_hook(name)
                 # Use pre-hook for MoE modules to fire before StopForward
                 if is_moe_module:
-                    subset[name].forward_hook = looper._masked_pre_hook_wrapper(processor, original_hook)
+                    subset[name].forward_hook = looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
                 else:
                     subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
                 enable_stop = processor.fwd_after_process or getattr(processor, "subset_forward_early_stop", False)
@@ -281,7 +281,7 @@ def run_subset_stage(
                 # Use pre-hook registration for MoE modules
                 if is_moe_module:
                     handle.append(subset[name].register_forward_hook(
-                        looper._masked_pre_hook_wrapper(processor, original_hook)
+                        looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
                     ))
                 else:
                     handle.append(subset[name].register_forward_hook(
