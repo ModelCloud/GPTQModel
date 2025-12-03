@@ -24,6 +24,8 @@ import time
 
 import torch
 
+from tests.models.model_test import ModelTest
+
 
 def gib_to_elems_fp16(gib: float) -> int:
     # 1 GiB = 1024**3 bytes; fp16 = 2 bytes/elem
@@ -129,5 +131,6 @@ def main():
     print(f"  GPU to CPU Pageable: {bw_dtoh_pageable:.2f}")
     print(f"  GPU to CPU Pinned  : {bw_dtoh_pinned:.2f}")
 
-if __name__ == "__main__":
-    main()
+class Test(ModelTest):
+    def test(self):
+        main()
