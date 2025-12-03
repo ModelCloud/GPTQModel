@@ -993,23 +993,30 @@ class ModuleLooper():
         # Ensure any async replication/memcpy ops are complete before threads start fanning out.
         torch_sync()
         
-        # MoE lifecycle hooks integration - using context manager
-        with self.MoELifecycleContext(self, module, processor, self._current_subset):
+        # Clone modules FIRST, then apply MoE lifecycle hooks to all replicas
+        try:
+            module_replicas = clone_module_for_devices(
+                module,
+                devices,
+                progress_callback=progress_cb,
+            )
+        finally:
+            if replica_pb is not None:
+                replica_pb.close()
+            if progress_pb is not None:
+                progress_pb.title(effective_title).subtitle(
+                    f"{stage_label} rows 0/{total_rows}"
+                ).draw()
 
-            try:
-                module_replicas = clone_module_for_devices(
-                    module,
-                    devices,
-                    progress_callback=progress_cb,
-                )
-            finally:
-                # Context manager handles restoring the forward method on the original module
-                if replica_pb is not None:
-                    replica_pb.close()
-                if progress_pb is not None:
-                    progress_pb.title(effective_title).subtitle(
-                        f"{stage_label} rows 0/{total_rows}"
-                    ).draw()
+        # Apply MoE lifecycle hooks to ALL replicas (not just the original module)
+        moe_contexts = []
+        if self._should_use_moe_lifecycle(module, processor):
+            hooks = self.gptq_model.moe_lifecycle_hooks
+            for device, replica in module_replicas.items():
+                # Create and activate context for each replica
+                ctx = self.MoELifecycleContext(self, replica, processor, self._current_subset)
+                ctx.__enter__()
+                moe_contexts.append(ctx)
 
             prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
 
@@ -1099,6 +1106,14 @@ class ModuleLooper():
                             f"{stage_label} rows {processed_rows}/{total_rows}"
                         ).draw()
 
+
+            # Clean up MoE lifecycle hooks from all replicas
+            for ctx in moe_contexts:
+                try:
+                    ctx.__exit__(None, None, None)
+                except Exception:
+                    pass
+            
             # ensure replicas release promptly and free GPU memory
             for dev in list(module_replicas.keys()):
                 del module_replicas[dev]
