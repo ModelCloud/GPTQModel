@@ -513,11 +513,26 @@ class GPTQModel:
                 model_args["gptqmodel"] = True
             model_args["pretrained"] = model_id_or_path
 
+            # TODO FIXME lm-eval latest broken imports
+            # lm_eval indirectly imports sglang, which expects newer Triton helpers.
+            # Provide shims so import succeeds on older triton/runtime builds.
+            try:
+                from triton.runtime import cache as triton_cache
+
+                if not hasattr(triton_cache, "default_cache_dir"):
+                    triton_cache.default_cache_dir = lambda: getattr(triton_cache.knobs.cache, "dir", None)
+                if not hasattr(triton_cache, "default_override_dir"):
+                    triton_cache.default_override_dir = lambda: getattr(triton_cache.knobs.cache, "override_dir", None)
+                if not hasattr(triton_cache, "default_dump_dir"):
+                    triton_cache.default_dump_dir = lambda: getattr(triton_cache.knobs.cache, "dump_dir", None)
+            except Exception as exc:
+                log.warning("Triton cache shim failed; lm_eval import may fail: %s", exc)
+
             try:
                 from lm_eval import simple_evaluate
                 from lm_eval.models.huggingface import HFLM
-            except BaseException:
-                raise ValueError("lm_eval is not installed. Please install via `pip install gptqmodel[eval]`.")
+            except BaseException as e:
+                raise ValueError(f"lm_eval import failed: {e}. Please install via `pip install gptqmodel[eval]`.") from e
 
             if llm_backend == "gptqmodel" and model is not None:
                 model_name = HFLM(
@@ -550,19 +565,35 @@ class GPTQModel:
             apply_chat_template = args.pop("apply_chat_template", False) # args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False)
             log.info(f"LM-EVAL: `apply_chat_template` = `{apply_chat_template}`")
 
-            results = simple_evaluate(
-                model=model_name,
-                model_args=model_args,
-                tasks=[task.value for task in tasks],
-                batch_size=batch_size,
-                apply_chat_template=apply_chat_template,
-                gen_kwargs=gen_kwargs,
-                random_seed=random_seed,
-                numpy_random_seed=random_seed,
-                torch_random_seed=random_seed,
-                fewshot_random_seed=random_seed,
-                **args,
-            )
+            # TODO FIXME lm-eval latest broken imports
+            # lm_eval pretty prints task yaml paths using Path.relative_to; when custom tasks live outside the
+            # installed lm_eval package tree this raises ValueError. Monkeypatch to fall back to absolute paths.
+            from pathlib import Path
+            original_relative_to = Path.relative_to
+
+            def _relative_to_noerror(self, other, *extra_args, **kwargs):
+                try:
+                    return original_relative_to(self, other, *extra_args, **kwargs)
+                except ValueError:
+                    return self
+
+            Path.relative_to = _relative_to_noerror
+            try:
+                results = simple_evaluate(
+                    model=model_name,
+                    model_args=model_args,
+                    tasks=[task.value for task in tasks],
+                    batch_size=batch_size,
+                    apply_chat_template=apply_chat_template,
+                    gen_kwargs=gen_kwargs,
+                    random_seed=random_seed,
+                    numpy_random_seed=random_seed,
+                    torch_random_seed=random_seed,
+                    fewshot_random_seed=random_seed,
+                    **args,
+                )
+            finally:
+                Path.relative_to = original_relative_to
 
             if results is None:
                 raise ValueError('lm_eval run fail, check your code!!!')
