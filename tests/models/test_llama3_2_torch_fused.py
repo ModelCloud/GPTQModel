@@ -3,11 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from model_test import ModelTest
 from parameterized import parameterized
 
-from gptqmodel import GPTQModel, BACKEND
+from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.models._const import DEVICE
-from model_test import ModelTest
+
 
 class TestLlama_TorchFused(ModelTest):
     NATIVE_MODEL_ID = "ModelCloud/Llama-3.2-1B-gptqmodel-ci-4bit"

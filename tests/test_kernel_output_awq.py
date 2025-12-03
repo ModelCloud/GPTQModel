@@ -24,6 +24,8 @@ from gptqmodel.nn_modules.qlinear.marlin_awq import (
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
 from gptqmodel.utils.marlin import marlin_make_workspace_new
+
+
 try:
     from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonQuantLinear
 
