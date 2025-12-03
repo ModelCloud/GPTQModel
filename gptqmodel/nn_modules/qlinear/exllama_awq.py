@@ -56,7 +56,6 @@ class AwqExllamaQuantLinear(AWQuantLinear):
             bias: bool = False,
             pack_dtype: torch.dtype = torch.int32,
             adapter: Adapter = None,
-            register_buffers: bool = False,
             **kwargs,
     ):
         super().__init__(
