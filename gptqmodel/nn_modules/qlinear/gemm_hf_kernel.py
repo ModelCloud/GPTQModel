@@ -13,18 +13,30 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from ...utils.torch import TORCH_HAS_FUSED_OPS
 
 
 log = setup_logger()
 
 gemm_int4_forward_kernel = None
 
-def test_gemm(input, weight, zeros, scales , group_size):
+def fallback_gemm(input, weight, zeros, scales , group_size):
     f_weight = (weight - zeros.T.repeat_interleave(group_size, dim=1)) * scales.T.repeat_interleave(group_size, dim=1)
     return torch.matmul(input, f_weight.T)
 
-gemm_int4_forward_kernel = test_gemm
+try:
+    from pathlib import Path
+
+    from kernels import get_local_kernel
+
+    gemm_int4_forward_kernel = get_local_kernel(
+        repo_path=Path(
+            "/home/jiqing/ssp57swwhbsb2jx7a2jbavvz9b4m4fvh-quantization_gptq-torch-ext"
+        ),
+        package_name="quantization_gptq",
+    ).gemm_int4_forward
+except Exception as exc:  # pragma: no cover - best effort fallback
+    gemm_int4_forward_kernel = fallback_gemm
+    log.warning("Failed to load CPU gemm_4bit kernel: %s. Use fallback path", exc)
 
 
 class HFKernelLinear(PackableQuantLinear):
@@ -208,7 +220,7 @@ class HFKernelLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if not self.training and not self.transformed and gemm_int4_forward_kernel is not None:
+        if not self.training and not self.transformed:
             self.transform(x.dtype, x.device.type)
             self.transformed = True
 
