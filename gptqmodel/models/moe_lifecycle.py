@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional, Set
 import torch
 import torch.nn as nn
 
+from ..nn_modules.hooked_linear import StopForward
 from ..utils.logger import setup_logger
 
 log = setup_logger()
@@ -49,17 +50,11 @@ class MoELifecycleHooks:
         moe_module_name = model_class.get_moe_module_name()
         
         if moe_module_name is None:
-            log.info(f"[MOEDEBUG] No :moe flag found in module_tree for {model_class.__name__}")
+            log.error(f"No :moe flag found in module_tree for {model_class.__name__}")
             return None
         
         # Get the module by name
         moe_block = getattr(layer_module, moe_module_name, None)
-        
-        if moe_block is None:
-            log.info(
-                f"[MOEDEBUG] MoE module '{moe_module_name}' not found in layer {type(layer_module).__name__}. "
-                f"This is normal for layers without MoE (layer_modules_strict=False)"
-            )
         
         return moe_block
     
@@ -81,10 +76,8 @@ class MoELifecycleHooks:
         name = self.get_experts_module_name(moe_block)
         if name:
             experts_module = getattr(moe_block, name)
-            log.info(f"[MOEDEBUG] Found experts module: {type(moe_block).__name__}.{name}")
             return experts_module
         
-        log.info(f"[MOEDEBUG] No experts module found in MoE block {type(moe_block).__name__}")
         return None
     
     def get_experts_module_name(self, moe_block: nn.Module) -> Optional[str]:
@@ -147,7 +140,6 @@ class MoELifecycleHooks:
         name = self.get_shared_experts_module_name(moe_block)
         if name:
             shared_experts_module = getattr(moe_block, name)
-            log.info(f"[MOEDEBUG] Found shared experts module: {type(moe_block).__name__}.{name}")
             return shared_experts_module
         
         # This is normal - not all MoE models have shared experts
@@ -184,7 +176,7 @@ class MoELifecycleHooks:
             Output tensor from routed forward pass
         """
         log.error(
-            f"[MOEDEBUG] forward_to_all_experts not implemented for {type(moe_block).__name__}. "
+            f"forward_to_all_experts not implemented for {type(moe_block).__name__}. "
             f"Falling back to normal forward. Override this method "
             f"for model-specific implementation."
         )
@@ -291,12 +283,13 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         import torch.nn.functional as F
         
         if not processor or not original_forward:
-            error_msg = "[MOEDEBUG] Missing processor or original_forward - this is an invalid operation that should never happen"
+            error_msg = "Missing processor or original_forward"
             log.error(error_msg)
             raise ValueError(error_msg)
         
         if moe_block_prefix is None:
-            log.info(f"[MOEDEBUG] moe_block_prefix is None fallback to original forward")
+            # moe_block_prefix is None fallback to original forward 
+            # this is normal for example glm4_moe has 1-3 :moe layers without experts
             return original_forward(hidden_states, **kwargs)
 
         expert_count = 0
@@ -334,24 +327,16 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                         has_expert_projs = True
                         break
         
-        log.info(f"[MOEDEBUG] has_shared_experts: {has_shared_experts}, has_expert_projs: {has_expert_projs}")
-        
         # Forward to shared experts if they exist AND if any of their modules are in subset
         # Simply call the shared expert module's forward - hooks will fire for projections in subset
         if has_shared_experts and shared_expert_attr_name:
-            log.info(f"[MOEDEBUG] Forwarding to {shared_expert_attr_name}")
             try:
                 # Get the shared expert module and call its forward
                 shared_expert_module = getattr(moe_block, shared_expert_attr_name)
-                result = shared_expert_module(hidden_states)
+                shared_expert_module(hidden_states)
                 expert_count += 1
-                log.info(f"[MOEDEBUG] {shared_expert_attr_name}: Forward complete")
-            except Exception as e:
-                if "StopForward" in str(type(e).__name__):
-                    stop_forward_raised = True
-                    log.info(f"[MOEDEBUG] {shared_expert_attr_name}: StopForward raised")
-                else:
-                    log.info(f"[MOEDEBUG] {shared_expert_attr_name}: Error: {e}")
+            except StopForward:
+                stop_forward_raised = True
         
         # Forward to all individual experts
         if has_expert_projs and experts_module is not None and hasattr(experts_module, '__iter__') and experts_attr_name:
@@ -361,7 +346,6 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             else:
                 hidden_states_2d = hidden_states
             
-            log.info(f"[MOEDEBUG] Starting to forward to {len(experts_module)} experts")
             for expert_idx, expert in enumerate(experts_module):
                 # Construct keys for this expert's projections using the detected attribute name
                 gate_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.gate_proj_name}"
@@ -372,14 +356,11 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                 if gate_key not in subset and up_key not in subset and down_key not in subset:
                     continue
                 
-                log.info(f"[MOEDEBUG] Processing expert {expert_idx}")
                 try:
                     # Strategy: If down_proj is in subset, compute intermediate on-the-fly
                     # Note: When down is in subset, gate/up are NOT in subset (separate subset groups)
                     # We need to compute gate/up outputs to create the intermediate for down
                     if down_key in subset:
-                        log.info(f"[MOEDEBUG] Expert {expert_idx}: Has down_proj in subset")
-                        
                         # Get gate/up modules directly from expert via getattr
                         # This returns the UNWRAPPED modules (not NamedModule wrappers)
                         # Hooks are only registered on NamedModule wrappers in subset,
@@ -398,35 +379,25 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                             intermediate = F.silu(gate_out) * up_out
                         
                         # Call down_proj via wrapper with hooks enabled for activation collection
-                        down_result = subset[down_key](intermediate)
+                        subset[down_key](intermediate)
                         expert_count += 1
-                        log.info(f"[MOEDEBUG] Expert {expert_idx}: Forwarded (intermediate + down_proj)")
                     else:
                         # For gate_proj/up_proj in subset, just call them directly via wrappers
-                        log.info(f"[MOEDEBUG] Expert {expert_idx}: Using direct projection calls")
                         called_any = False
                         if gate_key in subset:
-                            gate_result = subset[gate_key](hidden_states_2d)
+                            subset[gate_key](hidden_states_2d)
                             called_any = True
                         if up_key in subset:
-                            up_result = subset[up_key](hidden_states_2d)
+                            subset[up_key](hidden_states_2d)
                             called_any = True
                         if called_any:
                             expert_count += 1
-                            log.info(f"[MOEDEBUG] Expert {expert_idx}: Forwarded (direct)")
                 
-                except Exception as e:
-                    if "StopForward" in str(type(e).__name__):
-                        stop_forward_raised = True
-                        log.info(f"[MOEDEBUG] Expert {expert_idx}: StopForward raised")
-                    else:
-                        log.info(f"[MOEDEBUG] Expert {expert_idx}: Error: {e}")
-        
-        log.info(f"[MOEDEBUG] Forwarded to {expert_count} experts for subset calibration")
+                except StopForward:
+                    stop_forward_raised = True
         
         if stop_forward_raised:
             # Re-raise StopForward if it was caught
-            from ..nn_modules.hooked_linear import StopForward  # Local import to avoid circular dependency
             raise StopForward()
         
         # After forcing all experts to see the data for calibration,
