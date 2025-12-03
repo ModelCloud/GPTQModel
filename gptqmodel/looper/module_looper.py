@@ -1018,126 +1018,125 @@ class ModuleLooper():
                 ctx.__enter__()
                 moe_contexts.append(ctx)
 
-            prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
+        prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
 
-            results: Dict[int, torch.Tensor | tuple | None] = {}
+        results: Dict[int, torch.Tensor | tuple | None] = {}
 
-            processed_rows = 0
-            device_segments: Dict[torch.device, List[int]] = {}
-            segment_start = 0
-            num_devices = len(devices)
+        processed_rows = 0
+        device_segments: Dict[torch.device, List[int]] = {}
+        segment_start = 0
+        num_devices = len(devices)
 
-            for index, device in enumerate(devices):
-                # Split the outstanding batches across devices so that each accelerator
-                # receives a contiguous slice.
-                remaining_batches = max(total_batches - segment_start, 0)
-                remaining_devices = max(num_devices - index, 1)
-                segment_length = remaining_batches // remaining_devices
-                remainder = remaining_batches % remaining_devices
-                if remainder > 0:
-                    segment_length += 1
+        for index, device in enumerate(devices):
+            # Split the outstanding batches across devices so that each accelerator
+            # receives a contiguous slice.
+            remaining_batches = max(total_batches - segment_start, 0)
+            remaining_devices = max(num_devices - index, 1)
+            segment_length = remaining_batches // remaining_devices
+            remainder = remaining_batches % remaining_devices
+            if remainder > 0:
+                segment_length += 1
 
-                if segment_length <= 0:
-                    device_segments[device] = []
+            if segment_length <= 0:
+                device_segments[device] = []
+                continue
+
+            segment_end = min(segment_start + segment_length, total_batches)
+            device_segments[device] = list(range(segment_start, segment_end))
+            segment_start = segment_end
+
+        max_segment_length = 0
+        for indices in device_segments.values():
+            if len(indices) > max_segment_length:
+                max_segment_length = len(indices)
+
+        for position in range(max_segment_length):
+            # Submit one batch per device
+            futures = []
+            for device in devices:
+                segment_indices = device_segments.get(device, [])
+                if position >= len(segment_indices):
                     continue
+                batch_idx = segment_indices[position]
+                replica = module_replicas[device]
+                submitter = (
+                    DEVICE_THREAD_POOL.submit_serial
+                    if device.type in ("cuda", "xpu", "mps")
+                    else DEVICE_THREAD_POOL.submit
+                )
 
-                segment_end = min(segment_start + segment_length, total_batches)
-                device_segments[device] = list(range(segment_start, segment_end))
-                segment_start = segment_end
-
-            max_segment_length = 0
-            for indices in device_segments.values():
-                if len(indices) > max_segment_length:
-                    max_segment_length = len(indices)
-
-            for position in range(max_segment_length):
-                # Submit one batch per device
-                futures = []
-                for device in devices:
-                    segment_indices = device_segments.get(device, [])
-                    if position >= len(segment_indices):
-                        continue
-                    batch_idx = segment_indices[position]
-                    replica = module_replicas[device]
-                    submitter = (
-                        DEVICE_THREAD_POOL.submit_serial
-                        if device.type in ("cuda", "xpu", "mps")
-                        else DEVICE_THREAD_POOL.submit
+                futures.append(
+                    submitter(
+                        device,
+                        forward_batch_worker,
+                        replica,
+                        processor,
+                        batch_idx,
+                        layer_inputs[batch_idx],
+                        layer_input_kwargs[batch_idx],
+                        attention_masks[batch_idx],
+                        position_ids[batch_idx] if position_ids else None,
+                        support_batch_quantize=self.support_batch_quantize,
+                        is_lm_head_module=is_lm_head_module,
+                        need_output=need_outputs,
+                        reuse_kv=reuse_kv,
+                        prev_kv=prev_kv,
                     )
+                )
 
-                    futures.append(
-                        submitter(
-                            device,
-                            forward_batch_worker,
-                            replica,
-                            processor,
-                            batch_idx,
-                            layer_inputs[batch_idx],
-                            layer_input_kwargs[batch_idx],
-                            attention_masks[batch_idx],
-                            position_ids[batch_idx] if position_ids else None,
-                            support_batch_quantize=self.support_batch_quantize,
-                            is_lm_head_module=is_lm_head_module,
-                            need_output=need_outputs,
-                            reuse_kv=reuse_kv,
-                            prev_kv=prev_kv,
-                        )
-                    )
+            for fut in futures:
+                # Preserve the original batch order
+                batch_idx, module_output, kv_next = fut.result()
+                if need_outputs and module_output is not None:
+                    results[batch_idx] = module_output
+                if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
+                    shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)
 
-                for fut in futures:
-                    # Preserve the original batch order
-                    batch_idx, module_output, kv_next = fut.result()
-                    if need_outputs and module_output is not None:
-                        results[batch_idx] = module_output
-                    if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
-                        shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)
+                rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
+                if rows_for_batch <= 0:
+                    rows_for_batch = self._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
+                    rows_for_batch = max(rows_for_batch, 1)
 
-                    rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
-                    if rows_for_batch <= 0:
-                        rows_for_batch = self._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
-                        rows_for_batch = max(rows_for_batch, 1)
+                processed_rows = min(processed_rows + rows_for_batch, total_rows)
+                if progress_pb is not None:
+                    if progress_title:
+                        progress_pb.title(progress_title)
+                    progress_pb.current_iter_step = processed_rows
+                    progress_pb.subtitle(
+                        f"{stage_label} rows {processed_rows}/{total_rows}"
+                    ).draw()
 
-                    processed_rows = min(processed_rows + rows_for_batch, total_rows)
-                    if progress_pb is not None:
-                        if progress_title:
-                            progress_pb.title(progress_title)
-                        progress_pb.current_iter_step = processed_rows
-                        progress_pb.subtitle(
-                            f"{stage_label} rows {processed_rows}/{total_rows}"
-                        ).draw()
-
-
-            # Clean up MoE lifecycle hooks from all replicas
-            for ctx in moe_contexts:
-                try:
-                    ctx.__exit__(None, None, None)
-                except Exception:
-                    pass
+        # Clean up MoE lifecycle hooks from all replicas
+        for ctx in moe_contexts:
+            try:
+                ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+        
+        # ensure replicas release promptly and free GPU memory
+        for dev in list(module_replicas.keys()):
+            del module_replicas[dev]
             
-            # ensure replicas release promptly and free GPU memory
-            for dev in list(module_replicas.keys()):
-                del module_replicas[dev]
-                
-            # Note: Context manager handles restoring the forward method
+        # Note: Context manager handles restoring the forward method
 
-            if not need_outputs:
-                return []
+        if not need_outputs:
+            return []
 
-            ordered_outputs: List[List[torch.Tensor]] = []
-            for idx in range(total_batches):
-                # Rebuild the ordered list of batch outputs expected by the next
-                # stage.
-                module_output = results.get(idx)
-                if module_output is None:
-                    raise RuntimeError("Forward batch returned no output; data-parallel execution produced empty result.")
-                if isinstance(module_output, tuple):
-                    primary = module_output[0]
-                else:
-                    primary = module_output
-                primary = move_to(primary, device=cur_layer_device)
-                ordered_outputs.append([primary])
+        ordered_outputs: List[List[torch.Tensor]] = []
+        for idx in range(total_batches):
+            # Rebuild the ordered list of batch outputs expected by the next
+            # stage.
+            module_output = results.get(idx)
+            if module_output is None:
+                raise RuntimeError("Forward batch returned no output; data-parallel execution produced empty result.")
+            if isinstance(module_output, tuple):
+                primary = module_output[0]
+            else:
+                primary = module_output
+            primary = move_to(primary, device=cur_layer_device)
+            ordered_outputs.append([primary])
 
-            return ordered_outputs
+        return ordered_outputs
 
     def _masked_hook_wrapper(self, processor: LoopProcessor, inner_hook, hook_source: str):
         def hook(module, inputs, output):
