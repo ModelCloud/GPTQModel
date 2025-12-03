@@ -13,7 +13,7 @@ from pytest import MonkeyPatch
 from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
-from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.config import QuantizeConfig, METHOD, FORMAT
 
 
 QWEN3_HIDDEN_SIZE = 3584
@@ -223,7 +223,7 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
     batch_size = 4
     inp = torch.randn(batch_size, QWEN3_HIDDEN_SIZE, device=device_str, dtype=dtype)
 
-    processor = _TestAWQProcessor(QuantizeConfig(group_size=group_size))
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=group_size))
 
     captured = {}
 
