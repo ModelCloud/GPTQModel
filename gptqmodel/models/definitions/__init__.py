@@ -18,6 +18,7 @@ from .dbrx_converted import DbrxConvertedQModel
 from .decilm import DeciLMQModel
 from .deepseek_v2 import DeepSeekV2QModel
 from .deepseek_v3 import DeepSeekV3QModel
+from .dots1 import Dots1QModel
 from .dream import DreamQModel
 from .exaone import ExaOneQModel
 from .ernie4_5 import Ernie4_5QModel
