@@ -23,6 +23,8 @@ import time
 
 import torch
 
+from models.model_test import ModelTest
+
 
 def gib_to_elems_fp16(gib: float) -> int:
     # 1 GiB = 1024**3 bytes; fp16 = 2 bytes/elem
@@ -95,5 +97,6 @@ def main():
     # Summary
     print(f"Average bandwidth: {(bw_fwd + bw_bwd)/2:.2f} GiB/s")
 
-if __name__ == "__main__":
-    main()
+class Test(ModelTest):
+    def test(self):
+        main()

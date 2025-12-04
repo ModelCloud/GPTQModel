@@ -427,10 +427,12 @@ def select_quant_linear(
         qlinear = AwqTorchQuantLinear
     elif backend == BACKEND.TORCH:
         qlinear = TorchQuantLinear
-    elif backend == BACKEND.TORCH_FUSED:
-        qlinear = TorchFusedQuantLinear
     elif backend == BACKEND.HF_KERNEL:
         qlinear = HFKernelLinear
+    elif backend == BACKEND.TORCH_FUSED:
+        qlinear = TorchFusedQuantLinear
+    elif backend == BACKEND.TORCH_FUSED_AWQ:
+        qlinear = TorchFusedAwqQuantLinear
     else:
         qlinear = TorchQuantLinear
 

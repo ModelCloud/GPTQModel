@@ -11,11 +11,7 @@ dynamic = ["version"]
 description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
 readme = "README.md"
 requires-python = ">=3.10"
-license = "Apache-2.0"
-license-files = [
-    "LICENSE",
-    "licenses/LICENSE.apache",
-]
+license = { text = "Apache-2.0" }
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
 ]
@@ -46,7 +42,6 @@ dependencies = [
     "device-smi>=0.5.2",
     "protobuf>=6.32.0",
     "pillow>=11.3.0",
-    "pypcre>=0.2.5",
     "hf_transfer>=0.1.9",
     "huggingface_hub>=0.34.4",
     "random_word>=1.0.13",
@@ -56,7 +51,7 @@ dependencies = [
     "datasets>=3.6.0",
     "pyarrow>=21.0",
     "dill>=0.3.8", # datasets requirements
-    "pypcre>=0.2.4",
+    "pypcre>=0.2.6",
     "torchao>=0.14.1", # fix bad transformers 4.57.1 breaking torchao compat
     # "cython>=3.1.4", # required by hf-xet/hf-transfer
 # "flash-attn>=2.8.3", <-- install for lower vram usage
@@ -106,4 +101,10 @@ openai = [
 ]
 mlx = [
     "mlx_lm>=0.24.0",
+]
+
+[tool.setuptools]
+license-files = [
+    "LICENSE",
+    "licenses/LICENSE.apache",
 ]

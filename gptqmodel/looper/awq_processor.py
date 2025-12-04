@@ -91,14 +91,8 @@ class AWQProcessor(LoopProcessor):
         self._scale_context = threading.local()
         self.gptq_model = gptq_model
 
-        if qcfg.format == FORMAT.GEMM:
-            self.gptq_model.qlinear_kernel = AwqGEMMQuantLinear
-        elif qcfg.format == FORMAT.GEMV:
-            self.gptq_model.qlinear_kernel = AwqGEMVQuantLinear
-        elif qcfg.format == FORMAT.GEMV_FAST:
-            self.gptq_model.qlinear_kernel = AwqGEMVFastQuantLinear
-        else:
-            raise ValueError(f"METHOD.AWQ does not support this FORMAT: {qcfg.format}")
+        # Select a default AWQ kernel for this processor (per-module overrides can still apply).
+        self.qlinear_kernel = self._select_qlinear_kernel_for_format(qcfg.format)
 
         self.model = model
         # Whether to apply clipping to the model during quantization. Some models may perform better with this set to False.
@@ -122,6 +116,25 @@ class AWQProcessor(LoopProcessor):
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
+
+    def _select_qlinear_kernel_for_format(self, format_value: FORMAT):
+        fmt = FORMAT(format_value) if not isinstance(format_value, FORMAT) else format_value
+        if fmt == FORMAT.GEMM:
+            return AwqGEMMQuantLinear
+        if fmt == FORMAT.GEMV:
+            return AwqGEMVQuantLinear
+        if fmt == FORMAT.GEMV_FAST:
+            return AwqGEMVFastQuantLinear
+        # We do not allow saving to marlin format
+        # if fmt == FORMAT.MARLIN:
+        #     return AwqMarlinQuantLinear
+        raise ValueError(f"METHOD.AWQ does not support this FORMAT: {format_value}")
+
+    def _resolve_qlinear_kernel(self, module_name: Optional[str] = None):
+        # Honor per-module dynamic format overrides when present.
+        format_override = self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
+        target_format = format_override or self.qcfg.format
+        return self._select_qlinear_kernel_for_format(target_format)
 
     def _get_layer_state(self, layer_index: int) -> _AWQLayerState:
         with self._layer_states_lock:
@@ -279,21 +292,20 @@ class AWQProcessor(LoopProcessor):
         self._module_forward_kwargs = refreshed
 
     def _quantize_layer(self, layer_index: int, state: _AWQLayerState) -> None:
-        with state.lock:
-            if state.quantized:
-                return
+        if state.quantized:
+            return
 
-            layer_module = state.layer_module
-            if layer_module is None and state.modules:
-                sample_module = next(iter(state.modules.values()))
-                layer_path = sample_module.full_name.rsplit(".", 1)[0]
-                layer_module, _ = get_module_by_name_prefix(self.gptq_model.model, layer_path)
-                state.layer_module = layer_module
+        layer_module = state.layer_module
+        if layer_module is None and state.modules:
+            sample_module = next(iter(state.modules.values()))
+            layer_path = sample_module.full_name.rsplit(".", 1)[0]
+            layer_module, _ = get_module_by_name_prefix(self.gptq_model.model, layer_path)
+            state.layer_module = layer_module
 
-            layer_module_ref = state.layer_module
+        layer_module_ref = state.layer_module
 
-            if layer_module_ref is None:
-                raise RuntimeError(f"AWQProcessor: unable to resolve layer module for layer index {layer_index}")
+        if layer_module_ref is None:
+            raise RuntimeError(f"AWQProcessor: unable to resolve layer module for layer index {layer_index}")
 
         log.info(
             "AWQProcessor: layer %s tracking %s modules before quantization (subsets processed=%s/%s); first modules=%s",
@@ -331,27 +343,25 @@ class AWQProcessor(LoopProcessor):
                     "AWQProcessor: layer %s has no modules with captured activations; marking quantized.",
                     layer_index,
                 )
-                with state.lock:
-                    state.quantized = True
-                    state.processed_subsets.clear()
-                    state.subset_total = None
-                    state.previous_weight_scale = None
+                state.quantized = True
+                state.processed_subsets.clear()
+                state.subset_total = None
+                state.previous_weight_scale = None
                 if hasattr(self._scale_context, "layer_index"):
                     delattr(self._scale_context, "layer_index")
                 if hasattr(self._scale_context, "prev_scale"):
                     delattr(self._scale_context, "prev_scale")
                 return
 
-        with state.lock:
-            # Filtering MLP modules like Qwen3MoeSparseMoeBlock
-            def unwrap(m):
-                return m.module if isinstance(m, NamedModule) else m
+        # Filtering MLP modules like Qwen3MoeSparseMoeBlock
+        def unwrap(m):
+            return m.module if isinstance(m, NamedModule) else m
 
-            named_childs = {
-                name: module
-                for name, module in state.modules.items()
-                if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
-            }
+        named_childs = {
+            name: module
+            for name, module in state.modules.items()
+            if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
+        }
 
         module_kwargs_global = dict(self._module_forward_kwargs)
 
@@ -558,14 +568,13 @@ class AWQProcessor(LoopProcessor):
             start = time.time()
             self.pack_module(named_childs, start, scales_list)
 
-        with state.lock:
-            state.quantized = True
-            state.modules.clear()
-            state.pending_modules.clear()
-            state.layer_module = None
-            state.processed_subsets.clear()
-            state.subset_total = None
-            state.previous_weight_scale = None
+        state.quantized = True
+        state.modules.clear()
+        state.pending_modules.clear()
+        state.layer_module = None
+        state.processed_subsets.clear()
+        state.subset_total = None
+        state.previous_weight_scale = None
 
         with self.lock:
             for name in named_childs:
@@ -1078,6 +1087,7 @@ class AWQProcessor(LoopProcessor):
             linear_layer = named_module.module
             # NOTE: small regression in perplexity if linear layer uses .cpu().float()
             linear_layer = linear_layer.to(get_best_device()).half()
+            quant_linear_cls = self._resolve_qlinear_kernel(named_module.full_name)
 
             tp_info = named_module.state.get("tp_pad_info")
             pad_cols = 0
@@ -1194,7 +1204,7 @@ class AWQProcessor(LoopProcessor):
                 with parent_module_lock(parent_key):
                     create_quant_module(
                         name=named_module.full_name,
-                        linear_cls=self.gptq_model.qlinear_kernel,
+                        linear_cls=quant_linear_cls,
                         bits=self.qcfg.bits,
                         desc_act=self.qcfg.desc_act,
                         dynamic=self.qcfg.dynamic,
@@ -1217,7 +1227,7 @@ class AWQProcessor(LoopProcessor):
             # pack module
             qModules = {
                 name: submodule
-                for name, submodule in find_modules(self.gptq_model.model, [self.gptq_model.qlinear_kernel]).items()
+                for name, submodule in find_modules(self.gptq_model.model, [quant_linear_cls]).items()
                 if name == named_module.full_name
             }
             pack_start = time.perf_counter() if timer is not None else None
@@ -1234,7 +1244,7 @@ class AWQProcessor(LoopProcessor):
                         q_zeros=zeros,
                         q_g_idx=None,
                         layers=layers,
-                        quant_linear_cls=self.gptq_model.qlinear_kernel,
+                        quant_linear_cls=quant_linear_cls,
                         lock=self.lock,
                         quantize_config=self.qcfg,
                     )
@@ -1345,8 +1355,8 @@ class AWQProcessor(LoopProcessor):
                 )
             )
 
-        if should_quantize:
-            self._quantize_layer(layer_index, state)
+            if should_quantize:
+                self._quantize_layer(layer_index, state)
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
@@ -1355,17 +1365,6 @@ class AWQProcessor(LoopProcessor):
         module.state.pop("w", None) # no need for original weights now
 
     def finalize(self, model: BaseQModel, **kwargs):
-        if model.quantize_config.format == FORMAT.GEMM:
-            model.qlinear_kernel = AwqGEMMQuantLinear
-        elif model.quantize_config.format == FORMAT.GEMV:
-            model.qlinear_kernel = AwqGEMVQuantLinear
-        elif model.quantize_config.format == FORMAT.GEMV_FAST:
-            model.qlinear_kernel = AwqGEMVFastQuantLinear
-        elif model.quantize_config.format == FORMAT.MARLIN:
-            model.qlinear_kernel = AwqMarlinQuantLinear
-        else:
-            raise Exception(f"unkown format: {model.quantize_config.format}")
-
         # set quantized state
         model.quantized = True
 
