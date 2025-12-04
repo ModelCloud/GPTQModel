@@ -521,11 +521,21 @@ class ModuleLooper():
         # Check if model has lifecycle hooks
         hooks = getattr(self.gptq_model, 'moe_lifecycle_hooks', None)
         if hooks is None:
+            log.warn(
+                f"pass_whole_dataset_to_each_expert is enabled but {self.gptq_model.__class__.__name__} "
+                f"model does not have 'moe_lifecycle_hooks' configured. MoE optimization will be disabled. "
+                f"Please ensure your model definition has proper MoE lifecycle hooks configured."
+            )
             return False
-        
+
         # Check if this module contains an MoE block
         moe_block = hooks.get_moe_block(module, self.gptq_model.__class__)
         if moe_block is None:
+            log.warn(
+                f"pass_whole_dataset_to_each_expert is enabled but no MoE block found in module "
+                f"{module.__class__.__name__}. MoE optimization will be disabled for this module. "
+                f"This may indicate an issue with the model's MoE configuration or module structure."
+            )
             return False
         
         return True
