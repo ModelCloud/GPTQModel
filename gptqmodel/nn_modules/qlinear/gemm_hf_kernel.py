@@ -86,7 +86,7 @@ class HFKernelLinear(PackableQuantLinear):
             **kwargs)
 
         self.transformed = False
-        self.dequant_dtype = torch.uint8
+        self.dequant_dtype = torch.int8
 
     def post_init(self):
         super().post_init()
@@ -193,7 +193,7 @@ class HFKernelLinear(PackableQuantLinear):
             torch.bitwise_right_shift(
                 torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
                 self.wf_unsqueeze_neg_one  # self.wf.unsqueeze(-1)
-            ).to(self.dequant_dtype),
+            ).to(torch.uint8),
             self.maxq
         )
         ret_idx = self._build_ret_idx()
@@ -202,7 +202,7 @@ class HFKernelLinear(PackableQuantLinear):
         zeros = torch.bitwise_right_shift(
             torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
             self.wf_unsqueeze_zero  # self.wf.unsqueeze(0),
-        ).to(self.dequant_dtype)
+        ).to(torch.uint8)
         zeros = torch.bitwise_and(zeros, self.maxq).reshape(zeros.shape[0], -1)
         self.qzeros = zeros.contiguous()
 
