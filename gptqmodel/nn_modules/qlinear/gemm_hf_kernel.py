@@ -31,7 +31,8 @@ try:
         package_name="quantization_gptq",
     ).gemm_int4_forward
 except Exception as exc:  # pragma: no cover - best effort fallback
-    log.warning("Failed to load CPU gemm_4bit kernel: %s. Use fallback path", exc)
+    log.warning("Failed to load CPU gemm_4bit kernel: %s. Use fallback path. \
+                Please make sure you already `pip install kernels` and the kernels >= 0.11.1", exc)
 
 
 class HFKernelLinear(PackableQuantLinear):
