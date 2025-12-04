@@ -25,7 +25,7 @@ from ..utils.device import get_device, get_device_new
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import find_modules, get_module
 from ..utils.offload import offload_to_disk
-from ..utils.torch import CPU, torch_sync
+from ..utils.torch import CPU, torch_empty_cache, torch_sync
 from .stage_subset import SubsetForwardContext, run_subset_stage
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
@@ -503,14 +503,7 @@ def run_layer_stage(
                         )
 
                 if finalize_futures_snapshot:
-                    # Check if we should wait for layer completion before proceeding to next layer
-                    wait_for_completion = getattr(
-                        looper.gptq_model.quantize_config,
-                        'wait_for_layer_completion',
-                        False
-                    )
-
-                    if wait_for_completion:
+                    if looper.gptq_model.quantize_config.wait_for_completion:
                         # Synchronous: wait for all finalization to complete before proceeding to next layer
                         # This ensures all packing and writing tasks are done
                         _drain_finalize_futures(
@@ -519,6 +512,7 @@ def run_layer_stage(
                             finalize_count,
                             layer_index,
                         )
+                        torch_empty_cache()
                     else:
                         # Asynchronous (current/default behavior): drain in background thread
                         # This allows next layer to start while current layer finalizes

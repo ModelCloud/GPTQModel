@@ -377,9 +377,11 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                             intermediate = expert.act_fn(gate_out) * up_out
                         else:
                             intermediate = F.silu(gate_out) * up_out
+                        del gate_out, up_out
                         
                         # Call down_proj via wrapper with hooks enabled for activation collection
                         subset[down_key](intermediate)
+                        del intermediate
                         expert_count += 1
                     else:
                         # For gate_proj/up_proj in subset, just call them directly via wrappers

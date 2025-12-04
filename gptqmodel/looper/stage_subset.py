@@ -22,7 +22,7 @@ from ..looper.named_module import NamedModule
 from ..quantization.config import VRAMStrategy
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_sync
+from ..utils.torch import torch_empty_cache, torch_sync
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .module_looper import ModuleLooper
@@ -536,6 +536,9 @@ def run_subset_stage(
         name, named_module = fut.result()
         processed_subset[name] = named_module
     torch_sync()
+
+    if looper.gptq_model.quantize_config.wait_for_layer_completion:
+        torch_empty_cache()
 
     emit_subset_event("quant_complete")
 

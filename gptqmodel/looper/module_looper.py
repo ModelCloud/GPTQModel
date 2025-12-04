@@ -1106,19 +1106,18 @@ class ModuleLooper():
                             f"{stage_label} rows {processed_rows}/{total_rows}"
                         ).draw()
         finally:
-            # Clean up MoE lifecycle hooks from all replicas (guaranteed to run)
+            # Clean up MoE lifecycle hooks from all replicas
             for ctx in moe_contexts:
                 try:
                     ctx.__exit__(None, None, None)
                 except Exception:
                     pass
+            moe_contexts.clear()
         
         # ensure replicas release promptly and free GPU memory
         for dev in list(module_replicas.keys()):
             del module_replicas[dev]
             
-        # Note: Context manager handles restoring the forward method
-
         if not need_outputs:
             return []
 
