@@ -397,6 +397,11 @@ def run_subset_stage(
             if hasattr(subset[name], 'forward_hook'):
                 subset[name].forward_hook = None
                 subset[name].forward_hook_last = False
+
+        if looper.gptq_model.quantize_config.wait_for_layer_completion:
+            torch_sync()
+            torch_empty_cache()
+
     else:
         if DEBUG_ON:
             logger.debug(
