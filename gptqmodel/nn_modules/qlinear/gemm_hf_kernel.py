@@ -19,10 +19,6 @@ log = setup_logger()
 
 gemm_int4_forward_kernel = None
 
-def fallback_gemm(input, weight, zeros, scales , group_size):
-    f_weight = (weight - zeros.T.repeat_interleave(group_size, dim=1)) * scales.T.repeat_interleave(group_size, dim=1)
-    return torch.matmul(input, f_weight.T)
-
 try:
     from pathlib import Path
 
@@ -35,7 +31,6 @@ try:
         package_name="quantization_gptq",
     ).gemm_int4_forward
 except Exception as exc:  # pragma: no cover - best effort fallback
-    gemm_int4_forward_kernel = fallback_gemm
     log.warning("Failed to load CPU gemm_4bit kernel: %s. Use fallback path", exc)
 
 
@@ -220,7 +215,7 @@ class HFKernelLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if not self.training and not self.transformed:
+        if not self.training and not self.transformed and gemm_int4_forward_kernel is not None:
             self.transform(x.dtype, x.device.type)
             self.transformed = True
 
