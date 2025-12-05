@@ -142,6 +142,7 @@ from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
+from .definitions.mistral3 import Mistral3GPTQ
 
 
 # make quants and inference more determinisitc
@@ -244,6 +245,7 @@ MODEL_MAP = {
     "nemotron_h": NemotronHQModel,
     "bailing_moe": BailingMoeQModel,
     "lfm2_moe": LFM2MoeQModel,
+    "mistral3": Mistral3GPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
