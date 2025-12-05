@@ -247,7 +247,7 @@ jobs:
     container:
       image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_1021
       volumes:
-        - /home/ci/models/pyenv:/opt/pyenv
+        - /monster/ci/pyenv:/opt/pyenv
     steps:
       - name: Check matrix
         run: |
@@ -374,7 +374,7 @@ jobs:
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_1021
       volumes:
-        - /home/ci/models/pyenv:/opt/pyenv
+        - /monster/ci/pyenv:/opt/pyenv
     env:
       RELEASE_MODE: 0
     steps:
