@@ -20,7 +20,6 @@ log = setup_logger()
 gemm_int4_forward_kernel = None
 
 try:
-    from pathlib import Path
     from kernels import get_kernel
 
     gemm_int4_forward_kernel = get_kernel("kernels-community/quantization_gptq").gemm_int4_forward
