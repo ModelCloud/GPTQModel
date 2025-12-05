@@ -14,6 +14,7 @@ from torch import Tensor
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
+from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
 from gptqmodel.utils.model import find_modules
 
 
@@ -29,6 +30,7 @@ class TestKernelOutput(unittest.TestCase):
     target_qliner_map = {
         BACKEND.TORCH: TorchQuantLinear,
         BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
+        BACKEND.HF_KERNEL: HFKernelLinear,
     }
     target = 'model.layers.6.self_attn.v_proj'
     device = "cpu"
@@ -71,6 +73,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TORCH, 0.0000, 0.0005),
         # (BACKEND.TRITON,  0.0000, 0.0005),
         (BACKEND.TORCH_FUSED,  r_tolerance, a_tolerance),
+        (BACKEND.HF_KERNEL,  r_tolerance, a_tolerance),
     ])
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
         model = GPTQModel.load(self.model_path, backend=backend, device=self.device, dtype=self.dtype)
@@ -99,7 +102,7 @@ class TestKernelOutputXPUBFloat16(TestKernelOutputXPU):
     dtype = torch.bfloat16
 
 
-class TestTorchFusedKernelDevices(unittest.TestCase):
+class TestTorchFusedAndHFKernelDevices(unittest.TestCase):
     model_path = TestKernelOutput.model_path
     target_qliner_map = TestKernelOutput.target_qliner_map
     target = TestKernelOutput.target
@@ -149,23 +152,24 @@ class TestTorchFusedKernelDevices(unittest.TestCase):
         torch.testing.assert_close(a, b, rtol=rtol, atol=atol)
 
     @parameterized.expand([
-        ("cpu", "cpu"),
-        ("xpu", "xpu:0"),
+        ("cpu", "cpu", BACKEND.TORCH_FUSED),
+        ("cpu", "cpu", BACKEND.HF_KERNEL),
+        ("xpu", "xpu:0", BACKEND.TORCH_FUSED),
     ])
-    def test_torch_fused_matches_cpu_reference(self, _name: str, device: str):
+    def test_backends_matches_cpu_reference(self, _name: str, device: str, backend: BACKEND):
         if device.startswith("xpu") and not _xpu_available():
             self.skipTest("Test requires XPU")
 
         model = GPTQModel.load(
             self.model_path,
-            backend=BACKEND.TORCH_FUSED,
+            backend=backend,
             device=device,
             dtype=self.dtype,
         )
         failures = []
         for idx, sample in enumerate(self.inputs):
             model_input = sample.to(model.device)
-            fused_out = self.forward(model, model_input, BACKEND.TORCH_FUSED)
+            fused_out = self.forward(model, model_input, backend)
             reference = self.reference_outputs[idx]
             try:
                 self.assert_on_mismatch(
@@ -181,7 +185,7 @@ class TestTorchFusedKernelDevices(unittest.TestCase):
         table = tabulate(
             [
                 [
-                    BACKEND.TORCH_FUSED.name,
+                    backend.name,
                     str(self.dtype),
                     device,
                     len(self.inputs),
@@ -210,7 +214,7 @@ class TestTorchFusedKernelDevices(unittest.TestCase):
         if failures:
             raise AssertionError(f"{len(failures)} mismatched samples on device {device}")
 
-class TestTorchFusedKernelDevicesWithBias(TestTorchFusedKernelDevices):
+class TestTorchFusedAndHFKernelDevicesWithBias(TestTorchFusedAndHFKernelDevices):
     model_path = "/monster/data/model/bloom-560m-gptqmodel-4bit"
     target = 'transformer.h.6.self_attention.query_key_value'
     k = 1024

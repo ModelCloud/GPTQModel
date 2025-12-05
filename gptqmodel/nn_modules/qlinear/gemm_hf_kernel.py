@@ -179,8 +179,8 @@ class HFKernelLinear(PackableQuantLinear):
 
         self.qweight = final_qweight.contiguous()
 
-    def transform_cpu(self, dtype):
-        self.scales = self.scales.to(dtype).contiguous()
+    def transform_cpu(self):
+        self.scales = self.scales.to(torch.bfloat16).contiguous()
         # Unpack and reorder qweight
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(
@@ -199,9 +199,9 @@ class HFKernelLinear(PackableQuantLinear):
         zeros = torch.bitwise_and(zeros, self.maxq).reshape(zeros.shape[0], -1)
         self.qzeros = zeros.contiguous()
 
-    def transform(self, dtype, device):
+    def transform(self, device):
         if device == "cpu":
-            self.transform_cpu(dtype)
+            self.transform_cpu()
             self.convert_weight_packed_zp()
         else:
             raise NotImplementedError
@@ -210,7 +210,7 @@ class HFKernelLinear(PackableQuantLinear):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
         if not self.training and not self.transformed and gemm_int4_forward_kernel is not None:
-            self.transform(x.dtype, x.device.type)
+            self.transform(x.device.type)
             self.transformed = True
 
         if self.transformed:
