@@ -22,6 +22,7 @@ class BACKEND(str, Enum):
     MARLIN = "marlin" # FASTEST: marlin reduce ops in fp32 (higher precision -> more accurate, slightly slower)
     MARLIN_FP16 = "marlin_fp16" # FASTEST and then some: marlin reduce ops in fp16 (lower precision -> less accurate, slightly faster)
     BITBLAS = "bitblas" # EXTREMELY FAST: speed at the cost of 10+ minutes of AOT (ahead of time compilation with disk cache)
+    HF_KERNEL = "hf_kernel" # FAST: optimized from HuggingFace kernels-community
 
     # qqq
     QQQ = "qqq" # marlin based qqq kernel

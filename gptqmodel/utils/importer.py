@@ -32,6 +32,7 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from ..nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
+from ..nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT, METHOD
 from ..utils.logger import setup_logger
@@ -55,6 +56,7 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear, #
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
         BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
+        BACKEND.HF_KERNEL: HFKernelLinear, # optimized from HuggingFace kernels-community
         BACKEND.TORCH_FUSED: TorchFusedQuantLinear, # optimized for Intel XPU
         BACKEND.TRITON: TritonV2QuantLinear, # good all around kernel that JIT compiles
         # BACKEND.CUDA: DynamicCudaQuantLinear,
@@ -80,8 +82,8 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
 
 SUPPORTS_BACKEND_MAP = {
     METHOD.GPTQ: {
-        FORMAT.GPTQ: [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH_FUSED, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
-        FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
+        FORMAT.GPTQ: [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.HF_KERNEL, BACKEND.TRITON, BACKEND.TORCH_FUSED, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
+        FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.HF_KERNEL, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
         FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
         FORMAT.BITBLAS: [BACKEND.BITBLAS],
     },
@@ -425,6 +427,8 @@ def select_quant_linear(
         qlinear = AwqTorchQuantLinear
     elif backend == BACKEND.TORCH:
         qlinear = TorchQuantLinear
+    elif backend == BACKEND.HF_KERNEL:
+        qlinear = HFKernelLinear
     elif backend == BACKEND.TORCH_FUSED:
         qlinear = TorchFusedQuantLinear
     elif backend == BACKEND.TORCH_FUSED_AWQ:
