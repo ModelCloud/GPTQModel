@@ -262,18 +262,30 @@ class QuantizeConfig():
     # VRAM allocation strategy for MoE-heavy subsets
     vram_strategy: VRAMStrategy = field(default=VRAMStrategy.EXCLUSIVE)
 
+    # Control whether to wait for layer finalization (packing, writing) before proceeding to next layer
+    # Default False preserves current behavior (async finalization in background while next layer starts)
+    vram_opt_memory_cleanup_on_stage_end: bool = field(
+        default=False,
+        metadata={"help": "Also wait for all layer finalization tasks (packing, writing) to complete before proceeding to next layer"}
+    )
+
+    # Control whether to exclude device 0 from forward pass and quantization
+    exclude_device_0: bool = field(
+        default=False,
+        metadata={"help": "Exclude device 0 from forward pass and quantization to reserve memory for model weights, input/output tokens"}
+    )
+
     # MoE quantization: forward whole calibration dataset to each expert instead of only routed data
     # This ensures all experts receive sufficient calibration samples but increases quantization time
-    pass_whole_dataset_to_each_expert: bool = field(
+    moe_bypass_router: bool = field(
         default=False,
         metadata={"help": "Forward entire calibration dataset to all MoE experts (not just routed experts)"}
     )
 
-    # Control whether to wait for layer finalization (packing, writing) before proceeding to next layer
-    # Default False preserves current behavior (async finalization in background while next layer starts)
-    wait_for_layer_completion: bool = field(
+    # Works faster than data parallel with some configurations 
+    force_subset_forward_serial: bool = field(
         default=False,
-        metadata={"help": "Wait for all layer finalization tasks (packing, writing) to complete before proceeding to next layer"}
+        metadata={"help": "Force serial forward pass for subsets instead of data parallel"}
     )
 
 

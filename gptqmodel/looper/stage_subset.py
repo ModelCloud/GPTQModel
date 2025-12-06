@@ -195,7 +195,7 @@ def run_subset_stage(
                 assignable_group_keys: List[str] = []
                 for group_key, module_names in expert_groups.items():
                     suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
-                    if {"gate_proj", "up_proj"}.issubset(suffixes):
+                    if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
                         assignable_group_keys.append(group_key)
 
                 if assignable_group_keys:
@@ -218,6 +218,8 @@ def run_subset_stage(
     else:
         for named_module in subset.values():
             setattr(named_module, "moe_enabled", False)
+
+    subset_forward_serial = subset_forward_serial or looper.gptq_model.quantize_config.force_subset_forward_serial
 
     handle = []
 
@@ -398,7 +400,7 @@ def run_subset_stage(
                 subset[name].forward_hook = None
                 subset[name].forward_hook_last = False
 
-        if looper.gptq_model.quantize_config.wait_for_layer_completion:
+        if looper.gptq_model.quantize_config.vram_opt_memory_cleanup_on_stage_end:
             torch_sync()
             torch_empty_cache()
 
@@ -542,7 +544,7 @@ def run_subset_stage(
         processed_subset[name] = named_module
     torch_sync()
 
-    if looper.gptq_model.quantize_config.wait_for_layer_completion:
+    if looper.gptq_model.quantize_config.vram_opt_memory_cleanup_on_stage_end:
         torch_empty_cache()
 
     emit_subset_event("quant_complete")

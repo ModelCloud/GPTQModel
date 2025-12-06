@@ -503,7 +503,7 @@ def run_layer_stage(
                         )
 
                 if finalize_futures_snapshot:
-                    if looper.gptq_model.quantize_config.wait_for_layer_completion:
+                    if looper.gptq_model.quantize_config.vram_opt_memory_cleanup_on_stage_end:
                         # Synchronous: wait for all finalization to complete before proceeding to next layer
                         # This ensures all packing and writing tasks are done
                         _drain_finalize_futures(

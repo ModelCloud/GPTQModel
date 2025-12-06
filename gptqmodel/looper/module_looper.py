@@ -112,10 +112,6 @@ class ModuleLooper():
         if not quant_devices:
             quant_devices = [CPU]
 
-        self._quant_devices = quant_devices
-        self._quant_device_rr = 0
-        self._module_device_map: Dict[str, torch.device] = {}
-        self._quant_device_lock = threading.Lock()
         vram_strategy = getattr(self.gptq_model.quantize_config, "vram_strategy", VRAMStrategy.EXCLUSIVE)
         if isinstance(vram_strategy, str):
             try:
@@ -133,6 +129,23 @@ class ModuleLooper():
             )
             vram_strategy = VRAMStrategy.EXCLUSIVE
         self._vram_strategy = vram_strategy
+
+        # For vram_opt_exclude_device_0_from_compute=True, exclude device 0 from quantization device pool
+        # Device 0 holds inputs/outputs/modules, so quantization should happen on other devices
+        if self.gptq_model.quantize_config.vram_opt_exclude_device_0_from_compute:
+            quant_devices_filtered = [d for d in quant_devices if d.index != 0]
+            if len(quant_devices_filtered) >= 1:
+                quant_devices = quant_devices_filtered
+            else:
+                log.warn(
+                    f"vram_opt_exclude_device_0_from_compute=True: No devices available after excluding device 0. "
+                    "Using all devices including device 0 for quantization."
+                )
+
+        self._quant_devices = quant_devices
+        self._quant_device_rr = 0
+        self._module_device_map: Dict[str, torch.device] = {}
+        self._quant_device_lock = threading.Lock()
         self._moe_subset_threshold = 16
         self._subset_callback = getattr(self.gptq_model, "subset_callback", None)
         
@@ -177,6 +190,7 @@ class ModuleLooper():
                             model_class=self.module_looper.gptq_model.__class__,
                             module_looper=self.module_looper,  # Pass for TLS-based hooks pausing
                             moe_block_prefix=moe_block_prefix,
+                            replica_module=self.module,  # Pass replica for device-correct module resolution
                             **kwargs
                         )
                     
@@ -514,7 +528,7 @@ class ModuleLooper():
         - Module contains an MoE block
         """
         # Check if feature is enabled
-        flag_enabled = self.gptq_model.quantize_config.pass_whole_dataset_to_each_expert
+        flag_enabled = self.gptq_model.quantize_config.moe_bypass_router
         if not flag_enabled:
             return False
         
@@ -886,6 +900,12 @@ class ModuleLooper():
                     finally:
                         self._set_processor_mask(processor, None)
 
+                # Release intermediate tensors promptly after they are no longer needed
+                del layer_input
+                del attn_tensor
+                del keep_mask
+                del additional_inputs
+
                 if (
                     reuse_kv
                     and module_output is not None
@@ -899,6 +919,10 @@ class ModuleLooper():
                     primary = module_output[0] if isinstance(module_output, tuple) else module_output
                     primary = move_to(primary, device=cur_layer_device)
                     outputs.append([primary])
+
+                # Release module_output promptly after extracting what we need
+                if module_output is not None:
+                    del module_output
 
                 rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
                 if rows_for_batch <= 0:
@@ -1033,12 +1057,25 @@ class ModuleLooper():
             results: Dict[int, torch.Tensor | tuple | None] = {}
 
             processed_rows = 0
+            
+            # Check if device 0 should be excluded from forward execution
+            if self.gptq_model.quantize_config.vram_opt_exclude_device_0_from_compute:
+                forward_devices = [d for d in devices if d.index != 0]
+                if len(forward_devices) < 1:
+                    log.warn(
+                        f"vram_opt_exclude_device_0_from_compute=True: No devices available after excluding device 0. "
+                        "Using all devices including device 0."
+                    )
+                    forward_devices = devices
+            else:
+                forward_devices = devices
+            
             device_segments: Dict[torch.device, List[int]] = {}
             segment_start = 0
-            num_devices = len(devices)
+            num_devices = len(forward_devices)
 
-            for index, device in enumerate(devices):
-                # Split the outstanding batches across devices so that each accelerator
+            for index, device in enumerate(forward_devices):
+                # Split the outstanding batches across forward_devices so that each accelerator
                 # receives a contiguous slice.
                 remaining_batches = max(total_batches - segment_start, 0)
                 remaining_devices = max(num_devices - index, 1)
@@ -1063,7 +1100,7 @@ class ModuleLooper():
             for position in range(max_segment_length):
                 # Submit one batch per device
                 futures = []
-                for device in devices:
+                for device in forward_devices:
                     segment_indices = device_segments.get(device, [])
                     if position >= len(segment_indices):
                         continue
