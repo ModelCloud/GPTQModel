@@ -22,7 +22,7 @@ from ..looper.named_module import NamedModule
 from ..quantization.config import VRAMStrategy
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_sync
+from ..utils.torch import torch_empty_cache, torch_sync
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .module_looper import ModuleLooper
@@ -195,7 +195,7 @@ def run_subset_stage(
                 assignable_group_keys: List[str] = []
                 for group_key, module_names in expert_groups.items():
                     suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
-                    if {"gate_proj", "up_proj"}.issubset(suffixes):
+                    if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
                         assignable_group_keys.append(group_key)
 
                 if assignable_group_keys:
@@ -219,6 +219,8 @@ def run_subset_stage(
         for named_module in subset.values():
             setattr(named_module, "moe_enabled", False)
 
+    subset_forward_serial = subset_forward_serial or looper.gptq_model.quantize_config.force_subset_forward_serial
+
     handle = []
 
     # some processes are simple and not require forward captures
@@ -238,6 +240,20 @@ def run_subset_stage(
             forward_row_counts.extend([1] * (batch_count - len(forward_row_counts)))
 
         subset_size = len(subset)
+        
+        # Determine MoE block name for hook selection
+        moe_block_name = None
+        if looper.gptq_model and hasattr(looper.gptq_model, 'moe_lifecycle_hooks'):
+            hooks = looper.gptq_model.moe_lifecycle_hooks
+            if hooks is not None:
+                moe_block = hooks.get_moe_block(module, looper.gptq_model.__class__)
+                if moe_block is not None:
+                    # Get the full name/path of the MoE block
+                    for mod_name, mod in module.named_modules():
+                        if mod is moe_block:
+                            moe_block_name = mod_name
+                            break
+        
         for idx, (name, m) in enumerate(subset.items()):
             # Register the forward hook that captures activations for quantization.
             # The final module optionally flips a flag so processors can trigger
@@ -248,18 +264,31 @@ def run_subset_stage(
                 hook_source = getattr(m, "name", name)
             if hook_source is None:
                 hook_source = str(name)
+            
+            # Determine if this module is part of MoE block (needs pre-hook to avoid StopForward)
+            is_moe_module = moe_block_name and name.startswith(moe_block_name + ".")
 
             if hasattr(subset[name], 'forward_hook'):
                 original_hook = processor.pre_process_fwd_hook(name)
-                subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
+                # Use pre-hook for MoE modules to fire before StopForward
+                if is_moe_module:
+                    subset[name].forward_hook = looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
+                else:
+                    subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
                 enable_stop = processor.fwd_after_process or getattr(processor, "subset_forward_early_stop", False)
                 if is_last and enable_stop:
                     subset[name].forward_hook_last = True
             else:
                 original_hook = processor.pre_process_fwd_hook(name)
-                handle.append(subset[name].register_forward_hook(
-                    looper._masked_hook_wrapper(processor, original_hook, hook_source)
-                ))
+                # Use pre-hook registration for MoE modules
+                if is_moe_module:
+                    handle.append(subset[name].register_forward_hook(
+                        looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
+                    ))
+                else:
+                    handle.append(subset[name].register_forward_hook(
+                        looper._masked_hook_wrapper(processor, original_hook, hook_source)
+                    ))
 
         if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
             if is_awq_processor:
@@ -311,6 +340,8 @@ def run_subset_stage(
             )
 
         try:
+            # Set the current subset for MoE lifecycle hooks
+            looper._current_subset = subset
             forward_outputs = looper._run_forward_batches(
                 module=module,
                 processor=processor,
@@ -368,6 +399,11 @@ def run_subset_stage(
             if hasattr(subset[name], 'forward_hook'):
                 subset[name].forward_hook = None
                 subset[name].forward_hook_last = False
+
+        if looper.gptq_model.quantize_config.vram_opt_memory_cleanup_on_stage_end:
+            torch_sync()
+            torch_empty_cache()
+
     else:
         if DEBUG_ON:
             logger.debug(
@@ -507,6 +543,9 @@ def run_subset_stage(
         name, named_module = fut.result()
         processed_subset[name] = named_module
     torch_sync()
+
+    if looper.gptq_model.quantize_config.vram_opt_memory_cleanup_on_stage_end:
+        torch_empty_cache()
 
     emit_subset_event("quant_complete")
 
