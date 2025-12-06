@@ -270,7 +270,7 @@ class QuantizeConfig():
     )
 
     # Control whether to exclude device 0 from forward pass and quantization
-    exclude_device_0: bool = field(
+    vram_opt_exclude_device_0_from_compute: bool = field(
         default=False,
         metadata={"help": "Exclude device 0 from forward pass and quantization to reserve memory for model weights, input/output tokens"}
     )
