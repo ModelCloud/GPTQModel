@@ -828,10 +828,15 @@ class BaseQModel(nn.Module):
         # prepare processor worker (looper)
         module_looper = ModuleLooper(self, processors=processors)
 
-        result = module_looper.loop(
-            backend=backend,
-            fail_safe=self.quantize_config.fail_safe,
-        )
+        # When vram_opt_memory_cleanup_on_stage_end=True, disable auto-gc for the whole quantization process
+        # to prevent interference with manual cleanups performed at stage ends
+        gc_context = DEVICE_THREAD_POOL.no_auto_gc() if self.quantize_config.vram_opt_memory_cleanup_on_stage_end else nullcontext()
+        
+        with gc_context:
+            result = module_looper.loop(
+                backend=backend,
+                fail_safe=self.quantize_config.fail_safe,
+            )
 
         timer = getattr(self, "quant_region_timer", None)
         if timer is not None:
