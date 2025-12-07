@@ -243,8 +243,9 @@ def run_layer_stage(
                 #     )
 
                 try:
-                    # Set current subset for MoE lifecycle hooks
-                    looper._current_subset = subset_for_overrides
+                    # Reset current subset for MoE lifecycle hooks as we do not need to collect activation at this stage,
+                    # and need to collect only outputs produced by original forward
+                    looper._current_subset = None
                     layer_outputs = looper._run_forward_batches(
                         module=module,
                         processor=processor,
