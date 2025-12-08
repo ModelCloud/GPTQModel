@@ -1179,7 +1179,7 @@ class BaseQModel(nn.Module):
         if not getattr(self.quantize_config, "offload_to_disk", False):
             return 0
 
-        default_bytes = 512 * 1024 ** 3 #512MB
+        default_bytes = 512 * 1024 ** 2 #512MB
         raw = os.getenv("GPTQMODEL_RELOAD_THRESHOLD")
         if raw is None or raw.strip() == "":
             return default_bytes
