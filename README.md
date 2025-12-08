@@ -192,7 +192,7 @@ Native support support some of the most popular multi-modal models:
 | DeepSeek-V2-Lite  | ✅ | Granite     | ✅ | Instella      | ✅ | Phi 1-4   | ✅ | XVERSE          | ✅ |
 | Dream             | ✅ | GRIN-MoE    | ✅ | MiniCPM3      | ✅ | PanGu-α   | ✅ | Minimax M2      | ✅ |
 | ERNIE 4.5         | ✅ | Hymba       | ✅ | Mistral       | ✅ | Qwen 1/2/3 | ✅ | GLM 4.X         | ✅ |
-| Brumby            | ✅ | Dots1       | ✅ |               |  |      |  |              |  |
+| Brumby            | ✅ | Dots1       | ✅ | Mistral3      | ✅ |      |  |              |  |
 
 
 ## Platform and HW Support 
