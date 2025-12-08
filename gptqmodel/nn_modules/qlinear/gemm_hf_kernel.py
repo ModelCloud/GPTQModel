@@ -18,12 +18,14 @@ from ...utils.logger import setup_logger
 log = setup_logger()
 
 gemm_int4_forward_kernel = None
+gemm_int4_forward_kernel_exception = None
 
 try:
     from kernels import get_kernel
 
     gemm_int4_forward_kernel = get_kernel("kernels-community/quantization_gptq").gemm_int4_forward
 except Exception as exc:  # pragma: no cover - best effort fallback
+    gemm_int4_forward_kernel_exception = exc
     log.warning("Failed to load CPU gemm_4bit kernel: %s. Use fallback path. \
                 Please make sure you already `pip install kernels` and the kernels >= 0.11.1", exc)
 
@@ -80,6 +82,13 @@ class HFKernelLinear(PackableQuantLinear):
 
         self.transformed = False
         self.dequant_dtype = torch.int8
+
+    @classmethod
+    def validate(cls, **args):
+        if gemm_int4_forward_kernel_exception is not None:
+            return False, gemm_int4_forward_kernel_exception
+
+        return cls._validate(**args)
 
     def post_init(self):
         super().post_init()
