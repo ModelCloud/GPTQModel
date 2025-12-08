@@ -25,9 +25,9 @@ try:
 
     gemm_int4_forward_kernel = get_kernel("kernels-community/quantization_gptq").gemm_int4_forward
 except Exception as exc:  # pragma: no cover - best effort fallback
-    gemm_int4_forward_kernel_exception = exc
+    gemm_int4_forward_kernel_exception = str(exc)
     log.warning("Failed to load CPU gemm_4bit kernel: %s. Use fallback path. \
-                Please make sure you already `pip install kernels` and the kernels >= 0.11.1", exc)
+                Please make sure you already `pip install kernels` and the kernels >= 0.11.1", str(exc))
 
 
 class HFKernelLinear(PackableQuantLinear):
@@ -86,7 +86,7 @@ class HFKernelLinear(PackableQuantLinear):
     @classmethod
     def validate(cls, **args):
         if gemm_int4_forward_kernel_exception is not None:
-            return False, gemm_int4_forward_kernel_exception
+            return False, ImportError(gemm_int4_forward_kernel_exception)
 
         return cls._validate(**args)
 
