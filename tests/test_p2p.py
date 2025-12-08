@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch
-
 from models.model_test import ModelTest
 
 

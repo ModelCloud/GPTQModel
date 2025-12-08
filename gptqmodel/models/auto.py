@@ -114,6 +114,7 @@ from .definitions.mimo import MimoQModel  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCpm3QModel  # noqa: E402
 from .definitions.minimax_m2 import MiniMaxM2GPTQ  # noqa: E402
+from .definitions.mistral3 import Mistral3GPTQ
 from .definitions.mixtral import MixtralQModel  # noqa: E402
 from .definitions.mllama import MLlamaQModel  # noqa: E402
 from .definitions.mobilellm import MobileLLMQModel  # noqa: E402
@@ -142,7 +143,6 @@ from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
-from .definitions.mistral3 import Mistral3GPTQ
 
 
 # make quants and inference more determinisitc

@@ -1,7 +1,5 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from typing import Dict, Optional
-
 from transformers import AutoModelForPreTraining
 
 from ..base import BaseQModel
