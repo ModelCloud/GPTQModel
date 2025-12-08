@@ -1126,6 +1126,14 @@ class ModuleLooper():
         for processor in self.processors:
             processor.release_calibration_dataset()
 
+        if self.gptq_model.quantize_config.offload_to_disk:
+            log.info("Offloading base modules to disk...")
+            offload_to_disk(
+                model=self.gptq_model.model,
+                module=self.gptq_model.get_base_modules(model=self.gptq_model.model),
+                disk_path=self.gptq_model.quantize_config.offload_to_disk_path
+            )
+
         if region_timer is not None:
             region_timer.flush()
 
