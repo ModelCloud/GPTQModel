@@ -196,6 +196,14 @@ def find_modules(module: nn.Module, layers=None, name: str="") -> Dict[str, nn.M
     return res
 
 
+def get_module_by_name(module, child_name):
+    # get the child module by its name relative to the module
+    for name, m in module.named_modules():
+        if name == child_name:
+            return m
+    raise ValueError(f"Cannot find child_name {child_name} in module {module}")
+
+
 def get_module_by_name_prefix(model, module_name: Union[List[str], str]):
     module_name_list = module_name if isinstance(module_name, list) else [module_name]
     for name, module in model.named_modules():
@@ -1468,6 +1476,9 @@ def _collect_state_dict_with_offload(model: nn.Module, offload_root: str) -> Dic
         if name in state_dict:
             continue
         module_path, leaf = _split_parameter_path(name)
+        module = get_module_by_name(model, module_path)
+        if hasattr(module, "_non_persistent_buffers_set") and leaf in module._non_persistent_buffers_set:
+            continue
         if getattr(buf, "is_meta", False) or buf.device.type == "meta":
             source = _resolve_offload_entry(
                 offload_root,
@@ -1503,6 +1514,10 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
             state_dict[name] = TensorSource(name=name, torch_dtype=param.dtype, shape=tuple(param.shape), source=param)
         for name, buf in model.named_buffers():
             if name in state_dict:
+                continue
+            module_path, leaf = _split_parameter_path(name)
+            module = get_module_by_name(model, module_path)
+            if hasattr(module, "_non_persistent_buffers_set") and leaf in module._non_persistent_buffers_set:
                 continue
             state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
 
