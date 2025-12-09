@@ -70,6 +70,7 @@ from ..utils.eval import EVAL  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
 from .base import BaseQModel, QuantizeConfig  # noqa: E402
+from .definitions.afmoe import AfMoeQModel  # noqa: E402
 from .definitions.apertus import ApertusQModel  # noqa: E402
 from .definitions.baichuan import BaiChuanQModel  # noqa: E402
 from .definitions.bailing_moe import BailingMoeQModel  # noqa: E402
@@ -246,6 +247,7 @@ MODEL_MAP = {
     "bailing_moe": BailingMoeQModel,
     "lfm2_moe": LFM2MoeQModel,
     "mistral3": Mistral3GPTQ,
+    "afmoe": AfMoeQModel,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
