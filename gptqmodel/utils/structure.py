@@ -555,9 +555,13 @@ def alias_from_turtle_for_submodule(
         tb = t_bufs.get(name)
         t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)
         s_parent, _ = _get_parent_and_leaf_by_path(src_sub, name)
+
+        # nn.Module decides buffer persistence using `_non_persistent_buffers_set`:
+        # the buffer is persistent unless its name is in this set.
         persistent = True
         if hasattr(s_parent, "_non_persistent_buffers_set"):
             persistent = leaf not in s_parent._non_persistent_buffers_set
+
         if tb is None or getattr(tb, "is_meta", False) or tb.device.type == "meta":
             new_b = torch.empty_like(s_b, device=device)
             new_b.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))

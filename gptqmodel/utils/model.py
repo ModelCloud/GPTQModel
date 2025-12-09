@@ -1475,10 +1475,13 @@ def _collect_state_dict_with_offload(model: nn.Module, offload_root: str) -> Dic
     for name, buf in model.named_buffers():
         if name in state_dict:
             continue
+
+        # If the buffer is non-persistent, it does not need to be written to state_dict.
         module_path, leaf = _split_parameter_path(name)
         module = get_module_by_name(model, module_path)
         if hasattr(module, "_non_persistent_buffers_set") and leaf in module._non_persistent_buffers_set:
             continue
+
         if getattr(buf, "is_meta", False) or buf.device.type == "meta":
             source = _resolve_offload_entry(
                 offload_root,
@@ -1515,10 +1518,13 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
         for name, buf in model.named_buffers():
             if name in state_dict:
                 continue
+
+            # If the buffer is non-persistent, it does not need to be written to state_dict.
             module_path, leaf = _split_parameter_path(name)
             module = get_module_by_name(model, module_path)
             if hasattr(module, "_non_persistent_buffers_set") and leaf in module._non_persistent_buffers_set:
                 continue
+
             state_dict[name] = TensorSource(name=name, torch_dtype=buf.dtype, shape=tuple(buf.shape), source=buf)
 
     ptrs = collections.defaultdict(list)
