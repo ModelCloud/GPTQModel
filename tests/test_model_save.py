@@ -28,13 +28,13 @@ from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 class TestModelSave(unittest.TestCase):
 
     @classmethod
-    def setUpClass(self):
-        self.pretrained_model_id = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
+    def setUpClass(cls):
+        cls.pretrained_model_id = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.pretrained_model_id, use_fast=True)
+        cls.tokenizer = AutoTokenizer.from_pretrained(cls.pretrained_model_id, use_fast=True)
 
         traindata = load_dataset(path="/monster/data/model/dataset/nm-calibration", name="LLM", split="train")
-        self.calibration_dataset = traindata.select(range(1))
+        cls.calibration_dataset = traindata.select(range(1))
 
     @parameterized.expand([
         True,
