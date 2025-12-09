@@ -522,7 +522,7 @@ if BUILD_CUDA_EXT == "1":
         os.environ["NINJA_NUM_JOBS"] = str(effective_max_jobs)
         print(f"Using MAX_JOBS={effective_max_jobs} to cap concurrent CUDA compilations.")
 
-        nvcc_threads = 1
+        nvcc_threads = 2
         os.environ["NVCC_THREADS"] = str(nvcc_threads)
         print(f"Using NVCC_THREADS={nvcc_threads} for per-invocation NVCC concurrency.")
 
