@@ -529,7 +529,7 @@ def alias_from_turtle_for_submodule(
 
     # Resolve path & source submodule (on CPU/mmap)
     path = _get_qualified_name(target_model, target_submodule)
-    src_map = dict(turtle_model.named_modules())
+    src_map: Dict[str, nn.Module] = dict(turtle_model.named_modules())
     if path not in src_map:
         raise KeyError(f"Path '{path}' not found in turtle_model.")
     src_sub = src_map[path]
@@ -544,8 +544,8 @@ def alias_from_turtle_for_submodule(
                 continue
             t_p_new = _ensure_target_storage_on_device_(t_p, device)
             if t_p_new is not t_p:
-                parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)
-                setattr(parent, leaf, t_p_new)
+                t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)
+                setattr(t_parent, leaf, t_p_new)
                 t_p = t_p_new
             t_p.detach().copy_(s_p.detach(), non_blocking=(non_blocking and s_p.is_pinned()))
 
@@ -553,16 +553,24 @@ def alias_from_turtle_for_submodule(
     s_bufs = dict(src_sub.named_buffers(recurse=True))
     for name, s_b in s_bufs.items():
         tb = t_bufs.get(name)
-        parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)
+        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)
+        s_parent, _ = _get_parent_and_leaf_by_path(src_sub, name)
+
+        # nn.Module decides buffer persistence using `_non_persistent_buffers_set`:
+        # the buffer is persistent unless its name is in this set.
+        persistent = True
+        if hasattr(s_parent, "_non_persistent_buffers_set"):
+            persistent = leaf not in s_parent._non_persistent_buffers_set
+
         if tb is None or getattr(tb, "is_meta", False) or tb.device.type == "meta":
             new_b = torch.empty_like(s_b, device=device)
             new_b.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))
-            parent.register_buffer(leaf, new_b, persistent=True)
+            t_parent.register_buffer(leaf, new_b, persistent=persistent)
         else:
             if tb.device != device:
                 new_tb = torch.empty_like(s_b, device=device)
                 new_tb.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))
-                parent.register_buffer(leaf, new_tb, persistent=True)
+                t_parent.register_buffer(leaf, new_tb, persistent=persistent)
             else:
                 tb.copy_(s_b.detach(), non_blocking=(non_blocking and s_b.is_pinned()))
 
