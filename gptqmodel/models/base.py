@@ -936,7 +936,9 @@ class BaseQModel(nn.Module):
 
     def pre_quantize_generate_hook_end(self):
         if self.quantize_config.offload_to_disk:
-            offload_to_disk(model=self.model, module=self.get_base_modules(model=self.model), disk_path=self.quantize_config.offload_to_disk_path)
+            # This hook is now disabled as it's handled by the ModuleLooper after input capture.
+            # offload_to_disk(model=self.model, module=self.get_base_modules(model=self.model), disk_path=self.quantize_config.offload_to_disk_path)
+            pass
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.pre_lm_head_norm_module:
@@ -1177,7 +1179,7 @@ class BaseQModel(nn.Module):
         if not getattr(self.quantize_config, "offload_to_disk", False):
             return 0
 
-        default_bytes = 512 * 1024 ** 3 #512MB
+        default_bytes = 512 * 1024 ** 2 #512MB
         raw = os.getenv("GPTQMODEL_RELOAD_THRESHOLD")
         if raw is None or raw.strip() == "":
             return default_bytes
