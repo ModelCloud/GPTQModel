@@ -23,7 +23,6 @@ import math
 import time
 
 import torch
-
 from models.model_test import ModelTest
 
 
