@@ -21,6 +21,7 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from ..nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonQuantLinear
+from ..nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
 from ..nn_modules.qlinear.machete import MacheteQuantLinear
@@ -32,7 +33,6 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from ..nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
-from ..nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
 from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
 from ..quantization import FORMAT, METHOD
 from ..utils.logger import setup_logger
