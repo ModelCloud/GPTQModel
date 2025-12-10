@@ -37,7 +37,8 @@ def safe_load_cpp_ext(
         **kwargs
 ):
     """
-    A safe wrapper for torch.utils.cpp_extension.load()
+    A safe wrapper for torch.utils.cpp_extension.load() that removed old cached kernel on first load. Pytorch has a bug where it does not check previous cached kernel for current pytorch compatibility as it 
+    only does it a naive name check based on pytorch/cuda version but same pytorch version can have multiple variants (cpu, cuda, etc) which are not cross compatible resulting in hidden errors.
     """
     global _cpp_ext_initialized
 
