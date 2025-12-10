@@ -16,8 +16,7 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
-from functools import lru_cache
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import torch
