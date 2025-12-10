@@ -217,6 +217,11 @@ class BaseQuantLinear(nn.Module):
                 lora_B=getattr(self, "lora_B", None))
 
     @classmethod
+    @lru_cache(maxsize=1)
+    def validate_once(cls) -> Optional[Exception]:
+        return None
+
+    @classmethod
     # custom quant linear class can override this and add custom checks
     def validate(
             cls,
@@ -235,6 +240,10 @@ class BaseQuantLinear(nn.Module):
             adapter:Optional[Adapter]=None,
     ) -> Tuple[
         bool, Optional[Exception]]:
+        if cls.validate_once() is not None:
+            return False, cls.validate_once()
+
+
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
                              in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
                              dtype=dtype, zero_point=zero_point,

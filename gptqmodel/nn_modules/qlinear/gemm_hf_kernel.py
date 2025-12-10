@@ -17,19 +17,6 @@ from ...utils.logger import setup_logger
 
 log = setup_logger()
 
-gemm_int4_forward_kernel = None
-gemm_int4_forward_kernel_exception = None
-
-try:
-    from kernels import get_kernel
-
-    gemm_int4_forward_kernel = get_kernel("kernels-community/quantization_gptq").gemm_int4_forward
-except Exception as exc:  # pragma: no cover - best effort fallback
-    gemm_int4_forward_kernel_exception = str(exc)
-    log.warning("Failed to load CPU gemm_4bit kernel: %s. Use fallback path. \
-                Please make sure you already `pip install kernels` and the kernels >= 0.11.1", str(exc))
-
-
 class HFKernelLinear(PackableQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
@@ -51,6 +38,8 @@ class HFKernelLinear(PackableQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "hf_kernel"
+
+    gemm_int4_forward_kernel = None
 
     def __init__(
         self,
@@ -84,11 +73,17 @@ class HFKernelLinear(PackableQuantLinear):
         self.dequant_dtype = torch.int8
 
     @classmethod
-    def validate(cls, **args):
-        if gemm_int4_forward_kernel_exception is not None:
-            return False, ImportError(gemm_int4_forward_kernel_exception)
+    @lru_cache(maxsize=1)
+    def validate_once(cls) -> Optional[Exception]:
+        try:
+            from kernels import get_kernel
 
-        return cls._validate(**args)
+            cls.gemm_int4_forward_kernel = get_kernel("kernels-community/quantization_gptq").gemm_int4_forward
+            return None
+        except Exception as exc:  # pragma: no cover - best effort fallback
+            log.warning("Failed to load CPU gemm_4bit kernel: %s. Use fallback path. \
+                        Please make sure you already `pip install kernels` and the kernels >= 0.11.1", str(exc))
+            return exc
 
     def post_init(self):
         super().post_init()
@@ -218,7 +213,7 @@ class HFKernelLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if not self.training and not self.transformed and gemm_int4_forward_kernel is not None:
+        if not self.training and not self.transformed and cls.gemm_int4_forward_kernel is not None:
             self.transform(x.device.type)
             self.transformed = True
 
@@ -242,7 +237,7 @@ class HFKernelLinear(PackableQuantLinear):
     def _fused_op_forward(self, x):
         x = x[:, self.ret_idx].contiguous()
         if x.device.type == "cpu":
-            out = gemm_int4_forward_kernel(x, self.qweight, self.qzeros, self.scales, self.group_size)
+            out = cls.gemm_int4_forward_kernel(x, self.qweight, self.qzeros, self.scales, self.group_size)
         else:
             raise NotImplementedError
 

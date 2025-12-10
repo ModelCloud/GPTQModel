@@ -16,6 +16,7 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -208,12 +209,15 @@ class MarlinQuantLinear(BaseQuantLinear):
     #
     #     super().optimize()
 
-    @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        if marlin_import_exception is not None:
-            return False, ImportError(marlin_import_exception)
-        return cls._validate(**args)
 
+    @classmethod
+    @lru_cache(maxsize=1)
+    def validate_once(cls) -> Optional[Exception]:
+        if marlin_import_exception is not None:
+            return ImportError(marlin_import_exception)
+        return None
+    
+    
     @classmethod
     def validate_device(cls, device: DEVICE):
         super().validate_device(device)
