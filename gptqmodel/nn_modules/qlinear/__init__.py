@@ -216,10 +216,20 @@ class BaseQuantLinear(nn.Module):
                 lora_A=getattr(self, "lora_A", None),
                 lora_B=getattr(self, "lora_B", None))
 
-    @classmethod
     @lru_cache(maxsize=1)
     def validate_once(cls) -> Optional[Exception]:
+        exp = cls.cache_validate_once()
+
+        if exp is not None:
+            # need set traceback to None to avoid caching caching traceback to prevent exception info from being held long-term
+            exp.with_traceback(None)
+            return exp
+
         return None
+
+    @classmethod
+    def cache_validate_once(cls) -> Optional[Exception]:
+        return cls.validate_once()
 
     @classmethod
     # custom quant linear class can override this and add custom checks
