@@ -216,7 +216,7 @@ class BaseQuantLinear(nn.Module):
                 lora_A=getattr(self, "lora_A", None),
                 lora_B=getattr(self, "lora_B", None))
 
-    @lru_cache(maxsize=1)
+    @lru_cache(maxsize=1024)
     def validate_once(cls) -> Optional[Exception]:
         exp = cls.cache_validate_once()
 
