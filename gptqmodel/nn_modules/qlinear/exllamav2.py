@@ -181,16 +181,15 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     def scratch_space_fixed(self, max_input_len=2048, max_batch_size=8):
         return self.temp_dq_size() + self.temp_fwd_size(max_input_len, max_batch_size)
 
-    def ext_gemm_half_q_half(cls, x, q_handle, q4_width, force_cuda):
+    def ext_gemm_half_q_half(self, x, q_handle, q4_width, force_cuda):
         """Matrix multiplication, returns x @ q4"""
         output_shape = x.shape[:-1] + (q4_width,)
         x = x.view(-1, x.shape[-1])
         output = torch.empty((x.shape[0], q4_width), dtype=torch.half, device=x.device)
-        cls.gptqmodel_exllamav2_kernels.gemm_half_q_half(x, q_handle, output, force_cuda)
+        self.gptqmodel_exllamav2_kernels.gemm_half_q_half(x, q_handle, output, force_cuda)
         return output.view(output_shape)
 
-
-    def ext_make_q_matrix(cls, w: dict, temp_dq, key: str = None):
+    def ext_make_q_matrix(self, w: dict, temp_dq, key: str = None):
         """
         Create Q matrix
         """
@@ -200,7 +199,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             w["q_scale_max"] /= 256
             w["q_perm"] = w["q_perm"].short()
             w["q_invperm"] = w["q_invperm"].short()
-            return cls.gptqmodel_exllamav2_kernels.make_q_matrix(
+            return self.gptqmodel_exllamav2_kernels.make_q_matrix(
                 w["q_weight"],
                 w["q_perm"],
                 w["q_invperm"],
@@ -226,7 +225,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
                 )
                 w["q_invperm"] = torch.empty_like(w["q_perm"])
                 # make_q4 segfaults if g_idx is not on cpu in the act-order case. In the non act-order case, None needs to be passed for g_idx.
-                return cls.gptqmodel_exllamav2_kernels.make_q_matrix(
+                return self.gptqmodel_exllamav2_kernels.make_q_matrix(
                     w["qweight"],
                     w["q_perm"],
                     w["q_invperm"],
@@ -240,7 +239,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
                 )
             # GPTQ without g_idx
             else:
-                return cls.gptqmodel_exllamav2_kernels.make_q_matrix(
+                return self.gptqmodel_exllamav2_kernels.make_q_matrix(
                     w["qweight"],
                     NONE_TENSOR,
                     NONE_TENSOR,
