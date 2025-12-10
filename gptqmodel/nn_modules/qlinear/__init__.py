@@ -217,8 +217,8 @@ class BaseQuantLinear(nn.Module):
                 lora_B=getattr(self, "lora_B", None))
 
     @lru_cache(maxsize=1024)
-    def validate_once(cls) -> Optional[Exception]:
-        exp = cls.cache_validate_once()
+    def cached_validate_once(cls) -> Optional[Exception]:
+        exp = cls.validate_once()
 
         if exp is not None:
             # need set traceback to None to avoid caching caching traceback to prevent exception info from being held long-term
@@ -228,7 +228,7 @@ class BaseQuantLinear(nn.Module):
         return None
 
     @classmethod
-    def cache_validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Optional[Exception]:
         return cls.validate_once()
 
     @classmethod
@@ -250,9 +250,8 @@ class BaseQuantLinear(nn.Module):
             adapter:Optional[Adapter]=None,
     ) -> Tuple[
         bool, Optional[Exception]]:
-        if cls.validate_once() is not None:
-            return False, cls.validate_once()
-
+        if cls.cached_validate_once() is not None:
+            return False, cls.cached_validate_once()
 
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
                              in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,

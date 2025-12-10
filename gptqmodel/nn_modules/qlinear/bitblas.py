@@ -325,7 +325,7 @@ class BitblasQuantLinear(BaseQuantLinear):
         self._initialize_buffers(in_features, out_features, bias)
 
     @classmethod
-    def cache_validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Optional[Exception]:
         if not BITBLAS_AVAILABLE:
             return ValueError(BITBLAS_INSTALL_HINT)
 

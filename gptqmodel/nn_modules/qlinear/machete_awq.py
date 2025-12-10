@@ -96,7 +96,7 @@ class AwqMacheteQuantLinear(AWQuantLinear):
         self.has_zero_points = True
 
     @classmethod
-    def cache_validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Optional[Exception]:
         if gptqmodel_machete_kernels is None:
             return ImportError(machete_import_exception)
         else:

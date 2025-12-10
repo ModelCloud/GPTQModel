@@ -91,7 +91,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
             **kwargs)
 
     @classmethod
-    def cache_validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Optional[Exception]:
         try:
             from gptqmodel_exllama_kernels import make_q4, q4_matmul
             return None
