@@ -20,11 +20,6 @@ log = setup_logger()
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
 NONE_TENSOR = torch.empty((1, 1), device="meta")
 
-
-def ext_make_q4(qweight, qzeros, scales, g_idx, device):
-    """Construct Q4Matrix, return handle"""
-    return make_q4(qweight, qzeros, scales, g_idx if g_idx is not None else NONE_TENSOR, device)
-
 class ExllamaQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
@@ -47,6 +42,8 @@ class ExllamaQuantLinear(BaseQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllama"
+
+    gptqmodel_exllama_kernels = None
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
@@ -93,7 +90,8 @@ class ExllamaQuantLinear(BaseQuantLinear):
     @classmethod
     def validate_once(cls) -> Optional[Exception]:
         try:
-            from gptqmodel_exllama_kernels import make_q4, q4_matmul
+            import gptqmodel_exllama_kernels
+            cls.gptqmodel_exllama_kernels = gptqmodel_exllama_kernels
             return None
         except ImportError as e:
             return e
@@ -117,13 +115,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
         self.width = self.qweight.shape[1]
 
         # make_q4 segfaults if g_idx is not on cpu in the act-order case. In the non act-order case, None needs to be passed for g_idx.
-        self.q4 = ext_make_q4(
-            self.qweight,
-            self.qzeros,
-            self.scales,
-            self.g_idx.to("cpu") if self._use_act_order else None,
-            self.qweight.device.index,
-        )
+        self.q4 = self.gptqmodel_exllama_kernels.make_q4(self.qweight, self.qzeros, self.scales, self.g_idx if self._use_act_order else NONE_TENSOR, self.qweight.device.index)
 
         super().post_init()
 
@@ -139,7 +131,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
         x = x.view(-1, x.shape[-1])
 
         output = torch.empty((x.shape[0], q4_width), dtype=torch.float16, device=x.device)
-        q4_matmul(x, q4, output)
+        self.gptqmodel_exllama_kernels.q4_matmul(x, q4, output)
 
         if self.bias is not None:
             output.add_(self.bias)
