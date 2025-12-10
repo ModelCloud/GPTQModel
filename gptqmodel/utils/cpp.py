@@ -8,19 +8,60 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import shutil
+import threading
 from pathlib import Path
 from typing import Optional
 
 import torch
-from torch.utils.cpp_extension import load
+from torch.utils.cpp_extension import load, _get_build_directory
 
 from .env import env_flag
-
 
 log = logging.getLogger(__name__)
 
 _PACK_BLOCK_EXTENSION: Optional[bool] = None
 _PACK_BLOCK_EXTENSION_INITIALISED = False
+
+_cpp_ext_lock = threading.Lock()
+
+# Used to track whether cleanup has been done already
+_cpp_ext_initialized = False
+
+
+def safe_load_cpp_ext(
+        name,
+        build_directory=None,
+        verbose=False,
+        **kwargs
+):
+    """
+    A safe wrapper for torch.utils.cpp_extension.load()
+    """
+    global _cpp_ext_initialized
+
+    build_directory = build_directory or _get_build_directory(name, verbose=verbose)
+    with _cpp_ext_lock:
+        # First-time initialization cleanup
+        if not _cpp_ext_initialized:
+            if os.path.exists(build_directory):
+                try:
+                    shutil.rmtree(build_directory)
+                    if verbose:
+                        log.debug(f"[safe_cpp_extension_load] Removed old build directory: {build_directory}")
+                except Exception as e:
+                    log.error(f"[safe_cpp_extension_load] Failed to remove build directory: {e}")
+
+        # Load the extension (JIT)
+        module = load(
+            name=name,
+            build_directory=build_directory,
+            **kwargs
+        )
+
+        _cpp_ext_initialized = True
+
+    return module
 
 
 def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
@@ -71,7 +112,7 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
         verbose = env_flag("GPTQMODEL_EXT_VERBOSE", True)
 
     try:
-        load(
+        safe_load_cpp_ext(
             name="gptqmodel_pack_block_cpu",
             sources=[str(source_path)],
             extra_cflags=extra_cflags,
