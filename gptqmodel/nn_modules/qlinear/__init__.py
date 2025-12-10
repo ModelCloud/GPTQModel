@@ -511,7 +511,6 @@ class PackableQuantLinear(BaseQuantLinear):
             scales: t.Tensor,
             zeros: t.Tensor,
             g_idx: t.Tensor,
-            lock,
             block_in: int = 8192,
             workers: int = 1,
     ):
@@ -594,7 +593,6 @@ class PackableQuantLinear(BaseQuantLinear):
                     word_bits,
                     block_in,
                     pack_block_threads,
-                    lock=lock,
                 )
 
                 self.register_buffer("qweight", qweight_ext.to(dtype=self.pack_dtype))

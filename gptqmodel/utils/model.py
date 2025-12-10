@@ -797,7 +797,6 @@ def pack_module(
                         scales=q_scales,
                         zeros=q_zeros,
                         g_idx=q_g_idx,
-                        lock=lock,
                     )
                 except ValueError:
                     module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
