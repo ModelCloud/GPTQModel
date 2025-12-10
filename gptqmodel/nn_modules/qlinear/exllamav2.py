@@ -28,80 +28,6 @@ def _torch_device(idx):
         return "cpu"
     return f"cuda:{idx}"
 
-
-def ext_gemm_half_q_half(x, q_handle, q4_width, force_cuda):
-    """Matrix multiplication, returns x @ q4"""
-    output_shape = x.shape[:-1] + (q4_width,)
-    x = x.view(-1, x.shape[-1])
-    output = torch.empty((x.shape[0], q4_width), dtype=torch.half, device=x.device)
-    gemm_half_q_half(x, q_handle, output, force_cuda)
-    return output.view(output_shape)
-
-
-def ext_make_q_matrix(w: dict, temp_dq, key: str = None):
-    """
-    Create Q matrix
-    """
-    # EXL2
-    # won't work as the moment because the tensors are not the same.
-    if "q_weight" in w:
-        w["q_scale_max"] /= 256
-        w["q_perm"] = w["q_perm"].short()
-        w["q_invperm"] = w["q_invperm"].short()
-        return make_q_matrix(
-            w["q_weight"],
-            w["q_perm"],
-            w["q_invperm"],
-            w["q_scale"],
-            w["q_scale_max"],
-            w["q_groups"],
-            NONE_TENSOR,
-            NONE_TENSOR,
-            NONE_TENSOR,
-            temp_dq,
-        )
-    # GPTQ
-    elif "qweight" in w:
-        if w["scales"].dtype == torch.float:
-            w["scales"] = w["scales"].half()
-
-        # GPTQ with g_idx (act_order)
-        if "g_idx" in w and not (w["g_idx"] == 0).all().item():
-            w["q_perm"] = torch.empty(
-                (w["qweight"].shape[0] * 8,),
-                dtype=torch.short,
-                device=w["qweight"].device,
-            )
-            w["q_invperm"] = torch.empty_like(w["q_perm"])
-            # make_q4 segfaults if g_idx is not on cpu in the act-order case. In the non act-order case, None needs to be passed for g_idx.
-            return make_q_matrix(
-                w["qweight"],
-                w["q_perm"],
-                w["q_invperm"],
-                NONE_TENSOR,
-                NONE_TENSOR,
-                NONE_TENSOR,
-                w["qzeros"],
-                w["scales"],
-                w["g_idx"].cpu(),
-                temp_dq,
-            )
-        # GPTQ without g_idx
-        else:
-            return make_q_matrix(
-                w["qweight"],
-                NONE_TENSOR,
-                NONE_TENSOR,
-                NONE_TENSOR,
-                NONE_TENSOR,
-                NONE_TENSOR,
-                w["qzeros"],
-                w["scales"],
-                NONE_TENSOR,
-                temp_dq,
-            )
-
-
 class ExllamaV2QuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
     # TODO: intel is reporting v2 has accuracy issues with group-size == 16 for this kernel
@@ -128,6 +54,8 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "exllamav2"
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
+
+    gptqmodel_exllamav2_kernels = None
 
     def __init__(
         self,
@@ -175,7 +103,8 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
     @classmethod
     def validate_once(cls) -> Optional[Exception]:
         try:
-            from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix
+            import gptqmodel_exllamav2_kernels
+            cls.gptqmodel_exllamav2_kernels = gptqmodel_exllamav2_kernels
             return None
         except ImportError as e:
             return e
@@ -203,7 +132,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
             "g_idx": self.g_idx,
         }
         temp_dq = scratch_space.get_slice(self.temp_dq_size())
-        self.q_handle = ext_make_q_matrix(self.q_tensors, temp_dq)
+        self.q_handle = self.ext_make_q_matrix(self.q_tensors, temp_dq)
 
         super().post_init()
 
@@ -233,7 +162,7 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         #     x = F.pad(x, self.in_features_padding_shape)
 
 
-        out = ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
+        out = self.ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
 
         if self.bias is not None:
             out.add_(self.bias)
@@ -251,3 +180,76 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
 
     def scratch_space_fixed(self, max_input_len=2048, max_batch_size=8):
         return self.temp_dq_size() + self.temp_fwd_size(max_input_len, max_batch_size)
+
+    def ext_gemm_half_q_half(cls, x, q_handle, q4_width, force_cuda):
+        """Matrix multiplication, returns x @ q4"""
+        output_shape = x.shape[:-1] + (q4_width,)
+        x = x.view(-1, x.shape[-1])
+        output = torch.empty((x.shape[0], q4_width), dtype=torch.half, device=x.device)
+        cls.gptqmodel_exllamav2_kernels.gemm_half_q_half(x, q_handle, output, force_cuda)
+        return output.view(output_shape)
+
+
+    def ext_make_q_matrix(cls, w: dict, temp_dq, key: str = None):
+        """
+        Create Q matrix
+        """
+        # EXL2
+        # won't work as the moment because the tensors are not the same.
+        if "q_weight" in w:
+            w["q_scale_max"] /= 256
+            w["q_perm"] = w["q_perm"].short()
+            w["q_invperm"] = w["q_invperm"].short()
+            return cls.gptqmodel_exllamav2_kernels.make_q_matrix(
+                w["q_weight"],
+                w["q_perm"],
+                w["q_invperm"],
+                w["q_scale"],
+                w["q_scale_max"],
+                w["q_groups"],
+                NONE_TENSOR,
+                NONE_TENSOR,
+                NONE_TENSOR,
+                temp_dq,
+            )
+        # GPTQ
+        elif "qweight" in w:
+            if w["scales"].dtype == torch.float:
+                w["scales"] = w["scales"].half()
+
+            # GPTQ with g_idx (act_order)
+            if "g_idx" in w and not (w["g_idx"] == 0).all().item():
+                w["q_perm"] = torch.empty(
+                    (w["qweight"].shape[0] * 8,),
+                    dtype=torch.short,
+                    device=w["qweight"].device,
+                )
+                w["q_invperm"] = torch.empty_like(w["q_perm"])
+                # make_q4 segfaults if g_idx is not on cpu in the act-order case. In the non act-order case, None needs to be passed for g_idx.
+                return cls.gptqmodel_exllamav2_kernels.make_q_matrix(
+                    w["qweight"],
+                    w["q_perm"],
+                    w["q_invperm"],
+                    NONE_TENSOR,
+                    NONE_TENSOR,
+                    NONE_TENSOR,
+                    w["qzeros"],
+                    w["scales"],
+                    w["g_idx"].cpu(),
+                    temp_dq,
+                )
+            # GPTQ without g_idx
+            else:
+                return cls.gptqmodel_exllamav2_kernels.make_q_matrix(
+                    w["qweight"],
+                    NONE_TENSOR,
+                    NONE_TENSOR,
+                    NONE_TENSOR,
+                    NONE_TENSOR,
+                    NONE_TENSOR,
+                    w["qzeros"],
+                    w["scales"],
+                    NONE_TENSOR,
+                    temp_dq,
+                )
+
