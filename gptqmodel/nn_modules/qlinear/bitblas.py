@@ -325,14 +325,15 @@ class BitblasQuantLinear(BaseQuantLinear):
         self._initialize_buffers(in_features, out_features, bias)
 
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+    def cache_validate_once(cls) -> Optional[Exception]:
         if not BITBLAS_AVAILABLE:
-            return False, ValueError(BITBLAS_INSTALL_HINT)
+            return ValueError(BITBLAS_INSTALL_HINT)
+
         try:
             import_bitblas()
         except Exception as exc:  # pragma: no cover - import errors handled above
-            return False, exc
-        return cls._validate(**args)
+            return exc
+        return None
 
     def _validate_parameters(self, in_features: int, out_features: int) -> None:
         if in_features % 16 != 0:
