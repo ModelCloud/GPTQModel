@@ -753,6 +753,7 @@ class ModuleLooper():
                         additional_inputs["position_ids"] = move_to(pos, device=exec_device)
 
                 for key, value in layer_input_kwargs[batch_idx].items():
+                    # past_key_values will triggers the cache logic. we need disable cache when layer forward.
                     if key in ["past_key_values", "past_key_value"]:
                         continue
                     additional_inputs[key] = nested_move_to(value, device=exec_device)
