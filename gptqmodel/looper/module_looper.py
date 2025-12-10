@@ -753,10 +753,14 @@ class ModuleLooper():
                         additional_inputs["position_ids"] = move_to(pos, device=exec_device)
 
                 for key, value in layer_input_kwargs[batch_idx].items():
+                    if key in ["past_key_values", "past_key_value"]:
+                        continue
                     additional_inputs[key] = nested_move_to(value, device=exec_device)
 
                 if reuse_kv and prev_kv is not None:
                     additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=exec_device)
+
+                additional_inputs["use_cache"] = False
 
                 if not preserve_module_devices:
                     rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)

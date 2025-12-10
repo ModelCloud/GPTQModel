@@ -398,6 +398,8 @@ def forward_batch_worker(
     if reuse_kv and prev_kv is not None:
         additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=module_device)
 
+    additional_inputs["use_cache"] = False
+
     module_output = None
     kv_next = None
     try:
