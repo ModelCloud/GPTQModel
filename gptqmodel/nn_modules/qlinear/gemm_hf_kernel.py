@@ -73,7 +73,6 @@ class HFKernelLinear(PackableQuantLinear):
         self.dequant_dtype = torch.int8
 
     @classmethod
-    @lru_cache(maxsize=1)
     def validate_once(cls) -> Optional[Exception]:
         try:
             from kernels import get_kernel

@@ -211,7 +211,6 @@ class MarlinQuantLinear(BaseQuantLinear):
 
 
     @classmethod
-    @lru_cache(maxsize=1)
     def validate_once(cls) -> Optional[Exception]:
         if marlin_import_exception is not None:
             return ImportError(marlin_import_exception)
