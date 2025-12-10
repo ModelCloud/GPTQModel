@@ -16,15 +16,7 @@ from ...utils.backend import BACKEND
 from ...utils.exllamav2 import ScratchSpace
 from ...utils.logger import setup_logger
 
-
-exllama_v2_import_exception = None
-try:
-    from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix
-except ImportError as e:
-    exllama_v2_import_exception = str(e)
-
 log = setup_logger()
-
 
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
@@ -150,12 +142,6 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         adapter: Adapter = None,
         register_buffers: bool = True,
         **kwargs, ):
-
-        if exllama_v2_import_exception is not None:
-            raise ValueError(
-                f"Trying to use the exllama v2 backend, but could not import the C++/CUDA dependencies with the following error: {exllama_v2_import_exception}"
-            )
-
         # backup original values
         # self.original_out_features = out_features
         # self.original_in_features = in_features
@@ -187,10 +173,12 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         self.q_tensors = None
 
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        if exllama_v2_import_exception is not None:
-            return False, ImportError(exllama_v2_import_exception)
-        return cls._validate(**args)
+    def cache_validate_once(cls) -> Optional[Exception]:
+        try:
+            from gptqmodel_exllamav2_kernels import gemm_half_q_half, make_q_matrix
+            return None
+        except ImportError as e:
+            return e
 
     def post_init(self, scratch_space: ScratchSpace):
         # resize due to padding after model weights have been loaded
