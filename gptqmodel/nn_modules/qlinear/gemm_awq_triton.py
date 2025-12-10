@@ -95,12 +95,12 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
     QUANT_TYPE = "awq_gemm_triton"
 
     @classmethod
-    def validate(cls, **args):
+    def cache_validate_once(cls) -> Optional[Exception]:
         if not tritonv2.TRITON_AVAILABLE:
-            return False, ValueError(tritonv2.TRITON_INSTALL_HINT)
-
-        return cls._validate(**args)
-
+            return ImportError(tritonv2.TRITON_INSTALL_HINT)
+        else:
+            return None
+            
     def __init__(
         self,
         bits: int,

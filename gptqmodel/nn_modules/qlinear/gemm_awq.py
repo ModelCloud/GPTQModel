@@ -105,11 +105,11 @@ class AwqGEMMQuantLinear(AWQuantLinear):
     QUANT_TYPE = "awq_gemm"
 
     @classmethod
-    def validate(cls, **args):
+    def cache_validate_once(cls) -> Optional[Exception]:
         if awq_ext is None:
-            return False, ValueError(msg or "CUDA AWQ extension not available; cannot select AwqGEMMQuantLinear")
-
-        return cls._validate(**args)
+            return ValueError(msg or "CUDA AWQ extension not available; cannot select AwqGEMMQuantLinear")
+        else:
+            return None
 
     def __init__(
         self,
