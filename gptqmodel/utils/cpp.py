@@ -40,10 +40,10 @@ def safe_load_cpp_ext(
     """
     global _cpp_ext_initialized
 
-    build_directory = build_directory or _get_build_directory(name, verbose=verbose)
     with _cpp_ext_lock:
         # First-time initialization cleanup
         if not _cpp_ext_initialized:
+            build_directory = build_directory or _get_build_directory(name, verbose=verbose)
             if os.path.exists(build_directory):
                 try:
                     shutil.rmtree(build_directory)
@@ -52,16 +52,22 @@ def safe_load_cpp_ext(
                 except Exception as e:
                     log.error(f"[safe_cpp_extension_load] Failed to remove build directory: {e}")
 
-        # Load the extension (JIT)
-        module = load(
-            name=name,
-            build_directory=build_directory,
-            **kwargs
-        )
+            if not os.path.exists(build_directory):
+                if verbose:
+                    log.debug('Creating extension directory %s...', build_directory)
+                # This is like mkdir -p, i.e. will also create parent directories.
+                os.makedirs(build_directory, exist_ok=True)
 
-        _cpp_ext_initialized = True
+            # Load the extension (JIT)
+            load(
+                name=name,
+                build_directory=build_directory,
+                **kwargs
+            )
 
-    return module
+            _cpp_ext_initialized = True
+
+        return
 
 
 def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
