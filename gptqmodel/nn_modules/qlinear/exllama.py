@@ -15,13 +15,6 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import BaseQuantLinear
 
-
-exllama_import_exception = None
-try:
-    from gptqmodel_exllama_kernels import make_q4, q4_matmul
-except ImportError as e:
-    exllama_import_exception = str(e)
-
 log = setup_logger()
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
@@ -71,11 +64,6 @@ class ExllamaQuantLinear(BaseQuantLinear):
         register_buffers: bool = True,
         **kwargs,
     ):
-        if exllama_import_exception is not None:
-            raise ValueError(
-                f"Trying to use the Exllama v1 backend but could not import the kernel cpp extension error: {exllama_import_exception}. Please manually reinstall and recompile package as Exllama v1 kernel extension is not part of prebuilt wheels."
-            )
-
         # backup original values
         # self.original_out_features = out_features
         # self.original_in_features = in_features
@@ -103,10 +91,12 @@ class ExllamaQuantLinear(BaseQuantLinear):
             **kwargs)
 
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        if exllama_import_exception is not None:
-            return False, ImportError(exllama_import_exception)
-        return cls._validate(**args)
+    def cache_validate_once(cls) -> Optional[Exception]:
+        try:
+            from gptqmodel_exllama_kernels import make_q4, q4_matmul
+            return None
+        except ImportError as e:
+            return e
 
     def post_init(self):
         # resize due to padding after model weights have been loaded
