@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-from torch.utils.cpp_extension import load, _get_build_directory
+from torch.utils.cpp_extension import _get_build_directory, load
 
 from .env import env_flag
+
 
 log = logging.getLogger(__name__)
 
