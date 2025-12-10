@@ -9,21 +9,19 @@ import importlib.util
 import logging
 import os
 import shutil
-import threading
 from pathlib import Path
 from typing import Optional
 
 import torch
-from torch.utils.cpp_extension import load, _get_build_directory
+from torch.utils.cpp_extension import _get_build_directory, load
 
 from .env import env_flag
+
 
 log = logging.getLogger(__name__)
 
 _PACK_BLOCK_EXTENSION: Optional[bool] = None
 _PACK_BLOCK_EXTENSION_INITIALISED = False
-
-_cpp_ext_lock = threading.Lock()
 
 # Used to track whether cleanup has been done already
 _cpp_ext_initialized = False
@@ -31,6 +29,7 @@ _cpp_ext_initialized = False
 
 def safe_load_cpp_ext(
         name,
+        lock,
         build_directory=None,
         verbose=False,
         **kwargs
@@ -40,8 +39,8 @@ def safe_load_cpp_ext(
     """
     global _cpp_ext_initialized
 
-    build_directory = build_directory or _get_build_directory(name, verbose=verbose)
-    with _cpp_ext_lock:
+    with lock:
+        build_directory = build_directory or _get_build_directory(name, verbose=verbose)
         # First-time initialization cleanup
         if not _cpp_ext_initialized:
             if os.path.exists(build_directory):
@@ -64,7 +63,7 @@ def safe_load_cpp_ext(
     return module
 
 
-def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
+def load_pack_block_extension(lock, *, verbose: bool = False) -> Optional[object]:
     """Ensure the pack_block CPU extension is built and loaded."""
 
     global _PACK_BLOCK_EXTENSION, _PACK_BLOCK_EXTENSION_INITIALISED
@@ -114,6 +113,7 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
     try:
         safe_load_cpp_ext(
             name="gptqmodel_pack_block_cpu",
+            lock=lock,
             sources=[str(source_path)],
             extra_cflags=extra_cflags,
             extra_ldflags=extra_ldflags,

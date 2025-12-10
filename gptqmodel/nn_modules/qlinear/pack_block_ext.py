@@ -21,8 +21,9 @@ def pack_block_cpu(
     word_bits: int,
     block_in: int,
     threads: int,
+    lock,
 ) -> Tuple[Tensor, Tensor]:
-    ext = load_pack_block_extension()
+    ext = load_pack_block_extension(lock=lock)
     if ext is None:
         raise RuntimeError("pack_block_cpu extension unavailable")
     return torch.ops.gptqmodel.pack_block_cpu(
