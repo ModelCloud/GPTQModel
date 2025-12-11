@@ -219,19 +219,18 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     @lru_cache(maxsize=1024)
-    def cached_validate_once(cls) -> Optional[Exception]:
-        exp = cls.validate_once()
+    def cached_validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        ok, exp = cls.validate_once()
 
-        if exp is not None:
-            # need set traceback to None to avoid caching caching traceback to prevent exception info from being held long-term
+        if not ok and exp is not None:
             exp.with_traceback(None)
-            return exp
+            return False, exp
 
-        return None
+        return True, None
 
     @classmethod
-    def validate_once(cls) -> Optional[Exception]:
-        return None
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        return True, None
 
     @classmethod
     # custom quant linear class can override this and add custom checks
@@ -252,8 +251,9 @@ class BaseQuantLinear(nn.Module):
             adapter:Optional[Adapter]=None,
     ) -> Tuple[
         bool, Optional[Exception]]:
-        if cls.cached_validate_once() is not None:
-            return False, cls.cached_validate_once()
+        ok_once, exp_once = cls.cached_validate_once()
+        if not ok_once:
+            return False, exp_once
 
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
                              in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,

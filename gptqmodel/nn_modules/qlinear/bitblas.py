@@ -9,7 +9,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 from packaging import version
@@ -325,15 +325,15 @@ class BitblasQuantLinear(BaseQuantLinear):
         self._initialize_buffers(in_features, out_features, bias)
 
     @classmethod
-    def validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if not BITBLAS_AVAILABLE:
-            return ValueError(BITBLAS_INSTALL_HINT)
+            return False, ValueError(BITBLAS_INSTALL_HINT)
 
         try:
             import_bitblas()
         except Exception as exc:  # pragma: no cover - import errors handled above
-            return exc
-        return None
+            return False, exc
+        return True, None
 
     def _validate_parameters(self, in_features: int, out_features: int) -> None:
         if in_features % 16 != 0:

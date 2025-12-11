@@ -5,7 +5,7 @@
 
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -102,13 +102,13 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
         self.q_tensors = None
 
     @classmethod
-    def validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         try:
             import gptqmodel_exllamav2_kernels
             cls.gptqmodel_exllamav2_kernels = gptqmodel_exllamav2_kernels
-            return None
+            return True, None
         except ImportError as e:
-            return e
+            return False, e
 
     def post_init(self, scratch_space: ScratchSpace):
         # resize due to padding after model weights have been loaded

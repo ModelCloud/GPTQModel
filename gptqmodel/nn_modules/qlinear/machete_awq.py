@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -96,11 +96,11 @@ class AwqMacheteQuantLinear(AWQuantLinear):
         self.has_zero_points = True
 
     @classmethod
-    def validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if gptqmodel_machete_kernels is None:
-            return ImportError(machete_import_exception)
+            return False, ImportError(machete_import_exception)
         else:
-            return None
+            return True, None
 
     @classmethod
     def validate_device(cls, device: DEVICE):

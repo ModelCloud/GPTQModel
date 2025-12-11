@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -75,16 +75,16 @@ class HFKernelLinear(PackableQuantLinear):
         self.dequant_dtype = torch.int8
 
     @classmethod
-    def validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         try:
             from kernels import get_kernel
 
             cls.gemm_int4_forward_kernel = get_kernel("kernels-community/quantization_gptq").gemm_int4_forward
-            return None
+            return True, None
         except Exception as exc:  # pragma: no cover - best effort fallback
             log.warning("Failed to load CPU gemm_4bit kernel: %s. Use fallback path. \
                         Please make sure you already `pip install kernels` and the kernels >= 0.11.1", str(exc))
-            return exc
+            return False, exc
 
     def post_init(self):
         super().post_init()

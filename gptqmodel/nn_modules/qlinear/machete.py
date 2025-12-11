@@ -152,11 +152,11 @@ class MacheteQuantLinear(BaseQuantLinear):
         self.register_buffer("input_perm", torch.empty(0, dtype=torch.int32))
 
     @classmethod
-    def validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if gptqmodel_machete_kernels is None:
-            return ImportError(machete_import_exception)
+            return False, ImportError(machete_import_exception)
         else:
-            return None
+            return True, None
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:

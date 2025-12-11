@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from contextlib import nullcontext
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
@@ -96,11 +96,11 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
     QUANT_TYPE = "awq_gemm_triton"
 
     @classmethod
-    def validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if not tritonv2.TRITON_AVAILABLE:
-            return ImportError(tritonv2.TRITON_INSTALL_HINT)
+            return False, ImportError(tritonv2.TRITON_INSTALL_HINT)
         else:
-            return None
+            return True, None
 
     def __init__(
         self,

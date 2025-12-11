@@ -198,13 +198,13 @@ class QQQQuantLinear(BaseQuantLinear):
     #     super().optimize()
 
     @classmethod
-    def validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         try:
             import gptqmodel_qqq_kernels
             cls.gptqmodel_qqq_kernels = gptqmodel_qqq_kernels
-            return None
+            return True, None
         except ImportError as e:
-            return e
+            return False, e
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:

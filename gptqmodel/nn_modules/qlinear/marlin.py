@@ -16,7 +16,7 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -210,10 +210,10 @@ class MarlinQuantLinear(BaseQuantLinear):
 
 
     @classmethod
-    def validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if marlin_import_exception is not None:
-            return ImportError(marlin_import_exception)
-        return None
+            return False, ImportError(marlin_import_exception)
+        return True, None
 
 
     @classmethod

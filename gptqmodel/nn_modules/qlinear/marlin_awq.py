@@ -6,7 +6,7 @@
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -157,10 +157,10 @@ class AwqMarlinQuantLinear(AWQuantLinear):
     #     super().optimize()
 
     @classmethod
-    def validate_once(cls) -> Optional[Exception]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if marlin_import_exception is not None:
-            return ImportError(marlin_import_exception)
-        return None
+            return False, ImportError(marlin_import_exception)
+        return True, None
 
     @classmethod
     def validate_device(cls, device: DEVICE):
