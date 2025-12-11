@@ -16,21 +16,10 @@ from ...utils.logger import setup_logger
 from . import BaseQuantLinear
 
 
-exllama_import_exception = None
-try:
-    from gptqmodel_exllama_kernels import make_q4, q4_matmul
-except ImportError as e:
-    exllama_import_exception = str(e)
-
 log = setup_logger()
 
 # Dummy tensor to pass instead of g_idx since there is no way to pass "None" to a C++ extension
 NONE_TENSOR = torch.empty((1, 1), device="meta")
-
-
-def ext_make_q4(qweight, qzeros, scales, g_idx, device):
-    """Construct Q4Matrix, return handle"""
-    return make_q4(qweight, qzeros, scales, g_idx if g_idx is not None else NONE_TENSOR, device)
 
 class ExllamaQuantLinear(BaseQuantLinear):
     SUPPORTS_BITS = [4]
@@ -55,6 +44,8 @@ class ExllamaQuantLinear(BaseQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "exllama"
 
+    gptqmodel_exllama_kernels = None
+
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
     def __init__(
@@ -71,11 +62,6 @@ class ExllamaQuantLinear(BaseQuantLinear):
         register_buffers: bool = True,
         **kwargs,
     ):
-        if exllama_import_exception is not None:
-            raise ValueError(
-                f"Trying to use the Exllama v1 backend but could not import the kernel cpp extension error: {exllama_import_exception}. Please manually reinstall and recompile package as Exllama v1 kernel extension is not part of prebuilt wheels."
-            )
-
         # backup original values
         # self.original_out_features = out_features
         # self.original_in_features = in_features
@@ -103,10 +89,13 @@ class ExllamaQuantLinear(BaseQuantLinear):
             **kwargs)
 
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        if exllama_import_exception is not None:
-            return False, ImportError(exllama_import_exception)
-        return cls._validate(**args)
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        try:
+            import gptqmodel_exllama_kernels
+            cls.gptqmodel_exllama_kernels = gptqmodel_exllama_kernels
+            return True, None
+        except ImportError as e:
+            return False, e
 
     def post_init(self):
         # resize due to padding after model weights have been loaded
@@ -127,13 +116,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
         self.width = self.qweight.shape[1]
 
         # make_q4 segfaults if g_idx is not on cpu in the act-order case. In the non act-order case, None needs to be passed for g_idx.
-        self.q4 = ext_make_q4(
-            self.qweight,
-            self.qzeros,
-            self.scales,
-            self.g_idx.to("cpu") if self._use_act_order else None,
-            self.qweight.device.index,
-        )
+        self.q4 = self.gptqmodel_exllama_kernels.make_q4(self.qweight, self.qzeros, self.scales, self.g_idx if self._use_act_order else NONE_TENSOR, self.qweight.device.index)
 
         super().post_init()
 
@@ -149,7 +132,7 @@ class ExllamaQuantLinear(BaseQuantLinear):
         x = x.view(-1, x.shape[-1])
 
         output = torch.empty((x.shape[0], q4_width), dtype=torch.float16, device=x.device)
-        q4_matmul(x, q4, output)
+        self.gptqmodel_exllama_kernels.q4_matmul(x, q4, output)
 
         if self.bias is not None:
             output.add_(self.bias)

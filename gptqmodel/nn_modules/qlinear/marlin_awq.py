@@ -18,6 +18,8 @@ from ...utils.logger import setup_logger
 from ...utils.marlin import (
     apply_awq_marlin_linear,
     awq_to_marlin_zero_points,
+    gptqmodel_marlin_kernels,
+    marlin_import_exception,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_permute_bias,
@@ -27,12 +29,6 @@ from ...utils.marlin import (
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
 
-
-marlin_import_exception = None
-try:
-    import gptqmodel_marlin_kernels
-except ImportError as e:
-    marlin_import_exception = str(e)
 
 log = setup_logger()
 
@@ -78,11 +74,6 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             adapter: Adapter = None,
             register_buffers=False,
             **kwargs):
-        if marlin_import_exception is not None:
-            raise ValueError(
-                f"Trying to use the marlin backend, but could not import the C++/CUDA dependencies with the following error: {marlin_import_exception}"
-            )
-
         self.max_par = 8  # partitioning for large inputs
 
         super().__init__(
@@ -166,10 +157,10 @@ class AwqMarlinQuantLinear(AWQuantLinear):
     #     super().optimize()
 
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if marlin_import_exception is not None:
             return False, ImportError(marlin_import_exception)
-        return cls._validate(**args)
+        return True, None
 
     @classmethod
     def validate_device(cls, device: DEVICE):

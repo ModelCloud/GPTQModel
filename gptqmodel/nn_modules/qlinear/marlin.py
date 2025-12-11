@@ -208,11 +208,13 @@ class MarlinQuantLinear(BaseQuantLinear):
     #
     #     super().optimize()
 
+
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if marlin_import_exception is not None:
             return False, ImportError(marlin_import_exception)
-        return cls._validate(**args)
+        return True, None
+
 
     @classmethod
     def validate_device(cls, device: DEVICE):

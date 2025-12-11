@@ -15,6 +15,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.machete import (
     _validate_machete_device_support,
+    gptqmodel_machete_kernels,
     machete_import_exception,
     machete_mm,
     machete_prepack_B,
@@ -95,10 +96,11 @@ class AwqMacheteQuantLinear(AWQuantLinear):
         self.has_zero_points = True
 
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        if machete_import_exception is not None:
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        if gptqmodel_machete_kernels is None:
             return False, ImportError(machete_import_exception)
-        return cls._validate(**args)
+        else:
+            return True, None
 
     @classmethod
     def validate_device(cls, device: DEVICE):
