@@ -6,7 +6,7 @@
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 
@@ -16,10 +16,10 @@ from ...nn_modules.qlinear import AWQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
-    gptqmodel_marlin_kernels,
-    marlin_import_exception,
     apply_awq_marlin_linear,
     awq_to_marlin_zero_points,
+    gptqmodel_marlin_kernels,
+    marlin_import_exception,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_permute_bias,
@@ -28,6 +28,7 @@ from ...utils.marlin import (
 )
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
+
 
 log = setup_logger()
 

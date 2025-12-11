@@ -5,7 +5,7 @@
 
 # Adapted from turboderp exllama: https://github.com/turboderp/exllama
 
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 
@@ -14,6 +14,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import BaseQuantLinear
+
 
 log = setup_logger()
 

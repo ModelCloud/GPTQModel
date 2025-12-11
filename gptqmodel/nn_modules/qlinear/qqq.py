@@ -18,6 +18,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 
+
 log = setup_logger()
 
 def mul(
@@ -376,7 +377,7 @@ class QQQQuantLinear(BaseQuantLinear):
             self.reduce_buffer, # C
             D, # D
             s1, # s1
-            cls.gptqmodel_qqq_kernels,
+            self.gptqmodel_qqq_kernels,
             self.s_channel, # s2
             self.s_group, # s3
             self.workspace,

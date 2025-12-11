@@ -4,11 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
 
-from typing import Optional
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
@@ -213,7 +214,7 @@ class HFKernelLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if not self.training and not self.transformed and cls.gemm_int4_forward_kernel is not None:
+        if not self.training and not self.transformed and self.gemm_int4_forward_kernel is not None:
             self.transform(x.device.type)
             self.transformed = True
 
@@ -237,7 +238,7 @@ class HFKernelLinear(PackableQuantLinear):
     def _fused_op_forward(self, x):
         x = x[:, self.ret_idx].contiguous()
         if x.device.type == "cpu":
-            out = cls.gemm_int4_forward_kernel(x, self.qweight, self.qzeros, self.scales, self.group_size)
+            out = self.gemm_int4_forward_kernel(x, self.qweight, self.qzeros, self.scales, self.group_size)
         else:
             raise NotImplementedError
 

@@ -7,6 +7,7 @@ import math
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -21,8 +22,6 @@ from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from ...utils.safe import THREADPOOLCTL
-from functools import lru_cache
-
 
 
 log = setup_logger()

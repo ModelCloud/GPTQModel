@@ -9,7 +9,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Union
 
 import torch
 from packaging import version

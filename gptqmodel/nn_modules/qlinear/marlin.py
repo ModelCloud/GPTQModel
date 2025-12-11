@@ -214,8 +214,8 @@ class MarlinQuantLinear(BaseQuantLinear):
         if marlin_import_exception is not None:
             return ImportError(marlin_import_exception)
         return None
-    
-    
+
+
     @classmethod
     def validate_device(cls, device: DEVICE):
         super().validate_device(device)

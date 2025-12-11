@@ -15,9 +15,9 @@ from ...nn_modules.qlinear import BaseQuantLinear
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.machete import (
-    gptqmodel_machete_kernels,
     _validate_machete_device_support,
     check_machete_supports_shape,
+    gptqmodel_machete_kernels,
     machete_import_exception,
     machete_mm,
     machete_prepack_B,
