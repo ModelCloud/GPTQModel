@@ -120,6 +120,53 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
         include:
+          # pytorch 2.9.1
+          # cuda 130
+          - cuda: 130
+            torch: 2.9.1
+            python: 314t
+          - cuda: 130
+            torch: 2.9.1
+            python: 314
+          - cuda: 130
+            torch: 2.9.1
+            python: 313t
+          - cuda: 130
+            torch: 2.9.1
+            python: 313
+          - cuda: 130
+            torch: 2.9.1
+            python: 312
+          - cuda: 130
+            torch: 2.9.1
+            python: 311
+          - cuda: 130
+            torch: 2.9.1
+            python: 310
+
+          # cuda 128
+          - cuda: 128
+            torch: 2.9.1
+            python: 314t
+          - cuda: 128
+            torch: 2.9.1
+            python: 314
+          - cuda: 128
+            torch: 2.9.1
+            python: 313t
+          - cuda: 128
+            torch: 2.9.1
+            python: 313
+          - cuda: 128
+            torch: 2.9.1
+            python: 312
+          - cuda: 128
+            torch: 2.9.1
+            python: 311
+          - cuda: 128
+            torch: 2.9.1
+            python: 310
+
           # pytorch 2.9
           # cuda 13
           - cuda: 130
