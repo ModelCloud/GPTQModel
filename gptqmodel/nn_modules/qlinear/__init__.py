@@ -21,6 +21,8 @@ from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from ...utils.safe import THREADPOOLCTL
+from functools import lru_cache
+
 
 
 log = setup_logger()
