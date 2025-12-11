@@ -232,7 +232,7 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def validate_once(cls) -> Optional[Exception]:
-        return cls.validate_once()
+        return None
 
     @classmethod
     # custom quant linear class can override this and add custom checks

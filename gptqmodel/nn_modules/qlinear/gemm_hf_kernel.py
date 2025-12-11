@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
 
+from typing import Optional
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
