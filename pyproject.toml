@@ -104,8 +104,8 @@ mlx = [
     "mlx_lm>=0.24.0",
 ]
 
-[tool.setuptools]
-license-files = [
+[project.license-files]
+files = [
     "LICENSE",
     "licenses/LICENSE.apache",
 ]
