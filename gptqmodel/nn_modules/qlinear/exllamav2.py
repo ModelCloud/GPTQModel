@@ -251,4 +251,5 @@ class ExllamaV2QuantLinear(BaseQuantLinear):
                     NONE_TENSOR,
                     temp_dq,
                 )
-
+        else:
+            raise ValueError("q_weight not found in exllama v2 quantized weights")
