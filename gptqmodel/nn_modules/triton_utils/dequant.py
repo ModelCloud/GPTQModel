@@ -40,73 +40,198 @@ def dequant_kernel(
     num_groups: tl.constexpr,
     X_BLOCK: tl.constexpr,
 ):
-    # Block indexing
+    # 1. block indexing
     xoffset = tl.program_id(0) * X_BLOCK
     x_index = xoffset + tl.arange(0, X_BLOCK)
     xmask = x_index < numels
+
     row_idx = x_index // out_features
     col_idx = x_index % out_features
 
     pack_scale: tl.constexpr = pack_bits // bits
-    qzero_ncols: tl.constexpr = out_features // pack_scale
+    qzero_ncols: tl.constexpr = out_features // pack_scale  # only 2/4/8bit
 
-    # Load group indices
+    # 2. load groups / scales
     g_idx = tl.load(g_idx_ptr + row_idx, mask=xmask, eviction_policy="evict_last")
     groups = tl.where(g_idx < 0, g_idx + num_groups, g_idx)
 
-    # Load scales
     scales = tl.cast(
-        tl.load(scales_ptr + (col_idx + out_features * groups), mask=xmask, eviction_policy="evict_last"),
-        tl.float32)
+        tl.load(
+            scales_ptr + (col_idx + out_features * groups),
+            mask=xmask,
+            eviction_policy="evict_last",
+        ),
+        tl.float32,
+    )
 
-    # Load zeros
+    # 3. decode qzeros (zeros) —— GPTQ INT3 10-1-10-1-10 format
     if bits == 3:
-        # For 3-bit, we need to calculate the correct position in the packed zeros
-        zero_bit_pos = (groups * out_features + col_idx) * 3
-        zero_word_idx = zero_bit_pos // 32
-        zero_bit_offset = zero_bit_pos % 32
+        # qzeros shape (row-major):
+        #   [num_groups, (out_features // 32) * 3]
+        # For every 32 zeros → 3 × 32-bit words:
+        #   word0, word1, word2 (10-1-10-1-10 pattern)
+        tl.static_assert(out_features % 32 == 0, "out_features must be divisible by 32 for 3-bit zeros")
 
-        zero_word = tl.load(qzeros_ptr + zero_word_idx, mask=xmask, eviction_policy="evict_last")
+        BLOCKS_PER_ROW: tl.constexpr = out_features // 32
 
-        # Handle case where 3-bit value is fully within current 32-bit word
-        if zero_bit_offset <= 29:
-            zeros = (zero_word >> zero_bit_offset) & 0b111
-        else:
-            # 3-bit value spans two 32-bit words
-            next_zero_word = tl.load(qzeros_ptr + zero_word_idx + 1, mask=xmask, eviction_policy="evict_last")
-            combined = (zero_word >> zero_bit_offset) | (next_zero_word << (32 - zero_bit_offset))
-            zeros = combined & 0b111
+        block = col_idx // 32        # which 32-value group
+        idx32 = col_idx % 32         # index inside a 32-value group (0..31)
+
+        # each group produces one row; each row contains BLOCKS_PER_ROW * 3 words
+        row_word_base = groups * (BLOCKS_PER_ROW * 3) + block * 3
+
+        word0 = tl.load(
+            qzeros_ptr + row_word_base + 0,
+            mask=xmask,
+            other=0,
+            eviction_policy="evict_last",
+        )
+        word1 = tl.load(
+            qzeros_ptr + row_word_base + 1,
+            mask=xmask,
+            other=0,
+            eviction_policy="evict_last",
+        )
+        word2 = tl.load(
+            qzeros_ptr + row_word_base + 2,
+            mask=xmask,
+            other=0,
+            eviction_policy="evict_last",
+        )
+
+        # idx32: [0..31] → decode according to GPTQ INT3 10-1-10-1-10 packing
+        idx = idx32
+
+        zeros_i32 = tl.cast(idx, tl.int32) & 0  # generate zero-like int32 vector from idx
+
+        # --- case 0: idx in [0..9] → from word0, shift = 3 * idx
+        cond_0_9 = idx <= 9
+        shift_0_9 = idx * 3
+        val_0_9 = (word0 >> shift_0_9) & 0x7
+        zeros_i32 = tl.where(cond_0_9, tl.cast(val_0_9, tl.int32), zeros_i32)
+
+        # --- case 1: idx == 10 → word0 bits [30..31] + word1 bit[0]
+        cond_10 = idx == 10
+        base_10 = (word0 >> 30) & 0x3          # lower 2 bits
+        extra_10 = ((word1 >> 0) << 2) & 0x4   # upper 1 bit
+        val_10 = (base_10 | extra_10) & 0x7
+        zeros_i32 = tl.where(cond_10, tl.cast(val_10, tl.int32), zeros_i32)
+
+        # --- case 2: idx in [11..20] (shifts 1,4,7,...,28 in word1)
+        cond_11_20 = (idx >= 11) & (idx <= 20)
+        j_11_20 = idx - 11
+        shift_11_20 = 1 + 3 * j_11_20
+        val_11_20 = (word1 >> shift_11_20) & 0x7
+        zeros_i32 = tl.where(cond_11_20, tl.cast(val_11_20, tl.int32), zeros_i32)
+
+        # --- case 3: idx == 21 → word1 bit 31 + word2 bits [0..1]
+        cond_21 = idx == 21
+        base_21 = (word1 >> 31) & 0x1
+        extra_21 = ((word2 >> 0) << 1) & 0x6
+        val_21 = (base_21 | extra_21) & 0x7
+        zeros_i32 = tl.where(cond_21, tl.cast(val_21, tl.int32), zeros_i32)
+
+        # --- case 4: idx in [22..31] (shifts 2,5,8,...,29 in word2)
+        cond_22_31 = idx >= 22
+        j_22_31 = idx - 22
+        shift_22_31 = 2 + 3 * j_22_31
+        val_22_31 = (word2 >> shift_22_31) & 0x7
+        zeros_i32 = tl.where(cond_22_31, tl.cast(val_22_31, tl.int32), zeros_i32)
+
+        zeros = zeros_i32  # int32 3-bit value
     else:
-        qzeros = tl.load(qzeros_ptr + (qzero_ncols * groups + col_idx // pack_scale), mask=xmask,
-                         eviction_policy="evict_last")
+        # original 2/4/8bit path unchanged
+        qzeros = tl.load(
+            qzeros_ptr + (qzero_ncols * groups + col_idx // pack_scale),
+            mask=xmask,
+            other=0,
+            eviction_policy="evict_last",
+        )
         wf_zeros = (col_idx % pack_scale) * bits
         zeros = (qzeros >> wf_zeros) & maxq
 
-    # Load weights
+    # 4. decode qweight (weights) — also 10-1-10-1-10 format
     if bits == 3:
-        # For 3-bit, we need to calculate the correct position in the packed weights
-        weight_bit_pos = (row_idx * out_features + col_idx) * 3
-        weight_word_idx = weight_bit_pos // 32
-        weight_bit_offset = weight_bit_pos % 32
+        tl.static_assert(out_features % 32 == 0, "out_features must be divisible by 32 for 3-bit qweight")
 
-        weight_word = tl.load(qweight_ptr + weight_word_idx, mask=xmask, eviction_policy="evict_last")
+        ROW_BLOCKS: tl.constexpr = 32  # every block is 32 rows
+        rows_per_group: tl.constexpr = 3
 
-        # Handle case where 3-bit value is fully within current 32-bit word
-        if weight_bit_offset <= 29:
-            weights = (weight_word >> weight_bit_offset) & 0b111
-        else:
-            # 3-bit value spans two 32-bit words
-            next_weight_word = tl.load(qweight_ptr + weight_word_idx + 1, mask=xmask, eviction_policy="evict_last")
-            combined = (weight_word >> weight_bit_offset) | (next_weight_word << (32 - weight_bit_offset))
-            weights = combined & 0b111
+        block_r = row_idx // ROW_BLOCKS
+        idx32_r = row_idx % ROW_BLOCKS
+
+        row_word_base = block_r * rows_per_group
+
+        w0 = tl.load(
+            qweight_ptr + (row_word_base + 0) * out_features + col_idx,
+            mask=xmask,
+            other=0,
+            eviction_policy="evict_last",
+        )
+        w1 = tl.load(
+            qweight_ptr + (row_word_base + 1) * out_features + col_idx,
+            mask=xmask,
+            other=0,
+            eviction_policy="evict_last",
+        )
+        w2 = tl.load(
+            qweight_ptr + (row_word_base + 2) * out_features + col_idx,
+            mask=xmask,
+            other=0,
+            eviction_policy="evict_last",
+        )
+
+        idxr = idx32_r
+        weights_i32 = tl.cast(idxr, tl.int32) & 0
+
+        # --- case 0: idxr in [0..9]
+        cond_r_0_9 = idxr <= 9
+        shift_r_0_9 = idxr * 3
+        val_r_0_9 = (w0 >> shift_r_0_9) & 0x7
+        weights_i32 = tl.where(cond_r_0_9, tl.cast(val_r_0_9, tl.int32), weights_i32)
+
+        # --- case 1: idxr == 10
+        cond_r_10 = idxr == 10
+        base_r_10 = (w0 >> 30) & 0x3
+        extra_r_10 = ((w1 >> 0) << 2) & 0x4
+        val_r_10 = (base_r_10 | extra_r_10) & 0x7
+        weights_i32 = tl.where(cond_r_10, tl.cast(val_r_10, tl.int32), weights_i32)
+
+        # --- case 2: idxr in [11..20]
+        cond_r_11_20 = (idxr >= 11) & (idxr <= 20)
+        jr_11_20 = idxr - 11
+        shift_r_11_20 = 1 + 3 * jr_11_20
+        val_r_11_20 = (w1 >> shift_r_11_20) & 0x7
+        weights_i32 = tl.where(cond_r_11_20, tl.cast(val_r_11_20, tl.int32), weights_i32)
+
+        # --- case 3: idxr == 21
+        cond_r_21 = idxr == 21
+        base_r_21 = (w1 >> 31) & 0x1
+        extra_r_21 = ((w2 >> 0) << 1) & 0x6
+        val_r_21 = (base_r_21 | extra_r_21) & 0x7
+        weights_i32 = tl.where(cond_r_21, tl.cast(val_r_21, tl.int32), weights_i32)
+
+        # --- case 4: idxr in [22..31]
+        cond_r_22_31 = idxr >= 22
+        jr_22_31 = idxr - 22
+        shift_r_22_31 = 2 + 3 * jr_22_31
+        val_r_22_31 = (w2 >> shift_r_22_31) & 0x7
+        weights_i32 = tl.where(cond_r_22_31, tl.cast(val_r_22_31, tl.int32), weights_i32)
+
+        weights = weights_i32
     else:
-        qweights = tl.load(qweight_ptr + (col_idx + out_features * (row_idx // pack_scale)), mask=xmask,
-                           eviction_policy="evict_last")
+        # original 2/4/8bit path unchanged
+        qweights = tl.load(
+            qweight_ptr + (col_idx + out_features * (row_idx // pack_scale)),
+            mask=xmask,
+            other=0,
+            eviction_policy="evict_last",
+        )
         wf_weights = (row_idx % pack_scale) * bits
         weights = (qweights >> wf_weights) & maxq
 
-    # Dequantize
-    weights = (weights - zeros).to(tl.float32) * scales
+    # 5. Dequantize
+    weights = (tl.cast(weights, tl.float32) - tl.cast(zeros, tl.float32)) * scales
     weights = tl.cast(weights, out_dtype)
     tl.store(out_ptr + x_index, weights, mask=xmask)
 
