@@ -34,7 +34,7 @@ from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 log = LogBar.shared()
 
 
-class TestGroupSize(unittest.TestCase):
+class TestAwq(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
@@ -114,16 +114,6 @@ class TestGroupSize(unittest.TestCase):
             tmp_dir.cleanup()
         # torch_empty_cache()
 
-    # def test_load_group_128(self):
-    #     model = GPTQModel.load(
-    #         "/monster/data/model/AWQ-Llama-3-8b-g128",
-    #     )
-    #
-    #     self.assert_awq_linear(model)
-    #
-    #     result = model.generate("Uncovering deep insights begins with")[0] # tokens
-    #     log.info(f"Output: {model.tokenizer.decode(result)}") # string output
-
     @parameterized.expand([
         (FORMAT.GEMM, BACKEND.GEMM, 128),
         #(FORMAT.GEMM, BACKEND.MACHETE, 128),
@@ -186,6 +176,19 @@ class TestInferenceOnly(unittest.TestCase):
     def test_inference_mistral_awq(self):
         model = GPTQModel.load(
             "TheBloke/Mistral-7B-v0.1-AWQ",
+            backend=BACKEND.GEMM,
+        )
+
+        tokens = model.generate("Capital of France is", max_new_tokens=64)[0]
+        result = model.tokenizer.decode(tokens)
+        if "paris" not in result.lower() and "city" not in result.lower():
+            raise AssertionError(" `paris` not found in `result`")
+
+        del model
+
+    def test_inference_quantized_by_llm_awq(self):
+        model = GPTQModel.load(
+            "vicuna-7b-1.5-awq-safetensors", # this quantized by llm-awq
             backend=BACKEND.GEMM,
         )
 
