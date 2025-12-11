@@ -12,9 +12,8 @@ description = "Production ready LLM model compression/quantization toolkit with 
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
-authors = [
-    { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
-]
+license-files = [ "LICENSE", "licenses/LICENSE.apache" ]
+authors = [{ name = "ModelCloud", email = "qubitium@modelcloud.ai" }]
 keywords = ["gptq", "awq", "qqq", "autogptq", "autoawq", "eora", "gar", "quantization", "large-language-models", "transformers", "llm", "moe", "compression"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -102,10 +101,4 @@ openai = [
 ]
 mlx = [
     "mlx_lm>=0.24.0",
-]
-
-[project.license-files]
-files = [
-    "LICENSE",
-    "licenses/LICENSE.apache",
 ]
