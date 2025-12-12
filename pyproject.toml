@@ -11,7 +11,8 @@ dynamic = ["version"]
 description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "licenses/LICENSE.apache" ]
 authors = [
     { name = "ModelCloud", email = "qubitium@modelcloud.ai" },
 ]
@@ -102,10 +103,4 @@ openai = [
 ]
 mlx = [
     "mlx_lm>=0.24.0",
-]
-
-[tool.setuptools]
-license-files = [
-    "LICENSE",
-    "licenses/LICENSE.apache",
 ]
