@@ -262,6 +262,33 @@ class QuantizeConfig():
     # VRAM allocation strategy for MoE-heavy subsets
     vram_strategy: VRAMStrategy = field(default=VRAMStrategy.EXCLUSIVE)
 
+    # Control whether to wait for layer finalization (packing, writing) before proceeding to next layer
+    # Default False preserves current behavior (async finalization in background while next layer starts)
+    vram_opt_memory_cleanup_on_stage_end: bool = field(
+        default=False,
+        metadata={"help": "Also wait for all layer finalization tasks (packing, writing) to complete before proceeding to next layer"}
+    )
+
+    # Control whether to exclude device 0 from forward pass and quantization
+    vram_opt_exclude_device_0_from_compute: bool = field(
+        default=False,
+        metadata={"help": "Exclude device 0 from forward pass and quantization to reserve memory for model weights, input/output tokens"}
+    )
+
+    # MoE quantization: forward whole calibration dataset to each expert instead of only routed data
+    # This ensures all experts receive sufficient calibration samples but increases quantization time
+    moe_bypass_router: bool = field(
+        default=False,
+        metadata={"help": "Forward entire calibration dataset to all MoE experts (not just routed experts)"}
+    )
+
+    # Works faster than data parallel with some configurations 
+    force_subset_forward_serial: bool = field(
+        default=False,
+        metadata={"help": "Force serial forward pass for subsets instead of data parallel"}
+    )
+
+
     def __post_init__(self):
         fields_info = fields(self)
 
