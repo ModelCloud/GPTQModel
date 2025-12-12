@@ -199,6 +199,7 @@ jobs:
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /monster/ci/models:/monster/data/model
+        - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
         - /monster/ci/pyenv:/opt/pyenv
         - /monster/ci/dist:/opt/dist
@@ -352,6 +353,7 @@ jobs:
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /monster/ci/models:/monster/data/model
+        - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
         - /monster/ci/pyenv:/opt/pyenv
         - /monster/ci/dist:/opt/dist
