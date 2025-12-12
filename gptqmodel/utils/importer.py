@@ -23,7 +23,7 @@ from ..nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonQuantLinear
 from ..nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
-from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
+from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear, LLMAwqQuantLinear
 from ..nn_modules.qlinear.machete import MacheteQuantLinear
 from ..nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
@@ -75,6 +75,7 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.GEMM_TRITON: AwqGEMMTritonQuantLinear,
         BACKEND.GEMV: AwqGEMVQuantLinear,
         BACKEND.GEMV_FAST: AwqGEMVFastQuantLinear,
+        BACKEND.LLM_AWQ: LLMAwqQuantLinear,
         BACKEND.TORCH_FUSED_AWQ: TorchFusedAwqQuantLinear,
         BACKEND.TORCH_AWQ: AwqTorchQuantLinear,
     }),
@@ -103,6 +104,7 @@ SUPPORTS_BACKEND_MAP = {
         ],
         FORMAT.GEMV: [BACKEND.GEMV],
         FORMAT.GEMV_FAST: [BACKEND.GEMV_FAST],
+        FORMAT.LLM_AWQ: [BACKEND.LLM_AWQ],
         FORMAT.MARLIN: [BACKEND.MACHETE, BACKEND.MARLIN],
     }
 }
@@ -272,6 +274,10 @@ def hf_select_quant_linear_v2(
     else:
         device = DEVICE.CPU
 
+    if backend == "llm-awq":
+        # llm-awq uses torch.int16 to pack qweight
+        pack_dtype = torch.int16
+
     return select_quant_linear(
         bits=bits,
         group_size=group_size,
@@ -423,6 +429,8 @@ def select_quant_linear(
         qlinear = AwqGEMVQuantLinear
     elif backend == BACKEND.GEMV_FAST:
         qlinear = AwqGEMVFastQuantLinear
+    elif backend == BACKEND.LLM_AWQ:
+        qlinear = LLMAwqQuantLinear
     elif backend == BACKEND.TORCH_AWQ:
         qlinear = AwqTorchQuantLinear
     elif backend == BACKEND.TORCH:

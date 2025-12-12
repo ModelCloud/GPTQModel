@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-from typing import Optional
 
 import torch
 from torch import nn
@@ -48,10 +47,10 @@ def pack_intweight(unpacked_qweight, interleave, kstride):
     )
     # Packing -> (N // 4, K // 64, 64)
     Packed_Kernel = (
-        Packed_Kernel[..., 0]
-        | (Packed_Kernel[..., 1] << 4)
-        | (Packed_Kernel[..., 2] << 8)
-        | (Packed_Kernel[..., 3] << 12)
+            Packed_Kernel[..., 0]
+            | (Packed_Kernel[..., 1] << 4)
+            | (Packed_Kernel[..., 2] << 8)
+            | (Packed_Kernel[..., 3] << 12)
     )
     # reshape to (N // 4, K), FP16 format
     Packed_Kernel = Packed_Kernel.reshape(N // interleave, K)
@@ -84,20 +83,21 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv_fast"
 
+    zeros_name = "qzeros"
+
     def __init__(
-        self,
-        bits: int,
-        group_size: int,
-        sym: bool,
-        desc_act: bool,
-        in_features: int,
-        out_features: int,
-        bias: bool = False,
-        pack_dtype: torch.dtype = torch.int16,
-        adapter: Adapter = None,
-        register_buffers: bool = False,
-        from_llm_awq_quantized: Optional[bool] = None,
-        **kwargs,
+            self,
+            bits: int,
+            group_size: int,
+            sym: bool,
+            desc_act: bool,
+            in_features: int,
+            out_features: int,
+            bias: bool = False,
+            pack_dtype: torch.dtype = torch.int16,
+            adapter: Adapter = None,
+            register_buffers: bool = False,
+            **kwargs,
     ):
         backend = kwargs.pop("backend", BACKEND.GEMV_FAST)
         super().__init__(
@@ -116,7 +116,6 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
         self.split_k_iters = 8
         self.interleave = 4
-        self.zeros_name = "scaled_zeros" if from_llm_awq_quantized else "qzeros"
 
         # The GEMV_FAST packing is a bit special; qweight and scales/zeros do not use the same pack_dtype.
         # qweight is packaged using torch.int16.
@@ -126,7 +125,8 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         if register_buffers:
             self.register_buffer(
                 "qweight",
-                torch.zeros((out_features // self.interleave, in_features // self.pack_factor * self.interleave), dtype=self.pack_dtype),
+                torch.zeros((out_features // self.interleave, in_features // self.pack_factor * self.interleave),
+                            dtype=self.pack_dtype),
             )
             self.register_buffer(
                 self.zeros_name,
@@ -195,7 +195,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
         return out
 
-    def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor=None):
+    def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
         scale_zeros = zeros * scales
@@ -249,4 +249,29 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             )
         )
 
-__all__ = ["AwqGEMVFastQuantLinear"]
+
+class LLMAwqQuantLinear(AwqGEMVFastQuantLinear):
+    SUPPORTS_BITS = [4]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = True
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+
+    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int16]
+    SUPPORTS_ADAPTERS = [Lora]
+
+    SUPPORTS_DTYPES = [torch.float16]
+
+    # for transformers/optimum tests compat
+    QUANT_TYPE = "llm-awq"
+
+    zeros_name = "scaled_zeros"
+
+
+__all__ = ["AwqGEMVFastQuantLinear", "LLMAwqQuantLinear"]

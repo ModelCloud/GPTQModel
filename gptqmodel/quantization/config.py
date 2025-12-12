@@ -72,6 +72,7 @@ class FORMAT(str, Enum):
     GEMM = "gemm"
     GEMV = "gemv"
     GEMV_FAST = "gemv_fast"
+    LLM_AWQ = "llm-awq"
 
 
 # quant methods
@@ -613,12 +614,10 @@ class QuantizeConfig():
 
         if quantize_cfg.get(AWQ_PACKING_BACKEND_FIELD) and quantize_cfg[AWQ_PACKING_BACKEND_FIELD] == "llm-awq":
             cfg.quant_method = METHOD.AWQ
-            cfg.format = FORMAT.GEMV_FAST
+            cfg.format = FORMAT.LLM_AWQ
             cfg.pack_dtype = torch.int16
-            # Special field used to distinguish whether it is quantized from llm-awq
-            cls.from_llm_awq_quantized = True
             log.info(
-                "Detected llm-awq quantization format; FORMAT automatically set to FORMAT.GEMV_FAST."
+                "Detected llm-awq quantization format; FORMAT automatically set to FORMAT.LLM_AWQ."
             )
 
         return cfg
