@@ -92,7 +92,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         in_features: int,
         out_features: int,
         bias: bool = False,
-        pack_dtype: torch.dtype = torch.int32,
+        pack_dtype: torch.dtype = torch.int16,
         adapter: Adapter = None,
         register_buffers: bool = False,
         **kwargs,
@@ -117,15 +117,13 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
         int32_pack_factor = 32 // self.bits
 
-        self.bias = None
-
         if register_buffers:
             self.register_buffer(
                 "qweight",
                 torch.zeros((out_features // self.interleave, in_features // self.pack_factor * self.interleave), dtype=self.pack_dtype),
             )
             self.register_buffer(
-                "qzeros",
+                "scaled_zeros",
                 torch.zeros(
                     calculate_zeros_width(in_features, self.group_size) * int32_pack_factor,
                     out_features,
@@ -143,37 +141,33 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
             if bias:
                 self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
-
-    def post_init(self):
-        # if self.padded_infeatures != self.in_features:
-        #     self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
-        #     self.qzeros.resize_(
-        #         math.ceil(self.padded_infeatures / self.group_size),
-        #         self.out_features // self.pack_dtype_bits * self.bits
-        #     )
-        #     self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
-        #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
-        #                               device=self.g_idx.device)
-
-        super().post_init()
+            else:
+                self.bias = None
 
     def forward(self, x: torch.Tensor):
         if awq_v2_ext is None:
-            raise ModuleNotFoundError("External AWQ V2 kernels are not properly installed." + msg)
+            raise ModuleNotFoundError("External AWQ V2 kernels are not properly installed. Error: " + msg)
 
         inputs = x
-        batch_size, n_tokens, _ = inputs.shape
+        inputs_dim = inputs.dim()
+
+        batch_size = None
+        n_tokens = None
+        # Some linear layers in certain models (for example, opt-12m model.decoder.layers.0.fc1) receive inputs of shape `[B*S, H]`,
+        # so it's necessary to check if the dimension is equal to 3.
+        if inputs_dim == 3:
+            batch_size, n_tokens, _ = inputs.shape
 
         input_dtype = inputs.dtype
         if input_dtype != torch.float16:
             inputs = inputs.half()
 
-        if batch_size < 8 and n_tokens == 1:
+        if inputs_dim == 3 and batch_size < 8 and n_tokens == 1:
             out = awq_v2_ext.gemv_forward_cuda_decode(
                 inputs,
                 self.qweight,
                 self.scales,
-                self.qzeros,
+                self.scaled_zeros,
                 inputs.numel() // inputs.shape[-1],
                 self.out_features,
                 self.in_features,
@@ -181,7 +175,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             )
         else:
             out = awq_v2_ext.gemm_forward_cuda_prefill(
-                inputs, self.qweight, self.scales, self.qzeros
+                inputs, self.qweight, self.scales, self.scaled_zeros
             )
 
         if input_dtype != torch.float16:

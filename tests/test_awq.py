@@ -175,7 +175,7 @@ class TestInferenceOnly(unittest.TestCase):
 
     def test_inference_mistral_awq(self):
         model = GPTQModel.load(
-            "TheBloke/Mistral-7B-v0.1-AWQ",
+            "casperhansen/opt-125m-awq",
             backend=BACKEND.GEMM,
         )
 
@@ -188,12 +188,13 @@ class TestInferenceOnly(unittest.TestCase):
 
     def test_inference_quantized_by_llm_awq(self):
         model = GPTQModel.load(
-            "vicuna-7b-1.5-awq-safetensors", # this quantized by llm-awq
-            backend=BACKEND.GEMM,
+            "ModelCloud/opt-125m-llm-awq", # this quantized by llm-awq
+            backend=BACKEND.GEMV_FAST,
         )
 
-        tokens = model.generate("Capital of France is", max_new_tokens=64)[0]
+        tokens = model.generate("Capital of France is", max_new_tokens=256)[0]
         result = model.tokenizer.decode(tokens)
+        print("result", result)
         if "paris" not in result.lower() and "city" not in result.lower():
             raise AssertionError(" `paris` not found in `result`")
 
