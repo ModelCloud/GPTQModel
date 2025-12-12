@@ -616,7 +616,7 @@ class QuantizeConfig():
             cfg.format = FORMAT.GEMV_FAST
             cfg.pack_dtype = torch.int16
             # Special field used to distinguish whether it is quantized from llm-awq
-            cls.from_llm_awq_quantize = True
+            cls.from_llm_awq_quantized = True
             log.info(
                 "Detected llm-awq quantization format; FORMAT automatically set to FORMAT.GEMV_FAST."
             )

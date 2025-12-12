@@ -296,6 +296,7 @@ def make_quant(
                 pack_dtype=pack_dtype,
                 backend=backend,
                 adapter=qcfg.adapter,
+                from_llm_awq_quantized=getattr(qcfg, "from_llm_awq_quantized", None)
             )
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
@@ -324,6 +325,7 @@ def create_quant_module(
     backend: BACKEND = BACKEND.AUTO,
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
+    from_llm_awq_quantized: Optional[bool] = None,
 ):
     # unwrap named module
     if isinstance(submodule, NamedModule):
@@ -419,6 +421,7 @@ def create_quant_module(
         backend=backend,
         register_buffers=register_buffers,
         adapter=adapter,
+        from_llm_awq_quantized=from_llm_awq_quantized,
     )
     new_layer.device = ori_layer_device
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
@@ -437,6 +440,7 @@ def create_quant_layer(
         pack_dtype: torch.dtype,
         backend: BACKEND,
         adapter: Optional[Adapter] = None,
+        from_llm_awq_quantized: Optional[bool] = None,
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
         return linear_cls
@@ -460,6 +464,7 @@ def create_quant_layer(
             pack_dtype=pack_dtype,
             backend=backend,
             adapter=adapter,
+            from_llm_awq_quantized=from_llm_awq_quantized,
         )
 
     return linear_cls

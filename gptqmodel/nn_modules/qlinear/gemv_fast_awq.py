@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+from typing import Optional
 
 import torch
 from torch import nn
@@ -95,6 +96,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         pack_dtype: torch.dtype = torch.int16,
         adapter: Adapter = None,
         register_buffers: bool = False,
+        from_llm_awq_quantized: Optional[bool] = None,
         **kwargs,
     ):
         backend = kwargs.pop("backend", BACKEND.GEMV_FAST)
@@ -114,7 +116,11 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
         self.split_k_iters = 8
         self.interleave = 4
+        self.zeros_name = "scaled_zeros" if from_llm_awq_quantized else "qzeros"
 
+        # The GEMV_FAST packing is a bit special; qweight and scales/zeros do not use the same pack_dtype.
+        # qweight is packaged using torch.int16.
+        # scales/zeros are packaged using torch.int32.
         int32_pack_factor = 32 // self.bits
 
         if register_buffers:
@@ -123,7 +129,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
                 torch.zeros((out_features // self.interleave, in_features // self.pack_factor * self.interleave), dtype=self.pack_dtype),
             )
             self.register_buffer(
-                "scaled_zeros",
+                self.zeros_name,
                 torch.zeros(
                     calculate_zeros_width(in_features, self.group_size) * int32_pack_factor,
                     out_features,
@@ -162,12 +168,13 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         if input_dtype != torch.float16:
             inputs = inputs.half()
 
+        zeros = getattr(self, self.zeros_name)
         if inputs_dim == 3 and batch_size < 8 and n_tokens == 1:
             out = awq_v2_ext.gemv_forward_cuda_decode(
                 inputs,
                 self.qweight,
                 self.scales,
-                self.scaled_zeros,
+                zeros,
                 inputs.numel() // inputs.shape[-1],
                 self.out_features,
                 self.in_features,
@@ -175,7 +182,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             )
         else:
             out = awq_v2_ext.gemm_forward_cuda_prefill(
-                inputs, self.qweight, self.scales, self.scaled_zeros
+                inputs, self.qweight, self.scales, zeros
             )
 
         if input_dtype != torch.float16:
@@ -229,7 +236,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         qzeros[:, : scales.shape[1]] = -(
                 qscales[:, : scales.shape[1]] * (zeros.to(torch.float32))
         ).to(torch.float16)
-        self.register_buffer("qzeros", qzeros.transpose(1, 0).contiguous())
+        self.register_buffer(self.zeros_name, qzeros.transpose(1, 0).contiguous())
 
     def extra_repr(self) -> str:
         return (

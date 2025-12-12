@@ -175,7 +175,7 @@ class TestInferenceOnly(unittest.TestCase):
 
     def test_inference_mistral_awq(self):
         model = GPTQModel.load(
-            "casperhansen/opt-125m-awq",
+            "TheBloke/Mistral-7B-v0.1-AWQ",
             backend=BACKEND.GEMM,
         )
 
@@ -192,7 +192,7 @@ class TestInferenceOnly(unittest.TestCase):
             backend=BACKEND.GEMV_FAST,
         )
 
-        tokens = model.generate("Capital of France is", max_new_tokens=256)[0]
+        tokens = model.generate("Capital of France is", max_new_tokens=512)[0]
         result = model.tokenizer.decode(tokens)
         print("result", result)
         if "paris" not in result.lower() and "city" not in result.lower():
