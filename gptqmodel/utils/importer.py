@@ -23,7 +23,7 @@ from ..nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonQuantLinear
 from ..nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
-from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
+from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear, LLMAwqQuantLinear
 from ..nn_modules.qlinear.machete import MacheteQuantLinear
 from ..nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
@@ -103,6 +103,7 @@ SUPPORTS_BACKEND_MAP = {
         ],
         FORMAT.GEMV: [BACKEND.GEMV],
         FORMAT.GEMV_FAST: [BACKEND.GEMV_FAST],
+        FORMAT.LLM_AWQ: [BACKEND.GEMV_FAST],
         FORMAT.MARLIN: [BACKEND.MACHETE, BACKEND.MARLIN],
     }
 }
@@ -272,6 +273,10 @@ def hf_select_quant_linear_v2(
     else:
         device = DEVICE.CPU
 
+    if format == FORMAT.LLM_AWQ:
+        # llm-awq uses torch.int16 to pack qweight
+        pack_dtype = torch.int16
+
     return select_quant_linear(
         bits=bits,
         group_size=group_size,
@@ -332,7 +337,11 @@ def select_quant_linear(
     validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        allow_quant_linears = [(k, v) for k, v in AUTO_SELECT_BACKEND_ORDER_MAP[quant_method].items() if k in SUPPORTS_BACKEND_MAP[quant_method][format]]
+        if format == FORMAT.LLM_AWQ:
+            allow_quant_linears = [(BACKEND.GEMV_FAST, LLMAwqQuantLinear)]
+        else:
+            allow_quant_linears = [(k, v) for k, v in AUTO_SELECT_BACKEND_ORDER_MAP[quant_method].items() if k in SUPPORTS_BACKEND_MAP[quant_method][format]]
+
         err = None
         global message_logged
         # Suppose all quant linears in the model should have the same backend.
@@ -422,7 +431,7 @@ def select_quant_linear(
     elif backend == BACKEND.GEMV:
         qlinear = AwqGEMVQuantLinear
     elif backend == BACKEND.GEMV_FAST:
-        qlinear = AwqGEMVFastQuantLinear
+        qlinear = LLMAwqQuantLinear if format == FORMAT.LLM_AWQ else AwqGEMVFastQuantLinear
     elif backend == BACKEND.TORCH_AWQ:
         qlinear = AwqTorchQuantLinear
     elif backend == BACKEND.TORCH:

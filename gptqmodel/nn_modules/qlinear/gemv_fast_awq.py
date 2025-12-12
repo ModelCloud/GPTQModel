@@ -47,10 +47,10 @@ def pack_intweight(unpacked_qweight, interleave, kstride):
     )
     # Packing -> (N // 4, K // 64, 64)
     Packed_Kernel = (
-        Packed_Kernel[..., 0]
-        | (Packed_Kernel[..., 1] << 4)
-        | (Packed_Kernel[..., 2] << 8)
-        | (Packed_Kernel[..., 3] << 12)
+            Packed_Kernel[..., 0]
+            | (Packed_Kernel[..., 1] << 4)
+            | (Packed_Kernel[..., 2] << 8)
+            | (Packed_Kernel[..., 3] << 12)
     )
     # reshape to (N // 4, K), FP16 format
     Packed_Kernel = Packed_Kernel.reshape(N // interleave, K)
@@ -83,19 +83,21 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv_fast"
 
+    zeros_name = "qzeros"
+
     def __init__(
-        self,
-        bits: int,
-        group_size: int,
-        sym: bool,
-        desc_act: bool,
-        in_features: int,
-        out_features: int,
-        bias: bool = False,
-        pack_dtype: torch.dtype = torch.int32,
-        adapter: Adapter = None,
-        register_buffers: bool = False,
-        **kwargs,
+            self,
+            bits: int,
+            group_size: int,
+            sym: bool,
+            desc_act: bool,
+            in_features: int,
+            out_features: int,
+            bias: bool = False,
+            pack_dtype: torch.dtype = torch.int16,
+            adapter: Adapter = None,
+            register_buffers: bool = False,
+            **kwargs,
     ):
         backend = kwargs.pop("backend", BACKEND.GEMV_FAST)
         super().__init__(
@@ -115,17 +117,19 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         self.split_k_iters = 8
         self.interleave = 4
 
+        # The GEMV_FAST packing is a bit special; qweight and scales/zeros do not use the same pack_dtype.
+        # qweight is packaged using torch.int16.
+        # scales/zeros are packaged using torch.int32.
         int32_pack_factor = 32 // self.bits
-
-        self.bias = None
 
         if register_buffers:
             self.register_buffer(
                 "qweight",
-                torch.zeros((out_features // self.interleave, in_features // self.pack_factor * self.interleave), dtype=self.pack_dtype),
+                torch.zeros((out_features // self.interleave, in_features // self.pack_factor * self.interleave),
+                            dtype=self.pack_dtype),
             )
             self.register_buffer(
-                "qzeros",
+                self.zeros_name,
                 torch.zeros(
                     calculate_zeros_width(in_features, self.group_size) * int32_pack_factor,
                     out_features,
@@ -143,37 +147,34 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
             if bias:
                 self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
-
-    def post_init(self):
-        # if self.padded_infeatures != self.in_features:
-        #     self.qweight.resize_(self.padded_infeatures // self.pack_dtype_bits * self.bits, self.out_features)
-        #     self.qzeros.resize_(
-        #         math.ceil(self.padded_infeatures / self.group_size),
-        #         self.out_features // self.pack_dtype_bits * self.bits
-        #     )
-        #     self.scales.resize_((math.ceil(self.padded_infeatures / self.group_size), self.out_features), )
-        #     self.g_idx = torch.tensor([i // self.group_size for i in range(self.padded_infeatures)], dtype=torch.int32,
-        #                               device=self.g_idx.device)
-
-        super().post_init()
+            else:
+                self.bias = None
 
     def forward(self, x: torch.Tensor):
         if awq_v2_ext is None:
-            raise ModuleNotFoundError("External AWQ V2 kernels are not properly installed." + msg)
+            raise ModuleNotFoundError("External AWQ V2 kernels are not properly installed. Error: " + msg)
 
         inputs = x
-        batch_size, n_tokens, _ = inputs.shape
+        inputs_dim = inputs.dim()
+
+        batch_size = None
+        n_tokens = None
+        # Some linear layers in certain models (for example, opt-12m model.decoder.layers.0.fc1) receive inputs of shape `[B*S, H]`,
+        # so it's necessary to check if the dimension is equal to 3.
+        if inputs_dim == 3:
+            batch_size, n_tokens, _ = inputs.shape
 
         input_dtype = inputs.dtype
         if input_dtype != torch.float16:
             inputs = inputs.half()
 
-        if batch_size < 8 and n_tokens == 1:
+        zeros = getattr(self, self.zeros_name)
+        if inputs_dim == 3 and batch_size < 8 and n_tokens == 1:
             out = awq_v2_ext.gemv_forward_cuda_decode(
                 inputs,
                 self.qweight,
                 self.scales,
-                self.qzeros,
+                zeros,
                 inputs.numel() // inputs.shape[-1],
                 self.out_features,
                 self.in_features,
@@ -181,7 +182,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             )
         else:
             out = awq_v2_ext.gemm_forward_cuda_prefill(
-                inputs, self.qweight, self.scales, self.qzeros
+                inputs, self.qweight, self.scales, zeros
             )
 
         if input_dtype != torch.float16:
@@ -194,7 +195,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
         return out
 
-    def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor=None):
+    def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
         scale_zeros = zeros * scales
@@ -235,7 +236,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
         qzeros[:, : scales.shape[1]] = -(
                 qscales[:, : scales.shape[1]] * (zeros.to(torch.float32))
         ).to(torch.float16)
-        self.register_buffer("qzeros", qzeros.transpose(1, 0).contiguous())
+        self.register_buffer(self.zeros_name, qzeros.transpose(1, 0).contiguous())
 
     def extra_repr(self) -> str:
         return (
@@ -248,4 +249,29 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             )
         )
 
-__all__ = ["AwqGEMVFastQuantLinear"]
+
+class LLMAwqQuantLinear(AwqGEMVFastQuantLinear):
+    SUPPORTS_BITS = [4]
+    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = True
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+
+    SUPPORTS_DEVICES = [DEVICE.ALL]
+    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PACK_DTYPES = [torch.int16]
+    SUPPORTS_ADAPTERS = [Lora]
+
+    SUPPORTS_DTYPES = [torch.float16]
+
+    # for transformers/optimum tests compat
+    QUANT_TYPE = "llm-awq"
+
+    zeros_name = "scaled_zeros"
+
+
+__all__ = ["AwqGEMVFastQuantLinear", "LLMAwqQuantLinear"]

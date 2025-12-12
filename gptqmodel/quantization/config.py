@@ -30,6 +30,9 @@ QUANT_METHOD_FIELD = "quant_method"
 PACK_DTYPE_FIELD = "pack_dtype"
 QUANT_CONFIG_FILENAME = "quantize_config.json"
 QUANT_CONFIG_FILENAME_COMPAT = [QUANT_CONFIG_FILENAME, "quant_config.json", "config.json"]
+# This is AwqBackendPackingMethod, not GPTQModel.BACKEND.
+# It's used to distinguish between quantization by llm-awq and autoawq; llm-awq actually uses GEMV_FAST for packing.
+AWQ_PACKING_BACKEND_FIELD = "backend"
 
 MIN_VERSION_WITH_V2 = "0.9.0"
 
@@ -69,6 +72,7 @@ class FORMAT(str, Enum):
     GEMM = "gemm"
     GEMV = "gemv"
     GEMV_FAST = "gemv_fast"
+    LLM_AWQ = "llm-awq"
 
 
 # quant methods
@@ -606,7 +610,17 @@ class QuantizeConfig():
                 if "v2_memory_device" in overrides and "gptaq_memory_device" not in overrides:
                     overrides["gptaq_memory_device"] = overrides.pop("v2_memory_device")
 
-        return cls(**normalized)
+        cfg = cls(**normalized)
+
+        if quantize_cfg.get(AWQ_PACKING_BACKEND_FIELD) and quantize_cfg[AWQ_PACKING_BACKEND_FIELD] == "llm-awq":
+            cfg.quant_method = METHOD.AWQ
+            cfg.format = FORMAT.LLM_AWQ
+            cfg.pack_dtype = torch.int16
+            log.info(
+                "Detected llm-awq quantization format; FORMAT automatically set to FORMAT.LLM_AWQ."
+            )
+
+        return cfg
 
     @classmethod
     def from_pretrained(cls, save_dir: str, **kwargs):
