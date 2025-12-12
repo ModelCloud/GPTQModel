@@ -32,7 +32,6 @@ class BACKEND(str, Enum):
     GEMM_TRITON = "gemm_triton"
     GEMV = "gemv"
     GEMV_FAST = "gemv_fast"
-    LLM_AWQ = "llm-awq"
     TORCH_AWQ = "torch_awq"
 
     # external

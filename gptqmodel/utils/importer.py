@@ -75,7 +75,6 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
         BACKEND.GEMM_TRITON: AwqGEMMTritonQuantLinear,
         BACKEND.GEMV: AwqGEMVQuantLinear,
         BACKEND.GEMV_FAST: AwqGEMVFastQuantLinear,
-        BACKEND.LLM_AWQ: LLMAwqQuantLinear,
         BACKEND.TORCH_FUSED_AWQ: TorchFusedAwqQuantLinear,
         BACKEND.TORCH_AWQ: AwqTorchQuantLinear,
     }),
@@ -104,7 +103,7 @@ SUPPORTS_BACKEND_MAP = {
         ],
         FORMAT.GEMV: [BACKEND.GEMV],
         FORMAT.GEMV_FAST: [BACKEND.GEMV_FAST],
-        FORMAT.LLM_AWQ: [BACKEND.LLM_AWQ],
+        FORMAT.LLM_AWQ: [BACKEND.GEMV_FAST],
         FORMAT.MARLIN: [BACKEND.MACHETE, BACKEND.MARLIN],
     }
 }
@@ -274,7 +273,7 @@ def hf_select_quant_linear_v2(
     else:
         device = DEVICE.CPU
 
-    if backend == "llm-awq":
+    if format == FORMAT.LLM_AWQ:
         # llm-awq uses torch.int16 to pack qweight
         pack_dtype = torch.int16
 
@@ -338,7 +337,11 @@ def select_quant_linear(
     validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        allow_quant_linears = [(k, v) for k, v in AUTO_SELECT_BACKEND_ORDER_MAP[quant_method].items() if k in SUPPORTS_BACKEND_MAP[quant_method][format]]
+        if format == FORMAT.LLM_AWQ:
+            allow_quant_linears = [(BACKEND.GEMV_FAST, LLMAwqQuantLinear)]
+        else:
+            allow_quant_linears = [(k, v) for k, v in AUTO_SELECT_BACKEND_ORDER_MAP[quant_method].items() if k in SUPPORTS_BACKEND_MAP[quant_method][format]]
+
         err = None
         global message_logged
         # Suppose all quant linears in the model should have the same backend.
@@ -428,7 +431,7 @@ def select_quant_linear(
     elif backend == BACKEND.GEMV:
         qlinear = AwqGEMVQuantLinear
     elif backend == BACKEND.GEMV_FAST:
-        qlinear = AwqGEMVFastQuantLinear
+        qlinear = LLMAwqQuantLinear if format == FORMAT.LLM_AWQ else AwqGEMVFastQuantLinear
     elif backend == BACKEND.LLM_AWQ:
         qlinear = LLMAwqQuantLinear
     elif backend == BACKEND.TORCH_AWQ:
