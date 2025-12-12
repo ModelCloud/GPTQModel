@@ -432,8 +432,6 @@ def select_quant_linear(
         qlinear = AwqGEMVQuantLinear
     elif backend == BACKEND.GEMV_FAST:
         qlinear = LLMAwqQuantLinear if format == FORMAT.LLM_AWQ else AwqGEMVFastQuantLinear
-    elif backend == BACKEND.LLM_AWQ:
-        qlinear = LLMAwqQuantLinear
     elif backend == BACKEND.TORCH_AWQ:
         qlinear = AwqTorchQuantLinear
     elif backend == BACKEND.TORCH:
