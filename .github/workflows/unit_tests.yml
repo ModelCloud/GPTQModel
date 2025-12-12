@@ -71,6 +71,7 @@ env:
   BUILD_QQQ: 1
   BUILD_EORA: 1
   GPTQMODEL_BUILD_EXLLAMA_V1: 1
+  GPTQMODEL_BUILD_EORA: 1
   LEGACY_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py"
   GPTQMODEL_FORCE_BUILD: 1

@@ -105,7 +105,7 @@ def main():
     parser.add_argument("--gpu", type=int, default=0, help="GPU id to test against")
     parser.add_argument("--total-gib", type=float, default=40.0, help="Total GiB to stream per direction per mode")
     parser.add_argument("--chunk-gib", type=float, default=1.0, help="Chunk size GiB per copy")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     if not torch.cuda.is_available():
         raise SystemExit("CUDA not available.")
