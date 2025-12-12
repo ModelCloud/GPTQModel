@@ -845,7 +845,17 @@ class CachedWheelsCommand(_bdist_wheel):
             print("Raw wheel path", wheel_path)
             os.rename(wheel_filename, wheel_path)
         except BaseException:
-            print(f"Precompiled wheel not found at: {wheel_url}. Building from source...")
+            env_info = [f"python={python_version}", f"torch={TORCH_VERSION or 'unknown'}"]
+            if CUDA_VERSION:
+                env_info.append(f"cuda={CUDA_VERSION}")
+            if ROCM_VERSION:
+                env_info.append(f"rocm={ROCM_VERSION}")
+
+            print(
+                "Unable to match and download a precompiled wheel; entering slow manual build mode. "
+                f"Wheel match params: {', '.join(env_info)}. "
+                f"Fallback source build triggered for {wheel_url}"
+            )
             super().run()
 
 
