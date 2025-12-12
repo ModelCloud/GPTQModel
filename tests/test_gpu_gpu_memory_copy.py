@@ -77,7 +77,7 @@ def main():
     parser.add_argument("--dst", type=int, default=1, help="destination GPU id")
     parser.add_argument("--total-gib", type=float, default=40.0, help="total GiB to stream per direction")
     parser.add_argument("--chunk-gib", type=float, default=1.0, help="chunk size GiB per copy")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
         raise SystemExit("Need at least 2 CUDA devices.")
