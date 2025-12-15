@@ -264,20 +264,21 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     numels = out.numel()
     grid = lambda meta: (triton.cdiv(numels, meta["X_BLOCK"]),)  # noqa: E731
 
-    dequant_kernel[grid](
-        g_idx,
-        scales,
-        qweight,
-        qzeros,
-        out,
-        torch_dtype_to_triton(out_dtype),
-        numels,
-        pack_bits=pack_bits,
-        maxq=maxq,
-        bits=bits,
-        out_features=out_features,
-        num_groups=num_groups,
-    )
+    with torch.cuda.device(qweight.device):
+        dequant_kernel[grid](
+            g_idx,
+            scales,
+            qweight,
+            qzeros,
+            out,
+            torch_dtype_to_triton(out_dtype),
+            numels,
+            pack_bits=pack_bits,
+            maxq=maxq,
+            bits=bits,
+            out_features=out_features,
+            num_groups=num_groups,
+        )
     return out
 
 
