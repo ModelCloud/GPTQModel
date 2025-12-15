@@ -13,10 +13,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pcre as re
 import torch
 from packaging import version
-from random_word import random_word
 
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
+from ..utils.random_str import get_random_string
 
 
 log = setup_logger()
@@ -395,8 +395,7 @@ class QuantizeConfig():
         #print(f"adapter: {self.adapter}")
 
         if self.offload_to_disk and not self.offload_to_disk_path:
-            randWords = random_word.RandomWords()
-            path_key = f"{randWords.get_random_word()}-{randWords.get_random_word()}"
+            path_key = f"{get_random_string()}-{get_random_string()}"
             self.offload_to_disk_path = f"./gptqmodel_offload/{path_key}/"
             log.info(f"QuantizeConfig: offload_to_disk_path auto set to `{self.offload_to_disk_path}`")
 
