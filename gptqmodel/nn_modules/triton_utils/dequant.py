@@ -264,7 +264,7 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     numels = out.numel()
     grid = lambda meta: (triton.cdiv(numels, meta["X_BLOCK"]),)  # noqa: E731
 
-    with torch.cuda.device(qweight.device):
+    with torch.xpu.device(qweight.device) if HAS_XPU else torch.cuda.device(qweight.device):
         dequant_kernel[grid](
             g_idx,
             scales,
