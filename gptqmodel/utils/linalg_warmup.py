@@ -37,6 +37,10 @@ def _run_svd(device: torch.device, dtype: torch.dtype) -> None:
 
 
 def _run_qr(device: torch.device, dtype: torch.dtype) -> None:
+    # mps has no aten.qr implementation
+    if device.type == "mps":
+        return
+
     square = torch.randn((4, 4), device=device, dtype=dtype)
     torch.linalg.qr(square)
 
