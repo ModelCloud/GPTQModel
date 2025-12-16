@@ -23,6 +23,11 @@ def _make_spd(size: int, device: torch.device, dtype: torch.dtype) -> torch.Tens
 def _run_cholesky_and_eigh(device: torch.device, dtype: torch.dtype) -> None:
     spd = _make_spd(4, device, dtype)
     torch.linalg.cholesky(spd)
+
+    # mps has no aten.eigh implementation
+    if device.type == "mps":
+        return
+
     torch.linalg.eigh(spd)
 
 
