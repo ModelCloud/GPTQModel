@@ -15,33 +15,6 @@ from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
 from .torch import TorchQuantLinear
 
-
-try:
-    import triton
-    import triton.language as tl
-    from triton import __version__ as triton_version
-
-    from ..triton_utils.dequant import QuantLinearFunction
-    from ..triton_utils.mixin import TritonModuleMixin
-
-    triton_v = version.parse(triton_version)
-
-    if triton_v < version.parse("2.0.0"):
-        raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
-
-    # GIL=0 is tested with Triton 3.4.0 and it works
-    if has_gil_disabled() and triton_v < version.parse("3.4.0"):
-        raise Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0")
-
-    TRITON_AVAILABLE = True
-except BaseException:
-    TRITON_AVAILABLE = False
-    class TritonModuleMixin:
-        pass
-
-TRITON_INSTALL_HINT = "Trying to use the triton backend, but it could not be imported. Please install triton by 'pip install gptqmodel[triton] --no-build-isolation'"
-TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)"
-
 log = setup_logger()
 
 
@@ -90,9 +63,6 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
         register_buffers: bool = True,
         **kwargs,
     ):
-        if not TRITON_AVAILABLE:
-            raise ValueError(TRITON_INSTALL_HINT)
-
         # log.debug(f"triton register_buffers: {register_buffers}")
         super().__init__(
             bits=bits,
@@ -114,14 +84,31 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
         #     self.padded_infeatures = self.in_features
 
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        if not TRITON_AVAILABLE:
-            return False, ValueError(TRITON_INSTALL_HINT)
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        import triton
+        import triton.language as tl
+        from triton import __version__ as triton_version
 
+        from ..triton_utils.dequant import QuantLinearFunction
+        from ..triton_utils.mixin import TritonModuleMixin
+
+        triton_v = version.parse(triton_version)
+
+        if triton_v < version.parse("2.0.0"):
+            raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
+
+        # GIL=0 is tested with Triton 3.4.0 and it works
+        if has_gil_disabled() and triton_v < version.parse("3.4.0"):
+            raise Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0")
+
+        return True, None
+
+    @classmethod
+    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         device = args.get('device')
 
         if device == DEVICE.XPU and not triton_xpu_available():
-            return False, ValueError(TRITON_XPU_INSTALL_HINT)
+            return False, ValueError("Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)")
 
         return cls._validate(**args)
 
@@ -195,8 +182,6 @@ def triton_test_add(x: torch.Tensor, y: torch.Tensor):
 
 
 def triton_xpu_available():
-    if not TRITON_AVAILABLE:
-        return False
     size = 1024
     x = torch.rand(size, device='xpu:0')
     y = torch.rand(size, device='xpu:0')

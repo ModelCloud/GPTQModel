@@ -13,7 +13,6 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
 from ...utils.backend import BACKEND
-from . import tritonv2
 
 
 class AwqGemmTritonFn(torch.autograd.Function):
@@ -30,9 +29,6 @@ class AwqGemmTritonFn(torch.autograd.Function):
         out_features=0,
         prefer_backend=None,
     ):
-        if not tritonv2.TRITON_AVAILABLE:
-            raise ValueError(tritonv2.TRITON_INSTALL_HINT)
-
         ctx.save_for_backward(x, qweight, qzeros, scales, bias)
         ctx.out_features = out_features
 
@@ -60,8 +56,6 @@ class AwqGemmTritonFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         input, qweight, qzeros, scales, bias = ctx.saved_tensors
-        if not tritonv2.TRITON_AVAILABLE:
-            raise ValueError(tritonv2.TRITON_INSTALL_HINT)
 
         weights = awq_dequantize_triton(qweight, scales, qzeros).to(grad_output.dtype)
 
@@ -97,10 +91,20 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        if not tritonv2.TRITON_AVAILABLE:
-            return False, ImportError(tritonv2.TRITON_INSTALL_HINT)
-        else:
-            return True, None
+        import triton
+        import triton.language as tl
+        from triton import __version__ as triton_version
+
+        triton_v = version.parse(triton_version)
+
+        if triton_v < version.parse("2.0.0"):
+            raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
+
+        # GIL=0 is tested with Triton 3.4.0 and it works
+        if has_gil_disabled() and triton_v < version.parse("3.4.0"):
+            raise Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0")
+
+        return True, None
 
     def __init__(
         self,

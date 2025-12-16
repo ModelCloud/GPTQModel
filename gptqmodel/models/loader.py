@@ -311,11 +311,6 @@ def ModelLoader(cls):
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
-        if backend == BACKEND.TRITON:
-            from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT
-            if not TRITON_AVAILABLE:
-                raise ValueError(TRITON_INSTALL_HINT)
-
         """load quantized model from local disk"""
         if cls.require_trust_remote_code and not trust_remote_code:
             raise ValueError(
