@@ -710,6 +710,7 @@ jobs:
       BUILD_EORA: 0
       GPTQMODEL_BUILD_EXLLAMA_V1: 0
       GPTQMODEL_BUILD_EORA: 0
+      GPTQMODEL_FORCE_BUILD: 0
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
