@@ -12,6 +12,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
+from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 
 
@@ -91,10 +92,8 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        import triton
-        import triton.language as tl
+        from packaging import version
         from triton import __version__ as triton_version
-
         triton_v = version.parse(triton_version)
 
         if triton_v < version.parse("2.0.0"):

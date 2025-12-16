@@ -6,7 +6,6 @@ from functools import lru_cache
 from typing import Optional, Tuple
 
 import torch
-from packaging import version
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
@@ -15,10 +14,11 @@ from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
 from .torch import TorchQuantLinear
 
+
 log = setup_logger()
 
 
-class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
+class TritonV2QuantLinear(TorchQuantLinear):
     SUPPORTS_BITS = [2, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]
@@ -87,6 +87,7 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         import triton  # noqa: F401  # validate Triton is importable
         import triton.language as tl  # noqa: F401  # ensure Triton language bindings load
+        from packaging import version
         from triton import __version__ as triton_version
 
         from ..triton_utils.dequant import QuantLinearFunction  # noqa: F401  # dependency check for validate_once
@@ -127,6 +128,8 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
         super().post_init()
 
     def forward(self, x):
+        from ..triton_utils.dequant import QuantLinearFunction
+
         if self.training:
             return super().forward(x)
 
@@ -161,6 +164,9 @@ __all__ = ["TritonV2QuantLinear"]
 
 # test triton on XPU to ensure special Intel/Triton is installed as we cannot check based on triton package meta data
 def triton_test_add(x: torch.Tensor, y: torch.Tensor):
+    import triton  # noqa: F401  # ensure Triton language bindings load
+    import triton.language as tl  # noqa: F401  # ensure Triton language bindings load
+
     # don't put it on top-level to avoid crash if triton was not installed
     @triton.jit
     def add_kernel(x_ptr,  # *Pointer* to first input vector.
