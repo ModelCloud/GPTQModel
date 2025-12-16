@@ -700,64 +700,48 @@ jobs:
           source venv/bin/activate && pip cache purge && uv cache clean || true
           rm -rf ../GPTQModel && mkdir ../GPTQModel
 
-
   mac-test:
     runs-on: macos-latest
+    env:
+      CUDA_VISIBLE_DEVICES: ''
+      TORCH_CUDA_ARCH_LIST: ''
+      MAX_JOBS: 3
+      BUILD_QQQ: 0
+      BUILD_EORA: 0
+      GPTQMODEL_BUILD_EXLLAMA_V1: 0
+      GPTQMODEL_BUILD_EORA: 0
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
-
-      #      - name: prepare
-      #        run: |
-      #          echo "" > requirements.txt
-      #          echo transformers >> requirements.txt
-      #          echo optimum >> requirements.txt
 
       - uses: actions/setup-python@v6
         with:
           python-version: 3.12
           cache: 'pip'
 
-      - name: system
-        run: |
-          echo "sysctl -n hw.logicalcpu"
-          sysctl -n hw.logicalcpu
-          echo "sysctl -n hw.physicalcpu"
-          sysctl -n hw.physicalcpu
-      - name: install
+      - name: Install dependencies
         run: |
           python -V
           python -m venv venv
           source venv/bin/activate
           pip install pip uv setuptools build wheel torch -U
-          echo "=========="
-          echo "==== pip install meson-python -U ===="
           pip install meson-python -U
-          echo "=========="
-          echo "==== pip install numpy -U ===="
           pip install numpy==2.2.6 -U
+
           uv pip install -e . --no-build-isolation
           pip install pip Pillow device_smi pypcre tokenicer threadpoolctl accelerate logbar transformers optimum torch -U
-      - name: run
+
+      - name: Run test
         run: |
           source venv/bin/activate
-          
-          export CUDA_VISIBLE_DEVICES=""
-          pip list
           python - <<'PY'
           import os
-          
-          print("eeeeeeeeeeeeeeeeeee")
-          print(f"os.cpu_count(): {os.cpu_count()}")
-          print("eeeeeeeeeeeeeeeeeee")
-          
           from transformers import pipeline
           os.environ["CUDA_VISIBLE_DEVICES"] = ""
           os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-          llm_pipeline = pipeline(
-            model="JunHowie/Qwen3-0.6B-GPTQ-Int4",
-          )
-          
-          output = llm_pipeline("What is the capital of Germany?", max_new_tokens=100)
+          llm_pipeline = pipeline(model="JunHowie/Qwen3-0.6B-GPTQ-Int4")
+          output = llm_pipeline("Which city is the capital of France?", max_new_tokens=100)
           print(output)
+          
+          assert "paris" in output.lower()
           PY
