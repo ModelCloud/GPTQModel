@@ -33,7 +33,7 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from ..nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
-from ..nn_modules.qlinear.tritonv2 import TRITON_AVAILABLE, TRITON_INSTALL_HINT, TritonV2QuantLinear
+from ..nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from ..quantization import FORMAT, METHOD
 from ..utils.logger import setup_logger
 from . import BACKEND
@@ -395,8 +395,6 @@ def select_quant_linear(
 
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:
-        if not TRITON_AVAILABLE:
-            raise ValueError(TRITON_INSTALL_HINT)
         qlinear = TritonV2QuantLinear
     elif backend == BACKEND.BITBLAS:
         qlinear = BitBLASQuantLinear
