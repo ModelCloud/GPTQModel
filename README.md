@@ -17,7 +17,7 @@
 </p>
 
 ## Latest News
-* 12/16/2025 [5.6.8 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.8): Fixed `MacOS` and `AWQMarlin` kernel loading import regressions.
+* 12/16/2025 [5.6.10 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.10): Fixed `MacOS` and `AWQMarlin` kernel loading import regressions. Resolved most `multi-arch` compile issue on `Ubuntu`, `Arch`, `RedHat` and other distros.
 * 12/15/2025 [5.6.6 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.6): Fixed `multi-arch` build issues and `Tritonv2` kernel launch bug on multi-gpus. 
 * 12/12/2025 [5.6.2 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.2): Fixed 3-bit Triton GPTQ kernel dequant/inference and `license` property compatibility issue with latest pip/setuptools.
 * 12/9/2025 [5.6.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.0): ✨New `HF Kernel` for CPU optimized for `AMX`, `AVX2` and `AVX512`. Auto module tree for auto-model support. Added Afmoe and Dosts1 model support. Fixed pre-layer pass quantization speed regression. Improved HF Transformers, Peft and Optimum support for both GPTQ and AWQ. Fixed many AWQ compat bugs and regressions. 
@@ -29,14 +29,16 @@ default to massively reduce `cpu` ram usage. New `Intel` and `AMD` cpu hw accele
 `gemm_fast`, `marlin` kernel support. `LFM`, `Ling`, `Qwen3 Omni` model support. 
 `Bitblas` kernel updated to support Bitblas `0.1.0.post1` reelase.
 Quantization is now faster with reduced vram usage. Enhanced logging support with `LogBar`.
-* 09/16/2025 [4.2.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.5): `hyb_act` renamed to `act_group_aware`. Removed finicky `torch` import within `setup.py`. Packing bug fix and prebuilt Pytorch 2.8 whls. 
-* 09/12/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.0): ✨ New Models Support: Qwen3-Next, Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compat. Patch fix GIL=0 cuda error for multi-gpu. Fix compat with autoround + new transformers. 
-* 09/04/2025 [4.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ Meituan LongCat Flash Chat, Llama 4, GPT-OSS (BF16), and GLM-4.5-Air support.  New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
-* 08/21/2025 [4.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.0.0): 🎉 New Group Aware Reordering (GAR) support. New models support: Bytedance Seed-OSS, Baidu Ernie, Huawei PanGu, Gemma3, Xiaomi Mimo, Qwen 3/MoE, Falcon H1, GPT-Neo. Memory leak and multiple model compatibility fixes related to Transformers >= 4.54. Python >= 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. Early access Pytorch 2.8 fused-ops on Intel XPU for up to 50% speedup.
 
 <details>
 
 <summary>Archived News</summary>
+* 09/16/2025 [4.2.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.5): `hyb_act` renamed to `act_group_aware`. Removed finicky `torch` import within `setup.py`. Packing bug fix and prebuilt Pytorch 2.8 whls. 
+* 09/12/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.0): ✨ New Models Support: Qwen3-Next, Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compat. Patch fix GIL=0 cuda error for multi-gpu. Fix compat with autoround + new transformers. 
+
+* 09/04/2025 [4.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ Meituan LongCat Flash Chat, Llama 4, GPT-OSS (BF16), and GLM-4.5-Air support.  New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
+* 08/21/2025 [4.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.0.0): 🎉 New Group Aware Reordering (GAR) support. New models support: Bytedance Seed-OSS, Baidu Ernie, Huawei PanGu, Gemma3, Xiaomi Mimo, Qwen 3/MoE, Falcon H1, GPT-Neo. Memory leak and multiple model compatibility fixes related to Transformers >= 4.54. Python >= 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. Early access Pytorch 2.8 fused-ops on Intel XPU for up to 50% speedup.
+
 * 10/17/2025 5.0.0-dev `main`: 👀: EoRA now multi-gpu compatible. Fixed both quality stability of multi-gpu quanta and vram usage. New LFM and Ling models support.
 * 09/30/2025 5.0.0-dev `main`: 👀: New Data Parallel + Multi-GPU + Python 3.13T (PYTHON_GIL=0) equals 80%+ overall quant time reduction of large MoE models vs v4.2.5. 
 * 09/29/2025 5.0.0-dev `main`: 🎉 New Qwen3 Omni model support. AWQ Marlin kernel integrated + many disk offload, threading, and memory usage fixes. 
