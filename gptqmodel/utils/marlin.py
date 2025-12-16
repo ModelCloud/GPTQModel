@@ -16,6 +16,7 @@ from .rocm import IS_ROCM
 log = setup_logger()
 
 marlin_import_exception = None
+gptqmodel_marlin_kernels = None
 try:
     gptqmodel_marlin_kernels = load_extension_module("gptqmodel_marlin_kernels")
 except ImportError as e:
