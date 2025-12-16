@@ -29,6 +29,7 @@ from ..nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
 from ..nn_modules.qlinear.marlin import MarlinQuantLinear
 from ..nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
+from ..nn_modules.qlinear.ascend_npu import AscendNPUQuantLinear
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
@@ -38,7 +39,7 @@ from ..quantization import FORMAT, METHOD
 from ..utils.logger import setup_logger
 from . import BACKEND
 from .rocm import IS_ROCM
-from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
+from .torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU
 
 
 ACCELERATE_DEVICE_MAP_KEYWORDS = {"auto", "balanced", "sequential"}
@@ -51,6 +52,7 @@ log = setup_logger()
 
 AUTO_SELECT_BACKEND_ORDER_MAP = {
     METHOD.GPTQ: OrderedDict({
+        BACKEND.ASCEND_NPU: AscendNPUQuantLinear,  # Ascend NPU inference via torch_npu
         BACKEND.MACHETE: MacheteQuantLinear, # optimized for sm90+
         BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
         # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear, #
@@ -82,8 +84,8 @@ AUTO_SELECT_BACKEND_ORDER_MAP = {
 
 SUPPORTS_BACKEND_MAP = {
     METHOD.GPTQ: {
-        FORMAT.GPTQ: [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.HF_KERNEL, BACKEND.TRITON, BACKEND.TORCH_FUSED, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
-        FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.HF_KERNEL, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
+        FORMAT.GPTQ: [BACKEND.ASCEND_NPU, BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.HF_KERNEL, BACKEND.TRITON, BACKEND.TORCH_FUSED, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
+        FORMAT.GPTQ_V2: [BACKEND.ASCEND_NPU, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.HF_KERNEL, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
         FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
         FORMAT.BITBLAS: [BACKEND.BITBLAS],
     },
@@ -171,6 +173,8 @@ def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> 
     if device is None:
         if HAS_CUDA:
             device = DEVICE.CUDA
+        elif HAS_NPU:
+            device = DEVICE.NPU
         elif HAS_XPU:
             device = DEVICE.XPU
         elif HAS_MPS:
@@ -398,6 +402,8 @@ def select_quant_linear(
     # Handle the case where backend is not AUTO.
     if backend == BACKEND.TRITON:
         qlinear = TritonV2QuantLinear
+    elif backend == BACKEND.ASCEND_NPU:
+        qlinear = AscendNPUQuantLinear
     elif backend == BACKEND.BITBLAS:
         qlinear = BitBLASQuantLinear
     elif backend == BACKEND.MACHETE:
