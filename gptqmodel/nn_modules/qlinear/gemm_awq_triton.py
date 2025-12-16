@@ -11,7 +11,6 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
-from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 
@@ -30,6 +29,8 @@ class AwqGemmTritonFn(torch.autograd.Function):
         out_features=0,
         prefer_backend=None,
     ):
+        from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
+
         ctx.save_for_backward(x, qweight, qzeros, scales, bias)
         ctx.out_features = out_features
 
@@ -56,6 +57,9 @@ class AwqGemmTritonFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton
+
+
         input, qweight, qzeros, scales, bias = ctx.saved_tensors
 
         weights = awq_dequantize_triton(qweight, scales, qzeros).to(grad_output.dtype)
