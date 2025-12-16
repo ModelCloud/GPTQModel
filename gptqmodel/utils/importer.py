@@ -370,17 +370,19 @@ def select_quant_linear(
                         #if not message_logged:
                         #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
                         #    message_logged = True
-                        log.info(f"{'Packing' if pack else ''} Kernel: Auto-selection: adding candidate `{cls.__name__}`")
+                        log.info(f"{'Packing ' if pack else ''}Kernel: Auto-selection: adding candidate `{cls.__name__}`")
                         validated_qlinears.append(cls)
                         if not multi_select:
+                            log.info(f"Kernel: selected -> `{cls.__name__}`.")
                             return cls
                 else:
                     #if not message_logged:
                     #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
                     #    message_logged = True
-                    log.info(f"{'Packing' if pack else ''} Kernel: Auto-selection: adding candidate `{cls.__name__}`")
+                    log.info(f"{'Packing ' if pack else ''}Kernel: Auto-selection: adding candidate `{cls.__name__}`")
                     validated_qlinears.append(cls)
                     if not multi_select:
+                        log.info(f"Kernel: selected -> `{cls.__name__}`.")
                         return cls
 
         if err:
