@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-
+from functools import lru_cache
 from typing import Optional, Tuple
 
 import torch
@@ -29,7 +29,7 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA] # Intel XPU can use Triton but this has been validated
+    SUPPORTS_DEVICES = [DEVICE.CUDA]  # Intel XPU can use Triton but this has not been validated yet
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
     SUPPORTS_ADAPTERS = [Lora]
@@ -50,18 +50,18 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
     """
 
     def __init__(
-        self,
-        bits: int,
-        group_size: int,
-        desc_act: bool,
-        sym: bool,
-        in_features,
-        out_features,
-        bias: bool = False,
-        pack_dtype: torch.dtype = torch.int32,
-        adapter: Adapter = None,
-        register_buffers: bool = True,
-        **kwargs,
+            self,
+            bits: int,
+            group_size: int,
+            desc_act: bool,
+            sym: bool,
+            in_features,
+            out_features,
+            bias: bool = False,
+            pack_dtype: torch.dtype = torch.int32,
+            adapter: Adapter = None,
+            register_buffers: bool = True,
+            **kwargs,
     ):
         # log.debug(f"triton register_buffers: {register_buffers}")
         super().__init__(
@@ -107,8 +107,10 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         device = args.get('device')
 
+        # xpu requires extra runtime checks to see if triton actually works
         if device == DEVICE.XPU and not triton_xpu_available():
-            return False, ValueError("Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)")
+            return False, ValueError(
+                "Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)")
 
         return cls._validate(**args)
 
@@ -156,6 +158,7 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
 
 __all__ = ["TritonV2QuantLinear"]
 
+
 # test triton on XPU to ensure special Intel/Triton is installed as we cannot check based on triton package meta data
 def triton_test_add(x: torch.Tensor, y: torch.Tensor):
     # don't put it on top-level to avoid crash if triton was not installed
@@ -173,14 +176,18 @@ def triton_test_add(x: torch.Tensor, y: torch.Tensor):
         x = tl.load(x_ptr + offsets, mask=mask)
         y = tl.load(y_ptr + offsets, mask=mask)
         output = x + y  # noqa: F841
+
     output = torch.empty_like(x)
     n_elements = output.numel()
+
     def grid(meta):
-        return (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+        return (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+
     add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
     return output
 
 
+@lru_cache
 def triton_xpu_available():
     size = 1024
     x = torch.rand(size, device='xpu:0')
