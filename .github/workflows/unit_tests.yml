@@ -720,9 +720,9 @@ jobs:
           python-version: 3.12
           cache: 'pip'
 
+#       it wastes too much time to find which exactly one caused installation failed, just unset them all.....
       - name: Install dependencies
         run: |
-#         it wastes too much time to find which exactly one caused installation failed, just unset them all.....
           unset CUDA_DEVICE_ORDER
           unset CUDA_VISIBLE_DEVICES
           unset TORCH_CUDA_ARCH_LIST
