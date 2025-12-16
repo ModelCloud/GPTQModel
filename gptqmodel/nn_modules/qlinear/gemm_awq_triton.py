@@ -13,6 +13,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
+from ...utils.torch import HAS_XPU
 
 
 class AwqGemmTritonFn(torch.autograd.Function):
@@ -149,7 +150,7 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
         if input_dtype != torch.float16:
             x = x.half()
 
-        with torch.xpu.device(qweight.device) if HAS_XPU else torch.cuda.device(qweight.device):
+        with torch.xpu.device(self.qweight.device) if HAS_XPU else torch.cuda.device(self.qweight.device):
             with nullcontext() if self.training else torch.inference_mode():
                 out = AwqGemmTritonFn.apply(
                     x,
