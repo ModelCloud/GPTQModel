@@ -36,7 +36,7 @@ DEVICE_THREAD_POOL = DeviceThreadPool(
         "cuda:per": 4,
         "xpu:per": 1,
         "mps": 8,
-        "cpu": min(12, max(1, (os.cpu_count() or 1) // 2)),
+        "cpu": min(12, max(1, (os.cpu_count() or 1) + 1 // 2)), # count + 1, fixed pool size > 1 check when count=3
         "model_loader:cpu": 2,
     },
     empty_cache_every_n=512,

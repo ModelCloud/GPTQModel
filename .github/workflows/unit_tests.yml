@@ -699,3 +699,38 @@ jobs:
         run: |
           source venv/bin/activate && pip cache purge && uv cache clean || true
           rm -rf ../GPTQModel && mkdir ../GPTQModel
+
+  mac-test:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.14
+          cache: 'pip'
+
+      - name: install
+        run: |
+          python -V
+          python -m venv venv
+          source venv/bin/activate
+          pip install pip uv setuptools build wheel torch -U
+          pip install meson-python -U
+          pip install numpy==2.2.6 -U
+          uv pip install -e . --no-build-isolation
+          pip install Pillow device_smi pypcre tokenicer threadpoolctl accelerate logbar transformers optimum -U
+
+      - name: run
+        run: |
+          source venv/bin/activate
+          python - <<'PY'
+          import os
+          from transformers import pipeline
+          os.environ["CUDA_VISIBLE_DEVICES"] = ""
+          os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+          llm_pipeline = pipeline(model="JunHowie/Qwen3-0.6B-GPTQ-Int4")
+          output = llm_pipeline("What is the capital of Germany?", max_new_tokens=100)
+          print(output)
+          PY
