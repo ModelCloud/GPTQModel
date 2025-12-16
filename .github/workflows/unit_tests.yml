@@ -711,7 +711,7 @@ jobs:
           python-version: 3.14
           cache: 'pip'
 
-      - name: install
+      - name: Install dependencies
         run: |
           python -V
           python -m venv venv
@@ -722,7 +722,7 @@ jobs:
           uv pip install -e . --no-build-isolation
           pip install Pillow device_smi pypcre tokenicer threadpoolctl accelerate logbar transformers optimum -U
 
-      - name: run
+      - name: Run test
         run: |
           source venv/bin/activate
           python - <<'PY'
