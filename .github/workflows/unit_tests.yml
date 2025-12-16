@@ -82,6 +82,9 @@ concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-unit-tests-${{ github.event.inputs.test_names }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   check-vm:
     runs-on: ubuntu-24.04
@@ -699,3 +702,73 @@ jobs:
         run: |
           source venv/bin/activate && pip cache purge && uv cache clean || true
           rm -rf ../GPTQModel && mkdir ../GPTQModel
+
+  mac-test:
+    runs-on: macos-latest
+    env:
+      CUDA_VISIBLE_DEVICES: ''
+      TORCH_CUDA_ARCH_LIST: ''
+      MAX_JOBS: 3
+      BUILD_QQQ: 0
+      BUILD_EORA: 0
+      GPTQMODEL_BUILD_EXLLAMA_V1: 0
+      GPTQMODEL_BUILD_EORA: 0
+      GPTQMODEL_FORCE_BUILD: 0
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.12
+          cache: 'pip'
+
+#       it wastes too much time to find which exactly one caused installation failed, just unset them all.....
+      - name: Install dependencies
+        run: |
+          unset CUDA_DEVICE_ORDER
+          unset CUDA_VISIBLE_DEVICES
+          unset TORCH_CUDA_ARCH_LIST
+          unset PYTORCH_ALLOC_CONF
+          unset MAX_JOBS
+          unset RUNNER
+          unset XEON5
+          unset UV_INDEX_URL
+          unset CUDA_VERSION
+          unset TORCH_VERSION
+          unset PYTHON_VERSION
+          unset # PYTHON_GIL
+          unset BUILD_QQQ
+          unset BUILD_EORA
+          unset GPTQMODEL_BUILD_EXLLAMA_V1
+          unset GPTQMODEL_BUILD_EORA
+          unset LEGACY_TESTS
+          unset IGNORED_TEST_FILES
+          unset GPTQMODEL_FORCE_BUILD
+          unset repo
+          unset ref
+          
+          python -V
+          python -m venv venv
+          source venv/bin/activate
+          pip install pip uv setuptools build wheel torch -U
+          pip install meson-python -U
+          pip install numpy==2.2.6 -U
+
+          uv pip install -e . --no-build-isolation
+          pip install pip Pillow device_smi pypcre tokenicer threadpoolctl accelerate logbar transformers optimum torch -U
+
+      - name: Run test
+        run: |
+          source venv/bin/activate
+          python - <<'PY'
+          import os
+          from transformers import pipeline
+          os.environ["CUDA_VISIBLE_DEVICES"] = ""
+          os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+          llm_pipeline = pipeline(model="JunHowie/Qwen3-0.6B-GPTQ-Int4")
+          output = llm_pipeline("Which city is the capital of France?", max_new_tokens=100)
+          print(output)
+          
+          assert "paris" in output.lower()
+          PY
