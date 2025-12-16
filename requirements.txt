@@ -1,5 +1,5 @@
 accelerate>=1.10.1
-numpy==2.2.6
+numpy
 torch>=2.8.0
 safetensors>=0.6.2
 transformers>=4.57.1
