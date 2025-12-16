@@ -83,8 +83,8 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.ALL]
-    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
@@ -149,19 +149,19 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
         if input_dtype != torch.float16:
             x = x.half()
 
-        ctx = nullcontext() if self.training else torch.inference_mode()
-        with ctx:
-            out = AwqGemmTritonFn.apply(
-                x,
-                self.qweight,
-                self.qzeros,
-                self.scales,
-                self.bits,
-                self.group_size,
-                self.bias,
-                self.out_features,
-                "triton",
-            )
+        with torch.xpu.device(qweight.device) if HAS_XPU else torch.cuda.device(qweight.device):
+            with nullcontext() if self.training else torch.inference_mode():
+                out = AwqGemmTritonFn.apply(
+                    x,
+                    self.qweight,
+                    self.qzeros,
+                    self.scales,
+                    self.bits,
+                    self.group_size,
+                    self.bias,
+                    self.out_features,
+                    "triton",
+                )
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)
