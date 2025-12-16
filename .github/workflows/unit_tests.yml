@@ -732,6 +732,8 @@ jobs:
           os.environ["CUDA_VISIBLE_DEVICES"] = ""
           os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
           llm_pipeline = pipeline(model="JunHowie/Qwen3-0.6B-GPTQ-Int4")
-          output = llm_pipeline("Which city is the capital of Germany?", max_new_tokens=100)
+          output = llm_pipeline("Which city is the capital of France?", max_new_tokens=100)
           print(output)
+          
+          assert "paris" in output.lower()
           PY
