@@ -85,12 +85,12 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        import triton
-        import triton.language as tl
+        import triton  # noqa: F401  # validate Triton is importable
+        import triton.language as tl  # noqa: F401  # ensure Triton language bindings load
         from triton import __version__ as triton_version
 
-        from ..triton_utils.dequant import QuantLinearFunction
-        from ..triton_utils.mixin import TritonModuleMixin
+        from ..triton_utils.dequant import QuantLinearFunction  # noqa: F401  # dependency check for validate_once
+        from ..triton_utils.mixin import TritonModuleMixin  # noqa: F401  # ensure mixin is available at runtime
 
         triton_v = version.parse(triton_version)
 
@@ -191,4 +191,3 @@ def triton_xpu_available():
         return True
     except Exception:
         return False
-
