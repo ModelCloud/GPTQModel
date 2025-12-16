@@ -722,6 +722,29 @@ jobs:
 
       - name: Install dependencies
         run: |
+#         it wastes too much time to find which exactly one caused installation failed, just unset them all.....
+          unset CUDA_DEVICE_ORDER
+          unset CUDA_VISIBLE_DEVICES
+          unset TORCH_CUDA_ARCH_LIST
+          unset PYTORCH_ALLOC_CONF
+          unset MAX_JOBS
+          unset RUNNER
+          unset XEON5
+          unset UV_INDEX_URL
+          unset CUDA_VERSION
+          unset TORCH_VERSION
+          unset PYTHON_VERSION
+          unset # PYTHON_GIL
+          unset BUILD_QQQ
+          unset BUILD_EORA
+          unset GPTQMODEL_BUILD_EXLLAMA_V1
+          unset GPTQMODEL_BUILD_EORA
+          unset LEGACY_TESTS
+          unset IGNORED_TEST_FILES
+          unset GPTQMODEL_FORCE_BUILD
+          unset repo
+          unset ref
+          
           python -V
           python -m venv venv
           source venv/bin/activate
