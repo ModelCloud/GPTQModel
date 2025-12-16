@@ -707,6 +707,12 @@ jobs:
       - name: Checkout Codes
         uses: actions/checkout@v6
 
+      #      - name: prepare
+      #        run: |
+      #          echo "" > requirements.txt
+      #          echo transformers >> requirements.txt
+      #          echo optimum >> requirements.txt
+
       - uses: actions/setup-python@v6
         with:
           python-version: 3.12
@@ -718,7 +724,6 @@ jobs:
           sysctl -n hw.logicalcpu
           echo "sysctl -n hw.physicalcpu"
           sysctl -n hw.physicalcpu
-
       - name: install
         run: |
           python -V
@@ -733,7 +738,6 @@ jobs:
           pip install numpy==2.2.6 -U
           uv pip install -e . --no-build-isolation
           pip install pip Pillow device_smi pypcre tokenicer threadpoolctl accelerate logbar transformers optimum torch -U
-
       - name: run
         run: |
           source venv/bin/activate
@@ -742,6 +746,10 @@ jobs:
           pip list
           python - <<'PY'
           import os
+          
+          print("eeeeeeeeeeeeeeeeeee")
+          print(f"os.cpu_count(): {os.cpu_count()}")
+          print("eeeeeeeeeeeeeeeeeee")
           
           from transformers import pipeline
           os.environ["CUDA_VISIBLE_DEVICES"] = ""
