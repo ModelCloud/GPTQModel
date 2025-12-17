@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 12/17/2025 [5.6.12 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.12): Fixed `uv` compat. Both `uv` and `pip` install will now show ui progress for external wheel/depend downloads.
 * 12/16/2025 [5.6.10 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.10): Fixed `MacOS` and `AWQMarlin` kernel loading import regressions. Resolved most `multi-arch` compile issue on `Ubuntu`, `Arch`, `RedHat` and other distros.
 * 12/15/2025 [5.6.6 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.6): Fixed `multi-arch` build issues and `Tritonv2` kernel launch bug on multi-gpus. 
 * 12/12/2025 [5.6.2 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.2): Fixed 3-bit Triton GPTQ kernel dequant/inference and `license` property compatibility issue with latest pip/setuptools.
