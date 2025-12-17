@@ -885,7 +885,7 @@ class CachedWheelsCommand(_bdist_wheel):
 
             _download_with_progress(wheel_url, wheel_path, title="Downloading wheel")
             print("Raw wheel path", wheel_filename)
-        except BaseException as e:
+        except BaseException:
             env_info = [f"python={python_version}", f"torch={TORCH_VERSION or 'unknown'}"]
             if CUDA_VERSION:
                 env_info.append(f"cuda={CUDA_VERSION}")
