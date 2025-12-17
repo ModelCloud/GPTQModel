@@ -834,13 +834,63 @@ class CachedWheelsCommand(_bdist_wheel):
 
         try:
             import urllib.request as req
-            req.urlretrieve(wheel_url, os.path.join(self.dist_dir, wheel_filename))
+            import time
 
             if not os.path.exists(self.dist_dir):
                 os.makedirs(self.dist_dir)
 
+            wheel_path = os.path.join(self.dist_dir, wheel_filename)
+
+            # `urlretrieve()` can appear "stalled" on large downloads; show a progress bar.
+            start_time = time.time()
+            last_draw_time = 0.0
+            last_print_percent = -1
+
+            def _format_bytes(num_bytes: float) -> str:
+                units = ["B", "KiB", "MiB", "GiB", "TiB"]
+                value = float(max(num_bytes, 0.0))
+                for unit in units:
+                    if value < 1024.0 or unit == units[-1]:
+                        return f"{value:0.1f}{unit}" if unit != "B" else f"{int(value)}B"
+                    value /= 1024.0
+                return f"{value:0.1f}TiB"
+
+
+            def _reporthook(block_num: int, block_size: int, total_size: int) -> None:
+                nonlocal last_draw_time, last_print_percent
+                now = time.time()
+                downloaded = block_num * block_size
+                speed = downloaded / max(now - start_time, 1e-6)
+
+                if total_size and total_size > 0:
+                    percent = min(int(downloaded * 100 / total_size), 100)
+                    # Only update on percent changes to avoid spamming progress redraws (some UIs
+                    # don't support in-place cursor updates and will render each draw on a new line).
+                    if percent == last_print_percent and percent != 100:
+                        return
+                    subtitle = (
+                        f"{percent:3d}% ({_format_bytes(downloaded)}/{_format_bytes(total_size)}) "
+                        f"{_format_bytes(speed)}/s"
+                    )
+
+                    print(f"Downloading wheel {subtitle}", flush=True)
+                    last_print_percent = percent
+                    last_draw_time = now
+                else:
+                    if (now - last_draw_time) < 1.0:
+                        return
+                    subtitle = f"{_format_bytes(downloaded)} {_format_bytes(speed)}/s"
+
+                    print(f"Downloading wheel {subtitle}", flush=True)
+                    last_draw_time = now
+
+            try:
+                req.urlretrieve(wheel_url, wheel_path, reporthook=_reporthook)
+            finally:
+                pass
+
             print("Raw wheel path", wheel_filename)
-        except BaseException:
+        except BaseException as e:
             env_info = [f"python={python_version}", f"torch={TORCH_VERSION or 'unknown'}"]
             if CUDA_VERSION:
                 env_info.append(f"cuda={CUDA_VERSION}")
