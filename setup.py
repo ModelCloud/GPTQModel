@@ -834,16 +834,12 @@ class CachedWheelsCommand(_bdist_wheel):
 
         try:
             import urllib.request as req
-            req.urlretrieve(wheel_url, wheel_filename)
+            req.urlretrieve(wheel_url, os.path.join(self.dist_dir, wheel_filename))
 
             if not os.path.exists(self.dist_dir):
                 os.makedirs(self.dist_dir)
 
-            impl_tag, abi_tag, plat_tag = self.get_tag()
-            archive_basename = (f"gptqmodel-{gptqmodel_version}-{impl_tag}-{abi_tag}-{plat_tag}")
-            wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
-            print("Raw wheel path", wheel_path)
-            os.rename(wheel_filename, wheel_path)
+            print("Raw wheel path", wheel_filename)
         except BaseException:
             env_info = [f"python={python_version}", f"torch={TORCH_VERSION or 'unknown'}"]
             if CUDA_VERSION:
