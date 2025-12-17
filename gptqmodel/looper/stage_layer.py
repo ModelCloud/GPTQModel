@@ -70,20 +70,22 @@ def run_layer_stage(
 
         module = looper.gptq_model.pre_quantize(module)
 
-        model_type = looper.gptq_model.model.config.model_type
-        if model_type in MODULE_CONVERTER_MAP:
-            converter = MODULE_CONVERTER_MAP[model_type]
-            module = converter(module, looper.gptq_model.model.config)
-
-        replace_module_with_hooked_legacy(module, quant_lm_head=looper.gptq_model.quantize_config.lm_head)
-
-        layers[layer_index] = module
         if is_lm_head_module:
             layer_descriptor = looper.gptq_model.lm_head
-        elif layers_prefix:
-            layer_descriptor = f"{layers_prefix}.{layer_index}"
         else:
-            layer_descriptor = str(layer_index)
+            model_type = looper.gptq_model.model.config.model_type
+            if model_type in MODULE_CONVERTER_MAP:
+                converter = MODULE_CONVERTER_MAP[model_type]
+                module = converter(module, looper.gptq_model.model.config)
+
+            replace_module_with_hooked_legacy(module, quant_lm_head=looper.gptq_model.quantize_config.lm_head)
+
+            layers[layer_index] = module
+
+            if layers_prefix:
+                layer_descriptor = f"{layers_prefix}.{layer_index}"
+            else:
+                layer_descriptor = str(layer_index)
 
         cur_layer_device = get_device(module)
         full = find_modules(module, name=looper.gptq_model.lm_head if is_lm_head_module else "")

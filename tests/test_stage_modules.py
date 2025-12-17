@@ -256,6 +256,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
     class DummyGptqModel:
         def __init__(self):
             self.model = torch.nn.Module()
+            self.model.config = types.SimpleNamespace(model_type="llama")
             self.quantize_config = types.SimpleNamespace(lm_head=False)
             self.lm_head = None
 
@@ -287,6 +288,9 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
 
         def _request_loop_stop(self, exc):
             self._stop_exc = exc
+
+        def _subset_event_dispatch(self, *kwargs):
+            pass
 
     looper = DummyLooper()
     processor = looper.processors[0]

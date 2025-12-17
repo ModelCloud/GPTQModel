@@ -40,7 +40,7 @@ class TestLmHeadLoad(ModelTest):
 
 
 class TestLmHeadQuant(ModelTest):
-    EXPECT_LM_HEAD_LOSS = 0.0094
+    EXPECT_LM_HEAD_LOSS = 0.0005535857
 
     sample_length = 1024
     samples = 128
