@@ -3,13 +3,12 @@ import os
 import pytest
 import torch
 
+from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.bitblas import (
     BITBLAS_AVAILABLE,
     import_bitblas,
 )
 
-from gptqmodel import GPTQModel, BACKEND
-from gptqmodel.quantization.config import FORMAT
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
 @pytest.mark.skipif(not BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
