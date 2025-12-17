@@ -7,7 +7,6 @@ import re
 import subprocess
 import sys
 import tarfile
-import urllib.request
 from pathlib import Path
 from shutil import rmtree
 
@@ -30,10 +29,11 @@ def _ensure_cutlass_source() -> Path:
 
     archive_path = deps_dir / f"cutlass-v{CUTLASS_VERSION}.tar.gz"
     if not archive_path.exists():
-        print(f"Downloading CUTLASS v{CUTLASS_VERSION} ...")
-        with urllib.request.urlopen(CUTLASS_RELEASE_URL) as response:
-            data = response.read()
-        archive_path.write_bytes(data)
+        _download_with_progress(
+            CUTLASS_RELEASE_URL,
+            str(archive_path),
+            title=f"Downloading CUTLASS v{CUTLASS_VERSION}",
+        )
 
     if cutlass_root.exists():
         rmtree(cutlass_root)
