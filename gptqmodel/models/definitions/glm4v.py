@@ -9,9 +9,15 @@ class Glm4vTextMLPNew(nn.Module):
     def __init__(self, config, ori_mlp=None):
         super().__init__()
         self.config = config
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj   = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+        dtype = None
+        device = None
+        if ori_mlp is not None:
+            dtype = ori_mlp.gate_up_proj.weight.dtype
+            device = ori_mlp.gate_up_proj.weight.device
+
+        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False, dtype=dtype, device=device)
+        self.up_proj   = nn.Linear(config.hidden_size, config.intermediate_size, bias=False, dtype=dtype, device=device)
+        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False, dtype=dtype, device=device)
         self.activation_fn = ACT2FN[config.hidden_act]
 
         if ori_mlp is not None:
@@ -42,3 +48,9 @@ class Glm4vGPTQ(BaseQModel):
             "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
         }
     ]
+
+    def before_model_load(self, load_quantized_model=False):
+        if load_quantized_model:
+            import transformers.models.glm4v.modeling_glm4v as glm4v_modeling
+
+            glm4v_modeling.Glm4vTextMLP= Glm4vTextMLPNew
