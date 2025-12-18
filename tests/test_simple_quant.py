@@ -55,7 +55,7 @@ quant_config = QuantizeConfig(
     format=FORMAT.GPTQ,
     desc_act=True,
     sym=True,
-    v2=CFG_V2,
+    gptaq=CFG_V2,
 )
 
 log.info(f"QuantConfig: {quant_config}")

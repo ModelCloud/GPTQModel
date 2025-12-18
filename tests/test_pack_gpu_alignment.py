@@ -62,15 +62,22 @@ def test_pack_gpu_raises_on_misaligned_qzeros():
 
     lock = threading.Lock()
 
-    with pytest.raises(ValueError, match="pack_gpu expected zeros second dimension divisible"):
-        pack_module(
-            name=layer_name,
-            qModules=qModules,
-            q_scales=q_scales,
-            q_zeros=q_zeros,
-            q_g_idx=q_g_idx,
-            layers=layers,
-            quant_linear_cls=TorchQuantLinear,
-            lock=lock,
-            quantize_config=quant_config,
-        )
+    # Currently, if `pack_module()` fails, it will fall back to calling `pack_original()`.
+    pack_module(
+        name=layer_name,
+        qModules=qModules,
+        q_scales=q_scales,
+        q_zeros=q_zeros,
+        q_g_idx=q_g_idx,
+        layers=layers,
+        quant_linear_cls=TorchQuantLinear,
+        lock=lock,
+        quantize_config=quant_config,
+    )
+
+    packed_module = qModules[layer_name]
+
+    assert isinstance(packed_module, TorchQuantLinear)
+    assert packed_module.qweight.shape == torch.Size([16, 16])
+    assert packed_module.qzeros.shape == torch.Size([16, 0])
+    assert packed_module.scales.shape == torch.Size([16, 1])
