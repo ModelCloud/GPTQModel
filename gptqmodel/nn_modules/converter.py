@@ -109,6 +109,7 @@ def convert_glm4v_mlp_converter(module, config):
         if isinstance(sub_module, glm4v_modeling.Glm4vTextMLP):
             new_module = Glm4vTextMLPNew(config=config.get_text_config(), ori_mlp=sub_module)
             setattr(module, name, new_module)
+    return module
 
 MODULE_CONVERTER_MAP = {
     "llama4": convert_llama4_expert_converter,
