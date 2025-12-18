@@ -102,7 +102,7 @@ def convert_llama4_expert_converter(module, config):
     return module
 
 def convert_glm4v_mlp_converter(module, config):
-    from transformers.models.glm4v.modeling_glm4v import Glm4vTextMLPNew
+    from ..models.definitions.glm4v import Glm4vTextMLPNew
     import transformers.models.glm4v.modeling_glm4v as glm4v_modeling
 
     for name, sub_module in module.named_modules():
