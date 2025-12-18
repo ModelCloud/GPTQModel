@@ -381,7 +381,15 @@ def forward_batch_worker(
         additional_inputs["attention_mask"] = attn_tensor
 
     if position_ids is not None:
-        additional_inputs["position_ids"] = move_to(position_ids, device=module_device)
+        pos = position_ids
+        if pos.dim() == 3 and pos.size(1) == 1:
+            pos = pos.squeeze(1)
+        elif pos.dim() > 2:
+            pos = pos.reshape(pos.size(0), -1)
+        elif pos.dim() == 1:
+            pos = pos.unsqueeze(0)
+        pos = pos.contiguous()
+        additional_inputs["position_ids"] = move_to(pos, device=module_device)
 
     for key, value in layer_input_kwargs.items():
         additional_inputs[key] = nested_move_to(value, device=module_device)
