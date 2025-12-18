@@ -144,6 +144,8 @@ from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.xverse import XverseQModel  # noqa: E402
+from .definitions.glm4v import Glm4vGPTQ  # noqa: E402
+
 
 
 # make quants and inference more determinisitc
@@ -169,6 +171,7 @@ MODEL_MAP = {
     "chatglm": ChatGLMQModel,
     "glm": GlmQModel,
     "glm4": GlmQModel,
+    "glm4v": Glm4vGPTQ,
     "glm4_moe": GLM4MoEGPTQ,
     "gpt_bigcode": GptBigCodeQModel,
     "codegen": CodeGenQModel,
