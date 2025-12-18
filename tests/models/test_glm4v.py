@@ -10,8 +10,8 @@ from gptqmodel.utils.eval import EVAL
 
 class TestGlm4v(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/GLM-4.1V-9B-Thinking"
-    NATIVE_ARC_CHALLENGE_ACC = 0.4164
-    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3925
+    NATIVE_ARC_CHALLENGE_ACC = 0.5119
+    NATIVE_ARC_CHALLENGE_ACC_NORM = 0.5282
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
     EVAL_TASKS = {
