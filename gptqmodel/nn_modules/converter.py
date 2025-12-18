@@ -107,7 +107,7 @@ def convert_glm4v_mlp_converter(module, config):
 
     for name, sub_module in module.named_modules():
         if isinstance(sub_module, glm4v_modeling.Glm4vTextMLP):
-            new_module = Glm4vTextMLPNew(config=config.get_text_config(), original=sub_module)
+            new_module = Glm4vTextMLPNew(config=config.get_text_config(), ori_mlp==sub_module)
             setattr(module, name, new_module)
 
 MODULE_CONVERTER_MAP = {
