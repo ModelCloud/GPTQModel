@@ -1264,7 +1264,7 @@ class ModuleLooper():
 
         return total_log
 
-    def crate_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe, layer_module=None) -> Dict[str, NamedModule]:
+    def crate_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, failsafe_with_rtn, layer_module=None) -> Dict[str, NamedModule]:
         subset = {}
         for n in names:
             if n in full:
@@ -1296,7 +1296,7 @@ class ModuleLooper():
                     named_module.state.setdefault("layer_module", layer_module)
 
             if isinstance(processor, GPTQProcessor):
-                processor.preprocess(subset[name], fail_safe=fail_safe)
+                processor.preprocess(subset[name], failsafe_with_rtn=failsafe_with_rtn)
             else:
                 processor.preprocess(subset[name])
             # some modules are skipped

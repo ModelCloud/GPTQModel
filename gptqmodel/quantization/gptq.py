@@ -989,7 +989,7 @@ class GPTQ:
                         self.qcfg.mock_quantization = True
                         return self.quantize(blocksize=blocksize)
                     else:
-                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable fail_safe=True")
+                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable failsafe_with_rtn=True")
             else:
                 if self.failsafe_with_rtn:
                     log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")

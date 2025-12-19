@@ -320,7 +320,7 @@ def test_stage_subset_early_stop_and_callbacks():
         subset_index=0,
         subset_total=2,
         full=full_modules,
-        fail_safe=False,
+        failsafe_with_rtn=False,
         shared_kv_cache_dict=shared_kv_cache_dict,
         pb=_DummyProgress(),
         log=None,

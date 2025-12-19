@@ -156,7 +156,7 @@ def run_layer_stage(
                     subset_index=index,
                     subset_total=subset_total,
                     full=full,
-                    fail_safe=failsafe_with_rtn,
+                    failsafe_with_rtn=failsafe_with_rtn,
                     shared_kv_cache_dict=shared_kv_cache_dict,
                     pb=pb,
                     log=log,

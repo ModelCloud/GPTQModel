@@ -111,7 +111,7 @@ class ModelTest(unittest.TestCase):
     SYM = True
     GPTQA = False
     ACT_GROUP_AWARE = True
-    FAIL_SAFE = True
+    FAILSAFE_WITH_RTN = True
     EORA = None
     DAMP_PERCENT = 0.05
     MSE = 0.0
@@ -829,7 +829,7 @@ class ModelTest(unittest.TestCase):
             group_size=self.GROUP_SIZE,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
-            failsafe_with_rtn=self.FAIL_SAFE,
+            failsafe_with_rtn=self.FAILSAFE_WITH_RTN,
             sym=self.SYM,
             gptaq=self.GPTQA,
             adapter=self.EORA,

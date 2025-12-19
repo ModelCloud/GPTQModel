@@ -151,7 +151,7 @@ def test_submodule_finalize_timing():
     )
     processor.pb = _DummyProgressBar()
 
-    processor.preprocess(named_module, fail_safe=False)
+    processor.preprocess(named_module, )
     processor.process(named_module)
 
     # move weights to CPU to satisfy create_quant_module invariants
@@ -302,7 +302,7 @@ def _prepare_modules(processor, qcfg, device, module_count):
         named_module.target_device = device
         named_module.module.target_device = device
 
-        processor.preprocess(named_module, fail_safe=False)
+        processor.preprocess(named_module, failsafe_with_rtn=False)
         processor.process(named_module)
 
         base_model.to("cpu")

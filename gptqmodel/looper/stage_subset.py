@@ -63,7 +63,7 @@ def run_subset_stage(
     subset_index: int,
     subset_total: int,
     full,
-    fail_safe: bool,
+    failsafe_with_rtn: bool,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
     pb,
     log=None,
@@ -86,7 +86,7 @@ def run_subset_stage(
         layers_prefix=layers_prefix,
         names=subset_names,
         processor=processor,
-        fail_safe=fail_safe,
+        failsafe_with_rtn=failsafe_with_rtn,
         layer_module=module,
     )
 
@@ -389,7 +389,7 @@ def run_subset_stage(
                 logger.error(f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it.")
                 moe_skip_modules.append(name)
 
-        if not fail_safe:
+        if not failsafe_with_rtn:
             for name in moe_skip_modules:
                 subset.pop(name)
                 task_map = getattr(processor, "tasks", None)
