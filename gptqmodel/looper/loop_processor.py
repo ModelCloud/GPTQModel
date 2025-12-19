@@ -535,7 +535,7 @@ class LoopProcessor:
         return f"{fwd_time:.3f}"
 
     # called first
-    def preprocess(self, module: NamedModule, failsafe_with_rtn: bool, **kwargs):
+    def preprocess(self, module: NamedModule, **kwargs):
         pass
 
     # after preproces, this process may be skipped due to dynamic override (lora adapter = None)
