@@ -58,7 +58,7 @@ class QQQProcessor(LoopProcessor):
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("QQQProcessor's calibration_dataset cannot be modified")
 
-    def preprocess(self, module: NamedModule):
+    def preprocess(self, module: NamedModule, failsafe_with_rtn: bool = True, **kwargs):
         # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
             return

@@ -33,6 +33,7 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         qcfg = QuantizeConfig(
             bits=4,
             group_size=128,
+            failsafe_with_rtn=False,
         )
 
         # ============================================================
@@ -50,6 +51,7 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         # ============================================================
         # RTN fallback (use_hessian = False)
         # ============================================================
+        qcfg.failsafe_with_rtn=True
         gptq_r = GPTQ(linear, qcfg)
         gptq_r.quantizer.configure(perchannel=True)
         gptq_r.failsafe_with_rtn = True

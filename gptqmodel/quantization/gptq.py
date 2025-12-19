@@ -742,7 +742,7 @@ class GPTQ:
             use_hessian = False
             log.warn(
                 f"Quantization: Module `{self.name}` -> "
-                "No calibration samples, falling back to RTN-style GPTQ quantization."
+                "No calibration samples, falling back to naive rtn (round to nearest) quantization."
             )
             self.H = self.create_H(target_device=target_device)
         else:
