@@ -151,7 +151,7 @@ def test_submodule_finalize_timing():
     )
     processor.pb = _DummyProgressBar()
 
-    processor.preprocess(named_module, )
+    processor.preprocess(named_module)
     processor.process(named_module)
 
     # move weights to CPU to satisfy create_quant_module invariants
