@@ -168,7 +168,7 @@ class TestMultiVsSingleGPU(ModelTest):
             group_size=self.GROUP_SIZE,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
-            fail_safe=self.FAIL_SAFE,
+            failsafe_with_rtn=self.FAIL_SAFE,
             sym=self.SYM,
             v2=self.V2,
             adapter=self.EORA,

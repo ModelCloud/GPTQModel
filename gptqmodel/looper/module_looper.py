@@ -1076,12 +1076,12 @@ class ModuleLooper():
             use_cache=use_cache,
         )
 
-    def loop(self, fail_safe: bool = False, **kwargs):
+    def loop(self, failsafe_with_rtn: bool = False, **kwargs):
         with tf32_high_precision_guard():
-            return self._loop_impl(fail_safe=fail_safe, **kwargs)
+            return self._loop_impl(failsafe_with_rtn=failsafe_with_rtn, **kwargs)
 
     @torch.inference_mode()
-    def _loop_impl(self, fail_safe: bool = False, **kwargs):
+    def _loop_impl(self, failsafe_with_rtn: bool = False, **kwargs):
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
                 tied_keys = self.gptq_model.model._tied_weights_keys
@@ -1185,7 +1185,7 @@ class ModuleLooper():
             layers=layers,
             layer_modules=layer_modules,
             layers_prefix=layers_prefix,
-            fail_safe=fail_safe,
+            failsafe_with_rtn=failsafe_with_rtn,
             shared_kv_cache_dict=shared_kv_cache_dict,
             pb=pb,
             layer_count=layer_count,

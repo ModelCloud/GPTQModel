@@ -65,7 +65,7 @@ class GPTQProcessor(LoopProcessor):
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
-    def preprocess(self, module: NamedModule, fail_safe: bool):
+    def preprocess(self, module: NamedModule, failsafe_with_rtn: bool):
         # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
             return
@@ -99,7 +99,7 @@ class GPTQProcessor(LoopProcessor):
             tmp = GPTQv2(module=module, qcfg=qcfg_clone)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
-            tmp.fail_safe = fail_safe
+            tmp.failsafe_with_rtn = failsafe_with_rtn
 
         tmp.quantizer.configure(
             perchannel=True,

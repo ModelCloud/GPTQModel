@@ -197,7 +197,7 @@ class GPTQ:
         # fwd counter
         self.fwd_counter = 0
 
-        self.fail_safe = False
+        self.failsafe_with_rtn = False
 
         self.H: Optional[torch.Tensor] = None
 
@@ -738,7 +738,7 @@ class GPTQ:
         start = time.time()
 
         target_device = getattr(self.module, "target_device", None)
-        if self.fail_safe and self.nsamples == 0:
+        if self.failsafe_with_rtn and self.nsamples == 0:
             use_hessian = False
             log.warn(
                 f"Quantization: Module `{self.name}` -> "
@@ -984,14 +984,14 @@ class GPTQ:
 
                 if math.isnan(avg_loss):
                     print("Losses sum item:", torch.sum(Losses).item())
-                    if self.fail_safe:
+                    if self.failsafe_with_rtn:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
                         self.qcfg.mock_quantization = True
                         return self.quantize(blocksize=blocksize)
                     else:
                         raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable fail_safe=True")
             else:
-                if self.fail_safe:
+                if self.failsafe_with_rtn:
                     log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
                 else:
                     log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")

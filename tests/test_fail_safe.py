@@ -40,7 +40,7 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         # ============================================================
         gptq_h = GPTQ(linear, qcfg)
         gptq_h.quantizer.configure(perchannel=True)
-        gptq_h.fail_safe = False
+        gptq_h.failsafe_with_rtn = False
 
         # Accumulate Hessian via the public API
         gptq_h.add_batch(inp, None)
@@ -52,7 +52,7 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         # ============================================================
         gptq_r = GPTQ(linear, qcfg)
         gptq_r.quantizer.configure(perchannel=True)
-        gptq_r.fail_safe = True
+        gptq_r.failsafe_with_rtn = True
 
         # IMPORTANT:
         # We intentionally do NOT call add_batch here,

@@ -1274,7 +1274,7 @@ class AWQProcessor(LoopProcessor):
                 sanitized_kwargs[k] = v
         return sanitized_kwargs
 
-    def preprocess(self, module: NamedModule, fail_safe: Optional[bool] = None):
+    def preprocess(self, module: NamedModule, failsafe_with_rtn: Optional[bool] = None):
         layer_state = self._get_layer_state(module.layer_index)
         with layer_state.lock:
             layer_state.modules[module.name] = module

@@ -243,8 +243,10 @@ class QuantizeConfig():
     # deprecated: only used for compat
     is_marlin_format: bool = False
 
-    # use mock quantization to quantize module so the gptq process can continue and not fail
-    fail_safe: bool = field(default=False)
+    # gptq/awq only:
+    # in case gptq/awq fail due to lack of calibration, fallback to round-to-nearest to produce simple but low-quantized module
+    # useful for moe models with uneven distribution of routing
+    failsafe_with_rtn: bool = field(default=True)
 
     # gptaq only:
     gptaq: bool = field(default=False)

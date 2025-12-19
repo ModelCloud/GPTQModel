@@ -219,7 +219,7 @@ class _StubAWQProcessor(LoopProcessor):
     def name(cls) -> str:
         return "stub-awq"
 
-    def preprocess(self, module: NamedModule, fail_safe: Optional[bool] = None):
+    def preprocess(self, module: NamedModule, failsafe_with_rtn: Optional[bool] = None, **_kwargs):
         self.tasks[module.name] = {"inputs": []}
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[torch.nn.Module, tuple, torch.Tensor], None]:

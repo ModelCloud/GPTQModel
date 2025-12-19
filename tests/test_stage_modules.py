@@ -307,7 +307,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         layers=layers,
         layer_modules=layer_modules,
         layers_prefix="model.layers",
-        fail_safe=True,
+        failsafe_with_rtn=True,
         shared_kv_cache_dict={},
         pb=pb,
         layer_count=1,
