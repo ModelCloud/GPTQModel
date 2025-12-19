@@ -599,8 +599,12 @@ class GPTQ:
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
         self.materialize_global_hessian(target_device=target_device)
         if self.H is None:
-            self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self._select_hessian_target_device(target_device))
+            self.H = self.create_H(target_device)
         return self.H
+
+    def create_H(self, target_device):
+        return torch.zeros((self.columns, self.columns), dtype=torch.float32,
+                           device=self._select_hessian_target_device(target_device))
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
@@ -734,7 +738,16 @@ class GPTQ:
         start = time.time()
 
         target_device = getattr(self.module, "target_device", None)
-        self.finalize_hessian(target_device=target_device)
+        if self.fail_safe and self.nsamples == 0:
+            use_hessian = False
+            log.warn(
+                f"Quantization: Module `{self.name}` -> "
+                "No calibration samples, falling back to RTN-style GPTQ quantization."
+            )
+            self.H = self.create_H(target_device=target_device)
+        else:
+            use_hessian = True
+            self.finalize_hessian(target_device=target_device)
 
         # Temporarily disable torch.compile due to compatibility issues with torch 2.8
         # Will re-enable once the issue is fixed
@@ -764,9 +777,10 @@ class GPTQ:
 
         # H = self.H.to(device=self.H.device)
 
-        dead = torch.diag(self.H) == 0
-        self.H[dead, dead] = 1
-        W[:, dead] = 0
+        if use_hessian:
+            dead = torch.diag(self.H) == 0
+            self.H[dead, dead] = 1
+            W[:, dead] = 0
 
         # g_idx = []
         scale = []
@@ -785,13 +799,13 @@ class GPTQ:
                 zero.append(quantizer.zero)
                 groups.append(quantizer)
 
-        if self.qcfg.desc_act:
+        if self.qcfg.desc_act and use_hessian:
             perm = torch.argsort(torch.diag(self.H), descending=True)
             W = W[:, perm]
             self.H = self.H[perm][:, perm]
             invperm = torch.argsort(perm)
 
-        elif self.qcfg.act_group_aware:
+        elif self.qcfg.act_group_aware and use_hessian:
             diag_h = torch.diag(self.H)
             local_perms, local_values = compute_local_perms(
                 diag_h, self.qcfg.group_size, return_values=True
@@ -809,10 +823,13 @@ class GPTQ:
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        Hinv, damp = self.hessian_inverse(self.H)
+        if use_hessian:
+            Hinv, damp = self.hessian_inverse(self.H)
+        else:
+            Hinv, damp = None, 0.0
 
         # Use simplified loop when mock_quantization is active
-        if self.qcfg.mock_quantization or (self.fail_safe and self.fwd_counter == 0):
+        if self.qcfg.mock_quantization:
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
@@ -994,11 +1011,11 @@ class GPTQ:
 
         g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
 
-        if self.qcfg.desc_act:
+        if self.qcfg.desc_act and use_hessian:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
 
-        elif self.qcfg.act_group_aware:
+        elif self.qcfg.act_group_aware and use_hessian:
             inv_final = invert_perm(final_perm)
             Q = Q[:, inv_final]
             inv_global_perm = invert_perm(global_perm)
