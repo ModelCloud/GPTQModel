@@ -1,9 +1,10 @@
 import unittest
+
 import torch
 import torch.nn as nn
 
-from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.gptq import GPTQ
 
 
 class TestGPTQHessianSimilarity(unittest.TestCase):
