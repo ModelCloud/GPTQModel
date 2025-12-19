@@ -353,7 +353,7 @@ class TestMultiVsSingleGPU(ModelTest):
 
         original_preprocess = GPTQProcessor.preprocess
 
-        def wrapped_preprocess(self, module, failsafe_with_rtn=False):  # type: ignore[override]
+        def wrapped_preprocess(self, module, failsafe_with_rtn=True):  # type: ignore[override]
             result = original_preprocess(self, module, failsafe_with_rtn)
             task = self.tasks.get(module.name)
             if task is not None:
