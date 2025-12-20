@@ -19,3 +19,4 @@ pyarrow>=21.0
 dill>=0.3.8
 torchao>=0.14.1
 kernels>=0.11.1
+pynput>=1.7.6
