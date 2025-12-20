@@ -184,7 +184,7 @@ class PauseResumeController:
             self._state = new_state
 
             # Update events based on state
-            if new_state == PauseResumeState.PAUSED:
+            if new_state == PauseResumeState.PAUSED or new_state == PauseResumeState.PAUSE_REQUESTED:
                 self._pause_event.set()
                 self._resume_event.clear()
             elif new_state == PauseResumeState.RUNNING:
