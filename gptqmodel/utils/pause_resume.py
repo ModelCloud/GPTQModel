@@ -251,7 +251,7 @@ class PauseResumeController:
                     with self._state_lock:
                         if self._state == PauseResumeState.PAUSED:
                             self._set_state(PauseResumeState.RUNNING)
-                        break
+                            break
 
         return True
 
