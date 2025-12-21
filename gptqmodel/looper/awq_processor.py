@@ -387,6 +387,19 @@ class AWQProcessor(LoopProcessor):
             missing_activation = not input_feat or all(t.numel() == 0 for t in input_feat.values())
             if fallback_needed or missing_activation:
                 reason = "failsafe threshold" if fallback_needed else "no activation captures"
+                if fallback_needed:
+                    from ..utils.failsafe import resolve_threshold
+
+                    threshold_raw, is_percent = resolve_threshold(self.failsafe_with_rtn, expected_tokens)
+                    extra = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+                    log.warn(
+                        "AWQProcessor: layer %s -> Using RTN-style failsafe quantization (captured=%s tokens, threshold=%s%s, max_total=%s).",
+                        layer_index,
+                        captured_tokens,
+                        self.failsafe_with_rtn,
+                        extra,
+                        expected_tokens,
+                    )
                 self._quantize_layer_rtn_fallback(layer_index, state, reason)
                 return
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]

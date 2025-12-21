@@ -13,7 +13,7 @@ def test_should_use_rtn_failsafe_parses_numeric_and_percent():
     assert should_use_rtn_failsafe("10", observed_samples=5, expected_total_samples=100)
     assert not should_use_rtn_failsafe("10", observed_samples=11, expected_total_samples=100)
 
-    assert should_use_rtn_failsafe("10%", observed_samples=9, expected_total_samples=90)
+    assert should_use_rtn_failsafe("10%", observed_samples=8, expected_total_samples=90)
     assert should_use_rtn_failsafe("10%", observed_samples=10, expected_total_samples=200)
 
 

@@ -355,10 +355,32 @@ class QQQ:
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
         H[diag, diag] += damp
-        H = torch.linalg.cholesky(H)
-        H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
-        Hinv = H
+        try:
+            H = torch.linalg.cholesky(H)
+            H = torch.cholesky_inverse(H)
+            H = torch.linalg.cholesky(H, upper=True)
+            Hinv = H
+        except Exception:
+            from ..utils.failsafe import resolve_threshold, should_use_rtn_failsafe
+            fallback_requested = should_use_rtn_failsafe(
+                self.failsafe_with_rtn,
+                float(self.nsamples),
+                self.expected_nsamples,
+            )
+            threshold_raw, is_percent = resolve_threshold(self.failsafe_with_rtn, self.expected_nsamples)
+            if fallback_requested:
+                extra = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+                log.warn(
+                    "Quantization: Module `%s` -> Using RTN-style failsafe quantization (observed %s samples, threshold=%s%s, max_total=%s).",
+                    self.name,
+                    self.nsamples,
+                    self.failsafe_with_rtn,
+                    extra,
+                    self.expected_nsamples,
+                )
+                Hinv = None
+            else:
+                raise
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)

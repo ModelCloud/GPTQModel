@@ -34,26 +34,29 @@ def should_use_rtn_failsafe(
     observed_samples: float,
     expected_total_samples: Optional[float] = None,
 ) -> bool:
-    """
-    Determine whether failsafe RTN should activate.
+    threshold_value, _ = resolve_threshold(setting, expected_total_samples)
+    if threshold_value is None:
+        return False
+    return observed_samples < threshold_value
 
-    Rules:
-    - False/None: never trigger.
-    - True: trigger only when observed <= 0 (preserves legacy behavior).
-    - Numeric (int/float): trigger when observed <= numeric threshold.
-    - String with '%' suffix: interpret as percentage; trigger when observed <=
-      percent/100 * expected_total_samples (if available), otherwise percent/100
-      of 1 token for safety.
+
+def resolve_threshold(
+    setting: Any,
+    expected_total_samples: Optional[float] = None,
+) -> Tuple[Optional[float], bool]:
+    """
+    Resolve a threshold into a raw numeric value and whether it was percent-based.
     """
     if not setting:
-        return False
+        return None, False
 
     if setting is True:
-        return observed_samples <= 0
+        # Tiny positive epsilon so 0 triggers but positive counts do not when using `<`.
+        return 1e-9, False
 
     threshold, is_percent = _parse_threshold(setting)
     if threshold is None:
-        return False
+        return None, False
 
     if is_percent:
         base = expected_total_samples if expected_total_samples else 1.0
@@ -61,4 +64,4 @@ def should_use_rtn_failsafe(
     else:
         threshold_value = threshold
 
-    return observed_samples <= threshold_value
+    return threshold_value, is_percent

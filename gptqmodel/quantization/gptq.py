@@ -739,19 +739,22 @@ class GPTQ:
         start = time.time()
 
         target_device = getattr(self.module, "target_device", None)
-        from ..utils.failsafe import should_use_rtn_failsafe
+        from ..utils.failsafe import resolve_threshold, should_use_rtn_failsafe
 
         fallback_requested = should_use_rtn_failsafe(
             self.failsafe_with_rtn,
             float(self.nsamples),
             self.expected_nsamples,
         )
+        threshold_raw, is_percent = resolve_threshold(self.failsafe_with_rtn, self.expected_nsamples)
 
         if fallback_requested:
             use_hessian = False
+            threshold_text = str(self.failsafe_with_rtn)
+            threshold_info = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
             log.warn(
                 f"Quantization: Module `{self.name}` -> "
-                "Using RTN-style failsafe quantization based on configured threshold."
+                f"Using RTN-style failsafe quantization (observed {self.nsamples} samples, threshold={threshold_text}{threshold_info}, max_total={self.expected_nsamples})."
             )
             self.H = self.create_H(target_device=target_device)
         else:
