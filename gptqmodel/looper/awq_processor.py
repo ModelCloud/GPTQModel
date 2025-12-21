@@ -113,6 +113,9 @@ class AWQProcessor(LoopProcessor):
         self._module_forward_kwargs: Dict[str, torch.Tensor] = {}
         self._initialize_sample_counts()
         self._module_forward_kwargs.setdefault("attention_mask", None)
+        # Preserve failsafe preference so AWQ can optionally fall back to RTN-style
+        # quantization when no calibration data or activations are available.
+        self.failsafe_with_rtn = bool(qcfg.failsafe_with_rtn)
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
@@ -237,6 +240,52 @@ class AWQProcessor(LoopProcessor):
         #         features[root] = tensors[0]
         return features
 
+    def _quantize_layer_rtn_fallback(
+        self,
+        layer_index: int,
+        state: _AWQLayerState,
+        reason: str,
+    ) -> None:
+        def unwrap(mod):
+            return mod.module if isinstance(mod, NamedModule) else mod
+
+        named_childs = {
+            name: module
+            for name, module in state.modules.items()
+            if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
+        }
+
+        log.warning(
+            "AWQProcessor: layer %s using RTN-style fallback quantization (%s).",
+            layer_index,
+            reason,
+        )
+
+        if named_childs:
+            start = time.time()
+            self.pack_module(named_childs, start, scales_list=[])
+        else:
+            log.warning("AWQProcessor: layer %s had no supported modules to quantize.", layer_index)
+
+        state.quantized = True
+        state.modules.clear()
+        state.pending_modules.clear()
+        state.layer_module = None
+        state.processed_subsets.clear()
+        state.subset_total = None
+        state.previous_weight_scale = None
+
+        with self.lock:
+            for name in list(named_childs.keys()):
+                task_entry = self.tasks.pop(name, None)
+                if task_entry and "inputs" in task_entry:
+                    task_entry["inputs"].clear()
+
+        if hasattr(self._scale_context, "layer_index"):
+            delattr(self._scale_context, "layer_index")
+        if hasattr(self._scale_context, "prev_scale"):
+            delattr(self._scale_context, "prev_scale")
+
     def _refresh_forward_kwargs_from_cache(self) -> None:
         cache = getattr(self, "inputs_cache", None)
         if cache is None:
@@ -317,6 +366,13 @@ class AWQProcessor(LoopProcessor):
         )
 
         input_feat = self._layer_input_features(state)
+        if self.failsafe_with_rtn:
+            no_samples = self._nsamples_total == 0
+            missing_activation = not input_feat or all(t.numel() == 0 for t in input_feat.values())
+            if no_samples or missing_activation:
+                reason = "no calibration samples" if no_samples else "no activation captures"
+                self._quantize_layer_rtn_fallback(layer_index, state, reason)
+                return
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
         if missing:
             log.warning(
@@ -1275,6 +1331,9 @@ class AWQProcessor(LoopProcessor):
         return sanitized_kwargs
 
     def preprocess(self, module: NamedModule, failsafe_with_rtn: bool = True, **kwargs):
+        # Track the most recent preference so the processor can decide whether
+        # to fall back to RTN-style quantization when activations are missing.
+        self.failsafe_with_rtn = bool(failsafe_with_rtn)
         layer_state = self._get_layer_state(module.layer_index)
         with layer_state.lock:
             layer_state.modules[module.name] = module
