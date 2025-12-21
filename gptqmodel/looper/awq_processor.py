@@ -27,7 +27,7 @@ from ..nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
-from ..quantization.config import FORMAT, METHOD, QuantizeConfig
+from ..quantization.config import FailSafe, FailSafeStrategy, FORMAT, METHOD, QuantizeConfig
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.ctx import ctx
 from ..utils.model import find_modules, get_module_by_name_prefix, move_to, create_quant_module, pack_module
@@ -113,9 +113,8 @@ class AWQProcessor(LoopProcessor):
         self._module_forward_kwargs: Dict[str, torch.Tensor] = {}
         self._initialize_sample_counts()
         self._module_forward_kwargs.setdefault("attention_mask", None)
-        # Preserve failsafe preference so AWQ can optionally fall back to RTN-style
-        # quantization when no calibration data or activations are available.
-        self.failsafe_with_rtn = bool(qcfg.failsafe_with_rtn)
+        # Preserve failsafe preference so AWQ can optionally fall back when no calibration data or activations are available.
+        self.failsafe = qcfg.failsafe
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
@@ -367,8 +366,10 @@ class AWQProcessor(LoopProcessor):
         )
 
         input_feat = self._layer_input_features(state)
-        if self.failsafe_with_rtn:
-            from ..utils.failsafe import should_use_rtn_failsafe
+        if self.failsafe:
+            from ..utils.failsafe import resolve_failsafe_strategy, resolve_threshold, should_use_failsafe
+
+            strategy = resolve_failsafe_strategy(self.failsafe)
 
             captured_tokens = 0
             for tensor in input_feat.values():
@@ -379,8 +380,8 @@ class AWQProcessor(LoopProcessor):
                 captured_tokens += tokens
 
             expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
-            fallback_needed = should_use_rtn_failsafe(
-                self.failsafe_with_rtn,
+            fallback_needed = should_use_failsafe(
+                self.failsafe,
                 float(captured_tokens),
                 float(expected_tokens) if expected_tokens else None,
             )
@@ -388,15 +389,14 @@ class AWQProcessor(LoopProcessor):
             if fallback_needed or missing_activation:
                 reason = "failsafe threshold" if fallback_needed else "no activation captures"
                 if fallback_needed:
-                    from ..utils.failsafe import resolve_threshold
-
-                    threshold_raw, is_percent = resolve_threshold(self.failsafe_with_rtn, expected_tokens)
+                    threshold_raw, is_percent = resolve_threshold(self.failsafe, expected_tokens)
                     extra = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
                     log.warn(
-                        "AWQProcessor: layer %s -> Using RTN-style failsafe quantization (captured=%s tokens, threshold=%s%s, max_total=%s).",
+                        "AWQProcessor: layer %s -> Using `%s` failsafe quantization (captured=%s tokens, threshold=%s%s, max_total=%s).",
                         layer_index,
+                        strategy.value,
                         captured_tokens,
-                        self.failsafe_with_rtn,
+                        self.failsafe,
                         extra,
                         expected_tokens,
                     )
@@ -1359,10 +1359,19 @@ class AWQProcessor(LoopProcessor):
                 sanitized_kwargs[k] = v
         return sanitized_kwargs
 
-    def preprocess(self, module: NamedModule, failsafe_with_rtn: bool = True, **kwargs):
+    def preprocess(self, module: NamedModule, failsafe=None, **kwargs):
         # Track the most recent preference so the processor can decide whether
-        # to fall back to RTN-style quantization when activations are missing.
-        self.failsafe_with_rtn = bool(failsafe_with_rtn)
+        # to fall back to simple quantization when activations are missing.
+        def _normalize_failsafe(value, default: FailSafe) -> FailSafe:
+            if value is None:
+                return default
+            if isinstance(value, FailSafe):
+                return value
+            if isinstance(value, dict):
+                return FailSafe(strategy=value.get("strategy", default.strategy), threshold=value.get("threshold", default.threshold))
+            return FailSafe(strategy=FailSafeStrategy.AUTO, threshold=value)
+
+        self.failsafe = _normalize_failsafe(failsafe, self.qcfg.failsafe)
         layer_state = self._get_layer_state(module.layer_index)
         with layer_state.lock:
             layer_state.modules[module.name] = module

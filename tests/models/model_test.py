@@ -62,7 +62,7 @@ from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
-from gptqmodel.quantization.config import QuantizeConfig, VRAMStrategy  # noqa: E402
+from gptqmodel.quantization.config import FailSafe, FailSafeStrategy, QuantizeConfig, VRAMStrategy  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -111,7 +111,7 @@ class ModelTest(unittest.TestCase):
     SYM = True
     GPTQA = False
     ACT_GROUP_AWARE = True
-    FAILSAFE_WITH_RTN = True
+    FAILSAFE = FailSafe(strategy=FailSafeStrategy.AUTO, threshold="1.0%")
     EORA = None
     DAMP_PERCENT = 0.05
     MSE = 0.0
@@ -829,7 +829,7 @@ class ModelTest(unittest.TestCase):
             group_size=self.GROUP_SIZE,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
-            failsafe_with_rtn=self.FAILSAFE_WITH_RTN,
+            failsafe=self.FAILSAFE,
             sym=self.SYM,
             gptaq=self.GPTQA,
             adapter=self.EORA,

@@ -1076,12 +1076,15 @@ class ModuleLooper():
             use_cache=use_cache,
         )
 
-    def loop(self, failsafe_with_rtn: bool = False, **kwargs):
+    def loop(self, failsafe=None, **kwargs):
         with tf32_high_precision_guard():
-            return self._loop_impl(failsafe_with_rtn=failsafe_with_rtn, **kwargs)
+            return self._loop_impl(failsafe=failsafe, **kwargs)
 
     @torch.inference_mode()
-    def _loop_impl(self, failsafe_with_rtn: bool = False, **kwargs):
+    def _loop_impl(self, failsafe=None, **kwargs):
+        if failsafe is None:
+            failsafe = getattr(self.gptq_model.quantize_config, "failsafe", None)
+
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
                 tied_keys = self.gptq_model.model._tied_weights_keys
@@ -1185,7 +1188,7 @@ class ModuleLooper():
             layers=layers,
             layer_modules=layer_modules,
             layers_prefix=layers_prefix,
-            failsafe_with_rtn=failsafe_with_rtn,
+            failsafe=failsafe,
             shared_kv_cache_dict=shared_kv_cache_dict,
             pb=pb,
             layer_count=layer_count,
@@ -1264,7 +1267,7 @@ class ModuleLooper():
 
         return total_log
 
-    def crate_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, failsafe_with_rtn, layer_module=None) -> Dict[str, NamedModule]:
+    def crate_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, failsafe, layer_module=None) -> Dict[str, NamedModule]:
         subset = {}
         for n in names:
             if n in full:
@@ -1296,7 +1299,7 @@ class ModuleLooper():
                     named_module.state.setdefault("layer_module", layer_module)
 
             if isinstance(processor, GPTQProcessor):
-                processor.preprocess(subset[name], failsafe_with_rtn=failsafe_with_rtn)
+                processor.preprocess(subset[name], failsafe=failsafe)
             else:
                 processor.preprocess(subset[name])
             # some modules are skipped

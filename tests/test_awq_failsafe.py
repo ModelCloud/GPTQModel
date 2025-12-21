@@ -33,7 +33,13 @@ def test_awq_failsafe_falls_back_to_rtn_when_no_activations(monkeypatch):
 
     gptq_model = SimpleNamespace(model=model, lm_head=None, quant_region_timer=None)
 
-    qcfg = QuantizeConfig(bits=4, group_size=-1, failsafe_with_rtn=True, format=FORMAT.GEMM, quant_method=METHOD.AWQ)
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=-1,
+        failsafe={"strategy": "rtn", "threshold": "1.0%"},
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+    )
     processor = AWQProcessor(
         tokenizer=None,
         qcfg=qcfg,
@@ -50,7 +56,7 @@ def test_awq_failsafe_falls_back_to_rtn_when_no_activations(monkeypatch):
     processor.pb = _DummyProgressBar()
 
     named = NamedModule(model.linear, name="linear", full_name="linear", layer_index=0)
-    processor.preprocess(named, failsafe_with_rtn=True)
+    processor.preprocess(named, failsafe=qcfg.failsafe)
 
     calls = {}
 

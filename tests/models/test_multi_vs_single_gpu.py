@@ -168,7 +168,7 @@ class TestMultiVsSingleGPU(ModelTest):
             group_size=self.GROUP_SIZE,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
-            failsafe_with_rtn=self.FAILSAFE_WITH_RTN,
+            failsafe=self.FAILSAFE,
             sym=self.SYM,
             v2=self.V2,
             adapter=self.EORA,
@@ -353,8 +353,8 @@ class TestMultiVsSingleGPU(ModelTest):
 
         original_preprocess = GPTQProcessor.preprocess
 
-        def wrapped_preprocess(self, module, failsafe_with_rtn=True):  # type: ignore[override]
-            result = original_preprocess(self, module, failsafe_with_rtn)
+        def wrapped_preprocess(self, module, failsafe=None):  # type: ignore[override]
+            result = original_preprocess(self, module, failsafe=failsafe)
             task = self.tasks.get(module.name)
             if task is not None:
                 primary_handles[module.name] = hex(id(task))

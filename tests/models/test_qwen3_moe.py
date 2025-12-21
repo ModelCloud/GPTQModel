@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import VRAMStrategy
+from gptqmodel.quantization.config import FailSafe, FailSafeStrategy, VRAMStrategy
 from gptqmodel.utils.eval import EVAL
 
 
@@ -13,6 +13,8 @@ from gptqmodel.utils.eval import EVAL
 # | arc_challenge :: acc,none      |   0.5094 |
 # | arc_challenge :: acc_norm,none |   0.5486 |
 class TestQwen3Moe(ModelTest):
+    FAILSAFE = FailSafe(strategy=FailSafeStrategy.AUTO, threshold="1%")
+    #DATASET_SIZE = 1
     # DEVICE = torch.device("cpu")
     # HESSIAN_CHUNK_SIZE = 256 * 1024 * 1024
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"

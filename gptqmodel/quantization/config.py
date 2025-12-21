@@ -87,6 +87,20 @@ class VRAMStrategy(str, Enum):
     BALANCED = "balanced"
 
 
+class FailSafeStrategy(str, Enum):
+    AUTO = "auto"
+    RTN = "rtn"
+    MIDPOINT = "midpoint"
+    MEAN = "mean"
+    STDCLIP = "stdclip"
+
+
+@dataclass
+class FailSafe:
+    strategy: FailSafeStrategy = FailSafeStrategy.AUTO
+    threshold: Any = "1.0%"
+
+
 QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.GPTQ: {
         FORMAT.GPTQ,
@@ -244,9 +258,8 @@ class QuantizeConfig():
     is_marlin_format: bool = False
 
     # gptq/awq only:
-    # in case gptq/awq fail due to lack of calibration, fallback to round-to-nearest to produce simple but low-quantized module
-    # useful for moe models with uneven distribution of routing
-    failsafe_with_rtn: bool = field(default=True)
+    # if calibration is insufficient, fallback to a simple quantization strategy; encapsulated in FailSafe config
+    failsafe: FailSafe = field(default_factory=FailSafe)
 
     # gptaq only:
     gptaq: bool = field(default=False)
@@ -316,6 +329,28 @@ class QuantizeConfig():
         if self.format not in valid_formats:
             raise ValueError(
                 f"QuantizeConfig: checkpoint `format` used is {self.format}, and the quantization method is {self.quant_method}. "
+            )
+
+        # normalize failsafe config
+        if isinstance(self.failsafe, dict):
+            strategy = self.failsafe.get("strategy", FailSafeStrategy.AUTO)
+            threshold = self.failsafe.get("threshold", "1.0%")
+            self.failsafe = FailSafe(strategy=strategy, threshold=threshold)
+        elif isinstance(self.failsafe, (str, int, float)):
+            self.failsafe = FailSafe(strategy=FailSafeStrategy.AUTO, threshold=self.failsafe)
+        elif not isinstance(self.failsafe, FailSafe):
+            raise ValueError("QuantizeConfig: `failsafe` must be a FailSafe config, dict, string, int, or float.")
+
+        if isinstance(self.failsafe.strategy, str):
+            try:
+                self.failsafe.strategy = FailSafeStrategy(self.failsafe.strategy.lower())
+            except ValueError as exc:
+                raise ValueError(
+                    f"QuantizeConfig: `failsafe.strategy` must be one of {[v.value for v in FailSafeStrategy]}."
+                ) from exc
+        elif not isinstance(self.failsafe.strategy, FailSafeStrategy):
+            raise ValueError(
+                f"QuantizeConfig: `failsafe.strategy` must be one of {[v.value for v in FailSafeStrategy]}."
             )
 
         if self.bits not in fields_info[0].metadata["choices"]:
@@ -561,6 +596,8 @@ class QuantizeConfig():
                     normalized[QUANT_METHOD_FIELD] = val
             elif key == FORMAT_FIELD_CODE:
                 normalized[key] = val.lower() if isinstance(val, str) else val
+            elif key == "failsafe":
+                normalized[key] = val
             elif key in field_names:
                 normalized[key] = val
             else:
@@ -657,6 +694,10 @@ class QuantizeConfig():
             "desc_act": self.desc_act,
             "sym": self.sym,
             "lm_head": self.lm_head,
+            "failsafe": {
+                "strategy": self.failsafe.strategy.value if isinstance(self.failsafe.strategy, FailSafeStrategy) else self.failsafe.strategy,
+                "threshold": self.failsafe.threshold,
+            },
             QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_CHECKPOINT: self.format,
             # torch.dtype convert to string

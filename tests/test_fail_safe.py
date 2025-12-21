@@ -33,7 +33,7 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         qcfg = QuantizeConfig(
             bits=4,
             group_size=128,
-            failsafe_with_rtn=False,
+            failsafe={"strategy": "rtn", "threshold": False},
         )
 
         # ============================================================
@@ -41,7 +41,7 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         # ============================================================
         gptq_h = GPTQ(linear, qcfg)
         gptq_h.quantizer.configure(perchannel=True)
-        gptq_h.failsafe_with_rtn = False
+        gptq_h.failsafe = False
 
         # Accumulate Hessian via the public API
         gptq_h.add_batch(inp, None)
@@ -51,10 +51,10 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         # ============================================================
         # RTN fallback (use_hessian = False)
         # ============================================================
-        qcfg.failsafe_with_rtn=True
+        qcfg.failsafe={"strategy": "rtn", "threshold": True}
         gptq_r = GPTQ(linear, qcfg)
         gptq_r.quantizer.configure(perchannel=True)
-        gptq_r.failsafe_with_rtn = True
+        gptq_r.failsafe = qcfg.failsafe
 
         # IMPORTANT:
         # We intentionally do NOT call add_batch here,

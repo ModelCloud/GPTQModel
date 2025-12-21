@@ -677,7 +677,7 @@ class BaseQModel(nn.Module):
 
         result = module_looper.loop(
             backend=backend,
-            failsafe_with_rtn=self.quantize_config.failsafe_with_rtn,
+            failsafe=self.quantize_config.failsafe,
         )
 
         timer = getattr(self, "quant_region_timer", None)

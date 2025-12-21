@@ -17,7 +17,7 @@ from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
-from ..quantization.config import METHOD, QuantizeConfig
+from ..quantization.config import FailSafe, FailSafeStrategy, METHOD, QuantizeConfig
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
@@ -58,7 +58,7 @@ class QQQProcessor(LoopProcessor):
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("QQQProcessor's calibration_dataset cannot be modified")
 
-    def preprocess(self, module: NamedModule, failsafe_with_rtn: bool = False, **kwargs):
+    def preprocess(self, module: NamedModule, failsafe=None, **kwargs):
         # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
             return
@@ -84,6 +84,18 @@ class QQQProcessor(LoopProcessor):
             qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
 
         tmp = QQQ(module=module, qcfg=qcfg_clone)
+
+        def _normalize_failsafe(value, default: FailSafe) -> FailSafe:
+            if value is None:
+                return default
+            if isinstance(value, FailSafe):
+                return value
+            if isinstance(value, dict):
+                return FailSafe(strategy=value.get("strategy", default.strategy), threshold=value.get("threshold", default.threshold))
+            return FailSafe(strategy=FailSafeStrategy.AUTO, threshold=value)
+
+        tmp.failsafe = _normalize_failsafe(failsafe, qcfg_clone.failsafe)
+        tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         if self.qcfg.mse > 0.0:
             mse = True
