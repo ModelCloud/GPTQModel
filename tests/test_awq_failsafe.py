@@ -1,7 +1,6 @@
 import types
 from types import SimpleNamespace
 
-import torch
 import torch.nn as nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor
