@@ -252,9 +252,13 @@ class LoopProcessor:
         text = "" if value is None else str(value)
 
         if key == QUANT_LOG_LOSS and text:
+            orange_labels = {"rtn failsafe"}
+            cleaned = text.strip().lower()
             try:
                 color_code = self.loss_color(float(text))
             except (TypeError, ValueError):
+                if cleaned in orange_labels:
+                    return color_text(text, ANSIColor.ORANGE)
                 return text
             return color_text(text, color_code)
 

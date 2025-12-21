@@ -438,9 +438,9 @@ class QQQ:
                     log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
                 else:
                     log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
-                avg_loss = 999999999
+                avg_loss = "rtn failsafe" if self.failsafe_with_rtn else 999999999
         else:
-            avg_loss = 999999999
+            avg_loss = "rtn failsafe" if self.failsafe_with_rtn else 999999999
 
         del Losses
 

@@ -158,13 +158,18 @@ class QQQProcessor(LoopProcessor):
         #         value=duration,
         #         iteration=name_index,
         #     )
+        if isinstance(avg_loss, str):
+            loss_display = avg_loss
+        else:
+            loss_display = f"{avg_loss:.10f}" if isinstance(avg_loss, (int, float)) else "unknown"
+
         stat = {
             PROCESS_LOG_NAME:  self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,
             MODULE_FEATURE_COLUMN: self.module_feature_summary(module),
             DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(module),
-            QUANT_LOG_LOSS: f"{avg_loss:.10f}",
+            QUANT_LOG_LOSS: loss_display,
             QUANT_LOG_NSAMPLES: f"{nsamples}",
             QUANT_LOG_DAMP: f"{damp_percent:.5f}",
             PROCESS_LOG_TIME: f"{duration:.3f}",
@@ -176,7 +181,8 @@ class QQQProcessor(LoopProcessor):
 
         with self.lock:
             self.durations.append(duration)
-            self.avg_losses.append(avg_loss)
+            if isinstance(avg_loss, (int, float)):
+                self.avg_losses.append(avg_loss)
             self.module_names.append(f"layer-{module.layer_index}-{module.name}")
             self.log.append(stat)
 
