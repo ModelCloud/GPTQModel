@@ -68,10 +68,14 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         # ------------------------------------------------------------
         # 1. Quantized weights should remain numerically close
         #
-        # GPTQ is designed to minimally perturb RTN quantization
-        # while reducing global error via Hessian-based correction.
+        # GPTQ is designed to minimally perturb the RTN baseline while
+        # reducing global error via Hessian-based correction. The scale
+        # tensor returned by RTN encodes the uniform quantizer step size
+        # for each group; its mean is used as a representative "one bin"
+        # width to define our closeness tolerance.
         # ------------------------------------------------------------
         quant_step = torch.mean(scale_r).item()
+        self.assertGreater(quant_step, 0.0, msg="RTN-derived quantization step must be positive")
 
         close_mask = torch.isclose(Q_h, Q_r, atol=quant_step)
         close_ratio = close_mask.float().mean().item()
@@ -79,7 +83,7 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         self.assertGreater(
             close_ratio,
             0.95,
-            msg="More than 95% of quantized values should remain within one quantization bin",
+            msg="At least 95% of quantized values should stay within one average RTN quantization step",
         )
 
         # ------------------------------------------------------------

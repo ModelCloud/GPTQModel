@@ -1,5 +1,6 @@
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,7 +20,9 @@ def _patch_backend(monkeypatch, backend: str, calls):
     if backend == "triton":
         monkeypatch.setattr(gemm_awq, "awq_ext", None)
 
-        monkeypatch.setattr(gemm_awq_triton.tritonv2, "TRITON_AVAILABLE", True)
+        triton_state = getattr(gemm_awq_triton, "tritonv2", SimpleNamespace(TRITON_AVAILABLE=False))
+        monkeypatch.setattr(gemm_awq_triton, "tritonv2", triton_state, raising=False)
+        monkeypatch.setattr(triton_state, "TRITON_AVAILABLE", True)
 
         def fake_dequant(qweight, scales, qzeros):
             calls["dequant"] += 1
@@ -32,6 +35,16 @@ def _patch_backend(monkeypatch, backend: str, calls):
 
         monkeypatch.setattr(gemm_awq_triton, "awq_dequantize_triton", fake_dequant, raising=False)
         monkeypatch.setattr(gemm_awq_triton, "awq_gemm_triton", fake_gemm, raising=False)
+        monkeypatch.setattr(
+            "gptqmodel.quantization.awq.modules.triton.gemm.awq_dequantize_triton",
+            fake_dequant,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "gptqmodel.quantization.awq.modules.triton.gemm.awq_gemm_triton",
+            fake_gemm,
+            raising=False,
+        )
 
         return gemm_awq_triton.AwqGemmTritonFn
 
@@ -47,7 +60,9 @@ def _patch_backend(monkeypatch, backend: str, calls):
             return torch.ones(input.shape[0], out_features, device=input.device, dtype=input.dtype)
 
     monkeypatch.setattr(gemm_awq, "awq_ext", FakeAwqExt())
-    monkeypatch.setattr(gemm_awq_triton.tritonv2, "TRITON_AVAILABLE", False)
+    triton_state = getattr(gemm_awq_triton, "tritonv2", SimpleNamespace(TRITON_AVAILABLE=False))
+    monkeypatch.setattr(gemm_awq_triton, "tritonv2", triton_state, raising=False)
+    monkeypatch.setattr(triton_state, "TRITON_AVAILABLE", False)
     return gemm_awq.AwqGemmFn
 
 
@@ -60,7 +75,8 @@ def test_fp16_matmul_heuristic_prefers_dequant_for_large_matrices(monkeypatch, b
     out_features = 8
     qweight, scales, qzeros = _fake_quant_tensors(in_features=32, out_features=out_features, group_size=group_size)
 
-    # Large batch x sequence activates the dequantize-then-matmul path.
+    # Large batch x sequence (33*32=1056 rows) exceeds the 1024-row heuristic
+    # and activates the dequantize-then-matmul path.
     x = torch.ones((33, 32, qweight.shape[0]), dtype=torch.float16)
 
     out = fn.apply(
@@ -80,7 +96,8 @@ def test_fp16_matmul_heuristic_prefers_fused_gemm_for_small_matrices(monkeypatch
     out_features = 8
     qweight, scales, qzeros = _fake_quant_tensors(in_features=32, out_features=out_features, group_size=group_size)
 
-    # Small batch x sequence stays on the fused GEMM kernel.
+    # Small batch x sequence (1 row) sits below the 1024-row heuristic and
+    # stays on the fused GEMM kernel.
     x = torch.ones((1, 1, qweight.shape[0]), dtype=torch.float16)
 
     out = fn.apply(
@@ -95,7 +112,8 @@ def _available_bench_backends():
     backends = []
     if gemm_awq.awq_ext is not None:
         backends.append("awq_ext")
-    if gemm_awq_triton.tritonv2.TRITON_AVAILABLE:
+    triton_mod = getattr(gemm_awq_triton, "tritonv2", None)
+    if triton_mod is not None and getattr(triton_mod, "TRITON_AVAILABLE", False):
         backends.append("triton")
     return backends
 
