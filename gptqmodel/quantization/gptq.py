@@ -940,14 +940,20 @@ class GPTQ:
                 Q[:, i1:i2] = Q1
         else:
             # Original heavy loop for normal quantization
-            for i1 in range(0, self.columns, blocksize):
-                i2 = min(i1 + blocksize, self.columns)
+            effective_block = blocksize
+            if Hinv is None and self.qcfg.group_size and self.qcfg.group_size > 0:
+                # Align RTN fallback work chunks to group boundaries to avoid
+                # redundant quantizer reconfiguration across partial groups.
+                effective_block = self.qcfg.group_size
+
+            for i1 in range(0, self.columns, effective_block):
+                i2 = min(i1 + effective_block, self.columns)
                 count = i2 - i1
 
                 W1 = W[:, i1:i2].clone()
                 Q1 = torch.zeros_like(W1)
-                Err1 = torch.zeros_like(W1)
-                Losses1 = torch.zeros_like(W1)
+                Err1 = torch.zeros_like(W1) if Hinv is not None else None
+                Losses1 = torch.zeros_like(W1) if Hinv is not None else None
 
                 if Hinv is not None:
                     Hinv1 = Hinv[i1:i2, i1:i2]
