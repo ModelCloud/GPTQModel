@@ -53,7 +53,6 @@ dependencies = [
     "pypcre>=0.2.9",
     "torchao>=0.14.1", # fix bad transformers 4.57.1 breaking torchao compat
     "kernels>=0.11.1", # For CPU kernels
-    "pynput>=1.7.6", # for pause/resume functionality
     # "cython>=3.1.4", # required by hf-xet/hf-transfer
 # "flash-attn>=2.8.3", <-- install for lower vram usage
 ]

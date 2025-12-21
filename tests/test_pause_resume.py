@@ -5,12 +5,25 @@
 
 import threading
 import time
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+import sys
 
 import pytest
 
 from gptqmodel.utils.pause_resume import PauseResumeController, PauseResumeState
 
+
+@pytest.fixture
+def mock_stdin():
+    """Fixture to mock stdin for testing."""
+    if sys.platform == "win32":
+        with patch('msvcrt.kbhit', return_value=True), \
+             patch('msvcrt.getch', return_value=b'p'):
+            yield
+    else:
+        with patch('select.select', return_value=([sys.stdin], [], [])), \
+             patch('sys.stdin.read', return_value='p'):
+            yield
 
 class TestPauseResumeController:
     """Test the pause/resume controller functionality."""
@@ -159,20 +172,19 @@ class TestPauseResumeController:
         resume_thread.join()
         controller.cleanup()
 
-    def test_keyboard_disabled(self):
-        """Test controller with keyboard disabled."""
+    @patch('sys.stdin.isatty', return_value=True)
+    def test_keyboard_input_toggles_pause(self, mock_isatty, mock_stdin):
+        """Test that keyboard input 'p' toggles the pause state."""
         controller = PauseResumeController()
-
-        # Should work normally without keyboard
-        controller.pause()
+        
+        # Simulate a key press 'p'
+        # The listener runs in a background thread, so we wait a bit for it to process
+        time.sleep(0.2) 
         assert controller.get_state() == PauseResumeState.PAUSE_REQUESTED
 
-        controller.resume()
+        time.sleep(0.2)
         assert controller.get_state() == PauseResumeState.RUNNING
-
-        # Keyboard should be inactive
-        assert not controller._keyboard_active
-
+        
         controller.cleanup()
 
     def test_thread_safety(self):

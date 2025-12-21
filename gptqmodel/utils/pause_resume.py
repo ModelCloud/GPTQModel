@@ -13,9 +13,22 @@ import logging
 from enum import Enum
 from typing import Dict, List, Optional, Callable
 from contextlib import contextmanager
-from pynput import keyboard
+import sys
+import time
 
 log = logging.getLogger(__name__)
+
+_IS_WINDOWS = sys.platform == "win32"
+
+if _IS_WINDOWS:
+    import msvcrt
+else:
+    try:
+        import tty
+        import termios
+        import select
+    except ImportError:
+        log.warning("termios, tty, or select not available. Pause/resume from keyboard will not work.")
 
 
 class PauseResumeState(Enum):
@@ -31,7 +44,7 @@ class PauseResumeController:
 
     Provides:
     - Thread-safe state management
-    - Keyboard input handling (Pause/Break key)
+    - Keyboard input handling from stdin ('p' key)
     - Integration with progress tracking
     """
 
@@ -44,9 +57,9 @@ class PauseResumeController:
         self._pause_event = threading.Event()
         self._resume_event = threading.Event()
 
-        # Keyboard handling
-        self._keyboard_active = False
-        self._keyboard_listener = None
+        # Stdin input handling
+        self._input_thread = None
+        self._stop_event = threading.Event()
 
         # Callbacks for status updates
         self._status_callback: Optional[Callable[[PauseResumeState], None]] = None
@@ -142,35 +155,53 @@ class PauseResumeController:
                 except Exception as e:
                     log.warning(f"Failed to update progress bar title: {e}")
 
+    def _windows_stdin_listener(self):
+        while not self._stop_event.is_set():
+            try:
+                if msvcrt.kbhit():
+                    char = msvcrt.getch().decode('utf-8').lower()
+                    if char == 'p':
+                        self.toggle_pause_resume()
+                time.sleep(0.1)
+            except Exception as e:
+                log.warning(f"Error in stdin listener: {e}")
+                break
+
+    def _posix_stdin_listener(self):
+        old_settings = None
+        try:
+            old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+            
+            while not self._stop_event.is_set():
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    char = sys.stdin.read(1)
+                    if char.lower() == 'p':
+                        self.toggle_pause_resume()
+        except Exception as e:
+            log.warning(f"Error in stdin listener: {e}")
+        finally:
+            if old_settings:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
     def _setup_keyboard_handler(self):
         """Setup keyboard event handlers for pause/break keys."""
+        if not sys.stdin.isatty():
+            log.info("Not a TTY. Pause/resume from keyboard is disabled.")
+            return
 
-        def on_key_press(key):
-            try:
-                # Convert pynput key to string representation
-                key_str = str(key).lower()
+        target = None
+        if _IS_WINDOWS:
+            target = self._windows_stdin_listener
+        else:
+            if 'termios' in sys.modules:
+                target = self._posix_stdin_listener
+            else:
+                log.warning("termios module not found, cannot listen for keyboard input on POSIX.")
+                return
 
-                # Handle different key formats
-                if hasattr(key, 'char') and key.char:
-                    key_char = key.char.lower()
-                    if key_char == 'p':
-                        self.toggle_pause_resume()
-                        return
-
-                # Handle special keys
-                if 'pause' in key_str or 'break' in key_str:
-                    self.toggle_pause_resume()
-            except Exception as e:
-                log.warning(f"Keyboard handler error: {e}")
-
-        try:
-            self._keyboard_listener = keyboard.Listener(on_press=on_key_press)
-            self._keyboard_listener.start()
-            self._keyboard_active = True
-        except Exception as e:
-            log.warning(f"Failed to setup keyboard handler: {e}")
-            self._keyboard_active = False
-            self._keyboard_listener = None
+        self._input_thread = threading.Thread(target=target, daemon=True)
+        self._input_thread.start()
 
     def set_status_callback(self, callback: Callable[[PauseResumeState], None]):
         """Set callback for state changes."""
@@ -282,14 +313,11 @@ class PauseResumeController:
 
     def cleanup(self):
         """Cleanup resources and keyboard handlers."""
-        # Cleanup keyboard handlers
-        if self._keyboard_active and self._keyboard_listener:
-            try:
-                self._keyboard_listener.stop()
-                self._keyboard_listener = None
-                self._keyboard_active = False
-            except Exception as e:
-                log.warning(f"Error cleaning up keyboard handlers: {e}")
+        # Stop the input listener thread
+        self._stop_event.set()
+        if self._input_thread:
+            self._input_thread.join(timeout=0.5)
+            self._input_thread = None
 
         # Clear progress bar references
         with self._state_lock:
