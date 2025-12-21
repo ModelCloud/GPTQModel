@@ -68,11 +68,10 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         # ------------------------------------------------------------
         # 1. Quantized weights should remain numerically close
         #
-        # GPTQ is designed to minimally perturb the RTN baseline while
-        # reducing global error via Hessian-based correction. The scale
-        # tensor returned by RTN encodes the uniform quantizer step size
-        # for each group; its mean is used as a representative "one bin"
-        # width to define our closeness tolerance.
+        # GPTQ tries to stay very close to the RTN baseline while reducing
+        # global error using Hessian-based correction. The RTN scale tensor
+        # stores the uniform quantizer step size for each group; its mean
+        # stands in for a single-bin width when we decide what counts as "close".
         # ------------------------------------------------------------
         quant_step = torch.mean(scale_r).item()
         self.assertGreater(quant_step, 0.0, msg="RTN-derived quantization step must be positive")
