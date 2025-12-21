@@ -1,3 +1,6 @@
+import os
+from glob import glob
+
 import torch
 
 from gptqmodel.quantization.config import QuantizeConfig
@@ -92,6 +95,110 @@ def _scenarios():
 
 
 def test_midpoint_vs_rtn_across_distributions():
+    rows = _collect_synthetic_rows()
+    for scenario_name, group_size, rtn_err, midpoint_err, mean_err, std_err in rows:
+        assert midpoint_err <= rtn_err, f"{scenario_name}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
+        assert mean_err <= rtn_err * 1.10, f"{scenario_name}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
+        # std-clip intentionally biases to avoid outliers; allow generous headroom while keeping it bounded.
+        assert std_err <= rtn_err * 2.50, f"{scenario_name}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
+
+
+def _load_weight_slice(model_dir: str, tensor_name: str, *, max_rows: int = 256, max_cols: int = 256) -> torch.Tensor:
+    from safetensors import safe_open
+
+    shards = sorted(glob(os.path.join(model_dir, "model-*.safetensors")))
+    if not shards:
+        raise FileNotFoundError(f"No safetensor shards found under {model_dir}")
+
+    for shard_path in shards:
+        with safe_open(shard_path, framework="pt", device="cpu") as f:
+            if tensor_name in f.keys():
+                tensor = f.get_tensor(tensor_name)
+                return tensor[:max_rows, :max_cols].clone()
+    raise FileNotFoundError(f"Tensor `{tensor_name}` not found in {model_dir}")
+
+
+def test_midpoint_vs_rtn_on_qwen3_real_weights():
+    model_dir = "/monster/data/model/Qwen3-30B-A3B"
+    if not os.path.isdir(model_dir):
+        import pytest
+        pytest.skip(f"Model path missing: {model_dir}")
+
+    targets = [
+        "model.layers.0.mlp.experts.10.up_proj.weight",
+        "model.layers.0.mlp.experts.10.down_proj.weight",
+        "model.layers.0.mlp.experts.10.gate_proj.weight",
+    ]
+    group_size = 128
+    rows = []
+
+    for name in targets:
+        try:
+            w = _load_weight_slice(model_dir, name, max_rows=256, max_cols=256)
+        except FileNotFoundError:
+            import pytest
+            pytest.skip(f"Tensor `{name}` not found in model shards at {model_dir}")
+
+        rtn = _quantize_rtn(w, group_size=group_size)
+        mid = _quantize_midpoint(w, group_size=group_size)
+        mean_c = _quantize_mean_centered(w, group_size=group_size)
+        std_c = _quantize_std_clipped(w, group_size=group_size, sigma=3.0)
+
+        rtn_err = torch.mean((w - rtn).abs()).item()
+        mid_err = torch.mean((w - mid).abs()).item()
+        mean_err = torch.mean((w - mean_c).abs()).item()
+        std_err = torch.mean((w - std_c).abs()).item()
+        rows.append((name, rtn_err, mid_err, mean_err, std_err))
+
+    combined = [("synthetic:" + s, gs, re, me, mne, se) for s, gs, re, me, mne, se in _collect_synthetic_rows()]
+    combined += [("real:" + m, group_size, re, me, mne, se) for m, re, me, mne, se in rows]
+
+    header = "+-------------------------------+------------+---------+--------------+--------------+--------------+"
+    try:
+        from logbar import LogBar
+
+        cols = LogBar.shared().columns(
+            cols=[
+                {"label": "case", "width": "fit"},
+                {"label": "group_size", "width": "fit"},
+                {"label": "rtn_err", "width": "fit"},
+                {"label": "mid_err", "width": "fit"},
+                {"label": "mean_err", "width": "fit"},
+                {"label": "stdclip_err", "width": "fit"},
+            ],
+            padding=1,
+        )
+        cols.info.header()
+        for label, gs, rtn_err, mid_err, mean_err, std_err in combined:
+            errors = {"rtn": rtn_err, "mid": mid_err, "mean": mean_err, "std": std_err}
+            sorted_methods = sorted(errors.items(), key=lambda kv: kv[1])
+            palette = ["\033[32m", "\033[33m", "\033[35m", "\033[31m"]
+            color_map = {name: palette[min(idx, len(palette) - 1)] for idx, (name, _) in enumerate(sorted_methods)}
+            reset = "\033[0m"
+            cols.info(
+                label,
+                str(gs),
+                f"{color_map['rtn']}{rtn_err:.5f}{reset}",
+                f"{color_map['mid']}{mid_err:.5f}{reset}",
+                f"{color_map['mean']}{mean_err:.5f}{reset}",
+                f"{color_map['std']}{std_err:.5f}{reset}",
+            )
+        cols.info.header()
+    except Exception:
+        print(header)
+        print("| case                          | group_size | rtn_err | midpoint_err | mean_err     | stdclip_err  |")
+        print(header)
+        for label, gs, rtn_err, mid_err, mean_err, std_err in combined:
+            print(f"| {label:29} | {gs:10d} | {rtn_err:7.5f} | {mid_err:12.5f} | {mean_err:12.5f} | {std_err:12.5f} |")
+        print(header)
+
+    for module, rtn_err, mid_err, mean_err, std_err in rows:
+        assert mid_err <= rtn_err, f"{module}: midpoint_err={mid_err}, rtn_err={rtn_err}"
+        assert mean_err <= rtn_err * 1.20, f"{module}: mean_err={mean_err}, rtn_err={rtn_err}"
+        assert std_err <= rtn_err * 2.50, f"{module}: std_err={std_err}, rtn_err={rtn_err}"
+
+
+def _collect_synthetic_rows():
     rows = []
     for scenario_name, weights in _scenarios().items():
         for group_size in (16, 32, 64, 128):
@@ -105,54 +212,4 @@ def test_midpoint_vs_rtn_across_distributions():
             mean_err = torch.mean((weights - mean_centered).abs()).item()
             std_err = torch.mean((weights - std_clip).abs()).item()
             rows.append((scenario_name, group_size, rtn_err, midpoint_err, mean_err, std_err))
-
-    header = "+----------------+------------+---------+--------------+--------------+--------------+"
-    try:
-        from logbar import LogBar
-
-        cols = LogBar.shared().columns(
-            cols=[
-                {"label": "scenario", "width": "fit"},
-                {"label": "group_size", "width": "fit"},
-                {"label": "rtn_err", "width": "fit"},
-                {"label": "midpoint_err", "width": "fit"},
-                {"label": "mean_err", "width": "fit"},
-                {"label": "stdclip_err", "width": "fit"},
-            ],
-            padding=1,
-        )
-        cols.info.header()
-        for scenario_name, group_size, rtn_err, midpoint_err, mean_err, std_err in rows:
-            errors = {
-                "rtn": rtn_err,
-                "mid": midpoint_err,
-                "mean": mean_err,
-                "std": std_err,
-            }
-            sorted_methods = sorted(errors.items(), key=lambda kv: kv[1])
-            palette = ["\033[32m", "\033[33m", "\033[35m", "\033[31m"]
-            color_map = {name: palette[min(idx, len(palette) - 1)] for idx, (name, _) in enumerate(sorted_methods)}
-            reset = "\033[0m"
-            cols.info(
-                scenario_name,
-                str(group_size),
-                f"{color_map['rtn']}{rtn_err:.5f}{reset}",
-                f"{color_map['mid']}{midpoint_err:.5f}{reset}",
-                f"{color_map['mean']}{mean_err:.5f}{reset}",
-                f"{color_map['std']}{std_err:.5f}{reset}",
-            )
-        cols.info.header()
-    except Exception:
-        # Fallback to plain ASCII print if LogBar is unavailable
-        print(header)
-        print("| scenario       | group_size | rtn_err | midpoint_err | mean_err     | stdclip_err  |")
-        print(header)
-        for scenario_name, group_size, rtn_err, midpoint_err, mean_err, std_err in rows:
-            print(f"| {scenario_name:14} | {group_size:10d} | {rtn_err:7.5f} | {midpoint_err:12.5f} | {mean_err:12.5f} | {std_err:12.5f} |")
-        print(header)
-
-    for scenario_name, group_size, rtn_err, midpoint_err, mean_err, std_err in rows:
-        assert midpoint_err <= rtn_err, f"{scenario_name}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
-        assert mean_err <= rtn_err * 1.10, f"{scenario_name}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
-        # std-clip intentionally biases to avoid outliers; allow generous headroom while keeping it bounded.
-        assert std_err <= rtn_err * 2.50, f"{scenario_name}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
+    return rows
