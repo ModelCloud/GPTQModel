@@ -237,6 +237,7 @@ class QQQ:
         self.fwd_counter = 0
 
         self.failsafe_with_rtn = False
+        self.expected_nsamples: Optional[float] = None
 
         self.H = torch.zeros((self.columns, self.columns),
                              dtype=torch.float32,

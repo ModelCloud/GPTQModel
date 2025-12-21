@@ -198,6 +198,7 @@ class GPTQ:
         self.fwd_counter = 0
 
         self.failsafe_with_rtn = False
+        self.expected_nsamples: Optional[float] = None
 
         self.H: Optional[torch.Tensor] = None
 
@@ -738,11 +739,19 @@ class GPTQ:
         start = time.time()
 
         target_device = getattr(self.module, "target_device", None)
-        if self.failsafe_with_rtn and self.nsamples == 0:
+        from ..utils.failsafe import should_use_rtn_failsafe
+
+        fallback_requested = should_use_rtn_failsafe(
+            self.failsafe_with_rtn,
+            float(self.nsamples),
+            self.expected_nsamples,
+        )
+
+        if fallback_requested:
             use_hessian = False
             log.warn(
                 f"Quantization: Module `{self.name}` -> "
-                "No calibration samples, falling back to naive rtn (round to nearest) quantization."
+                "Using RTN-style failsafe quantization based on configured threshold."
             )
             self.H = self.create_H(target_device=target_device)
         else:

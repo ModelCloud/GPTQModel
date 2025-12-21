@@ -100,6 +100,7 @@ class GPTQProcessor(LoopProcessor):
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
             tmp.failsafe_with_rtn = failsafe_with_rtn
+            tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         tmp.quantizer.configure(
             perchannel=True,

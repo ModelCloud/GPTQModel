@@ -172,8 +172,9 @@ class AWQProcessor(LoopProcessor):
                 except TypeError:
                     total += 1
 
-        self._nsamples_total = total
-        self.nsamples = total
+        total_tokens = getattr(self, "total_calibration_tokens", 0) or total
+        self._nsamples_total = total_tokens
+        self.nsamples = total_tokens
 
     def _record_input_feature(self, module_name: str, feature: torch.Tensor) -> None:
         if feature.device.type != "cpu":
@@ -367,10 +368,25 @@ class AWQProcessor(LoopProcessor):
 
         input_feat = self._layer_input_features(state)
         if self.failsafe_with_rtn:
-            no_samples = self._nsamples_total == 0
+            from ..utils.failsafe import should_use_rtn_failsafe
+
+            captured_tokens = 0
+            for tensor in input_feat.values():
+                if tensor is None or tensor.numel() == 0:
+                    continue
+                hidden = tensor.shape[-1] if tensor.dim() >= 1 else 1
+                tokens = int(tensor.numel() / max(hidden, 1))
+                captured_tokens += tokens
+
+            expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
+            fallback_needed = should_use_rtn_failsafe(
+                self.failsafe_with_rtn,
+                float(captured_tokens),
+                float(expected_tokens) if expected_tokens else None,
+            )
             missing_activation = not input_feat or all(t.numel() == 0 for t in input_feat.values())
-            if no_samples or missing_activation:
-                reason = "no calibration samples" if no_samples else "no activation captures"
+            if fallback_needed or missing_activation:
+                reason = "failsafe threshold" if fallback_needed else "no activation captures"
                 self._quantize_layer_rtn_fallback(layer_index, state, reason)
                 return
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]

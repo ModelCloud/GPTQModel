@@ -174,10 +174,42 @@ class LoopProcessor:
             self.num_batches = 0
             self.calibration_dataset = []
 
+        self.total_calibration_tokens = self._compute_total_tokens(self.calibration_dataset)
+
         # Track the current calibration batch index on a per-thread basis so
         # processors can retrieve deterministic ordering information (e.g.
         # GPTQ's Hessian updates) even when forwards run on multiple threads.
         self._batch_tls = threading.local()
+
+    @staticmethod
+    def _compute_total_tokens(calibration_dataset) -> int:
+        if not calibration_dataset:
+            return 0
+        total = 0
+        for row in calibration_dataset:
+            if not isinstance(row, dict):
+                continue
+            if "attention_mask" in row:
+                mask = row["attention_mask"]
+                if isinstance(mask, torch.Tensor):
+                    total += int(mask.sum().item())
+                else:
+                    try:
+                        total += sum(int(x) for x in mask)
+                    except Exception:
+                        total += 0
+                continue
+            input_ids = row.get("input_ids")
+            if input_ids is None:
+                continue
+            if isinstance(input_ids, torch.Tensor):
+                total += int(input_ids.numel())
+            else:
+                try:
+                    total += len(input_ids)
+                except Exception:
+                    total += 0
+        return total
 
     def _set_current_batch_index(self, batch_index: Optional[int]) -> None:
         if batch_index is None:
