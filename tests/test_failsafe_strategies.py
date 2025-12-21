@@ -129,7 +129,7 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
         "model.layers.0.mlp.experts.10.down_proj.weight",
         "model.layers.0.mlp.experts.10.gate_proj.weight",
     ]
-    group_size = 128
+    group_sizes = (32, 64, 128)
     rows = []
 
     for name in targets:
@@ -139,19 +139,21 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
             import pytest
             pytest.skip(f"Tensor `{name}` not found in model shards at {model_dir}")
 
-        rtn = _quantize_rtn(w, group_size=group_size)
-        mid = _quantize_midpoint(w, group_size=group_size)
-        mean_c = _quantize_mean_centered(w, group_size=group_size)
-        std_c = _quantize_std_clipped(w, group_size=group_size, sigma=3.0)
+        for group_size in group_sizes:
+            rtn = _quantize_rtn(w, group_size=group_size)
+            mid = _quantize_midpoint(w, group_size=group_size)
+            mean_c = _quantize_mean_centered(w, group_size=group_size)
+            std_c = _quantize_std_clipped(w, group_size=group_size, sigma=3.0)
 
-        rtn_err = torch.mean((w - rtn).abs()).item()
-        mid_err = torch.mean((w - mid).abs()).item()
-        mean_err = torch.mean((w - mean_c).abs()).item()
-        std_err = torch.mean((w - std_c).abs()).item()
-        rows.append((name, rtn_err, mid_err, mean_err, std_err))
+            rtn_err = torch.mean((w - rtn).abs()).item()
+            mid_err = torch.mean((w - mid).abs()).item()
+            mean_err = torch.mean((w - mean_c).abs()).item()
+            std_err = torch.mean((w - std_c).abs()).item()
+            rows.append((name, group_size, rtn_err, mid_err, mean_err, std_err))
 
-    combined = [("synthetic:" + s, gs, re, me, mne, se) for s, gs, re, me, mne, se in _collect_synthetic_rows()]
-    combined += [("real:" + m, group_size, re, me, mne, se) for m, re, me, mne, se in rows]
+    synthetic_rows = _collect_synthetic_rows()
+    combined = [("synthetic:" + s, gs, re, me, mne, se) for s, gs, re, me, mne, se in synthetic_rows]
+    combined += [("real:" + m, gs, re, me, mne, se) for m, gs, re, me, mne, se in rows]
 
     header = "+-------------------------------+------------+---------+--------------+--------------+--------------+"
     try:
@@ -192,10 +194,10 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
             print(f"| {label:29} | {gs:10d} | {rtn_err:7.5f} | {mid_err:12.5f} | {mean_err:12.5f} | {std_err:12.5f} |")
         print(header)
 
-    for module, rtn_err, mid_err, mean_err, std_err in rows:
-        assert mid_err <= rtn_err, f"{module}: midpoint_err={mid_err}, rtn_err={rtn_err}"
-        assert mean_err <= rtn_err * 1.20, f"{module}: mean_err={mean_err}, rtn_err={rtn_err}"
-        assert std_err <= rtn_err * 2.50, f"{module}: std_err={std_err}, rtn_err={rtn_err}"
+    for module, group_size, rtn_err, mid_err, mean_err, std_err in rows:
+        assert mid_err <= rtn_err, f"{module}, group={group_size}: midpoint_err={mid_err}, rtn_err={rtn_err}"
+        assert mean_err <= rtn_err * 1.20, f"{module}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
+        assert std_err <= rtn_err * 2.50, f"{module}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
 
 
 def _collect_synthetic_rows():
