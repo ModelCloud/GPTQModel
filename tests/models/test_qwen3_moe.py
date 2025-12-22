@@ -6,7 +6,7 @@ from model_test import ModelTest
 
 from gptqmodel.quantization.config import FailSafe, FailSafeStrategy, VRAMStrategy
 from gptqmodel.utils.eval import EVAL
-
+from gptqmodel.quantization import FORMAT, METHOD
 
 # | Metric                         |   MARLIN |
 # |--------------------------------|----------|
@@ -14,6 +14,9 @@ from gptqmodel.utils.eval import EVAL
 # | arc_challenge :: acc_norm,none |   0.5486 |
 class TestQwen3Moe(ModelTest):
     FAILSAFE = FailSafe(strategy=FailSafeStrategy.AUTO, threshold="1%")
+    FORMAT = FORMAT.GEMM
+    METHOD = METHOD.AWQ
+
     #DATASET_SIZE = 1
     # DEVICE = torch.device("cpu")
     # HESSIAN_CHUNK_SIZE = 256 * 1024 * 1024
