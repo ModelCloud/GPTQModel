@@ -356,8 +356,6 @@ def run_subset_stage(
                 source=forward_source,
             )
 
-        pb.title(layer_title).subtitle("").draw()
-
         for h in handle:
             # Detach temporary hooks to avoid leaking state into future passes.
             h.remove()

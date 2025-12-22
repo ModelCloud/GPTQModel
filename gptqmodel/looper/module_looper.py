@@ -42,6 +42,7 @@ from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
 from ..utils.disk import estimate_disk_io_speed
 from ..utils.logger import setup_logger, log_time_block
+from ..utils.pause_resume import PauseResumeController, PauseResumeState
 from ..utils.looper_helpers import (
     clone_module_for_devices,
     device_ctx,
@@ -85,6 +86,13 @@ class ModuleLooper():
     def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
         self.processors = processors
         self.gptq_model = model
+
+        # Initialize pause/resume controller first
+        self.pause_controller = PauseResumeController()
+
+        # Give processors access to pause controller for status
+        for processor in self.processors:
+            processor._pause_controller = self.pause_controller
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
         self._layer_callback = getattr(model, "layer_callback", None)
@@ -1264,6 +1272,8 @@ class ModuleLooper():
             region_timer.flush()
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
+
+        self.pause_controller.cleanup()
 
         return total_log
 
