@@ -386,7 +386,12 @@ def run_subset_stage(
             # Skip MoE experts that never fired; they likely lacked calibration
             # traffic and would produce invalid statistics.
             if processor.tasks[name].fwd_counter == 0:
-                logger.error(f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it.")
+                # only log for moe if `failsafe` is not enabled
+                if failsafe is not None:
+                    logger.error(
+                        f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it. "
+                        f"Please enable and use `failsafe` config option."
+                    )
                 moe_skip_modules.append(name)
 
         if not failsafe:
