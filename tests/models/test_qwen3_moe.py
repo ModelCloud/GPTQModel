@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from model_test import ModelTest
 
-from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import FailSafe, FailSafeStrategy, VramStrategy
 from gptqmodel.utils.eval import EVAL
 
