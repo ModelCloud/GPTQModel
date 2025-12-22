@@ -97,8 +97,8 @@ class FailSafeStrategy(str, Enum):
 
 @dataclass
 class FailSafe:
-    strategy: FailSafeStrategy = FailSafeStrategy.AUTO
-    threshold: Any = "1.0%"
+    strategy: FailSafeStrategy = FailSafeStrategy.AUTO # enable failsafe by default due to moe routing behavior breaking calibration based quantization
+    threshold: Any = "0.50%" # if less than 0.5% of calibration reaches module (think moe) then we trigger per-module failsafe quantization
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
