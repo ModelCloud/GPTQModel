@@ -7,12 +7,12 @@ from .config import (
                      FORMAT,
                      FORMAT_FIELD_CHECKPOINT,
                      FORMAT_FIELD_CODE,
-                     FailSafeStrategy,
-                     FailSafe,
                      METHOD,
                      QUANT_CONFIG_FILENAME,
                      QUANT_METHOD_FIELD,
                      BaseQuantizeConfig,
+                     FailSafe,
+                     FailSafeStrategy,
                      QuantizeConfig,
 )
 from .gptq import GPTQ
