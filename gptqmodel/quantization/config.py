@@ -82,7 +82,7 @@ class METHOD(str, Enum):
     AWQ = "awq"
 
 
-class VRAMStrategy(str, Enum):
+class VramStrategy(str, Enum):
     EXCLUSIVE = "exclusive"
     BALANCED = "balanced"
 
@@ -279,7 +279,7 @@ class QuantizeConfig():
     hessian_use_bfloat16_staging: bool = field(default=False, metadata={"help": "Stage Hessian chunks in bfloat16 when supported"})
 
     # VRAM allocation strategy for MoE-heavy subsets
-    vram_strategy: VRAMStrategy = field(default=VRAMStrategy.EXCLUSIVE)
+    vram_strategy: VramStrategy = field(default=VramStrategy.EXCLUSIVE)
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -438,14 +438,14 @@ class QuantizeConfig():
 
         if isinstance(self.vram_strategy, str):
             try:
-                self.vram_strategy = VRAMStrategy(self.vram_strategy.lower())
+                self.vram_strategy = VramStrategy(self.vram_strategy.lower())
             except ValueError as exc:
                 raise ValueError(
-                    f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VRAMStrategy]}."
+                    f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VramStrategy]}."
                 ) from exc
-        elif not isinstance(self.vram_strategy, VRAMStrategy):
+        elif not isinstance(self.vram_strategy, VramStrategy):
             raise ValueError(
-                f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VRAMStrategy]}."
+                f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VramStrategy]}."
             )
 
     def extension_set(self, key: str, value: Any):

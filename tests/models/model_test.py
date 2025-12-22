@@ -62,7 +62,7 @@ from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
-from gptqmodel.quantization.config import FailSafe, FailSafeStrategy, QuantizeConfig, VRAMStrategy  # noqa: E402
+from gptqmodel.quantization.config import FailSafe, FailSafeStrategy, QuantizeConfig, VramStrategy  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -80,7 +80,7 @@ DEFAULT_TASK_NAMES = (EVAL.LM_EVAL.ARC_CHALLENGE,)
 class ModelTest(unittest.TestCase):
     DEBUG = True # enable extra debug output
 
-    VRAM_STRATEGY = VRAMStrategy.EXCLUSIVE
+    VRAM_STRATEGY = VramStrategy.EXCLUSIVE
     TRUST_REMOTE_CODE = False
     TORCH_DTYPE = "auto"
     EVAL_BATCH_SIZE = "auto"

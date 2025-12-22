@@ -19,7 +19,7 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
-from ..quantization.config import VRAMStrategy
+from ..quantization.config import VramStrategy
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
@@ -186,7 +186,7 @@ def run_subset_stage(
         for name, named_module in subset.items():
             setattr(named_module, "moe_enabled", name in moe_modules_set)
 
-        if looper._vram_strategy == VRAMStrategy.BALANCED:
+        if looper._vram_strategy == VramStrategy.BALANCED:
             devices = [
                 dev for dev in looper._quant_devices
                 if dev is not None and getattr(dev, "type", None) != "cpu"
@@ -208,7 +208,7 @@ def run_subset_stage(
                         for module_name in expert_groups[group_key]:
                             forward_device_map[module_name] = target_device
 
-        subset_forward_serial = looper._vram_strategy == VRAMStrategy.BALANCED
+        subset_forward_serial = looper._vram_strategy == VramStrategy.BALANCED
         if subset_forward_serial:
             active_group_count = len(moe_group_keys_all)
             if active_group_count == 0:
@@ -505,6 +505,9 @@ def run_subset_stage(
         # Collect results in submission order so the final subset map preserves
         # deterministic iteration for downstream consumers.
         name, named_module = fut.result()
+        if isinstance(named_module, NamedModule) and named_module.state.get("capture_only"):
+            # Capture-only modules should not be finalized or offloaded.
+            continue
         processed_subset[name] = named_module
     torch_sync()
 

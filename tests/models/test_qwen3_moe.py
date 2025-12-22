@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import FailSafe, FailSafeStrategy, VRAMStrategy
+from gptqmodel.quantization.config import FailSafe, FailSafeStrategy, VramStrategy
 from gptqmodel.utils.eval import EVAL
 from gptqmodel.quantization import FORMAT, METHOD
 
@@ -28,7 +28,7 @@ class TestQwen3Moe(ModelTest):
         },
     }
 
-    VRAM_STRATEGY = VRAMStrategy.BALANCED
+    VRAM_STRATEGY = VramStrategy.BALANCED
     # TRUST_REMOTE_CODE = False
     # APPLY_CHAT_TEMPLATE = True
     # EVAL_BATCH_SIZE = 6

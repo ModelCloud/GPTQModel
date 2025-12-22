@@ -1440,15 +1440,19 @@ class AWQProcessor(LoopProcessor):
             if previous_subset:
                 state.previous_weight_scale = self._capture_previous_subset_scale(previous_subset)
 
+            # Only gate on modules that were scheduled for subset processing to
+            # avoid early quantization while parallel workers are still running.
+            pending_in_scope = state.pending_modules
+            if state.modules:
+                pending_in_scope = state.pending_modules.intersection(state.modules.keys())
+
             should_quantize = (
                 not state.quantized
                 and bool(state.modules)
+                and not pending_in_scope
                 and (
-                    not state.pending_modules
-                    or (
-                        state.subset_total is not None
-                        and len(state.processed_subsets) >= state.subset_total
-                    )
+                    state.subset_total is None
+                    or len(state.processed_subsets) >= state.subset_total
                 )
             )
 
