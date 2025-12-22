@@ -14,9 +14,9 @@ from gptqmodel.utils.eval import EVAL
 # | arc_challenge :: acc,none      |   0.5094 |
 # | arc_challenge :: acc_norm,none |   0.5486 |
 class TestQwen3Moe(ModelTest):
-    FAILSAFE = FailSafe(strategy=FailSafeStrategy.AUTO, threshold="1%")
-    FORMAT = FORMAT.GEMM
-    METHOD = METHOD.AWQ
+    FAILSAFE = FailSafe(strategy=FailSafeStrategy.AUTO, threshold="0.5%")
+    # FORMAT = FORMAT.GEMM
+    # METHOD = METHOD.AWQ
 
     #DATASET_SIZE = 1
     # DEVICE = torch.device("cpu")
