@@ -11,6 +11,8 @@ from .config import (
                      QUANT_CONFIG_FILENAME,
                      QUANT_METHOD_FIELD,
                      BaseQuantizeConfig,
+                     FailSafe,
+                     FailSafeStrategy,
                      QuantizeConfig,
 )
 from .gptq import GPTQ

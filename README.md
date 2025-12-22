@@ -17,6 +17,12 @@
 </p>
 
 ## Latest News
+* 12/22/2025 5.6.99-dev: New/refractored `failsafe` strategy, now enabled by default, to address un-even routing of MoE module routing and quantization issue. Another pending PR will be merged soon to address the same MoE routing issue using a different, brue-force, approach. 
+* 12/17/2025 [5.6.12 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.12): Fixed `uv` compat. Both `uv` and `pip` install will now show ui progress for external wheel/depend downloads.
+* 12/16/2025 [5.6.10 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.10): Fixed `MacOS` and `AWQMarlin` kernel loading import regressions. Resolved most `multi-arch` compile issue on `Ubuntu`, `Arch`, `RedHat` and other distros.
+* 12/15/2025 [5.6.6 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.6): Fixed `multi-arch` build issues and `Tritonv2` kernel launch bug on multi-gpus. 
+* 12/12/2025 [5.6.2 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.2): Fixed 3-bit Triton GPTQ kernel dequant/inference and `license` property compatibility issue with latest pip/setuptools.
+* 12/9/2025 [5.6.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.0): ✨New `HF Kernel` for CPU optimized for `AMX`, `AVX2` and `AVX512`. Auto module tree for auto-model support. Added Afmoe and Dosts1 model support. Fixed pre-layer pass quantization speed regression. Improved HF Transformers, Peft and Optimum support for both GPTQ and AWQ. Fixed many AWQ compat bugs and regressions. 
 * 11/9/2025 [5.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.4.0): ✨New Intel CPU and XPU hw optimized AWQ `TorchFusedAWQ` kernel. Torch Fused kernels now compatible with `torch.compile`. Fixed AWQ MoE model compatibility and reduced vram usage.
 * 11/3/2025 [5.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.2.0): 🎉Minimax M2 support with [ModelCloud BF16 M2 Model](https://huggingface.co/ModelCloud/MiniMax-M2-BF16). New `VramStrategy.Balanced` quantization property for reduced memory usage for large MoE on multi-3090 (24GB) devices. ✨Marin model. New AWQ Torch reference kernel. Fix AWQ Marlin kernel for bf16. Fix GLM 4.5/4.6 MoE missing `mtp` layers on model save (HF bug). Modular refractor.  🎉AWQ support out of beta with full feature support in including multi-gpu quant and MoE vram saving.  ✨Brumby (attention free) model support. ✨Brumby (attention free) model support. ✨IBM Granite Nano support. New `calibration_concat_separator` config option.
 * 10/24/2025 [5.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.0.0): 🎉 Data-parallel quant support for `MoE` models on multi-gpu using `nogil` Python. `offload_to_disk` support enabled by 
@@ -25,14 +31,16 @@ default to massively reduce `cpu` ram usage. New `Intel` and `AMD` cpu hw accele
 `gemm_fast`, `marlin` kernel support. `LFM`, `Ling`, `Qwen3 Omni` model support. 
 `Bitblas` kernel updated to support Bitblas `0.1.0.post1` reelase.
 Quantization is now faster with reduced vram usage. Enhanced logging support with `LogBar`.
-* 09/16/2025 [4.2.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.5): `hyb_act` renamed to `act_group_aware`. Removed finicky `torch` import within `setup.py`. Packing bug fix and prebuilt Pytorch 2.8 whls. 
-* 09/12/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.0): ✨ New Models Support: Qwen3-Next, Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compat. Patch fix GIL=0 cuda error for multi-gpu. Fix compat with autoround + new transformers. 
-* 09/04/2025 [4.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ Meituan LongCat Flash Chat, Llama 4, GPT-OSS (BF16), and GLM-4.5-Air support.  New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
-* 08/21/2025 [4.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.0.0): 🎉 New Group Aware Reordering (GAR) support. New models support: Bytedance Seed-OSS, Baidu Ernie, Huawei PanGu, Gemma3, Xiaomi Mimo, Qwen 3/MoE, Falcon H1, GPT-Neo. Memory leak and multiple model compatibility fixes related to Transformers >= 4.54. Python >= 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. Early access Pytorch 2.8 fused-ops on Intel XPU for up to 50% speedup.
 
 <details>
 
 <summary>Archived News</summary>
+* 09/16/2025 [4.2.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.5): `hyb_act` renamed to `act_group_aware`. Removed finicky `torch` import within `setup.py`. Packing bug fix and prebuilt Pytorch 2.8 whls. 
+* 09/12/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.0): ✨ New Models Support: Qwen3-Next, Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compat. Patch fix GIL=0 cuda error for multi-gpu. Fix compat with autoround + new transformers. 
+
+* 09/04/2025 [4.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ Meituan LongCat Flash Chat, Llama 4, GPT-OSS (BF16), and GLM-4.5-Air support.  New experiemental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
+* 08/21/2025 [4.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.0.0): 🎉 New Group Aware Reordering (GAR) support. New models support: Bytedance Seed-OSS, Baidu Ernie, Huawei PanGu, Gemma3, Xiaomi Mimo, Qwen 3/MoE, Falcon H1, GPT-Neo. Memory leak and multiple model compatibility fixes related to Transformers >= 4.54. Python >= 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. Early access Pytorch 2.8 fused-ops on Intel XPU for up to 50% speedup.
+
 * 10/17/2025 5.0.0-dev `main`: 👀: EoRA now multi-gpu compatible. Fixed both quality stability of multi-gpu quanta and vram usage. New LFM and Ling models support.
 * 09/30/2025 5.0.0-dev `main`: 👀: New Data Parallel + Multi-GPU + Python 3.13T (PYTHON_GIL=0) equals 80%+ overall quant time reduction of large MoE models vs v4.2.5. 
 * 09/29/2025 5.0.0-dev `main`: 🎉 New Qwen3 Omni model support. AWQ Marlin kernel integrated + many disk offload, threading, and memory usage fixes. 
@@ -178,22 +186,21 @@ Native support support some of the most popular multi-modal models:
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
 ## Model Support  
-| Model             |   |             |   |               |  |           |  |                 |  |
-|-------------------|---|-------------|---|---------------|--|-----------|--|-----------------|--|
-| Apertus           | ✅ | EXAONE 3.0  | ✅ | InternLM 1/2.5 | ✅ | Mixtral   | ✅ | Qwen 2/3 (Next/MoE) | ✅ |
-| Baichuan          | ✅ | Falcon (H1) | ✅ | Kimi K2       | ✅ | MobileLLM | ✅ | Qwen 2/2.5/3 VL | ✅ |
-| Bloom             | ✅ | FastVLM     | ✅ | Klear         | ✅ | MOSS      | ✅ | Qwen 2.5/3 Omni | ✅ |
-| ChatGLM           | ✅ | Gemma 1/2/3 | ✅ | LING/RING     | ✅ | MPT       | ✅ | RefinedWeb      | ✅ |
-| CodeGen           | ✅ | GPTBigCod   | ✅ | Llama 1-3.3   | ✅ | Nemotron H | ✅ | StableLM        | ✅ |
-| Cohere 1-2        | ✅ | GPTQ-Neo(X) | ✅ | Llama 3.2 VL  | ✅ | Nemotron Ultra | ✅ | StarCoder2      | ✅ |
-| DBRX Converted    | ✅ | GPT-2       | ✅ | Llama 4       | ✅ | OPT       | ✅ | TeleChat2       | ✅ |
-| Deci              | ✅ | GPT-J       | ✅ | LongCatFlash  | ✅ | OLMo2     | ✅ | Yi              | ✅ |
-| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS     | ✅ | LongLLaMA     | ✅ | Ovis 1.6/2 | ✅ | Seed-OSS        | ✅ |
-| DeepSeek-V2-Lite  | ✅ | Granite     | ✅ | Instella      | ✅ | Phi 1-4   | ✅ | XVERSE          | ✅ |
-| Dream             | ✅ | GRIN-MoE    | ✅ | MiniCPM3      | ✅ | PanGu-α   | ✅ | Minimax M2      | ✅ |
-| ERNIE 4.5         | ✅ | Hymba       | ✅ | Mistral       | ✅ | Qwen 1/2/3 | ✅ | GLM 4.X         | ✅ |
-| Brumby            | ✅ |             |   |               |  |      |  |              |  |
-
+| Model             |   |             |   |                |   |                     |   |                 |   |
+|-------------------|---|-------------|---|----------------|---|---------------------|---|-----------------|---|
+| Apertus           | ✅ | EXAONE 3.0  | ✅ | InternLM 1/2.5 | ✅ | Mixtral             | ✅ | Qwen 2/2.5/3 VL | ✅ |
+| Baichuan          | ✅ | Falcon (H1) | ✅ | Kimi K2        | ✅ | MobileLLM           | ✅ | Qwen 2.5/3 Omni | ✅ |
+| Bloom             | ✅ | FastVLM     | ✅ | Klear          | ✅ | MOSS                | ✅ | RefinedWeb      | ✅ |
+| ChatGLM           | ✅ | Gemma 1/2/3 | ✅ | LING/RING      | ✅ | MPT                 | ✅ | StableLM        | ✅ |
+| CodeGen           | ✅ | GPTBigCod   | ✅ | Llama 1-3.3    | ✅ | Nemotron H          | ✅ | StarCoder2      | ✅ |
+| Cohere 1-2        | ✅ | GPTQ-Neo(X) | ✅ | Llama 3.2 VL   | ✅ | Nemotron Ultra      | ✅ | TeleChat2       | ✅ |
+| DBRX Converted    | ✅ | GPT-2       | ✅ | Llama 4        | ✅ | OPT                 | ✅ | Trinity         | ✅ |
+| Deci              | ✅ | GPT-J       | ✅ | LongCatFlash   | ✅ | OLMo2               | ✅ | Yi              | ✅ |
+| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS     | ✅ | LongLLaMA      | ✅ | Ovis 1.6/2          | ✅ | Seed-OSS        | ✅ |
+| DeepSeek-V2-Lite  | ✅ | Granite     | ✅ | Instella       | ✅ | Phi 1-4             | ✅ | XVERSE          | ✅ |
+| Dream             | ✅ | GRIN-MoE    | ✅ | MiniCPM3       | ✅ | PanGu-α             | ✅ | Minimax M2      | ✅ |
+| ERNIE 4.5         | ✅ | Hymba       | ✅ | Mistral        | ✅ | Qwen 1/2/3          | ✅ | GLM 4.X         | ✅ |
+| Brumby            | ✅ | Dots1       | ✅ | Mistral3       | ✅ | Qwen 2/3 (Next/MoE) | ✅ |                 |   |
 
 ## Platform and HW Support 
 

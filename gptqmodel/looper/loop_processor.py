@@ -9,9 +9,10 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from device_smi import Device
 import torch
-from random_word import RandomWords
 from torch import Tensor
 from torch.nn import Module
+
+from ..utils.random_str import get_random_string
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
@@ -115,7 +116,7 @@ class LoopProcessor:
         self._log_columns = None
         self._log_header_interval = 20
         current_time = datetime.now().strftime("%m_%d_%Y_%Hh_%Mm_%Ss")
-        self.log_tmp_log_file_name = f"{self.name()}_log_{RandomWords().get_random_word()}_time_{current_time}.log"
+        self.log_tmp_log_file_name = f"{self.name()}_log_{get_random_string()}_time_{current_time}.log"
         self._device_smi_handles = self._init_device_smi_handles()
         self._cpu_device_smi = self._init_cpu_device_handle()
         self._device_metric_failures: Set[str] = set()
@@ -173,10 +174,42 @@ class LoopProcessor:
             self.num_batches = 0
             self.calibration_dataset = []
 
+        self.total_calibration_tokens = self._compute_total_tokens(self.calibration_dataset)
+
         # Track the current calibration batch index on a per-thread basis so
         # processors can retrieve deterministic ordering information (e.g.
         # GPTQ's Hessian updates) even when forwards run on multiple threads.
         self._batch_tls = threading.local()
+
+    @staticmethod
+    def _compute_total_tokens(calibration_dataset) -> int:
+        if not calibration_dataset:
+            return 0
+        total = 0
+        for row in calibration_dataset:
+            if not isinstance(row, dict):
+                continue
+            if "attention_mask" in row:
+                mask = row["attention_mask"]
+                if isinstance(mask, torch.Tensor):
+                    total += int(mask.sum().item())
+                else:
+                    try:
+                        total += sum(int(x) for x in mask)
+                    except Exception:
+                        total += 0
+                continue
+            input_ids = row.get("input_ids")
+            if input_ids is None:
+                continue
+            if isinstance(input_ids, torch.Tensor):
+                total += int(input_ids.numel())
+            else:
+                try:
+                    total += len(input_ids)
+                except Exception:
+                    total += 0
+        return total
 
     def _set_current_batch_index(self, batch_index: Optional[int]) -> None:
         if batch_index is None:
@@ -251,9 +284,12 @@ class LoopProcessor:
         text = "" if value is None else str(value)
 
         if key == QUANT_LOG_LOSS and text:
+            cleaned = text.strip().lower()
             try:
                 color_code = self.loss_color(float(text))
             except (TypeError, ValueError):
+                if cleaned.endswith("failsafe"):
+                    return color_text(text, ANSIColor.ORANGE)
                 return text
             return color_text(text, color_code)
 

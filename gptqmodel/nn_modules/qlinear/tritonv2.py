@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-
+from functools import lru_cache
 from typing import Optional, Tuple
 
 import torch
-from packaging import version
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
@@ -16,36 +15,10 @@ from ...utils.python import has_gil_disabled
 from .torch import TorchQuantLinear
 
 
-try:
-    import triton
-    import triton.language as tl
-    from triton import __version__ as triton_version
-
-    from ..triton_utils.dequant import QuantLinearFunction
-    from ..triton_utils.mixin import TritonModuleMixin
-
-    triton_v = version.parse(triton_version)
-
-    if triton_v < version.parse("2.0.0"):
-        raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
-
-    # GIL=0 is tested with Triton 3.4.0 and it works
-    if has_gil_disabled() and triton_v < version.parse("3.4.0"):
-        raise Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0")
-
-    TRITON_AVAILABLE = True
-except BaseException:
-    TRITON_AVAILABLE = False
-    class TritonModuleMixin:
-        pass
-
-TRITON_INSTALL_HINT = "Trying to use the triton backend, but it could not be imported. Please install triton by 'pip install gptqmodel[triton] --no-build-isolation'"
-TRITON_XPU_INSTALL_HINT = "Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)"
-
 log = setup_logger()
 
 
-class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
+class TritonV2QuantLinear(TorchQuantLinear):
     SUPPORTS_BITS = [2, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]
@@ -56,7 +29,8 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA] # Intel XPU can use Triton but this has been validated
+    # TODO: ROCM also has Triton support. Need to validate ROCM for triton
+    SUPPORTS_DEVICES = [DEVICE.CUDA]  # Intel XPU can use Triton but this has not been validated yet
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32, torch.int16, torch.int8]
     SUPPORTS_ADAPTERS = [Lora]
@@ -77,22 +51,19 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
     """
 
     def __init__(
-        self,
-        bits: int,
-        group_size: int,
-        desc_act: bool,
-        sym: bool,
-        in_features,
-        out_features,
-        bias: bool = False,
-        pack_dtype: torch.dtype = torch.int32,
-        adapter: Adapter = None,
-        register_buffers: bool = True,
-        **kwargs,
+            self,
+            bits: int,
+            group_size: int,
+            desc_act: bool,
+            sym: bool,
+            in_features,
+            out_features,
+            bias: bool = False,
+            pack_dtype: torch.dtype = torch.int32,
+            adapter: Adapter = None,
+            register_buffers: bool = True,
+            **kwargs,
     ):
-        if not TRITON_AVAILABLE:
-            raise ValueError(TRITON_INSTALL_HINT)
-
         # log.debug(f"triton register_buffers: {register_buffers}")
         super().__init__(
             bits=bits,
@@ -114,14 +85,34 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
         #     self.padded_infeatures = self.in_features
 
     @classmethod
-    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
-        if not TRITON_AVAILABLE:
-            return False, ValueError(TRITON_INSTALL_HINT)
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        import triton  # noqa: F401  # validate Triton is importable
+        import triton.language as tl  # noqa: F401  # ensure Triton language bindings load
+        from packaging import version
+        from triton import __version__ as triton_version
 
+        from ..triton_utils.dequant import QuantLinearFunction  # noqa: F401  # dependency check for validate_once
+        from ..triton_utils.mixin import TritonModuleMixin  # noqa: F401  # ensure mixin is available at runtime
+
+        triton_v = version.parse(triton_version)
+
+        if triton_v < version.parse("2.0.0"):
+            raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
+
+        # GIL=0 is tested with Triton 3.4.0 and it works
+        if has_gil_disabled() and triton_v < version.parse("3.4.0"):
+            raise Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0")
+
+        return True, None
+
+    @classmethod
+    def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         device = args.get('device')
 
+        # xpu requires extra runtime checks to see if triton actually works
         if device == DEVICE.XPU and not triton_xpu_available():
-            return False, ValueError(TRITON_XPU_INSTALL_HINT)
+            return False, ValueError(
+                "Trying to use the triton backend and xpu device, but it could not be imported. Please install triton by [intel-xpu-backend-for-triton](https://github.com/intel/intel-xpu-backend-for-triton)")
 
         return cls._validate(**args)
 
@@ -138,6 +129,8 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
         super().post_init()
 
     def forward(self, x):
+        from ..triton_utils.dequant import QuantLinearFunction
+
         if self.training:
             return super().forward(x)
 
@@ -169,8 +162,12 @@ class TritonV2QuantLinear(TorchQuantLinear, TritonModuleMixin):
 
 __all__ = ["TritonV2QuantLinear"]
 
+
 # test triton on XPU to ensure special Intel/Triton is installed as we cannot check based on triton package meta data
 def triton_test_add(x: torch.Tensor, y: torch.Tensor):
+    import triton  # noqa: F401  # ensure Triton language bindings load
+    import triton.language as tl  # noqa: F401  # ensure Triton language bindings load
+
     # don't put it on top-level to avoid crash if triton was not installed
     @triton.jit
     def add_kernel(x_ptr,  # *Pointer* to first input vector.
@@ -186,17 +183,19 @@ def triton_test_add(x: torch.Tensor, y: torch.Tensor):
         x = tl.load(x_ptr + offsets, mask=mask)
         y = tl.load(y_ptr + offsets, mask=mask)
         output = x + y  # noqa: F841
+
     output = torch.empty_like(x)
     n_elements = output.numel()
+
     def grid(meta):
-        return (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+        return (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+
     add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
     return output
 
 
+@lru_cache
 def triton_xpu_available():
-    if not TRITON_AVAILABLE:
-        return False
     size = 1024
     x = torch.rand(size, device='xpu:0')
     y = torch.rand(size, device='xpu:0')
@@ -206,4 +205,3 @@ def triton_xpu_available():
         return True
     except Exception:
         return False
-

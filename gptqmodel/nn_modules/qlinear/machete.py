@@ -17,6 +17,7 @@ from ...utils.logger import setup_logger
 from ...utils.machete import (
     _validate_machete_device_support,
     check_machete_supports_shape,
+    gptqmodel_machete_kernels,
     machete_import_exception,
     machete_mm,
     machete_prepack_B,
@@ -149,6 +150,13 @@ class MacheteQuantLinear(BaseQuantLinear):
 
         # Buffer storing permutation applied to activations (empty when unused)
         self.register_buffer("input_perm", torch.empty(0, dtype=torch.int32))
+
+    @classmethod
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        if gptqmodel_machete_kernels is None:
+            return False, ImportError(machete_import_exception)
+        else:
+            return True, None
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:

@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from contextlib import nullcontext
+from typing import Optional, Tuple
 
 import torch
 from torch import nn
@@ -14,6 +15,7 @@ from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.utils import get_best_device
 from ...utils.backend import BACKEND
+
 
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
@@ -104,11 +106,11 @@ class AwqGEMMQuantLinear(AWQuantLinear):
     QUANT_TYPE = "awq_gemm"
 
     @classmethod
-    def validate(cls, **args):
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if awq_ext is None:
             return False, ValueError(msg or "CUDA AWQ extension not available; cannot select AwqGEMMQuantLinear")
-
-        return cls._validate(**args)
+        else:
+            return True, None
 
     def __init__(
         self,

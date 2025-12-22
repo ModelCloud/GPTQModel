@@ -4,15 +4,16 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from contextlib import nullcontext
+from typing import Optional, Tuple
 
 import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
-from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
+from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
-from . import tritonv2
+from ...utils.torch import HAS_XPU
 
 
 class AwqGemmTritonFn(torch.autograd.Function):
@@ -29,8 +30,7 @@ class AwqGemmTritonFn(torch.autograd.Function):
         out_features=0,
         prefer_backend=None,
     ):
-        if not tritonv2.TRITON_AVAILABLE:
-            raise ValueError(tritonv2.TRITON_INSTALL_HINT)
+        from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
 
         ctx.save_for_backward(x, qweight, qzeros, scales, bias)
         ctx.out_features = out_features
@@ -58,9 +58,10 @@ class AwqGemmTritonFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton
+
+
         input, qweight, qzeros, scales, bias = ctx.saved_tensors
-        if not tritonv2.TRITON_AVAILABLE:
-            raise ValueError(tritonv2.TRITON_INSTALL_HINT)
 
         weights = awq_dequantize_triton(qweight, scales, qzeros).to(grad_output.dtype)
 
@@ -83,8 +84,9 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.ALL]
-    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    # TODO: ROCM also has Triton support. Need to validate ROCM for triton
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
@@ -95,11 +97,19 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
     QUANT_TYPE = "awq_gemm_triton"
 
     @classmethod
-    def validate(cls, **args):
-        if not tritonv2.TRITON_AVAILABLE:
-            return False, ValueError(tritonv2.TRITON_INSTALL_HINT)
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        from packaging import version
+        from triton import __version__ as triton_version
+        triton_v = version.parse(triton_version)
 
-        return cls._validate(**args)
+        if triton_v < version.parse("2.0.0"):
+            raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
+
+        # GIL=0 is tested with Triton 3.4.0 and it works
+        if has_gil_disabled() and triton_v < version.parse("3.4.0"):
+            raise Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0")
+
+        return True, None
 
     def __init__(
         self,
@@ -141,19 +151,19 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
         if input_dtype != torch.float16:
             x = x.half()
 
-        ctx = nullcontext() if self.training else torch.inference_mode()
-        with ctx:
-            out = AwqGemmTritonFn.apply(
-                x,
-                self.qweight,
-                self.qzeros,
-                self.scales,
-                self.bits,
-                self.group_size,
-                self.bias,
-                self.out_features,
-                "triton",
-            )
+        with torch.xpu.device(self.qweight.device) if HAS_XPU else torch.cuda.device(self.qweight.device):
+            with nullcontext() if self.training else torch.inference_mode():
+                out = AwqGemmTritonFn.apply(
+                    x,
+                    self.qweight,
+                    self.qzeros,
+                    self.scales,
+                    self.bits,
+                    self.group_size,
+                    self.bias,
+                    self.out_features,
+                    "triton",
+                )
 
         if input_dtype != torch.float16:
             out = out.to(dtype=input_dtype)

@@ -71,6 +71,7 @@ env:
   BUILD_QQQ: 1
   BUILD_EORA: 1
   GPTQMODEL_BUILD_EXLLAMA_V1: 1
+  GPTQMODEL_BUILD_EORA: 1
   LEGACY_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py"
   GPTQMODEL_FORCE_BUILD: 1
@@ -80,6 +81,9 @@ env:
 concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-unit-tests-${{ github.event.inputs.test_names }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   check-vm:
@@ -198,10 +202,11 @@ jobs:
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
-        - /home/ci/models/pyenv:/opt/pyenv
-        - /home/ci/models/dist:/opt/dist
-        - /home/ci/models:/monster/data/model
-        - /home/ci/models/huggingface:/github/home/.cache/huggingface
+        - /monster/ci/models:/monster/data/model
+        - /monster/ci/dataset:/monster/data/model/dataset
+        - /monster/ci/huggingface:/github/home/.cache/huggingface
+        - /monster/ci/pyenv:/opt/pyenv
+        - /monster/ci/dist:/opt/dist
 
     steps:
       - name: Checkout Codes
@@ -285,7 +290,7 @@ jobs:
 #          cp dist/gptqmodel_source.tar.gz $DIR/
 
       - name: Upload source to github artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: source
           path: dist/gptqmodel_source.tar.gz
@@ -331,7 +336,7 @@ jobs:
 
       - name: Upload wheel to github artifact
         if: github.event.inputs.artifact_id == '' && !cancelled()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: whl
           path: dist/${{ env.WHL_NAME }}
@@ -351,10 +356,11 @@ jobs:
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
-        - /home/ci/models:/monster/data/model
-        - /home/ci/models/huggingface:/github/home/.cache/huggingface
-        - /home/ci/models/pyenv:/opt/pyenv
-        - /home/ci/models/dist:/opt/dist
+        - /monster/ci/models:/monster/data/model
+        - /monster/ci/dataset:/monster/data/model/dataset
+        - /monster/ci/huggingface:/github/home/.cache/huggingface
+        - /monster/ci/pyenv:/opt/pyenv
+        - /monster/ci/dist:/opt/dist
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
@@ -434,7 +440,7 @@ jobs:
 
       # - name: Download source from github
       #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
-      #   uses: actions/download-artifact@v6
+      #   uses: actions/download-artifact@v7
       #   with:
       #     name: source
       #     path: dist
@@ -476,7 +482,7 @@ jobs:
 
       - name: Download artifact from github
         if: env.WHL_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           name: whl
           path: dist
@@ -696,3 +702,73 @@ jobs:
         run: |
           source venv/bin/activate && pip cache purge && uv cache clean || true
           rm -rf ../GPTQModel && mkdir ../GPTQModel
+
+  mac-test:
+    runs-on: macos-latest
+    env:
+      CUDA_VISIBLE_DEVICES: ''
+      TORCH_CUDA_ARCH_LIST: ''
+      MAX_JOBS: 3
+      BUILD_QQQ: 0
+      BUILD_EORA: 0
+      GPTQMODEL_BUILD_EXLLAMA_V1: 0
+      GPTQMODEL_BUILD_EORA: 0
+      GPTQMODEL_FORCE_BUILD: 0
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.12
+          cache: 'pip'
+
+#       it wastes too much time to find which exactly one caused installation failed, just unset them all.....
+      - name: Install dependencies
+        run: |
+          unset CUDA_DEVICE_ORDER
+          unset CUDA_VISIBLE_DEVICES
+          unset TORCH_CUDA_ARCH_LIST
+          unset PYTORCH_ALLOC_CONF
+          unset MAX_JOBS
+          unset RUNNER
+          unset XEON5
+          unset UV_INDEX_URL
+          unset CUDA_VERSION
+          unset TORCH_VERSION
+          unset PYTHON_VERSION
+          unset # PYTHON_GIL
+          unset BUILD_QQQ
+          unset BUILD_EORA
+          unset GPTQMODEL_BUILD_EXLLAMA_V1
+          unset GPTQMODEL_BUILD_EORA
+          unset LEGACY_TESTS
+          unset IGNORED_TEST_FILES
+          unset GPTQMODEL_FORCE_BUILD
+          unset repo
+          unset ref
+          
+          python -V
+          python -m venv venv
+          source venv/bin/activate
+          pip install pip uv setuptools build wheel torch -U
+          pip install meson-python -U
+          pip install numpy==2.2.6 -U
+
+          uv pip install -e . --no-build-isolation
+          pip install pip Pillow device_smi pypcre tokenicer threadpoolctl accelerate logbar transformers optimum torch -U
+
+      - name: Run test
+        run: |
+          source venv/bin/activate
+          python - <<'PY'
+          import os
+          from transformers import pipeline
+          os.environ["CUDA_VISIBLE_DEVICES"] = ""
+          os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+          llm_pipeline = pipeline(model="JunHowie/Qwen3-0.6B-GPTQ-Int4")
+          output = llm_pipeline("Which city is the capital of France?", max_new_tokens=100)
+          print(output)
+          
+          assert "paris" in output.lower()
+          PY

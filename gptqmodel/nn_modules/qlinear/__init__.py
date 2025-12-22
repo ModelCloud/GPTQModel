@@ -7,6 +7,7 @@ import math
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -217,6 +218,21 @@ class BaseQuantLinear(nn.Module):
                 lora_B=getattr(self, "lora_B", None))
 
     @classmethod
+    @lru_cache(maxsize=1024)
+    def cached_validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        ok, exp = cls.validate_once()
+
+        if not ok and exp is not None:
+            exp.with_traceback(None)
+            return False, exp
+
+        return True, None
+
+    @classmethod
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        return True, None
+
+    @classmethod
     # custom quant linear class can override this and add custom checks
     def validate(
             cls,
@@ -235,6 +251,10 @@ class BaseQuantLinear(nn.Module):
             adapter:Optional[Adapter]=None,
     ) -> Tuple[
         bool, Optional[Exception]]:
+        ok_once, exp_once = cls.cached_validate_once()
+        if not ok_once:
+            return False, exp_once
+
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
                              in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
                              dtype=dtype, zero_point=zero_point,

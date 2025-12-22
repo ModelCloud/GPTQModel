@@ -27,7 +27,7 @@ from ..nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
-from ..quantization.config import FORMAT, METHOD, QuantizeConfig
+from ..quantization.config import FailSafe, FailSafeStrategy, FORMAT, METHOD, QuantizeConfig
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.ctx import ctx
 from ..utils.model import find_modules, get_module_by_name_prefix, move_to, create_quant_module, pack_module
@@ -91,14 +91,8 @@ class AWQProcessor(LoopProcessor):
         self._scale_context = threading.local()
         self.gptq_model = gptq_model
 
-        if qcfg.format == FORMAT.GEMM:
-            self.gptq_model.qlinear_kernel = AwqGEMMQuantLinear
-        elif qcfg.format == FORMAT.GEMV:
-            self.gptq_model.qlinear_kernel = AwqGEMVQuantLinear
-        elif qcfg.format == FORMAT.GEMV_FAST:
-            self.gptq_model.qlinear_kernel = AwqGEMVFastQuantLinear
-        else:
-            raise ValueError(f"METHOD.AWQ does not support this FORMAT: {qcfg.format}")
+        # Select a default AWQ kernel for this processor (per-module overrides can still apply).
+        self.qlinear_kernel = self._select_qlinear_kernel_for_format(qcfg.format)
 
         self.model = model
         # Whether to apply clipping to the model during quantization. Some models may perform better with this set to False.
@@ -119,9 +113,30 @@ class AWQProcessor(LoopProcessor):
         self._module_forward_kwargs: Dict[str, torch.Tensor] = {}
         self._initialize_sample_counts()
         self._module_forward_kwargs.setdefault("attention_mask", None)
+        # Preserve failsafe preference so AWQ can optionally fall back when no calibration data or activations are available.
+        self.failsafe = qcfg.failsafe
 
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("AWQProcessor's calibration_dataset cannot be modified")
+
+    def _select_qlinear_kernel_for_format(self, format_value: FORMAT):
+        fmt = FORMAT(format_value) if not isinstance(format_value, FORMAT) else format_value
+        if fmt == FORMAT.GEMM:
+            return AwqGEMMQuantLinear
+        if fmt == FORMAT.GEMV:
+            return AwqGEMVQuantLinear
+        if fmt == FORMAT.GEMV_FAST:
+            return AwqGEMVFastQuantLinear
+        # We do not allow saving to marlin format
+        # if fmt == FORMAT.MARLIN:
+        #     return AwqMarlinQuantLinear
+        raise ValueError(f"METHOD.AWQ does not support this FORMAT: {format_value}")
+
+    def _resolve_qlinear_kernel(self, module_name: Optional[str] = None):
+        # Honor per-module dynamic format overrides when present.
+        format_override = self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
+        target_format = format_override or self.qcfg.format
+        return self._select_qlinear_kernel_for_format(target_format)
 
     def _get_layer_state(self, layer_index: int) -> _AWQLayerState:
         with self._layer_states_lock:
@@ -156,8 +171,9 @@ class AWQProcessor(LoopProcessor):
                 except TypeError:
                     total += 1
 
-        self._nsamples_total = total
-        self.nsamples = total
+        total_tokens = getattr(self, "total_calibration_tokens", 0) or total
+        self._nsamples_total = total_tokens
+        self.nsamples = total_tokens
 
     def _record_input_feature(self, module_name: str, feature: torch.Tensor) -> None:
         if feature.device.type != "cpu":
@@ -224,6 +240,52 @@ class AWQProcessor(LoopProcessor):
         #         features[root] = tensors[0]
         return features
 
+    def _quantize_layer_failsafe(
+        self,
+        layer_index: int,
+        state: _AWQLayerState,
+        reason: str,
+    ) -> None:
+        def unwrap(mod):
+            return mod.module if isinstance(mod, NamedModule) else mod
+
+        named_childs = {
+            name: module
+            for name, module in state.modules.items()
+            if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
+        }
+
+        log.warning(
+            "AWQProcessor: layer %s using fallback quantization (%s).",
+            layer_index,
+            reason,
+        )
+
+        if named_childs:
+            start = time.time()
+            self.pack_module(named_childs, start, scales_list=[])
+        else:
+            log.warning("AWQProcessor: layer %s had no supported modules to quantize.", layer_index)
+
+        state.quantized = True
+        state.modules.clear()
+        state.pending_modules.clear()
+        state.layer_module = None
+        state.processed_subsets.clear()
+        state.subset_total = None
+        state.previous_weight_scale = None
+
+        with self.lock:
+            for name in list(named_childs.keys()):
+                task_entry = self.tasks.pop(name, None)
+                if task_entry and "inputs" in task_entry:
+                    task_entry["inputs"].clear()
+
+        if hasattr(self._scale_context, "layer_index"):
+            delattr(self._scale_context, "layer_index")
+        if hasattr(self._scale_context, "prev_scale"):
+            delattr(self._scale_context, "prev_scale")
+
     def _refresh_forward_kwargs_from_cache(self) -> None:
         cache = getattr(self, "inputs_cache", None)
         if cache is None:
@@ -279,21 +341,20 @@ class AWQProcessor(LoopProcessor):
         self._module_forward_kwargs = refreshed
 
     def _quantize_layer(self, layer_index: int, state: _AWQLayerState) -> None:
-        with state.lock:
-            if state.quantized:
-                return
+        if state.quantized:
+            return
 
-            layer_module = state.layer_module
-            if layer_module is None and state.modules:
-                sample_module = next(iter(state.modules.values()))
-                layer_path = sample_module.full_name.rsplit(".", 1)[0]
-                layer_module, _ = get_module_by_name_prefix(self.gptq_model.model, layer_path)
-                state.layer_module = layer_module
+        layer_module = state.layer_module
+        if layer_module is None and state.modules:
+            sample_module = next(iter(state.modules.values()))
+            layer_path = sample_module.full_name.rsplit(".", 1)[0]
+            layer_module, _ = get_module_by_name_prefix(self.gptq_model.model, layer_path)
+            state.layer_module = layer_module
 
-            layer_module_ref = state.layer_module
+        layer_module_ref = state.layer_module
 
-            if layer_module_ref is None:
-                raise RuntimeError(f"AWQProcessor: unable to resolve layer module for layer index {layer_index}")
+        if layer_module_ref is None:
+            raise RuntimeError(f"AWQProcessor: unable to resolve layer module for layer index {layer_index}")
 
         log.info(
             "AWQProcessor: layer %s tracking %s modules before quantization (subsets processed=%s/%s); first modules=%s",
@@ -305,6 +366,42 @@ class AWQProcessor(LoopProcessor):
         )
 
         input_feat = self._layer_input_features(state)
+        if self.failsafe:
+            from ..utils.failsafe import resolve_failsafe_strategy, resolve_threshold, should_use_failsafe
+
+            strategy = resolve_failsafe_strategy(self.failsafe)
+
+            captured_tokens = 0
+            for tensor in input_feat.values():
+                if tensor is None or tensor.numel() == 0:
+                    continue
+                hidden = tensor.shape[-1] if tensor.dim() >= 1 else 1
+                tokens = int(tensor.numel() / max(hidden, 1))
+                captured_tokens += tokens
+
+            expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
+            fallback_needed = should_use_failsafe(
+                self.failsafe,
+                float(captured_tokens),
+                float(expected_tokens) if expected_tokens else None,
+            )
+            missing_activation = not input_feat or all(t.numel() == 0 for t in input_feat.values())
+            if fallback_needed or missing_activation:
+                reason = "failsafe threshold" if fallback_needed else "no activation captures"
+                if fallback_needed:
+                    threshold_raw, is_percent = resolve_threshold(self.failsafe, expected_tokens)
+                    extra = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+                    log.warn(
+                        "AWQProcessor: layer %s -> Using `%s` failsafe quantization (captured=%s tokens, threshold=%s%s, max_total=%s).",
+                        layer_index,
+                        strategy.value,
+                        captured_tokens,
+                        self.failsafe,
+                        extra,
+                        expected_tokens,
+                    )
+                self._quantize_layer_failsafe(layer_index, state, reason)
+                return
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
         if missing:
             log.warning(
@@ -331,27 +428,25 @@ class AWQProcessor(LoopProcessor):
                     "AWQProcessor: layer %s has no modules with captured activations; marking quantized.",
                     layer_index,
                 )
-                with state.lock:
-                    state.quantized = True
-                    state.processed_subsets.clear()
-                    state.subset_total = None
-                    state.previous_weight_scale = None
+                state.quantized = True
+                state.processed_subsets.clear()
+                state.subset_total = None
+                state.previous_weight_scale = None
                 if hasattr(self._scale_context, "layer_index"):
                     delattr(self._scale_context, "layer_index")
                 if hasattr(self._scale_context, "prev_scale"):
                     delattr(self._scale_context, "prev_scale")
                 return
 
-        with state.lock:
-            # Filtering MLP modules like Qwen3MoeSparseMoeBlock
-            def unwrap(m):
-                return m.module if isinstance(m, NamedModule) else m
+        # Filtering MLP modules like Qwen3MoeSparseMoeBlock
+        def unwrap(m):
+            return m.module if isinstance(m, NamedModule) else m
 
-            named_childs = {
-                name: module
-                for name, module in state.modules.items()
-                if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
-            }
+        named_childs = {
+            name: module
+            for name, module in state.modules.items()
+            if isinstance(unwrap(module), tuple(SUPPORTS_MODULE_TYPES))
+        }
 
         module_kwargs_global = dict(self._module_forward_kwargs)
 
@@ -558,14 +653,13 @@ class AWQProcessor(LoopProcessor):
             start = time.time()
             self.pack_module(named_childs, start, scales_list)
 
-        with state.lock:
-            state.quantized = True
-            state.modules.clear()
-            state.pending_modules.clear()
-            state.layer_module = None
-            state.processed_subsets.clear()
-            state.subset_total = None
-            state.previous_weight_scale = None
+        state.quantized = True
+        state.modules.clear()
+        state.pending_modules.clear()
+        state.layer_module = None
+        state.processed_subsets.clear()
+        state.subset_total = None
+        state.previous_weight_scale = None
 
         with self.lock:
             for name in named_childs:
@@ -1074,10 +1168,13 @@ class AWQProcessor(LoopProcessor):
     def pack_module(self, named_linears: Dict[str, NamedModule], start_time, scales_list):
         for name, named_module in named_linears.items():
             # print("app_quant", name)
-            self.pb.title(f"Quantizing {named_module.name} in layer ").draw()
+            base_title = f"Quantizing {named_module.name} in layer"
+            self._pause_controller.register_and_draw_progress_bar(self.pb, title=base_title, subtitle="")
+            
             linear_layer = named_module.module
             # NOTE: small regression in perplexity if linear layer uses .cpu().float()
             linear_layer = linear_layer.to(get_best_device()).half()
+            quant_linear_cls = self._resolve_qlinear_kernel(named_module.full_name)
 
             tp_info = named_module.state.get("tp_pad_info")
             pad_cols = 0
@@ -1194,7 +1291,7 @@ class AWQProcessor(LoopProcessor):
                 with parent_module_lock(parent_key):
                     create_quant_module(
                         name=named_module.full_name,
-                        linear_cls=self.gptq_model.qlinear_kernel,
+                        linear_cls=quant_linear_cls,
                         bits=self.qcfg.bits,
                         desc_act=self.qcfg.desc_act,
                         dynamic=self.qcfg.dynamic,
@@ -1217,7 +1314,7 @@ class AWQProcessor(LoopProcessor):
             # pack module
             qModules = {
                 name: submodule
-                for name, submodule in find_modules(self.gptq_model.model, [self.gptq_model.qlinear_kernel]).items()
+                for name, submodule in find_modules(self.gptq_model.model, [quant_linear_cls]).items()
                 if name == named_module.full_name
             }
             pack_start = time.perf_counter() if timer is not None else None
@@ -1234,7 +1331,7 @@ class AWQProcessor(LoopProcessor):
                         q_zeros=zeros,
                         q_g_idx=None,
                         layers=layers,
-                        quant_linear_cls=self.gptq_model.qlinear_kernel,
+                        quant_linear_cls=quant_linear_cls,
                         lock=self.lock,
                         quantize_config=self.qcfg,
                     )
@@ -1264,7 +1361,19 @@ class AWQProcessor(LoopProcessor):
                 sanitized_kwargs[k] = v
         return sanitized_kwargs
 
-    def preprocess(self, module: NamedModule, fail_safe: Optional[bool] = None):
+    def preprocess(self, module: NamedModule, failsafe=None, **kwargs):
+        # Track the most recent preference so the processor can decide whether
+        # to fall back to simple quantization when activations are missing.
+        def _normalize_failsafe(value, default: FailSafe) -> FailSafe:
+            if value is None:
+                return default
+            if isinstance(value, FailSafe):
+                return value
+            if isinstance(value, dict):
+                return FailSafe(strategy=value.get("strategy", default.strategy), threshold=value.get("threshold", default.threshold))
+            return FailSafe(strategy=FailSafeStrategy.AUTO, threshold=value)
+
+        self.failsafe = _normalize_failsafe(failsafe, self.qcfg.failsafe)
         layer_state = self._get_layer_state(module.layer_index)
         with layer_state.lock:
             layer_state.modules[module.name] = module
@@ -1333,20 +1442,24 @@ class AWQProcessor(LoopProcessor):
             if previous_subset:
                 state.previous_weight_scale = self._capture_previous_subset_scale(previous_subset)
 
+            # Only gate on modules that were scheduled for subset processing to
+            # avoid early quantization while parallel workers are still running.
+            pending_in_scope = state.pending_modules
+            if state.modules:
+                pending_in_scope = state.pending_modules.intersection(state.modules.keys())
+
             should_quantize = (
                 not state.quantized
                 and bool(state.modules)
+                and not pending_in_scope
                 and (
-                    not state.pending_modules
-                    or (
-                        state.subset_total is not None
-                        and len(state.processed_subsets) >= state.subset_total
-                    )
+                    state.subset_total is None
+                    or len(state.processed_subsets) >= state.subset_total
                 )
             )
 
-        if should_quantize:
-            self._quantize_layer(layer_index, state)
+            if should_quantize:
+                self._quantize_layer(layer_index, state)
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
@@ -1355,17 +1468,6 @@ class AWQProcessor(LoopProcessor):
         module.state.pop("w", None) # no need for original weights now
 
     def finalize(self, model: BaseQModel, **kwargs):
-        if model.quantize_config.format == FORMAT.GEMM:
-            model.qlinear_kernel = AwqGEMMQuantLinear
-        elif model.quantize_config.format == FORMAT.GEMV:
-            model.qlinear_kernel = AwqGEMVQuantLinear
-        elif model.quantize_config.format == FORMAT.GEMV_FAST:
-            model.qlinear_kernel = AwqGEMVFastQuantLinear
-        elif model.quantize_config.format == FORMAT.MARLIN:
-            model.qlinear_kernel = AwqMarlinQuantLinear
-        else:
-            raise Exception(f"unkown format: {model.quantize_config.format}")
-
         # set quantized state
         model.quantized = True
 

@@ -42,7 +42,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, VRAMStrategy, dynamic_get
+from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, VramStrategy, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.calibration import prepare_calibration_dataset
@@ -51,7 +51,6 @@ from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
 from ..utils.model import MODALITY, find_modules, get_module_by_name_prefix, move_to
-from ..utils.offload import offload_to_disk
 from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from ._const import (
@@ -182,7 +181,7 @@ class BaseQModel(nn.Module):
     require_monkeypatch = False
 
     # VRAM strategy support list
-    supported_vram_strategies: List[VRAMStrategy] = [VRAMStrategy.EXCLUSIVE, VRAMStrategy.BALANCED]
+    supported_vram_strategies: List[VramStrategy] = [VramStrategy.EXCLUSIVE, VramStrategy.BALANCED]
 
     # some models have broken attention mask codes so we need to only use batch 1 with no masks
     support_batch_quantize = True
@@ -835,7 +834,7 @@ class BaseQModel(nn.Module):
         with gc_context:
             result = module_looper.loop(
                 backend=backend,
-                fail_safe=self.quantize_config.fail_safe,
+                failsafe=self.quantize_config.failsafe,
             )
 
         timer = getattr(self, "quant_region_timer", None)
@@ -1093,7 +1092,9 @@ class BaseQModel(nn.Module):
 
     def pre_quantize_generate_hook_end(self):
         if self.quantize_config.offload_to_disk:
-            offload_to_disk(model=self.model, module=self.get_base_modules(model=self.model), disk_path=self.quantize_config.offload_to_disk_path)
+            # This hook is now disabled as it's handled by the ModuleLooper after input capture.
+            # offload_to_disk(model=self.model, module=self.get_base_modules(model=self.model), disk_path=self.quantize_config.offload_to_disk_path)
+            pass
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.pre_lm_head_norm_module:
@@ -1334,7 +1335,7 @@ class BaseQModel(nn.Module):
         if not getattr(self.quantize_config, "offload_to_disk", False):
             return 0
 
-        default_bytes = 512 * 1024 ** 3 #512MB
+        default_bytes = 512 * 1024 ** 2 #512MB
         raw = os.getenv("GPTQMODEL_RELOAD_THRESHOLD")
         if raw is None or raw.strip() == "":
             return default_bytes

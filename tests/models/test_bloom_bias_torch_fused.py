@@ -4,11 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import tempfile
 
+from model_test import ModelTest
 from parameterized import parameterized
 
-from gptqmodel import GPTQModel, QuantizeConfig, BACKEND
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
 from gptqmodel.models._const import DEVICE
-from model_test import ModelTest
+
 
 class TestBloom_With_Bias_TorchFused(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/bloom-560m"

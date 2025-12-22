@@ -6,6 +6,7 @@ recursive-include gptqmodel_ext/marlin *.h *.cuh *.cu *.cpp *.hpp
 recursive-include gptqmodel_ext/machete *.h *.hpp *.cuh *.cu *.cpp *.py
 recursive-include gptqmodel_ext/cutlass_extensions *.h *.hpp *.cuh *.cu *.cpp *.py
 recursive-include gptqmodel_ext/qqq *.h *.cuh *.cu *.cpp
+include licenses/*
 include gptqmodel_ext/pack_block_cpu.cpp
 include gptqmodel_ext/marlin/generate_kernels.py
 include gptqmodel_ext/machete/generate.py

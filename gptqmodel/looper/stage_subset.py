@@ -19,7 +19,7 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
-from ..quantization.config import VRAMStrategy
+from ..quantization.config import VramStrategy
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_empty_cache, torch_sync
@@ -63,7 +63,7 @@ def run_subset_stage(
     subset_index: int,
     subset_total: int,
     full,
-    fail_safe: bool,
+    failsafe,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
     pb,
     log=None,
@@ -86,7 +86,7 @@ def run_subset_stage(
         layers_prefix=layers_prefix,
         names=subset_names,
         processor=processor,
-        fail_safe=fail_safe,
+        failsafe=failsafe,
         layer_module=module,
     )
 
@@ -186,7 +186,7 @@ def run_subset_stage(
         for name, named_module in subset.items():
             setattr(named_module, "moe_enabled", name in moe_modules_set)
 
-        if looper._vram_strategy == VRAMStrategy.BALANCED:
+        if looper._vram_strategy == VramStrategy.BALANCED:
             devices = [
                 dev for dev in looper._quant_devices
                 if dev is not None and getattr(dev, "type", None) != "cpu"
@@ -208,7 +208,7 @@ def run_subset_stage(
                         for module_name in expert_groups[group_key]:
                             forward_device_map[module_name] = target_device
 
-        subset_forward_serial = looper._vram_strategy == VRAMStrategy.BALANCED
+        subset_forward_serial = looper._vram_strategy == VramStrategy.BALANCED
         if subset_forward_serial:
             active_group_count = len(moe_group_keys_all)
             if active_group_count == 0:
@@ -387,8 +387,6 @@ def run_subset_stage(
                 source=forward_source,
             )
 
-        pb.title(layer_title).subtitle("").draw()
-
         for h in handle:
             # Detach temporary hooks to avoid leaking state into future passes.
             h.remove()
@@ -422,10 +420,15 @@ def run_subset_stage(
             # Skip MoE experts that never fired; they likely lacked calibration
             # traffic and would produce invalid statistics.
             if processor.tasks[name].fwd_counter == 0:
-                logger.error(f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it.")
+                # only log for moe if `failsafe` is not enabled
+                if failsafe is not None:
+                    logger.error(
+                        f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it. "
+                        f"Please enable and use `failsafe` config option."
+                    )
                 moe_skip_modules.append(name)
 
-        if not fail_safe:
+        if not failsafe:
             for name in moe_skip_modules:
                 subset.pop(name)
                 task_map = getattr(processor, "tasks", None)
@@ -541,6 +544,9 @@ def run_subset_stage(
         # Collect results in submission order so the final subset map preserves
         # deterministic iteration for downstream consumers.
         name, named_module = fut.result()
+        if isinstance(named_module, NamedModule) and named_module.state.get("capture_only"):
+            # Capture-only modules should not be finalized or offloaded.
+            continue
         processed_subset[name] = named_module
     torch_sync()
 

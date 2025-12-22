@@ -70,7 +70,7 @@ env:
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
-  MAX_JOBS: 4
+  MAX_JOBS: 8
   GPTQMODEL_BUILD_QQQ: 0
   GPTQMODEL_BUILD_EORA: 0
   GPTQMODEL_BUILD_EXLLAMA_V1: 0
@@ -120,6 +120,53 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
         include:
+          # pytorch 2.9.1
+          # cuda 130
+          - cuda: 130
+            torch: 2.9.1
+            python: 314t
+          - cuda: 130
+            torch: 2.9.1
+            python: 314
+          - cuda: 130
+            torch: 2.9.1
+            python: 313t
+          - cuda: 130
+            torch: 2.9.1
+            python: 313
+          - cuda: 130
+            torch: 2.9.1
+            python: 312
+          - cuda: 130
+            torch: 2.9.1
+            python: 311
+          - cuda: 130
+            torch: 2.9.1
+            python: 310
+
+          # cuda 128
+          - cuda: 128
+            torch: 2.9.1
+            python: 314t
+          - cuda: 128
+            torch: 2.9.1
+            python: 314
+          - cuda: 128
+            torch: 2.9.1
+            python: 313t
+          - cuda: 128
+            torch: 2.9.1
+            python: 313
+          - cuda: 128
+            torch: 2.9.1
+            python: 312
+          - cuda: 128
+            torch: 2.9.1
+            python: 311
+          - cuda: 128
+            torch: 2.9.1
+            python: 310
+
           # pytorch 2.9
           # cuda 13
           - cuda: 130
@@ -247,7 +294,7 @@ jobs:
     container:
       image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_1021
       volumes:
-        - /home/ci/models/pyenv:/opt/pyenv
+        - /monster/ci/pyenv:/opt/pyenv
     steps:
       - name: Check matrix
         run: |
@@ -348,7 +395,7 @@ jobs:
 
       - name: Upload artifact
         if: env.SHOULD_RUN == 1
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
           overwrite: true
@@ -374,7 +421,7 @@ jobs:
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_1021
       volumes:
-        - /home/ci/models/pyenv:/opt/pyenv
+        - /monster/ci/pyenv:/opt/pyenv
     env:
       RELEASE_MODE: 0
     steps:
@@ -429,7 +476,7 @@ jobs:
           echo "UPLOADED=1" >> $GITHUB_ENV
 
       - name: Upload to artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
           name: ${{ env.WHL_NAME }}
@@ -517,7 +564,7 @@ jobs:
           twine check dist/$whl
 
       - name: Upload to artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}

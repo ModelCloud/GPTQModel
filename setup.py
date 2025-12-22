@@ -7,7 +7,6 @@ import re
 import subprocess
 import sys
 import tarfile
-import urllib.request
 from pathlib import Path
 from shutil import rmtree
 
@@ -30,10 +29,11 @@ def _ensure_cutlass_source() -> Path:
 
     archive_path = deps_dir / f"cutlass-v{CUTLASS_VERSION}.tar.gz"
     if not archive_path.exists():
-        print(f"Downloading CUTLASS v{CUTLASS_VERSION} ...")
-        with urllib.request.urlopen(CUTLASS_RELEASE_URL) as response:
-            data = response.read()
-        archive_path.write_bytes(data)
+        _download_with_progress(
+            CUTLASS_RELEASE_URL,
+            str(archive_path),
+            title=f"Downloading CUTLASS v{CUTLASS_VERSION}",
+        )
 
     if cutlass_root.exists():
         rmtree(cutlass_root)
@@ -421,6 +421,51 @@ def _resolve_wheel_url(tag_name: str, wheel_name: str) -> str:
     return DEFAULT_WHEEL_URL_TEMPLATE.format(tag_name=tag_name, wheel_name=wheel_name)
 
 
+def _download_with_progress(url: str, dest_path: str, title: str = "Downloading") -> None:
+    """Download url to dest_path with simple stdout progress updates."""
+    import time
+    import urllib.request as req
+
+    start_time = time.time()
+    last_draw_time = 0.0
+    last_print_percent = -1
+
+    def _format_bytes(num_bytes: float) -> str:
+        units = ["B", "KiB", "MiB", "GiB", "TiB"]
+        value = float(max(num_bytes, 0.0))
+        for unit in units:
+            if value < 1024.0 or unit == units[-1]:
+                return f"{value:0.1f}{unit}" if unit != "B" else f"{int(value)}B"
+            value /= 1024.0
+        return f"{value:0.1f}TiB"
+
+    def _reporthook(block_num: int, block_size: int, total_size: int) -> None:
+        nonlocal last_draw_time, last_print_percent
+        now = time.time()
+        downloaded = block_num * block_size
+        speed = downloaded / max(now - start_time, 1e-6)
+
+        if total_size and total_size > 0:
+            percent = min(int(downloaded * 100 / total_size), 100)
+            if percent == last_print_percent and percent != 100:
+                return
+            subtitle = (
+                f"{percent:3d}% ({_format_bytes(downloaded)}/{_format_bytes(total_size)}) "
+                f"{_format_bytes(speed)}/s"
+            )
+            print(f"{title} {subtitle}", flush=True)
+            last_print_percent = percent
+            last_draw_time = now
+        else:
+            if (now - last_draw_time) < 1.0:
+                return
+            subtitle = f"{_format_bytes(downloaded)} {_format_bytes(speed)}/s"
+            print(f"{title} {subtitle}", flush=True)
+            last_draw_time = now
+
+    req.urlretrieve(url, dest_path, reporthook=_reporthook)
+
+
 # Decide HAS_CUDA_V8 / HAS_CUDA_V9 without torch
 HAS_CUDA_V8 = False
 HAS_CUDA_V9 = False
@@ -522,7 +567,7 @@ if BUILD_CUDA_EXT == "1":
         os.environ["NINJA_NUM_JOBS"] = str(effective_max_jobs)
         print(f"Using MAX_JOBS={effective_max_jobs} to cap concurrent CUDA compilations.")
 
-        nvcc_threads = 1
+        nvcc_threads = 2
         os.environ["NVCC_THREADS"] = str(nvcc_threads)
         print(f"Using NVCC_THREADS={nvcc_threads} for per-invocation NVCC concurrency.")
 
@@ -833,19 +878,25 @@ class CachedWheelsCommand(_bdist_wheel):
         print(f"Resolved wheel URL: {wheel_url}\nwheel name={wheel_filename}")
 
         try:
-            import urllib.request as req
-            req.urlretrieve(wheel_url, wheel_filename)
-
             if not os.path.exists(self.dist_dir):
                 os.makedirs(self.dist_dir)
 
-            impl_tag, abi_tag, plat_tag = self.get_tag()
-            archive_basename = (f"gptqmodel-{gptqmodel_version}-{impl_tag}-{abi_tag}-{plat_tag}")
-            wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
-            print("Raw wheel path", wheel_path)
-            os.rename(wheel_filename, wheel_path)
+            wheel_path = os.path.join(self.dist_dir, wheel_filename)
+
+            _download_with_progress(wheel_url, wheel_path, title="Downloading wheel")
+            print("Raw wheel path", wheel_filename)
         except BaseException:
-            print(f"Precompiled wheel not found at: {wheel_url}. Building from source...")
+            env_info = [f"python={python_version}", f"torch={TORCH_VERSION or 'unknown'}"]
+            if CUDA_VERSION:
+                env_info.append(f"cuda={CUDA_VERSION}")
+            if ROCM_VERSION:
+                env_info.append(f"rocm={ROCM_VERSION}")
+
+            print(
+                "Unable to match and download a precompiled wheel; entering slow manual build mode. "
+                f"Wheel match params: {', '.join(env_info)}. "
+                f"Fallback source build triggered for {wheel_url}"
+            )
             super().run()
 
 

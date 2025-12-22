@@ -18,6 +18,7 @@ from .dbrx_converted import DbrxConvertedQModel
 from .decilm import DeciLMQModel
 from .deepseek_v2 import DeepSeekV2QModel
 from .deepseek_v3 import DeepSeekV3QModel
+from .dots1 import Dots1QModel
 from .dream import DreamQModel
 from .exaone import ExaOneQModel
 from .ernie4_5 import Ernie4_5QModel
@@ -68,3 +69,5 @@ from .klear import KlearQModel
 from .llava_qwen2 import LlavaQwen2QModel
 from .nemotron_h import NemotronHQModel
 from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
+from .mistral3 import Mistral3GPTQ
+from .afmoe import AfMoeQModel

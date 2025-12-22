@@ -8,11 +8,13 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import shutil
+import threading
 from pathlib import Path
 from typing import Optional
 
 import torch
-from torch.utils.cpp_extension import load
+from torch.utils.cpp_extension import _get_build_directory, load
 
 from .env import env_flag
 
@@ -21,6 +23,53 @@ log = logging.getLogger(__name__)
 
 _PACK_BLOCK_EXTENSION: Optional[bool] = None
 _PACK_BLOCK_EXTENSION_INITIALISED = False
+
+_cpp_ext_lock = threading.Lock()
+
+# Used to track whether cleanup has been done already
+_cpp_ext_initialized = False
+
+
+def safe_load_cpp_ext(
+        name,
+        build_directory=None,
+        verbose=False,
+        **kwargs
+):
+    """
+    A safe wrapper for torch.utils.cpp_extension.load() that removed old cached kernel on first load. Pytorch has a bug where it does not check previous cached kernel for current pytorch compatibility as it
+    only does it a naive name check based on pytorch/cuda version but same pytorch version can have multiple variants (cpu, cuda, etc) which are not cross compatible resulting in hidden errors.
+    """
+    global _cpp_ext_initialized
+
+    with _cpp_ext_lock:
+        # First-time initialization cleanup
+        if not _cpp_ext_initialized:
+            build_directory = build_directory or _get_build_directory(name, verbose=verbose)
+            if os.path.exists(build_directory):
+                try:
+                    shutil.rmtree(build_directory)
+                    if verbose:
+                        log.debug(f"[safe_cpp_extension_load] Removed old build directory: {build_directory}")
+                except Exception as e:
+                    log.error(f"[safe_cpp_extension_load] Failed to remove build directory: {e}")
+
+            if not os.path.exists(build_directory):
+                if verbose:
+                    log.debug('Creating extension directory %s...', build_directory)
+                # This is like mkdir -p, i.e. will also create parent directories.
+                os.makedirs(build_directory, exist_ok=True)
+
+            # Load the extension (JIT)
+            load(
+                name=name,
+                build_directory=build_directory,
+                **kwargs
+            )
+
+            _cpp_ext_initialized = True
+
+        return
 
 
 def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
@@ -71,7 +120,7 @@ def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
         verbose = env_flag("GPTQMODEL_EXT_VERBOSE", True)
 
     try:
-        load(
+        safe_load_cpp_ext(
             name="gptqmodel_pack_block_cpu",
             sources=[str(source_path)],
             extra_cflags=extra_cflags,
