@@ -240,7 +240,7 @@ class AWQProcessor(LoopProcessor):
         #         features[root] = tensors[0]
         return features
 
-    def _quantize_layer_rtn_fallback(
+    def _quantize_layer_failsafe(
         self,
         layer_index: int,
         state: _AWQLayerState,
@@ -256,7 +256,7 @@ class AWQProcessor(LoopProcessor):
         }
 
         log.warning(
-            "AWQProcessor: layer %s using RTN-style fallback quantization (%s).",
+            "AWQProcessor: layer %s using fallback quantization (%s).",
             layer_index,
             reason,
         )
@@ -400,7 +400,7 @@ class AWQProcessor(LoopProcessor):
                         extra,
                         expected_tokens,
                     )
-                self._quantize_layer_rtn_fallback(layer_index, state, reason)
+                self._quantize_layer_failsafe(layer_index, state, reason)
                 return
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
         if missing:
