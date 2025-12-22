@@ -38,6 +38,7 @@ from ...utils.marlin import (
     marlin_permute_scales,
     marlin_repeat_scales_on_all_ranks,
     marlin_sort_g_idx,
+    replace_parameter,
 )
 from ...utils.marlin_scalar_type import scalar_types
 from ...utils.rocm import IS_ROCM
@@ -291,7 +292,7 @@ class MarlinQuantLinear(BaseQuantLinear):
 
         # make sure scales is synced with x/input
         if x.dtype != self.scales.dtype:
-            self.scales = self.scales.to(dtype=x.dtype)
+            replace_parameter(self, "scales", self.scales.to(dtype=x.dtype))
 
         out = apply_gptq_marlin_linear(
             input=x.contiguous() if self.is_lm_head else x,
