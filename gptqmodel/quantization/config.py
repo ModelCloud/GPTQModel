@@ -89,7 +89,7 @@ class VramStrategy(str, Enum):
 
 class FailSafeStrategy(str, Enum):
     AUTO = "auto"
-    RTN = "rtn"
+    RTN = "rtn" # round to nearest
     MIDPOINT = "midpoint"
     MEAN = "mean"
     STDCLIP = "stdclip"
