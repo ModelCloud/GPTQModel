@@ -27,7 +27,7 @@ from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from gptqmodel.quantization import FORMAT, METHOD
-from gptqmodel.quantization.config import QuantizeConfig, VRAMStrategy
+from gptqmodel.quantization.config import QuantizeConfig, VramStrategy
 from gptqmodel.utils.model import find_modules, get_module_by_name_prefix
 
 
@@ -46,7 +46,7 @@ def _make_quant_config(device: torch.device | str = "cpu") -> QuantizeConfig:
         quant_method=METHOD.AWQ,
         format=FORMAT.GEMM,
         device=device,
-        vram_strategy=VRAMStrategy.EXCLUSIVE,
+        vram_strategy=VramStrategy.EXCLUSIVE,
     )
 
 
@@ -133,7 +133,7 @@ def test_awq_processor_enables_subset_early_stop():
 def test_module_looper_subset_callback_invoked():
     quant_cfg = SimpleNamespace(
         device=torch.device("cpu"),
-        vram_strategy=VRAMStrategy.EXCLUSIVE,
+        vram_strategy=VramStrategy.EXCLUSIVE,
         true_sequential=True,
         lm_head=False,
     )
@@ -142,7 +142,7 @@ def test_module_looper_subset_callback_invoked():
         quantize_config=quant_cfg,
         layer_callback=None,
         subset_callback=None,
-        supported_vram_strategies=[VRAMStrategy.EXCLUSIVE],
+        supported_vram_strategies=[VramStrategy.EXCLUSIVE],
     )
 
     looper = ModuleLooper(model=dummy_model, processors=[])
@@ -219,7 +219,7 @@ class _StubAWQProcessor(LoopProcessor):
     def name(cls) -> str:
         return "stub-awq"
 
-    def preprocess(self, module: NamedModule, fail_safe: Optional[bool] = None):
+    def preprocess(self, module: NamedModule, failsafe=None, **_kwargs):
         self.tasks[module.name] = {"inputs": []}
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[torch.nn.Module, tuple, torch.Tensor], None]:
@@ -273,7 +273,7 @@ def test_stage_subset_early_stop_and_callbacks():
 
     dummy_quant_cfg = SimpleNamespace(
         device=torch.device("cpu"),
-        vram_strategy=VRAMStrategy.EXCLUSIVE,
+        vram_strategy=VramStrategy.EXCLUSIVE,
         true_sequential=True,
         lm_head=False,
     )
@@ -282,7 +282,7 @@ def test_stage_subset_early_stop_and_callbacks():
         quantize_config=dummy_quant_cfg,
         layer_callback=None,
         subset_callback=None,
-        supported_vram_strategies=[VRAMStrategy.EXCLUSIVE, VRAMStrategy.BALANCED],
+        supported_vram_strategies=[VramStrategy.EXCLUSIVE, VramStrategy.BALANCED],
         layer_modules_strict=True,
         lm_head="lm_head",
     )
@@ -320,7 +320,7 @@ def test_stage_subset_early_stop_and_callbacks():
         subset_index=0,
         subset_total=2,
         full=full_modules,
-        fail_safe=False,
+        failsafe=False,
         shared_kv_cache_dict=shared_kv_cache_dict,
         pb=_DummyProgress(),
         log=None,

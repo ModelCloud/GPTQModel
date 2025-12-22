@@ -36,7 +36,7 @@ from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
-from ..quantization.config import VRAMStrategy
+from ..quantization.config import VramStrategy
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
@@ -123,14 +123,14 @@ class ModuleLooper():
         self._quant_device_rr = 0
         self._module_device_map: Dict[str, torch.device] = {}
         self._quant_device_lock = threading.Lock()
-        vram_strategy = getattr(self.gptq_model.quantize_config, "vram_strategy", VRAMStrategy.EXCLUSIVE)
+        vram_strategy = getattr(self.gptq_model.quantize_config, "vram_strategy", VramStrategy.EXCLUSIVE)
         if isinstance(vram_strategy, str):
             try:
-                vram_strategy = VRAMStrategy(vram_strategy.lower())
+                vram_strategy = VramStrategy(vram_strategy.lower())
             except ValueError:
-                vram_strategy = VRAMStrategy.EXCLUSIVE
-        supported_strategies = getattr(self.gptq_model, "supported_vram_strategies", [VRAMStrategy.EXCLUSIVE, VRAMStrategy.BALANCED])
-        if isinstance(supported_strategies, VRAMStrategy):
+                vram_strategy = VramStrategy.EXCLUSIVE
+        supported_strategies = getattr(self.gptq_model, "supported_vram_strategies", [VramStrategy.EXCLUSIVE, VramStrategy.BALANCED])
+        if isinstance(supported_strategies, VramStrategy):
             supported_strategies = [supported_strategies]
         if vram_strategy not in supported_strategies:
             log.debug(
@@ -138,7 +138,7 @@ class ModuleLooper():
                 getattr(self.gptq_model, "__class__", type(self.gptq_model)).__name__,
                 vram_strategy,
             )
-            vram_strategy = VRAMStrategy.EXCLUSIVE
+            vram_strategy = VramStrategy.EXCLUSIVE
         self._vram_strategy = vram_strategy
         self._moe_subset_threshold = 16
         self._subset_callback = getattr(self.gptq_model, "subset_callback", None)
@@ -1084,12 +1084,15 @@ class ModuleLooper():
             use_cache=use_cache,
         )
 
-    def loop(self, fail_safe: bool = False, **kwargs):
+    def loop(self, failsafe=None, **kwargs):
         with tf32_high_precision_guard():
-            return self._loop_impl(fail_safe=fail_safe, **kwargs)
+            return self._loop_impl(failsafe=failsafe, **kwargs)
 
     @torch.inference_mode()
-    def _loop_impl(self, fail_safe: bool = False, **kwargs):
+    def _loop_impl(self, failsafe=None, **kwargs):
+        if failsafe is None:
+            failsafe = getattr(self.gptq_model.quantize_config, "failsafe", None)
+
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
                 tied_keys = self.gptq_model.model._tied_weights_keys
@@ -1193,7 +1196,7 @@ class ModuleLooper():
             layers=layers,
             layer_modules=layer_modules,
             layers_prefix=layers_prefix,
-            fail_safe=fail_safe,
+            failsafe=failsafe,
             shared_kv_cache_dict=shared_kv_cache_dict,
             pb=pb,
             layer_count=layer_count,
@@ -1274,19 +1277,25 @@ class ModuleLooper():
 
         return total_log
 
-    def crate_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fail_safe, layer_module=None) -> Dict[str, NamedModule]:
+    def crate_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, failsafe, layer_module=None) -> Dict[str, NamedModule]:
         subset = {}
+        capture_only_flags: Dict[str, bool] = {}
         for n in names:
+            capture_only = False
+            if n.endswith(CAPTURE_ONLY_FLAG):
+                capture_only = True
+                n = n.split(CAPTURE_ONLY_FLAG, 1)[0]
             if n in full:
                 subset[n] = full[n]
-            elif n.endswith(CAPTURE_ONLY_FLAG):
+            elif capture_only:
                 # Obtain the CAPTURE_ONLY_FLAG Module separately
-                n = n.split(CAPTURE_ONLY_FLAG, 1)[0]
                 subset[n], _ = get_module_by_name_prefix(module, module_name=n)
             # some modules have layer_modules that are dynamic based on config
             # ref: deepseek v2/v3/r1
             elif self.gptq_model.layer_modules_strict:
                 raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
+            if capture_only:
+                capture_only_flags[n] = True  # forward-only modules should not be finalized
         skipped_modules = []
         for name in subset:
             layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{name}"
@@ -1295,6 +1304,8 @@ class ModuleLooper():
             if not isinstance(subset[name], NamedModule):
                 named_module = NamedModule(subset[name], name=name, full_name=layer_name,
                                            layer_index=layer_index)
+                if capture_only_flags.get(name, False):
+                    named_module.state["capture_only"] = True
                 if isinstance(processor, EoraProcessor):
                     named_module.state.update({
                         "wq": processor.quantized_weights[layer_name],
@@ -1304,9 +1315,11 @@ class ModuleLooper():
                 full[name] = named_module
                 if layer_module is not None:
                     named_module.state.setdefault("layer_module", layer_module)
+            elif capture_only_flags.get(name, False):
+                subset[name].state["capture_only"] = True
 
             if isinstance(processor, GPTQProcessor):
-                processor.preprocess(subset[name], fail_safe=fail_safe)
+                processor.preprocess(subset[name], failsafe=failsafe)
             else:
                 processor.preprocess(subset[name])
             # some modules are skipped

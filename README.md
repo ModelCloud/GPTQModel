@@ -17,6 +17,7 @@
 </p>
 
 ## Latest News
+* 12/22/2025 5.6.99-dev: New/refractored `failsafe` strategy, now enabled by default, to address un-even routing of MoE module routing and quantization issue. Another pending PR will be merged soon to address the same MoE routing issue using a different, brue-force, approach. 
 * 12/17/2025 [5.6.12 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.12): Fixed `uv` compat. Both `uv` and `pip` install will now show ui progress for external wheel/depend downloads.
 * 12/16/2025 [5.6.10 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.10): Fixed `MacOS` and `AWQMarlin` kernel loading import regressions. Resolved most `multi-arch` compile issue on `Ubuntu`, `Arch`, `RedHat` and other distros.
 * 12/15/2025 [5.6.6 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.6): Fixed `multi-arch` build issues and `Tritonv2` kernel launch bug on multi-gpus. 
