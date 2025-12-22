@@ -13,6 +13,7 @@ from torch import nn
 
 from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
+from ..quantization.config import FailSafeStrategy
 from ..quantization.quantizer import HF_OPTIMUM
 from ..utils import setup_logger
 from .gptq import get_number_of_rows_and_cols
@@ -236,7 +237,8 @@ class QQQ:
         # fwd counter
         self.fwd_counter = 0
 
-        self.fail_safe = False
+        self.failsafe = self.qcfg.failsafe
+        self.expected_nsamples: Optional[float] = None
 
         self.H = torch.zeros((self.columns, self.columns),
                              dtype=torch.float32,
@@ -257,6 +259,119 @@ class QQQ:
             return tensor
 
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
+
+    def _failsafe_quantize(self, strategy: FailSafeStrategy):
+        maxq = 2 ** self.qcfg.bits - 1
+        sigma = 3.0
+        group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
+        start_time = time.time()
+
+        W = self.layer.weight.data.clone()
+        if isinstance(self.layer, nn.Conv2d):
+            W = W.flatten(1)
+        if isinstance(self.layer, transformers.Conv1D):
+            W = W.t()
+        W = W.float()
+
+        if self._tp_pad_cols:
+            pad = torch.zeros(
+                (W.shape[0], self._tp_pad_cols),
+                dtype=W.dtype,
+                device=W.device,
+            )
+            W = torch.cat((W, pad), dim=1)
+        Q = torch.empty_like(W)
+        scale_chunks = []
+        zero_chunks = []
+
+        for start in range(0, self.columns, group_size):
+            end = min(start + group_size, self.columns)
+            block = W[:, start:end]
+
+            if strategy in (FailSafeStrategy.AUTO, FailSafeStrategy.MIDPOINT):
+                w_min = block.min(dim=1, keepdim=True).values
+                w_max = block.max(dim=1, keepdim=True).values
+                mid = (w_max + w_min) / 2.0
+                scale = torch.clamp((w_max - w_min) / maxq, min=1e-8)
+                zero = torch.full_like(scale, maxq / 2.0)
+                q = torch.round((block - mid) / scale + zero)
+                q = torch.clamp(q, 0, maxq)
+                dequant = (q - zero) * scale + mid
+            elif strategy == FailSafeStrategy.MEAN:
+                mean = block.mean(dim=1, keepdim=True)
+                max_dev = torch.max((block - mean).abs(), dim=1, keepdim=True).values
+                max_dev = torch.clamp(max_dev, min=1e-8)
+                scale = (2 * max_dev) / maxq
+                zero = torch.full_like(scale, maxq / 2.0)
+                q = torch.round((block - mean) / scale + zero)
+                q = torch.clamp(q, 0, maxq)
+                dequant = (q - zero) * scale + mean
+            elif strategy == FailSafeStrategy.STDCLIP:
+                mean = block.mean(dim=1, keepdim=True)
+                std = block.std(dim=1, keepdim=True, unbiased=False)
+                std = torch.clamp(std, min=1e-8)
+                lo = mean - sigma * std
+                hi = mean + sigma * std
+                scale = torch.clamp((hi - lo) / maxq, min=1e-8)
+                zero = torch.round(-lo / scale)
+                q = torch.round(block / scale + zero)
+                q = torch.clamp(q, 0, maxq)
+                dequant = (q - zero) * scale
+            else:
+                self.quantizer.find_params(block, weight=True)
+                dequant = self.quantizer.quantize(block)
+                scale = self.quantizer.scale
+                zero = self.quantizer.zero
+
+            Q[:, start:end] = dequant
+
+            scale_block = scale if scale.dim() > 1 else scale.unsqueeze(1)
+            zero_block = zero if zero.dim() > 1 else zero.unsqueeze(1)
+            if scale_block.shape[1] > 1:
+                scale_block = scale_block.mean(dim=1, keepdim=True)
+            if zero_block.shape[1] > 1:
+                zero_block = zero_block.mean(dim=1, keepdim=True)
+            scale_chunks.append(scale_block)
+            zero_chunks.append(zero_block)
+
+        scale = torch.cat(scale_chunks, dim=1)
+        zero = torch.cat(zero_chunks, dim=1)
+
+        if self._tp_pad_cols:
+            valid_cols = self._original_columns
+            Q = Q[:, :valid_cols]
+            scale = self._truncate_last_dim(scale, valid_cols)
+            zero = self._truncate_last_dim(zero, valid_cols)
+        else:
+            valid_cols = self.columns
+
+        g_idx = torch.arange(valid_cols, device=Q.device, dtype=torch.int32) // (group_size if group_size != -1 else self.columns)
+
+        if isinstance(self.layer, transformers.Conv1D):
+            Q = Q.t()
+        if Q.shape != self.layer.weight.shape:
+            Q = Q.reshape(self.layer.weight.shape).to(self.layer.weight.dtype)
+        else:
+            Q = Q.to(self.layer.weight.dtype)
+
+        scale_extra = None
+        if group_size != self.columns:
+            quantizer_extra = Quantizer()
+            quantizer_extra.configure(
+                bits=8,
+                perchannel=True,
+                groupsize=-1,
+                sym=True,
+                mse=False,
+            )
+            quantizer_extra.find_params(self.layer.weight.data.clone(), weight=True)
+            scale_extra = quantizer_extra.scale
+
+        duration = time.time() - start_time
+        avg_loss = f"{strategy.value} failsafe"
+        damp_percent = 0.0
+        self.H = None
+        return Q, scale, zero, g_idx, duration, avg_loss, damp_percent, scale_extra, self.nsamples
 
     def add_batch(self, inp, out):
         if DEBUG:
@@ -295,6 +410,9 @@ class QQQ:
             blocksize=128,
     ):
         start = time.time()
+        from ..utils.failsafe import resolve_failsafe_strategy, resolve_threshold, should_use_failsafe
+
+        resolved_strategy = resolve_failsafe_strategy(self.failsafe)
 
         percdamp = self.qcfg.damp_percent
         groupsize = self.qcfg.group_size
@@ -354,10 +472,36 @@ class QQQ:
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
         H[diag, diag] += damp
-        H = torch.linalg.cholesky(H)
-        H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
-        Hinv = H
+        threshold_raw, is_percent = resolve_threshold(self.failsafe, self.expected_nsamples)
+        failsafe_configured = threshold_raw is not None
+
+        try:
+            H = torch.linalg.cholesky(H)
+            H = torch.cholesky_inverse(H)
+            H = torch.linalg.cholesky(H, upper=True)
+            Hinv = H
+        except Exception:
+            fallback_requested = should_use_failsafe(
+                self.failsafe,
+                float(self.nsamples),
+                self.expected_nsamples,
+            )
+            if fallback_requested:
+                extra = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+                log.warn(
+                    "Quantization: Module `%s` -> Using `%s` failsafe quantization (observed %s samples, threshold=%s%s, max_total=%s).",
+                    self.name,
+                    resolved_strategy.value,
+                    self.nsamples,
+                    self.failsafe,
+                    extra,
+                    self.expected_nsamples,
+                )
+                if resolved_strategy != FailSafeStrategy.RTN:
+                    return self._failsafe_quantize(resolved_strategy)
+                Hinv = None
+            else:
+                raise
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
@@ -427,20 +571,20 @@ class QQQ:
 
                 if math.isnan(avg_loss):
                     print("Losses sum item:", torch.sum(Losses).item())
-                    if self.fail_safe:
+                    if failsafe_configured:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
                         self.qcfg.mock_quantization = True
                         return self.quantize(blocksize=blocksize)
                     else:
-                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable fail_safe=True")
+                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable failsafe=True")
             else:
-                if self.fail_safe:
+                if failsafe_configured:
                     log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
                 else:
                     log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
-                avg_loss = 999999999
+                avg_loss = f"{resolved_strategy.value} failsafe" if failsafe_configured else 999999999
         else:
-            avg_loss = 999999999
+            avg_loss = f"{resolved_strategy.value} failsafe" if failsafe_configured else 999999999
 
         del Losses
 
