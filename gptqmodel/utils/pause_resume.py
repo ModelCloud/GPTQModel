@@ -8,16 +8,16 @@
 Provides thread-safe pause/resume capabilities with keyboard input handling.
 """
 
-import threading
 import logging
-from enum import Enum
-from functools import lru_cache
-from typing import Dict, List, Optional, Callable
-from contextlib import contextmanager
 import sys
+import threading
 import time
+from contextlib import contextmanager
+from enum import Enum
+from typing import Callable, Dict, List, Optional
 
 from .colors import ANSIColor, color_text
+
 
 log = logging.getLogger(__name__)
 
@@ -27,9 +27,9 @@ if _IS_WINDOWS:
     import msvcrt
 else:
     try:
-        import tty
-        import termios
         import select
+        import termios
+        import tty
     except ImportError:
         log.warning("termios, tty, or select not available. Pause/resume from keyboard will not work.")
 
@@ -66,7 +66,7 @@ class PauseResumeController:
 
         # Callbacks for status updates
         self._status_callback: Optional[Callable[[PauseResumeState], None]] = None
-        
+
         # Progress bar references for immediate title updates
         self._progress_bars: List[Dict] = []  # List of {"pb": progress_bar, "title_func": callable}
 
@@ -113,11 +113,11 @@ class PauseResumeController:
         if hint:
             text = f"{text} {hint}"
         return text
-    
+
     def register_and_draw_progress_bar(self, pb, title: Optional[str] = None, subtitle: Optional[str] = None):
         """
         Register a progress bar for immediate title updates when pause/resume state changes.
-        
+
         Args:
             pb: Progress bar instance
             title: Optional title string without status icons/hints
@@ -134,28 +134,28 @@ class PauseResumeController:
                         # Update the title and subtitle if already registered
                         item["title"] = title
                         return
-                
+
                 # Register new progress bar
                 self._progress_bars.append({"pb": pb, "title": title})
         finally:
             self._update_progress_bars()
-    
+
     def unregister_progress_bar(self, pb):
         """
         Unregister a progress bar from immediate title updates.
-        
+
         Args:
             pb: Progress bar instance to remove
         """
         with self._state_lock:
             self._progress_bars = [item for item in self._progress_bars if item["pb"] != pb]
-    
+
     def _update_progress_bars(self):
         """Update all registered progress bars with current pause/resume status."""
         for item in self._progress_bars:
             pb = item["pb"]
             title = item.get("title")
-            
+
             if title:
                 wrapped_title = self.wrap_text(title)
                 try:
@@ -181,7 +181,7 @@ class PauseResumeController:
         try:
             old_settings = termios.tcgetattr(sys.stdin)
             tty.setcbreak(sys.stdin.fileno())
-            
+
             while not self._stop_event.is_set():
                 if select.select([sys.stdin], [], [], 0.1)[0]:
                     char = sys.stdin.read(1)

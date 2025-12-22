@@ -3,12 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import sys
 import threading
 import time
 from unittest.mock import Mock, patch
-import sys
-
-import pytest
 
 from gptqmodel.utils.pause_resume import PauseResumeController, PauseResumeState
 
@@ -163,9 +161,9 @@ class TestPauseResumeController:
     @patch('sys.stdin.isatty', return_value=True)
     def test_keyboard_input_toggles_pause(self, mock_isatty):
         """Test that keyboard input 'p' toggles the pause state."""
-        
+
         state_changed = threading.Event()
-        
+
         def state_change_callback(new_state):
             # This callback will be executed in the listener thread
             state_changed.set()
@@ -175,13 +173,13 @@ class TestPauseResumeController:
             # The listener thread loops roughly every 0.1s
             kbhit_mock = Mock(side_effect=[True, False, True, False, False, False, False, False])
             getch_mock = Mock(return_value=b'p')
-            
+
             with patch('msvcrt.kbhit', kbhit_mock), \
                  patch('msvcrt.getch', getch_mock):
-                
+
                 controller = PauseResumeController()
                 controller.set_status_callback(state_change_callback)
-                
+
                 # Wait for the listener thread to detect the first key press
                 assert state_changed.wait(timeout=1), "Timeout waiting for first state change"
                 assert controller.get_state() == PauseResumeState.PAUSE_REQUESTED
@@ -189,7 +187,7 @@ class TestPauseResumeController:
 
                 # Reset event for the next state change
                 state_changed.clear()
-                
+
                 # Wait for the listener thread to detect the second key press
                 assert state_changed.wait(timeout=1), "Timeout waiting for second state change"
                 assert controller.get_state() == PauseResumeState.RUNNING
@@ -209,7 +207,7 @@ class TestPauseResumeController:
             select_gen = select_generator()
             select_mock = Mock(side_effect=lambda *args: next(select_gen))
             read_mock = Mock(return_value='p')
-            
+
             # Mock tcgetattr to return a valid list to prevent TypeError in the listener's finally block
             tcgetattr_mock = Mock(return_value=["iflag", "oflag", "cflag", "lflag", "ispeed", "ospeed", "cc"])
 
@@ -218,7 +216,7 @@ class TestPauseResumeController:
                  patch('termios.tcgetattr', tcgetattr_mock), \
                  patch('termios.tcsetattr'), \
                  patch('tty.setcbreak'):
-                
+
                 controller = PauseResumeController()
                 controller.set_status_callback(state_change_callback)
 
@@ -229,12 +227,12 @@ class TestPauseResumeController:
 
                 # Reset event for the next state change
                 state_changed.clear()
-                
+
                 # Wait for the listener thread to detect the second key press
                 assert state_changed.wait(timeout=2), "Timeout waiting for second state change"
                 assert controller.get_state() == PauseResumeState.RUNNING
                 assert read_mock.call_count == 2
-                
+
                 controller.cleanup()
 
     def test_thread_safety(self):
