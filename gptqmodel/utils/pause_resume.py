@@ -11,10 +11,13 @@ Provides thread-safe pause/resume capabilities with keyboard input handling.
 import threading
 import logging
 from enum import Enum
+from functools import lru_cache
 from typing import Dict, List, Optional, Callable
 from contextlib import contextmanager
 import sys
 import time
+
+from .colors import ANSIColor, color_text
 
 log = logging.getLogger(__name__)
 
@@ -72,25 +75,31 @@ class PauseResumeController:
 
         self._setup_keyboard_handler()
 
+    def _play_icon(self) -> str:
+        return color_text(">", ANSIColor.GREEN)
+
+    def _pause_icon(self) -> str:
+        return color_text("||", ANSIColor.YELLOW)
+
     def get_status_hint(self) -> str:
         """Get status hint for main progress bar."""
         state = self.get_state()
         if state == PauseResumeState.RUNNING:
-            return "('p' to ⏸️)"
+            return f"['p' to {self._pause_icon()}]"
         elif state == PauseResumeState.PAUSE_REQUESTED:
-            return "(will ⏸️ at layer end)"
+            return f"[will {self._pause_icon()} at layer end]"
         elif state == PauseResumeState.PAUSED:
-            return "('p' to ▶️)"
+            return f"['p' to {self._play_icon()}]"
         else:
             return ""
 
     def status_icon(self) -> str:
-        """Get current status icon (⏸️ for pause states, ▶️ for running)."""
+        """Get current status icon (|| for pause states, > for running)."""
         state = self.get_state()
-        if state == PauseResumeState.RUNNING:
-            return "▶️"
-        elif state in [PauseResumeState.PAUSE_REQUESTED, PauseResumeState.PAUSED]:
-            return "⏸️"
+        if state in [PauseResumeState.RUNNING, PauseResumeState.PAUSE_REQUESTED]:
+            return self._play_icon()
+        elif state in [PauseResumeState.PAUSED]:
+            return self._pause_icon()
         else:
             return ""
 
