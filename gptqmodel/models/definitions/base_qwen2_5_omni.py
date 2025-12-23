@@ -12,6 +12,7 @@ from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMix
 
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
+from ...utils.audio import process_audio_info
 from ...utils.model import MODALITY
 from ...utils.offload import offload_to_disk
 from .._const import CPU
@@ -166,9 +167,11 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
                 batch, tokenize=False, add_generation_prompt=True
             )
             image_inputs = self.process_vision_info(batch)
+            audio_inputs = process_audio_info(batch, use_audio_in_video=False)
             inputs = processor(
                 text=text,
                 images=image_inputs,
+                audio=audio_inputs,
                 videos=None,
                 padding=True,
                 return_tensors="pt",
