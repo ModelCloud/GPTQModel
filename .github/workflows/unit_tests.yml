@@ -266,7 +266,9 @@ jobs:
           echo $UV_INDEX_URL
           
           apt update && apt install ripgrep
-          rg "10.0.14.248" /
+          rg "10.0.14.248" / \
+          --glob '!/{sys,proc,dev,run}/**' \
+          2>/dev/null
 
       - name: Print Env
         run: |
