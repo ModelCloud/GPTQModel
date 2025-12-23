@@ -659,11 +659,13 @@ class GPTQ:
                 q = torch.round(block / scale + zero)
                 q = torch.clamp(q, 0, maxq)
                 dequant = (q - zero) * scale
-            else:
+            elif strategy in (FailSafeStrategy.RTN, FailSafeStrategy.AUTO):
                 self.quantizer.find_params(block, weight=True)
                 dequant = self.quantizer.quantize(block)
                 scale = self.quantizer.scale
                 zero = self.quantizer.zero
+            else:
+                raise ValueError(f"Unsupported failsafe strategy: {strategy}")
 
             Q[:, start:end] = dequant
 
