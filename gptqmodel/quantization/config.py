@@ -95,6 +95,11 @@ class FailSafeStrategy(str, Enum):
     STDCLIP = "stdclip"
 
 
+class GcMode(str, Enum):
+    INTERVAL = "interval"
+    ON_STAGE_END = "on_stage_end"
+
+
 @dataclass
 class FailSafe:
     strategy: FailSafeStrategy = FailSafeStrategy.AUTO # enable failsafe by default due to moe routing behavior breaking calibration based quantization
@@ -283,9 +288,14 @@ class QuantizeConfig():
     # VRAM allocation strategy for MoE-heavy subsets
     vram_strategy: VramStrategy = field(default=VramStrategy.EXCLUSIVE)
 
+    gc_mode: GcMode = field(
+        default=GcMode.INTERVAL,
+        metadata={"help": "Garbage collection mode: 'interval' for regular GC or 'on_stage_end' for GC after stage end (after forward pass, quantize, layer finilization)."}
+    )
+
     # Control whether to wait for layer finalization (packing, writing) before proceeding to next layer
     # Default False preserves current behavior (async finalization in background while next layer starts)
-    vram_opt_memory_cleanup_on_stage_end: bool = field(
+    wait_for_submodule_finalizers: bool = field(
         default=False,
         metadata={"help": "Wait for all layer finalization tasks (packing, offloading to disk, etc) to complete before proceeding to next layer. May reduce vram pressure for some env."}
     )
@@ -479,6 +489,18 @@ class QuantizeConfig():
         elif not isinstance(self.vram_strategy, VramStrategy):
             raise ValueError(
                 f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VramStrategy]}."
+            )
+
+        if isinstance(self.gc_mode, str):
+            try:
+                self.gc_mode = GcMode(self.gc_mode.lower())
+            except ValueError as exc:
+                raise ValueError(
+                    f"QuantizeConfig: `gc_mode` must be one of {[v.value for v in GcMode]}."
+                ) from exc
+        elif not isinstance(self.gc_mode, GcMode):
+            raise ValueError(
+                f"QuantizeConfig: `gc_mode` must be one of {[v.value for v in GcMode]}."
             )
 
     def extension_set(self, key: str, value: Any):

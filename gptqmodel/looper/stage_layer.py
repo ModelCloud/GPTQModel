@@ -14,6 +14,7 @@ from concurrent.futures import as_completed
 from typing import TYPE_CHECKING, Dict, List, Optional
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
+from ..quantization.config import GcMode
 import torch
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
@@ -505,7 +506,7 @@ def run_layer_stage(
                         )
 
                 if finalize_futures_snapshot:
-                    if looper.gptq_model.quantize_config.vram_opt_memory_cleanup_on_stage_end:
+                    if looper.gptq_model.quantize_config.wait_for_submodule_finalizers:
                         # Synchronous: wait for all finalization to complete before proceeding to next layer
                         # This ensures all packing and writing tasks are done
                         _drain_finalize_futures(
@@ -514,7 +515,8 @@ def run_layer_stage(
                             finalize_count,
                             layer_index,
                         )
-                        torch_empty_cache()
+                        if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
+                            torch_empty_cache()
                     else:
                         # Asynchronous (current/default behavior): drain in background thread
                         # This allows next layer to start while current layer finalizes
