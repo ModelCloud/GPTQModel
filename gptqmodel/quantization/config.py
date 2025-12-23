@@ -172,7 +172,7 @@ class FailSafe:
     # int/float = if captured module fwd tokens is less than value, trigger strategy
     # string = if string is int/float followed by %, then if captured module fwd tokens is less than value in percentage relative to calibration, trigger strategy
     threshold: int | float | str = "0.5%" # if less than 0.5% of calibration reaches module (think moe) then we trigger per-module failsafe quantization
-    smooth: Optional[SmoothMethod] = None
+    smooth: Optional[SmoothMethod] = field(default_factory=SmoothMAD)
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
