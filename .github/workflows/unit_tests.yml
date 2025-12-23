@@ -198,6 +198,7 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     env:
       PYENV_ROOT: /opt/pyenv
+      UV_INDEX_URL: ''
     container:
       image: intel/intel-extension-for-pytorch:2.8.10-xpu
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
