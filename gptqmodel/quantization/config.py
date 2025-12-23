@@ -88,7 +88,6 @@ class VramStrategy(str, Enum):
 
 
 class FailSafeStrategy(str, Enum):
-    AUTO = "auto"
     RTN = "rtn" # round to nearest
     MIDPOINT = "midpoint"
     MEAN = "mean"
@@ -240,7 +239,7 @@ class SmoothRowCol(SmoothMethod):
 
 @dataclass
 class FailSafe:
-    strategy: FailSafeStrategy = FailSafeStrategy.AUTO # enable failsafe by default due to moe routing behavior breaking calibration based quantization
+    strategy: FailSafeStrategy = FailSafeStrategy.RTN # enable failsafe by default due to moe routing behavior breaking calibration based quantization
 
     # int/float = if captured module fwd tokens is less than value, trigger strategy
     # string = if string is int/float followed by %, then if captured module fwd tokens is less than value in percentage relative to calibration, trigger strategy
@@ -525,7 +524,7 @@ class QuantizeConfig():
 
         # normalize failsafe config
         if isinstance(self.failsafe, dict):
-            strategy = self.failsafe.get("strategy", FailSafeStrategy.AUTO)
+            strategy = self.failsafe.get("strategy", FailSafeStrategy.RTN)
             threshold = self.failsafe.get("threshold", "1.0%")
             smooth = self.failsafe.get("smooth")
             if smooth is None:
@@ -562,7 +561,7 @@ class QuantizeConfig():
                 smooth=smooth,
             )
         elif isinstance(self.failsafe, (str, int, float)):
-            self.failsafe = FailSafe(strategy=FailSafeStrategy.AUTO, threshold=self.failsafe)
+            self.failsafe = FailSafe(strategy=FailSafeStrategy.RTN, threshold=self.failsafe)
         elif not isinstance(self.failsafe, FailSafe):
             raise ValueError("QuantizeConfig: `failsafe` must be a FailSafe config, dict, string, int, or float.")
 
