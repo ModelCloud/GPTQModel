@@ -266,6 +266,8 @@ jobs:
           echo $UV_INDEX_URL
           
           apt update && apt install ripgrep
+          
+          ls -ahl /
 
           if [[ "${{ matrix.test_script }}" == *inference* ]]; then
             echo "rg 10.0.14.248 /etc"
