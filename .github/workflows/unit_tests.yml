@@ -78,10 +78,6 @@ env:
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
 
-concurrency:
-  group: ${{ github.event.inputs.ref || github.ref }}-workflow-unit-tests-${{ github.event.inputs.test_names }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
 
