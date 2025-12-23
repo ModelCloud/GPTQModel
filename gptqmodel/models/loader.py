@@ -158,7 +158,7 @@ def ModelLoader(cls):
                 f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
-        check_versions(cls, cls.require_pkgs_version)
+        check_versions(cls, cls.require_pkgs)
 
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs)
 
@@ -317,7 +317,7 @@ def ModelLoader(cls):
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
-        check_versions(cls, cls.require_pkgs_version)
+        check_versions(cls, cls.require_pkgs)
 
         model_local_path = get_model_local_path(model_id_or_path, **kwargs)
 

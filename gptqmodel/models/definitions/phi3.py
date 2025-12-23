@@ -19,7 +19,7 @@ class Phi3QModel(BaseQModel):
     ]
 
 class PhiMoEGPTQForCausalLM(BaseQModel):
-    require_pkgs_version = ["transformers<=4.44.2"]
+    require_pkgs = ["transformers<=4.44.2"]
 
     module_tree = [
         "model",

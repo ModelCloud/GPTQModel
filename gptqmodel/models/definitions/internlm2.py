@@ -8,7 +8,7 @@ from ..base import BaseQModel
 
 class InternLM2QModel(BaseQModel):
 
-    require_pkgs_version = ["transformers<=4.44.2"]
+    require_pkgs = ["transformers<=4.44.2"]
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [
