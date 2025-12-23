@@ -269,27 +269,19 @@ jobs:
           
           ls -ahl /
 
-          if [[ "${{ matrix.test_script }}" == *inference* ]]; then
-            echo "rg 10.0.14.248 /etc"
-            rg "10.0.14.248" /etc
-          fi
+          echo "rg 10.0.14.248 /etc"
+          rg "10.0.14.248" /etc || true
 
 
-          if [[ "${{ matrix.test_script }}" == *kernel* ]]; then
-            echo "rg 10.0.14.248 /home"
-            rg "10.0.14.248" /home
-          fi
+          echo "rg 10.0.14.248 /home"
+          rg "10.0.14.248" /home || true
 
-          if [[ "${{ matrix.test_script }}" == *olora* ]]; then
-            echo "rg 10.0.14.248 /opt"
-            rg "10.0.14.248" /opt
-          fi
+          echo "rg 10.0.14.248 /opt"
+          rg "10.0.14.248" /opt || true
 
 
-          if [[ "${{ matrix.test_script }}" == *_torch_xpu* ]]; then
-            echo "rg 10.0.14.248 /monster"
-            rg "10.0.14.248" /monster
-          fi
+          echo "rg 10.0.14.248 /monster"
+          rg "10.0.14.248" /monster || true
 
 
       - name: Print Env
