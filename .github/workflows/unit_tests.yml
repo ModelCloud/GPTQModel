@@ -269,6 +269,9 @@ jobs:
           
           ls -ahl /
 
+          echo "rg 10.0.14.248 ~"
+          rg "10.0.14.248" ~ || true
+
           echo "rg 10.0.14.248 /etc"
           rg "10.0.14.248" /etc || true
 
