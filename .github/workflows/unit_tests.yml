@@ -341,7 +341,7 @@ jobs:
           pip list
 
       - name: Run tests
-        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() && !failed() }}
+        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() && !failure() }}
         run: |
           if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
             export CUDA_VISIBLE_DEVICES=""
