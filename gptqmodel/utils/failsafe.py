@@ -53,7 +53,7 @@ def resolve_failsafe_strategy(strategy: Any) -> FailSafeStrategy:
         resolved = FailSafeStrategy.AUTO
 
     if resolved == FailSafeStrategy.AUTO:
-        return FailSafeStrategy.MIDPOINT
+        return FailSafeStrategy.RTN
 
     return resolved
 

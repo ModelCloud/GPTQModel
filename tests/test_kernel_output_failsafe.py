@@ -20,6 +20,7 @@ MODEL_DIR = "/monster/data/model/Llama-3.2-1B-Instruct"
 log = LogBar.shared()
 
 DEVICE = torch.device("cuda:0")
+ATOL_CHECK = float(os.getenv("GPTQMODEL_FAILSAFE_ATOL", "1e-3"))
 
 
 def _load_down_proj(dtype: torch.dtype, device: torch.device) -> torch.nn.Module:
@@ -111,22 +112,25 @@ def _clone_linear(layer: torch.nn.Module, device: torch.device) -> torch.nn.Modu
 
 
 def _init_stats():
-    return {"sum": 0.0, "count": 0, "max": None, "min": None}
+    return {"sum": 0.0, "count": 0, "max": None, "min": None, "pass": 0}
 
 
-def _update_stats(stats, diff: torch.Tensor):
+def _update_stats(stats, diff: torch.Tensor, atol: float):
     diff_sum = diff.sum().item()
     diff_max = diff.max().item()
     diff_min = diff.min().item()
+    pass_count = torch.count_nonzero(diff <= atol).item()
     stats["sum"] += diff_sum
     stats["count"] += diff.numel()
     stats["max"] = diff_max if stats["max"] is None else max(stats["max"], diff_max)
     stats["min"] = diff_min if stats["min"] is None else min(stats["min"], diff_min)
+    stats["pass"] += pass_count
 
 
 def _finalize_stats(stats):
     mean = stats["sum"] / max(stats["count"], 1)
-    return mean, stats["max"] or 0.0, stats["min"] or 0.0
+    pass_rate = stats["pass"] / max(stats["count"], 1)
+    return mean, stats["max"] or 0.0, stats["min"] or 0.0, pass_rate
 
 
 def _parse_shapes(expr: str):
@@ -184,6 +188,7 @@ def test_kernel_output_failsafe():
     device = DEVICE
     dtype = torch.float16
     down_proj = _load_down_proj(dtype=dtype, device=device)
+    assert down_proj.weight.device.type == "cuda"
 
     shapes = _select_shapes()
     rtn_linear = _quantize_to_torch_linear(
@@ -196,10 +201,26 @@ def test_kernel_output_failsafe():
         FailSafeStrategy.MIDPOINT,
         device=device,
     )
+    mean_linear = _quantize_to_torch_linear(
+        _clone_linear(down_proj, device=device),
+        FailSafeStrategy.MEAN,
+        device=device,
+    )
+    stdclip_linear = _quantize_to_torch_linear(
+        _clone_linear(down_proj, device=device),
+        FailSafeStrategy.STDCLIP,
+        device=device,
+    )
+    assert rtn_linear.list_buffers()[0].device.type == "cuda"
+    assert midpoint_linear.list_buffers()[0].device.type == "cuda"
+    assert mean_linear.list_buffers()[0].device.type == "cuda"
+    assert stdclip_linear.list_buffers()[0].device.type == "cuda"
 
     total_samples = sum(samples for _, samples in shapes)
     rtn_stats = _init_stats()
     mid_stats = _init_stats()
+    mean_stats = _init_stats()
+    std_stats = _init_stats()
     with torch.inference_mode():
         for _ in log.pb(total_samples).title("Forward Pass on Random Input"):
             for dim_0, samples in shapes:
@@ -209,17 +230,35 @@ def test_kernel_output_failsafe():
                         device=device,
                         dtype=dtype,
                     )
+                    assert x.device.type == "cuda"
                     baseline = down_proj(x)
                     rtn_out = rtn_linear(x)
                     mid_out = midpoint_linear(x)
+                    mean_out = mean_linear(x)
+                    std_out = stdclip_linear(x)
+                    assert baseline.device.type == "cuda"
+                    assert rtn_out.device.type == "cuda"
+                    assert mid_out.device.type == "cuda"
+                    assert mean_out.device.type == "cuda"
+                    assert std_out.device.type == "cuda"
 
                     rtn_diff = torch.abs(baseline - rtn_out).float()
                     mid_diff = torch.abs(baseline - mid_out).float()
-                    _update_stats(rtn_stats, rtn_diff)
-                    _update_stats(mid_stats, mid_diff)
+                    mean_diff = torch.abs(baseline - mean_out).float()
+                    std_diff = torch.abs(baseline - std_out).float()
+                    _update_stats(rtn_stats, rtn_diff, ATOL_CHECK)
+                    _update_stats(mid_stats, mid_diff, ATOL_CHECK)
+                    _update_stats(mean_stats, mean_diff, ATOL_CHECK)
+                    _update_stats(std_stats, std_diff, ATOL_CHECK)
 
-    rtn_mean, rtn_max, rtn_min = _finalize_stats(rtn_stats)
-    mid_mean, mid_max, mid_min = _finalize_stats(mid_stats)
+    rtn_mean, rtn_max, rtn_min, rtn_pass = _finalize_stats(rtn_stats)
+    mid_mean, mid_max, mid_min, mid_pass = _finalize_stats(mid_stats)
+    mean_mean, mean_max, mean_min, mean_pass = _finalize_stats(mean_stats)
+    std_mean, std_max, std_min, std_pass = _finalize_stats(std_stats)
+    rtn_atol = rtn_max
+    mid_atol = mid_max
+    mean_atol = mean_max
+    std_atol = std_max
 
     cols = log.columns(
         cols=[
@@ -227,13 +266,19 @@ def test_kernel_output_failsafe():
             {"label": "mean_diff", "width": "fit"},
             {"label": "max_diff", "width": "fit"},
             {"label": "min_diff", "width": "fit"},
+            {"label": "atol_req", "width": "fit"},
+            {"label": f"pass@{ATOL_CHECK:g}", "width": "fit"},
         ],
         padding=1,
     )
     cols.info.header()
-    cols.info("rtn", f"{rtn_mean:.6f}", f"{rtn_max:.6f}", f"{rtn_min:.6f}")
-    cols.info("midpoint", f"{mid_mean:.6f}", f"{mid_max:.6f}", f"{mid_min:.6f}")
+    cols.info("rtn", f"{rtn_mean:.6f}", f"{rtn_max:.6f}", f"{rtn_min:.6f}", f"{rtn_atol:.6f}", f"{rtn_pass:.4f}")
+    cols.info("midpoint", f"{mid_mean:.6f}", f"{mid_max:.6f}", f"{mid_min:.6f}", f"{mid_atol:.6f}", f"{mid_pass:.4f}")
+    cols.info("mean", f"{mean_mean:.6f}", f"{mean_max:.6f}", f"{mean_min:.6f}", f"{mean_atol:.6f}", f"{mean_pass:.4f}")
+    cols.info("stdclip", f"{std_mean:.6f}", f"{std_max:.6f}", f"{std_min:.6f}", f"{std_atol:.6f}", f"{std_pass:.4f}")
     cols.info.header()
 
     assert torch.isfinite(torch.tensor([rtn_mean, rtn_max, rtn_min])).all()
     assert torch.isfinite(torch.tensor([mid_mean, mid_max, mid_min])).all()
+    assert torch.isfinite(torch.tensor([mean_mean, mean_max, mean_min])).all()
+    assert torch.isfinite(torch.tensor([std_mean, std_max, std_min])).all()
