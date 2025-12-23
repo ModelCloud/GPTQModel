@@ -758,13 +758,6 @@ class ModuleLooper():
                 if position_ids:
                     pos = position_ids[batch_idx]
                     if pos is not None:
-                        if pos.dim() == 3 and pos.size(1) == 1:
-                            pos = pos.squeeze(1)
-                        elif pos.dim() > 2:
-                            pos = pos.reshape(pos.size(0), -1)
-                        elif pos.dim() == 1:
-                            pos = pos.unsqueeze(0)
-                        pos = pos.contiguous()
                         additional_inputs["position_ids"] = move_to(pos, device=exec_device)
 
                 for key, value in layer_input_kwargs[batch_idx].items():
