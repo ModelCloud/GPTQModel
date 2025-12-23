@@ -287,13 +287,15 @@ class QuantizeConfig():
     # Default False preserves current behavior (async finalization in background while next layer starts)
     vram_opt_memory_cleanup_on_stage_end: bool = field(
         default=False,
-        metadata={"help": "Also wait for all layer finalization tasks (packing, writing) to complete before proceeding to next layer"}
+        metadata={"help": "Wait for all layer finalization tasks (packing, offloading to disk, etc) to complete before proceeding to next layer. May reduce vram pressure for some env."}
     )
 
-    # Control whether to exclude device 0 from forward pass and quantization
-    vram_opt_exclude_device_0_from_compute: bool = field(
-        default=False,
-        metadata={"help": "Exclude device 0 from forward pass and quantization to reserve memory for model weights, input/output tokens"}
+    # Callback function to filter devices for compute-intensive stages (quantization and forwarding)
+    # Takes a list of devices and returns either the original list or a filtered subset
+    compute_device_filter: Optional[callable] = field(
+        default=None,
+        metadata={"help": "Callback function to filter devices for compute-intensive stages. Function signature: fn(devices: List) -> List. "
+                  "Example to exclude device 0: compute_device_filter=lambda devices: [d for d in devices if d.index != 0]"}
     )
 
     # MoE quantization: forward whole calibration dataset to each expert instead of only routed data
@@ -304,9 +306,11 @@ class QuantizeConfig():
     )
 
     # Works faster than data parallel with some configurations 
-    force_subset_forward_serial: bool = field(
-        default=False,
-        metadata={"help": "Force serial forward pass for subsets instead of data parallel"}
+    auto_forward_data_parallel: bool = field(
+        default=True,
+        metadata={"help": "When multi-gpu is detected, we may data clone modules to each gpu for data parallelism "
+        "to speed up quantization forwarding. This causes extra time spent (especially for MoE layers) and vram pressure, "
+        "leading in some cases to slower forwarding or vram OOM"}
     )
 
 
@@ -734,6 +738,7 @@ class QuantizeConfig():
             META_FIELD: self.meta,
             # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
+            # DO NOT EXPORT compute_device_filter since functions are not serializable
         }
 
         if getattr(self, "pack_impl", "original") != "original":

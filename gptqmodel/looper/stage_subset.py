@@ -195,6 +195,7 @@ def run_subset_stage(
                 assignable_group_keys: List[str] = []
                 for group_key, module_names in expert_groups.items():
                     suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
+                    # TODO: Need to make this configuratble and not static string based. Some moe use wN naming.
                     if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
                         assignable_group_keys.append(group_key)
 
@@ -219,7 +220,7 @@ def run_subset_stage(
         for named_module in subset.values():
             setattr(named_module, "moe_enabled", False)
 
-    subset_forward_serial = subset_forward_serial or looper.gptq_model.quantize_config.force_subset_forward_serial
+    subset_forward_serial = subset_forward_serial or not looper.gptq_model.quantize_config.auto_forward_data_parallel
 
     handle = []
 

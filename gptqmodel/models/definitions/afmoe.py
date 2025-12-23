@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 from ..base import BaseQModel
 
 
@@ -16,6 +17,11 @@ class AfMoeQModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.norm"
 
+    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
+    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
+    moe_lifecycle_hooks.expert_block_names = ['experts:0']
+    moe_lifecycle_hooks.shared_expert_block_names = ['shared_expert:0']
+    
     module_tree = [
         "model",
         "layers",
@@ -24,7 +30,7 @@ class AfMoeQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp:?": {
+            "mlp:moe:?": {
                 "gate": ("gate:!",),
                 "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "experts:0": {

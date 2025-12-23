@@ -68,6 +68,12 @@ class MoELifecycleHooks:
     Main use case: Forward whole calibration dataset to all experts instead of only routed ones.
     """
     
+    # List of possible expert block names that models can override
+    expert_block_names = ['experts']
+    
+    # List of possible shared expert block names that models can override
+    shared_expert_block_names = ['shared_experts', 'shared_expert']
+    
     def get_moe_block(self, layer_module: nn.Module, model_class: type) -> Optional[nn.Module]:
         """
         Extract the MoE block from a layer module using the :moe flag from module_tree.
@@ -132,8 +138,8 @@ class MoELifecycleHooks:
             if name:
                 experts = getattr(moe_block, name)
         """
-        # Try common expert container attribute names
-        for name in ['experts', 'expert_list', 'expert_modules']:
+        # Try expert container attribute names from the class attribute
+        for name in self.expert_block_names:
             if hasattr(moe_block, name):
                 return name
         return None
@@ -153,8 +159,8 @@ class MoELifecycleHooks:
             if name:
                 shared_experts = getattr(moe_block, name)
         """
-        # Try both singular and plural naming
-        for name in ['shared_experts', 'shared_expert']:
+        # Try shared expert container attribute names from the class attribute
+        for name in self.shared_expert_block_names:
             if hasattr(moe_block, name):
                 return name
         return None

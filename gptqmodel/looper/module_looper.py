@@ -138,16 +138,15 @@ class ModuleLooper():
             vram_strategy = VramStrategy.EXCLUSIVE
         self._vram_strategy = vram_strategy
 
-        # For vram_opt_exclude_device_0_from_compute=True, exclude device 0 from quantization device pool
-        # Device 0 holds inputs/outputs/modules, so quantization should happen on other devices
-        if self.gptq_model.quantize_config.vram_opt_exclude_device_0_from_compute:
-            quant_devices_filtered = [d for d in quant_devices if d.index != 0]
+        # Apply compute device filter if provided to determine which devices to use for quantization
+        if self.gptq_model.quantize_config.compute_device_filter is not None:
+            quant_devices_filtered = self.gptq_model.quantize_config.compute_device_filter(quant_devices)
             if len(quant_devices_filtered) >= 1:
                 quant_devices = quant_devices_filtered
             else:
                 log.warn(
-                    f"vram_opt_exclude_device_0_from_compute=True: No devices available after excluding device 0. "
-                    "Using all devices including device 0 for quantization."
+                    "compute_device_filter returned empty device list. "
+                    "Using all devices for quantization."
                 )
 
         self._quant_devices = quant_devices
@@ -1072,16 +1071,17 @@ class ModuleLooper():
 
             processed_rows = 0
             
-            # Check if device 0 should be excluded from forward execution
-            if self.gptq_model.quantize_config.vram_opt_exclude_device_0_from_compute:
-                forward_devices = [d for d in devices if d.index != 0]
+            # Apply compute device filter if provided to determine which devices to use for forward execution
+            if self.gptq_model.quantize_config.compute_device_filter is not None:
+                forward_devices = self.gptq_model.quantize_config.compute_device_filter(devices)
                 if len(forward_devices) < 1:
                     log.warn(
-                        f"vram_opt_exclude_device_0_from_compute=True: No devices available after excluding device 0. "
-                        "Using all devices including device 0."
+                        "compute_device_filter returned empty device list. "
+                        "Using all devices for forward execution."
                     )
                     forward_devices = devices
             else:
+                # If no filter is provided, use all devices (default behavior)
                 forward_devices = devices
             
             device_segments: Dict[torch.device, List[int]] = {}

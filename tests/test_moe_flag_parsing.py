@@ -90,13 +90,13 @@ class TestMoEModuleDetection:
             "#",
             {
                 "mlp:moe": {
-                    "shared_experts:moe": {
+                    "shared_experts": {
                         "gate_proj": ("gate_proj:0",),
                     },
-                    "experts:moe": {
+                    "experts": {
                         "#": ("gate_proj:0", "up_proj:0"),
                     },
-                    "gate:moe:!": ("gate:!",),
+                    "gate:!": ("gate:!",),
                 },
             }
         ]
@@ -120,7 +120,7 @@ class TestMoEModuleDetection:
                     "q_proj": ("q_proj:0",),
                 },
                 "mlp:moe": {
-                    "experts:moe": {
+                    "experts": {
                         "#": ("gate_proj:0",),
                     },
                 },
