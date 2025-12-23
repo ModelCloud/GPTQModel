@@ -622,17 +622,8 @@ class BaseQModel(nn.Module):
         calibration_concat_separator: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         import sys
-        
-        old_hook = sys.excepthook
+        import traceback
 
-        # TODO: this is workaround for the overwritten of the last line of the trace
-        # on quantization crash, originally caused by logbar progress bar (probably)
-        def my_hook(type, value, tb):
-            old_hook(type, value, tb)
-            print()
-
-        sys.excepthook = my_hook
-        
         try:
             return self.quantize_core(
                 calibration=calibration,
@@ -646,8 +637,12 @@ class BaseQModel(nn.Module):
                 calibration_data_min_length=calibration_data_min_length,
                 calibration_concat_separator=calibration_concat_separator,
             )
-        finally:
-            sys.excepthook = old_hook
+        except Exception:
+            # TODO: this is workaround for the overwritten of the last line of the trace
+            # on quantization crash, originally caused by logbar progress bar (probably)
+            traceback.print_exc()
+            print()
+            sys.exit(1)
 
     def quantize_core(
         self,
