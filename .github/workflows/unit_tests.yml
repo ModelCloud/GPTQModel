@@ -346,6 +346,7 @@ jobs:
         run: rm -rf ./* .[^.] .??* # pip cache purge && uv cache clean &&
 
   system:
+    runs-on: ubuntu-latest
     needs:
       - list-test-files
       - check-vm
