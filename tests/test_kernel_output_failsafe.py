@@ -26,7 +26,7 @@ from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.model import convert_gptq_v1_to_v2_format_module
 
 
-MODEL_DIR = "/monster/data/model/Llama-3.2-1B-Instruct" # "/monster/data/model/llama3-8B" #
+MODEL_DIR = "/monster/data/model/llama3-8B" #"/monster/data/model/Llama-3.2-1B-Instruct" #
 
 log = LogBar.shared()
 

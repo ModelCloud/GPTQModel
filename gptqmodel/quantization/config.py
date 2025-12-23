@@ -169,9 +169,13 @@ class SmoothRowCol(SmoothMethod):
 @dataclass
 class FailSafe:
     strategy: FailSafeStrategy = FailSafeStrategy.AUTO # enable failsafe by default due to moe routing behavior breaking calibration based quantization
+
     # int/float = if captured module fwd tokens is less than value, trigger strategy
     # string = if string is int/float followed by %, then if captured module fwd tokens is less than value in percentage relative to calibration, trigger strategy
     threshold: int | float | str = "0.5%" # if less than 0.5% of calibration reaches module (think moe) then we trigger per-module failsafe quantization
+
+    # naive quantization methods used in failsafe has issue with very small/large outliers that can severely degrade the quantization quality
+    # use smoothers to normalize these outliers so they do not dominate the scale/zero calculation
     smooth: Optional[SmoothMethod] = field(default_factory=SmoothMAD)
 
 
