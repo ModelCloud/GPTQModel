@@ -199,7 +199,7 @@ Native support support some of the most popular multi-modal models:
 | DeepSeek-V2/V3/R1 | ✅ | GPT-OSS         | ✅ | LongCatFlash   | ✅ | OLMo2          | ✅ | Yi                  | ✅ |
 | DeepSeek-V2-Lite  | ✅ | Granite         | ✅ | LongLLaMA      | ✅ | Ovis 1.6/2     | ✅ | Seed-OSS            | ✅ |
 | Dream             | ✅ | GRIN-MoE        | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | XVERSE              | ✅ |
-| ERNIE 4.5         | ✅ | GLM 4.X/4V/4MoE | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | Minimax M2          | ✅ |
+| ERNIE 4.5         | ✅ | GLM 4/4V/4MoE | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | Minimax M2          | ✅ |
 | Brumby            | ✅ | Hymba           | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ |                     |   |
 
 
