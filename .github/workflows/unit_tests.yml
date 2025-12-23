@@ -235,7 +235,6 @@ jobs:
           xpu-smi discovery
           
           tee /etc/profile.d/pyenv.sh > /dev/null <<'EOF'
-            export PYENV_ROOT="/usr/local/pyenv"
             export PATH="$PYENV_ROOT/bin:$PATH"
             
             eval "$(pyenv init -)"
