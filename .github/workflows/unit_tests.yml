@@ -382,7 +382,10 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Print Path
+      - name: Print System
+        run: xpu-smi
+
+      - name: Print Env
         run: |
           python_version=${{ env.PYTHON_VERSION }}
           if [[ "$python_version" != *"."* ]]; then
