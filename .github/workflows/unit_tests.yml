@@ -268,18 +268,17 @@ jobs:
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
          
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
-            echo "env exists, skip"
+            echo "env: $env_name exists, skip"
             pyenv local $env_name
             pyenv uninstall -f $env_name
           fi
-            echo "creating venv..."
+            echo "creating venv: $env_name..."
             pyenv virtualenv "$python_version" "$env_name"
             pyenv local $env_name
             pyenv activate $env_name
             pip install uv
             uv pip install pytest build setuptools pip -i https://pypi.org/simple
             uv pip install torch -i https://pypi.org/simple
-          fi
 
           pyenv local $env_name
           pyenv activate $env_name
