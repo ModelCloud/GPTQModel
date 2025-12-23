@@ -12,10 +12,10 @@
     <a href="https://github.com/ModelCloud/GPTQModel/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/gptqmodel"></a>
     <a href="https://huggingface.co/modelcloud/"><img src="https://img.shields.io/badge/🤗%20Hugging%20Face-ModelCloud-%23ff8811.svg"></a>
     <a href="https://huggingface.co/models?search=gptq">
-        <img alt="Huggingface - Models" src="https://img.shields.io/badge/🤗_6000+_models_available-8A2BE2">
+        <img alt="Huggingface - Models" src="https://img.shields.io/badge/🤗_6.7K_gptq_models-8A2BE2">
     </a>
     <a href="https://huggingface.co/models?search=awq">
-        <img alt="Huggingface - Models" src="https://img.shields.io/badge/🤗_8000+_models_available-8A2BE2">
+        <img alt="Huggingface - Models" src="https://img.shields.io/badge/🤗_8.2K_awq_models-8A2BE2">
     </a>
 </p>
 
