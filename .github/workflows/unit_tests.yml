@@ -279,7 +279,7 @@ jobs:
             echo "env: $env_name exists, skip"
             pyenv local $env_name
             pyenv uninstall -f $env_name
-          fi
+          else
             echo "creating venv: $env_name..."
             pyenv virtualenv "$python_version" "$env_name"
             pyenv local $env_name
@@ -287,6 +287,7 @@ jobs:
             pip install uv
             uv pip install pytest build setuptools pip -i https://pypi.org/simple
             uv pip install torch -i https://pypi.org/simple
+          fi
 
           pyenv local $env_name
           pyenv activate $env_name
