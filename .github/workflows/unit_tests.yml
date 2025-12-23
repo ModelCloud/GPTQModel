@@ -264,6 +264,9 @@ jobs:
           echo $UV_INDEX_URL
           echo "echo $UV_INDEX_URL"
           echo $UV_INDEX_URL
+          
+          apt update && apt install ripgrep
+          rg "10.0.14.248" /
 
       - name: Print Env
         run: |
@@ -275,11 +278,10 @@ jobs:
           test_name=${test_name//\//_}
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
          
-          if [ -d "$(pyenv root)/versions/$env_name" ]; then
             echo "env: $env_name exists, skip"
             pyenv local $env_name
             pyenv uninstall -f $env_name
-          else
+
             echo "creating venv: $env_name..."
             pyenv virtualenv "$python_version" "$env_name"
             pyenv local $env_name
@@ -287,7 +289,7 @@ jobs:
             pip install uv
             uv pip install pytest build setuptools pip -i https://pypi.org/simple
             uv pip install torch -i https://pypi.org/simple
-          fi
+          
 
           pyenv local $env_name
           pyenv activate $env_name
