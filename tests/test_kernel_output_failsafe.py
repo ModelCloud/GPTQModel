@@ -317,3 +317,100 @@ def test_kernel_output_failsafe():
     for label, _ in variants:
         metrics = finalized[label]
         assert torch.isfinite(torch.tensor([metrics["mean"], metrics["max"], metrics["min"]])).all()
+
+
+def test_kernel_output_failsafe_mad_sweep():
+    if not os.path.isdir(MODEL_DIR):
+        import pytest
+
+        pytest.skip(f"Model path missing: {MODEL_DIR}")
+
+    if not torch.cuda.is_available():
+        import pytest
+
+        pytest.skip("CUDA required for failsafe kernel output test")
+
+    torch.manual_seed(0)
+
+    device = DEVICE
+    dtype = torch.float16
+    down_proj = _load_down_proj(dtype=dtype, device=device)
+    assert down_proj.weight.device.type == "cuda"
+
+    k_values = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0]
+    variants = [
+        (f"rtn_mad_k{k:g}", FailSafe(
+            strategy=FailSafeStrategy.RTN,
+            threshold=True,
+            smooth=SmoothMAD(k=k),
+        ))
+        for k in k_values
+    ]
+
+    shapes = _select_shapes()
+    qlinears = {
+        label: _quantize_to_torch_linear(_clone_linear(down_proj, device=device), failsafe, device=device)
+        for label, failsafe in variants
+    }
+    for label, qlinear in qlinears.items():
+        assert qlinear.list_buffers()[0].device.type == "cuda", f"{label} buffers not on CUDA"
+
+    total_samples = sum(samples for _, samples in shapes)
+    stats = {label: _init_stats() for label, _ in variants}
+    with torch.inference_mode():
+        for _ in log.pb(total_samples).title("Forward Pass on Random Input (MAD Sweep)"):
+            for dim_0, samples in shapes:
+                for _ in range(samples):
+                    x = torch.randn(
+                        (dim_0, down_proj.in_features),
+                        device=device,
+                        dtype=dtype,
+                    )
+                    assert x.device.type == "cuda"
+                    baseline = down_proj(x)
+                    variant_out = {label: qlinears[label](x) for label, _ in variants}
+                    assert baseline.device.type == "cuda"
+
+                    for label, out in variant_out.items():
+                        assert out.device.type == "cuda"
+                        diff = torch.abs(baseline - out).float()
+                        _update_stats(stats[label], diff)
+
+    finalized = {}
+    for label, _ in variants:
+        mean_val, max_val, min_val, pass_rates = _finalize_stats(stats[label])
+        finalized[label] = {
+            "mean": mean_val,
+            "max": max_val,
+            "min": min_val,
+            "pass": pass_rates,
+            "atol": max_val,
+        }
+
+    pass_cols = [{"label": f"pass@{atol:g}", "width": "fit"} for atol in ATOL_CHECKS]
+    cols = log.columns(
+        cols=[
+            {"label": "variant", "width": "fit"},
+            {"label": "mean_diff", "width": "fit"},
+            {"label": "max_diff", "width": "fit"},
+            {"label": "min_diff", "width": "fit"},
+            {"label": "atol_req", "width": "fit"},
+        ] + pass_cols,
+        padding=1,
+    )
+    cols.info.header()
+    for label, _ in variants:
+        metrics = finalized[label]
+        cols.info(
+            label,
+            f"{metrics['mean']:.6f}",
+            f"{metrics['max']:.6f}",
+            f"{metrics['min']:.6f}",
+            f"{metrics['atol']:.6f}",
+            *[f"{metrics['pass'][atol]:.4f}" for atol in ATOL_CHECKS],
+        )
+    cols.info.header()
+
+    for label, _ in variants:
+        metrics = finalized[label]
+        assert torch.isfinite(torch.tensor([metrics["mean"], metrics["max"], metrics["min"]])).all()
