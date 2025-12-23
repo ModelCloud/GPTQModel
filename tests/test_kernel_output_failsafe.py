@@ -10,12 +10,23 @@ from logbar import LogBar
 from transformers import AutoModelForCausalLM
 
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.quantization.config import FailSafe, FailSafeStrategy, QuantizeConfig
+from gptqmodel.quantization.config import (
+    FailSafe,
+    FailSafeStrategy,
+    QuantizeConfig,
+    SmoothLog,
+    SmoothMAD,
+    SmoothMSE,
+    SmoothOutlier,
+    SmoothPercentile,
+    SmoothRowCol,
+    SmoothSoftNorm,
+)
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.model import convert_gptq_v1_to_v2_format_module
 
 
-MODEL_DIR = "/monster/data/model/llama3-8B" # "/monster/data/model/Llama-3.2-1B-Instruct"
+MODEL_DIR = "/monster/data/model/llama3-8B" #"/monster/data/model/Llama-3.2-1B-Instruct" #
 
 log = LogBar.shared()
 
@@ -41,7 +52,7 @@ def _load_down_proj(dtype: torch.dtype, device: torch.device) -> torch.nn.Module
 
 def _quantize_to_torch_linear(
     layer: torch.nn.Module,
-    strategy: FailSafeStrategy,
+    failsafe: FailSafe,
     device: torch.device,
 ) -> TorchQuantLinear:
     qcfg = QuantizeConfig(
@@ -49,7 +60,7 @@ def _quantize_to_torch_linear(
         group_size=128,
         sym=False,
         desc_act=False,
-        failsafe=FailSafe(strategy=strategy, threshold=True),
+        failsafe=failsafe,
     )
 
     gptq = GPTQ(layer, qcfg)
@@ -117,7 +128,7 @@ def _init_stats():
         "count": 0,
         "max": None,
         "min": None,
-        "passes": {atol: 0 for atol in ATOL_CHECKS},
+        "passes": dict.fromkeys(ATOL_CHECKS, 0),
     }
 
 
@@ -200,36 +211,56 @@ def test_kernel_output_failsafe():
     assert down_proj.weight.device.type == "cuda"
 
     shapes = _select_shapes()
-    rtn_linear = _quantize_to_torch_linear(
-        _clone_linear(down_proj, device=device),
-        FailSafeStrategy.RTN,
-        device=device,
-    )
-    midpoint_linear = _quantize_to_torch_linear(
-        _clone_linear(down_proj, device=device),
-        FailSafeStrategy.MIDPOINT,
-        device=device,
-    )
-    mean_linear = _quantize_to_torch_linear(
-        _clone_linear(down_proj, device=device),
-        FailSafeStrategy.MEAN,
-        device=device,
-    )
-    stdclip_linear = _quantize_to_torch_linear(
-        _clone_linear(down_proj, device=device),
-        FailSafeStrategy.STDCLIP,
-        device=device,
-    )
-    assert rtn_linear.list_buffers()[0].device.type == "cuda"
-    assert midpoint_linear.list_buffers()[0].device.type == "cuda"
-    assert mean_linear.list_buffers()[0].device.type == "cuda"
-    assert stdclip_linear.list_buffers()[0].device.type == "cuda"
+    variants = [
+        ("rtn", FailSafe(strategy=FailSafeStrategy.RTN, threshold=True)),
+        ("midpoint", FailSafe(strategy=FailSafeStrategy.MIDPOINT, threshold=True)),
+        ("mean", FailSafe(strategy=FailSafeStrategy.MEAN, threshold=True)),
+        ("stdclip", FailSafe(strategy=FailSafeStrategy.STDCLIP, threshold=True)),
+        ("rtn_p99", FailSafe(
+            strategy=FailSafeStrategy.RTN,
+            threshold=True,
+            smooth=SmoothPercentile(percentile=99.0),
+        )),
+        ("rtn_mad", FailSafe(
+            strategy=FailSafeStrategy.RTN,
+            threshold=True,
+            smooth=SmoothMAD(k=3.0),
+        )),
+        ("rtn_mse", FailSafe(
+            strategy=FailSafeStrategy.RTN,
+            threshold=True,
+            smooth=SmoothMSE(steps=32, maxshrink=0.8),
+        )),
+        ("rtn_outlier", FailSafe(
+            strategy=FailSafeStrategy.RTN,
+            threshold=True,
+            smooth=SmoothOutlier(pct=1.0),
+        )),
+        ("rtn_softnorm", FailSafe(
+            strategy=FailSafeStrategy.RTN,
+            threshold=True,
+            smooth=SmoothSoftNorm(k=3.0),
+        )),
+        ("rtn_log", FailSafe(
+            strategy=FailSafeStrategy.RTN,
+            threshold=True,
+            smooth=SmoothLog(percentile=99.0, mu=8.0),
+        )),
+        ("rtn_rowcol", FailSafe(
+            strategy=FailSafeStrategy.RTN,
+            threshold=True,
+            smooth=SmoothRowCol(axis="row"),
+        )),
+    ]
+    qlinears = {
+        label: _quantize_to_torch_linear(_clone_linear(down_proj, device=device), failsafe, device=device)
+        for label, failsafe in variants
+    }
+    for label, qlinear in qlinears.items():
+        assert qlinear.list_buffers()[0].device.type == "cuda", f"{label} buffers not on CUDA"
 
     total_samples = sum(samples for _, samples in shapes)
-    rtn_stats = _init_stats()
-    mid_stats = _init_stats()
-    mean_stats = _init_stats()
-    std_stats = _init_stats()
+    stats = {label: _init_stats() for label, _ in variants}
     with torch.inference_mode():
         for _ in log.pb(total_samples).title("Forward Pass on Random Input"):
             for dim_0, samples in shapes:
@@ -241,33 +272,23 @@ def test_kernel_output_failsafe():
                     )
                     assert x.device.type == "cuda"
                     baseline = down_proj(x)
-                    rtn_out = rtn_linear(x)
-                    mid_out = midpoint_linear(x)
-                    mean_out = mean_linear(x)
-                    std_out = stdclip_linear(x)
+                    variant_out = {label: qlinears[label](x) for label, _ in variants}
                     assert baseline.device.type == "cuda"
-                    assert rtn_out.device.type == "cuda"
-                    assert mid_out.device.type == "cuda"
-                    assert mean_out.device.type == "cuda"
-                    assert std_out.device.type == "cuda"
+                    for label, out in variant_out.items():
+                        assert out.device.type == "cuda"
+                        diff = torch.abs(baseline - out).float()
+                        _update_stats(stats[label], diff)
 
-                    rtn_diff = torch.abs(baseline - rtn_out).float()
-                    mid_diff = torch.abs(baseline - mid_out).float()
-                    mean_diff = torch.abs(baseline - mean_out).float()
-                    std_diff = torch.abs(baseline - std_out).float()
-                    _update_stats(rtn_stats, rtn_diff)
-                    _update_stats(mid_stats, mid_diff)
-                    _update_stats(mean_stats, mean_diff)
-                    _update_stats(std_stats, std_diff)
-
-    rtn_mean, rtn_max, rtn_min, rtn_pass = _finalize_stats(rtn_stats)
-    mid_mean, mid_max, mid_min, mid_pass = _finalize_stats(mid_stats)
-    mean_mean, mean_max, mean_min, mean_pass = _finalize_stats(mean_stats)
-    std_mean, std_max, std_min, std_pass = _finalize_stats(std_stats)
-    rtn_atol = rtn_max
-    mid_atol = mid_max
-    mean_atol = mean_max
-    std_atol = std_max
+    finalized = {}
+    for label, _ in variants:
+        mean_val, max_val, min_val, pass_rates = _finalize_stats(stats[label])
+        finalized[label] = {
+            "mean": mean_val,
+            "max": max_val,
+            "min": min_val,
+            "pass": pass_rates,
+            "atol": max_val,
+        }
 
     pass_cols = [{"label": f"pass@{atol:g}", "width": "fit"} for atol in ATOL_CHECKS]
     cols = log.columns(
@@ -281,41 +302,115 @@ def test_kernel_output_failsafe():
         padding=1,
     )
     cols.info.header()
-    cols.info(
-        "rtn",
-        f"{rtn_mean:.6f}",
-        f"{rtn_max:.6f}",
-        f"{rtn_min:.6f}",
-        f"{rtn_atol:.6f}",
-        *[f"{rtn_pass[atol]:.4f}" for atol in ATOL_CHECKS],
-    )
-    cols.info(
-        "midpoint",
-        f"{mid_mean:.6f}",
-        f"{mid_max:.6f}",
-        f"{mid_min:.6f}",
-        f"{mid_atol:.6f}",
-        *[f"{mid_pass[atol]:.4f}" for atol in ATOL_CHECKS],
-    )
-    cols.info(
-        "mean",
-        f"{mean_mean:.6f}",
-        f"{mean_max:.6f}",
-        f"{mean_min:.6f}",
-        f"{mean_atol:.6f}",
-        *[f"{mean_pass[atol]:.4f}" for atol in ATOL_CHECKS],
-    )
-    cols.info(
-        "stdclip",
-        f"{std_mean:.6f}",
-        f"{std_max:.6f}",
-        f"{std_min:.6f}",
-        f"{std_atol:.6f}",
-        *[f"{std_pass[atol]:.4f}" for atol in ATOL_CHECKS],
-    )
+    for label, _ in variants:
+        metrics = finalized[label]
+        cols.info(
+            label,
+            f"{metrics['mean']:.6f}",
+            f"{metrics['max']:.6f}",
+            f"{metrics['min']:.6f}",
+            f"{metrics['atol']:.6f}",
+            *[f"{metrics['pass'][atol]:.4f}" for atol in ATOL_CHECKS],
+        )
     cols.info.header()
 
-    assert torch.isfinite(torch.tensor([rtn_mean, rtn_max, rtn_min])).all()
-    assert torch.isfinite(torch.tensor([mid_mean, mid_max, mid_min])).all()
-    assert torch.isfinite(torch.tensor([mean_mean, mean_max, mean_min])).all()
-    assert torch.isfinite(torch.tensor([std_mean, std_max, std_min])).all()
+    for label, _ in variants:
+        metrics = finalized[label]
+        assert torch.isfinite(torch.tensor([metrics["mean"], metrics["max"], metrics["min"]])).all()
+
+
+def test_kernel_output_failsafe_mad_sweep():
+    if not os.path.isdir(MODEL_DIR):
+        import pytest
+
+        pytest.skip(f"Model path missing: {MODEL_DIR}")
+
+    if not torch.cuda.is_available():
+        import pytest
+
+        pytest.skip("CUDA required for failsafe kernel output test")
+
+    torch.manual_seed(0)
+
+    device = DEVICE
+    dtype = torch.float16
+    down_proj = _load_down_proj(dtype=dtype, device=device)
+    assert down_proj.weight.device.type == "cuda"
+
+    k_values = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0]
+    variants = [
+        (f"rtn_mad_k{k:g}", FailSafe(
+            strategy=FailSafeStrategy.RTN,
+            threshold=True,
+            smooth=SmoothMAD(k=k),
+        ))
+        for k in k_values
+    ]
+
+    shapes = _select_shapes()
+    qlinears = {
+        label: _quantize_to_torch_linear(_clone_linear(down_proj, device=device), failsafe, device=device)
+        for label, failsafe in variants
+    }
+    for label, qlinear in qlinears.items():
+        assert qlinear.list_buffers()[0].device.type == "cuda", f"{label} buffers not on CUDA"
+
+    total_samples = sum(samples for _, samples in shapes)
+    stats = {label: _init_stats() for label, _ in variants}
+    with torch.inference_mode():
+        for _ in log.pb(total_samples).title("Forward Pass on Random Input (MAD Sweep)"):
+            for dim_0, samples in shapes:
+                for _ in range(samples):
+                    x = torch.randn(
+                        (dim_0, down_proj.in_features),
+                        device=device,
+                        dtype=dtype,
+                    )
+                    assert x.device.type == "cuda"
+                    baseline = down_proj(x)
+                    variant_out = {label: qlinears[label](x) for label, _ in variants}
+                    assert baseline.device.type == "cuda"
+
+                    for label, out in variant_out.items():
+                        assert out.device.type == "cuda"
+                        diff = torch.abs(baseline - out).float()
+                        _update_stats(stats[label], diff)
+
+    finalized = {}
+    for label, _ in variants:
+        mean_val, max_val, min_val, pass_rates = _finalize_stats(stats[label])
+        finalized[label] = {
+            "mean": mean_val,
+            "max": max_val,
+            "min": min_val,
+            "pass": pass_rates,
+            "atol": max_val,
+        }
+
+    pass_cols = [{"label": f"pass@{atol:g}", "width": "fit"} for atol in ATOL_CHECKS]
+    cols = log.columns(
+        cols=[
+            {"label": "variant", "width": "fit"},
+            {"label": "mean_diff", "width": "fit"},
+            {"label": "max_diff", "width": "fit"},
+            {"label": "min_diff", "width": "fit"},
+            {"label": "atol_req", "width": "fit"},
+        ] + pass_cols,
+        padding=1,
+    )
+    cols.info.header()
+    for label, _ in variants:
+        metrics = finalized[label]
+        cols.info(
+            label,
+            f"{metrics['mean']:.6f}",
+            f"{metrics['max']:.6f}",
+            f"{metrics['min']:.6f}",
+            f"{metrics['atol']:.6f}",
+            *[f"{metrics['pass'][atol]:.4f}" for atol in ATOL_CHECKS],
+        )
+    cols.info.header()
+
+    for label, _ in variants:
+        metrics = finalized[label]
+        assert torch.isfinite(torch.tensor([metrics["mean"], metrics["max"], metrics["min"]])).all()

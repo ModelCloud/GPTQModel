@@ -1,9 +1,11 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from torch import nn
 from transformers import AutoModelForImageTextToText
 from transformers.activations import ACT2FN
+
 from ..base import BaseQModel
-from torch import nn
+
 
 class Glm4vTextMLPNew(nn.Module):
     def __init__(self, config, ori_mlp=None):
@@ -25,7 +27,7 @@ class Glm4vTextMLPNew(nn.Module):
             self.gate_proj.weight.data.copy_(gate_w)
             self.up_proj.weight.data.copy_(up_w)
             self.down_proj.weight.data.copy_(ori_mlp.down_proj.weight.data)
-        
+
     def forward(self, hidden_states):
         gate = self.gate_proj(hidden_states)
         up   = self.up_proj(hidden_states)
