@@ -257,12 +257,13 @@ jobs:
           if [ -d "$(pyenv root)/versions/$env_name" ]; then
             echo "env exists, skip"
             pyenv local $env_name
-            pyenv activate $env_name
-          else
+            pyenv uninstall -f $env_name
+          fi
             echo "creating venv..."
             pyenv virtualenv "$python_version" "$env_name"
             pyenv local $env_name
             pyenv activate $env_name
+            pip install uv
             uv pip install torch
           fi
 
