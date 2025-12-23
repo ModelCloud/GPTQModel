@@ -625,6 +625,173 @@ jobs:
           # pip cache purge && uv cache clean
           rm -rf rm -rf ./* .[^.] .??*
 
+
+  xpu:
+    needs:
+      - list-test-files
+      - check-vm
+    runs-on: [ self-hosted, xeon5 ]
+    container:
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_1021
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
+      volumes:
+        - /dev/dri/by-path:/dev/dri/by-path
+        - /monster/ci/models:/monster/data/model
+        - /monster/ci/dataset:/monster/data/model/dataset
+        - /monster/ci/huggingface:/github/home/.cache/huggingface
+        - /monster/ci/pyenv:/opt/pyenv
+        - /monster/ci/dist:/opt/dist
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
+      matrix:
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.xpu-files) }}
+    if: always() && !cancelled() && (github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.xpu-files != '[]'
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
+
+      - name: Print Env
+        run: |
+          python_version=${{ env.PYTHON_VERSION }}
+          if [[ "$python_version" != *"."* ]]; then
+            python_version="${python_version/3/3.}"
+          fi
+          test_name=${{ matrix.test_script }}
+          test_name=${test_name//\//_}
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
+         
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            echo "env exists, skip"
+            pyenv local $env_name
+            pyenv activate $env_name
+          else
+            echo "creating venv..."
+            pyenv virtualenv "$python_version" "$env_name"
+            pyenv local $env_name
+            pyenv activate $env_name
+#            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+            uv pip install torch
+          fi
+
+          pyenv local $env_name
+          pyenv activate $env_name
+
+          echo "::group::pyenv versions"
+          pyenv versions
+          echo "::endgroup::"
+          
+          echo "== python =="
+          python --version
+
+          echo "== torch =="
+          pip show torch
+
+          echo "::group::pip list"
+          pip list
+          echo "::endgroup::"
+
+      - name: Download wheel from local
+        continue-on-error: true
+        run: |
+          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
+          [ -d $DIR ] || exit 1
+          echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
+
+          ls -ahl $DIR
+          
+          mkdir dist || true
+
+          cp $DIR/*.whl dist/
+
+      - name: Download artifact from github
+        if: env.WHL_DOWNLOADED == '' && !cancelled()
+        uses: actions/download-artifact@v7
+        with:
+          name: whl
+          path: dist
+          run-id: ${{ needs.check-vm.outputs.run_id }}
+
+      - name: Install wheel
+        run: |
+          uv pip uninstall gptqmodel
+          uv pip install -U transformers tabulate
+
+          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
+            uv pip install intel_extension_for_pytorch -U
+          fi
+
+          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
+            echo "===== switching to xpu env ====="
+            source /etc/profile.d/pyenv.sh && pyenv activate xpu
+          fi
+
+          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
+            uv pip install peft trl wandb
+          fi
+
+          if [[ "${{ matrix.test_script }}" == *ipex* ]] && [[ "${{ matrix.test_script }}" != *xpu* ]]; then
+            uv pip uninstall torchvision torch flash_attn # fix ipex can't be used with torch+cu126
+            uv pip install torchvision torch
+            uv pip install -U intel_extension_for_pytorch -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          fi
+
+          uv pip install git+https://github.com/ModelCloud/Tokenicer -U
+
+          # ipex doesn't need to compile kernels. xpu can't install cuda package
+          if [[ "${{ matrix.test_script }}" != *ipex* && "${{ matrix.test_script }}" != *xpu* ]]; then
+            echo "===== install dist/whl ====="
+            uv pip install dist/*.whl -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          else
+            echo "===== install with local files for xpu env ====="
+            export CUDA_VISIBLE_DEVICES=""
+            unset TORCH_CUDA_ARCH_LIST
+            uv pip install . --no-build-isolation
+          fi
+
+          echo "===== uninstall torchao ====="
+          uv pip uninstall torchao
+
+          echo "== pip list =="
+          pip list
+
+      - name: Run tests
+        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
+        run: |
+          if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
+            export CUDA_VISIBLE_DEVICES=""
+          fi
+          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
+            export CUDA_VISIBLE_DEVICES=""
+            pip uninstall vllm -y
+            pip list
+          fi
+
+          start_time=$(date +%s)
+          pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
+          execution_time=$(( $(date +%s) - start_time ))
+          echo "$((execution_time / 60))m $((execution_time % 60))s"
+          curl "http://$XEON5/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
+
+      - name: Clean cache
+        if: always()
+        run: |
+          # rm ~/.cache/evalplus/*pkl || true
+          # pip cache purge && uv cache clean
+          rm -rf rm -rf ./* .[^.] .??*
+
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
     if: always() && inputs['exclusive-gpu'] &&  !cancelled()
