@@ -12,6 +12,7 @@ import logging
 import sys
 import threading
 import time
+import atexit
 from contextlib import contextmanager
 from enum import Enum
 from typing import Callable, Dict, List, Optional
@@ -32,6 +33,26 @@ else:
         import tty
     except ImportError:
         log.warning("termios, tty, or select not available. Pause/resume from keyboard will not work.")
+
+
+_original_termios_settings = None
+
+
+def _restore_terminal_settings_on_exit():
+    """Restore terminal settings on exit."""
+    global _original_termios_settings
+    if _original_termios_settings:
+        try:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _original_termios_settings)
+            _original_termios_settings = None
+            log.debug("Terminal settings restored on exit.")
+        except Exception as e:
+            log.warning(f"Failed to restore terminal settings on exit: {e}")
+
+
+if not _IS_WINDOWS and 'termios' in sys.modules:
+    if sys.stdin.isatty():
+        atexit.register(_restore_terminal_settings_on_exit)
 
 
 class PauseResumeState(Enum):
@@ -177,9 +198,12 @@ class PauseResumeController:
                 break
 
     def _posix_stdin_listener(self):
+        global _original_termios_settings
         old_settings = None
         try:
             old_settings = termios.tcgetattr(sys.stdin)
+            if _original_termios_settings is None:
+                _original_termios_settings = old_settings
             tty.setcbreak(sys.stdin.fileno())
 
             while not self._stop_event.is_set():
