@@ -12,12 +12,15 @@
     <a href="https://github.com/ModelCloud/GPTQModel/blob/main/LICENSE"><img src="https://img.shields.io/pypi/l/gptqmodel"></a>
     <a href="https://huggingface.co/modelcloud/"><img src="https://img.shields.io/badge/🤗%20Hugging%20Face-ModelCloud-%23ff8811.svg"></a>
     <a href="https://huggingface.co/models?search=gptq">
-        <img alt="Huggingface - Models" src="https://img.shields.io/badge/🤗_5000+_models_available-8A2BE2">
+        <img alt="Huggingface - Models" src="https://img.shields.io/badge/🤗_6000+_models_available-8A2BE2">
+    </a>
+    <a href="https://huggingface.co/models?search=awq">
+        <img alt="Huggingface - Models" src="https://img.shields.io/badge/🤗_8000+_models_available-8A2BE2">
     </a>
 </p>
 
 ## Latest News
-* 12/22/2025 5.6.99-dev: New/refractored `failsafe` strategy, now enabled by default, to address un-even routing of MoE module routing and quantization issue. Another pending PR will be merged soon to address the same MoE routing issue using a different, brue-force, approach. 
+* 12/23/2025 5.6.99-dev: 🎉 New `FailSafe` config and `FailSafeStrategy`, auto enabled by default, to address un-even routing of MoE experts resulting quantization issue of some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce outliers impact of `FailSafe` quantization using `RTN` by default. Different `FaileSafeStategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
 * 12/17/2025 [5.6.12 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.12): Fixed `uv` compat. Both `uv` and `pip` install will now show ui progress for external wheel/depend downloads.
 * 12/16/2025 [5.6.10 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.10): Fixed `MacOS` and `AWQMarlin` kernel loading import regressions. Resolved most `multi-arch` compile issue on `Ubuntu`, `Arch`, `RedHat` and other distros.
 * 12/15/2025 [5.6.6 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.6): Fixed `multi-arch` build issues and `Tritonv2` kernel launch bug on multi-gpus. 
