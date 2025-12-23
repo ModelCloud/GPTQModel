@@ -509,17 +509,6 @@ jobs:
           # pip cache purge && uv cache clean
           rm -rf rm -rf ./* .[^.] .??*
 
-  show-statistics:
-    runs-on: [ self-hosted, xeon5 ]
-    if: always() && inputs['exclusive-gpu'] &&  !cancelled()
-    container:
-      image: modelcloud/gptqmodel:alpine-ci-v1
-    needs:
-      - torch
-    steps:
-      - name: Print statistics
-        run: curl "http://$RUNNER/gpu/get_vram_logs?id=${{ github.run_id }}"
-
   m4:
     runs-on: [ self-hosted, m4 ]
     needs:
