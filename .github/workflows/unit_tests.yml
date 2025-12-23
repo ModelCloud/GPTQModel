@@ -191,21 +191,13 @@ jobs:
           echo "MLX Test files: $mlx_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
-  system:
-    runs-on: ubuntu-latest
-    needs:
-      - list-test-files
-      - check-vm
-    steps:
-      - name: Print env Codes
-        run: |
-          echo ${{ needs.list-test-files.outputs.xpu-files }}
-
   xpu:
     needs:
       - list-test-files
       - check-vm
     runs-on: [ self-hosted, xeon5 ]
+    env:
+      PYENV_ROOT: /opt/pyenv
     container:
       image: intel/intel-extension-for-pytorch:2.8.10-xpu
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
@@ -239,7 +231,19 @@ jobs:
           git checkout pr-${PR_NUMBER}
 
       - name: Print System
-        run: xpu-smi
+        run: |
+          xpu-smi discovery
+          
+          tee /etc/profile.d/pyenv.sh > /dev/null <<'EOF'
+            export PYENV_ROOT="/usr/local/pyenv"
+            export PATH="$PYENV_ROOT/bin:$PATH"
+            
+            eval "$(pyenv init -)"
+            eval "$(pyenv init --path)"
+            eval "$(pyenv virtualenv-init -)"
+          EOF
+          chmod 644 /etc/profile.d/pyenv.sh
+          source /etc/profile.d/pyenv.sh
 
       - name: Print Env
         run: |
