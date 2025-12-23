@@ -20,7 +20,7 @@ MODEL_DIR = "/monster/data/model/Llama-3.2-1B-Instruct"
 log = LogBar.shared()
 
 DEVICE = torch.device("cuda:0")
-ATOL_CHECK = float(os.getenv("GPTQMODEL_FAILSAFE_ATOL", "1e-3"))
+ATOL_CHECKS = [0.001, 0.005, 0.01, 0.05, 0.1]
 
 
 def _load_down_proj(dtype: torch.dtype, device: torch.device) -> torch.nn.Module:
@@ -112,25 +112,34 @@ def _clone_linear(layer: torch.nn.Module, device: torch.device) -> torch.nn.Modu
 
 
 def _init_stats():
-    return {"sum": 0.0, "count": 0, "max": None, "min": None, "pass": 0}
+    return {
+        "sum": 0.0,
+        "count": 0,
+        "max": None,
+        "min": None,
+        "passes": {atol: 0 for atol in ATOL_CHECKS},
+    }
 
 
-def _update_stats(stats, diff: torch.Tensor, atol: float):
+def _update_stats(stats, diff: torch.Tensor):
     diff_sum = diff.sum().item()
     diff_max = diff.max().item()
     diff_min = diff.min().item()
-    pass_count = torch.count_nonzero(diff <= atol).item()
+    for atol in ATOL_CHECKS:
+        stats["passes"][atol] += torch.count_nonzero(diff <= atol).item()
     stats["sum"] += diff_sum
     stats["count"] += diff.numel()
     stats["max"] = diff_max if stats["max"] is None else max(stats["max"], diff_max)
     stats["min"] = diff_min if stats["min"] is None else min(stats["min"], diff_min)
-    stats["pass"] += pass_count
 
 
 def _finalize_stats(stats):
     mean = stats["sum"] / max(stats["count"], 1)
-    pass_rate = stats["pass"] / max(stats["count"], 1)
-    return mean, stats["max"] or 0.0, stats["min"] or 0.0, pass_rate
+    pass_rates = {
+        atol: stats["passes"][atol] / max(stats["count"], 1)
+        for atol in ATOL_CHECKS
+    }
+    return mean, stats["max"] or 0.0, stats["min"] or 0.0, pass_rates
 
 
 def _parse_shapes(expr: str):
@@ -246,10 +255,10 @@ def test_kernel_output_failsafe():
                     mid_diff = torch.abs(baseline - mid_out).float()
                     mean_diff = torch.abs(baseline - mean_out).float()
                     std_diff = torch.abs(baseline - std_out).float()
-                    _update_stats(rtn_stats, rtn_diff, ATOL_CHECK)
-                    _update_stats(mid_stats, mid_diff, ATOL_CHECK)
-                    _update_stats(mean_stats, mean_diff, ATOL_CHECK)
-                    _update_stats(std_stats, std_diff, ATOL_CHECK)
+                    _update_stats(rtn_stats, rtn_diff)
+                    _update_stats(mid_stats, mid_diff)
+                    _update_stats(mean_stats, mean_diff)
+                    _update_stats(std_stats, std_diff)
 
     rtn_mean, rtn_max, rtn_min, rtn_pass = _finalize_stats(rtn_stats)
     mid_mean, mid_max, mid_min, mid_pass = _finalize_stats(mid_stats)
@@ -260,6 +269,7 @@ def test_kernel_output_failsafe():
     mean_atol = mean_max
     std_atol = std_max
 
+    pass_cols = [{"label": f"pass@{atol:g}", "width": "fit"} for atol in ATOL_CHECKS]
     cols = log.columns(
         cols=[
             {"label": "variant", "width": "fit"},
@@ -267,15 +277,42 @@ def test_kernel_output_failsafe():
             {"label": "max_diff", "width": "fit"},
             {"label": "min_diff", "width": "fit"},
             {"label": "atol_req", "width": "fit"},
-            {"label": f"pass@{ATOL_CHECK:g}", "width": "fit"},
-        ],
+        ] + pass_cols,
         padding=1,
     )
     cols.info.header()
-    cols.info("rtn", f"{rtn_mean:.6f}", f"{rtn_max:.6f}", f"{rtn_min:.6f}", f"{rtn_atol:.6f}", f"{rtn_pass:.4f}")
-    cols.info("midpoint", f"{mid_mean:.6f}", f"{mid_max:.6f}", f"{mid_min:.6f}", f"{mid_atol:.6f}", f"{mid_pass:.4f}")
-    cols.info("mean", f"{mean_mean:.6f}", f"{mean_max:.6f}", f"{mean_min:.6f}", f"{mean_atol:.6f}", f"{mean_pass:.4f}")
-    cols.info("stdclip", f"{std_mean:.6f}", f"{std_max:.6f}", f"{std_min:.6f}", f"{std_atol:.6f}", f"{std_pass:.4f}")
+    cols.info(
+        "rtn",
+        f"{rtn_mean:.6f}",
+        f"{rtn_max:.6f}",
+        f"{rtn_min:.6f}",
+        f"{rtn_atol:.6f}",
+        *[f"{rtn_pass[atol]:.4f}" for atol in ATOL_CHECKS],
+    )
+    cols.info(
+        "midpoint",
+        f"{mid_mean:.6f}",
+        f"{mid_max:.6f}",
+        f"{mid_min:.6f}",
+        f"{mid_atol:.6f}",
+        *[f"{mid_pass[atol]:.4f}" for atol in ATOL_CHECKS],
+    )
+    cols.info(
+        "mean",
+        f"{mean_mean:.6f}",
+        f"{mean_max:.6f}",
+        f"{mean_min:.6f}",
+        f"{mean_atol:.6f}",
+        *[f"{mean_pass[atol]:.4f}" for atol in ATOL_CHECKS],
+    )
+    cols.info(
+        "stdclip",
+        f"{std_mean:.6f}",
+        f"{std_max:.6f}",
+        f"{std_min:.6f}",
+        f"{std_atol:.6f}",
+        *[f"{std_pass[atol]:.4f}" for atol in ATOL_CHECKS],
+    )
     cols.info.header()
 
     assert torch.isfinite(torch.tensor([rtn_mean, rtn_max, rtn_min])).all()
