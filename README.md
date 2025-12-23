@@ -20,7 +20,7 @@
 </p>
 
 ## Latest News
-* 12/23/2025 5.6.99-dev: 🎉 New `FailSafe` config and `FailSafeStrategy`, now enabled by default, to address un-even routing of MoE experts resulting quantization issue of some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce outliers impact of `FailSafe` quantization using `RTN` by default. Different `FaileSafeStategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
+* 12/23/2025 5.6.99-dev: 🎉 New `FailSafe` config and `FailSafeStrategy`, auto enabled by default, to address un-even routing of MoE experts resulting quantization issue of some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce outliers impact of `FailSafe` quantization using `RTN` by default. Different `FaileSafeStategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
 * 12/17/2025 [5.6.12 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.12): Fixed `uv` compat. Both `uv` and `pip` install will now show ui progress for external wheel/depend downloads.
 * 12/16/2025 [5.6.10 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.10): Fixed `MacOS` and `AWQMarlin` kernel loading import regressions. Resolved most `multi-arch` compile issue on `Ubuntu`, `Arch`, `RedHat` and other distros.
 * 12/15/2025 [5.6.6 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.6): Fixed `multi-arch` build issues and `Tritonv2` kernel launch bug on multi-gpus. 
