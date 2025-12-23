@@ -361,7 +361,7 @@ jobs:
       - check-vm
     runs-on: [ self-hosted, xeon5 ]
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_1021
+      image: intel/intel-extension-for-pytorch:2.8.10-xpu
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
