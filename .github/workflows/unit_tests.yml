@@ -201,7 +201,14 @@ jobs:
       UV_INDEX_URL: ''
     container:
       image: intel/intel-extension-for-pytorch:2.8.10-xpu
-      options: --device /dev/dri --ipc=host --gpus all
+      options:
+        --privileged
+        --device /dev/dri
+        --ipc=host
+        --gpus all
+        --device /dev/mem:/dev/mem \
+        $(ls /dev/|grep mei|sed 's/^/--device \/dev\//g'|tr "\n" " ") \
+        $(ls /dev/|grep ipmi|sed 's/^/--device \/dev\//g'|tr "\n" " ") \
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /monster/ci/models:/monster/data/model
