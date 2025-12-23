@@ -621,6 +621,50 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
+        import sys
+        
+        old_hook = sys.excepthook
+
+        # TODO: this is workaround for the overwritten of the last line of the trace
+        # on quantization crash, originally caused by logbar progress bar (probably)
+        def my_hook(type, value, tb):
+            old_hook(type, value, tb)
+            print()
+
+        sys.excepthook = my_hook
+        
+        try:
+            return self.quantize_core(
+                calibration=calibration,
+                calibration_concat_size=calibration_concat_size,
+                calibration_sort=calibration_sort,
+                batch_size=batch_size,
+                tokenizer=tokenizer,
+                backend=backend,
+                adapter=adapter,
+                adapter_calibration_dataset=adapter_calibration_dataset,
+                calibration_data_min_length=calibration_data_min_length,
+                calibration_concat_separator=calibration_concat_separator,
+            )
+        finally:
+            sys.excepthook = old_hook
+
+    def quantize_core(
+        self,
+        calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
+        calibration_concat_size: Optional[int] = None,
+        calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle
+        batch_size: int = 1,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+        # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
+        adapter: Adapter = None,
+        adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
+        # minimum length of calibration data, default is 10
+        calibration_data_min_length: int = 10,
+        calibration_concat_separator: Optional[str] = None,
+    ) -> Dict[str, List[Dict[str, str]]]:
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
