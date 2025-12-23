@@ -265,6 +265,7 @@ jobs:
             pyenv local $env_name
             pyenv activate $env_name
             pip install uv
+            uv pip install pytest build setuptools pip
             uv pip install torch
           fi
 
