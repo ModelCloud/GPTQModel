@@ -244,6 +244,11 @@ jobs:
           EOF
           chmod 644 /etc/profile.d/pyenv.sh
           source /etc/profile.d/pyenv.sh
+          
+          echo "echo $UV_INDEX_URL"
+          echo $UV_INDEX_URL
+          echo "echo $UV_INDEX_URL"
+          echo $UV_INDEX_URL
 
       - name: Print Env
         run: |
