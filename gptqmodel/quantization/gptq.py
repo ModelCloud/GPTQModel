@@ -625,7 +625,8 @@ class GPTQ:
             end = min(start + effective_group_size, self.columns)
             block = W[:, start:end]
 
-            if strategy in (FailSafeStrategy.AUTO, FailSafeStrategy.MIDPOINT):
+            # TODO FIXME. all non-RTN has packing bug with scale/zeros
+            if strategy == FailSafeStrategy.MIDPOINT:
                 w_min = block.min(dim=1, keepdim=True).values
                 w_max = block.max(dim=1, keepdim=True).values
                 mid = (w_max + w_min) / 2.0
@@ -853,8 +854,10 @@ class GPTQ:
                 f"Using `{resolved_strategy.value}` failsafe quantization (observed {self.nsamples} samples, threshold={threshold_text}{threshold_info}, max_total={self.expected_nsamples})."
             )
             self.H = self.create_H(target_device=target_device)
-            if resolved_strategy != FailSafeStrategy.RTN:
-                return self._failsafe_quantize(resolved_strategy, blocksize)
+
+            # TODO FIXME: regression src?
+            #if resolved_strategy != FailSafeStrategy.RTN:
+            #    return self._failsafe_quantize(resolved_strategy, blocksize)
         else:
             use_hessian = True
             self.finalize_hessian(target_device=target_device)

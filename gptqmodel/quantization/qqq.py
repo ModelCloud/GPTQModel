@@ -288,7 +288,7 @@ class QQQ:
             end = min(start + group_size, self.columns)
             block = W[:, start:end]
 
-            if strategy in (FailSafeStrategy.AUTO, FailSafeStrategy.MIDPOINT):
+            if strategy == FailSafeStrategy.MIDPOINT:
                 w_min = block.min(dim=1, keepdim=True).values
                 w_max = block.max(dim=1, keepdim=True).values
                 mid = (w_max + w_min) / 2.0
