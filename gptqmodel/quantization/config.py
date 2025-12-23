@@ -82,9 +82,25 @@ class METHOD(str, Enum):
     AWQ = "awq"
 
 
-class VRAMStrategy(str, Enum):
+class VramStrategy(str, Enum):
     EXCLUSIVE = "exclusive"
     BALANCED = "balanced"
+
+
+class FailSafeStrategy(str, Enum):
+    AUTO = "auto"
+    RTN = "rtn" # round to nearest
+    MIDPOINT = "midpoint"
+    MEAN = "mean"
+    STDCLIP = "stdclip"
+
+
+@dataclass
+class FailSafe:
+    strategy: FailSafeStrategy = FailSafeStrategy.AUTO # enable failsafe by default due to moe routing behavior breaking calibration based quantization
+    # int/float = if captured module fwd tokens is less than value, trigger strategy
+    # string = if string is int/float followed by %, then if captured module fwd tokens is less than value in percentage relative to calibration, trigger strategy
+    threshold: int | float | str = "0.5%" # if less than 0.5% of calibration reaches module (think moe) then we trigger per-module failsafe quantization
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
@@ -243,8 +259,9 @@ class QuantizeConfig():
     # deprecated: only used for compat
     is_marlin_format: bool = False
 
-    # use mock quantization to quantize module so the gptq process can continue and not fail
-    fail_safe: bool = field(default=False)
+    # gptq/awq only:
+    # if calibration is insufficient, fallback to a simple quantization strategy; encapsulated in FailSafe config
+    failsafe: FailSafe = field(default_factory=FailSafe)
 
     # gptaq only:
     gptaq: bool = field(default=False)
@@ -264,7 +281,7 @@ class QuantizeConfig():
     hessian_use_bfloat16_staging: bool = field(default=False, metadata={"help": "Stage Hessian chunks in bfloat16 when supported"})
 
     # VRAM allocation strategy for MoE-heavy subsets
-    vram_strategy: VRAMStrategy = field(default=VRAMStrategy.EXCLUSIVE)
+    vram_strategy: VramStrategy = field(default=VramStrategy.EXCLUSIVE)
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -314,6 +331,28 @@ class QuantizeConfig():
         if self.format not in valid_formats:
             raise ValueError(
                 f"QuantizeConfig: checkpoint `format` used is {self.format}, and the quantization method is {self.quant_method}. "
+            )
+
+        # normalize failsafe config
+        if isinstance(self.failsafe, dict):
+            strategy = self.failsafe.get("strategy", FailSafeStrategy.AUTO)
+            threshold = self.failsafe.get("threshold", "1.0%")
+            self.failsafe = FailSafe(strategy=strategy, threshold=threshold)
+        elif isinstance(self.failsafe, (str, int, float)):
+            self.failsafe = FailSafe(strategy=FailSafeStrategy.AUTO, threshold=self.failsafe)
+        elif not isinstance(self.failsafe, FailSafe):
+            raise ValueError("QuantizeConfig: `failsafe` must be a FailSafe config, dict, string, int, or float.")
+
+        if isinstance(self.failsafe.strategy, str):
+            try:
+                self.failsafe.strategy = FailSafeStrategy(self.failsafe.strategy.lower())
+            except ValueError as exc:
+                raise ValueError(
+                    f"QuantizeConfig: `failsafe.strategy` must be one of {[v.value for v in FailSafeStrategy]}."
+                ) from exc
+        elif not isinstance(self.failsafe.strategy, FailSafeStrategy):
+            raise ValueError(
+                f"QuantizeConfig: `failsafe.strategy` must be one of {[v.value for v in FailSafeStrategy]}."
             )
 
         if self.bits not in fields_info[0].metadata["choices"]:
@@ -401,14 +440,14 @@ class QuantizeConfig():
 
         if isinstance(self.vram_strategy, str):
             try:
-                self.vram_strategy = VRAMStrategy(self.vram_strategy.lower())
+                self.vram_strategy = VramStrategy(self.vram_strategy.lower())
             except ValueError as exc:
                 raise ValueError(
-                    f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VRAMStrategy]}."
+                    f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VramStrategy]}."
                 ) from exc
-        elif not isinstance(self.vram_strategy, VRAMStrategy):
+        elif not isinstance(self.vram_strategy, VramStrategy):
             raise ValueError(
-                f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VRAMStrategy]}."
+                f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VramStrategy]}."
             )
 
     def extension_set(self, key: str, value: Any):
@@ -559,6 +598,8 @@ class QuantizeConfig():
                     normalized[QUANT_METHOD_FIELD] = val
             elif key == FORMAT_FIELD_CODE:
                 normalized[key] = val.lower() if isinstance(val, str) else val
+            elif key == "failsafe":
+                normalized[key] = val
             elif key in field_names:
                 normalized[key] = val
             else:
@@ -655,6 +696,10 @@ class QuantizeConfig():
             "desc_act": self.desc_act,
             "sym": self.sym,
             "lm_head": self.lm_head,
+            "failsafe": {
+                "strategy": self.failsafe.strategy.value if isinstance(self.failsafe.strategy, FailSafeStrategy) else self.failsafe.strategy,
+                "threshold": self.failsafe.threshold,
+            },
             QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_CHECKPOINT: self.format,
             # torch.dtype convert to string

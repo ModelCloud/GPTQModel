@@ -5,7 +5,7 @@
 
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import VRAMStrategy
+from gptqmodel.quantization.config import VramStrategy
 from gptqmodel.utils.eval import EVAL
 
 
@@ -26,7 +26,7 @@ class TestQwen3Next(ModelTest):
         },
     }
 
-    VRAM_STRATEGY = VRAMStrategy.BALANCED
+    VRAM_STRATEGY = VramStrategy.BALANCED
     # DATASET_SIZE = 2048
     # TRUST_REMOTE_CODE = True
     # APPLY_CHAT_TEMPLATE = True

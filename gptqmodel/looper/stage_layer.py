@@ -38,7 +38,7 @@ def run_layer_stage(
     layers: List[torch.nn.Module],
     layer_modules: List[List[str]],
     layers_prefix: Optional[str],
-    fail_safe: bool,
+    failsafe,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
     pb,
     layer_count: int,
@@ -62,7 +62,7 @@ def run_layer_stage(
             layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
             module = layers[layer_index]
 
-        pb.title(layer_title).subtitle("").draw()
+        looper.pause_controller.register_and_draw_progress_bar(pb, title=layer_title, subtitle="")
 
         if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
             # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
@@ -156,7 +156,7 @@ def run_layer_stage(
                     subset_index=index,
                     subset_total=subset_total,
                     full=full,
-                    fail_safe=fail_safe,
+                    failsafe=failsafe,
                     shared_kv_cache_dict=shared_kv_cache_dict,
                     pb=pb,
                     log=log,
@@ -310,8 +310,7 @@ def run_layer_stage(
                 processor.clear_cache_data()
                 processor.receive_layer_inputs(layer_outputs)
                 layer_inputs = processor.inputs_cache.layer_inputs
-
-                pb.title(layer_title).subtitle("").draw()
+                looper.pause_controller.register_and_draw_progress_bar(pb, title=layer_title, subtitle="")
 
             if p_index == len(looper.processors) - 1:
                 torch_sync()
@@ -521,3 +520,10 @@ def run_layer_stage(
                         submodule_finalized=True,
                         raise_in_place=True,
                     )
+
+        # Check for pause after completing each layer
+        layer_info = f"layer {layer_index}" if not is_lm_head_module else "lm_head"
+        looper.pause_controller.check_pause_point(f"after {layer_info}")
+            
+        # Unregister progress bar when moving to next layer
+        looper.pause_controller.unregister_progress_bar(pb)

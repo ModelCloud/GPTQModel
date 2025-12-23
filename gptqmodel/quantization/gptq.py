@@ -21,6 +21,7 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
+from ..quantization.config import FailSafeStrategy
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
@@ -197,7 +198,8 @@ class GPTQ:
         # fwd counter
         self.fwd_counter = 0
 
-        self.fail_safe = False
+        self.failsafe = self.qcfg.failsafe
+        self.expected_nsamples: Optional[float] = None
 
         self.H: Optional[torch.Tensor] = None
 
@@ -599,8 +601,105 @@ class GPTQ:
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
         self.materialize_global_hessian(target_device=target_device)
         if self.H is None:
-            self.H = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=self._select_hessian_target_device(target_device))
+            self.H = self.create_H(target_device)
         return self.H
+
+    def create_H(self, target_device):
+        return torch.zeros((self.columns, self.columns), dtype=torch.float32,
+                           device=self._select_hessian_target_device(target_device))
+
+    def _failsafe_quantize(self, strategy: FailSafeStrategy, blocksize: int):
+        """Apply a lightweight quantization fallback using the requested strategy."""
+        maxq = 2 ** self.qcfg.bits - 1
+        sigma = 3.0
+        effective_group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
+        start_time = time.time()
+
+        target_device = self.H.device if self.H is not None else self.module.weight.device
+        W = self.clone_module(device=target_device)
+        Q = torch.empty_like(W)
+        scale_chunks = []
+        zero_chunks = []
+
+        for start in range(0, self.columns, effective_group_size):
+            end = min(start + effective_group_size, self.columns)
+            block = W[:, start:end]
+
+            if strategy in (FailSafeStrategy.AUTO, FailSafeStrategy.MIDPOINT):
+                w_min = block.min(dim=1, keepdim=True).values
+                w_max = block.max(dim=1, keepdim=True).values
+                mid = (w_max + w_min) / 2.0
+                scale = torch.clamp((w_max - w_min) / maxq, min=1e-8)
+                zero = torch.full_like(scale, maxq / 2.0)
+                q = torch.round((block - mid) / scale + zero)
+                q = torch.clamp(q, 0, maxq)
+                dequant = (q - zero) * scale + mid
+            elif strategy == FailSafeStrategy.MEAN:
+                mean = block.mean(dim=1, keepdim=True)
+                max_dev = torch.max((block - mean).abs(), dim=1, keepdim=True).values
+                max_dev = torch.clamp(max_dev, min=1e-8)
+                scale = (2 * max_dev) / maxq
+                zero = torch.full_like(scale, maxq / 2.0)
+                q = torch.round((block - mean) / scale + zero)
+                q = torch.clamp(q, 0, maxq)
+                dequant = (q - zero) * scale + mean
+            elif strategy == FailSafeStrategy.STDCLIP:
+                mean = block.mean(dim=1, keepdim=True)
+                std = block.std(dim=1, keepdim=True, unbiased=False)
+                std = torch.clamp(std, min=1e-8)
+                lo = mean - sigma * std
+                hi = mean + sigma * std
+                scale = torch.clamp((hi - lo) / maxq, min=1e-8)
+                zero = torch.round(-lo / scale)
+                q = torch.round(block / scale + zero)
+                q = torch.clamp(q, 0, maxq)
+                dequant = (q - zero) * scale
+            else:
+                self.quantizer.find_params(block, weight=True)
+                dequant = self.quantizer.quantize(block)
+                scale = self.quantizer.scale
+                zero = self.quantizer.zero
+
+            Q[:, start:end] = dequant
+
+            scale_block = scale if scale.dim() > 1 else scale.unsqueeze(1)
+            zero_block = zero if zero.dim() > 1 else zero.unsqueeze(1)
+            if scale_block.shape[1] > 1:
+                scale_block = scale_block.mean(dim=1, keepdim=True)
+            if zero_block.shape[1] > 1:
+                zero_block = zero_block.mean(dim=1, keepdim=True)
+            scale_chunks.append(scale_block)
+            zero_chunks.append(zero_block)
+
+        scale = torch.cat(scale_chunks, dim=1)
+        zero = torch.cat(zero_chunks, dim=1)
+
+        if self._tp_pad_cols:
+            valid_cols = self._original_columns
+            Q = Q[:, :valid_cols]
+            scale = self.truncate_last_dim(scale, valid_cols)
+            zero = self.truncate_last_dim(zero, valid_cols)
+        else:
+            valid_cols = self.columns
+
+        group_size = effective_group_size if effective_group_size != -1 else self.columns
+        g_idx = torch.arange(valid_cols, device=Q.device, dtype=torch.int32) // group_size
+
+        if isinstance(self.module, transformers.Conv1D):
+            Q = Q.t()
+
+        if Q.shape != self.module.weight.shape:
+            Q = Q.reshape(self.module.weight.shape).to(self.module.weight.dtype)
+        else:
+            Q = Q.to(self.module.weight.dtype)
+
+        Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
+        duration = time.time() - start_time
+        avg_loss = f"{strategy.value} failsafe"
+        damp = 0.0
+
+        self.H = None
+        return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
 
     # FIXME, optimum needs fasterquant, we need to remove it
     def fasterquant(
@@ -734,7 +833,31 @@ class GPTQ:
         start = time.time()
 
         target_device = getattr(self.module, "target_device", None)
-        self.finalize_hessian(target_device=target_device)
+        from ..utils.failsafe import resolve_failsafe_strategy, resolve_threshold, should_use_failsafe
+
+        resolved_strategy = resolve_failsafe_strategy(self.failsafe)
+        fallback_requested = should_use_failsafe(
+            self.failsafe,
+            float(self.nsamples),
+            self.expected_nsamples,
+        )
+        threshold_raw, is_percent = resolve_threshold(self.failsafe, self.expected_nsamples)
+        failsafe_configured = threshold_raw is not None
+
+        if fallback_requested:
+            use_hessian = False
+            threshold_text = str(getattr(self.failsafe, "threshold", None))
+            threshold_info = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
+            log.warn(
+                f"Quantization: Module `{self.name}` -> "
+                f"Using `{resolved_strategy.value}` failsafe quantization (observed {self.nsamples} samples, threshold={threshold_text}{threshold_info}, max_total={self.expected_nsamples})."
+            )
+            self.H = self.create_H(target_device=target_device)
+            if resolved_strategy != FailSafeStrategy.RTN:
+                return self._failsafe_quantize(resolved_strategy, blocksize)
+        else:
+            use_hessian = True
+            self.finalize_hessian(target_device=target_device)
 
         # Temporarily disable torch.compile due to compatibility issues with torch 2.8
         # Will re-enable once the issue is fixed
@@ -764,9 +887,10 @@ class GPTQ:
 
         # H = self.H.to(device=self.H.device)
 
-        dead = torch.diag(self.H) == 0
-        self.H[dead, dead] = 1
-        W[:, dead] = 0
+        if use_hessian:
+            dead = torch.diag(self.H) == 0
+            self.H[dead, dead] = 1
+            W[:, dead] = 0
 
         # g_idx = []
         scale = []
@@ -785,13 +909,13 @@ class GPTQ:
                 zero.append(quantizer.zero)
                 groups.append(quantizer)
 
-        if self.qcfg.desc_act:
+        if self.qcfg.desc_act and use_hessian:
             perm = torch.argsort(torch.diag(self.H), descending=True)
             W = W[:, perm]
             self.H = self.H[perm][:, perm]
             invperm = torch.argsort(perm)
 
-        elif self.qcfg.act_group_aware:
+        elif self.qcfg.act_group_aware and use_hessian:
             diag_h = torch.diag(self.H)
             local_perms, local_values = compute_local_perms(
                 diag_h, self.qcfg.group_size, return_values=True
@@ -809,10 +933,13 @@ class GPTQ:
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
-        Hinv, damp = self.hessian_inverse(self.H)
+        if use_hessian:
+            Hinv, damp = self.hessian_inverse(self.H)
+        else:
+            Hinv, damp = None, 0.0
 
         # Use simplified loop when mock_quantization is active
-        if self.qcfg.mock_quantization or (self.fail_safe and self.fwd_counter == 0):
+        if self.qcfg.mock_quantization:
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
@@ -911,14 +1038,20 @@ class GPTQ:
                 Q[:, i1:i2] = Q1
         else:
             # Original heavy loop for normal quantization
-            for i1 in range(0, self.columns, blocksize):
-                i2 = min(i1 + blocksize, self.columns)
+            effective_block = blocksize
+            if Hinv is None and self.qcfg.group_size and self.qcfg.group_size > 0:
+                # Align RTN fallback work chunks to group boundaries to avoid
+                # redundant quantizer reconfiguration across partial groups.
+                effective_block = self.qcfg.group_size
+
+            for i1 in range(0, self.columns, effective_block):
+                i2 = min(i1 + effective_block, self.columns)
                 count = i2 - i1
 
                 W1 = W[:, i1:i2].clone()
                 Q1 = torch.zeros_like(W1)
-                Err1 = torch.zeros_like(W1)
-                Losses1 = torch.zeros_like(W1)
+                Err1 = torch.zeros_like(W1) if Hinv is not None else None
+                Losses1 = torch.zeros_like(W1) if Hinv is not None else None
 
                 if Hinv is not None:
                     Hinv1 = Hinv[i1:i2, i1:i2]
@@ -967,20 +1100,20 @@ class GPTQ:
 
                 if math.isnan(avg_loss):
                     print("Losses sum item:", torch.sum(Losses).item())
-                    if self.fail_safe:
+                    if failsafe_configured:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
                         self.qcfg.mock_quantization = True
                         return self.quantize(blocksize=blocksize)
                     else:
-                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable fail_safe=True")
+                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable failsafe=True")
             else:
-                if self.fail_safe:
+                if failsafe_configured:
                     log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
                 else:
                     log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
-                avg_loss = 999999999
+                avg_loss = f"{resolved_strategy.value} failsafe" if failsafe_configured else 999999999
         else:
-            avg_loss = 999999999
+            avg_loss = f"{resolved_strategy.value} failsafe" if failsafe_configured else 999999999
 
         del Losses
         del self.H
@@ -994,11 +1127,11 @@ class GPTQ:
 
         g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
 
-        if self.qcfg.desc_act:
+        if self.qcfg.desc_act and use_hessian:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
 
-        elif self.qcfg.act_group_aware:
+        elif self.qcfg.act_group_aware and use_hessian:
             inv_final = invert_perm(final_perm)
             Q = Q[:, inv_final]
             inv_global_perm = invert_perm(global_perm)

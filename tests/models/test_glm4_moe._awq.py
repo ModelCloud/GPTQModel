@@ -25,7 +25,7 @@ class TestQwen3Moe(ModelTest):
         },
     }
 
-    # VRAM_STRATEGY = VRAMStrategy.BALANCED
+    # VRAM_STRATEGY = VramStrategy.BALANCED
     # TRUST_REMOTE_CODE = False
     # APPLY_CHAT_TEMPLATE = True
     # EVAL_BATCH_SIZE = 6

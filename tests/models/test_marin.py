@@ -13,7 +13,7 @@ from gptqmodel.utils.eval import EVAL
 
 class TestMarin(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/marin-32b-base"
-    # VRAM_STRATEGY = VRAMStrategy.BALANCED
+    # VRAM_STRATEGY = VramStrategy.BALANCED
     # Marin inherits Qwen3's backbone with QK-Norm attention.
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {

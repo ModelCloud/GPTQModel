@@ -15,6 +15,7 @@ from gptqmodel.utils.eval import EVAL
 # | mmlu_stem :: acc,none          |   0.3768 |
 # | gsm8k_plat :: exact,flexible   |   0.1944 |
 class TestLlama3_2(ModelTest):
+    # DELETE_QUANTIZED_MODEL = False
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
@@ -22,7 +23,7 @@ class TestLlama3_2(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.1944,
+                "value": 0.2961,
                 "floor_pct": 0.04,
             },
         },
