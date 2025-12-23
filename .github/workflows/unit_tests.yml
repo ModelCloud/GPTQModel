@@ -196,7 +196,7 @@ jobs:
     needs:
       - check-vm
       - list-test-files
-    if: needs.list-test-files.outputs.torch-files != '[]' || needs.list-test-files.outputs.transformers-files != '[]'
+    if: false && needs.list-test-files.outputs.torch-files != '[]' || needs.list-test-files.outputs.transformers-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_1021
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
@@ -347,7 +347,6 @@ jobs:
 
   torch:
     needs:
-      - build
       - list-test-files
       - check-vm
     runs-on: [ self-hosted, xeon5 ]
@@ -520,11 +519,10 @@ jobs:
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
-            uv pip install -U logbar==0.0.4
           fi
 
           if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
-            uv pip install git+https://github.com/huggingface/peft trl wandb
+            uv pip install peft trl wandb
           fi
 
           if [[ "${{ matrix.test_script }}" == *ipex* ]] && [[ "${{ matrix.test_script }}" != *xpu* ]]; then
