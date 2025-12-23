@@ -123,7 +123,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       torch-files: ${{ steps.files.outputs.torch-files }}
-      xpu_test_files: ${{ steps.files.outputs.xpu_test_files }}
+      xpu-files: ${{ steps.files.outputs.xpu-files }}
       transformers-files: ${{ steps.files.outputs.transformers-files }}
       m4-files: ${{ steps.files.outputs.m4-files }}
 
