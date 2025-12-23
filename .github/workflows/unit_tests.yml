@@ -284,27 +284,6 @@ jobs:
           pip list
           echo "::endgroup::"
 
-      - name: Download wheel from local
-        continue-on-error: true
-        run: |
-          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
-          [ -d $DIR ] || exit 1
-          echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
-
-          ls -ahl $DIR
-          
-          mkdir dist || true
-
-          cp $DIR/*.whl dist/
-
-      - name: Download artifact from github
-        if: env.WHL_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v7
-        with:
-          name: whl
-          path: dist
-          run-id: ${{ needs.check-vm.outputs.run_id }}
-
       - name: Install wheel
         run: |
           uv pip uninstall gptqmodel
