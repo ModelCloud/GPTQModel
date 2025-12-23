@@ -101,6 +101,16 @@ class SmoothMethod:
 
 @dataclass
 class SmoothPercentile(SmoothMethod):
+    """
+    +----------------+-------------------------------------------+
+    | math           | clip(|w|) at p-th percentile             |
+    | config         | SmoothPercentile(percentile=p)           |
+    +----------------+-------------------------------------------+
+    +----------------+-------------------------------------------+
+    | percentile (p) | percentile of |w| used as clip threshold |
+    | effect         | higher p = less clipping                  |
+    +----------------+-------------------------------------------+
+    """
     percentile: float = 99.0
 
     def __init__(self, percentile: float = 99.0):
@@ -110,6 +120,16 @@ class SmoothPercentile(SmoothMethod):
 
 @dataclass
 class SmoothMAD(SmoothMethod):
+    """
+    +----------------+-------------------------------------------+
+    | math           | median +/- K * MAD                        |
+    | config         | SmoothMAD(k=K)                            |
+    +----------------+-------------------------------------------+
+    +----------------+-------------------------------------------+
+    | K              | width multiplier for MAD window           |
+    | effect         | higher K = less clipping                  |
+    +----------------+-------------------------------------------+
+    """
     k: float = 3.0
 
     def __init__(self, k: float = 3.0):
@@ -119,6 +139,17 @@ class SmoothMAD(SmoothMethod):
 
 @dataclass
 class SmoothMSE(SmoothMethod):
+    """
+    +----------------+-------------------------------------------+
+    | math           | grid-search shrink p in [1..maxshrink]    |
+    | config         | SmoothMSE(steps=N, maxshrink=S)           |
+    +----------------+-------------------------------------------+
+    +----------------+-------------------------------------------+
+    | steps (N)      | number of shrink candidates               |
+    | maxshrink (S)  | smallest range multiplier                 |
+    | effect         | more steps = better fit, slower           |
+    +----------------+-------------------------------------------+
+    """
     steps: int = 32
     maxshrink: float = 0.8
 
@@ -130,6 +161,16 @@ class SmoothMSE(SmoothMethod):
 
 @dataclass
 class SmoothOutlier(SmoothMethod):
+    """
+    +----------------+-------------------------------------------+
+    | math           | clip by kth |w|, keep (100-pct)% mass     |
+    | config         | SmoothOutlier(pct=p)                      |
+    +----------------+-------------------------------------------+
+    +----------------+-------------------------------------------+
+    | pct (p)        | top-pct of |w| treated as outliers        |
+    | effect         | higher p = more clipping                  |
+    +----------------+-------------------------------------------+
+    """
     pct: float = 1.0
 
     def __init__(self, pct: float = 1.0):
@@ -139,6 +180,16 @@ class SmoothOutlier(SmoothMethod):
 
 @dataclass
 class SmoothSoftNorm(SmoothMethod):
+    """
+    +----------------+-------------------------------------------+
+    | math           | z=(w-mean)/rms, clip z to +/-K            |
+    | config         | SmoothSoftNorm(k=K)                       |
+    +----------------+-------------------------------------------+
+    +----------------+-------------------------------------------+
+    | K              | z-score clip limit                        |
+    | effect         | higher K = less clipping                  |
+    +----------------+-------------------------------------------+
+    """
     k: float = 3.0
 
     def __init__(self, k: float = 3.0):
@@ -148,6 +199,17 @@ class SmoothSoftNorm(SmoothMethod):
 
 @dataclass
 class SmoothLog(SmoothMethod):
+    """
+    +----------------+-------------------------------------------+
+    | math           | log1p(mu*|w|) percentile, invert to clip  |
+    | config         | SmoothLog(percentile=p, mu=mu)            |
+    +----------------+-------------------------------------------+
+    +----------------+-------------------------------------------+
+    | percentile (p) | percentile in log space for clip          |
+    | mu             | log companding strength                   |
+    | effect         | higher mu compresses outliers more        |
+    +----------------+-------------------------------------------+
+    """
     percentile: float = 99.0
     mu: float = 8.0
 
@@ -159,6 +221,16 @@ class SmoothLog(SmoothMethod):
 
 @dataclass
 class SmoothRowCol(SmoothMethod):
+    """
+    +----------------+-------------------------------------------+
+    | math           | divide by row/col RMS, re-scale after     |
+    | config         | SmoothRowCol(axis="row"|"col")            |
+    +----------------+-------------------------------------------+
+    +----------------+-------------------------------------------+
+    | axis           | apply RMS scale per "row" or "col"        |
+    | effect         | normalizes dynamic range before quant     |
+    +----------------+-------------------------------------------+
+    """
     axis: str = "row"
 
     def __init__(self, axis: str = "row"):
