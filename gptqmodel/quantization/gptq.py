@@ -625,25 +625,28 @@ class GPTQ:
             end = min(start + effective_group_size, self.columns)
             block = W[:, start:end]
 
-            # TODO FIXME. all non-RTN has packing bug with scale/zeros
             if strategy == FailSafeStrategy.MIDPOINT:
                 w_min = block.min(dim=1, keepdim=True).values
                 w_max = block.max(dim=1, keepdim=True).values
                 mid = (w_max + w_min) / 2.0
                 scale = torch.clamp((w_max - w_min) / maxq, min=1e-8)
-                zero = torch.full_like(scale, maxq / 2.0)
-                q = torch.round((block - mid) / scale + zero)
+                zero_mid = torch.full_like(scale, maxq / 2.0)
+                q = torch.round((block - mid) / scale + zero_mid)
                 q = torch.clamp(q, 0, maxq)
-                dequant = (q - zero) * scale + mid
+                zero = torch.round(zero_mid - (mid / scale))
+                zero = torch.clamp(zero, 0, maxq)
+                dequant = (q - zero) * scale
             elif strategy == FailSafeStrategy.MEAN:
                 mean = block.mean(dim=1, keepdim=True)
                 max_dev = torch.max((block - mean).abs(), dim=1, keepdim=True).values
                 max_dev = torch.clamp(max_dev, min=1e-8)
                 scale = (2 * max_dev) / maxq
-                zero = torch.full_like(scale, maxq / 2.0)
-                q = torch.round((block - mean) / scale + zero)
+                zero_mid = torch.full_like(scale, maxq / 2.0)
+                q = torch.round((block - mean) / scale + zero_mid)
                 q = torch.clamp(q, 0, maxq)
-                dequant = (q - zero) * scale + mean
+                zero = torch.round(zero_mid - (mean / scale))
+                zero = torch.clamp(zero, 0, maxq)
+                dequant = (q - zero) * scale
             elif strategy == FailSafeStrategy.STDCLIP:
                 mean = block.mean(dim=1, keepdim=True)
                 std = block.std(dim=1, keepdim=True, unbiased=False)
@@ -652,6 +655,7 @@ class GPTQ:
                 hi = mean + sigma * std
                 scale = torch.clamp((hi - lo) / maxq, min=1e-8)
                 zero = torch.round(-lo / scale)
+                zero = torch.clamp(zero, 0, maxq)
                 q = torch.round(block / scale + zero)
                 q = torch.clamp(q, 0, maxq)
                 dequant = (q - zero) * scale
@@ -855,9 +859,7 @@ class GPTQ:
             )
             self.H = self.create_H(target_device=target_device)
 
-            # TODO FIXME: regression src?
-            #if resolved_strategy != FailSafeStrategy.RTN:
-            #    return self._failsafe_quantize(resolved_strategy, blocksize)
+            return self._failsafe_quantize(resolved_strategy, blocksize)
         else:
             use_hessian = True
             self.finalize_hessian(target_device=target_device)
