@@ -130,9 +130,9 @@ class SmoothMAD(SmoothMethod):
     | effect         | higher K = less clipping                  |
     +----------------+-------------------------------------------+
     """
-    k: float = 3.0
+    k: float = 2.75
 
-    def __init__(self, k: float = 3.0):
+    def __init__(self, k: float = 2.75):
         super().__init__(name="mad")
         self.k = k
 
