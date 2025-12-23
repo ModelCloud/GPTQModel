@@ -345,6 +345,15 @@ jobs:
         if: always()
         run: rm -rf ./* .[^.] .??* # pip cache purge && uv cache clean &&
 
+  system:
+    needs:
+      - list-test-files
+      - check-vm
+    steps:
+      - name: Print env Codes
+        run: |
+          echo ${{ needs.list-test-files.outputs.xpu-files }}
+
   xpu:
     needs:
       - list-test-files
@@ -365,7 +374,7 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.xpu-files) }}
-    if: always() && !cancelled() && (github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.xpu-files != '[]'
+    if: always() && !cancelled() && needs.list-test-files.outputs.xpu-files != '[]'
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
