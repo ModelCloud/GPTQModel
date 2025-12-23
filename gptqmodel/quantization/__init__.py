@@ -14,6 +14,14 @@ from .config import (
                      FailSafe,
                      FailSafeStrategy,
                      QuantizeConfig,
+                     SmoothLog,
+                     SmoothMAD,
+                     SmoothMethod,
+                     SmoothMSE,
+                     SmoothOutlier,
+                     SmoothPercentile,
+                     SmoothRowCol,
+                     SmoothSoftNorm,
 )
 from .gptq import GPTQ
 from .gptqv2 import GPTQv2

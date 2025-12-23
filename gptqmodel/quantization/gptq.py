@@ -21,10 +21,11 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..quantization.config import FailSafeStrategy
+from ..quantization.config import FailSafeStrategy, SmoothMSE
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
+from .failsafe_smooth import mse_optimal_quant, smooth_block
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -614,6 +615,12 @@ class GPTQ:
         sigma = 3.0
         effective_group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
         start_time = time.time()
+        smooth_method = getattr(self.failsafe, "smooth", None)
+        mse_steps = 32
+        mse_maxshrink = 0.8
+        if isinstance(smooth_method, SmoothMSE):
+            mse_steps = smooth_method.steps
+            mse_maxshrink = smooth_method.maxshrink
 
         target_device = self.H.device if self.H is not None else self.module.weight.device
         W = self.clone_module(device=target_device)
@@ -625,47 +632,61 @@ class GPTQ:
             end = min(start + effective_group_size, self.columns)
             block = W[:, start:end]
 
-            if strategy == FailSafeStrategy.MIDPOINT:
-                w_min = block.min(dim=1, keepdim=True).values
-                w_max = block.max(dim=1, keepdim=True).values
-                mid = (w_max + w_min) / 2.0
-                scale = torch.clamp((w_max - w_min) / maxq, min=1e-8)
-                zero_mid = torch.full_like(scale, maxq / 2.0)
-                q = torch.round((block - mid) / scale + zero_mid)
-                q = torch.clamp(q, 0, maxq)
-                zero = torch.round(zero_mid - (mid / scale))
-                zero = torch.clamp(zero, 0, maxq)
-                dequant = (q - zero) * scale
-            elif strategy == FailSafeStrategy.MEAN:
-                mean = block.mean(dim=1, keepdim=True)
-                max_dev = torch.max((block - mean).abs(), dim=1, keepdim=True).values
-                max_dev = torch.clamp(max_dev, min=1e-8)
-                scale = (2 * max_dev) / maxq
-                zero_mid = torch.full_like(scale, maxq / 2.0)
-                q = torch.round((block - mean) / scale + zero_mid)
-                q = torch.clamp(q, 0, maxq)
-                zero = torch.round(zero_mid - (mean / scale))
-                zero = torch.clamp(zero, 0, maxq)
-                dequant = (q - zero) * scale
-            elif strategy == FailSafeStrategy.STDCLIP:
-                mean = block.mean(dim=1, keepdim=True)
-                std = block.std(dim=1, keepdim=True, unbiased=False)
-                std = torch.clamp(std, min=1e-8)
-                lo = mean - sigma * std
-                hi = mean + sigma * std
-                scale = torch.clamp((hi - lo) / maxq, min=1e-8)
-                zero = torch.round(-lo / scale)
-                zero = torch.clamp(zero, 0, maxq)
-                q = torch.round(block / scale + zero)
-                q = torch.clamp(q, 0, maxq)
-                dequant = (q - zero) * scale
-            elif strategy in (FailSafeStrategy.RTN, FailSafeStrategy.AUTO):
-                self.quantizer.find_params(block, weight=True)
-                dequant = self.quantizer.quantize(block)
-                scale = self.quantizer.scale
-                zero = self.quantizer.zero
+            if isinstance(smooth_method, SmoothMSE):
+                dequant, scale, zero = mse_optimal_quant(
+                    block,
+                    self.qcfg,
+                    maxq,
+                    steps=mse_steps,
+                    maxshrink=mse_maxshrink,
+                )
             else:
-                raise ValueError(f"Unsupported failsafe strategy: {strategy}")
+                block_mod, scale_factor = smooth_block(block, self.failsafe)
+                if strategy == FailSafeStrategy.MIDPOINT:
+                    w_min = block_mod.min(dim=1, keepdim=True).values
+                    w_max = block_mod.max(dim=1, keepdim=True).values
+                    mid = (w_max + w_min) / 2.0
+                    scale = torch.clamp((w_max - w_min) / maxq, min=1e-8)
+                    zero_mid = torch.full_like(scale, maxq / 2.0)
+                    q = torch.round((block_mod - mid) / scale + zero_mid)
+                    q = torch.clamp(q, 0, maxq)
+                    zero = torch.round(zero_mid - (mid / scale))
+                    zero = torch.clamp(zero, 0, maxq)
+                    dequant = (q - zero) * scale
+                elif strategy == FailSafeStrategy.MEAN:
+                    mean = block_mod.mean(dim=1, keepdim=True)
+                    max_dev = torch.max((block_mod - mean).abs(), dim=1, keepdim=True).values
+                    max_dev = torch.clamp(max_dev, min=1e-8)
+                    scale = (2 * max_dev) / maxq
+                    zero_mid = torch.full_like(scale, maxq / 2.0)
+                    q = torch.round((block_mod - mean) / scale + zero_mid)
+                    q = torch.clamp(q, 0, maxq)
+                    zero = torch.round(zero_mid - (mean / scale))
+                    zero = torch.clamp(zero, 0, maxq)
+                    dequant = (q - zero) * scale
+                elif strategy == FailSafeStrategy.STDCLIP:
+                    mean = block_mod.mean(dim=1, keepdim=True)
+                    std = block_mod.std(dim=1, keepdim=True, unbiased=False)
+                    std = torch.clamp(std, min=1e-8)
+                    lo = mean - sigma * std
+                    hi = mean + sigma * std
+                    scale = torch.clamp((hi - lo) / maxq, min=1e-8)
+                    zero = torch.round(-lo / scale)
+                    zero = torch.clamp(zero, 0, maxq)
+                    q = torch.round(block_mod / scale + zero)
+                    q = torch.clamp(q, 0, maxq)
+                    dequant = (q - zero) * scale
+                elif strategy in (FailSafeStrategy.RTN, FailSafeStrategy.AUTO):
+                    self.quantizer.find_params(block_mod, weight=True)
+                    dequant = self.quantizer.quantize(block_mod)
+                    scale = self.quantizer.scale
+                    zero = self.quantizer.zero
+                else:
+                    raise ValueError(f"Unsupported failsafe strategy: {strategy}")
+
+                if scale_factor is not None:
+                    scale = scale * scale_factor
+                    dequant = dequant * scale_factor
 
             Q[:, start:end] = dequant
 

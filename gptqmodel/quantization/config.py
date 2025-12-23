@@ -94,6 +94,77 @@ class FailSafeStrategy(str, Enum):
     MEAN = "mean"
     STDCLIP = "stdclip"
 
+@dataclass
+class SmoothMethod:
+    name: str
+
+
+@dataclass
+class SmoothPercentile(SmoothMethod):
+    percentile: float = 99.0
+
+    def __init__(self, percentile: float = 99.0):
+        super().__init__(name="percentile")
+        self.percentile = percentile
+
+
+@dataclass
+class SmoothMAD(SmoothMethod):
+    k: float = 3.0
+
+    def __init__(self, k: float = 3.0):
+        super().__init__(name="mad")
+        self.k = k
+
+
+@dataclass
+class SmoothMSE(SmoothMethod):
+    steps: int = 32
+    maxshrink: float = 0.8
+
+    def __init__(self, steps: int = 32, maxshrink: float = 0.8):
+        super().__init__(name="mse")
+        self.steps = steps
+        self.maxshrink = maxshrink
+
+
+@dataclass
+class SmoothOutlier(SmoothMethod):
+    pct: float = 1.0
+
+    def __init__(self, pct: float = 1.0):
+        super().__init__(name="outlier")
+        self.pct = pct
+
+
+@dataclass
+class SmoothSoftNorm(SmoothMethod):
+    k: float = 3.0
+
+    def __init__(self, k: float = 3.0):
+        super().__init__(name="softnorm")
+        self.k = k
+
+
+@dataclass
+class SmoothLog(SmoothMethod):
+    percentile: float = 99.0
+    mu: float = 8.0
+
+    def __init__(self, percentile: float = 99.0, mu: float = 8.0):
+        super().__init__(name="log")
+        self.percentile = percentile
+        self.mu = mu
+
+
+@dataclass
+class SmoothRowCol(SmoothMethod):
+    axis: str = "row"
+
+    def __init__(self, axis: str = "row"):
+        super().__init__(name="rowcol")
+        self.axis = axis
+
 
 @dataclass
 class FailSafe:
@@ -101,6 +172,7 @@ class FailSafe:
     # int/float = if captured module fwd tokens is less than value, trigger strategy
     # string = if string is int/float followed by %, then if captured module fwd tokens is less than value in percentage relative to calibration, trigger strategy
     threshold: int | float | str = "0.5%" # if less than 0.5% of calibration reaches module (think moe) then we trigger per-module failsafe quantization
+    smooth: Optional[SmoothMethod] = None
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
@@ -156,6 +228,48 @@ def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
     for value in d.values():
         if isinstance(value, dict):
             dict_scale_dtype_to_str(value)
+
+
+def _build_smooth_method_from_dict(payload: Dict[str, Any]) -> Optional[SmoothMethod]:
+    method_type = payload.get("type") or payload.get("name")
+    if not method_type:
+        return None
+    method_type = str(method_type).strip().lower()
+    if method_type == "percentile":
+        return SmoothPercentile(percentile=float(payload.get("percentile", 99.0)))
+    if method_type == "mad":
+        return SmoothMAD(k=float(payload.get("k", 3.0)))
+    if method_type == "mse":
+        return SmoothMSE(
+            steps=int(payload.get("steps", 32)),
+            maxshrink=float(payload.get("maxshrink", 0.8)),
+        )
+    if method_type == "outlier":
+        return SmoothOutlier(pct=float(payload.get("pct", 1.0)))
+    if method_type == "softnorm":
+        return SmoothSoftNorm(k=float(payload.get("k", 3.0)))
+    if method_type == "log":
+        return SmoothLog(
+            percentile=float(payload.get("percentile", 99.0)),
+            mu=float(payload.get("mu", 8.0)),
+        )
+    if method_type == "rowcol":
+        return SmoothRowCol(axis=str(payload.get("axis", "row")))
+    if method_type == "none":
+        return None
+    raise ValueError(f"QuantizeConfig: Unknown smooth type `{method_type}`.")
+
+
+def _parse_smooth_method(setting: Any) -> Optional[SmoothMethod]:
+    if setting is None:
+        return None
+    if isinstance(setting, SmoothMethod):
+        return setting
+    if isinstance(setting, str):
+        return _build_smooth_method_from_dict({"type": setting})
+    if isinstance(setting, dict):
+        return _build_smooth_method_from_dict(setting)
+    raise ValueError("QuantizeConfig: `failsafe.smooth` must be a SmoothMethod, string, or dict.")
 
 def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
                 default: Union[int, bool] = None, sub_key: str = None) -> Union[Dict, int, bool]:
@@ -337,7 +451,40 @@ class QuantizeConfig():
         if isinstance(self.failsafe, dict):
             strategy = self.failsafe.get("strategy", FailSafeStrategy.AUTO)
             threshold = self.failsafe.get("threshold", "1.0%")
-            self.failsafe = FailSafe(strategy=strategy, threshold=threshold)
+            smooth = self.failsafe.get("smooth")
+            if smooth is None:
+                smooth = self.failsafe.get("smooth_method")
+            if smooth is None and "clip_method" in self.failsafe:
+                smooth = self.failsafe.get("clip_method")
+            smooth = _parse_smooth_method(smooth)
+            if smooth is None:
+                if "smooth_percentile" in self.failsafe:
+                    smooth = SmoothPercentile(
+                        percentile=float(self.failsafe.get("smooth_percentile", 99.0))
+                    )
+                elif "smooth_mad_k" in self.failsafe:
+                    smooth = SmoothMAD(k=float(self.failsafe.get("smooth_mad_k", 3.0)))
+                elif "smooth_mse_steps" in self.failsafe or "smooth_mse_maxshrink" in self.failsafe:
+                    smooth = SmoothMSE(
+                        steps=int(self.failsafe.get("smooth_mse_steps", 32)),
+                        maxshrink=float(self.failsafe.get("smooth_mse_maxshrink", 0.8)),
+                    )
+                elif "smooth_outlier_pct" in self.failsafe:
+                    smooth = SmoothOutlier(pct=float(self.failsafe.get("smooth_outlier_pct", 1.0)))
+                elif "smooth_rms_k" in self.failsafe:
+                    smooth = SmoothSoftNorm(k=float(self.failsafe.get("smooth_rms_k", 3.0)))
+                elif "smooth_log_mu" in self.failsafe:
+                    smooth = SmoothLog(
+                        percentile=float(self.failsafe.get("smooth_percentile", 99.0)),
+                        mu=float(self.failsafe.get("smooth_log_mu", 8.0)),
+                    )
+                elif "smooth_axis" in self.failsafe:
+                    smooth = SmoothRowCol(axis=str(self.failsafe.get("smooth_axis", "row")))
+            self.failsafe = FailSafe(
+                strategy=strategy,
+                threshold=threshold,
+                smooth=smooth,
+            )
         elif isinstance(self.failsafe, (str, int, float)):
             self.failsafe = FailSafe(strategy=FailSafeStrategy.AUTO, threshold=self.failsafe)
         elif not isinstance(self.failsafe, FailSafe):
@@ -354,6 +501,8 @@ class QuantizeConfig():
             raise ValueError(
                 f"QuantizeConfig: `failsafe.strategy` must be one of {[v.value for v in FailSafeStrategy]}."
             )
+
+        self.failsafe.smooth = _parse_smooth_method(self.failsafe.smooth)
 
         if self.bits not in fields_info[0].metadata["choices"]:
             raise ValueError(f"QuantizeConfig: `bits` must be in the set of `{fields_info[0].metadata['choices']}`.")
@@ -650,6 +799,10 @@ class QuantizeConfig():
                 if "v2_memory_device" in overrides and "gptaq_memory_device" not in overrides:
                     overrides["gptaq_memory_device"] = overrides.pop("v2_memory_device")
 
+        meta_payload = normalized.get(META_FIELD)
+        if "failsafe" not in normalized and isinstance(meta_payload, dict) and meta_payload.get("failsafe") is not None:
+            normalized["failsafe"] = meta_payload.get("failsafe")
+
         cfg = cls(**normalized)
 
         if quantize_cfg.get(AWQ_PACKING_BACKEND_FIELD) and quantize_cfg[AWQ_PACKING_BACKEND_FIELD] == "llm-awq":
@@ -689,6 +842,34 @@ class QuantizeConfig():
             return cls.from_quant_config(args_from_json, format)
 
     def to_dict(self):
+        smooth = None
+        if self.failsafe.smooth is not None:
+            payload = {"type": self.failsafe.smooth.name}
+            if isinstance(self.failsafe.smooth, SmoothPercentile):
+                payload["percentile"] = self.failsafe.smooth.percentile
+            elif isinstance(self.failsafe.smooth, SmoothMAD):
+                payload["k"] = self.failsafe.smooth.k
+            elif isinstance(self.failsafe.smooth, SmoothMSE):
+                payload["steps"] = self.failsafe.smooth.steps
+                payload["maxshrink"] = self.failsafe.smooth.maxshrink
+            elif isinstance(self.failsafe.smooth, SmoothOutlier):
+                payload["pct"] = self.failsafe.smooth.pct
+            elif isinstance(self.failsafe.smooth, SmoothSoftNorm):
+                payload["k"] = self.failsafe.smooth.k
+            elif isinstance(self.failsafe.smooth, SmoothLog):
+                payload["percentile"] = self.failsafe.smooth.percentile
+                payload["mu"] = self.failsafe.smooth.mu
+            elif isinstance(self.failsafe.smooth, SmoothRowCol):
+                payload["axis"] = self.failsafe.smooth.axis
+            smooth = payload
+
+        meta_payload = dict(self.meta) if self.meta else {}
+        meta_payload["failsafe"] = {
+            "strategy": self.failsafe.strategy.value if isinstance(self.failsafe.strategy, FailSafeStrategy) else self.failsafe.strategy,
+            "threshold": self.failsafe.threshold,
+            "smooth": smooth,
+        }
+
         out = {
             "bits": self.bits,
             "dynamic": self.dynamic,
@@ -696,15 +877,11 @@ class QuantizeConfig():
             "desc_act": self.desc_act,
             "sym": self.sym,
             "lm_head": self.lm_head,
-            "failsafe": {
-                "strategy": self.failsafe.strategy.value if isinstance(self.failsafe.strategy, FailSafeStrategy) else self.failsafe.strategy,
-                "threshold": self.failsafe.threshold,
-            },
             QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_CHECKPOINT: self.format,
             # torch.dtype convert to string
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
-            META_FIELD: self.meta,
+            META_FIELD: meta_payload,
             # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
