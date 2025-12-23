@@ -676,7 +676,7 @@ class GPTQ:
                     q = torch.round(block_mod / scale + zero)
                     q = torch.clamp(q, 0, maxq)
                     dequant = (q - zero) * scale
-                elif strategy in (FailSafeStrategy.RTN, FailSafeStrategy.AUTO):
+                elif strategy == FailSafeStrategy.RTN:
                     self.quantizer.find_params(block_mod, weight=True)
                     dequant = self.quantizer.quantize(block_mod)
                     scale = self.quantizer.scale
@@ -722,8 +722,9 @@ class GPTQ:
             Q = Q.to(self.module.weight.dtype)
 
         Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
+        mean_abs_err = (Q - self.module.weight.data).abs().mean().item()
         duration = time.time() - start_time
-        avg_loss = f"{strategy.value} failsafe"
+        avg_loss = f"failsafe({strategy.value}): {mean_abs_err:.7f}"
         damp = 0.0
 
         self.H = None

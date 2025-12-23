@@ -33,14 +33,14 @@ def _parse_threshold(setting: Any) -> Tuple[Optional[float], bool]:
 
 def resolve_failsafe_strategy(strategy: Any) -> FailSafeStrategy:
     """
-    Normalize a failsafe strategy; auto currently resolves to midpoint.
+    Normalize a failsafe strategy.
     """
     if isinstance(strategy, FailSafe):
         strategy = strategy.strategy
     if isinstance(strategy, dict):
-        strategy = strategy.get("strategy", FailSafeStrategy.AUTO)
+        strategy = strategy.get("strategy", FailSafeStrategy.RTN)
     if strategy is None:
-        resolved = FailSafeStrategy.AUTO
+        resolved = FailSafeStrategy.RTN
     elif isinstance(strategy, FailSafeStrategy):
         resolved = strategy
     elif isinstance(strategy, str):
@@ -48,12 +48,9 @@ def resolve_failsafe_strategy(strategy: Any) -> FailSafeStrategy:
         try:
             resolved = FailSafeStrategy(normalized)
         except ValueError:
-            resolved = FailSafeStrategy.AUTO
+            resolved = FailSafeStrategy.RTN
     else:
-        resolved = FailSafeStrategy.AUTO
-
-    if resolved == FailSafeStrategy.AUTO:
-        return FailSafeStrategy.RTN
+        resolved = FailSafeStrategy.RTN
 
     return resolved
 
