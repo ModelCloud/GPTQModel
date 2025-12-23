@@ -628,7 +628,7 @@ jobs:
 
   show-statistics:
     runs-on: [ self-hosted, xeon5 ]
-    if: always() && inputs['exclusive-gpu']
+    if: !cancelled() && always() && inputs['exclusive-gpu']
     container:
       image: modelcloud/gptqmodel:alpine-ci-v1
     needs:
