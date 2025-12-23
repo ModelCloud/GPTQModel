@@ -201,7 +201,7 @@ jobs:
       UV_INDEX_URL: ''
     container:
       image: intel/intel-extension-for-pytorch:2.8.10-xpu
-      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
+      options: --device /dev/dri --ipc=host --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /monster/ci/models:/monster/data/model
