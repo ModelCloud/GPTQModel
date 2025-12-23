@@ -10,7 +10,7 @@ class NemotronHQModel(BaseQModel):
     require_trust_remote_code = True
     require_monkeypatch = True
     layer_modules_strict = False
-    require_pkgs_version = ["transformers<=4.48.3"]
+    require_pkgs = ["transformers<=4.48.3"]
 
     module_tree = [
         "backbone",

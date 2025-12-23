@@ -7,4 +7,4 @@ from . import LlamaQModel
 
 
 class InternLMQModel(LlamaQModel):
-    require_pkgs_version = ["transformers<=4.44.2"]
+    require_pkgs = ["transformers<=4.44.2"]
