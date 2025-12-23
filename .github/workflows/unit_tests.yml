@@ -268,24 +268,24 @@ jobs:
           apt update && apt install ripgrep
 
           if [[ "${{ matrix.test_script }}" == *inference* ]]; then
-            echo "rg "10.0.14.248" /etc"
+            echo "rg 10.0.14.248 /etc"
             rg "10.0.14.248" /etc
           fi
 
 
           if [[ "${{ matrix.test_script }}" == *kernel* ]]; then
-            echo "rg "10.0.14.248" /home"
+            echo "rg 10.0.14.248 /home"
             rg "10.0.14.248" /home
           fi
 
           if [[ "${{ matrix.test_script }}" == *olora* ]]; then
-            echo "rg "10.0.14.248" /opt"
+            echo "rg 10.0.14.248 /opt"
             rg "10.0.14.248" /opt
           fi
 
 
           if [[ "${{ matrix.test_script }}" == *_torch_xpu* ]]; then
-            echo "rg "10.0.14.248" /monster"
+            echo "rg 10.0.14.248 /monster"
             rg "10.0.14.248" /monster
           fi
 
