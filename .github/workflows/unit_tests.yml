@@ -382,9 +382,6 @@ jobs:
           git checkout pr-${PR_NUMBER}
 
       - name: Print Path
-        run: echo $(pwd)
-
-      - name: Print Env
         run: |
           python_version=${{ env.PYTHON_VERSION }}
           if [[ "$python_version" != *"."* ]]; then
