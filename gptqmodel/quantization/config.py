@@ -1059,6 +1059,11 @@ class QuantizeConfig():
             smooth = payload
 
         meta_payload = dict(self.meta) if self.meta else {}
+        meta_payload["gc_mode"] = self.gc_mode
+        meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
+        meta_payload["moe_bypass_router"] = self.moe_bypass_router
+        meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
+
         if self.failsafe is None:
             meta_payload["failsafe"] = None
         else:
