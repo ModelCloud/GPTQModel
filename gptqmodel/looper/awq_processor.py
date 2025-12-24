@@ -27,7 +27,8 @@ from ..nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
-from ..quantization.config import FailSafe, FailSafeStrategy, FORMAT, METHOD, QuantizeConfig
+from ..quantization.config import FORMAT, METHOD, QuantizeConfig
+from ..utils.failsafe import normalize_failsafe
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.ctx import ctx
 from ..utils.model import find_modules, get_module_by_name_prefix, move_to, create_quant_module, pack_module
@@ -1364,16 +1365,7 @@ class AWQProcessor(LoopProcessor):
     def preprocess(self, module: NamedModule, failsafe=None, **kwargs):
         # Track the most recent preference so the processor can decide whether
         # to fall back to simple quantization when activations are missing.
-        def _normalize_failsafe(value, default: FailSafe) -> FailSafe:
-            if value is None:
-                return default
-            if isinstance(value, FailSafe):
-                return value
-            if isinstance(value, dict):
-                return FailSafe(strategy=value.get("strategy", default.strategy), threshold=value.get("threshold", default.threshold))
-            return FailSafe(strategy=FailSafeStrategy.AUTO, threshold=value)
-
-        self.failsafe = _normalize_failsafe(failsafe, self.qcfg.failsafe)
+        self.failsafe = normalize_failsafe(failsafe, self.qcfg.failsafe)
         layer_state = self._get_layer_state(module.layer_index)
         with layer_state.lock:
             layer_state.modules[module.name] = module

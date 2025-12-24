@@ -152,3 +152,15 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_cuda(self):
         self._run_test("cuda")
+
+
+class TestFailsafeConfig(unittest.TestCase):
+    def test_failsafe_none_round_trip(self):
+        qcfg = QuantizeConfig(failsafe=None)
+        payload = qcfg.to_dict()
+
+        self.assertIn("failsafe", payload.get("meta", {}))
+        self.assertIsNone(payload["meta"]["failsafe"])
+
+        loaded = QuantizeConfig.from_quant_config(payload)
+        self.assertIsNone(loaded.failsafe)

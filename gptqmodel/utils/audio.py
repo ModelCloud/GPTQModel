@@ -5,7 +5,9 @@
 
 import base64
 from io import BytesIO
+
 import numpy as np
+
 
 try:
     import audioread
@@ -39,8 +41,8 @@ def _check_if_video_has_audio(video_path):
     return True
 
 
-def process_audio_info(conversations: list[dict] | list[list[dict]], 
-                       use_audio_in_video: bool, 
+def process_audio_info(conversations: list[dict] | list[list[dict]],
+                       use_audio_in_video: bool,
                        sample_rate: int=16000
                       ):
     """
