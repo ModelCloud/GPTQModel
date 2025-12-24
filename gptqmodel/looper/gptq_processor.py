@@ -19,7 +19,8 @@ from ..models._const import CPU
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ, GPTQv2
-from ..quantization.config import FailSafe, FailSafeStrategy, METHOD, QuantizeConfig
+from ..quantization.config import METHOD, QuantizeConfig
+from ..utils.failsafe import normalize_failsafe
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.device import get_device
@@ -99,16 +100,7 @@ class GPTQProcessor(LoopProcessor):
             tmp = GPTQv2(module=module, qcfg=qcfg_clone)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
-            def _normalize_failsafe(value, default: FailSafe) -> FailSafe:
-                if value is None:
-                    return default
-                if isinstance(value, FailSafe):
-                    return value
-                if isinstance(value, dict):
-                    return FailSafe(strategy=value.get("strategy", default.strategy), threshold=value.get("threshold", default.threshold))
-                return FailSafe(strategy=FailSafeStrategy.AUTO, threshold=value)
-
-            tmp.failsafe = _normalize_failsafe(failsafe, qcfg_clone.failsafe)
+            tmp.failsafe = normalize_failsafe(failsafe, qcfg_clone.failsafe)
             tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         tmp.quantizer.configure(

@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from importlib.metadata import PackageNotFoundError
-
 import builtins
+from importlib.metadata import PackageNotFoundError
 
 import pytest
 

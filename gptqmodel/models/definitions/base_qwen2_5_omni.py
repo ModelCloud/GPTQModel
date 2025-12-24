@@ -10,9 +10,9 @@ import torch
 from PIL import Image
 from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
 
+from ...utils.audio import process_audio_info
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
-from ...utils.audio import process_audio_info
 from ...utils.model import MODALITY
 from ...utils.offload import offload_to_disk
 from .._const import CPU

@@ -7,6 +7,23 @@ from typing import Any, Optional, Tuple
 from gptqmodel.quantization.config import FailSafe, FailSafeStrategy
 
 
+def normalize_failsafe(
+    value: Any,
+    default: Optional[FailSafe] = None,
+) -> Optional[FailSafe]:
+    if value is None:
+        return default
+    if isinstance(value, FailSafe):
+        return value
+    if isinstance(value, dict):
+        fallback = default if isinstance(default, FailSafe) else FailSafe()
+        return FailSafe(
+            strategy=value.get("strategy", fallback.strategy),
+            threshold=value.get("threshold", fallback.threshold),
+        )
+    return FailSafe(strategy=FailSafeStrategy.AUTO, threshold=value)
+
+
 def _parse_threshold(setting: Any) -> Tuple[Optional[float], bool]:
     """
     Returns (threshold_value, is_percent).
