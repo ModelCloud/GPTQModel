@@ -31,7 +31,7 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
 
     pre_lm_head_norm_module = "thinker.model.norm"
 
-    require_pkgs = ["audioread>=3.1.0", "librosa>0.11.0"]
+    require_pkgs = ["audioread>=3.1.0", "librosa>0.11.0", "av>=16.0.1"]
 
     module_tree = [
         "thinker",
