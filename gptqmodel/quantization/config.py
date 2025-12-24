@@ -515,7 +515,7 @@ class QuantizeConfig():
 
     # gptq/awq only:
     # if calibration is insufficient, fallback to a simple quantization strategy; encapsulated in FailSafe config
-    failsafe: FailSafe = field(default_factory=FailSafe)
+    failsafe: Optional[FailSafe] = field(default_factory=FailSafe)
 
     # gptaq only:
     gptaq: bool = field(default=False)
@@ -624,7 +624,9 @@ class QuantizeConfig():
             )
 
         # normalize failsafe config
-        if isinstance(self.failsafe, dict):
+        if self.failsafe is None:
+            pass
+        elif isinstance(self.failsafe, dict):
             strategy = self.failsafe.get("strategy", FailSafeStrategy.RTN)
             threshold = self.failsafe.get("threshold", "1.0%")
             smooth = self.failsafe.get("smooth")
@@ -664,21 +666,22 @@ class QuantizeConfig():
         elif isinstance(self.failsafe, (str, int, float)):
             self.failsafe = FailSafe(strategy=FailSafeStrategy.RTN, threshold=self.failsafe)
         elif not isinstance(self.failsafe, FailSafe):
-            raise ValueError("QuantizeConfig: `failsafe` must be a FailSafe config, dict, string, int, or float.")
+            raise ValueError("QuantizeConfig: `failsafe` must be a FailSafe config, dict, string, int, float, or None.")
 
-        if isinstance(self.failsafe.strategy, str):
-            try:
-                self.failsafe.strategy = FailSafeStrategy(self.failsafe.strategy.lower())
-            except ValueError as exc:
+        if self.failsafe is not None:
+            if isinstance(self.failsafe.strategy, str):
+                try:
+                    self.failsafe.strategy = FailSafeStrategy(self.failsafe.strategy.lower())
+                except ValueError as exc:
+                    raise ValueError(
+                        f"QuantizeConfig: `failsafe.strategy` must be one of {[v.value for v in FailSafeStrategy]}."
+                    ) from exc
+            elif not isinstance(self.failsafe.strategy, FailSafeStrategy):
                 raise ValueError(
                     f"QuantizeConfig: `failsafe.strategy` must be one of {[v.value for v in FailSafeStrategy]}."
-                ) from exc
-        elif not isinstance(self.failsafe.strategy, FailSafeStrategy):
-            raise ValueError(
-                f"QuantizeConfig: `failsafe.strategy` must be one of {[v.value for v in FailSafeStrategy]}."
-            )
+                )
 
-        self.failsafe.smooth = _parse_smooth_method(self.failsafe.smooth)
+            self.failsafe.smooth = _parse_smooth_method(self.failsafe.smooth)
 
         if self.bits not in fields_info[0].metadata["choices"]:
             raise ValueError(f"QuantizeConfig: `bits` must be in the set of `{fields_info[0].metadata['choices']}`.")
@@ -988,7 +991,7 @@ class QuantizeConfig():
                     overrides["gptaq_memory_device"] = overrides.pop("v2_memory_device")
 
         meta_payload = normalized.get(META_FIELD)
-        if "failsafe" not in normalized and isinstance(meta_payload, dict) and meta_payload.get("failsafe") is not None:
+        if "failsafe" not in normalized and isinstance(meta_payload, dict) and "failsafe" in meta_payload:
             normalized["failsafe"] = meta_payload.get("failsafe")
 
         cfg = cls(**normalized)
@@ -1031,7 +1034,7 @@ class QuantizeConfig():
 
     def to_dict(self):
         smooth = None
-        if self.failsafe.smooth is not None:
+        if self.failsafe is not None and self.failsafe.smooth is not None:
             payload = {"type": self.failsafe.smooth.name}
             payload["group_size_threshold"] = self.failsafe.smooth.group_size_threshold
             if isinstance(self.failsafe.smooth, SmoothPercentile):
@@ -1056,11 +1059,14 @@ class QuantizeConfig():
             smooth = payload
 
         meta_payload = dict(self.meta) if self.meta else {}
-        meta_payload["failsafe"] = {
-            "strategy": self.failsafe.strategy.value if isinstance(self.failsafe.strategy, FailSafeStrategy) else self.failsafe.strategy,
-            "threshold": self.failsafe.threshold,
-            "smooth": smooth,
-        }
+        if self.failsafe is None:
+            meta_payload["failsafe"] = None
+        else:
+            meta_payload["failsafe"] = {
+                "strategy": self.failsafe.strategy.value if isinstance(self.failsafe.strategy, FailSafeStrategy) else self.failsafe.strategy,
+                "threshold": self.failsafe.threshold,
+                "smooth": smooth,
+            }
 
         out = {
             "bits": self.bits,

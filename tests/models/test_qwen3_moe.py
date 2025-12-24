@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import FailSafe, FailSafeStrategy, VramStrategy
+from gptqmodel.quantization.config import FailSafe, VramStrategy
 from gptqmodel.utils.eval import EVAL
 
 
@@ -19,7 +19,7 @@ from gptqmodel.utils.eval import EVAL
 # |arc_challenge|      1|none  |     0|acc     |↑  |0.5307|±  |0.0146|
 # |             |       |none  |     0|acc_norm|↑  |0.5674|±  |0.0145|
 class TestQwen3Moe(ModelTest):
-    FAILSAFE = FailSafe(strategy=FailSafeStrategy.AUTO, threshold="0.5%")
+    FAILSAFE = FailSafe()
     # FORMAT = FORMAT.GEMM
     # METHOD = METHOD.AWQ
 
