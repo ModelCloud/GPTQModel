@@ -5,15 +5,33 @@
 
 import base64
 from io import BytesIO
-
-import audioread
-import av
-import librosa
 import numpy as np
 
+try:
+    import audioread
+    AUDIOREAD_AVAILABLE = True
+except ImportError:
+    AUDIOREAD_AVAILABLE = False
 
-SAMPLE_RATE=16000
+try:
+    import av
+    AV_AVAILABLE = True
+except ImportError:
+    AV_AVAILABLE = False
+
+try:
+    import librosa
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    LIBROSA_AVAILABLE = False
+
+AUDIOREAD_INSTALL_HINT = "audioread not installed. Please install via `pip install audioread>=3.1.0`."
+AV_INSTALL_HINT = "av not installed. Please install via `pip install av>=16.0.1`."
+LIBROSA_INSTALL_HINT = "librosa not installed. Please install via `pip install librosa>=0.11.0`."
+
 def _check_if_video_has_audio(video_path):
+    if not AV_AVAILABLE:
+        raise ValueError(AV_INSTALL_HINT)
     container = av.open(video_path)
     audio_streams = [stream for stream in container.streams if stream.type == "audio"]
     if not audio_streams:
@@ -21,7 +39,10 @@ def _check_if_video_has_audio(video_path):
     return True
 
 
-def process_audio_info(conversations: list[dict] | list[list[dict]], use_audio_in_video: bool):
+def process_audio_info(conversations: list[dict] | list[list[dict]], 
+                       use_audio_in_video: bool, 
+                       sample_rate: int=16000
+                      ):
     """
     Read and process audio info
 
@@ -54,13 +75,15 @@ def process_audio_info(conversations: list[dict] | list[list[dict]], use_audio_i
                             if path.ndim > 1:
                                 raise ValueError("Support only mono audio")
                             audios.append(
-                                path[int(SAMPLE_RATE * audio_start) : None if audio_end is None else int(SAMPLE_RATE * audio_end)]
+                                path[int(sample_rate * audio_start) : None if audio_end is None else int(sample_rate * audio_end)]
                             )
                             continue
                         elif path.startswith("data:audio"):
                             _, base64_data = path.split("base64,", 1)
                             data = BytesIO(base64.b64decode(base64_data))
                         elif path.startswith("http://") or path.startswith("https://"):
+                            if not AUDIOREAD_AVAILABLE:
+                                raise ValueError(AUDIOREAD_INSTALL_HINT)
                             data = audioread.ffdec.FFmpegAudioFile(path)
                         elif path.startswith("file://"):
                             data = path[len("file://") :]
@@ -77,6 +100,8 @@ def process_audio_info(conversations: list[dict] | list[list[dict]], use_audio_i
                             path
                         ), "Video must has audio track when use_audio_in_video=True"
                         if path.startswith("http://") or path.startswith("https://"):
+                            if not AUDIOREAD_AVAILABLE:
+                                raise ValueError(AUDIOREAD_INSTALL_HINT)
                             data = audioread.ffdec.FFmpegAudioFile(path)
                         elif path.startswith("file://"):
                             data = path[len("file://") :]
@@ -86,10 +111,12 @@ def process_audio_info(conversations: list[dict] | list[list[dict]], use_audio_i
                         raise ValueError("Unknown video {}".format(ele))
                 else:
                     continue
+                if not LIBROSA_AVAILABLE:
+                    raise ValueError(LIBROSA_INSTALL_HINT)
                 audios.append(
                     librosa.load(
                         data,
-                        sr=SAMPLE_RATE,
+                        sr=sample_rate,
                         offset=audio_start,
                         duration=(audio_end - audio_start) if audio_end is not None else None,
                     )[0]
