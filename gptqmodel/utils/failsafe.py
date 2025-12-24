@@ -21,7 +21,9 @@ def normalize_failsafe(
             strategy=value.get("strategy", fallback.strategy),
             threshold=value.get("threshold", fallback.threshold),
         )
-    return FailSafe(strategy=FailSafeStrategy.AUTO, threshold=value)
+    raise ValueError(
+        "normalize_failsafe: expected FailSafe, dict, or None. "
+    )
 
 
 def _parse_threshold(setting: Any) -> Tuple[Optional[float], bool]:
