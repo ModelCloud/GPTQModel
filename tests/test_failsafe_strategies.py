@@ -8,6 +8,7 @@ from gptqmodel.quantization.config import (
     FailSafe,
     FailSafeStrategy,
     QuantizeConfig,
+    SmoothMAD,
     SmoothPercentileAsymmetric,
 )
 from gptqmodel.quantization.gptq import GPTQ
@@ -94,6 +95,11 @@ def _assert_failsafe_bounds(
         assert asym_err <= ceiling, f"{label}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
 
 
+def _assert_finite_errors(label: str, group_size: int, errors: dict) -> None:
+    for name, err in errors.items():
+        assert math.isfinite(err), f"{label}, group={group_size}: {name} err is not finite ({err})"
+
+
 def test_midpoint_vs_rtn_across_distributions():
     scenarios = _scenarios()
     rows = _collect_synthetic_rows(scenarios)
@@ -140,6 +146,7 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
     ]
     group_sizes = (32, 64, 128)
     rows = []
+    rows_mad = []
 
     for name in targets:
         try:
@@ -180,10 +187,54 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
             )
             rows.append((name, group_size, rtn_err, mid_err, mean_err, median_err, std_err, asym_err))
 
+            rtn_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.RTN, smooth=SmoothMAD())
+            mid_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.MIDPOINT, smooth=SmoothMAD())
+            mean_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.MEAN, smooth=SmoothMAD())
+            median_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.MEDIAN, smooth=SmoothMAD())
+            std_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.STDCLIP, smooth=SmoothMAD())
+
+            rtn_mad_err = torch.mean((w - rtn_mad).abs()).item()
+            mid_mad_err = torch.mean((w - mid_mad).abs()).item()
+            mean_mad_err = torch.mean((w - mean_mad).abs()).item()
+            median_mad_err = torch.mean((w - median_mad).abs()).item()
+            std_mad_err = torch.mean((w - std_mad).abs()).item()
+            _assert_finite_errors(
+                f"{name} (mad)",
+                group_size,
+                {
+                    "rtn_mad": rtn_mad_err,
+                    "mid_mad": mid_mad_err,
+                    "mean_mad": mean_mad_err,
+                    "median_mad": median_mad_err,
+                    "stdclip_mad": std_mad_err,
+                },
+            )
+            rows_mad.append(
+                (
+                    name,
+                    group_size,
+                    rtn_mad_err,
+                    mid_mad_err,
+                    mean_mad_err,
+                    median_mad_err,
+                    std_mad_err,
+                )
+            )
+
     scenarios = _scenarios()
     synthetic_rows = _collect_synthetic_rows(scenarios)
     combined = [("synthetic:" + s, gs, re, me, mne, mde, se, ae) for s, gs, re, me, mne, mde, se, ae in synthetic_rows]
     combined += [("real:" + m, gs, re, me, mne, mde, se, ae) for m, gs, re, me, mne, mde, se, ae in rows]
+    native_map = {
+        (name, group_size): {
+            "rtn": rtn_err,
+            "mid": mid_err,
+            "mean": mean_err,
+            "median": median_err,
+            "std": std_err,
+        }
+        for name, group_size, rtn_err, mid_err, mean_err, median_err, std_err, _ in rows
+    }
 
     header = "+-------------------------------+------------+---------+--------------+--------------+--------------+--------------+--------------+"
     try:
@@ -234,6 +285,105 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
         for label, gs, rtn_err, mid_err, mean_err, median_err, std_err, asym_err in combined:
             print(f"| {label:29} | {gs:10d} | {rtn_err:7.5f} | {mid_err:12.5f} | {mean_err:12.5f} | {median_err:12.5f} | {std_err:12.5f} | {asym_err:12.5f} |")
         print(header)
+
+    if rows_mad:
+        mad_header = (
+            "+-------------------------------+------------+-------------+-------------+-------------+-------------+"
+            "-------------+-------------+-------------+-------------+-------------+-------------+-------------+"
+        )
+        try:
+            from logbar import LogBar
+
+            cols = LogBar.shared().columns(
+                cols=[
+                    {"label": "case (mad)", "width": "fit"},
+                    {"label": "group_size", "width": "fit"},
+                    {"label": "rtn_mad", "width": "fit"},
+                    {"label": "rtn_vs", "width": "fit"},
+                    {"label": "mid_mad", "width": "fit"},
+                    {"label": "mid_vs", "width": "fit"},
+                    {"label": "mean_mad", "width": "fit"},
+                    {"label": "mean_vs", "width": "fit"},
+                    {"label": "median_mad", "width": "fit"},
+                    {"label": "median_vs", "width": "fit"},
+                    {"label": "stdclip_mad", "width": "fit"},
+                    {"label": "stdclip_vs", "width": "fit"},
+                ],
+                padding=1,
+            )
+            cols.info.header()
+            for label, gs, rtn_err, mid_err, mean_err, median_err, std_err in rows_mad:
+                errors = {
+                    "rtn": rtn_err,
+                    "mid": mid_err,
+                    "mean": mean_err,
+                    "median": median_err,
+                    "std": std_err,
+                }
+                sorted_methods = sorted(errors.items(), key=lambda kv: kv[1])
+                palette = ["\033[32m", "\033[33m", "\033[35m", "\033[34m", "\033[36m", "\033[31m"]
+                color_map = {name: palette[min(idx, len(palette) - 1)] for idx, (name, _) in enumerate(sorted_methods)}
+                reset = "\033[0m"
+                native = native_map.get((label, gs), {})
+                deltas = {
+                    "rtn": rtn_err - native.get("rtn", rtn_err),
+                    "mid": mid_err - native.get("mid", mid_err),
+                    "mean": mean_err - native.get("mean", mean_err),
+                    "median": median_err - native.get("median", median_err),
+                    "std": std_err - native.get("std", std_err),
+                }
+                def _color_delta(value: float) -> str:
+                    if value > 0:
+                        return f"\033[31m{value:+.5f}\033[0m"
+                    if value < 0:
+                        return f"\033[32m{value:+.5f}\033[0m"
+                    return f"{value:+.5f}"
+
+                cols.info(
+                    f"mad:{label}",
+                    str(gs),
+                    f"{color_map['rtn']}{rtn_err:.5f}{reset}",
+                    _color_delta(deltas["rtn"]),
+                    f"{color_map['mid']}{mid_err:.5f}{reset}",
+                    _color_delta(deltas["mid"]),
+                    f"{color_map['mean']}{mean_err:.5f}{reset}",
+                    _color_delta(deltas["mean"]),
+                    f"{color_map['median']}{median_err:.5f}{reset}",
+                    _color_delta(deltas["median"]),
+                    f"{color_map['std']}{std_err:.5f}{reset}",
+                    _color_delta(deltas["std"]),
+                )
+            cols.info.header()
+        except Exception:
+            print(mad_header)
+            print(
+                "| case (mad)                   | group_size | rtn_mad     | rtn_vs      | mid_mad     | mid_vs      | mean_mad    | mean_vs     |"
+                " median_mad  | median_vs   | stdclip_mad | stdclip_vs  |"
+            )
+            print(mad_header)
+            for label, gs, rtn_err, mid_err, mean_err, median_err, std_err in rows_mad:
+                native = native_map.get((label, gs), {})
+                deltas = {
+                    "rtn": rtn_err - native.get("rtn", rtn_err),
+                    "mid": mid_err - native.get("mid", mid_err),
+                    "mean": mean_err - native.get("mean", mean_err),
+                    "median": median_err - native.get("median", median_err),
+                    "std": std_err - native.get("std", std_err),
+                }
+                def _color_delta_plain(value: float) -> str:
+                    if value > 0:
+                        return f"\033[31m{value:+.5f}\033[0m"
+                    if value < 0:
+                        return f"\033[32m{value:+.5f}\033[0m"
+                    return f"{value:+.5f}"
+
+                print(
+                    f"| mad:{label:24} | {gs:10d} | {rtn_err:11.5f} | {_color_delta_plain(deltas['rtn']):11} |"
+                    f" {mid_err:11.5f} | {_color_delta_plain(deltas['mid']):11} | {mean_err:11.5f} |"
+                    f" {_color_delta_plain(deltas['mean']):11} | {median_err:11.5f} | {_color_delta_plain(deltas['median']):11} |"
+                    f" {std_err:11.5f} | {_color_delta_plain(deltas['std']):11} |"
+                )
+            print(mad_header)
 
 
 def _collect_synthetic_rows(scenarios=None):
