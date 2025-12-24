@@ -20,6 +20,7 @@ from .config import (
                      SmoothMSE,
                      SmoothOutlier,
                      SmoothPercentile,
+                     SmoothPercentileAsymmetric,
                      SmoothRowCol,
                      SmoothSoftNorm,
 )

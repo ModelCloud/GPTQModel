@@ -16,6 +16,7 @@ from .config import (
     SmoothMAD,
     SmoothOutlier,
     SmoothPercentile,
+    SmoothPercentileAsymmetric,
     SmoothRowCol,
     SmoothSoftNorm,
 )
@@ -67,6 +68,13 @@ def smooth_block(
         abs_block = block_f.abs()
         threshold = _quantile(abs_block, float(method.percentile))
         return torch.clamp(block_f, -threshold, threshold).to(block.dtype), None
+
+    if isinstance(method, SmoothPercentileAsymmetric):
+        low = float(method.low)
+        high = float(method.high)
+        lo = torch.quantile(block_f, max(0.0, min(low / 100.0, 1.0)), dim=1, keepdim=True)
+        hi = torch.quantile(block_f, max(0.0, min(high / 100.0, 1.0)), dim=1, keepdim=True)
+        return _clamp_block(block_f, lo, hi).to(block.dtype), None
 
     if isinstance(method, SmoothMAD):
         median = block_f.median(dim=1, keepdim=True).values

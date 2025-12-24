@@ -88,9 +88,21 @@ class VramStrategy(str, Enum):
 
 
 class FailSafeStrategy(str, Enum):
+    """
+    +-----------+----------------------+---------------------------+------------------------------+
+    | strategy  | center               | scale                     | strengths / weaknesses       |
+    +-----------+----------------------+---------------------------+------------------------------+
+    | rtn       | min/max (quantizer)  | min/max (quantizer)        | simple, but outlier-driven   |
+    | midpoint  | (min+max)/2          | (max-min)                  | symmetric, outlier-sensitive |
+    | mean      | mean(w)              | 2*max(|w-mean|)            | stable for symmetric data    |
+    | median    | median(w)            | 2*max(|w-median|)          | robust center vs outliers    |
+    | stdclip   | mean(w)              | 2*sigma*std                | tames tails, may clip signal |
+    +-----------+----------------------+---------------------------+------------------------------+
+    """
     RTN = "rtn" # round to nearest
     MIDPOINT = "midpoint"
     MEAN = "mean"
+    MEDIAN = "median"
     STDCLIP = "stdclip"
 
 @dataclass
@@ -115,6 +127,27 @@ class SmoothPercentile(SmoothMethod):
     def __init__(self, percentile: float = 99.0):
         super().__init__(name="percentile")
         self.percentile = percentile
+
+
+@dataclass
+class SmoothPercentileAsymmetric(SmoothMethod):
+    """
+    +-------------------+-------------------------------------------+
+    | math              | clip to [p_low, p_high] percentiles      |
+    | config            | SmoothPercentileAsymmetric(low, high)    |
+    +-------------------+-------------------------------------------+
+    +-------------------+-------------------------------------------+
+    | low/high          | percentile bounds on raw weights         |
+    | effect            | asymmetric clipping of tails             |
+    +-------------------+-------------------------------------------+
+    """
+    low: float = 0.5
+    high: float = 99.5
+
+    def __init__(self, low: float = 0.5, high: float = 99.5):
+        super().__init__(name="percentile_asym")
+        self.low = low
+        self.high = high
 
 
 @dataclass
@@ -312,6 +345,11 @@ def _build_smooth_method_from_dict(payload: Dict[str, Any]) -> Optional[SmoothMe
     method_type = str(method_type).strip().lower()
     if method_type == "percentile":
         return SmoothPercentile(percentile=float(payload.get("percentile", 99.0)))
+    if method_type in ("percentile_asym", "percentile_asymmetric"):
+        return SmoothPercentileAsymmetric(
+            low=float(payload.get("low", 0.5)),
+            high=float(payload.get("high", 99.5)),
+        )
     if method_type == "mad":
         return SmoothMAD(k=float(payload.get("k", 3.0)))
     if method_type == "mse":
@@ -922,6 +960,9 @@ class QuantizeConfig():
             payload = {"type": self.failsafe.smooth.name}
             if isinstance(self.failsafe.smooth, SmoothPercentile):
                 payload["percentile"] = self.failsafe.smooth.percentile
+            elif isinstance(self.failsafe.smooth, SmoothPercentileAsymmetric):
+                payload["low"] = self.failsafe.smooth.low
+                payload["high"] = self.failsafe.smooth.high
             elif isinstance(self.failsafe.smooth, SmoothMAD):
                 payload["k"] = self.failsafe.smooth.k
             elif isinstance(self.failsafe.smooth, SmoothMSE):
