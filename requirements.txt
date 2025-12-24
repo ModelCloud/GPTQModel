@@ -19,5 +19,3 @@ pyarrow>=21.0
 dill>=0.3.8
 torchao>=0.14.1
 kernels>=0.11.1
-audioread>=3.1.0
-librosa>0.11.0
