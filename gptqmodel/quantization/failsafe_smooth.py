@@ -45,6 +45,8 @@ def smooth_block(
     method = getattr(failsafe, "smooth", None)
     if method is None:
         return block, None
+    if group_size is not None and group_size < 0:
+        group_size = block.shape[1]
     if group_size is not None and group_size < getattr(method, "group_size_threshold", 0):
         return block, None
 
