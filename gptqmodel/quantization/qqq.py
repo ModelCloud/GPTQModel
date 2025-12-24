@@ -327,6 +327,17 @@ class QQQ:
                     zero = torch.round(zero_mid - (mean / scale))
                     zero = torch.clamp(zero, 0, maxq)
                     dequant = (q - zero) * scale
+                elif strategy == FailSafeStrategy.MEDIAN:
+                    median = block_mod.median(dim=1, keepdim=True).values
+                    max_dev = torch.max((block_mod - median).abs(), dim=1, keepdim=True).values
+                    max_dev = torch.clamp(max_dev, min=1e-8)
+                    scale = (2 * max_dev) / maxq
+                    zero_mid = torch.full_like(scale, maxq / 2.0)
+                    q = torch.round((block_mod - median) / scale + zero_mid)
+                    q = torch.clamp(q, 0, maxq)
+                    zero = torch.round(zero_mid - (median / scale))
+                    zero = torch.clamp(zero, 0, maxq)
+                    dequant = (q - zero) * scale
                 elif strategy == FailSafeStrategy.STDCLIP:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     std = block_mod.std(dim=1, keepdim=True, unbiased=False)

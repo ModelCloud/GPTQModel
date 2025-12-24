@@ -61,6 +61,24 @@ def _quantize_mean_centered(weights: torch.Tensor, group_size: int, bits: int = 
     return out
 
 
+def _quantize_median_centered(weights: torch.Tensor, group_size: int, bits: int = 4) -> torch.Tensor:
+    maxq = 2 ** bits - 1
+    out = torch.empty_like(weights)
+    for start in range(0, weights.shape[1], group_size):
+        end = min(start + group_size, weights.shape[1])
+        block = weights[:, start:end]
+        median = block.median(dim=1, keepdim=True).values
+        max_dev = torch.max((block - median).abs(), dim=1, keepdim=True).values
+        max_dev = torch.clamp(max_dev, min=1e-6)
+        scale = (2 * max_dev) / maxq
+        zero = torch.full_like(scale, maxq / 2.0)
+        q = torch.round((block - median) / scale + zero)
+        q = torch.clamp(q, 0, maxq)
+        dequant = (q - zero) * scale + median
+        out[:, start:end] = dequant
+    return out
+
+
 def _quantize_std_clipped(weights: torch.Tensor, group_size: int, bits: int = 4, sigma: float = 3.0) -> torch.Tensor:
     maxq = 2 ** bits - 1
     out = torch.empty_like(weights)
@@ -81,6 +99,36 @@ def _quantize_std_clipped(weights: torch.Tensor, group_size: int, bits: int = 4,
     return out
 
 
+def _quantize_asym_percentile_midpoint(
+    weights: torch.Tensor,
+    group_size: int,
+    bits: int = 4,
+    low: float = 0.5,
+    high: float = 99.5,
+) -> torch.Tensor:
+    maxq = 2 ** bits - 1
+    out = torch.empty_like(weights)
+    low_q = max(0.0, min(low / 100.0, 1.0))
+    high_q = max(0.0, min(high / 100.0, 1.0))
+    for start in range(0, weights.shape[1], group_size):
+        end = min(start + group_size, weights.shape[1])
+        block = weights[:, start:end]
+        block_f = block.float()
+        lo = torch.quantile(block_f, low_q, dim=1, keepdim=True)
+        hi = torch.quantile(block_f, high_q, dim=1, keepdim=True)
+        clipped = torch.max(torch.min(block_f, hi), lo)
+        w_min = clipped.min(dim=1, keepdim=True).values
+        w_max = clipped.max(dim=1, keepdim=True).values
+        mid = (w_max + w_min) / 2.0
+        scale = (w_max - w_min) / maxq
+        zero = torch.full_like(scale, maxq / 2.0)
+        q = torch.round((clipped - mid) / scale + zero)
+        q = torch.clamp(q, 0, maxq)
+        dequant = (q - zero) * scale + mid
+        out[:, start:end] = dequant.to(dtype=block.dtype)
+    return out
+
+
 def _scenarios():
     torch.manual_seed(0)
     base = torch.randn(8, 32)
@@ -96,11 +144,13 @@ def _scenarios():
 
 def test_midpoint_vs_rtn_across_distributions():
     rows = _collect_synthetic_rows()
-    for scenario_name, group_size, rtn_err, midpoint_err, mean_err, std_err in rows:
+    for scenario_name, group_size, rtn_err, midpoint_err, mean_err, median_err, std_err, asym_err in rows:
         assert midpoint_err <= rtn_err, f"{scenario_name}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
         assert mean_err <= rtn_err * 1.10, f"{scenario_name}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
+        assert median_err <= rtn_err * 1.25, f"{scenario_name}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
         # std-clip intentionally biases to avoid outliers; allow generous headroom while keeping it bounded.
         assert std_err <= rtn_err * 2.50, f"{scenario_name}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
+        assert asym_err <= rtn_err * 1.50, f"{scenario_name}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
 
 
 def _load_weight_slice(model_dir: str, tensor_name: str, *, max_rows: int = 256, max_cols: int = 256) -> torch.Tensor:
@@ -143,19 +193,23 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
             rtn = _quantize_rtn(w, group_size=group_size)
             mid = _quantize_midpoint(w, group_size=group_size)
             mean_c = _quantize_mean_centered(w, group_size=group_size)
+            median_c = _quantize_median_centered(w, group_size=group_size)
             std_c = _quantize_std_clipped(w, group_size=group_size, sigma=3.0)
+            asym_c = _quantize_asym_percentile_midpoint(w, group_size=group_size)
 
             rtn_err = torch.mean((w - rtn).abs()).item()
             mid_err = torch.mean((w - mid).abs()).item()
             mean_err = torch.mean((w - mean_c).abs()).item()
+            median_err = torch.mean((w - median_c).abs()).item()
             std_err = torch.mean((w - std_c).abs()).item()
-            rows.append((name, group_size, rtn_err, mid_err, mean_err, std_err))
+            asym_err = torch.mean((w - asym_c).abs()).item()
+            rows.append((name, group_size, rtn_err, mid_err, mean_err, median_err, std_err, asym_err))
 
     synthetic_rows = _collect_synthetic_rows()
-    combined = [("synthetic:" + s, gs, re, me, mne, se) for s, gs, re, me, mne, se in synthetic_rows]
-    combined += [("real:" + m, gs, re, me, mne, se) for m, gs, re, me, mne, se in rows]
+    combined = [("synthetic:" + s, gs, re, me, mne, mde, se, ae) for s, gs, re, me, mne, mde, se, ae in synthetic_rows]
+    combined += [("real:" + m, gs, re, me, mne, mde, se, ae) for m, gs, re, me, mne, mde, se, ae in rows]
 
-    header = "+-------------------------------+------------+---------+--------------+--------------+--------------+"
+    header = "+-------------------------------+------------+---------+--------------+--------------+--------------+--------------+--------------+"
     try:
         from logbar import LogBar
 
@@ -166,15 +220,24 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
                 {"label": "rtn_err", "width": "fit"},
                 {"label": "mid_err", "width": "fit"},
                 {"label": "mean_err", "width": "fit"},
+                {"label": "median_err", "width": "fit"},
                 {"label": "stdclip_err", "width": "fit"},
+                {"label": "asym_err", "width": "fit"},
             ],
             padding=1,
         )
         cols.info.header()
-        for label, gs, rtn_err, mid_err, mean_err, std_err in combined:
-            errors = {"rtn": rtn_err, "mid": mid_err, "mean": mean_err, "std": std_err}
+        for label, gs, rtn_err, mid_err, mean_err, median_err, std_err, asym_err in combined:
+            errors = {
+                "rtn": rtn_err,
+                "mid": mid_err,
+                "mean": mean_err,
+                "median": median_err,
+                "std": std_err,
+                "asym": asym_err,
+            }
             sorted_methods = sorted(errors.items(), key=lambda kv: kv[1])
-            palette = ["\033[32m", "\033[33m", "\033[35m", "\033[31m"]
+            palette = ["\033[32m", "\033[33m", "\033[35m", "\033[34m", "\033[36m", "\033[31m"]
             color_map = {name: palette[min(idx, len(palette) - 1)] for idx, (name, _) in enumerate(sorted_methods)}
             reset = "\033[0m"
             cols.info(
@@ -183,21 +246,25 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
                 f"{color_map['rtn']}{rtn_err:.5f}{reset}",
                 f"{color_map['mid']}{mid_err:.5f}{reset}",
                 f"{color_map['mean']}{mean_err:.5f}{reset}",
+                f"{color_map['median']}{median_err:.5f}{reset}",
                 f"{color_map['std']}{std_err:.5f}{reset}",
+                f"{color_map['asym']}{asym_err:.5f}{reset}",
             )
         cols.info.header()
     except Exception:
         print(header)
-        print("| case                          | group_size | rtn_err | midpoint_err | mean_err     | stdclip_err  |")
+        print("| case                          | group_size | rtn_err | midpoint_err | mean_err     | median_err   | stdclip_err  | asym_err     |")
         print(header)
-        for label, gs, rtn_err, mid_err, mean_err, std_err in combined:
-            print(f"| {label:29} | {gs:10d} | {rtn_err:7.5f} | {mid_err:12.5f} | {mean_err:12.5f} | {std_err:12.5f} |")
+        for label, gs, rtn_err, mid_err, mean_err, median_err, std_err, asym_err in combined:
+            print(f"| {label:29} | {gs:10d} | {rtn_err:7.5f} | {mid_err:12.5f} | {mean_err:12.5f} | {median_err:12.5f} | {std_err:12.5f} | {asym_err:12.5f} |")
         print(header)
 
-    for module, group_size, rtn_err, mid_err, mean_err, std_err in rows:
+    for module, group_size, rtn_err, mid_err, mean_err, median_err, std_err, asym_err in rows:
         assert mid_err <= rtn_err, f"{module}, group={group_size}: midpoint_err={mid_err}, rtn_err={rtn_err}"
         assert mean_err <= rtn_err * 1.20, f"{module}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
+        assert median_err <= rtn_err * 1.20, f"{module}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
         assert std_err <= rtn_err * 2.50, f"{module}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
+        assert asym_err <= rtn_err * 1.50, f"{module}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
 
 
 def _collect_synthetic_rows():
@@ -207,11 +274,15 @@ def _collect_synthetic_rows():
             rtn = _quantize_rtn(weights, group_size=group_size)
             midpoint = _quantize_midpoint(weights, group_size=group_size)
             mean_centered = _quantize_mean_centered(weights, group_size=group_size)
+            median_centered = _quantize_median_centered(weights, group_size=group_size)
             std_clip = _quantize_std_clipped(weights, group_size=group_size, sigma=3.0)
+            asym_clip = _quantize_asym_percentile_midpoint(weights, group_size=group_size)
 
             rtn_err = torch.mean((weights - rtn).abs()).item()
             midpoint_err = torch.mean((weights - midpoint).abs()).item()
             mean_err = torch.mean((weights - mean_centered).abs()).item()
+            median_err = torch.mean((weights - median_centered).abs()).item()
             std_err = torch.mean((weights - std_clip).abs()).item()
-            rows.append((scenario_name, group_size, rtn_err, midpoint_err, mean_err, std_err))
+            asym_err = torch.mean((weights - asym_clip).abs()).item()
+            rows.append((scenario_name, group_size, rtn_err, midpoint_err, mean_err, median_err, std_err, asym_err))
     return rows

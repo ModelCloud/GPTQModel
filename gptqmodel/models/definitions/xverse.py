@@ -7,4 +7,4 @@ from . import LlamaQModel
 
 
 class XverseQModel(LlamaQModel):
-    require_pkgs_version = ["transformers<=4.38.2", "tokenizers<=0.15.2"]
+    require_pkgs = ["transformers<=4.38.2", "tokenizers<=0.15.2"]

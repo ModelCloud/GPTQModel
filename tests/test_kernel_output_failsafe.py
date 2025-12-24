@@ -19,6 +19,7 @@ from gptqmodel.quantization.config import (
     SmoothMSE,
     SmoothOutlier,
     SmoothPercentile,
+    SmoothPercentileAsymmetric,
     SmoothRowCol,
     SmoothSoftNorm,
 )
@@ -215,11 +216,17 @@ def test_kernel_output_failsafe():
         ("rtn", FailSafe(strategy=FailSafeStrategy.RTN, threshold=True)),
         ("midpoint", FailSafe(strategy=FailSafeStrategy.MIDPOINT, threshold=True)),
         ("mean", FailSafe(strategy=FailSafeStrategy.MEAN, threshold=True)),
+        ("median", FailSafe(strategy=FailSafeStrategy.MEDIAN, threshold=True)),
         ("stdclip", FailSafe(strategy=FailSafeStrategy.STDCLIP, threshold=True)),
         ("rtn_p99", FailSafe(
             strategy=FailSafeStrategy.RTN,
             threshold=True,
             smooth=SmoothPercentile(percentile=99.0),
+        )),
+        ("rtn_asym_p", FailSafe(
+            strategy=FailSafeStrategy.RTN,
+            threshold=True,
+            smooth=SmoothPercentileAsymmetric(low=0.5, high=99.5),
         )),
         ("rtn_mad", FailSafe(
             strategy=FailSafeStrategy.RTN,
@@ -248,6 +255,46 @@ def test_kernel_output_failsafe():
         )),
         ("rtn_rowcol", FailSafe(
             strategy=FailSafeStrategy.RTN,
+            threshold=True,
+            smooth=SmoothRowCol(axis="row"),
+        )),
+        ("median_p99", FailSafe(
+            strategy=FailSafeStrategy.MEDIAN,
+            threshold=True,
+            smooth=SmoothPercentile(percentile=99.0),
+        )),
+        ("median_asym_p", FailSafe(
+            strategy=FailSafeStrategy.MEDIAN,
+            threshold=True,
+            smooth=SmoothPercentileAsymmetric(low=0.5, high=99.5),
+        )),
+        ("median_mad", FailSafe(
+            strategy=FailSafeStrategy.MEDIAN,
+            threshold=True,
+            smooth=SmoothMAD(k=3.0),
+        )),
+        ("median_mse", FailSafe(
+            strategy=FailSafeStrategy.MEDIAN,
+            threshold=True,
+            smooth=SmoothMSE(steps=32, maxshrink=0.8),
+        )),
+        ("median_outlier", FailSafe(
+            strategy=FailSafeStrategy.MEDIAN,
+            threshold=True,
+            smooth=SmoothOutlier(pct=1.0),
+        )),
+        ("median_softnorm", FailSafe(
+            strategy=FailSafeStrategy.MEDIAN,
+            threshold=True,
+            smooth=SmoothSoftNorm(k=3.0),
+        )),
+        ("median_log", FailSafe(
+            strategy=FailSafeStrategy.MEDIAN,
+            threshold=True,
+            smooth=SmoothLog(percentile=99.0, mu=8.0),
+        )),
+        ("median_rowcol", FailSafe(
+            strategy=FailSafeStrategy.MEDIAN,
             threshold=True,
             smooth=SmoothRowCol(axis="row"),
         )),
