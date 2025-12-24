@@ -298,7 +298,7 @@ model.quantize(calibration_dataset, batch_size=1)
 model.save(quant_path)
 ```
 
-### Quantization using GPTAQ (Experimental, not MoE compatible, and results may not be better than v1)
+### Quantization using GPTAQ (Experimental, not MoE compatible, and results may not be better than original)
 
 Enable GPTAQ quantization by setting `gptaq = True`.
 ```py
@@ -447,12 +447,12 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 
 ### Attribution of Quantization Methods:
 
-* GPTQ (v1): IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
-* GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
-* QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
+* GPTQ: IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
+* AWQ: main-authors: Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song
 * EoRA: Nvidia, main-author: Shih-Yang Liu, arXiv preprint arXiv:2410.21271.
 * GAR: Intel, main-author: T Gafni, A Karnieli, Y Hanani, [Paper](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
-* AWQ: main-authors: Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song
+* GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
+* QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 
 ## Citation
 
@@ -509,19 +509,19 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
   year={2024}
 }
 
-# QQQ 
-@article{zhang2024qqq,
-      title={QQQ: Quality Quattuor-Bit Quantization for Large Language Models}, 
-      author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
-      journal={arXiv preprint arXiv:2406.09904},
-      year={2024}
-}
-
 # GPTAQ
 @article{li2025gptaq,
   title={GPTAQ: Efficient Finetuning-Free Quantization for Asymmetric Calibration}, 
   author={Yuhang Li and Ruokai Yin and Donghyun Lee and Shiting Xiao and Priyadarshini Panda},
   journal={arXiv preprint arXiv:2504.02692},
   year={2025}
+}
+
+# QQQ 
+@article{zhang2024qqq,
+      title={QQQ: Quality Quattuor-Bit Quantization for Large Language Models}, 
+      author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
+      journal={arXiv preprint arXiv:2406.09904},
+      year={2024}
 }
 ```
