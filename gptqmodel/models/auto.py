@@ -93,6 +93,7 @@ from .definitions.gemma2 import Gemma2QModel  # noqa: E402
 from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel  # noqa: E402
 from .definitions.glm import GlmQModel  # noqa: E402
 from .definitions.glm4_moe import GLM4MoEGPTQ  # noqa: E402
+from .definitions.glm4v import Glm4vGPTQ  # noqa: E402
 from .definitions.gpt2 import GPT2QModel  # noqa: E402
 from .definitions.gpt_bigcode import GptBigCodeQModel  # noqa: E402
 from .definitions.gpt_neo import GptNeoQModel  # noqa: E402
@@ -169,6 +170,7 @@ MODEL_MAP = {
     "chatglm": ChatGLMQModel,
     "glm": GlmQModel,
     "glm4": GlmQModel,
+    "glm4v": Glm4vGPTQ,
     "glm4_moe": GLM4MoEGPTQ,
     "gpt_bigcode": GptBigCodeQModel,
     "codegen": CodeGenQModel,

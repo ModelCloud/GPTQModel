@@ -78,7 +78,7 @@ def run_subset_stage(
     processor_name_lower = processor_name.lower()
     is_awq_processor = processor_name_lower.startswith("awq")
 
-    subset = looper.crate_named_modules(
+    subset = looper.create_named_modules(
         module=module,
         full=full,
         is_lm_head_module=is_lm_head_module,
@@ -416,20 +416,21 @@ def run_subset_stage(
         emit_subset_event("forward_end")
 
     moe_skip_modules = []
+    failsafe_enabled = failsafe is not None
     if isinstance(processor, GPTQProcessor):
         for name in subset:
             # Skip MoE experts that never fired; they likely lacked calibration
             # traffic and would produce invalid statistics.
             if processor.tasks[name].fwd_counter == 0:
                 # only log for moe if `failsafe` is not enabled
-                if failsafe is not None:
+                if not failsafe_enabled:
                     logger.error(
                         f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it. "
                         f"Please enable and use `failsafe` config option."
                     )
                 moe_skip_modules.append(name)
 
-        if not failsafe:
+        if not failsafe_enabled:
             for name in moe_skip_modules:
                 subset.pop(name)
                 task_map = getattr(processor, "tasks", None)
