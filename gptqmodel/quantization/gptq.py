@@ -641,7 +641,11 @@ class GPTQ:
                     maxshrink=mse_maxshrink,
                 )
             else:
-                block_mod, scale_factor = smooth_block(block, self.failsafe)
+                block_mod, scale_factor = smooth_block(
+                    block,
+                    self.failsafe,
+                    group_size=effective_group_size,
+                )
                 if strategy == FailSafeStrategy.MIDPOINT:
                     w_min = block_mod.min(dim=1, keepdim=True).values
                     w_max = block_mod.max(dim=1, keepdim=True).values

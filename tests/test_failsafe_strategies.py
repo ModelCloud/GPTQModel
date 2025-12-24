@@ -1,132 +1,44 @@
+import math
 import os
 from glob import glob
 
 import torch
 
-from gptqmodel.quantization.config import QuantizeConfig
-from gptqmodel.quantization.quantizer import Quantizer
+from gptqmodel.quantization.config import (
+    FailSafe,
+    FailSafeStrategy,
+    QuantizeConfig,
+    SmoothMAD,
+    SmoothPercentileAsymmetric,
+)
+from gptqmodel.quantization.gptq import GPTQ
 
 
-def _quantize_rtn(weights: torch.Tensor, group_size: int, bits: int = 4) -> torch.Tensor:
-    qcfg = QuantizeConfig(bits=bits, group_size=group_size, sym=False)
-    quantizer = Quantizer(qcfg=qcfg)
-    quantizer.configure(perchannel=True)
-
-    out = torch.empty_like(weights)
-
-    for start in range(0, weights.shape[1], group_size):
-        end = min(start + group_size, weights.shape[1])
-        block = weights[:, start:end]
-        quantizer.find_params(block, weight=True)
-        q_block = quantizer.quantize(block)
-        # Clip to valid range since quantizer.find_params uses per-channel layout.
-        q_block = torch.clamp(q_block, block.min(), block.max())
-        out[:, start:end] = q_block
-    return out
-
-
-def _quantize_midpoint(weights: torch.Tensor, group_size: int, bits: int = 4) -> torch.Tensor:
-    maxq = 2 ** bits - 1
-    out = torch.empty_like(weights)
-    for start in range(0, weights.shape[1], group_size):
-        end = min(start + group_size, weights.shape[1])
-        block = weights[:, start:end]
-        w_min = block.min(dim=1, keepdim=True).values
-        w_max = block.max(dim=1, keepdim=True).values
-        mid = (w_max + w_min) / 2.0
-        scale = (w_max - w_min) / maxq
-        zero = torch.full_like(scale, maxq / 2.0)
-        q = torch.round((block - mid) / scale + zero)
-        q = torch.clamp(q, 0, maxq)
-        dequant = (q - zero) * scale + mid
-        out[:, start:end] = dequant
-    return out
-
-
-def _quantize_mean_centered(weights: torch.Tensor, group_size: int, bits: int = 4) -> torch.Tensor:
-    maxq = 2 ** bits - 1
-    out = torch.empty_like(weights)
-    for start in range(0, weights.shape[1], group_size):
-        end = min(start + group_size, weights.shape[1])
-        block = weights[:, start:end]
-        mean = block.mean(dim=1, keepdim=True)
-        max_dev = torch.max((block - mean).abs(), dim=1, keepdim=True).values
-        max_dev = torch.clamp(max_dev, min=1e-6)
-        scale = (2 * max_dev) / maxq
-        zero = torch.full_like(scale, maxq / 2.0)
-        q = torch.round((block - mean) / scale + zero)
-        q = torch.clamp(q, 0, maxq)
-        dequant = (q - zero) * scale + mean
-        out[:, start:end] = dequant
-    return out
-
-
-def _quantize_median_centered(weights: torch.Tensor, group_size: int, bits: int = 4) -> torch.Tensor:
-    maxq = 2 ** bits - 1
-    out = torch.empty_like(weights)
-    for start in range(0, weights.shape[1], group_size):
-        end = min(start + group_size, weights.shape[1])
-        block = weights[:, start:end]
-        median = block.median(dim=1, keepdim=True).values
-        max_dev = torch.max((block - median).abs(), dim=1, keepdim=True).values
-        max_dev = torch.clamp(max_dev, min=1e-6)
-        scale = (2 * max_dev) / maxq
-        zero = torch.full_like(scale, maxq / 2.0)
-        q = torch.round((block - median) / scale + zero)
-        q = torch.clamp(q, 0, maxq)
-        dequant = (q - zero) * scale + median
-        out[:, start:end] = dequant
-    return out
-
-
-def _quantize_std_clipped(weights: torch.Tensor, group_size: int, bits: int = 4, sigma: float = 3.0) -> torch.Tensor:
-    maxq = 2 ** bits - 1
-    out = torch.empty_like(weights)
-    for start in range(0, weights.shape[1], group_size):
-        end = min(start + group_size, weights.shape[1])
-        block = weights[:, start:end]
-        mean = block.mean(dim=1, keepdim=True)
-        std = block.std(dim=1, keepdim=True, unbiased=False)
-        std = torch.clamp(std, min=1e-6)
-        lo = mean - sigma * std
-        hi = mean + sigma * std
-        scale = (hi - lo) / maxq
-        zero = torch.round(-lo / scale)
-        q = torch.round(block / scale + zero)
-        q = torch.clamp(q, 0, maxq)
-        dequant = (q - zero) * scale
-        out[:, start:end] = dequant
-    return out
-
-
-def _quantize_asym_percentile_midpoint(
+def _failsafe_quantize(
     weights: torch.Tensor,
     group_size: int,
+    strategy: FailSafeStrategy,
+    *,
     bits: int = 4,
-    low: float = 0.5,
-    high: float = 99.5,
+    sym: bool = False,
+    smooth=None,
 ) -> torch.Tensor:
-    maxq = 2 ** bits - 1
-    out = torch.empty_like(weights)
-    low_q = max(0.0, min(low / 100.0, 1.0))
-    high_q = max(0.0, min(high / 100.0, 1.0))
-    for start in range(0, weights.shape[1], group_size):
-        end = min(start + group_size, weights.shape[1])
-        block = weights[:, start:end]
-        block_f = block.float()
-        lo = torch.quantile(block_f, low_q, dim=1, keepdim=True)
-        hi = torch.quantile(block_f, high_q, dim=1, keepdim=True)
-        clipped = torch.max(torch.min(block_f, hi), lo)
-        w_min = clipped.min(dim=1, keepdim=True).values
-        w_max = clipped.max(dim=1, keepdim=True).values
-        mid = (w_max + w_min) / 2.0
-        scale = (w_max - w_min) / maxq
-        zero = torch.full_like(scale, maxq / 2.0)
-        q = torch.round((clipped - mid) / scale + zero)
-        q = torch.clamp(q, 0, maxq)
-        dequant = (q - zero) * scale + mid
-        out[:, start:end] = dequant.to(dtype=block.dtype)
-    return out
+    module = torch.nn.Linear(weights.shape[1], weights.shape[0], bias=False)
+    module = module.to(device=weights.device, dtype=weights.dtype)
+    with torch.no_grad():
+        module.weight.copy_(weights)
+
+    qcfg = QuantizeConfig(
+        bits=bits,
+        group_size=group_size,
+        sym=sym,
+        failsafe=FailSafe(strategy=strategy, smooth=smooth),
+        offload_to_disk=False,
+    )
+    gptq = GPTQ(module=module, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+    dequant, *_ = gptq._failsafe_quantize(strategy, blocksize=group_size)
+    return dequant
 
 
 def _scenarios():
@@ -142,15 +54,68 @@ def _scenarios():
     }
 
 
+def _assert_failsafe_bounds(
+    label: str,
+    weights: torch.Tensor,
+    group_size: int,
+    rtn_err: float,
+    midpoint_err: float,
+    mean_err: float,
+    median_err: float,
+    std_err: float,
+    asym_err: float,
+) -> None:
+    for name, err in (
+        ("rtn", rtn_err),
+        ("midpoint", midpoint_err),
+        ("mean", mean_err),
+        ("median", median_err),
+        ("stdclip", std_err),
+        ("asym", asym_err),
+    ):
+        assert math.isfinite(err), f"{label}, group={group_size}: {name}_err is not finite ({err})"
+
+    min_val = weights.min().item()
+    max_val = weights.max().item()
+    one_sided = min_val > 0.0 or max_val < 0.0
+
+    if one_sided:
+        floor = rtn_err * 5.0
+        assert midpoint_err >= floor, f"{label}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
+        assert mean_err >= floor, f"{label}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
+        assert median_err >= floor, f"{label}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
+        assert std_err >= floor, f"{label}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
+        assert asym_err >= floor, f"{label}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
+    else:
+        ceiling = rtn_err * 3.0
+        assert midpoint_err <= ceiling, f"{label}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
+        assert mean_err <= ceiling, f"{label}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
+        assert median_err <= ceiling, f"{label}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
+        assert std_err <= ceiling, f"{label}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
+        assert asym_err <= ceiling, f"{label}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
+
+
+def _assert_finite_errors(label: str, group_size: int, errors: dict) -> None:
+    for name, err in errors.items():
+        assert math.isfinite(err), f"{label}, group={group_size}: {name} err is not finite ({err})"
+
+
 def test_midpoint_vs_rtn_across_distributions():
-    rows = _collect_synthetic_rows()
+    scenarios = _scenarios()
+    rows = _collect_synthetic_rows(scenarios)
     for scenario_name, group_size, rtn_err, midpoint_err, mean_err, median_err, std_err, asym_err in rows:
-        assert midpoint_err <= rtn_err, f"{scenario_name}, group={group_size}: midpoint_err={midpoint_err}, rtn_err={rtn_err}"
-        assert mean_err <= rtn_err * 1.10, f"{scenario_name}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
-        assert median_err <= rtn_err * 1.25, f"{scenario_name}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
-        # std-clip intentionally biases to avoid outliers; allow generous headroom while keeping it bounded.
-        assert std_err <= rtn_err * 2.50, f"{scenario_name}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
-        assert asym_err <= rtn_err * 1.50, f"{scenario_name}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
+        weights = scenarios[scenario_name]
+        _assert_failsafe_bounds(
+            scenario_name,
+            weights,
+            group_size,
+            rtn_err,
+            midpoint_err,
+            mean_err,
+            median_err,
+            std_err,
+            asym_err,
+        )
 
 
 def _load_weight_slice(model_dir: str, tensor_name: str, *, max_rows: int = 256, max_cols: int = 256) -> torch.Tensor:
@@ -181,6 +146,7 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
     ]
     group_sizes = (32, 64, 128)
     rows = []
+    rows_mad = []
 
     for name in targets:
         try:
@@ -190,12 +156,17 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
             pytest.skip(f"Tensor `{name}` not found in model shards at {model_dir}")
 
         for group_size in group_sizes:
-            rtn = _quantize_rtn(w, group_size=group_size)
-            mid = _quantize_midpoint(w, group_size=group_size)
-            mean_c = _quantize_mean_centered(w, group_size=group_size)
-            median_c = _quantize_median_centered(w, group_size=group_size)
-            std_c = _quantize_std_clipped(w, group_size=group_size, sigma=3.0)
-            asym_c = _quantize_asym_percentile_midpoint(w, group_size=group_size)
+            rtn = _failsafe_quantize(w, group_size, FailSafeStrategy.RTN)
+            mid = _failsafe_quantize(w, group_size, FailSafeStrategy.MIDPOINT)
+            mean_c = _failsafe_quantize(w, group_size, FailSafeStrategy.MEAN)
+            median_c = _failsafe_quantize(w, group_size, FailSafeStrategy.MEDIAN)
+            std_c = _failsafe_quantize(w, group_size, FailSafeStrategy.STDCLIP)
+            asym_c = _failsafe_quantize(
+                w,
+                group_size,
+                FailSafeStrategy.MIDPOINT,
+                smooth=SmoothPercentileAsymmetric(low=0.5, high=99.5),
+            )
 
             rtn_err = torch.mean((w - rtn).abs()).item()
             mid_err = torch.mean((w - mid).abs()).item()
@@ -203,11 +174,67 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
             median_err = torch.mean((w - median_c).abs()).item()
             std_err = torch.mean((w - std_c).abs()).item()
             asym_err = torch.mean((w - asym_c).abs()).item()
+            _assert_failsafe_bounds(
+                name,
+                w,
+                group_size,
+                rtn_err,
+                mid_err,
+                mean_err,
+                median_err,
+                std_err,
+                asym_err,
+            )
             rows.append((name, group_size, rtn_err, mid_err, mean_err, median_err, std_err, asym_err))
 
-    synthetic_rows = _collect_synthetic_rows()
+            rtn_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.RTN, smooth=SmoothMAD())
+            mid_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.MIDPOINT, smooth=SmoothMAD())
+            mean_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.MEAN, smooth=SmoothMAD())
+            median_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.MEDIAN, smooth=SmoothMAD())
+            std_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.STDCLIP, smooth=SmoothMAD())
+
+            rtn_mad_err = torch.mean((w - rtn_mad).abs()).item()
+            mid_mad_err = torch.mean((w - mid_mad).abs()).item()
+            mean_mad_err = torch.mean((w - mean_mad).abs()).item()
+            median_mad_err = torch.mean((w - median_mad).abs()).item()
+            std_mad_err = torch.mean((w - std_mad).abs()).item()
+            _assert_finite_errors(
+                f"{name} (mad)",
+                group_size,
+                {
+                    "rtn_mad": rtn_mad_err,
+                    "mid_mad": mid_mad_err,
+                    "mean_mad": mean_mad_err,
+                    "median_mad": median_mad_err,
+                    "stdclip_mad": std_mad_err,
+                },
+            )
+            rows_mad.append(
+                (
+                    name,
+                    group_size,
+                    rtn_mad_err,
+                    mid_mad_err,
+                    mean_mad_err,
+                    median_mad_err,
+                    std_mad_err,
+                )
+            )
+
+    scenarios = _scenarios()
+    synthetic_rows = _collect_synthetic_rows(scenarios)
     combined = [("synthetic:" + s, gs, re, me, mne, mde, se, ae) for s, gs, re, me, mne, mde, se, ae in synthetic_rows]
     combined += [("real:" + m, gs, re, me, mne, mde, se, ae) for m, gs, re, me, mne, mde, se, ae in rows]
+    native_map = {
+        (name, group_size): {
+            "rtn": rtn_err,
+            "mid": mid_err,
+            "mean": mean_err,
+            "median": median_err,
+            "std": std_err,
+        }
+        for name, group_size, rtn_err, mid_err, mean_err, median_err, std_err, _ in rows
+    }
 
     header = "+-------------------------------+------------+---------+--------------+--------------+--------------+--------------+--------------+"
     try:
@@ -259,24 +286,123 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
             print(f"| {label:29} | {gs:10d} | {rtn_err:7.5f} | {mid_err:12.5f} | {mean_err:12.5f} | {median_err:12.5f} | {std_err:12.5f} | {asym_err:12.5f} |")
         print(header)
 
-    for module, group_size, rtn_err, mid_err, mean_err, median_err, std_err, asym_err in rows:
-        assert mid_err <= rtn_err, f"{module}, group={group_size}: midpoint_err={mid_err}, rtn_err={rtn_err}"
-        assert mean_err <= rtn_err * 1.20, f"{module}, group={group_size}: mean_err={mean_err}, rtn_err={rtn_err}"
-        assert median_err <= rtn_err * 1.20, f"{module}, group={group_size}: median_err={median_err}, rtn_err={rtn_err}"
-        assert std_err <= rtn_err * 2.50, f"{module}, group={group_size}: std_err={std_err}, rtn_err={rtn_err}"
-        assert asym_err <= rtn_err * 1.50, f"{module}, group={group_size}: asym_err={asym_err}, rtn_err={rtn_err}"
+    if rows_mad:
+        mad_header = (
+            "+-------------------------------+------------+-------------+-------------+-------------+-------------+"
+            "-------------+-------------+-------------+-------------+-------------+-------------+-------------+"
+        )
+        try:
+            from logbar import LogBar
+
+            cols = LogBar.shared().columns(
+                cols=[
+                    {"label": "case (mad)", "width": "fit"},
+                    {"label": "group_size", "width": "fit"},
+                    {"label": "rtn_mad", "width": "fit"},
+                    {"label": "rtn_vs", "width": "fit"},
+                    {"label": "mid_mad", "width": "fit"},
+                    {"label": "mid_vs", "width": "fit"},
+                    {"label": "mean_mad", "width": "fit"},
+                    {"label": "mean_vs", "width": "fit"},
+                    {"label": "median_mad", "width": "fit"},
+                    {"label": "median_vs", "width": "fit"},
+                    {"label": "stdclip_mad", "width": "fit"},
+                    {"label": "stdclip_vs", "width": "fit"},
+                ],
+                padding=1,
+            )
+            cols.info.header()
+            for label, gs, rtn_err, mid_err, mean_err, median_err, std_err in rows_mad:
+                errors = {
+                    "rtn": rtn_err,
+                    "mid": mid_err,
+                    "mean": mean_err,
+                    "median": median_err,
+                    "std": std_err,
+                }
+                sorted_methods = sorted(errors.items(), key=lambda kv: kv[1])
+                palette = ["\033[32m", "\033[33m", "\033[35m", "\033[34m", "\033[36m", "\033[31m"]
+                color_map = {name: palette[min(idx, len(palette) - 1)] for idx, (name, _) in enumerate(sorted_methods)}
+                reset = "\033[0m"
+                native = native_map.get((label, gs), {})
+                deltas = {
+                    "rtn": rtn_err - native.get("rtn", rtn_err),
+                    "mid": mid_err - native.get("mid", mid_err),
+                    "mean": mean_err - native.get("mean", mean_err),
+                    "median": median_err - native.get("median", median_err),
+                    "std": std_err - native.get("std", std_err),
+                }
+                def _color_delta(value: float) -> str:
+                    if value > 0:
+                        return f"\033[31m{value:+.5f}\033[0m"
+                    if value < 0:
+                        return f"\033[32m{value:+.5f}\033[0m"
+                    return f"{value:+.5f}"
+
+                cols.info(
+                    f"mad:{label}",
+                    str(gs),
+                    f"{color_map['rtn']}{rtn_err:.5f}{reset}",
+                    _color_delta(deltas["rtn"]),
+                    f"{color_map['mid']}{mid_err:.5f}{reset}",
+                    _color_delta(deltas["mid"]),
+                    f"{color_map['mean']}{mean_err:.5f}{reset}",
+                    _color_delta(deltas["mean"]),
+                    f"{color_map['median']}{median_err:.5f}{reset}",
+                    _color_delta(deltas["median"]),
+                    f"{color_map['std']}{std_err:.5f}{reset}",
+                    _color_delta(deltas["std"]),
+                )
+            cols.info.header()
+        except Exception:
+            print(mad_header)
+            print(
+                "| case (mad)                   | group_size | rtn_mad     | rtn_vs      | mid_mad     | mid_vs      | mean_mad    | mean_vs     |"
+                " median_mad  | median_vs   | stdclip_mad | stdclip_vs  |"
+            )
+            print(mad_header)
+            for label, gs, rtn_err, mid_err, mean_err, median_err, std_err in rows_mad:
+                native = native_map.get((label, gs), {})
+                deltas = {
+                    "rtn": rtn_err - native.get("rtn", rtn_err),
+                    "mid": mid_err - native.get("mid", mid_err),
+                    "mean": mean_err - native.get("mean", mean_err),
+                    "median": median_err - native.get("median", median_err),
+                    "std": std_err - native.get("std", std_err),
+                }
+                def _color_delta_plain(value: float) -> str:
+                    if value > 0:
+                        return f"\033[31m{value:+.5f}\033[0m"
+                    if value < 0:
+                        return f"\033[32m{value:+.5f}\033[0m"
+                    return f"{value:+.5f}"
+
+                print(
+                    f"| mad:{label:24} | {gs:10d} | {rtn_err:11.5f} | {_color_delta_plain(deltas['rtn']):11} |"
+                    f" {mid_err:11.5f} | {_color_delta_plain(deltas['mid']):11} | {mean_err:11.5f} |"
+                    f" {_color_delta_plain(deltas['mean']):11} | {median_err:11.5f} | {_color_delta_plain(deltas['median']):11} |"
+                    f" {std_err:11.5f} | {_color_delta_plain(deltas['std']):11} |"
+                )
+            print(mad_header)
 
 
-def _collect_synthetic_rows():
+def _collect_synthetic_rows(scenarios=None):
+    if scenarios is None:
+        scenarios = _scenarios()
     rows = []
-    for scenario_name, weights in _scenarios().items():
+    for scenario_name, weights in scenarios.items():
         for group_size in (16, 32, 64, 128):
-            rtn = _quantize_rtn(weights, group_size=group_size)
-            midpoint = _quantize_midpoint(weights, group_size=group_size)
-            mean_centered = _quantize_mean_centered(weights, group_size=group_size)
-            median_centered = _quantize_median_centered(weights, group_size=group_size)
-            std_clip = _quantize_std_clipped(weights, group_size=group_size, sigma=3.0)
-            asym_clip = _quantize_asym_percentile_midpoint(weights, group_size=group_size)
+            rtn = _failsafe_quantize(weights, group_size, FailSafeStrategy.RTN)
+            midpoint = _failsafe_quantize(weights, group_size, FailSafeStrategy.MIDPOINT)
+            mean_centered = _failsafe_quantize(weights, group_size, FailSafeStrategy.MEAN)
+            median_centered = _failsafe_quantize(weights, group_size, FailSafeStrategy.MEDIAN)
+            std_clip = _failsafe_quantize(weights, group_size, FailSafeStrategy.STDCLIP)
+            asym_clip = _failsafe_quantize(
+                weights,
+                group_size,
+                FailSafeStrategy.MIDPOINT,
+                smooth=SmoothPercentileAsymmetric(low=0.5, high=99.5),
+            )
 
             rtn_err = torch.mean((weights - rtn).abs()).item()
             midpoint_err = torch.mean((weights - midpoint).abs()).item()

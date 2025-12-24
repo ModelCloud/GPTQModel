@@ -40,9 +40,14 @@ def smooth_block(
     failsafe: FailSafe,
     *,
     eps: float = 1e-8,
+    group_size: Optional[int] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     method = getattr(failsafe, "smooth", None)
     if method is None:
+        return block, None
+    if group_size is not None and group_size < 0:
+        group_size = block.shape[1]
+    if group_size is not None and group_size < getattr(method, "group_size_threshold", 0):
         return block, None
 
     if isinstance(method, SmoothRowCol):

@@ -108,6 +108,8 @@ class FailSafeStrategy(str, Enum):
 @dataclass
 class SmoothMethod:
     name: str
+    # Apply the smoother only when group size >= this threshold.
+    group_size_threshold: int = 128
 
 
 @dataclass
@@ -124,8 +126,8 @@ class SmoothPercentile(SmoothMethod):
     """
     percentile: float = 99.0
 
-    def __init__(self, percentile: float = 99.0):
-        super().__init__(name="percentile")
+    def __init__(self, percentile: float = 99.0, group_size_threshold: int = 128):
+        super().__init__(name="percentile", group_size_threshold=group_size_threshold)
         self.percentile = percentile
 
 
@@ -144,8 +146,8 @@ class SmoothPercentileAsymmetric(SmoothMethod):
     low: float = 0.5
     high: float = 99.5
 
-    def __init__(self, low: float = 0.5, high: float = 99.5):
-        super().__init__(name="percentile_asym")
+    def __init__(self, low: float = 0.5, high: float = 99.5, group_size_threshold: int = 128):
+        super().__init__(name="percentile_asym", group_size_threshold=group_size_threshold)
         self.low = low
         self.high = high
 
@@ -164,8 +166,8 @@ class SmoothMAD(SmoothMethod):
     """
     k: float = 2.75
 
-    def __init__(self, k: float = 2.75):
-        super().__init__(name="mad")
+    def __init__(self, k: float = 2.75, group_size_threshold: int = 128):
+        super().__init__(name="mad", group_size_threshold=group_size_threshold)
         self.k = k
 
 
@@ -185,8 +187,8 @@ class SmoothMSE(SmoothMethod):
     steps: int = 32
     maxshrink: float = 0.8
 
-    def __init__(self, steps: int = 32, maxshrink: float = 0.8):
-        super().__init__(name="mse")
+    def __init__(self, steps: int = 32, maxshrink: float = 0.8, group_size_threshold: int = 128):
+        super().__init__(name="mse", group_size_threshold=group_size_threshold)
         self.steps = steps
         self.maxshrink = maxshrink
 
@@ -205,8 +207,8 @@ class SmoothOutlier(SmoothMethod):
     """
     pct: float = 1.0
 
-    def __init__(self, pct: float = 1.0):
-        super().__init__(name="outlier")
+    def __init__(self, pct: float = 1.0, group_size_threshold: int = 128):
+        super().__init__(name="outlier", group_size_threshold=group_size_threshold)
         self.pct = pct
 
 
@@ -224,8 +226,8 @@ class SmoothSoftNorm(SmoothMethod):
     """
     k: float = 3.0
 
-    def __init__(self, k: float = 3.0):
-        super().__init__(name="softnorm")
+    def __init__(self, k: float = 3.0, group_size_threshold: int = 128):
+        super().__init__(name="softnorm", group_size_threshold=group_size_threshold)
         self.k = k
 
 
@@ -245,8 +247,8 @@ class SmoothLog(SmoothMethod):
     percentile: float = 99.0
     mu: float = 8.0
 
-    def __init__(self, percentile: float = 99.0, mu: float = 8.0):
-        super().__init__(name="log")
+    def __init__(self, percentile: float = 99.0, mu: float = 8.0, group_size_threshold: int = 128):
+        super().__init__(name="log", group_size_threshold=group_size_threshold)
         self.percentile = percentile
         self.mu = mu
 
@@ -265,8 +267,8 @@ class SmoothRowCol(SmoothMethod):
     """
     axis: str = "row"
 
-    def __init__(self, axis: str = "row"):
-        super().__init__(name="rowcol")
+    def __init__(self, axis: str = "row", group_size_threshold: int = 128):
+        super().__init__(name="rowcol", group_size_threshold=group_size_threshold)
         self.axis = axis
 
 
@@ -343,31 +345,51 @@ def _build_smooth_method_from_dict(payload: Dict[str, Any]) -> Optional[SmoothMe
     if not method_type:
         return None
     method_type = str(method_type).strip().lower()
+    group_size_threshold_raw = payload.get("group_size_threshold", 128)
+    group_size_threshold = int(group_size_threshold_raw) if group_size_threshold_raw is not None else 128
     if method_type == "percentile":
-        return SmoothPercentile(percentile=float(payload.get("percentile", 99.0)))
+        return SmoothPercentile(
+            percentile=float(payload.get("percentile", 99.0)),
+            group_size_threshold=group_size_threshold,
+        )
     if method_type in ("percentile_asym", "percentile_asymmetric"):
         return SmoothPercentileAsymmetric(
             low=float(payload.get("low", 0.5)),
             high=float(payload.get("high", 99.5)),
+            group_size_threshold=group_size_threshold,
         )
     if method_type == "mad":
-        return SmoothMAD(k=float(payload.get("k", 3.0)))
+        return SmoothMAD(
+            k=float(payload.get("k", 3.0)),
+            group_size_threshold=group_size_threshold,
+        )
     if method_type == "mse":
         return SmoothMSE(
             steps=int(payload.get("steps", 32)),
             maxshrink=float(payload.get("maxshrink", 0.8)),
+            group_size_threshold=group_size_threshold,
         )
     if method_type == "outlier":
-        return SmoothOutlier(pct=float(payload.get("pct", 1.0)))
+        return SmoothOutlier(
+            pct=float(payload.get("pct", 1.0)),
+            group_size_threshold=group_size_threshold,
+        )
     if method_type == "softnorm":
-        return SmoothSoftNorm(k=float(payload.get("k", 3.0)))
+        return SmoothSoftNorm(
+            k=float(payload.get("k", 3.0)),
+            group_size_threshold=group_size_threshold,
+        )
     if method_type == "log":
         return SmoothLog(
             percentile=float(payload.get("percentile", 99.0)),
             mu=float(payload.get("mu", 8.0)),
+            group_size_threshold=group_size_threshold,
         )
     if method_type == "rowcol":
-        return SmoothRowCol(axis=str(payload.get("axis", "row")))
+        return SmoothRowCol(
+            axis=str(payload.get("axis", "row")),
+            group_size_threshold=group_size_threshold,
+        )
     if method_type == "none":
         return None
     raise ValueError(f"QuantizeConfig: Unknown smooth type `{method_type}`.")
@@ -958,6 +980,7 @@ class QuantizeConfig():
         smooth = None
         if self.failsafe.smooth is not None:
             payload = {"type": self.failsafe.smooth.name}
+            payload["group_size_threshold"] = self.failsafe.smooth.group_size_threshold
             if isinstance(self.failsafe.smooth, SmoothPercentile):
                 payload["percentile"] = self.failsafe.smooth.percentile
             elif isinstance(self.failsafe.smooth, SmoothPercentileAsymmetric):
