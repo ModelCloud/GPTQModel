@@ -378,6 +378,7 @@ CUDA_ARCH_LIST = _detect_cuda_arch_list() if (BUILD_CUDA_EXT == "1" and not ROCM
 #     print(f"CUDA_ARCH_LIST: {CUDA_ARCH_LIST}")
 #     print(f"TORCH_CUDA_ARCH_LIST: {TORCH_CUDA_ARCH_LIST}")
 
+os.environ["XPU_AVAILABLE"] = "true"
 os.environ["CUDA_ARCH_LIST"] = ""
 os.environ["TORCH_CUDA_ARCH_LIST"] = ""
 
