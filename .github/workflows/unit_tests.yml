@@ -280,7 +280,6 @@ jobs:
 
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
-#            source /etc/profile.d/pyenv.sh && pyenv activate xpu
           fi
 
           if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
