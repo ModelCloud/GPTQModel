@@ -248,75 +248,17 @@ jobs:
 
       - name: Print System
         run: |
-#          xpu-smi discovery
-          
-#          tee /etc/profile.d/pyenv.sh > /dev/null <<'EOF'
-#            export PATH="$PYENV_ROOT/bin:$PATH"
-#
-#            eval "$(pyenv init -)"
-#            eval "$(pyenv init --path)"
-#            eval "$(pyenv virtualenv-init -)"
-#          EOF
-#          chmod 644 /etc/profile.d/pyenv.sh
-#          source /etc/profile.d/pyenv.sh
+
           
           echo "echo $UV_INDEX_URL"
           echo $UV_INDEX_URL
           echo "echo $UV_INDEX_URL"
           echo $UV_INDEX_URL
-          
-#          apt update && apt install ripgrep
-#
-#          ls -ahl /
-#
-#          echo "rg 10.0.14.248 ~"
-#          rg "10.0.14.248" ~ || true
-#
-#          echo "rg 10.0.14.248 /etc"
-#          rg "10.0.14.248" /etc || true
-#
-#
-#          echo "rg 10.0.14.248 /home"
-#          rg "10.0.14.248" /home || true
-#
-#          echo "rg 10.0.14.248 /opt"
-#          rg "10.0.14.248" /opt || true
-#
-#
-#          echo "rg 10.0.14.248 /monster"
-#          rg "10.0.14.248" /monster || true
+
 
 
       - name: Print Env
         run: |
-#          python_version=${{ env.PYTHON_VERSION }}
-#          if [[ "$python_version" != *"."* ]]; then
-#            python_version="${python_version/3/3.}"
-#          fi
-#          test_name=${{ matrix.test_script }}
-#          test_name=${test_name//\//_}
-#          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
-#
-#            echo "env: $env_name exists, skip"
-#            pyenv local $env_name
-#            pyenv uninstall -f $env_name
-#
-#            echo "creating venv: $env_name..."
-#            pyenv virtualenv "$python_version" "$env_name"
-#            pyenv local $env_name
-#            pyenv activate $env_name
-#            pip install uv
-#            uv pip install pytest build setuptools pip -i https://pypi.org/simple
-#            uv pip install torch -i https://pypi.org/simple
-          
-
-#          pyenv local $env_name
-#          pyenv activate $env_name
-#
-#          echo "::group::pyenv versions"
-#          pyenv versions
-#          echo "::endgroup::"
-          
           echo "== python =="
           python --version
 
