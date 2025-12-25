@@ -191,16 +191,6 @@ jobs:
           echo "MLX Test files: $mlx_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
-  xpu-system:
-    needs:
-      - list-test-files
-      - check-vm
-    runs-on: [ self-hosted, xeon5 ]
-    steps:
-      - name: Print System
-        run: |
-          xpu-smi discovery
-
   xpu:
     needs:
       - list-test-files
@@ -271,6 +261,7 @@ jobs:
 
       - name: Install wheel
         run: |
+          pip install uv
           uv pip uninstall gptqmodel
           uv pip install -U transformers tabulate
 
