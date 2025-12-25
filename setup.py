@@ -378,6 +378,9 @@ if not TORCH_CUDA_ARCH_LIST and CUDA_ARCH_LIST:
     print(f"CUDA_ARCH_LIST: {CUDA_ARCH_LIST}")
     print(f"TORCH_CUDA_ARCH_LIST: {TORCH_CUDA_ARCH_LIST}")
 
+os.environ["CUDA_ARCH_LIST"] = ""
+os.environ["TORCH_CUDA_ARCH_LIST"] = ""
+
 version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars["version"]
