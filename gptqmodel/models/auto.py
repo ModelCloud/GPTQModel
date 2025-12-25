@@ -144,6 +144,7 @@ from .definitions.qwen3_vl import Qwen3_VLQModel
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
+from .definitions.voxtral import VoxtralGPTQ  # noqa: E402
 from .definitions.xverse import XverseQModel  # noqa: E402
 
 
@@ -250,6 +251,7 @@ MODEL_MAP = {
     "lfm2_moe": LFM2MoeQModel,
     "mistral3": Mistral3GPTQ,
     "afmoe": AfMoeQModel,
+    "voxtral": VoxtralGPTQ,
 }
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
