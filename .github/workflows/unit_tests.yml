@@ -294,7 +294,7 @@ jobs:
             unset CUDA_VISIBLE_DEVICES
             unset CUDA_ARCH_LIST
             unset TORCH_CUDA_ARCH_LIST
-            pip install . --no-build-isolation
+            pip install . --no-build-isolation -v
           fi
 
           echo "===== uninstall torchao ====="
