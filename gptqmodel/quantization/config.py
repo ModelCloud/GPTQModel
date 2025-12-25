@@ -1015,6 +1015,22 @@ class QuantizeConfig():
                 "smooth": smooth,
             }
 
+        meta_payload["gptaq"] = self.gptaq
+        meta_payload["gptaq_alpha"] = self.gptaq_alpha
+        meta_payload["gptaq_memory_device"] = self.gptaq_memory_device
+        meta_payload["offload_to_disk"] = self.offload_to_disk
+        meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
+        meta_payload["pack_impl"] = self.pack_impl
+        meta_payload["mse"] = self.mse
+        meta_payload["mock_quantization"] = self.mock_quantization
+        meta_payload["act_group_aware"] = self.act_group_aware
+        meta_payload["hessian_chunk_size"] = self.hessian_chunk_size
+        meta_payload["hessian_chunk_bytes"] = self.hessian_chunk_bytes
+        meta_payload["hessian_use_bfloat16_staging"] = self.hessian_use_bfloat16_staging
+        meta_payload["vram_strategy"] = (
+            self.vram_strategy.value if isinstance(self.vram_strategy, VramStrategy) else self.vram_strategy
+        )
+
         out = {
             "bits": self.bits,
             "dynamic": self.dynamic,
@@ -1030,9 +1046,6 @@ class QuantizeConfig():
             # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
         }
-
-        if getattr(self, "pack_impl", "original") != "original":
-            out["pack_impl"] = self.pack_impl
 
         # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm
         if self.quant_method == METHOD.AWQ:
