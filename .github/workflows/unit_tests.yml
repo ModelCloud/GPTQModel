@@ -261,12 +261,11 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip install uv
-          uv pip uninstall gptqmodel
-          uv pip install -U transformers tabulate
+          pip uninstall gptqmodel
+          pip install -U transformers tabulate
 
           if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
-            uv pip install intel_extension_for_pytorch -U
+            pip install intel_extension_for_pytorch -U
           fi
 
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
@@ -274,30 +273,30 @@ jobs:
           fi
 
           if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
-            uv pip install peft trl wandb
+            pip install peft trl wandb
           fi
 
           if [[ "${{ matrix.test_script }}" == *ipex* ]] && [[ "${{ matrix.test_script }}" != *xpu* ]]; then
-            uv pip uninstall torchvision torch flash_attn # fix ipex can't be used with torch+cu126
-            uv pip install torchvision torch
-            uv pip install -U intel_extension_for_pytorch -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+            pip uninstall torchvision torch flash_attn # fix ipex can't be used with torch+cu126
+            pip install torchvision torch
+            pip install -U intel_extension_for_pytorch -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           fi
 
-          uv pip install git+https://github.com/ModelCloud/Tokenicer -U
+          pip install git+https://github.com/ModelCloud/Tokenicer -U
 
           # ipex doesn't need to compile kernels. xpu can't install cuda package
           if [[ "${{ matrix.test_script }}" != *ipex* && "${{ matrix.test_script }}" != *xpu* ]]; then
             echo "===== install dist/whl ====="
-            uv pip install dist/*.whl -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+            pip install dist/*.whl -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           else
             echo "===== install with local files for xpu env ====="
             export CUDA_VISIBLE_DEVICES=""
             unset TORCH_CUDA_ARCH_LIST
-            uv pip install . --no-build-isolation
+            pip install . --no-build-isolation
           fi
 
           echo "===== uninstall torchao ====="
-          uv pip uninstall torchao
+          pip uninstall torchao
 
           echo "== pip list =="
           pip list
@@ -324,5 +323,5 @@ jobs:
         if: always()
         run: |
           # rm ~/.cache/evalplus/*pkl || true
-          # pip cache purge && uv cache clean
+          # pip cache purge && cache clean
           rm -rf rm -rf ./* .[^.] .??*
