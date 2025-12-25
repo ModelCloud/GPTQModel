@@ -358,25 +358,25 @@ if ROCM_VERSION and not SKIP_ROCM_VERSION_CHECK:
 # Handle CUDA_ARCH_LIST (public) and set TORCH_CUDA_ARCH_LIST for build toolchains
 CUDA_ARCH_LIST = _detect_cuda_arch_list() if (BUILD_CUDA_EXT == "1" and not ROCM_VERSION) else None
 
-if not TORCH_CUDA_ARCH_LIST and CUDA_ARCH_LIST:
-    archs = _parse_arch_list(CUDA_ARCH_LIST)
-    kept = []
-    for arch in archs:
-        try:
-            base = arch.split("+", 1)[0]
-            if float(base) >= 6.0:
-                kept.append(arch)
-            else:
-                print(f"we do not support this compute arch: {arch}, skipped.")
-        except Exception:
-            kept.append(arch)
-
-    # Use semicolons for TORCH_CUDA_ARCH_LIST (PyTorch likes this),
-    TORCH_CUDA_ARCH_LIST = ";".join(kept)
-    os.environ["TORCH_CUDA_ARCH_LIST"] = TORCH_CUDA_ARCH_LIST
-
-    print(f"CUDA_ARCH_LIST: {CUDA_ARCH_LIST}")
-    print(f"TORCH_CUDA_ARCH_LIST: {TORCH_CUDA_ARCH_LIST}")
+# if not TORCH_CUDA_ARCH_LIST and CUDA_ARCH_LIST:
+#     archs = _parse_arch_list(CUDA_ARCH_LIST)
+#     kept = []
+#     for arch in archs:
+#         try:
+#             base = arch.split("+", 1)[0]
+#             if float(base) >= 6.0:
+#                 kept.append(arch)
+#             else:
+#                 print(f"we do not support this compute arch: {arch}, skipped.")
+#         except Exception:
+#             kept.append(arch)
+#
+#     # Use semicolons for TORCH_CUDA_ARCH_LIST (PyTorch likes this),
+#     TORCH_CUDA_ARCH_LIST = ";".join(kept)
+#     os.environ["TORCH_CUDA_ARCH_LIST"] = TORCH_CUDA_ARCH_LIST
+#
+#     print(f"CUDA_ARCH_LIST: {CUDA_ARCH_LIST}")
+#     print(f"TORCH_CUDA_ARCH_LIST: {TORCH_CUDA_ARCH_LIST}")
 
 os.environ["CUDA_ARCH_LIST"] = ""
 os.environ["TORCH_CUDA_ARCH_LIST"] = ""
