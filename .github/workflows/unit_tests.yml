@@ -291,6 +291,8 @@ jobs:
           else
             echo "===== install with local files for xpu env ====="
             export CUDA_VISIBLE_DEVICES=""
+            unset CUDA_VISIBLE_DEVICES
+            unset CUDA_ARCH_LIST
             unset TORCH_CUDA_ARCH_LIST
             pip install . --no-build-isolation
           fi
