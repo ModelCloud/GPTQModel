@@ -11,8 +11,8 @@ class VoxtralGPTQ(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [
-        "model",
         "language_model",
+        "model",
         "layers",
         "#",
         {
