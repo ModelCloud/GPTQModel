@@ -218,7 +218,7 @@ class BaseQModel(nn.Module):
         self,
         model: PreTrainedModel,
         quantized: bool,
-        quantize_config: QuantizeConfig,
+        quantize_config: Optional[QuantizeConfig],
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         qlinear_kernel: nn.Module = None,
         load_quantized_model: bool = False,
@@ -230,15 +230,16 @@ class BaseQModel(nn.Module):
     ):
         super().__init__()
 
-        quant_method = quantize_config.quant_method
-        # override module_tree if need
-        if self.module_tree_overrides is not None and self.module_tree_overrides.get(quant_method) is not None:
-            log.info(f'Module Tree: overridden by METHOD.{quant_method.upper()}')
-            # setting cls.module_tree
-            type(self).module_tree = apply_module_tree_override(self.module_tree, self.module_tree_overrides[quant_method])
+        if quantize_config:
+            quant_method = quantize_config.quant_method
+            # override module_tree if need
+            if self.module_tree_overrides is not None and self.module_tree_overrides.get(quant_method) is not None:
+                log.info(f'Module Tree: overridden by METHOD.{quant_method.upper()}')
+                # setting cls.module_tree
+                type(self).module_tree = apply_module_tree_override(self.module_tree, self.module_tree_overrides[quant_method])
 
-        if type(self).module_tree is None:
-            type(self).module_tree = self._auto_detect_module_tree(model, quant_method)
+            if type(self).module_tree is None:
+                type(self).module_tree = self._auto_detect_module_tree(model, quant_method)
 
         # If module_tree is still None after auto-detection, raise an error indicating unsupported model type
         if type(self).module_tree is None:
@@ -295,7 +296,7 @@ class BaseQModel(nn.Module):
         from ..adapter.adapter import Lora
 
         # check adapter load and print info so users knows lora(s) are applied
-        if isinstance(self.quantize_config.adapter, Lora):
+        if quantize_config and isinstance(self.quantize_config.adapter, Lora):
             loaded_loras = 0
             qmodules = find_modules(self.model, layers=[BaseQuantLinear])
             for name, m in qmodules.items():
@@ -471,6 +472,9 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
+        if self.quantize_config is None or not isinstance(self.quantize_config, QuantizeConfig):
+            raise AttributeError("`quantize_config` must be not None")
+
         if self.quantized:
             raise EnvironmentError("quantize() is called a model that is already quantized")
 
