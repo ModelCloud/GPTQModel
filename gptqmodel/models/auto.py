@@ -519,7 +519,7 @@ class GPTQModel:
 
             model_name = "hf" if llm_backend == "gptqmodel" else llm_backend
 
-            if llm_backend == "gptqmodel":
+            if llm_backend == "gptqmodel" and isinstance(model, BaseQModel) and model.quantized:
                 model_args["gptqmodel"] = True
             model_args["pretrained"] = model_id_or_path
 
