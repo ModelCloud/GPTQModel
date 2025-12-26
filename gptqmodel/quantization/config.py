@@ -272,6 +272,11 @@ class SmoothRowCol(SmoothMethod):
         self.axis = axis
 
 
+class GcMode(str, Enum):
+    INTERVAL = "interval"
+    ON_STAGE_END = "on_stage_end"
+
+
 @dataclass
 class FailSafe:
     strategy: FailSafeStrategy = FailSafeStrategy.RTN # enable failsafe by default due to moe routing behavior breaking calibration based quantization
@@ -532,6 +537,42 @@ class QuantizeConfig():
     # VRAM allocation strategy for MoE-heavy subsets
     vram_strategy: VramStrategy = field(default=VramStrategy.EXCLUSIVE)
 
+    gc_mode: GcMode = field(
+        default=GcMode.INTERVAL,
+        metadata={"help": "Garbage collection mode: 'interval' for regular GC or 'on_stage_end' for GC after stage end (after forward pass, quantize, layer finilization)."}
+    )
+
+    # Control whether to wait for layer finalization (packing, writing) before proceeding to next layer
+    # Default False preserves current behavior (async finalization in background while next layer starts)
+    wait_for_submodule_finalizers: bool = field(
+        default=False,
+        metadata={"help": "Wait for all layer finalization tasks (packing, offloading to disk, etc) to complete before proceeding to next layer. May reduce vram pressure for some env."}
+    )
+
+    # Callback function to filter devices for compute-intensive stages (quantization and forwarding)
+    # Takes a list of devices and returns either the original list or a filtered subset
+    compute_device_filter: Optional[callable] = field(
+        default=None,
+        metadata={"help": "Callback function to filter devices for compute-intensive stages. Function signature: fn(devices: List) -> List. "
+                  "Example to exclude device 0: compute_device_filter=lambda devices: [d for d in devices if d.index != 0]"}
+    )
+
+    # MoE quantization: forward whole calibration dataset to each expert instead of only routed data
+    # This ensures all experts receive sufficient calibration samples but increases quantization time
+    moe_bypass_router: bool = field(
+        default=False,
+        metadata={"help": "Forward entire calibration dataset to all MoE experts (not just routed experts)"}
+    )
+
+    # Works faster than data parallel with some configurations 
+    auto_forward_data_parallel: bool = field(
+        default=True,
+        metadata={"help": "When multi-gpu is detected, we may data clone modules to each gpu for data parallelism "
+        "to speed up quantization forwarding. This causes extra time spent (especially for MoE layers) and vram pressure, "
+        "leading in some cases to slower forwarding or vram OOM"}
+    )
+
+
     def __post_init__(self):
         fields_info = fields(self)
 
@@ -735,6 +776,18 @@ class QuantizeConfig():
         elif not isinstance(self.vram_strategy, VramStrategy):
             raise ValueError(
                 f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VramStrategy]}."
+            )
+
+        if isinstance(self.gc_mode, str):
+            try:
+                self.gc_mode = GcMode(self.gc_mode.lower())
+            except ValueError as exc:
+                raise ValueError(
+                    f"QuantizeConfig: `gc_mode` must be one of {[v.value for v in GcMode]}."
+                ) from exc
+        elif not isinstance(self.gc_mode, GcMode):
+            raise ValueError(
+                f"QuantizeConfig: `gc_mode` must be one of {[v.value for v in GcMode]}."
             )
 
     def extension_set(self, key: str, value: Any):
@@ -1006,6 +1059,11 @@ class QuantizeConfig():
             smooth = payload
 
         meta_payload = dict(self.meta) if self.meta else {}
+        meta_payload["gc_mode"] = self.gc_mode
+        meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
+        meta_payload["moe_bypass_router"] = self.moe_bypass_router
+        meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
+
         if self.failsafe is None:
             meta_payload["failsafe"] = None
         else:
@@ -1045,6 +1103,7 @@ class QuantizeConfig():
             META_FIELD: meta_payload,
             # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
+            # DO NOT EXPORT compute_device_filter since functions are not serializable
         }
 
         # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm
