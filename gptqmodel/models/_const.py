@@ -13,7 +13,7 @@ from torch import device
 
 from ..utils import BACKEND
 from ..utils.rocm import IS_ROCM
-from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
+from ..utils.torch import HAS_CUDA, HAS_MPS, HAS_NPU, HAS_XPU
 
 
 CPU = device("cpu")
@@ -33,6 +33,7 @@ class DEVICE(str, Enum):
     ALL = "all"  # All device
     CPU = "cpu"  # All CPU: Optimized for IPEX is CPU has AVX, AVX512, AMX, or XMX instructions
     CUDA = "cuda"  # Nvidia GPU: Optimized for Ampere+
+    NPU = "npu"  # Ascend NPU via torch_npu
     XPU = "xpu"  # Intel GPU: Datacenter Max + Arc
     MPS = "mps"  # MacOS GPU: Apple Silicon/Metal)
     ROCM = "rocm"  # AMD GPU: ROCm maps to fake cuda
@@ -54,7 +55,7 @@ class DEVICE(str, Enum):
     @property
     def index(self) -> int | None:
         """Default index used when materialising a torch.device from this enum."""
-        if self in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU):
+        if self in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU):
             return 0
         return None
 
@@ -121,6 +122,8 @@ def normalize_device(type_value: str | DEVICE | int | torch.device) -> DEVICE:
 def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:
     if HAS_CUDA:
         return CUDA_0
+    elif HAS_NPU:
+        return torch.device("npu:0")
     elif HAS_XPU:
         return XPU_0
     elif HAS_MPS:
