@@ -13,6 +13,7 @@ from .config import (
                      BaseQuantizeConfig,
                      FailSafe,
                      FailSafeStrategy,
+                     HessianConfig,
                      QuantizeConfig,
                      SmoothLog,
                      SmoothMAD,

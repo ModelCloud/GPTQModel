@@ -15,9 +15,11 @@ import os  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
+import torch  # noqa: E402
+
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, FORMAT_FIELD_CHECKPOINT, QuantizeConfig  # noqa: E402
-from gptqmodel.quantization.config import VramStrategy  # noqa: E402
+from gptqmodel.quantization.config import HessianConfig, VramStrategy  # noqa: E402
 
 
 class TestSerialization(unittest.TestCase):
@@ -59,9 +61,11 @@ class TestSerialization(unittest.TestCase):
             pack_impl="gpu",
             mse=0.125,
             mock_quantization=True,
-            hessian_chunk_size=256,
-            hessian_chunk_bytes=4096,
-            hessian_use_bfloat16_staging=True,
+            hessian=HessianConfig(
+                chunk_size=256,
+                chunk_bytes=4096,
+                staging_dtype=torch.bfloat16,
+            ),
             vram_strategy=VramStrategy.BALANCED,
         )
 
@@ -80,9 +84,7 @@ class TestSerialization(unittest.TestCase):
             "mse",
             "mock_quantization",
             "act_group_aware",
-            "hessian_chunk_size",
-            "hessian_chunk_bytes",
-            "hessian_use_bfloat16_staging",
+            "hessian",
             "vram_strategy",
         ]
         for field in meta_only_fields:
@@ -98,7 +100,7 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(meta["mse"], cfg.mse)
         self.assertEqual(meta["mock_quantization"], cfg.mock_quantization)
         self.assertEqual(meta["act_group_aware"], cfg.act_group_aware)
-        self.assertEqual(meta["hessian_chunk_size"], cfg.hessian_chunk_size)
-        self.assertEqual(meta["hessian_chunk_bytes"], cfg.hessian_chunk_bytes)
-        self.assertEqual(meta["hessian_use_bfloat16_staging"], cfg.hessian_use_bfloat16_staging)
+        self.assertEqual(meta["hessian"]["chunk_size"], cfg.hessian.chunk_size)
+        self.assertEqual(meta["hessian"]["chunk_bytes"], cfg.hessian.chunk_bytes)
+        self.assertEqual(meta["hessian"]["staging_dtype"], "bfloat16")
         self.assertEqual(meta["vram_strategy"], cfg.vram_strategy.value)

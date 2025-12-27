@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from gptqmodel.quantization import gptq as gptq_mod
-from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
 
 
@@ -35,8 +35,7 @@ def _run_add_batch(
     warmup_batches: int,
     chunk_bytes: Optional[int],
 ) -> Dict[str, float]:
-    qcfg = QuantizeConfig()
-    qcfg.hessian_chunk_bytes = chunk_bytes
+    qcfg = QuantizeConfig(hessian=HessianConfig(chunk_bytes=chunk_bytes))
 
     module = _make_module(hidden_dim, device)
     gptq = GPTQ(module, qcfg=qcfg)

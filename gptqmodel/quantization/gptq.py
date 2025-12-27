@@ -311,26 +311,32 @@ class GPTQ:
     def preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
         device = torch.device(device)
 
-        if not self.qcfg.hessian_use_bfloat16_staging:
+        staging_dtype = self.qcfg.hessian.staging_dtype
+        if staging_dtype == torch.float32:
             return torch.float32
 
         if input_dtype not in (torch.float16, torch.bfloat16):
             return torch.float32
 
-        if not _device_supports_bfloat16(device):
-            return torch.float32
+        if staging_dtype == torch.bfloat16:
+            if not _device_supports_bfloat16(device):
+                return torch.float32
+            return torch.bfloat16
 
-        return torch.bfloat16
+        if staging_dtype == torch.float16:
+            return torch.float16
+
+        return torch.float32
 
     def resolve_hessian_chunk_size(self, rows: int, stage_dtype: torch.dtype) -> Optional[int]:
         if rows == 0:
             return None
 
-        cfg_chunk = self.qcfg.hessian_chunk_size
+        cfg_chunk = self.qcfg.hessian.chunk_size
         if cfg_chunk is not None:
             return max(1, min(cfg_chunk, rows))
 
-        bytes_budget = self.qcfg.hessian_chunk_bytes
+        bytes_budget = self.qcfg.hessian.chunk_bytes
         if bytes_budget is not None:
             bytes_per_row = self.columns * torch.tensor([], dtype=stage_dtype).element_size()
             if bytes_per_row > 0:
