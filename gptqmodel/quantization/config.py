@@ -348,18 +348,11 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     "q_group_size": GROUP_SIZE_FIELD_CODE,
     # AWQ compat
     "version" : FORMAT_FIELD_CODE,
-    "v2": "gptaq",
-    "v2_alpha": "gptaq_alpha",
-    "v2_memory_device": "gptaq_memory_device",
     # map format field (checkpoint_format) to class/code (format)
     FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
 }
 
-DYNAMIC_FIELD_SYNONYMS = {
-    "gptaq": ("v2",),
-    "gptaq_alpha": ("v2_alpha",),
-    "gptaq_memory_device": ("v2_memory_device",),
-}
+DYNAMIC_FIELD_SYNONYMS = {}
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
     """
