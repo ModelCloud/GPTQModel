@@ -19,7 +19,7 @@ from ..models._const import CPU
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTQ, GPTQv2
-from ..quantization.config import METHOD, QuantizeConfig
+from ..quantization.config import GPTAQConfig, METHOD, QuantizeConfig
 from ..utils.failsafe import normalize_failsafe
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger, log_time_block
@@ -88,15 +88,21 @@ class GPTQProcessor(LoopProcessor):
                 qcfg_clone.act_group_aware = act_group_aware_override
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
-            qcfg_clone.gptaq = self.qcfg.dynamic_get(module.full_name, "gptaq", qcfg_clone.gptaq)
-            qcfg_clone.gptaq_alpha = self.qcfg.dynamic_get(module.full_name, "gptaq_alpha", qcfg_clone.gptaq_alpha)
+            gptaq_override = self.qcfg.dynamic_get(module.full_name, "gptaq", None)
+            if gptaq_override is not None:
+                if isinstance(gptaq_override, dict):
+                    qcfg_clone.gptaq = GPTAQConfig(**gptaq_override)
+                elif isinstance(gptaq_override, GPTAQConfig):
+                    qcfg_clone.gptaq = gptaq_override
+                else:
+                    raise ValueError("QuantizeConfig: dynamic `gptaq` must be a GPTAQConfig or dict.")
 
             qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
 
         # store last used qcfg_dynamic
         self.qcfg_dynamic = qcfg_clone
 
-        if qcfg_clone.gptaq is True:
+        if qcfg_clone.gptaq is not None:
             tmp = GPTQv2(module=module, qcfg=qcfg_clone)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
@@ -418,4 +424,4 @@ class GPTQProcessor(LoopProcessor):
     def name(self) -> str:
         # TODO fix me..this hacks inherited base class logic, why not override name in gptqv2?
         qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
-        return "gptaq" if qcfg.gptaq else "gptq"
+        return "gptaq" if qcfg.gptaq is not None else "gptq"

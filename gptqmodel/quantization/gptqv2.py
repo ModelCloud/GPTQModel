@@ -177,7 +177,9 @@ class GPTQv2(GPTQ):
         Q = torch.zeros_like(W)
 
         Hinv, damp = self.hessian_inverse(H)
-        P = self.qcfg.gptaq_alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
+        if self.qcfg.gptaq is None:
+            raise ValueError("GPTQv2 requires `gptaq` configuration.")
+        P = self.qcfg.gptaq.alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
         del self.dXXT
 
         for i1 in range(0, self.columns, blocksize):

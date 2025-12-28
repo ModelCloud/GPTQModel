@@ -55,8 +55,6 @@ META_FIELD_MSE = "mse"
 META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
 META_FIELD_GPTAQ_ENABLED = "gptaq"
-META_FIELD_GPTAQ_ALPHA = "gptaq_alpha"
-META_FIELD_GPTAQ_MEMORY_DEVICE = "gptaq_memory_device"
 
 ADAPTER_FIELD = "adapter"
 
@@ -319,6 +317,21 @@ class HessianConfig:
         else:
             raise ValueError("HessianConfig: `staging_dtype` must be a torch.dtype or string.")
 
+
+@dataclass
+class GPTAQConfig:
+    alpha: float = field(default=0.25)
+    device: Union[str, torch.device] = field(default="auto")
+
+    def __post_init__(self):
+        if not isinstance(self.alpha, (int, float)):
+            raise ValueError("GPTAQConfig: `alpha` must be a numeric value.")
+        if isinstance(self.device, str):
+            if not self.device:
+                raise ValueError("GPTAQConfig: `device` must be a non-empty string or torch.device.")
+        elif not isinstance(self.device, torch.device):
+            raise ValueError("GPTAQConfig: `device` must be a string or torch.device.")
+
 QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.GPTQ: {
         FORMAT.GPTQ,
@@ -535,14 +548,12 @@ class QuantizeConfig():
     # deprecated: only used for compat
     is_marlin_format: bool = False
 
-    # gptq/awq only:
+    # gptq only:
     # if calibration is insufficient, fallback to a simple quantization strategy; encapsulated in FailSafe config
     failsafe: Optional[FailSafe] = field(default_factory=FailSafe)
 
     # gptaq only:
-    gptaq: bool = field(default=False)
-    gptaq_alpha: float = field(default=0.25)
-    gptaq_memory_device: str = field(default="auto")
+    gptaq: Optional[GPTAQConfig] = field(default=None)
 
     # awq only:
     zero_point: bool = field(default=True)
@@ -698,6 +709,13 @@ class QuantizeConfig():
             self.hessian = HessianConfig(**self.hessian)
         elif not isinstance(self.hessian, HessianConfig):
             raise ValueError("QuantizeConfig: `hessian` must be a HessianConfig, dict, or None.")
+
+        if self.gptaq is None:
+            pass
+        elif isinstance(self.gptaq, dict):
+            self.gptaq = GPTAQConfig(**self.gptaq)
+        elif not isinstance(self.gptaq, GPTAQConfig):
+            raise ValueError("QuantizeConfig: `gptaq` must be a GPTAQConfig, dict, or None.")
 
         # resolve activation ordering compatibility and defaults
         desc_act_user_value = self.desc_act
@@ -945,23 +963,13 @@ class QuantizeConfig():
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
 
-        dynamic_overrides = normalized.get("dynamic")
-        if isinstance(dynamic_overrides, dict):
-            for overrides in dynamic_overrides.values():
-                if not isinstance(overrides, dict):
-                    continue
-                if "v2" in overrides and "gptaq" not in overrides:
-                    overrides["gptaq"] = overrides.pop("v2")
-                if "v2_alpha" in overrides and "gptaq_alpha" not in overrides:
-                    overrides["gptaq_alpha"] = overrides.pop("v2_alpha")
-                if "v2_memory_device" in overrides and "gptaq_memory_device" not in overrides:
-                    overrides["gptaq_memory_device"] = overrides.pop("v2_memory_device")
-
         meta_payload = normalized.get(META_FIELD)
         if "failsafe" not in normalized and isinstance(meta_payload, dict) and "failsafe" in meta_payload:
             normalized["failsafe"] = meta_payload.get("failsafe")
         if "hessian" not in normalized and isinstance(meta_payload, dict) and "hessian" in meta_payload:
             normalized["hessian"] = meta_payload.get("hessian")
+        if "gptaq" not in normalized and isinstance(meta_payload, dict) and "gptaq" in meta_payload:
+            normalized["gptaq"] = meta_payload.get("gptaq")
 
         cfg = cls(**normalized)
 
@@ -1037,9 +1045,15 @@ class QuantizeConfig():
                 "smooth": smooth,
             }
 
-        meta_payload["gptaq"] = self.gptaq
-        meta_payload["gptaq_alpha"] = self.gptaq_alpha
-        meta_payload["gptaq_memory_device"] = self.gptaq_memory_device
+        if self.gptaq is None:
+            meta_payload["gptaq"] = None
+        else:
+            device = self.gptaq.device
+            device_value = device if isinstance(device, str) else str(device)
+            meta_payload["gptaq"] = {
+                "alpha": self.gptaq.alpha,
+                "device": device_value,
+            }
         meta_payload["offload_to_disk"] = self.offload_to_disk
         meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
         meta_payload["pack_impl"] = self.pack_impl

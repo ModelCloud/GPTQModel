@@ -14,6 +14,7 @@ from .config import (
                      FailSafe,
                      FailSafeStrategy,
                      HessianConfig,
+                     GPTAQConfig,
                      QuantizeConfig,
                      SmoothLog,
                      SmoothMAD,

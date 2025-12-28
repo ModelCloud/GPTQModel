@@ -650,7 +650,7 @@ class BaseQModel(nn.Module):
                 GPTQProcessor(**args),
             ]
 
-        if self.quantize_config.gptaq is True:
+        if self.quantize_config.gptaq is not None:
             from ..looper.native_processor import NativeProcessor
 
             # During the deepcopy process, self.prepare_dataset will be deeply copied along with self. However,
