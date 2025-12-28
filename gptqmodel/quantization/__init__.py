@@ -27,5 +27,5 @@ from .config import (
                      SmoothSoftNorm,
 )
 from .gptq import GPTQ
-from .gptqv2 import GPTQv2
+from .gptaq import GPTAQ
 from .quantizer import Quantizer, quantize

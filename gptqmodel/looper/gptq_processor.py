@@ -18,7 +18,7 @@ from ..models import BaseQModel
 from ..models._const import CPU
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..quantization import GPTQ, GPTQv2
+from ..quantization import GPTAQ, GPTQ
 from ..quantization.config import GPTAQConfig, METHOD, QuantizeConfig
 from ..utils.failsafe import normalize_failsafe
 from ..utils.importer import select_quant_linear
@@ -103,7 +103,7 @@ class GPTQProcessor(LoopProcessor):
         self.qcfg_dynamic = qcfg_clone
 
         if qcfg_clone.gptaq is not None:
-            tmp = GPTQv2(module=module, qcfg=qcfg_clone)
+            tmp = GPTAQ(module=module, qcfg=qcfg_clone)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
             tmp.failsafe = normalize_failsafe(failsafe, qcfg_clone.failsafe)
@@ -422,6 +422,6 @@ class GPTQProcessor(LoopProcessor):
             return True
 
     def name(self) -> str:
-        # TODO fix me..this hacks inherited base class logic, why not override name in gptqv2?
+        # TODO fix me..this hacks inherited base class logic, why not override name in gptaq?
         qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
         return "gptaq" if qcfg.gptaq is not None else "gptq"

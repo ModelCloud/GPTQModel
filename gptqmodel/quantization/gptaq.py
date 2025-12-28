@@ -22,7 +22,7 @@ from ..utils.torch import TORCH_GTE_28, torch_compile, torch_sync
 from .gptq import GPTQ
 
 
-class GPTQv2(GPTQ):
+class GPTAQ(GPTQ):
     def __init__(self, module: NamedModule, qcfg: Optional[QuantizeConfig] = None):
         from ..looper.native_processor import NATIVE_INPUTS_STATE_KEY  # avoid import loop
 
@@ -178,7 +178,7 @@ class GPTQv2(GPTQ):
 
         Hinv, damp = self.hessian_inverse(H)
         if self.qcfg.gptaq is None:
-            raise ValueError("GPTQv2 requires `gptaq` configuration.")
+            raise ValueError("GPTAQ requires `gptaq` configuration.")
         P = self.qcfg.gptaq.alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
         del self.dXXT
 
@@ -281,4 +281,4 @@ class GPTQv2(GPTQ):
             del self.dXXT
 
 
-__all__ = ["GPTQv2"]
+__all__ = ["GPTAQ"]

@@ -8,7 +8,7 @@ from models.model_test import ModelTest
 from gptqmodel.utils.eval import EVAL
 
 
-class TestQwen2_5_GPTQv2(ModelTest):
+class TestQwen2_5_GPTAQ(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
