@@ -79,7 +79,7 @@ class HFKernelLinear(PackableQuantLinear):
         try:
             from kernels import get_kernel
 
-            cls.gemm_int4_forward_kernel = get_kernel("kernels-community/quantization_gptq").gemm_int4_forward
+            cls.gemm_int4_forward_kernel = staticmethod(get_kernel("kernels-community/quantization_gptq").gemm_int4_forward)
             return True, None
         except Exception as exc:  # pragma: no cover - best effort fallback
             log.warning("Failed to load CPU gemm_4bit kernel: %s. Use fallback path. \
