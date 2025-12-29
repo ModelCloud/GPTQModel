@@ -17,7 +17,7 @@ import torch
 from tabulate import tabulate
 
 from gptqmodel.quantization import gptq as gptq_impl
-from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
 
 
@@ -60,13 +60,17 @@ def test_hessian_chunk_consistency_matches_full_precision():
     module_chunked = _clone_module(base)
 
     qcfg_full = QuantizeConfig(
-        hessian_chunk_size=None,
-        hessian_chunk_bytes=1_000_000_000,
-        hessian_use_bfloat16_staging=False,
+        hessian=HessianConfig(
+            chunk_size=None,
+            chunk_bytes=1_000_000_000,
+            staging_dtype=torch.float32,
+        ),
     )
     qcfg_chunked = QuantizeConfig(
-        hessian_chunk_size=16,
-        hessian_use_bfloat16_staging=False,
+        hessian=HessianConfig(
+            chunk_size=16,
+            staging_dtype=torch.float32,
+        ),
     )
 
     gptq_full = GPTQ(module_full, qcfg_full)
@@ -82,16 +86,69 @@ def test_hessian_chunk_consistency_matches_full_precision():
     assert torch.allclose(full_xtx, chunked_xtx, atol=3e-6, rtol=3e-6)
 
 
+@pytest.mark.cuda
+def test_hessian_staging_dtype_accuracy_cuda():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for staging dtype accuracy test")
+
+    torch.manual_seed(4)
+
+    device = torch.device("cuda", 0)
+    base = torch.nn.Linear(64, 32, bias=False, dtype=torch.float16).to(device).eval()
+
+    calib = torch.randn(256, 64, device=device, dtype=torch.float16)
+
+    qcfg_default = QuantizeConfig(hessian=HessianConfig(staging_dtype=torch.float32))
+    gptq_default = GPTQ(_clone_module(base).to(device), qcfg_default)
+    _, baseline_xtx, _ = gptq_default.process_batch(calib.clone())
+
+    for staging_dtype in (torch.bfloat16, torch.float16):
+        qcfg = QuantizeConfig(hessian=HessianConfig(staging_dtype=staging_dtype))
+        gptq = GPTQ(_clone_module(base).to(device), qcfg)
+        _, staged_xtx, _ = gptq.process_batch(calib.clone())
+
+        assert baseline_xtx is not None and staged_xtx is not None
+        assert torch.allclose(baseline_xtx, staged_xtx, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.cuda
+def test_hessian_bf16_vs_fp32_staging_closeness():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required for bf16 staging accuracy test")
+
+    torch.manual_seed(5)
+
+    device = torch.device("cuda", 0)
+    base = torch.nn.Linear(96, 48, bias=False, dtype=torch.float16).to(device).eval()
+    calib = torch.randn(192, 96, device=device, dtype=torch.float16)
+
+    qcfg_default = QuantizeConfig()
+    gptq_default = GPTQ(_clone_module(base).to(device), qcfg_default)
+    _, default_xtx, _ = gptq_default.process_batch(calib.clone())
+
+    qcfg_fp32 = QuantizeConfig(hessian=HessianConfig(staging_dtype=torch.float32))
+    gptq_fp32 = GPTQ(_clone_module(base).to(device), qcfg_fp32)
+    _, fp32_xtx, _ = gptq_fp32.process_batch(calib.clone())
+
+    qcfg_bf16 = QuantizeConfig(hessian=HessianConfig(staging_dtype=torch.bfloat16))
+    gptq_bf16 = GPTQ(_clone_module(base).to(device), qcfg_bf16)
+    _, bf16_xtx, _ = gptq_bf16.process_batch(calib.clone())
+
+    assert default_xtx is not None and fp32_xtx is not None and bf16_xtx is not None
+    assert torch.allclose(default_xtx, fp32_xtx, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(fp32_xtx, bf16_xtx, atol=1e-2, rtol=1e-2)
+
+
 def test_hessian_chunk_invocations_and_workspace_shape():
     torch.manual_seed(1)
 
     base = torch.nn.Linear(64, 32, bias=False).eval()
 
-    large_cfg = QuantizeConfig(hessian_chunk_size=256)
+    large_cfg = QuantizeConfig(hessian=HessianConfig(chunk_size=256))
     large_gptq = GPTQ(_clone_module(base), large_cfg)
     _instrument_chunks(large_gptq)
 
-    small_cfg = QuantizeConfig(hessian_chunk_size=16)
+    small_cfg = QuantizeConfig(hessian=HessianConfig(chunk_size=16))
     small_gptq = GPTQ(_clone_module(base), small_cfg)
     _instrument_chunks(small_gptq)
 
@@ -113,7 +170,7 @@ def test_hessian_chunk_invocations_and_workspace_shape():
     assert getattr(large_gptq, "_borrow_workspace_totals", {}).get("requests") == 0
 
     small_gptq.process_batch(calib.clone())
-    expected_chunks = math.ceil(calib.shape[0] / small_cfg.hessian_chunk_size)
+    expected_chunks = math.ceil(calib.shape[0] / small_cfg.hessian.chunk_size)
     assert small_gptq._chunk_invocations == expected_chunks
 
     small_summary = getattr(small_gptq, "_borrow_workspace_last_summary", None)
@@ -156,7 +213,7 @@ def test_hessian_chunk_bytes_budget():
     module = _clone_module(base)
 
     bytes_budget = 16 * 48 * 4
-    qcfg = QuantizeConfig(hessian_chunk_size=None, hessian_chunk_bytes=bytes_budget)
+    qcfg = QuantizeConfig(hessian=HessianConfig(chunk_size=None, chunk_bytes=bytes_budget))
     gptq = GPTQ(module, qcfg)
     _instrument_chunks(gptq)
 
@@ -181,8 +238,10 @@ def test_hessian_workspace_thread_safety_cuda():
 
     base = torch.nn.Linear(128, 64, bias=False).to(device)
     cfg = QuantizeConfig(
-        hessian_chunk_size=128,
-        hessian_use_bfloat16_staging=True,
+        hessian=HessianConfig(
+            chunk_size=128,
+            staging_dtype=torch.bfloat16,
+        ),
     )
 
     gptq_workers = [GPTQ(_clone_module(base).to(device), cfg) for _ in range(3)]
@@ -211,7 +270,7 @@ def test_hessian_workspace_thread_safety_cuda():
     cache_key = gptq_impl._workspace_cache_key(device)
     assert cache_key in gptq_impl._WORKSPACE_CACHE
     cached_workspace = gptq_impl._WORKSPACE_CACHE[cache_key]
-    expected_rows = cfg.hessian_chunk_size or rows
+    expected_rows = cfg.hessian.chunk_size or rows
     assert cached_workspace.shape[0] >= expected_rows
     assert cached_workspace.shape[1] == cols
 
@@ -272,9 +331,9 @@ def _benchmark_case(
     config_sample = cfg_factory()
 
     return {
-        "chunk_size": config_sample.hessian_chunk_size,
-        "chunk_bytes": config_sample.hessian_chunk_bytes,
-        "bf16": config_sample.hessian_use_bfloat16_staging,
+        "chunk_size": config_sample.hessian.chunk_size,
+        "chunk_bytes": config_sample.hessian.chunk_bytes,
+        "bf16": config_sample.hessian.staging_dtype == torch.bfloat16,
         "mean_ms": mean_ms,
         "stdev_ms": stdev_ms,
         "mean_mem_mb": mean_mem,
@@ -315,22 +374,30 @@ def test_hessian_chunk_benchmark_table():
 
     configs: List[Callable[[], QuantizeConfig]] = [
         lambda: QuantizeConfig(
-            hessian_chunk_size=None,
-            hessian_chunk_bytes=512 * 1024 * 1024,
-            hessian_use_bfloat16_staging=False,
+            hessian=HessianConfig(
+                chunk_size=None,
+                chunk_bytes=512 * 1024 * 1024,
+                staging_dtype=torch.float32,
+            ),
         ),
         lambda: QuantizeConfig(
-            hessian_chunk_size=64,
-            hessian_use_bfloat16_staging=False,
+            hessian=HessianConfig(
+                chunk_size=64,
+                staging_dtype=torch.float32,
+            ),
         ),
         lambda: QuantizeConfig(
-            hessian_chunk_size=32,
-            hessian_use_bfloat16_staging=True,
+            hessian=HessianConfig(
+                chunk_size=32,
+                staging_dtype=torch.bfloat16,
+            ),
         ),
         lambda: QuantizeConfig(
-            hessian_chunk_size=None,
-            hessian_chunk_bytes=64 * 1024 * 1024,
-            hessian_use_bfloat16_staging=True,
+            hessian=HessianConfig(
+                chunk_size=None,
+                chunk_bytes=64 * 1024 * 1024,
+                staging_dtype=torch.bfloat16,
+            ),
         ),
     ]
 

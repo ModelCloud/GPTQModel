@@ -30,7 +30,6 @@ from ..quantization.config import (
     META_FIELD_ACT_GROUP_AWARE,
     META_FIELD_DAMP_AUTO_INCREMENT,
     META_FIELD_DAMP_PERCENT,
-    META_FIELD_GPTAQ_ALPHA,
     META_FIELD_GPTAQ_ENABLED,
     META_FIELD_MSE,
     META_FIELD_QUANTIZER,
@@ -200,12 +199,14 @@ def ModelWriter(cls):
 
         self.quantize_config.meta_set(
             key=META_FIELD_GPTAQ_ENABLED,
-            value=self.quantize_config.gptaq
-        )
-
-        self.quantize_config.meta_set(
-            key=META_FIELD_GPTAQ_ALPHA,
-            value=self.quantize_config.gptaq_alpha
+            value=None if self.quantize_config.gptaq is None else {
+                "alpha": self.quantize_config.gptaq.alpha,
+                "device": (
+                    self.quantize_config.gptaq.device
+                    if isinstance(self.quantize_config.gptaq.device, str)
+                    else str(self.quantize_config.gptaq.device)
+                ),
+            }
         )
 
         self.quantize_config.meta_set(
