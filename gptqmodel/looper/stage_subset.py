@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional
@@ -395,10 +396,16 @@ def run_subset_stage(
 
         if not failsafe_enabled:
             for name in moe_skip_modules:
-                subset.pop(name)
+                skipped_module = subset.pop(name)
                 task_map = getattr(processor, "tasks", None)
                 if task_map is not None:
                     task_map.pop(name, None)
+
+                # No calibration data was routed to these MoE expert modules.
+                # We skip quantization them and record them in `qcfg.dynamic` as dynamically excluded modules.
+                if processor.qcfg.dynamic is None:
+                    processor.qcfg.dynamic = {}
+                processor.qcfg.dynamic[f"-:{re.escape(skipped_module.full_name)}"] = {}
 
     quant_target_devices: Dict[str, torch.device] = {}
     for name, named_module in subset.items():
