@@ -429,12 +429,12 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 
 #### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original)
 
-Enable GPTAQ quantization by setting `gptaq = True`.
+Enable GPTAQ quantization by setting `gptaq = GPTAQConfig(...)`.
 ```py
 # Note GPTAQ is currently experimental, not MoE compatible, and requires 2-4x more VRAM to execute
 # We have many reports of GPTAQ not working better or exceeding GPTQ so please use for testing only
 # If OOM on 1 GPU, please set CUDA_VISIBLE_DEVICES=0,1 to 2 GPUs and gptqmodel will auto use second GPU
-quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=True)
+quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=GPTAQConfig(alpha=0.25, device="auto"))
 ```
 
 
