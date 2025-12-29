@@ -8,12 +8,14 @@ from model_test import ModelTest
 from gptqmodel.utils.eval import EVAL
 
 
-# | Metric                         |   MARLIN |
-# |--------------------------------|----------|
-# | arc_challenge :: acc,none      |   0.3046 |
-# | arc_challenge :: acc_norm,none |   0.3345 |
-# | mmlu_stem :: acc,none          |   0.3768 |
-# | gsm8k_plat :: exact,flexible   |   0.1944 |
+# gpu9/a100
+# | Metric                                             |   MARLIN |
+# |----------------------------------------------------|----------|
+# | arc_challenge :: acc,none                          |   0.3089 |
+# | arc_challenge :: acc_norm,none                     |   0.3481 |
+# | gsm8k_platinum_cot :: exact_match,flexible-extract |   0.3143 |
+# | gsm8k_platinum_cot :: exact_match,strict-match     |   0.1315 |
+# | mmlu_stem :: acc,none                              |   0.399  |
 class TestLlama3_2(ModelTest):
     # DELETE_QUANTIZED_MODEL = False
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
@@ -23,25 +25,25 @@ class TestLlama3_2(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.2961,
+                "value": 0.3143,
                 "floor_pct": 0.04,
             },
         },
         EVAL.LM_EVAL.MMLU_STEM: {
             "chat_template": False,
             "acc": {
-                "value": 0.3768, # 0.3099 4096, 0.3270 2048
+                "value": 0.3990, # 0.3099 4096, 0.3270 2048
                 "floor_pct": 0.04,
             },
         },
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
-                "value": 0.3046,  # 0.3294 4096, 0.3242 2048
+                "value": 0.3089,  # 0.3294 4096, 0.3242 2048
                 "floor_pct": 0.04,
             },
             "acc_norm": {
-                "value": 0.3345,  # 0.3558 4096, 0.3635 2048
+                "value": 0.3481,  # 0.3558 4096, 0.3635 2048
                 "floor_pct": 0.04,
             },
         },
