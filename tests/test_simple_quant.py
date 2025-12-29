@@ -8,7 +8,7 @@ import tempfile
 from datasets import load_dataset
 from logbar import LogBar
 
-from gptqmodel import GPTQModel, QuantizeConfig
+from gptqmodel import GPTAQConfig, GPTQModel, QuantizeConfig
 from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.eval import EVAL
 
@@ -55,7 +55,7 @@ quant_config = QuantizeConfig(
     format=FORMAT.GPTQ,
     desc_act=True,
     sym=True,
-    gptaq=CFG_V2,
+    gptaq=GPTAQConfig() if CFG_V2 else None,
 )
 
 log.info(f"QuantConfig: {quant_config}")

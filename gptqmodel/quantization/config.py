@@ -55,8 +55,6 @@ META_FIELD_MSE = "mse"
 META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
 META_FIELD_GPTAQ_ENABLED = "gptaq"
-META_FIELD_GPTAQ_ALPHA = "gptaq_alpha"
-META_FIELD_GPTAQ_MEMORY_DEVICE = "gptaq_memory_device"
 
 ADAPTER_FIELD = "adapter"
 
@@ -290,6 +288,55 @@ class FailSafe:
     smooth: Optional[SmoothMethod] = field(default_factory=SmoothMAD)
 
 
+@dataclass
+class HessianConfig:
+    # Hessian accumulation controls (GPTQ only)
+    chunk_size: Optional[int] = field(default=None, metadata={"help": "Maximum rows per Hessian chunk"})
+    chunk_bytes: Optional[int] = field(default=None, metadata={"help": "Memory budget (in bytes) for Hessian chunk staging"})
+    staging_dtype: Union[str, torch.dtype] = field(
+        default=torch.float32,
+        metadata={"help": "Stage Hessian chunks in a lower precision dtype when supported"},
+    )
+
+    def __post_init__(self):
+        if self.chunk_size is not None:
+            if not isinstance(self.chunk_size, int):
+                raise ValueError("HessianConfig: `chunk_size` must be an integer or None.")
+            if self.chunk_size <= 0:
+                raise ValueError("HessianConfig: `chunk_size` must be a positive integer.")
+
+        if self.chunk_bytes is not None:
+            if not isinstance(self.chunk_bytes, int):
+                raise ValueError("HessianConfig: `chunk_bytes` must be an integer or None.")
+            if self.chunk_bytes <= 0:
+                raise ValueError("HessianConfig: `chunk_bytes` must be a positive integer amount of bytes.")
+
+        if isinstance(self.staging_dtype, str):
+            self.staging_dtype = self.staging_dtype.lower()
+            if self.staging_dtype not in ["float32", "float16", "bfloat16"]:
+                raise ValueError("HessianConfig: `staging_dtype` must be float32, float16, or bfloat16.")
+            self.staging_dtype = getattr(torch, self.staging_dtype)
+        elif isinstance(self.staging_dtype, torch.dtype):
+            if self.staging_dtype not in [torch.float32, torch.float16, torch.bfloat16]:
+                raise ValueError("HessianConfig: `staging_dtype` must be float32, float16, or bfloat16.")
+        else:
+            raise ValueError("HessianConfig: `staging_dtype` must be a torch.dtype or string.")
+
+
+@dataclass
+class GPTAQConfig:
+    alpha: float = field(default=0.25)
+    device: Union[str, torch.device] = field(default="auto")
+
+    def __post_init__(self):
+        if not isinstance(self.alpha, (int, float)):
+            raise ValueError("GPTAQConfig: `alpha` must be a numeric value.")
+        if isinstance(self.device, str):
+            if not self.device:
+                raise ValueError("GPTAQConfig: `device` must be a non-empty string or torch.device.")
+        elif not isinstance(self.device, torch.device):
+            raise ValueError("GPTAQConfig: `device` must be a string or torch.device.")
+
 QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.GPTQ: {
         FORMAT.GPTQ,
@@ -319,18 +366,11 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     "q_group_size": GROUP_SIZE_FIELD_CODE,
     # AWQ compat
     "version" : FORMAT_FIELD_CODE,
-    "v2": "gptaq",
-    "v2_alpha": "gptaq_alpha",
-    "v2_memory_device": "gptaq_memory_device",
     # map format field (checkpoint_format) to class/code (format)
     FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
 }
 
-DYNAMIC_FIELD_SYNONYMS = {
-    "gptaq": ("v2",),
-    "gptaq_alpha": ("v2_alpha",),
-    "gptaq_memory_device": ("v2_memory_device",),
-}
+DYNAMIC_FIELD_SYNONYMS = {}
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
     """
@@ -513,14 +553,12 @@ class QuantizeConfig():
     # deprecated: only used for compat
     is_marlin_format: bool = False
 
-    # gptq/awq only:
+    # gptq only:
     # if calibration is insufficient, fallback to a simple quantization strategy; encapsulated in FailSafe config
     failsafe: Optional[FailSafe] = field(default_factory=FailSafe)
 
     # gptaq only:
-    gptaq: bool = field(default=False)
-    gptaq_alpha: float = field(default=0.25)
-    gptaq_memory_device: str = field(default="auto")
+    gptaq: Optional[GPTAQConfig] = field(default=None)
 
     # awq only:
     zero_point: bool = field(default=True)
@@ -530,9 +568,7 @@ class QuantizeConfig():
     mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
 
     # Hessian accumulation controls (GPTQ only)
-    hessian_chunk_size: Optional[int] = field(default=None, metadata={"help": "Maximum rows per Hessian chunk"})
-    hessian_chunk_bytes: Optional[int] = field(default=None, metadata={"help": "Memory budget (in bytes) for Hessian chunk staging"})
-    hessian_use_bfloat16_staging: bool = field(default=False, metadata={"help": "Stage Hessian chunks in bfloat16 when supported"})
+    hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
 
     # VRAM allocation strategy for MoE-heavy subsets
     vram_strategy: VramStrategy = field(default=VramStrategy.EXCLUSIVE)
@@ -708,17 +744,19 @@ class QuantizeConfig():
         if self.damp_auto_increment < 0:
             raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
 
-        if self.hessian_chunk_size is not None:
-            if not isinstance(self.hessian_chunk_size, int):
-                raise ValueError("QuantizeConfig: `hessian_chunk_size` must be an integer or None.")
-            if self.hessian_chunk_size <= 0:
-                raise ValueError("QuantizeConfig: `hessian_chunk_size` must be a positive integer.")
+        if self.hessian is None:
+            self.hessian = HessianConfig()
+        elif isinstance(self.hessian, dict):
+            self.hessian = HessianConfig(**self.hessian)
+        elif not isinstance(self.hessian, HessianConfig):
+            raise ValueError("QuantizeConfig: `hessian` must be a HessianConfig, dict, or None.")
 
-        if self.hessian_chunk_bytes is not None:
-            if not isinstance(self.hessian_chunk_bytes, int):
-                raise ValueError("QuantizeConfig: `hessian_chunk_bytes` must be an integer or None.")
-            if self.hessian_chunk_bytes <= 0:
-                raise ValueError("QuantizeConfig: `hessian_chunk_bytes` must be a positive integer amount of bytes.")
+        if self.gptaq is None:
+            pass
+        elif isinstance(self.gptaq, dict):
+            self.gptaq = GPTAQConfig(**self.gptaq)
+        elif not isinstance(self.gptaq, GPTAQConfig):
+            raise ValueError("QuantizeConfig: `gptaq` must be a GPTAQConfig, dict, or None.")
 
         # resolve activation ordering compatibility and defaults
         desc_act_user_value = self.desc_act
@@ -978,21 +1016,13 @@ class QuantizeConfig():
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
 
-        dynamic_overrides = normalized.get("dynamic")
-        if isinstance(dynamic_overrides, dict):
-            for overrides in dynamic_overrides.values():
-                if not isinstance(overrides, dict):
-                    continue
-                if "v2" in overrides and "gptaq" not in overrides:
-                    overrides["gptaq"] = overrides.pop("v2")
-                if "v2_alpha" in overrides and "gptaq_alpha" not in overrides:
-                    overrides["gptaq_alpha"] = overrides.pop("v2_alpha")
-                if "v2_memory_device" in overrides and "gptaq_memory_device" not in overrides:
-                    overrides["gptaq_memory_device"] = overrides.pop("v2_memory_device")
-
         meta_payload = normalized.get(META_FIELD)
         if "failsafe" not in normalized and isinstance(meta_payload, dict) and "failsafe" in meta_payload:
             normalized["failsafe"] = meta_payload.get("failsafe")
+        if "hessian" not in normalized and isinstance(meta_payload, dict) and "hessian" in meta_payload:
+            normalized["hessian"] = meta_payload.get("hessian")
+        if "gptaq" not in normalized and isinstance(meta_payload, dict) and "gptaq" in meta_payload:
+            normalized["gptaq"] = meta_payload.get("gptaq")
 
         cfg = cls(**normalized)
 
@@ -1073,6 +1103,30 @@ class QuantizeConfig():
                 "smooth": smooth,
             }
 
+        if self.gptaq is None:
+            meta_payload["gptaq"] = None
+        else:
+            device = self.gptaq.device
+            device_value = device if isinstance(device, str) else str(device)
+            meta_payload["gptaq"] = {
+                "alpha": self.gptaq.alpha,
+                "device": device_value,
+            }
+        meta_payload["offload_to_disk"] = self.offload_to_disk
+        meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
+        meta_payload["pack_impl"] = self.pack_impl
+        meta_payload["mse"] = self.mse
+        meta_payload["mock_quantization"] = self.mock_quantization
+        meta_payload["act_group_aware"] = self.act_group_aware
+        meta_payload["hessian"] = {
+            "chunk_size": self.hessian.chunk_size,
+            "chunk_bytes": self.hessian.chunk_bytes,
+            "staging_dtype": str(self.hessian.staging_dtype).split(".")[-1],
+        }
+        meta_payload["vram_strategy"] = (
+            self.vram_strategy.value if isinstance(self.vram_strategy, VramStrategy) else self.vram_strategy
+        )
+
         out = {
             "bits": self.bits,
             "dynamic": self.dynamic,
@@ -1089,9 +1143,6 @@ class QuantizeConfig():
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
             # DO NOT EXPORT compute_device_filter since functions are not serializable
         }
-
-        if getattr(self, "pack_impl", "original") != "original":
-            out["pack_impl"] = self.pack_impl
 
         # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm
         if self.quant_method == METHOD.AWQ:

@@ -20,7 +20,9 @@
 </p>
 
 ## Latest News
-* 12/23/2025 5.7.0-dev: 🎉 New `FailSafe` config and `FailSafeStrategy`, auto enabled by default, to address un-even routing of MoE experts resulting quantization issue of some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce outliers impact of `FailSafe` quantization using `RTN` by default. Different `FaileSafeStategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized.
+* 12/27/2025 [5.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7): 🎉 New `FailSafe` config and `FailSafeStrategy`, auto enabled by default, to address un-even routing of MoE experts resulting quantization issue of some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce outliers impact of `FailSafe` quantization using `RTN` by default. Different `FaileSafeStategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
+New Voxtral, Glm-4v model support plus audio dataset calibration for Qwen2-Omni.
+
 * 12/17/2025 [5.6.2-12 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.12): Fixed `uv` compatibility. Both `uv` and `pip` install will now show UI progress for external wheel/dependency downloads. Fixed `MacOS` and `AWQMarlin` kernel loading import regressions. Resolved most `multi-arch` compile issue on `Ubuntu`, `Arch`, `RedHat` and other distros. Fixed `multi-arch` build issues and `Tritonv2` kernel launch bug on multi-GPUs. Fixed 3-bit Triton GPTQ kernel dequant/inference and `license` property compatibility issue with latest pip/setuptools.
 * 12/9/2025 [5.6.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.0): ✨New `HF Kernel` for CPU optimized for `AMX`, `AVX2` and `AVX512`. Auto module tree for auto-model support. Added Afmoe and Dosts1 model support. Fixed pre-layer pass quantization speed regression. Improved HF Transformers, Peft and Optimum support for both GPTQ and AWQ. Fixed many AWQ compatibility bugs and regressions. 
 * 11/9/2025 [5.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.4.0): ✨New Intel CPU and XPU hardware-optimized AWQ `TorchFusedAWQ` kernel. Torch Fused kernels now compatible with `torch.compile`. Fixed AWQ MoE model compatibility and reduced VRAM usage.
@@ -168,51 +170,52 @@ Native support for some of the most popular multi-modal models:
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model with format = `FORMAT.GPTQ`
 * ✨ GPTQ, AWQ, and QQQ quantization format with hardware-accelerated inference kernels. 
+* 🚀 Quantize MoE models with ease even with extreme routing activations bias via `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
 * ✨ Linux, MacOS, Windows platform quantization and accelerated inference support for CUDA (Nvidia), XPU (Intel), ROCm (AMD), MPS (Apple Silicon), CPU (Intel/AMD/Apple Silicon).
 * ✨ `Dynamic` mixed quantization control on a per-module basis. Each layer/module can have a unique quantization config or be excluded from quantization altogether. 
-* 🚀 Intel Torch 2.8 fused kernel support for XPU [`Arc` + `Datacenter Max`] and CPU [`avx`, `amx`, `xmx`].
+* 🚀 Intel Torch 2.8 fused kernel support for XPU [`Arc` + `Datacenter Max`] and CPU [`avx`, `amx`].
 * 🚀 Python 3.13.3t (free-threading, GIL disabled) support for multi-GPU accelerated quantization for MoE models and multi-core CPU boost for post-quant packing.
 * ✨ Asymmetric `Sym=False` support. Model weights sharding support with optional hash check of model weights on load.
 * ✨ `lm_head` module quant inference support for further VRAM reduction.
-* 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) format + dynamically compiled inference.
+* 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) optimized tile based inference.
 * 💯 100% CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
 
 
-## Quality: GPTQ 4bit (5.0 bpw) can match BF16:
+## Quality: GPTQ 4bit can match native BF16:
 🤗 [ModelCloud quantized Vortex models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
 
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
 ## Model Support  
-| Model             |   |                 |   |                |   |                |   |                     |   |
-|-------------------|---|-----------------|---|----------------|---|----------------|---|---------------------|---|
-| Apertus           | ✅ | EXAONE 3.0      | ✅ | Dots1          | ✅ | Mistral3       | ✅ | Qwen 2/3 (Next/MoE) | ✅ |
-| Baichuan          | ✅ | Falcon (H1)     | ✅ | InternLM 1/2.5 | ✅ | Mixtral        | ✅ | Qwen 2/2.5/3 VL     | ✅ |
-| Bloom             | ✅ | FastVLM         | ✅ | Kimi K2        | ✅ | MobileLLM      | ✅ | Qwen 2.5/3 Omni     | ✅ |
-| ChatGLM           | ✅ | Gemma 1/2/3     | ✅ | Klear          | ✅ | MOSS           | ✅ | RefinedWeb          | ✅ |
-| CodeGen           | ✅ | GPTBigCod       | ✅ | LING/RING      | ✅ | MPT            | ✅ | StableLM            | ✅ |
-| Cohere 1-2        | ✅ | GPTQ-Neo(X)     | ✅ | Llama 1-3.3    | ✅ | Nemotron H     | ✅ | StarCoder2          | ✅ |
-| DBRX Converted    | ✅ | GPT-2           | ✅ | Llama 3.2 VL   | ✅ | Nemotron Ultra | ✅ | TeleChat2           | ✅ |
-| Deci              | ✅ | GPT-J           | ✅ | Llama 4        | ✅ | OPT            | ✅ | Trinity             | ✅ |
-| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS         | ✅ | LongCatFlash   | ✅ | OLMo2          | ✅ | Yi                  | ✅ |
-| DeepSeek-V2-Lite  | ✅ | Granite         | ✅ | LongLLaMA      | ✅ | Ovis 1.6/2     | ✅ | Seed-OSS            | ✅ |
-| Dream             | ✅ | GRIN-MoE        | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | XVERSE              | ✅ |
-| ERNIE 4.5         | ✅ | GLM 4/4V/4MoE | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | Minimax M2          | ✅ |
-| Brumby            | ✅ | Hymba           | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ |                     |   |
+| Model             |   |               |   |                |   |                |   |                     |   |
+|-------------------|---|---------------|---|----------------|---|----------------|---|---------------------|---|
+| Apertus           | ✅ | EXAONE 3.0    | ✅ | Dots1          | ✅ | Mistral3       | ✅ | Qwen 2/3 (Next/MoE) | ✅ |
+| Baichuan          | ✅ | Falcon (H1)   | ✅ | InternLM 1/2.5 | ✅ | Mixtral        | ✅ | Qwen 2/2.5/3 VL     | ✅ |
+| Bloom             | ✅ | FastVLM       | ✅ | Kimi K2        | ✅ | MobileLLM      | ✅ | Qwen 2.5/3 Omni     | ✅ |
+| ChatGLM           | ✅ | Gemma 1/2/3   | ✅ | Klear          | ✅ | MOSS           | ✅ | RefinedWeb          | ✅ |
+| CodeGen           | ✅ | GPTBigCod     | ✅ | LING/RING      | ✅ | MPT            | ✅ | StableLM            | ✅ |
+| Cohere 1-2        | ✅ | GPTQ-Neo(X)   | ✅ | Llama 1-3.3    | ✅ | Nemotron H     | ✅ | StarCoder2          | ✅ |
+| DBRX Converted    | ✅ | GPT-2         | ✅ | Llama 3.2 VL   | ✅ | Nemotron Ultra | ✅ | TeleChat2           | ✅ |
+| Deci              | ✅ | GPT-J         | ✅ | Llama 4        | ✅ | OPT            | ✅ | Trinity             | ✅ |
+| DeepSeek-V2/V3/R1 | ✅ | GPT-OSS       | ✅ | LongCatFlash   | ✅ | OLMo2          | ✅ | Yi                  | ✅ |
+| DeepSeek-V2-Lite  | ✅ | Granite       | ✅ | LongLLaMA      | ✅ | Ovis 1.6/2     | ✅ | Seed-OSS            | ✅ |
+| Dream             | ✅ | GRIN-MoE      | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | Voxtral             | ✅ |
+| ERNIE 4.5         | ✅ | GLM 4/4V/4MoE | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | XVERSE              | ✅ |
+| Brumby            | ✅ | Hymba         | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ | Minimax M2          | ✅ |
 
 
 ## Platform and HW Support 
 
 GPT-QModel is validated for Linux, MacOS, and Windows 11:
 
-| Platform        | Device        |     |  Optimized Arch              | Kernels                                       |
-|-----------------|---------------| --- | -------------- |-----------------------------------------------| 
+| Platform        | Device        |     |  Optimized Arch          | Kernels                                       |
+|-----------------|---------------| --- | ------------ |-----------------------------------------------| 
 | 🐧 Linux           | Nvidia GPU    | ✅       | `Ampere+` | Marlin, Exllama V2, Exllama V1, Triton, Torch |
 | 🐧 Linux | AMD GPU     | ✅             |   `7900XT+`,  `ROCm 6.2+` | Exllama V2, Exllama V1, Torch                 |
 | 🐧 Linux | Intel XPU     | ✅             |   `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, Torch              |
-| 🐧 Linux           | Intel/AMD CPU | ✅          | `avx`, `amx`, `xmx` | TorchFused, TorchFusedAWQ, Torch                           |
+| 🐧 Linux           | Intel/AMD CPU | ✅          | `avx`, `amx` | TorchFused, TorchFusedAWQ, Torch                           |
 | 🍎 MacOS | GPU (Metal) / CPU          | ✅             |   `Apple Silicon`, `M1+` | Torch, MLX via conversion                     |
 | 🪟 Windows | GPU (Nvidia) / CPU       | ✅             |   `Nvidia`  | Torch                                         |
 
@@ -297,24 +300,6 @@ model.quantize(calibration_dataset, batch_size=1)
 
 model.save(quant_path)
 ```
-
-### Quantization using GPTAQ (Experimental, not MoE compatible, and results may not be better than original)
-
-Enable GPTAQ quantization by setting `gptaq = True`.
-```py
-# Note GPTAQ is currently experimental, not MoE compatible, and requires 2-4x more VRAM to execute
-# We have many reports of GPTAQ not working better or exceeding GPTQ so please use for testing only
-# If OOM on 1 GPU, please set CUDA_VISIBLE_DEVICES=0,1 to 2 GPUs and gptqmodel will auto use second GPU
-quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=True)
-```
-`Llama 3.1 8B-Instruct` quantized using `test/models/test_llama3_2.py`
-
-| Method | Bits/Group Size | ARC_CHALLENGE   | GSM8K_Platinum_COT | 
-|--------|-----------------|-----------------|--------------------|
-| GPTQ   | 4 / 128         | 49.15           | 48.30              |
-| GPTAQ  | 4 / 128         | 49.74  +1.20%   | 61.46  +27.25%     |
-| GPTQ   | 3 / 128         | 39.93           | 43.26              |
-| GPTAQ  | 3 / 128         | 41.13  +3.01%   | 50.54  +16.83%     | 
 
 # Quantization Inference
 ```py
@@ -442,7 +427,15 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 
 ### Experimental Features
 
-* GPTAQ: set `v2=True` in quantization config.
+#### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original)
+
+Enable GPTAQ quantization by setting `gptaq = GPTAQConfig(...)`.
+```py
+# Note GPTAQ is currently experimental, not MoE compatible, and requires 2-4x more VRAM to execute
+# We have many reports of GPTAQ not working better or exceeding GPTQ so please use for testing only
+# If OOM on 1 GPU, please set CUDA_VISIBLE_DEVICES=0,1 to 2 GPUs and gptqmodel will auto use second GPU
+quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=GPTAQConfig(alpha=0.25, device="auto"))
+```
 
 
 ### Attribution of Quantization Methods:
