@@ -69,7 +69,7 @@ class TestModelSave(unittest.TestCase):
         )
 
         model = GPTQModel.load(
-            "Qwen3-Omni-30B-A3B-Instruct-layers-1",
+            "/monster/data/model/Qwen3-Omni-30B-A3B-Instruct-layers-1/",
             quantize_config=quantize_config,
         )
 
