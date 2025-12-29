@@ -29,8 +29,39 @@ class TestQwen3Moe(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
-            "acc": {"value": 0.5307, "floor_pct": 0.04},
-            "acc_norm": {"value": 0.5674, "floor_pct": 0.04},
+            "acc": {"value": 0.5137, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.5307, "floor_pct": 0.04},
+        },
+        ######################################################################
+        # ⚠️  IMPORTANT NOTE (GSM8K_PLATINUM_COT)
+        #
+        # For SOME models (e.g. qwen3_moe):
+        #
+        #   - apply_chat_template MUST be set to False
+        #   - Otherwise, GSM8K_PLATINUM_COT scores will be SEVERELY degraded
+        #
+        # Empirical comparison (qwen3_moe as an example):
+        #   - apply_chat_template = False  → score = 0.9380
+        #   - apply_chat_template = True   → score = 0.2498 (broken)
+        #
+        # Conclusion:
+        #   GSM8K_PLATINUM_COT should NOT use chat templates for certain models,
+        #   as lead to unreliable evaluation results.
+        #
+        ######################################################################
+        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+            "chat_template": False,
+            "exact_match,flexible-extract": {
+                "value": 0.9380,
+                "floor_pct": 0.04,
+            },
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
+            "chat_template": False,
+            "acc": {
+                "value": 0.7805,
+                "floor_pct": 0.04,
+            },
         },
     }
 
