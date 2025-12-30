@@ -60,7 +60,7 @@ def run_subset_stage(
     layer_title: str,
     layer_index: int,
     layers_prefix: Optional[str],
-    subset_names: List[str],
+    subset: Dict[str, NamedModule],
     subset_index: int,
     subset_total: int,
     full,
@@ -78,18 +78,6 @@ def run_subset_stage(
     processor_name = processor.name() if hasattr(processor, "name") else type(processor).__name__
     processor_name_lower = processor_name.lower()
     is_awq_processor = processor_name_lower.startswith("awq")
-
-    subset = looper.create_named_modules(
-        module=module,
-        full=full,
-        is_lm_head_module=is_lm_head_module,
-        layer_index=layer_index,
-        layers_prefix=layers_prefix,
-        names=subset_names,
-        processor=processor,
-        failsafe=failsafe,
-        layer_module=module,
-    )
 
     def emit_subset_event(stage: str) -> None:
         if subset_event_cb is None:
