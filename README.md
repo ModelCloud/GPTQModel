@@ -20,8 +20,8 @@
 </p>
 
 ## Latest News
-* 12/27/2025 [5.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7): 🎉 New `FailSafe` config and `FailSafeStrategy`, auto enabled by default, to address un-even routing of MoE experts resulting quantization issue of some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce outliers impact of `FailSafe` quantization using `RTN` by default. Different `FaileSafeStategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
-New Voxtral, Glm-4v model support plus audio dataset calibration for Qwen2-Omni.
+* 12/31/2025 5.7.0-dev: 🎉 New `FailSafe` config and `FailSafeStrategy`, auto enabled by default, to address un-even routing of MoE experts resulting quantization issue of some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce outliers impact of `FailSafe` quantization using `RTN` by default. Different `FaileSafeStategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
+New Voxtral, Glm-4v model support plus audio dataset calibration for Qwen2-Omni. `AWQ` compat fix for `GLM 4.5-Air`.
 
 * 12/17/2025 [5.6.2-12 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.12): Fixed `uv` compatibility. Both `uv` and `pip` install will now show UI progress for external wheel/dependency downloads. Fixed `MacOS` and `AWQMarlin` kernel loading import regressions. Resolved most `multi-arch` compile issue on `Ubuntu`, `Arch`, `RedHat` and other distros. Fixed `multi-arch` build issues and `Tritonv2` kernel launch bug on multi-GPUs. Fixed 3-bit Triton GPTQ kernel dequant/inference and `license` property compatibility issue with latest pip/setuptools.
 * 12/9/2025 [5.6.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.0): ✨New `HF Kernel` for CPU optimized for `AMX`, `AVX2` and `AVX512`. Auto module tree for auto-model support. Added Afmoe and Dosts1 model support. Fixed pre-layer pass quantization speed regression. Improved HF Transformers, Peft and Optimum support for both GPTQ and AWQ. Fixed many AWQ compatibility bugs and regressions. 
