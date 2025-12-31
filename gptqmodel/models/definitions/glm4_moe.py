@@ -33,14 +33,14 @@ class GLM4MoEGPTQ(BaseQModel):
             "self_attn": ("q_proj:0", "q_norm:0:!","k_proj:0", "k_norm:0:!", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": {
+                "gate": ("gate:!",), # Glm4MoeTopKRouter, ~1.6MB float32 per layer.  We really do not quant to quantize this.
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                },
                 "shared_experts": {
                     "gate_proj": ("gate_proj:0",),
                     "up_proj": ("up_proj:0",),
                     "down_proj": ("down_proj:1",),
-                },
-                "gate": ("gate:!",), # Glm4MoeTopKRouter, ~1.6MB float32 per layer.  We really do not quant to quantize this.
-                "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
                 # Standard MLP components for layer 0
                 "gate_proj": ("gate_proj",),

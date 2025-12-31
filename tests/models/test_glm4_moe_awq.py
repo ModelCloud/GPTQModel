@@ -28,3 +28,25 @@ class TestGlm4Moe(ModelTest):
     }
     def test_glm4moe(self):
         self.quant_lm_eval()
+
+
+class TestGlm4_5_Air(ModelTest):
+    FORMAT = FORMAT.GEMM
+    METHOD = METHOD.AWQ
+
+    NATIVE_MODEL_ID = "/monster/data/model/GLM-4.5-Air/"
+    DELETE_QUANTIZED_MODEL = False
+    DATASET_SIZE = 512
+    GROUP_SIZE = 32
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.5247, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.5614, "floor_pct": 0.04},
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
+            "acc": {"value": 0.6403, "floor_pct": 0.04},
+        },
+    }
+
+    def test_glm4moe(self):
+        self.quant_lm_eval()
