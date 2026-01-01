@@ -91,8 +91,9 @@ class TensorParallelWeightProcessor(LoopProcessor):
         )
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
-        # Reuse the shared calibration cache; no bespoke dataset handling needed.
-        return True
+        # This processor works on weights and does not need a dataset.
+        # Return False to inherit the cache from the previous processor.
+        return False
 
     def name(self) -> str:
         return "tp-pre-pad"
