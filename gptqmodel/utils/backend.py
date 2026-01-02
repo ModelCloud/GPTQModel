@@ -11,6 +11,7 @@ class BACKEND(str, Enum):
     AUTO_TRAINABLE = "auto_trainable" # choose the optimal trainable local kernel for post-quant training
 
     # gptq
+    ASCEND_NPU = "ascend_npu"  # Ascend NPU inference kernel via torch_npu
     TORCH_FUSED = "torch_fused" # optimized for Intel XPU
     TORCH_FUSED_AWQ = "torch_fused_awq" # AWQ variant of torch fused kernel
     TORCH = "torch" # GOOD: about 80% of triton
