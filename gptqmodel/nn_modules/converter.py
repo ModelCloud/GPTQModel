@@ -34,8 +34,9 @@ def convert_gpt_oss_expert_converter(module, config):
 
 def convert_llama4_expert_converter(module, config):
     import torch
-    from transformers.modeling_utils import no_init_weights
     from transformers.models.llama4.modeling_llama4 import Llama4TextMLP, Llama4TextMoe
+
+    from ..utils.hf import no_init_weights
 
     # adapted/modified from https://github.com/vllm-project/llm-compressor/blob/main/src/llmcompressor/modeling/llama4.py
     class SequentialLlama4TextExperts(torch.nn.ModuleList):
