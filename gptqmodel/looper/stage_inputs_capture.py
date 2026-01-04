@@ -72,7 +72,16 @@ class StageInputsCapture:
                 calibration_batches,
             )
 
-        cur_layer_device = get_device(layers[0])
+        # materialize / move.to CPU for initial input capture and for first layer to minimize VRAM usage, inputs will be stored on CPU
+        # and to mimic behavior of offload_to_disk=False for offload_to_disk=True
+        # TODO: move back outputs to CPU after forward pass to minimize VRAM usage for other layers
+        # or wait till calibration_data_device feature merge, when we can specify device for calibration data (or balanced)
+        # (and in case calibration data device will be the same as forward pass device save some ticks)
+        layers[0] = self.gptq_model.shell_module_materialize(
+            target_submodule=layers[0],
+            device=CPU,
+        )
+        cur_layer_device = CPU
         data_device = cur_layer_device
 
         cache_forward_pb = None
@@ -122,15 +131,6 @@ class StageInputsCapture:
             # and wait for the first instance this callback is called
             raise STOP_FORWARD_EXCEPTION
 
-        if cur_layer_device == META:
-            layers[0] = self.gptq_model.shell_module_materialize(
-                target_submodule=layers[0],
-                device=self.gptq_model.quantize_config.device,
-            )
-            cur_layer_device = self.gptq_model.quantize_config.device
-        else:
-            layers[0] = layers[0].to(self.gptq_model.quantize_config.device)
-
         ori_outside_layer_module_devices: Dict[str, torch.device] = {}
         for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
@@ -140,11 +140,10 @@ class StageInputsCapture:
 
             m_device = get_device(module)
             ori_outside_layer_module_devices[module_name] = CPU if m_device == META else m_device
-            if module is not None:
-                self.gptq_model.shell_module_materialize(
-                    target_submodule=module,
-                    device=cur_layer_device,
-                )
+            self.gptq_model.shell_module_materialize(
+                target_submodule=module,
+                device=cur_layer_device,
+            )
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
@@ -152,6 +151,7 @@ class StageInputsCapture:
 
         self.gptq_model.pre_quantize_generate_hook_start()
 
+        # TODO: why data_device sometimes set to cuda (self.gptq_model.quantize_config.device) and sometimes to CPU (cur_layer_device)?
         try:
             for batch_index, example in enumerate(calibration_data, start=1):
                 for k, v in example.items():
