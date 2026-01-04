@@ -524,7 +524,8 @@ def alias_from_turtle_for_submodule(
     device: torch.device,
     non_blocking: bool = False,
 ) -> torch.nn.Module:
-    assert device not in [None, torch.device("cpu"), torch.device("meta")]
+    # removed cpu from list to allow materialize from meta to cpu
+    assert device not in [None, torch.device("meta")]
     # print(f"alias device = {device}")
 
     # Resolve path & source submodule (on CPU/mmap)

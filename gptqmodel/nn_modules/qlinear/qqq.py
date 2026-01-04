@@ -18,11 +18,17 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 
+qqq_import_exception = None
+try:
+    import gptqmodel_qqq_kernels
+except ImportError as e:
+    qqq_import_exception = str(e)
 
 log = setup_logger()
 
+
 def mul(
-    A, B, C, D, s1, s2, s3, workspace, gptqmodel_qqq_kernels, thread_k=-1, thread_n=-1, sms=-1, max_par=16
+    A, B, C, D, s1, s2, s3, workspace, thread_k=-1, thread_n=-1, sms=-1, max_par=16
 ):
     """INT8xINT4 multiply based on Marlin kernel; can be used within `torch.compile`.
     @A: `torch.int8` input matrix of shape `(m, k)` in standard row-major layout
@@ -65,8 +71,6 @@ class QQQQuantLinear(BaseQuantLinear):
     QUANT_TYPE = "qqq"
 
     IN_OUTPUT_FEATURES_DIVISIBLE_BY = [(64, 256), (128, 128), (128, 64), (64, 128)]
-
-    gptqmodel_qqq_kernels = None
 
     def __init__(
         self, bits: int,
@@ -199,12 +203,9 @@ class QQQQuantLinear(BaseQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        try:
-            import gptqmodel_qqq_kernels
-            cls.gptqmodel_qqq_kernels = gptqmodel_qqq_kernels
-            return True, None
-        except ImportError as e:
-            return False, e
+        if qqq_import_exception is not None:
+            return False, ImportError(qqq_import_exception)
+        return True, None
 
     @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
@@ -377,7 +378,6 @@ class QQQQuantLinear(BaseQuantLinear):
             self.reduce_buffer, # C
             D, # D
             s1, # s1
-            self.gptqmodel_qqq_kernels,
             self.s_channel, # s2
             self.s_group, # s3
             self.workspace,
