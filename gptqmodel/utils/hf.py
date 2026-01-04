@@ -10,6 +10,14 @@ import torch
 from accelerate import init_empty_weights
 from transformers import GenerationConfig, PreTrainedModel
 
+# Compatibility wrapper for no_init_weights across different transformers versions
+# transformers >= 5.0.0: from transformers.initialization import no_init_weights
+# transformers < 5.0.0: from transformers.modeling_utils import no_init_weights
+try:
+    from transformers.initialization import no_init_weights
+except ImportError:
+    from transformers.modeling_utils import no_init_weights
+
 from ..utils.logger import setup_logger
 
 

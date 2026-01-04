@@ -19,9 +19,10 @@ import transformers
 from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
-from transformers.initialization import no_init_weights
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils.generic import ContextManagers
+
+from ..utils.hf import no_init_weights
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
