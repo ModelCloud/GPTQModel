@@ -591,11 +591,6 @@ class QuantizeConfig():
         if valid_formats is None:
             raise ValueError(f"QuantizeConfig: Unsupported `quant_method`: {self.quant_method}")
 
-        # TODO FIXME qqq compat which didn't have checkpoint_format before merging to gptqmodel
-        if self.quant_method == METHOD.QQQ and self.format != FORMAT.QQQ:
-            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
-            self.format = FORMAT.QQQ
-
         # If the user does not pass it, the default value will be set according to quant_method
         if self.damp_percent is None:
             if self.quant_method == METHOD.QQQ:
@@ -933,6 +928,13 @@ class QuantizeConfig():
         # fix method if format is not allowed for the method
         fmt = normalized.get(FORMAT_FIELD_CODE)
         method = normalized.get(QUANT_METHOD_FIELD)
+
+        # TODO FIXME qqq compat which didn't have checkpoint_format before merging to gptqmodel
+        if method == METHOD.QQQ and fmt != FORMAT.QQQ:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.QQQ
+            fmt = FORMAT.QQQ
+
         if fmt is not None:
             allowed_methods = [m for m, fmts in QUANT_METHOD_FORMAT_MAPPING.items() if fmt in fmts]
             if method not in allowed_methods:
