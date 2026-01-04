@@ -535,7 +535,7 @@ class ModuleLooper():
         - Module contains an MoE block
         """
         # Check if feature is enabled
-        flag_enabled = self.gptq_model.quantize_config.moe_bypass_router
+        flag_enabled = self.gptq_model.quantize_config.moe and self.gptq_model.quantize_config.moe.bypass_router()
         if not flag_enabled:
             return False
         

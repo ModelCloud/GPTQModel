@@ -337,6 +337,32 @@ class GPTAQConfig:
         elif not isinstance(self.device, torch.device):
             raise ValueError("GPTAQConfig: `device` must be a string or torch.device.")
 
+
+@dataclass
+class BaseMoERouting:
+    pass
+
+
+@dataclass
+class ExpertsRoutingOverride(BaseMoERouting):
+    experts_per_token: Union[int, str]
+
+
+# MoE quantization: forward whole calibration dataset to each expert instead of only routed data
+# This ensures all experts receive sufficient calibration samples but increases quantization time
+@dataclass
+class ExpertsRoutingBypass(BaseMoERouting):
+    pass
+
+
+@dataclass
+class MoEConfig:
+    routing: BaseMoERouting
+
+    def bypass_router(self) -> bool:
+        return isinstance(self.routing, ExpertsRoutingBypass)
+
+
 QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.GPTQ: {
         FORMAT.GPTQ,
@@ -593,11 +619,9 @@ class QuantizeConfig():
                   "Example to exclude device 0: compute_device_filter=lambda devices: [d for d in devices if d.index != 0]"}
     )
 
-    # MoE quantization: forward whole calibration dataset to each expert instead of only routed data
-    # This ensures all experts receive sufficient calibration samples but increases quantization time
-    moe_bypass_router: bool = field(
-        default=False,
-        metadata={"help": "Forward entire calibration dataset to all MoE experts (not just routed experts)"}
+    moe: MoEConfig = field(
+        default=None,
+        metadata={"help": "Mixture-of-Experts (MoE) configuration, including routing strategy and related overrides."}
     )
 
     # Works faster than data parallel with some configurations 
@@ -1093,7 +1117,7 @@ class QuantizeConfig():
         meta_payload = dict(self.meta) if self.meta else {}
         meta_payload["gc_mode"] = self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
-        meta_payload["moe_bypass_router"] = self.moe_bypass_router
+        meta_payload["moe"] = self.moe
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
 
         if self.failsafe is None:
