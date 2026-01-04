@@ -113,10 +113,28 @@ def run_layer_stage(
 
             processed_subset: Dict[str, NamedModule] = {}
             last_subset_context: Optional[SubsetForwardContext] = None
-            subset_total = len(modules)
             previous_subset_processed: Optional[Dict[str, NamedModule]] = None
 
-            for index, names in enumerate(modules):
+            subsets = []
+            for names in modules:
+                subset = looper.create_named_modules(
+                    module=module,
+                    full=full,
+                    is_lm_head_module=is_lm_head_module,
+                    layer_index=layer_index,
+                    layers_prefix=layers_prefix,
+                    names=names,
+                    processor=processor,
+                    failsafe=failsafe,
+                    layer_module=module,
+                )
+                # Skip empty subsets caused by per-layer structure differences or dynamic config exclusions;
+                # otherwise awq_processor may fail to quantize
+                if subset:
+                    subsets.append(subset)
+
+            subset_total = len(subsets)
+            for index, subset in enumerate(subsets):
                 # Process the layer in smaller subsets so attention groups or
                 # MoE experts can be quantized independently within a layer.
                 if DEBUG_ON and log.isEnabledFor(logging.DEBUG):
@@ -126,8 +144,8 @@ def run_layer_stage(
                             layer_index,
                             index + 1,
                             subset_total,
-                            len(names),
-                            names[:5],
+                            len(subset),
+                            subset[:5],
                         )
                     else:
                         log.debug(
@@ -136,8 +154,8 @@ def run_layer_stage(
                             index + 1,
                             subset_total,
                             processor.name(),
-                            len(names),
-                            names[:8],
+                            len(subset),
+                            subset[:8],
                         )
                 subset_result = run_subset_stage(
                     looper=looper,
@@ -153,7 +171,7 @@ def run_layer_stage(
                     layer_title=layer_title,
                     layer_index=layer_index,
                     layers_prefix=layers_prefix,
-                    subset_names=names,
+                    subset=subset,
                     subset_index=index,
                     subset_total=subset_total,
                     full=full,

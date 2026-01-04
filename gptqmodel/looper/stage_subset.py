@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional
@@ -59,7 +60,7 @@ def run_subset_stage(
     layer_title: str,
     layer_index: int,
     layers_prefix: Optional[str],
-    subset_names: List[str],
+    subset: Dict[str, NamedModule],
     subset_index: int,
     subset_total: int,
     full,
@@ -77,18 +78,6 @@ def run_subset_stage(
     processor_name = processor.name() if hasattr(processor, "name") else type(processor).__name__
     processor_name_lower = processor_name.lower()
     is_awq_processor = processor_name_lower.startswith("awq")
-
-    subset = looper.create_named_modules(
-        module=module,
-        full=full,
-        is_lm_head_module=is_lm_head_module,
-        layer_index=layer_index,
-        layers_prefix=layers_prefix,
-        names=subset_names,
-        processor=processor,
-        failsafe=failsafe,
-        layer_module=module,
-    )
 
     def emit_subset_event(stage: str) -> None:
         if subset_event_cb is None:
@@ -432,10 +421,16 @@ def run_subset_stage(
 
         if not failsafe_enabled:
             for name in moe_skip_modules:
-                subset.pop(name)
+                skipped_module = subset.pop(name)
                 task_map = getattr(processor, "tasks", None)
                 if task_map is not None:
                     task_map.pop(name, None)
+
+                # No calibration data was routed to these MoE expert modules.
+                # We skip quantization them and record them in `qcfg.dynamic` as dynamically excluded modules.
+                if processor.qcfg.dynamic is None:
+                    processor.qcfg.dynamic = {}
+                processor.qcfg.dynamic[f"-:{re.escape(skipped_module.full_name)}"] = {}
 
     quant_target_devices: Dict[str, torch.device] = {}
     for name, named_module in subset.items():
