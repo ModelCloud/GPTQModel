@@ -5,7 +5,7 @@
 
 import json
 import os.path
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, asdict
 from enum import Enum
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -361,6 +361,14 @@ class MoEConfig:
 
     def bypass_router(self) -> bool:
         return isinstance(self.routing, ExpertsRoutingBypass)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "routing": {
+                "class": self.routing.__class__.__name__,
+                **asdict(self.routing),
+            }
+        }
 
 
 QUANT_METHOD_FORMAT_MAPPING = {
@@ -1117,7 +1125,7 @@ class QuantizeConfig():
         meta_payload = dict(self.meta) if self.meta else {}
         meta_payload["gc_mode"] = self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
-        meta_payload["moe"] = self.moe
+        meta_payload["moe"] = self.moe.to_dict()
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
 
         if self.failsafe is None:
