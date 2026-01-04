@@ -1086,7 +1086,8 @@ class ModuleLooper():
 
     def loop(self, failsafe=None, **kwargs):
         with tf32_high_precision_guard():
-            return self._loop_impl(failsafe=failsafe, **kwargs)
+            with self.pause_controller.lifecycle():
+                return self._loop_impl(failsafe=failsafe, **kwargs)
 
     @torch.inference_mode()
     def _loop_impl(self, failsafe=None, **kwargs):
@@ -1272,8 +1273,6 @@ class ModuleLooper():
             region_timer.flush()
 
         self.gptq_model.model.config.use_cache = forward_pass_use_cache
-
-        self.pause_controller.cleanup()
 
         return total_log
 
