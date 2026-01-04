@@ -5,6 +5,7 @@
 
 from ...quantization import METHOD
 from ..base import BaseQModel
+from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Qwen3NextGPTQ(BaseQModel):
@@ -21,6 +22,9 @@ class Qwen3NextGPTQ(BaseQModel):
 
     dynamic_expert_index = "num_experts"
 
+    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
+    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
+
     # -----------------------------------------------------------------------------
     # Preferred modern hierarchical spec. The loader will gracefully skip any
     # subpaths that don't exist on a given layer (e.g., dense vs MoE, or mixer type).
@@ -36,7 +40,7 @@ class Qwen3NextGPTQ(BaseQModel):
             "linear_attn": ("in_proj_qkvz", "in_proj_ba:!", "out_proj"),  # conv1d intentionally excluded
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             # MLP / MoE
-            "mlp": {
+            "mlp:moe": {
                 # MoE router + shared expert (Qwen3NextSparseMoeBlock)
                 "gate": ("gate:!",),  # router gate linear
                 "shared_expert_gate": ("shared_expert_gate:!",), # <-- single (1, N) logic projections should not be quantized
@@ -53,7 +57,7 @@ class Qwen3NextGPTQ(BaseQModel):
     module_tree_overrides = {
         METHOD.AWQ: [
             {
-                "mlp": {
+                "mlp:moe": {
                     "gate": ("gate",),
                 }
             }

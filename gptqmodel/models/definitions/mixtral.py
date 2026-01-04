@@ -4,10 +4,14 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
+from ..moe_lifecycle import W1W3W2MoELifecycleHooks
 
 
 class MixtralQModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
+
+    # MoE lifecycle hooks for w1/w3/w2 pattern
+    moe_lifecycle_hooks = W1W3W2MoELifecycleHooks()
 
     module_tree = [
         "model",
@@ -17,7 +21,7 @@ class MixtralQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "block_sparse_moe": {
+            "block_sparse_moe:moe": {
                 "experts": {
                     "#": ("w1:0", "w3:0", "w2:1"),
                 }
