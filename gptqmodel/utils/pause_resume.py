@@ -12,6 +12,7 @@ import logging
 import sys
 import threading
 import time
+import atexit
 from contextlib import contextmanager
 from enum import Enum
 from typing import Callable, Dict, List, Optional
@@ -32,6 +33,39 @@ else:
         import tty
     except ImportError:
         log.warning("termios, tty, or select not available. Pause/resume from keyboard will not work.")
+
+
+_original_termios_settings = None
+_terminal_restored = False
+_terminal_restore_lock = threading.Lock()
+
+
+def _restore_terminal_settings_on_exit():
+    """Restore terminal settings on exit. Idempotent, thread-safe, and safe to call multiple times."""
+    global _original_termios_settings, _terminal_restored
+
+    with _terminal_restore_lock:
+        # Idempotent: skip if already restored or nothing to restore
+        if _terminal_restored or _original_termios_settings is None:
+            return
+
+        try:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, _original_termios_settings)
+            # Show cursor explicitly (in case it was hidden by progress bars)
+            # ANSI escape sequence DECSET: Show cursor
+            sys.stdout.write('\x1b[?25h')
+            _original_termios_settings = None
+            _terminal_restored = True
+            log.debug("Terminal settings restored on exit.")
+        except Exception as e:
+            log.warning(f"Failed to restore terminal settings on exit: {e}")
+            # Mark as restored even on failure to prevent retry loops
+            _terminal_restored = True
+
+
+if not _IS_WINDOWS and 'termios' in sys.modules:
+    if sys.stdin.isatty():
+        atexit.register(_restore_terminal_settings_on_exit)
 
 
 class PauseResumeState(Enum):
@@ -72,8 +106,6 @@ class PauseResumeController:
 
         # Initialize events
         self._resume_event.set()  # Allow execution to start
-
-        self._setup_keyboard_handler()
 
     def _play_icon(self) -> str:
         return color_text(">", ANSIColor.GREEN)
@@ -177,9 +209,12 @@ class PauseResumeController:
                 break
 
     def _posix_stdin_listener(self):
+        global _original_termios_settings
         old_settings = None
         try:
             old_settings = termios.tcgetattr(sys.stdin)
+            if _original_termios_settings is None:
+                _original_termios_settings = old_settings
             tty.setcbreak(sys.stdin.fileno())
 
             while not self._stop_event.is_set():
@@ -190,8 +225,10 @@ class PauseResumeController:
         except Exception as e:
             log.warning(f"Error in stdin listener: {e}")
         finally:
+            # Defense-in-depth: restore terminal settings when listener thread exits
+            # This ensures cleanup even if cleanup() is never called
             if old_settings:
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                _restore_terminal_settings_on_exit()
 
     def _setup_keyboard_handler(self):
         """Setup keyboard event handlers for pause/break keys."""
@@ -320,8 +357,32 @@ class PauseResumeController:
             # Check pause point again after operation
             self.check_pause_point(f"after {operation_name}")
 
+    @contextmanager
+    def lifecycle(self):
+        """
+        Context manager for the controller lifecycle.
+
+        Usage:
+            with controller.lifecycle():
+                # quantization code here
+                pass
+            # cleanup is guaranteed here
+        """
+        self._setup_keyboard_handler()
+
+        try:
+            yield
+        finally:
+            # This ALWAYS runs, even on exceptions or KeyboardInterrupt
+            self.cleanup()
+
     def cleanup(self):
-        """Cleanup resources and keyboard handlers."""
+        """
+        Cleanup resources and keyboard handlers.
+
+        This method is idempotent - safe to call multiple times.
+        Ensures terminal settings are restored on all exit paths.
+        """
         # Stop the input listener thread
         self._stop_event.set()
         if self._input_thread:
@@ -336,3 +397,7 @@ class PauseResumeController:
         with self._state_lock:
             if self._state != PauseResumeState.RUNNING:
                 self._set_state(PauseResumeState.RUNNING)
+
+        # Ensure terminal settings are restored (idempotent)
+        if not _IS_WINDOWS and 'termios' in sys.modules:
+            _restore_terminal_settings_on_exit()
