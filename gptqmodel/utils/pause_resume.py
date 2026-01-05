@@ -113,15 +113,6 @@ class PauseResumeController:
     def _pause_icon(self) -> str:
         return color_text("||", ANSIColor.YELLOW)
 
-<<<<<<< HEAD
-    def _play_icon(self) -> str:
-        return color_text(">", ANSIColor.GREEN)
-
-    def _pause_icon(self) -> str:
-        return color_text("||", ANSIColor.YELLOW)
-
-=======
->>>>>>> origin/main
     def get_status_hint(self) -> str:
         """Get status hint for main progress bar."""
         state = self.get_state()
