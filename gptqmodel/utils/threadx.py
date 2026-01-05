@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Un
 
 import torch
 
+from .pause_resume import _restore_terminal_settings_on_exit
 
 try:
     from device_smi import Device  # type: ignore
@@ -441,6 +442,7 @@ class _DeviceWorker:
         except Exception:
             pass
         try:
+            _restore_terminal_settings_on_exit()
             os._exit(1)
         except Exception:
             # Last resort if os._exit is unavailable for some reason.
