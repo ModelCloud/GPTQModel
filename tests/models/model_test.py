@@ -62,7 +62,13 @@ from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
-from gptqmodel.quantization.config import FailSafe, GPTAQConfig, HessianConfig, QuantizeConfig, VramStrategy  # noqa: E402
+from gptqmodel.quantization.config import (  # noqa: E402
+    FailSafe,
+    GPTAQConfig,
+    HessianConfig,
+    QuantizeConfig,
+    VramStrategy,
+)
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -130,6 +136,7 @@ class ModelTest(unittest.TestCase):
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
     EXPECT_LM_HEAD_LOSS = None
     STOP_AFTER_LAYER: Optional[int] = None
+    MOE_CONFIG = None
 
     GENERIC_TEST_PROMPTS = [
         {"prompt": "Which city is the capital city of France?", "keywords": ["paris"]},
@@ -839,6 +846,7 @@ class ModelTest(unittest.TestCase):
             mse=self.MSE,
             dynamic=self.DYNAMIC,
             hessian=HessianConfig(chunk_size=self.HESSIAN_CHUNK_SIZE),
+            moe=self.MOE_CONFIG,
         )
 
         log.info(f"Quant config: {quantize_config}")
