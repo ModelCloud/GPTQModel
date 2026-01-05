@@ -37,7 +37,7 @@ from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
-from ..quantization.config import VramStrategy, FULL_EXPERTS
+from ..quantization.config import VramStrategy
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
@@ -933,8 +933,7 @@ class ModuleLooper():
                     rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
                 # MoE lifecycle hooks integration - using context manager
-                ctx_manager = self.MoERoutingOverrideContext(module, self.moe_routing_override) if self.moe_routing_override else self.MoELifecycleContext(self, module, processor, self._current_subset)
-                with ctx_manager:
+                with self.MoERoutingOverrideContext(module, self.moe_routing_override) if self.moe_routing_override else self.MoELifecycleContext(self, module, processor, self._current_subset):
                     module_output = None
                     try:
                         if is_lm_head_module:

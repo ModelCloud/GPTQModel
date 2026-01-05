@@ -343,12 +343,46 @@ class BaseMoERouting:
     pass
 
 
-FULL_EXPERTS = "full"
+MOE_ALL_EXPERTS = "all"
 
 
 @dataclass
 class ExpertsRoutingOverride(BaseMoERouting):
-    num_experts_per_tok: Union[int, str] = FULL_EXPERTS
+    num_experts_per_tok: Union[int, str] = MOE_ALL_EXPERTS
+
+    def __post_init__(self):
+        # Handle string values
+        if isinstance(self.num_experts_per_tok, str):
+            raw = self.num_experts_per_tok.strip()
+
+            # Numeric string -> int (must be > 0)
+            if raw.isdigit():
+                value = int(raw)
+                if value <= 0:
+                    raise ValueError(
+                        f"num_experts_per_tok must be a positive int or '{MOE_ALL_EXPERTS}', "
+                        f"got '{self.num_experts_per_tok}'"
+                    )
+                self.num_experts_per_tok = value
+                return
+
+            # Normalize keyword string
+            value = raw.lower()
+            if value != MOE_ALL_EXPERTS:
+                raise ValueError(
+                    f"num_experts_per_tok must be a positive int or '{MOE_ALL_EXPERTS}', "
+                    f"got '{self.num_experts_per_tok}'"
+                )
+
+            self.num_experts_per_tok = value
+            return
+
+        # Validate integer values
+        if not isinstance(self.num_experts_per_tok, int) or self.num_experts_per_tok <= 0:
+            raise ValueError(
+                f"num_experts_per_tok must be a positive int or '{MOE_ALL_EXPERTS}', "
+                f"got {self.num_experts_per_tok}"
+            )
 
 
 # MoE quantization: forward whole calibration dataset to each expert instead of only routed data
@@ -362,6 +396,13 @@ class ExpertsRoutingBypass(BaseMoERouting):
 class MoEConfig:
     routing: BaseMoERouting
 
+    def __post_init__(self):
+        if not isinstance(self.routing, BaseMoERouting):
+            raise ValueError(
+                f"routing must be an instance of BaseMoERouting, "
+                f"got {type(self.routing).__name__}"
+            )
+
     def routing_bypass(self) -> bool:
         return isinstance(self.routing, ExpertsRoutingBypass)
 
@@ -372,14 +413,25 @@ class MoEConfig:
         Returns the effective number of experts per token if routing override
         is enabled, otherwise None.
 
-        - "full" resolves to `num_experts`
+        - "all" resolves to `num_experts`
         - integer value is returned directly
         """
         if isinstance(self.routing, ExpertsRoutingOverride):
-            if self.routing.num_experts_per_tok.lower().strip() == FULL_EXPERTS:
+            # Resolve "all" to full expert count
+            if isinstance(self.routing.num_experts_per_tok, str) and self.routing.num_experts_per_tok.lower().strip() == MOE_ALL_EXPERTS:
                 return num_experts
+
             assert isinstance(self.routing.num_experts_per_tok, int)
-            return self.routing.num_experts_per_tok
+            top_k = self.routing.num_experts_per_tok
+
+            # Clamp to valid range and warn user if needed
+            if top_k > num_experts:
+                log.info(f"MoEConfig: MoE routing override num_experts_per_tok ({top_k}) exceeds "
+                    f"num_experts ({num_experts}); clamping to {num_experts}.",)
+                top_k = num_experts
+
+            return top_k
+
         return None
 
     def to_dict(self) -> Dict[str, Any]:
