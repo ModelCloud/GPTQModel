@@ -343,9 +343,12 @@ class BaseMoERouting:
     pass
 
 
+FULL_EXPERTS = "full"
+
+
 @dataclass
 class ExpertsRoutingOverride(BaseMoERouting):
-    experts_per_token: Union[int, str]
+    num_experts_per_tok: Union[int, str] = FULL_EXPERTS
 
 
 # MoE quantization: forward whole calibration dataset to each expert instead of only routed data
@@ -359,8 +362,13 @@ class ExpertsRoutingBypass(BaseMoERouting):
 class MoEConfig:
     routing: BaseMoERouting
 
-    def bypass_router(self) -> bool:
+    def bypass(self) -> bool:
         return isinstance(self.routing, ExpertsRoutingBypass)
+
+    def override(self) -> Union[int, str, None]:
+        if isinstance(self.routing, ExpertsRoutingOverride):
+            return self.routing.num_experts_per_tok
+        return None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1221,6 +1229,16 @@ class QuantizeConfig():
             # there is only one scale int32 + one qzero int32 per entire module so overall it contributes to close to 0 bpw
             bpw = self.bits
         log.info(f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
+
+    def moe_override(self) -> Union[int, str, None]:
+        if self.moe is None:
+            return None
+        return self.moe.override()
+
+    def moe_bypass(self) -> bool:
+        if self.moe is None:
+            return False
+        return self.moe.bypass()
 
 # deprecated: will be removed in future update
 @dataclass

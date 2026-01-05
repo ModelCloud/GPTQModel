@@ -1730,3 +1730,32 @@ def find_config_seq_len(config_dict, target_keys):
             if found is not None:
                 return found
     return None
+
+TOPK_FIELD_NAMES = [
+    "num_experts_per_tok",
+    "moe_k", # ernie4_5_vl_moe
+]
+
+NUM_EXPERTS_FIELD_NAMES = [
+    "num_experts",
+    "moe_num_experts",  # ernie4_5_vl_moe
+]
+
+def has_any_attr(obj, names):
+    return any(hasattr(obj, name) for name in names)
+
+def find_moe_routing_modules(model):
+    modules = []
+    for module in model.modules():
+        if has_any_attr(module, TOPK_FIELD_NAMES) and \
+                has_any_attr(module, NUM_EXPERTS_FIELD_NAMES):
+            modules.append(module)
+    return modules
+
+def set_num_experts_per_tok(model, override: int):
+    routers = find_moe_routing_modules(model)
+    for r in routers:
+        for name in TOPK_FIELD_NAMES:
+            old = getattr(r, name)
+            assert isinstance(old, int)
+            setattr(r, name, override)
