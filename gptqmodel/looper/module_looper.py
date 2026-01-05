@@ -21,7 +21,7 @@ import time
 import logging
 from concurrent.futures import as_completed
 from contextlib import nullcontext
-from typing import Any, Dict, List, NamedTuple, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, NamedTuple, Optional, TYPE_CHECKING, Union, Tuple
 
 import torch
 import torch.nn as nn
@@ -37,7 +37,7 @@ from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
                                         StopForward, replace_module_with_hooked_legacy)
-from ..quantization.config import VramStrategy
+from ..quantization.config import VramStrategy, FULL_EXPERTS
 from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
@@ -52,7 +52,8 @@ from ..utils.looper_helpers import (
     rehome_module_to_device,
     select_forward_devices,
 )
-from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
+from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to, \
+    MoETopKState, set_moe_topk, restore_moe_topk
 from ..utils.offload import offload_to_disk
 from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
 from .. import DEVICE_THREAD_POOL
@@ -159,8 +160,39 @@ class ModuleLooper():
         # Track current subset for MoE lifecycle hooks
         self._current_subset: Optional[Dict[str, Any]] = None
 
+        num_experts = self.gptq_model.get_num_experts(self.gptq_model.model.config)
+        self.moe_routing_override = self.gptq_model.quantize_config.moe_routing_override(num_experts)
+
         for processor in self.processors:
             self._processor_mask_tls(processor)
+
+    class MoERoutingOverrideContext:
+        """
+        Context manager that temporarily overrides MoE routing top-k.
+
+        On entry, applies the specified top-k override to all MoE routing modules.
+        On exit, restores the original routing configuration.
+        """
+
+        def __init__(self, model, moe_routing_override: int):
+            # Model containing MoE routing modules
+            self.model = model
+            # Target top-k value for per-token expert routing
+            self.moe_routing_override = moe_routing_override
+            # Saved state for restoring original top-k values
+            self._state: MoETopKState | None = None
+
+        def __enter__(self):
+            # Apply routing override if specified
+            if self.moe_routing_override:
+                self._state = set_moe_topk(self.model, self.moe_routing_override)
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            # Restore original routing configuration
+            if self.moe_routing_override:
+                restore_moe_topk(self._state)
+            return False  # Do not suppress exceptions
 
     class MoELifecycleContext:
         """Context manager for MoE lifecycle hooks integration."""
@@ -535,7 +567,7 @@ class ModuleLooper():
         - Module contains an MoE block
         """
         # Check if feature is enabled
-        flag_enabled = self.gptq_model.quantize_config.moe and self.gptq_model.quantize_config.moe.bypass_router()
+        flag_enabled = self.gptq_model.quantize_config.moe_routing_bypass()
         if not flag_enabled:
             return False
         
@@ -901,7 +933,8 @@ class ModuleLooper():
                     rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
                 # MoE lifecycle hooks integration - using context manager
-                with self.MoELifecycleContext(self, module, processor, self._current_subset):
+                ctx_manager = self.MoERoutingOverrideContext(module, self.moe_routing_override) if self.moe_routing_override else self.MoELifecycleContext(self, module, processor, self._current_subset)
+                with ctx_manager:
                     module_output = None
                     try:
                         if is_lm_head_module:
@@ -1058,10 +1091,15 @@ class ModuleLooper():
         # Apply MoE lifecycle hooks to ALL replicas (not just the original module)
         moe_contexts = []
         try:
-            if self._should_use_moe_lifecycle(module, processor):
-                for device, replica in module_replicas.items():
-                    # Create and activate context for each replica
+            for device, replica in module_replicas.items():
+                # Create and activate context for each replica
+                ctx = None
+                if self.moe_routing_override:
+                    ctx = self.MoERoutingOverrideContext(replica, self.moe_routing_override)
+                elif self._should_use_moe_lifecycle(module, processor):
                     ctx = self.MoELifecycleContext(self, replica, processor, self._current_subset)
+
+                if ctx:
                     ctx.__enter__()
                     moe_contexts.append(ctx)
 

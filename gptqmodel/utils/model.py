@@ -96,6 +96,18 @@ _DTYPE_STR_MAP = {
     "bool": torch.bool,
 }
 
+MoETopKState = List[Tuple[nn.Module, str, int]]
+
+MOE_TOPK_FIELD_NAMES = [
+    "top_k",
+    "moe_k", # ernie4_5_vl_moe
+]
+
+MOE_NUM_EXPERTS_FIELD_NAMES = [
+    "num_experts",
+    "moe_num_experts",  # ernie4_5_vl_moe
+]
+
 
 def _torch_dtype_num_bytes(dtype: torch.dtype) -> int:
     if dtype not in _DTYPE_SAFE_MAP:
@@ -1731,31 +1743,35 @@ def find_config_seq_len(config_dict, target_keys):
                 return found
     return None
 
-TOPK_FIELD_NAMES = [
-    "num_experts_per_tok",
-    "moe_k", # ernie4_5_vl_moe
-]
-
-NUM_EXPERTS_FIELD_NAMES = [
-    "num_experts",
-    "moe_num_experts",  # ernie4_5_vl_moe
-]
 
 def has_any_attr(obj, names):
     return any(hasattr(obj, name) for name in names)
 
+
 def find_moe_routing_modules(model):
     modules = []
     for module in model.modules():
-        if has_any_attr(module, TOPK_FIELD_NAMES) and \
-                has_any_attr(module, NUM_EXPERTS_FIELD_NAMES):
+        if has_any_attr(module, MOE_TOPK_FIELD_NAMES) and \
+                has_any_attr(module, MOE_NUM_EXPERTS_FIELD_NAMES):
             modules.append(module)
     return modules
 
-def set_num_experts_per_tok(model, override: int):
+
+def set_moe_topk(model: nn.Module, new_topk: int) -> MoETopKState:
     routers = find_moe_routing_modules(model)
+    state: MoETopKState = []
     for r in routers:
-        for name in TOPK_FIELD_NAMES:
-            old = getattr(r, name)
-            assert isinstance(old, int)
-            setattr(r, name, override)
+        for name in MOE_TOPK_FIELD_NAMES:
+            if hasattr(r, name):
+                old = getattr(r, name)
+                assert isinstance(old, int)
+                state.append((r, name, old))
+                setattr(r, name, new_topk)
+                break
+    return state
+
+
+def restore_moe_topk(state: MoETopKState):
+    for module, name, old in state:
+        if hasattr(module, name):
+            setattr(module, name, old)

@@ -5,7 +5,7 @@
 
 import json
 import os.path
-from dataclasses import dataclass, field, fields, asdict
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -362,11 +362,23 @@ class ExpertsRoutingBypass(BaseMoERouting):
 class MoEConfig:
     routing: BaseMoERouting
 
-    def bypass(self) -> bool:
+    def routing_bypass(self) -> bool:
         return isinstance(self.routing, ExpertsRoutingBypass)
 
-    def override(self) -> Union[int, str, None]:
+    def routing_override(self, num_experts: int) -> Union[int, None]:
+        """
+        Resolve MoE routing top-k override.
+
+        Returns the effective number of experts per token if routing override
+        is enabled, otherwise None.
+
+        - "full" resolves to `num_experts`
+        - integer value is returned directly
+        """
         if isinstance(self.routing, ExpertsRoutingOverride):
+            if self.routing.num_experts_per_tok.lower().strip() == FULL_EXPERTS:
+                return num_experts
+            assert isinstance(self.routing.num_experts_per_tok, int)
             return self.routing.num_experts_per_tok
         return None
 
@@ -640,7 +652,7 @@ class QuantizeConfig():
         metadata={"help": "Mixture-of-Experts (MoE) configuration, including routing strategy and related overrides."}
     )
 
-    # Works faster than data parallel with some configurations 
+    # Works faster than data parallel with some configurations
     auto_forward_data_parallel: bool = field(
         default=True,
         metadata={"help": "When multi-gpu is detected, we may data clone modules to each gpu for data parallelism "
@@ -1133,7 +1145,8 @@ class QuantizeConfig():
         meta_payload = dict(self.meta) if self.meta else {}
         meta_payload["gc_mode"] = self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
-        meta_payload["moe"] = self.moe.to_dict()
+        if self.moe:
+            meta_payload["moe"] = self.moe.to_dict()
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
 
         if self.failsafe is None:
@@ -1230,15 +1243,15 @@ class QuantizeConfig():
             bpw = self.bits
         log.info(f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
 
-    def moe_override(self) -> Union[int, str, None]:
+    def moe_routing_override(self, num_experts: int) -> Union[int, None]:
         if self.moe is None:
             return None
-        return self.moe.override()
+        return self.moe.routing_override(num_experts)
 
-    def moe_bypass(self) -> bool:
+    def moe_routing_bypass(self) -> bool:
         if self.moe is None:
             return False
-        return self.moe.bypass()
+        return self.moe.routing_bypass()
 
 # deprecated: will be removed in future update
 @dataclass
