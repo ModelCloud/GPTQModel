@@ -21,9 +21,10 @@ import time
 import logging
 from concurrent.futures import as_completed
 from contextlib import nullcontext
-from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, NamedTuple, Optional, TYPE_CHECKING, Union, Tuple
 
 import torch
+import torch.nn as nn
 
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
@@ -51,7 +52,8 @@ from ..utils.looper_helpers import (
     rehome_module_to_device,
     select_forward_devices,
 )
-from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to
+from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to, \
+    MoETopKState, set_moe_topk, restore_moe_topk
 from ..utils.offload import offload_to_disk
 from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
 from .. import DEVICE_THREAD_POOL
@@ -119,10 +121,6 @@ class ModuleLooper():
         if not quant_devices:
             quant_devices = [CPU]
 
-        self._quant_devices = quant_devices
-        self._quant_device_rr = 0
-        self._module_device_map: Dict[str, torch.device] = {}
-        self._quant_device_lock = threading.Lock()
         vram_strategy = getattr(self.gptq_model.quantize_config, "vram_strategy", VramStrategy.EXCLUSIVE)
         if isinstance(vram_strategy, str):
             try:
@@ -140,11 +138,112 @@ class ModuleLooper():
             )
             vram_strategy = VramStrategy.EXCLUSIVE
         self._vram_strategy = vram_strategy
+
+        # Apply compute device filter if provided to determine which devices to use for quantization
+        if self.gptq_model.quantize_config.compute_device_filter is not None:
+            quant_devices_filtered = self.gptq_model.quantize_config.compute_device_filter(quant_devices)
+            if len(quant_devices_filtered) >= 1:
+                quant_devices = quant_devices_filtered
+            else:
+                log.warn(
+                    "compute_device_filter returned empty device list. "
+                    "Using all devices for quantization."
+                )
+
+        self._quant_devices = quant_devices
+        self._quant_device_rr = 0
+        self._module_device_map: Dict[str, torch.device] = {}
+        self._quant_device_lock = threading.Lock()
         self._moe_subset_threshold = 16
         self._subset_callback = getattr(self.gptq_model, "subset_callback", None)
+        
+        # Track current subset for MoE lifecycle hooks
+        self._current_subset: Optional[Dict[str, Any]] = None
+
+        num_experts = self.gptq_model.get_num_experts(self.gptq_model.model.config)
+        self.moe_routing_override = self.gptq_model.quantize_config.moe_routing_override(num_experts)
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
+
+    class MoERoutingOverrideContext:
+        """
+        Context manager that temporarily overrides MoE routing top-k.
+
+        On entry, applies the specified top-k override to all MoE routing modules.
+        On exit, restores the original routing configuration.
+        """
+
+        def __init__(self, model, moe_routing_override: int):
+            # Model containing MoE routing modules
+            self.model = model
+            # Target top-k value for per-token expert routing
+            self.moe_routing_override = moe_routing_override
+            # Saved state for restoring original top-k values
+            self._state: MoETopKState | None = None
+
+        def __enter__(self):
+            # Apply routing override if specified
+            if self.moe_routing_override:
+                self._state = set_moe_topk(self.model, self.moe_routing_override)
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            # Restore original routing configuration
+            if self.moe_routing_override:
+                restore_moe_topk(self._state)
+            return False  # Do not suppress exceptions
+
+    class MoELifecycleContext:
+        """Context manager for MoE lifecycle hooks integration."""
+        
+        def __init__(self, module_looper, module, processor, current_subset):
+            self.module_looper = module_looper
+            self.module = module
+            self.processor = processor
+            self.current_subset = current_subset
+            self.moe_hooks_active = False
+            self.moe_block = None
+            self.moe_forward_original = None
+            
+        def __enter__(self):
+            """Set up MoE lifecycle hooks if applicable."""
+            if self.module_looper._should_use_moe_lifecycle(self.module, self.processor):
+                hooks = self.module_looper.gptq_model.moe_lifecycle_hooks
+                self.moe_block = hooks.get_moe_block(self.module, self.module_looper.gptq_model.__class__)
+                
+                if self.moe_block is not None:
+                    # Save original forward method
+                    self.moe_forward_original = self.moe_block.forward
+                    
+                    # Create wrapper that forwards to all experts
+                    moe_block_prefix = hooks._extract_moe_block_prefix(self.current_subset, self.moe_block)
+                    
+                    def moe_forward_wrapper(hidden_states, **kwargs):
+                        return hooks.forward_to_all_experts(
+                            moe_block=self.moe_block,
+                            hidden_states=hidden_states,
+                            processor=self.processor,
+                            subset=self.current_subset,
+                            original_forward=self.moe_forward_original,
+                            model_class=self.module_looper.gptq_model.__class__,
+                            module_looper=self.module_looper,  # Pass for TLS-based hooks pausing
+                            moe_block_prefix=moe_block_prefix,
+                            replica_module=self.module,  # Pass replica for device-correct module resolution
+                            **kwargs
+                        )
+                    
+                    # Temporarily replace forward method
+                    self.moe_block.forward = moe_forward_wrapper
+                    self.moe_hooks_active = True
+            
+            return self
+        
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            """Restore original MoE forward method if it was patched."""
+            if self.moe_hooks_active and self.moe_forward_original is not None and self.moe_block is not None:
+                self.moe_block.forward = self.moe_forward_original
+            return False  # Don't suppress exceptions
 
     def register_layer_callback(self, callback) -> None:
         """Register or replace the layer-complete callback target."""
@@ -318,6 +417,22 @@ class ModuleLooper():
             setattr(processor, "_mask_tls", tls)
         return tls
 
+    def _processor_hooks_paused_tls(self, processor):
+        """Get or create thread-local storage for hooks_paused flag."""
+        if not hasattr(processor, "_hooks_paused_tls"):
+            processor._hooks_paused_tls = threading.local()
+        return processor._hooks_paused_tls
+
+    def _set_processor_hooks_paused(self, processor: LoopProcessor, paused: bool):
+        """Set hooks paused state for current thread."""
+        tls = self._processor_hooks_paused_tls(processor)
+        tls.value = paused
+
+    def _get_processor_hooks_paused(self, processor: LoopProcessor) -> bool:
+        """Get hooks paused state for current thread (thread-safe)."""
+        tls = getattr(processor, "_hooks_paused_tls", None)
+        return getattr(tls, "value", False) if tls else False
+
     def _set_processor_mask(self, processor: LoopProcessor, mask):
         tls = self._processor_mask_tls(processor)
         tls.value = mask
@@ -423,6 +538,10 @@ class ModuleLooper():
             prefix, _ = module_name.split(".shared_experts.", 1)
             return f"{prefix}.shared_experts"
 
+        if ".shared_expert." in module_name:
+            prefix, _ = module_name.split(".shared_expert.", 1)
+            return f"{prefix}.shared_expert"
+
         return None
 
     def _is_attention_module_name(self, module_name: str) -> bool:
@@ -437,6 +556,42 @@ class ModuleLooper():
         if lowered.endswith("attn") or lowered.endswith("attention"):
             return True
         return False
+    
+    def _should_use_moe_lifecycle(self, module: nn.Module, processor: LoopProcessor) -> bool:
+        """
+        Check if MoE lifecycle hooks should be used for this module.
+        
+        Returns True if:
+        - pass_whole_dataset_to_each_expert flag is enabled
+        - Model has lifecycle hooks configured
+        - Module contains an MoE block
+        """
+        # Check if feature is enabled
+        flag_enabled = self.gptq_model.quantize_config.moe_routing_bypass()
+        if not flag_enabled:
+            return False
+        
+        # Check if model has lifecycle hooks
+        hooks = getattr(self.gptq_model, 'moe_lifecycle_hooks', None)
+        if hooks is None:
+            log.warn(
+                f"pass_whole_dataset_to_each_expert is enabled but {self.gptq_model.__class__.__name__} "
+                f"model does not have 'moe_lifecycle_hooks' configured. MoE optimization will be disabled. "
+                f"Please ensure your model definition has proper MoE lifecycle hooks configured."
+            )
+            return False
+
+        # Check if this module contains an MoE block
+        moe_block = hooks.get_moe_block(module, self.gptq_model.__class__)
+        if moe_block is None:
+            log.warn(
+                f"pass_whole_dataset_to_each_expert is enabled but no MoE block found in module "
+                f"{module.__class__.__name__}. MoE optimization will be disabled for this module. "
+                f"This may indicate an issue with the model's MoE configuration or module structure."
+            )
+            return False
+        
+        return True
 
     def _assign_quant_device_for_module(
         self,
@@ -749,6 +904,8 @@ class ModuleLooper():
                 if attn_tensor is not None:
                     seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
                     keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
+                
+                # Set mask using TLS (thread-safe)
                 self._set_processor_mask(processor, keep_mask)
 
                 additional_inputs: Dict[str, torch.Tensor] = {}
@@ -775,16 +932,24 @@ class ModuleLooper():
                 if not preserve_module_devices:
                     rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
-                module_output = None
-                try:
-                    if is_lm_head_module:
-                        module_output = module(*layer_input)
-                    else:
-                        module_output = module(*layer_input, **additional_inputs)
-                except StopForward:
+                # MoE lifecycle hooks integration - using context manager
+                with self.MoERoutingOverrideContext(module, self.moe_routing_override) if self.moe_routing_override else self.MoELifecycleContext(self, module, processor, self._current_subset):
                     module_output = None
-                finally:
-                    self._set_processor_mask(processor, None)
+                    try:
+                        if is_lm_head_module:
+                            module_output = module(*layer_input)
+                        else:
+                            module_output = module(*layer_input, **additional_inputs)
+                    except StopForward:
+                        module_output = None
+                    finally:
+                        self._set_processor_mask(processor, None)
+
+                # Release intermediate tensors promptly after they are no longer needed
+                del layer_input
+                del attn_tensor
+                del keep_mask
+                del additional_inputs
 
                 if (
                     reuse_kv
@@ -799,6 +964,10 @@ class ModuleLooper():
                     primary = module_output[0] if isinstance(module_output, tuple) else module_output
                     primary = move_to(primary, device=cur_layer_device)
                     outputs.append([primary])
+
+                # Release module_output promptly after extracting what we need
+                if module_output is not None:
+                    del module_output
 
                 rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
                 if rows_for_batch <= 0:
@@ -902,7 +1071,8 @@ class ModuleLooper():
 
         # Ensure any async replication/memcpy ops are complete before threads start fanning out.
         torch_sync()
-
+        
+        # Clone modules FIRST, then apply MoE lifecycle hooks to all replicas
         try:
             module_replicas = clone_module_for_devices(
                 module,
@@ -917,98 +1087,135 @@ class ModuleLooper():
                     f"{stage_label} rows 0/{total_rows}"
                 ).draw()
 
-        prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
+        # Apply MoE lifecycle hooks to ALL replicas (not just the original module)
+        moe_contexts = []
+        try:
+            for device, replica in module_replicas.items():
+                # Create and activate context for each replica
+                ctx = None
+                if self.moe_routing_override:
+                    ctx = self.MoERoutingOverrideContext(replica, self.moe_routing_override)
+                elif self._should_use_moe_lifecycle(module, processor):
+                    ctx = self.MoELifecycleContext(self, replica, processor, self._current_subset)
 
-        results: Dict[int, torch.Tensor | tuple | None] = {}
+                if ctx:
+                    ctx.__enter__()
+                    moe_contexts.append(ctx)
 
-        processed_rows = 0
-        device_segments: Dict[torch.device, List[int]] = {}
-        segment_start = 0
-        num_devices = len(devices)
+            prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
 
-        for index, device in enumerate(devices):
-            # Split the outstanding batches across devices so that each accelerator
-            # receives a contiguous slice.
-            remaining_batches = max(total_batches - segment_start, 0)
-            remaining_devices = max(num_devices - index, 1)
-            segment_length = remaining_batches // remaining_devices
-            remainder = remaining_batches % remaining_devices
-            if remainder > 0:
-                segment_length += 1
+            results: Dict[int, torch.Tensor | tuple | None] = {}
 
-            if segment_length <= 0:
-                device_segments[device] = []
-                continue
-
-            segment_end = min(segment_start + segment_length, total_batches)
-            device_segments[device] = list(range(segment_start, segment_end))
-            segment_start = segment_end
-
-        max_segment_length = 0
-        for indices in device_segments.values():
-            if len(indices) > max_segment_length:
-                max_segment_length = len(indices)
-
-        for position in range(max_segment_length):
-            # Submit one batch per device
-            futures = []
-            for device in devices:
-                segment_indices = device_segments.get(device, [])
-                if position >= len(segment_indices):
-                    continue
-                batch_idx = segment_indices[position]
-                replica = module_replicas[device]
-                submitter = (
-                    DEVICE_THREAD_POOL.submit_serial
-                    if device.type in ("cuda", "xpu", "mps")
-                    else DEVICE_THREAD_POOL.submit
-                )
-
-                futures.append(
-                    submitter(
-                        device,
-                        forward_batch_worker,
-                        replica,
-                        processor,
-                        batch_idx,
-                        layer_inputs[batch_idx],
-                        layer_input_kwargs[batch_idx],
-                        attention_masks[batch_idx],
-                        position_ids[batch_idx] if position_ids else None,
-                        support_batch_quantize=self.support_batch_quantize,
-                        is_lm_head_module=is_lm_head_module,
-                        need_output=need_outputs,
-                        reuse_kv=reuse_kv,
-                        prev_kv=prev_kv,
+            processed_rows = 0
+            
+            # Apply compute device filter if provided to determine which devices to use for forward execution
+            if self.gptq_model.quantize_config.compute_device_filter is not None:
+                forward_devices = self.gptq_model.quantize_config.compute_device_filter(devices)
+                if len(forward_devices) < 1:
+                    log.warn(
+                        "compute_device_filter returned empty device list. "
+                        "Using all devices for forward execution."
                     )
-                )
+                    forward_devices = devices
+            else:
+                # If no filter is provided, use all devices (default behavior)
+                forward_devices = devices
+            
+            device_segments: Dict[torch.device, List[int]] = {}
+            segment_start = 0
+            num_devices = len(forward_devices)
 
-            for fut in futures:
-                # Preserve the original batch order
-                batch_idx, module_output, kv_next = fut.result()
-                if need_outputs and module_output is not None:
-                    results[batch_idx] = module_output
-                if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
-                    shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)
+            for index, device in enumerate(forward_devices):
+                # Split the outstanding batches across forward_devices so that each accelerator
+                # receives a contiguous slice.
+                remaining_batches = max(total_batches - segment_start, 0)
+                remaining_devices = max(num_devices - index, 1)
+                segment_length = remaining_batches // remaining_devices
+                remainder = remaining_batches % remaining_devices
+                if remainder > 0:
+                    segment_length += 1
 
-                rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
-                if rows_for_batch <= 0:
-                    rows_for_batch = self._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
-                    rows_for_batch = max(rows_for_batch, 1)
+                if segment_length <= 0:
+                    device_segments[device] = []
+                    continue
 
-                processed_rows = min(processed_rows + rows_for_batch, total_rows)
-                if progress_pb is not None:
-                    if progress_title:
-                        progress_pb.title(progress_title)
-                    progress_pb.current_iter_step = processed_rows
-                    progress_pb.subtitle(
-                        f"{stage_label} rows {processed_rows}/{total_rows}"
-                    ).draw()
+                segment_end = min(segment_start + segment_length, total_batches)
+                device_segments[device] = list(range(segment_start, segment_end))
+                segment_start = segment_end
 
+            max_segment_length = 0
+            for indices in device_segments.values():
+                if len(indices) > max_segment_length:
+                    max_segment_length = len(indices)
+
+            for position in range(max_segment_length):
+                # Submit one batch per device
+                futures = []
+                for device in forward_devices:
+                    segment_indices = device_segments.get(device, [])
+                    if position >= len(segment_indices):
+                        continue
+                    batch_idx = segment_indices[position]
+                    replica = module_replicas[device]
+                    submitter = (
+                        DEVICE_THREAD_POOL.submit_serial
+                        if device.type in ("cuda", "xpu", "mps")
+                        else DEVICE_THREAD_POOL.submit
+                    )
+
+                    futures.append(
+                        submitter(
+                            device,
+                            forward_batch_worker,
+                            replica,
+                            processor,
+                            batch_idx,
+                            layer_inputs[batch_idx],
+                            layer_input_kwargs[batch_idx],
+                            attention_masks[batch_idx],
+                            position_ids[batch_idx] if position_ids else None,
+                            support_batch_quantize=self.support_batch_quantize,
+                            is_lm_head_module=is_lm_head_module,
+                            need_output=need_outputs,
+                            reuse_kv=reuse_kv,
+                            prev_kv=prev_kv,
+                        )
+                    )
+
+                for fut in futures:
+                    # Preserve the original batch order
+                    batch_idx, module_output, kv_next = fut.result()
+                    if need_outputs and module_output is not None:
+                        results[batch_idx] = module_output
+                    if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
+                        shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)
+
+                    rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
+                    if rows_for_batch <= 0:
+                        rows_for_batch = self._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
+                        rows_for_batch = max(rows_for_batch, 1)
+
+                    processed_rows = min(processed_rows + rows_for_batch, total_rows)
+                    if progress_pb is not None:
+                        if progress_title:
+                            progress_pb.title(progress_title)
+                        progress_pb.current_iter_step = processed_rows
+                        progress_pb.subtitle(
+                            f"{stage_label} rows {processed_rows}/{total_rows}"
+                        ).draw()
+        finally:
+            # Clean up MoE lifecycle hooks from all replicas
+            for ctx in moe_contexts:
+                try:
+                    ctx.__exit__(None, None, None)
+                except Exception:
+                    pass
+            moe_contexts.clear()
+        
         # ensure replicas release promptly and free GPU memory
         for dev in list(module_replicas.keys()):
             del module_replicas[dev]
-
+            
         if not need_outputs:
             return []
 
@@ -1030,6 +1237,10 @@ class ModuleLooper():
 
     def _masked_hook_wrapper(self, processor: LoopProcessor, inner_hook, hook_source: str):
         def hook(module, inputs, output):
+            # Thread-safe check if hooks are paused (TLS-based, per-thread)
+            if self._get_processor_hooks_paused(processor):
+                return
+            
             keep = self._get_processor_mask(processor)
 
             timer = getattr(self.gptq_model, "quant_region_timer", None)
@@ -1075,6 +1286,51 @@ class ModuleLooper():
                         source=hook_source,
                     )
         return hook
+    
+    def _masked_pre_hook_wrapper(self, processor: LoopProcessor, inner_hook, hook_source: str):
+        """
+        Pre-forward hook wrapper for MoE expert modules.
+        This is called BEFORE forward executes (when used with HookedLinear.forward_hook).
+        Respects hooks_paused state to avoid double-counting during intermediate calculations.
+        """
+        def pre_hook(module, inputs, output):
+            # Thread-safe check if hooks are paused (TLS-based, per-thread)
+            if self._get_processor_hooks_paused(processor):
+                return
+            
+            # Get mask using TLS (thread-safe)
+            keep = self._get_processor_mask(processor)
+
+            timer = getattr(self.gptq_model, "quant_region_timer", None)
+            start = time.perf_counter() if timer else None
+
+            # Mask first tensor-like input if it's [B, S, ...]
+            new_inputs = inputs
+            try:
+                if isinstance(inputs, (tuple, list)) and len(inputs) > 0 and torch.is_tensor(inputs[0]):
+                    x = inputs[0]
+                    if keep is not None and x.dim() >= 3:
+                        xk = apply_keep_mask_bt(x, keep)
+                        if isinstance(inputs, tuple):
+                            new_inputs = (xk,) + tuple(inputs[1:])
+                        else:
+                            new_inputs = [xk] + list(inputs[1:])
+            except Exception:
+                # Never break the forward due to masking
+                new_inputs = inputs
+
+            # Call inner hook with inputs and output (GPTQ ignores output anyway)
+            try:
+                inner_hook(module, new_inputs, output)
+            finally:
+                if timer is not None and start is not None:
+                    timer.record(
+                        "forward_pre_hook",
+                        time.perf_counter() - start,
+                        source=hook_source,
+                    )
+            
+        return pre_hook
 
     def cache_inputs(self, layers, calibration_data, use_cache):
         capture_stage = StageInputsCapture(self, logger=log)
