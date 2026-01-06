@@ -66,6 +66,7 @@ from gptqmodel.quantization.config import (  # noqa: E402
     FailSafe,
     GPTAQConfig,
     HessianConfig,
+    MoEConfig,
     QuantizeConfig,
     VramStrategy,
 )
@@ -136,7 +137,7 @@ class ModelTest(unittest.TestCase):
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
     EXPECT_LM_HEAD_LOSS = None
     STOP_AFTER_LAYER: Optional[int] = None
-    MOE_CONFIG = None
+    MOE_CONFIG: Optional[MoEConfig] = None
 
     GENERIC_TEST_PROMPTS = [
         {"prompt": "Which city is the capital city of France?", "keywords": ["paris"]},
