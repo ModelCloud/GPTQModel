@@ -26,17 +26,11 @@ def assert_results(model, target_class, moe_config: MoEConfig):
     for base_path in EXPERTS:
         for suffix in PROJ_SUFFIXES:
             full_path = f"model.{base_path}.{suffix}"
-
             module = get_module_by_name(model, full_path)
-
-            print("fff", full_path, module)
-
             assert isinstance(module, target_class), (
                 f"{full_path} exists but is {target_class} (got {type(module)})"
             )
-    print(model.quantize_config)
     qcfg: QuantizeConfig = model.quantize_config
-    print("qcfg.meta_get", qcfg.meta_get("moe"))
     if moe_config is None:
         assert qcfg.meta_get("moe") is None
     elif isinstance(moe_config.routing, ExpertsRoutingOverride):
