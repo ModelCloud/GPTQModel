@@ -263,7 +263,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
     @torch.no_grad
     def _fused_op_forward(self, x):
-        x = x[:, self.ret_idx].contiguous()
+        x = x[:, self.ret_idx.to(x.device)].contiguous()
         # fused ops optimized for xpu using torch.ops
         # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
         if x.device.type == "xpu":
