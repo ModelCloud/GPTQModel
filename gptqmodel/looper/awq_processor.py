@@ -103,9 +103,6 @@ class AWQProcessor(LoopProcessor):
         # " Default is 1GB (1024 * 1024 * 1024)."
         self.max_chunk_memory = 1024 * 1024 * 1024
 
-        # This argument avoids real quantization by only applying the scales without quantizing down to FP16.
-        self.export_compatible = False
-
         self.format = qcfg.format
 
         # Whether to scale using both w/x or just x.
@@ -263,8 +260,7 @@ class AWQProcessor(LoopProcessor):
         )
 
         if named_childs:
-            start = time.time()
-            self.pack_module(named_childs, start, scales_list=[])
+            self.apply_quant(named_childs, scales_list=[])
         else:
             log.warning("AWQProcessor: layer %s had no supported modules to quantize.", layer_index)
 
@@ -635,7 +631,6 @@ class AWQProcessor(LoopProcessor):
             get_op_name(self.model, layer_module_ref) + ".",
         )
 
-        clip_list = None
         if self.apply_clip:
             clip_list = self._search_best_clip(
                 layer_module_ref,
@@ -650,9 +645,7 @@ class AWQProcessor(LoopProcessor):
 
         named_childs = {name: named for name, named in named_childs.items() if name in input_feat}
 
-        if not self.export_compatible:
-            start = time.time()
-            self.pack_module(named_childs, start, scales_list)
+        self.apply_quant(named_childs, scales_list)
 
         state.quantized = True
         state.modules.clear()
@@ -1166,16 +1159,14 @@ class AWQProcessor(LoopProcessor):
 
         return module_output
 
-    def pack_module(self, named_linears: Dict[str, NamedModule], start_time, scales_list):
+    def apply_quant(self, named_linears: Dict[str, NamedModule], scales_list):
+        start_time = time.time()
         for name, named_module in named_linears.items():
-            # print("app_quant", name)
             base_title = f"Quantizing {named_module.name} in layer"
             self._pause_controller.register_and_draw_progress_bar(self.pb, title=base_title, subtitle="")
             
             linear_layer = named_module.module
-            # NOTE: small regression in perplexity if linear layer uses .cpu().float()
-            linear_layer = linear_layer.to(get_best_device()).half()
-            quant_linear_cls = self._resolve_qlinear_kernel(named_module.full_name)
+            linear_layer = linear_layer.to(get_best_device())
 
             tp_info = named_module.state.get("tp_pad_info")
             pad_cols = 0
@@ -1204,6 +1195,15 @@ class AWQProcessor(LoopProcessor):
                     scales = scales[:, :original_cols]
                     if zeros is not None:
                         zeros = zeros[:, :original_cols]
+
+            named_module.stream_state_payload_to_cpu(
+                {
+                    "q_scales": scales,
+                    "q_zeros": zeros,
+                },
+            )
+            del scales, zeros
+
             if self.calculate_w_wq_diff:
                 if named_module.weight.data.dtype == torch.float16:
                     # diff in float16
@@ -1271,77 +1271,6 @@ class AWQProcessor(LoopProcessor):
                 self._nsamples_total,
                 f"{duration:.3f}",
             )
-
-            linear_layer.cpu()
-            scales = scales.cpu()
-            zeros = zeros.cpu()
-
-            layers = find_modules(self.gptq_model.model)
-            module_label = getattr(named_module, "full_name", getattr(named_module, "name", ""))
-            parent_key = getattr(named_module, "full_name", getattr(named_module, "name", None))
-
-            # replace module with quantized module
-            timer = getattr(self.gptq_model, "quant_region_timer", None)
-
-            create_start = time.perf_counter() if timer is not None else None
-            with log_time_block(
-                    "create_quant_module",
-                    logger=log,
-                    module_name=module_label,
-            ):
-                with parent_module_lock(parent_key):
-                    create_quant_module(
-                        name=named_module.full_name,
-                        linear_cls=quant_linear_cls,
-                        bits=self.qcfg.bits,
-                        desc_act=self.qcfg.desc_act,
-                        dynamic=self.qcfg.dynamic,
-                        group_size=self.qcfg.group_size,
-                        module=self.gptq_model.model,
-                        submodule=named_module,
-                        sym=self.qcfg.sym,
-                        device=self.qcfg.device,
-                        lm_head_name=self.gptq_model.lm_head,
-                        pack_dtype=self.qcfg.pack_dtype,
-                        register_buffers=False,
-                    )
-            if timer is not None and create_start is not None:
-                timer.record(
-                    "submodule_finalize_create",
-                    time.perf_counter() - create_start,
-                    source=module_label,
-                )
-
-            # pack module
-            qModules = {
-                name: submodule
-                for name, submodule in find_modules(self.gptq_model.model, [quant_linear_cls]).items()
-                if name == named_module.full_name
-            }
-            pack_start = time.perf_counter() if timer is not None else None
-            with log_time_block(
-                    "pack",
-                    logger=log,
-                    module_name=module_label,
-            ):
-                with parent_module_lock(parent_key):
-                    packer_label = pack_module(
-                        name=named_module.full_name,
-                        qModules=qModules,
-                        q_scales=scales,
-                        q_zeros=zeros,
-                        q_g_idx=None,
-                        layers=layers,
-                        quant_linear_cls=quant_linear_cls,
-                        lock=self.lock,
-                        quantize_config=self.qcfg,
-                    )
-            if timer is not None and pack_start is not None:
-                timer.record(
-                    "submodule_finalize_pack",
-                    time.perf_counter() - pack_start,
-                    source=f"{module_label} [{packer_label or 'module.pack_original'}]",
-                )
 
     def _sanitize_kwargs(self, inputs_kwargs, module):
         """
@@ -1456,8 +1385,91 @@ class AWQProcessor(LoopProcessor):
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         # generate complete, safe to move to cpu
-        module.weight.data = move_to(module.weight.data, device=CPU) # large weights is slow to init on cpu
-        module.state.pop("w", None) # no need for original weights now
+        # cleanup all memory or states vars persistently added by this processor
+        module.stream_sync()
+        with (self.lock):
+            # if calculate_w_wq_diff is enabled (eora), we need to revert our original wq
+            if self.calculate_w_wq_diff:
+                module.weight.data = module.state.pop("wq").to(CPU)
+
+            module.state.pop("w", None) #
+            module.state.pop("w_wq_diff", None)
+
+            # need to clone to due to steamed pinned memory and access on diff thread
+            q_zeros = module.state.pop("q_zeros").clone()
+            q_scales = module.state.pop("q_scales").clone()
+
+        assert q_zeros.device == CPU
+        assert q_scales.device == CPU
+
+        quant_linear_cls = self._resolve_qlinear_kernel(module.full_name)
+
+        layers = find_modules(self.gptq_model.model)
+        module_label = getattr(module, "full_name", getattr(module, "name", ""))
+        parent_key = getattr(module, "full_name", getattr(module, "name", None))
+
+        # replace module with quantized module
+        timer = getattr(self.gptq_model, "quant_region_timer", None)
+
+        create_start = time.perf_counter() if timer is not None else None
+        with log_time_block(
+                "create_quant_module",
+                logger=log,
+                module_name=module_label,
+        ):
+            with parent_module_lock(parent_key):
+                create_quant_module(
+                    name=module.full_name,
+                    linear_cls=quant_linear_cls,
+                    bits=self.qcfg.bits,
+                    desc_act=self.qcfg.desc_act,
+                    dynamic=self.qcfg.dynamic,
+                    group_size=self.qcfg.group_size,
+                    module=self.gptq_model.model,
+                    submodule=module,
+                    sym=self.qcfg.sym,
+                    device=self.qcfg.device,
+                    lm_head_name=self.gptq_model.lm_head,
+                    pack_dtype=self.qcfg.pack_dtype,
+                    register_buffers=False,
+                )
+        if timer is not None and create_start is not None:
+            timer.record(
+                "submodule_finalize_create",
+                time.perf_counter() - create_start,
+                source=module_label,
+            )
+
+        # pack module
+        qModules = {
+            name: submodule
+            for name, submodule in find_modules(self.gptq_model.model, [quant_linear_cls]).items()
+            if name == module.full_name
+        }
+        pack_start = time.perf_counter() if timer is not None else None
+        with log_time_block(
+                "pack",
+                logger=log,
+                module_name=module_label,
+        ):
+            with parent_module_lock(parent_key):
+                packer_label = pack_module(
+                    name=module.full_name,
+                    qModules=qModules,
+                    q_scales=q_scales,
+                    q_zeros=q_zeros,
+                    q_g_idx=None,
+                    layers=layers,
+                    quant_linear_cls=quant_linear_cls,
+                    lock=self.lock,
+                    quantize_config=self.qcfg,
+                )
+        if timer is not None and pack_start is not None:
+            timer.record(
+                "submodule_finalize_pack",
+                time.perf_counter() - pack_start,
+                source=f"{module_label} [{packer_label or 'module.pack_original'}]",
+            )
 
     def finalize(self, model: BaseQModel, **kwargs):
         # set quantized state
