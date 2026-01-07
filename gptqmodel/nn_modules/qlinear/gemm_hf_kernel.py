@@ -217,7 +217,7 @@ class HFKernelLinear(PackableQuantLinear):
         if not self.training and not x.requires_grad and self.linear_mode is None and self.gemm_int4_forward_kernel is not None:
             self.transform(x.device.type)
             self.linear_mode = "inference"
-        else:
+        elif self.linear_mode is None:
             self.linear_mode = "train"
 
         if self.linear_mode == "inference":

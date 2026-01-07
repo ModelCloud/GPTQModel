@@ -244,7 +244,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
                 # self.torch_fused_op.forward = torch.compile(
                 #     self.torch_fused_op.forward, options={"max_autotune": True}
                 # )
-        else:
+        elif self.linear_mode is None:
             self.linear_mode = "train"
 
         if self.linear_mode == "inference":
