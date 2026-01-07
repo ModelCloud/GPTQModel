@@ -725,6 +725,7 @@ class AWQProcessor(LoopProcessor):
             w_mean = torch.zeros(num_channels, dtype=weight_dtype, device=weight_device)
         else:
             w_mean = (w_sum / row_count).to(weight_dtype)
+            w_mean = w_mean.clamp(min=1e-8)
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
         # Stream directly on the source device to avoid creating full CPU copies while still enforcing
@@ -751,6 +752,7 @@ class AWQProcessor(LoopProcessor):
             x_sum += chunk_sum
 
         x_mean = (x_sum / num_elements).to(inp.dtype)
+        x_mean = x_mean.clamp(min=1e-8)
         del x_sum
 
         # [STEP 3]: Compute output of module
@@ -987,7 +989,14 @@ class AWQProcessor(LoopProcessor):
                 scales = (x_mean.pow(ratio) / (w_mean.pow(1 - ratio) + 1e-4)).clamp(min=1e-4)
             else:
                 scales = x_mean.pow(ratio).clamp(min=1e-4).view(-1)
-            scales = scales / (scales.max() * scales.min()).sqrt()
+            scale_max = scales.max()
+            scale_min = scales.min()
+            scale_product = scale_max * scale_min
+            if scale_product < 1e-8 or scale_max < 1e-6:
+                scale_norm = scale_max if scale_max > 1e-6 else 1.0
+            else:
+                scale_norm = scale_product.sqrt()
+            scales = scales / scale_norm
             scales_view = scales.view(1, -1).to(device)
 
             # avoid scaling values that overflow
