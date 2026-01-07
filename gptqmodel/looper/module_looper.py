@@ -160,8 +160,12 @@ class ModuleLooper():
         # Track current subset for MoE lifecycle hooks
         self._current_subset: Optional[Dict[str, Any]] = None
 
-        num_experts = self.gptq_model.get_num_experts(self.gptq_model.model.config)
-        self.moe_routing_override = self.gptq_model.quantize_config.moe_routing_override(num_experts)
+        # moe_routing_override is only required for MoE models (i.e., models with dynamic_expert_index).
+        if self.gptq_model.dynamic_expert_index:
+            num_experts = self.gptq_model.get_num_experts(self.gptq_model.model.config)
+            self.moe_routing_override = self.gptq_model.quantize_config.moe_routing_override(num_experts)
+        else:
+            self.moe_routing_override = None
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
