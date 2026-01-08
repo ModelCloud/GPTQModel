@@ -264,9 +264,6 @@ def run_layer_stage(
                 #     )
 
                 try:
-                    # Reset current subset for MoE lifecycle hooks as we do not need to collect activation at this stage,
-                    # and need to collect only outputs produced by original forward
-                    looper._current_subset = None
                     layer_outputs = looper._run_forward_batches(
                         module=module,
                         processor=processor,
@@ -538,7 +535,7 @@ def run_layer_stage(
                     else:
                         # Asynchronous (current/default behavior): drain in background thread
                         # This allows next layer to start while current layer finalizes
-                        threading.Thread(
+                        finalizer_thread = threading.Thread(
                             target=_drain_finalize_futures,
                             args=(
                                 [future for future, *_ in finalize_futures_snapshot],
@@ -548,7 +545,9 @@ def run_layer_stage(
                             ),
                             name="SubmoduleFinalizeWatcher",
                             daemon=True,
-                        ).start()
+                        )
+                        looper.register_dangling_thread(finalizer_thread)
+                        finalizer_thread.start()
                 else:
                     looper._emit_layer_complete(
                         layer_idx=layer_index,

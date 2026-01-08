@@ -4,16 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class LongCatFlashQModel(BaseQModel):
     dynamic_expert_index = "n_routed_experts"
 
     pre_lm_head_norm_module = "model.norm"
-
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     module_tree = [
         "model",
@@ -30,7 +26,7 @@ class LongCatFlashQModel(BaseQModel):
                 "0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "1": ("gate_proj:0", "up_proj:0", "down_proj:1")
             },
-            "mlp:moe": {
+            "mlp": {
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1")
                 }

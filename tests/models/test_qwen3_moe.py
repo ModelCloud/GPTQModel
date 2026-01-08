@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import ExpertsRoutingOverride, FailSafe, MoEConfig, VramStrategy
+from gptqmodel.quantization.config import FailSafe, VramStrategy
 from gptqmodel.utils.eval import EVAL
 
 
@@ -66,7 +66,6 @@ class TestQwen3Moe(ModelTest):
     }
 
     VRAM_STRATEGY = VramStrategy.BALANCED
-    MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride())
     # TRUST_REMOTE_CODE = False
     # APPLY_CHAT_TEMPLATE = True
     # EVAL_BATCH_SIZE = 6

@@ -21,10 +21,9 @@ import time
 import logging
 from concurrent.futures import as_completed
 from contextlib import nullcontext
-from typing import Any, Dict, List, NamedTuple, Optional, TYPE_CHECKING, Union, Tuple
+from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING
 
 import torch
-import torch.nn as nn
 
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
@@ -101,6 +100,8 @@ class ModuleLooper():
         self._loop_stop_event = threading.Event()
         self._loop_stop_exc: Optional[BaseException] = None
         self._loop_stop_waited = False
+        self._dangling_threads: List[threading.Thread] = []
+        self._dangling_threads_lock = threading.Lock()
 
         disk_speed = estimate_disk_io_speed()
         disk_speed_mb = disk_speed / (1024 * 1024)
@@ -121,6 +122,10 @@ class ModuleLooper():
         if not quant_devices:
             quant_devices = [CPU]
 
+        self._quant_devices = quant_devices
+        self._quant_device_rr = 0
+        self._module_device_map: Dict[str, torch.device] = {}
+        self._quant_device_lock = threading.Lock()
         vram_strategy = getattr(self.gptq_model.quantize_config, "vram_strategy", VramStrategy.EXCLUSIVE)
         if isinstance(vram_strategy, str):
             try:
@@ -139,27 +144,8 @@ class ModuleLooper():
             vram_strategy = VramStrategy.EXCLUSIVE
         self._vram_strategy = vram_strategy
 
-        # Apply compute device filter if provided to determine which devices to use for quantization
-        compute_device_filter = getattr(self.gptq_model.quantize_config, "compute_device_filter", None)
-        if compute_device_filter is not None:
-            quant_devices_filtered = compute_device_filter(quant_devices)
-            if len(quant_devices_filtered) >= 1:
-                quant_devices = quant_devices_filtered
-            else:
-                log.warn(
-                    "compute_device_filter returned empty device list. "
-                    "Using all devices for quantization."
-                )
-
-        self._quant_devices = quant_devices
-        self._quant_device_rr = 0
-        self._module_device_map: Dict[str, torch.device] = {}
-        self._quant_device_lock = threading.Lock()
         self._moe_subset_threshold = 16
         self._subset_callback = getattr(self.gptq_model, "subset_callback", None)
-        
-        # Track current subset for MoE lifecycle hooks
-        self._current_subset: Optional[Dict[str, Any]] = None
 
         # moe_routing_override is only required for MoE models (i.e., models with dynamic_expert_index).
         if getattr(self.gptq_model, "dynamic_expert_index", None):
@@ -199,57 +185,6 @@ class ModuleLooper():
                 restore_moe_topk(self._state)
             return False  # Do not suppress exceptions
 
-    class MoELifecycleContext:
-        """Context manager for MoE lifecycle hooks integration."""
-        
-        def __init__(self, module_looper, module, processor, current_subset):
-            self.module_looper = module_looper
-            self.module = module
-            self.processor = processor
-            self.current_subset = current_subset
-            self.moe_hooks_active = False
-            self.moe_block = None
-            self.moe_forward_original = None
-            
-        def __enter__(self):
-            """Set up MoE lifecycle hooks if applicable."""
-            if self.module_looper._should_use_moe_lifecycle(self.module, self.processor):
-                hooks = self.module_looper.gptq_model.moe_lifecycle_hooks
-                self.moe_block = hooks.get_moe_block(self.module, self.module_looper.gptq_model.__class__)
-                
-                if self.moe_block is not None:
-                    # Save original forward method
-                    self.moe_forward_original = self.moe_block.forward
-                    
-                    # Create wrapper that forwards to all experts
-                    moe_block_prefix = hooks._extract_moe_block_prefix(self.current_subset, self.moe_block)
-                    
-                    def moe_forward_wrapper(hidden_states, **kwargs):
-                        return hooks.forward_to_all_experts(
-                            moe_block=self.moe_block,
-                            hidden_states=hidden_states,
-                            processor=self.processor,
-                            subset=self.current_subset,
-                            original_forward=self.moe_forward_original,
-                            model_class=self.module_looper.gptq_model.__class__,
-                            module_looper=self.module_looper,  # Pass for TLS-based hooks pausing
-                            moe_block_prefix=moe_block_prefix,
-                            replica_module=self.module,  # Pass replica for device-correct module resolution
-                            **kwargs
-                        )
-                    
-                    # Temporarily replace forward method
-                    self.moe_block.forward = moe_forward_wrapper
-                    self.moe_hooks_active = True
-            
-            return self
-        
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            """Restore original MoE forward method if it was patched."""
-            if self.moe_hooks_active and self.moe_forward_original is not None and self.moe_block is not None:
-                self.moe_block.forward = self.moe_forward_original
-            return False  # Don't suppress exceptions
-
     def register_layer_callback(self, callback) -> None:
         """Register or replace the layer-complete callback target."""
         self._layer_callback = callback
@@ -257,6 +192,22 @@ class ModuleLooper():
     def register_subset_callback(self, callback) -> None:
         """Register or replace the subset event callback target."""
         self._subset_callback = callback
+
+    def register_dangling_thread(self, watcher: threading.Thread) -> None:
+        with self._dangling_threads_lock:
+            if self._dangling_threads:
+                self._dangling_threads = [
+                    thread for thread in self._dangling_threads if thread.is_alive()
+                ]
+            self._dangling_threads.append(watcher)
+
+    def wait_dangling_threads(self) -> None:
+        with self._dangling_threads_lock:
+            threads = list(self._dangling_threads)
+            self._dangling_threads.clear()
+        alive_threads = [thread for thread in threads if thread.is_alive()]
+        for thread in alive_threads:
+            thread.join()
 
     def _resolve_layer_callback(self):
         for candidate in (
@@ -422,22 +373,6 @@ class ModuleLooper():
             setattr(processor, "_mask_tls", tls)
         return tls
 
-    def _processor_hooks_paused_tls(self, processor):
-        """Get or create thread-local storage for hooks_paused flag."""
-        if not hasattr(processor, "_hooks_paused_tls"):
-            processor._hooks_paused_tls = threading.local()
-        return processor._hooks_paused_tls
-
-    def _set_processor_hooks_paused(self, processor: LoopProcessor, paused: bool):
-        """Set hooks paused state for current thread."""
-        tls = self._processor_hooks_paused_tls(processor)
-        tls.value = paused
-
-    def _get_processor_hooks_paused(self, processor: LoopProcessor) -> bool:
-        """Get hooks paused state for current thread (thread-safe)."""
-        tls = getattr(processor, "_hooks_paused_tls", None)
-        return getattr(tls, "value", False) if tls else False
-
     def _set_processor_mask(self, processor: LoopProcessor, mask):
         tls = self._processor_mask_tls(processor)
         tls.value = mask
@@ -543,10 +478,6 @@ class ModuleLooper():
             prefix, _ = module_name.split(".shared_experts.", 1)
             return f"{prefix}.shared_experts"
 
-        if ".shared_expert." in module_name:
-            prefix, _ = module_name.split(".shared_expert.", 1)
-            return f"{prefix}.shared_expert"
-
         return None
 
     def _is_attention_module_name(self, module_name: str) -> bool:
@@ -561,43 +492,6 @@ class ModuleLooper():
         if lowered.endswith("attn") or lowered.endswith("attention"):
             return True
         return False
-    
-    def _should_use_moe_lifecycle(self, module: nn.Module, processor: LoopProcessor) -> bool:
-        """
-        Check if MoE lifecycle hooks should be used for this module.
-        
-        Returns True if:
-        - pass_whole_dataset_to_each_expert flag is enabled
-        - Model has lifecycle hooks configured
-        - Module contains an MoE block
-        """
-        # Check if feature is enabled
-        moe_routing_bypass = getattr(self.gptq_model.quantize_config, "moe_routing_bypass", None)
-        flag_enabled = moe_routing_bypass() if callable(moe_routing_bypass) else False
-        if not flag_enabled:
-            return False
-        
-        # Check if model has lifecycle hooks
-        hooks = getattr(self.gptq_model, 'moe_lifecycle_hooks', None)
-        if hooks is None:
-            log.warn(
-                f"pass_whole_dataset_to_each_expert is enabled but {self.gptq_model.__class__.__name__} "
-                f"model does not have 'moe_lifecycle_hooks' configured. MoE optimization will be disabled. "
-                f"Please ensure your model definition has proper MoE lifecycle hooks configured."
-            )
-            return False
-
-        # Check if this module contains an MoE block
-        moe_block = hooks.get_moe_block(module, self.gptq_model.__class__)
-        if moe_block is None:
-            log.warn(
-                f"pass_whole_dataset_to_each_expert is enabled but no MoE block found in module "
-                f"{module.__class__.__name__}. MoE optimization will be disabled for this module. "
-                f"This may indicate an issue with the model's MoE configuration or module structure."
-            )
-            return False
-        
-        return True
 
     def _assign_quant_device_for_module(
         self,
@@ -786,6 +680,10 @@ class ModuleLooper():
         single threaded path. The helper returns the ordered outputs that feed
         the next processor stage when ``need_outputs`` is set.
         """
+        if not force_serial:
+            quant_config = getattr(self.gptq_model, "quantize_config", None)
+            if quant_config is not None and not getattr(quant_config, "auto_forward_data_parallel", True):
+                force_serial = True
         if force_serial:
             return self._run_forward_batches_single(
                 module=module,
@@ -910,8 +808,6 @@ class ModuleLooper():
                 if attn_tensor is not None:
                     seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
                     keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
-                
-                # Set mask using TLS (thread-safe)
                 self._set_processor_mask(processor, keep_mask)
 
                 additional_inputs: Dict[str, torch.Tensor] = {}
@@ -938,8 +834,8 @@ class ModuleLooper():
                 if not preserve_module_devices:
                     rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
-                # MoE lifecycle hooks integration - using context manager
-                with self.MoERoutingOverrideContext(module, self.moe_routing_override) if self.moe_routing_override else self.MoELifecycleContext(self, module, processor, self._current_subset):
+                    # MoE lifecycle hooks integration - using context manager
+                with self.MoERoutingOverrideContext(module, self.moe_routing_override) if self.moe_routing_override else nullcontext():
                     module_output = None
                     try:
                         if is_lm_head_module:
@@ -950,12 +846,6 @@ class ModuleLooper():
                         module_output = None
                     finally:
                         self._set_processor_mask(processor, None)
-
-                # Release intermediate tensors promptly after they are no longer needed
-                del layer_input
-                del attn_tensor
-                del keep_mask
-                del additional_inputs
 
                 if (
                     reuse_kv
@@ -970,10 +860,6 @@ class ModuleLooper():
                     primary = module_output[0] if isinstance(module_output, tuple) else module_output
                     primary = move_to(primary, device=cur_layer_device)
                     outputs.append([primary])
-
-                # Release module_output promptly after extracting what we need
-                if module_output is not None:
-                    del module_output
 
                 rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
                 if rows_for_batch <= 0:
@@ -1077,8 +963,7 @@ class ModuleLooper():
 
         # Ensure any async replication/memcpy ops are complete before threads start fanning out.
         torch_sync()
-        
-        # Clone modules FIRST, then apply MoE lifecycle hooks to all replicas
+
         try:
             module_replicas = clone_module_for_devices(
                 module,
@@ -1101,8 +986,8 @@ class ModuleLooper():
                 ctx = None
                 if self.moe_routing_override:
                     ctx = self.MoERoutingOverrideContext(replica, self.moe_routing_override)
-                elif self._should_use_moe_lifecycle(module, processor):
-                    ctx = self.MoELifecycleContext(self, replica, processor, self._current_subset)
+                else:
+                    ctx = nullcontext()
 
                 if ctx:
                     ctx.__enter__()
@@ -1113,19 +998,9 @@ class ModuleLooper():
             results: Dict[int, torch.Tensor | tuple | None] = {}
 
             processed_rows = 0
-            
-            # Apply compute device filter if provided to determine which devices to use for forward execution
-            if self.gptq_model.quantize_config.compute_device_filter is not None:
-                forward_devices = self.gptq_model.quantize_config.compute_device_filter(devices)
-                if len(forward_devices) < 1:
-                    log.warn(
-                        "compute_device_filter returned empty device list. "
-                        "Using all devices for forward execution."
-                    )
-                    forward_devices = devices
-            else:
-                # If no filter is provided, use all devices (default behavior)
-                forward_devices = devices
+
+            # If no filter is provided, use all devices (default behavior)
+            forward_devices = devices
             
             device_segments: Dict[torch.device, List[int]] = {}
             segment_start = 0
@@ -1221,7 +1096,7 @@ class ModuleLooper():
         # ensure replicas release promptly and free GPU memory
         for dev in list(module_replicas.keys()):
             del module_replicas[dev]
-            
+
         if not need_outputs:
             return []
 
@@ -1243,10 +1118,6 @@ class ModuleLooper():
 
     def _masked_hook_wrapper(self, processor: LoopProcessor, inner_hook, hook_source: str):
         def hook(module, inputs, output):
-            # Thread-safe check if hooks are paused (TLS-based, per-thread)
-            if self._get_processor_hooks_paused(processor):
-                return
-            
             keep = self._get_processor_mask(processor)
 
             timer = getattr(self.gptq_model, "quant_region_timer", None)
@@ -1292,51 +1163,6 @@ class ModuleLooper():
                         source=hook_source,
                     )
         return hook
-    
-    def _masked_pre_hook_wrapper(self, processor: LoopProcessor, inner_hook, hook_source: str):
-        """
-        Pre-forward hook wrapper for MoE expert modules.
-        This is called BEFORE forward executes (when used with HookedLinear.forward_hook).
-        Respects hooks_paused state to avoid double-counting during intermediate calculations.
-        """
-        def pre_hook(module, inputs, output):
-            # Thread-safe check if hooks are paused (TLS-based, per-thread)
-            if self._get_processor_hooks_paused(processor):
-                return
-            
-            # Get mask using TLS (thread-safe)
-            keep = self._get_processor_mask(processor)
-
-            timer = getattr(self.gptq_model, "quant_region_timer", None)
-            start = time.perf_counter() if timer else None
-
-            # Mask first tensor-like input if it's [B, S, ...]
-            new_inputs = inputs
-            try:
-                if isinstance(inputs, (tuple, list)) and len(inputs) > 0 and torch.is_tensor(inputs[0]):
-                    x = inputs[0]
-                    if keep is not None and x.dim() >= 3:
-                        xk = apply_keep_mask_bt(x, keep)
-                        if isinstance(inputs, tuple):
-                            new_inputs = (xk,) + tuple(inputs[1:])
-                        else:
-                            new_inputs = [xk] + list(inputs[1:])
-            except Exception:
-                # Never break the forward due to masking
-                new_inputs = inputs
-
-            # Call inner hook with inputs and output (GPTQ ignores output anyway)
-            try:
-                inner_hook(module, new_inputs, output)
-            finally:
-                if timer is not None and start is not None:
-                    timer.record(
-                        "forward_pre_hook",
-                        time.perf_counter() - start,
-                        source=hook_source,
-                    )
-            
-        return pre_hook
 
     def cache_inputs(self, layers, calibration_data, use_cache):
         capture_stage = StageInputsCapture(self, logger=log)
@@ -1472,6 +1298,11 @@ class ModuleLooper():
         self._check_loop_stop()
         # Ensure ANY remaining tasks the looper submitted have drained
         DEVICE_THREAD_POOL.wait()  # same as wait('all')
+        # Drain any watcher threads tracking submodule finalization progress.
+        self.wait_dangling_threads()
+        # Ensure any background stream sync tasks complete before returning.
+        from ..utils.stream import STREAM_DEVICE_POOL
+        STREAM_DEVICE_POOL.wait()
         self._check_loop_stop()
 
         # paranoid safety check

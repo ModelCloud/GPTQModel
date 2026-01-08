@@ -1198,7 +1198,7 @@ class GPTQ:
             scale = temp_scale
             temp_zero = [zero[i] for i in inv_global_perm_list]
             zero = temp_zero
-            del final_perm, inv_final, global_perm, inv_global_perm, local_perms
+            del final_perm, inv_final, global_perm, inv_global_perm, inv_global_perm_list, local_perms
 
         if self._tp_pad_cols:
             valid_cols = self._original_columns

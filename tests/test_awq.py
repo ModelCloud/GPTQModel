@@ -12,6 +12,7 @@ import unittest
 
 import torch
 from datasets import load_dataset
+from models.model_test import ModelTest
 from parameterized import parameterized
 from transformers import AutoTokenizer
 
@@ -23,7 +24,7 @@ from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
 from gptqmodel.utils.eval import EVAL
 from gptqmodel.utils.machete import _validate_machete_device_support, machete_import_exception
-from models.model_test import ModelTest
+
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch

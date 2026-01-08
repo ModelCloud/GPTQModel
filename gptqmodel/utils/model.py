@@ -1775,3 +1775,4 @@ def restore_moe_topk(state: MoETopKState):
     for module, name, old in state:
         if hasattr(module, name):
             setattr(module, name, old)
+

@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class BailingMoeQModel(BaseQModel):
@@ -15,9 +14,6 @@ class BailingMoeQModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.norm"
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
-
     module_tree = [
         "model",
         "layers",
@@ -26,7 +22,7 @@ class BailingMoeQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "attention": ("query_key_value"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp:moe": {
+            "mlp": {
                 "gate": ("gate:!",), # <-- 0.5MB per layer. Not worth quantizing
                 "shared_experts": ("gate_proj", "up_proj", "down_proj"),
                 "experts": {
