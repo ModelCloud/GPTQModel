@@ -37,7 +37,7 @@ class Qwen3NextGPTQ(BaseQModel):
             "linear_attn": ("in_proj_qkvz", "in_proj_ba:!", "out_proj"),  # conv1d intentionally excluded
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             # MLP / MoE
-            "mlp:moe": {
+            "mlp": {
                 # MoE router + shared expert (Qwen3NextSparseMoeBlock)
                 "gate": ("gate:!",),  # router gate linear
                 "shared_expert_gate": ("shared_expert_gate:!",), # <-- single (1, N) logic projections should not be quantized
@@ -54,7 +54,7 @@ class Qwen3NextGPTQ(BaseQModel):
     module_tree_overrides = {
         METHOD.AWQ: [
             {
-                "mlp:moe": {
+                "mlp": {
                     "gate": ("gate",),
                 }
             }

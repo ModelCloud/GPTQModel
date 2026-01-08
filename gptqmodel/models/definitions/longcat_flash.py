@@ -27,7 +27,7 @@ class LongCatFlashQModel(BaseQModel):
                 "0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "1": ("gate_proj:0", "up_proj:0", "down_proj:1")
             },
-            "mlp:moe": {
+            "mlp": {
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1")
                 }

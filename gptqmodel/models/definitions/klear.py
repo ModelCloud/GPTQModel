@@ -21,7 +21,7 @@ class KlearQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp:moe": {
+            "mlp": {
                 "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),

@@ -22,7 +22,7 @@ class Qwen2MoeQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp:moe:?": {
+            "mlp:?": {
                 "gate": ("gate:!",),
                 "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "experts:0": {
@@ -35,7 +35,7 @@ class Qwen2MoeQModel(BaseQModel):
     # module_tree_overrides = {
     #     METHOD.AWQ: [
     #         {
-    #             "mlp:moe:?": {
+    #             "mlp:?": {
     #                 "gate": ("gate:!",),
     #                 "shared_expert": None,
     #                 "experts": {

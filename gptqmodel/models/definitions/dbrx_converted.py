@@ -20,7 +20,7 @@ class DbrxConvertedQModel(BaseQModel):
             "norm_attn_norm": {
                 "attn": ("q_proj:0", "k_proj:0", "v_proj:0", "out_proj:1"),
             },
-            "ffn:moe": {
+            "ffn": {
                 "experts": {
                     "mlp": {
                         "#": ("w1:0", "v1:0", "w2:1"),

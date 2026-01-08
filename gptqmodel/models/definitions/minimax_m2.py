@@ -36,7 +36,7 @@ class MiniMaxM2GPTQ(BaseQModel):
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "block_sparse_moe:moe": {  # MoE module
+            "block_sparse_moe": {  # MoE module
                 "gate": ("gate:!",),
                 "e_score_correction_bias": ("e_score_correction_bias:!",),
                 "experts": {
