@@ -744,7 +744,8 @@ class ModelTest(unittest.TestCase):
         headers = ["Metric"] + [backend.name for backend in ordered_backends]
         log.info("Evaluation comparison:\n%s", tabulate(table_rows, headers=headers, tablefmt="github"))
 
-    def load_tokenizer(self, model_id_or_path, trust_remote_code=False):
+    @classmethod
+    def load_tokenizer(cls, model_id_or_path, trust_remote_code=False):
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
         return tokenizer
 
