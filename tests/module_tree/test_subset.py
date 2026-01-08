@@ -13,7 +13,7 @@ from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
 
-repo_root = Path(__file__).resolve().parents[1]
+repo_root = Path(__file__).resolve().parents[2]
 repo_str = str(repo_root)
 if repo_str not in sys.path:
     sys.path.insert(0, repo_str)
