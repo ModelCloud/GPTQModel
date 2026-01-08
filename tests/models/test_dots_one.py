@@ -34,9 +34,13 @@ class TestDots1Struct(ModelTest):
 
         self.assertIn("q_norm:!", Dots1QModel.module_tree[3]["self_attn"])
         self.assertIn("k_norm:!", Dots1QModel.module_tree[3]["self_attn"])
-        self.assertIn("gate_proj:0", Dots1QModel.module_tree[3]["mlp"][""])
-        self.assertIn("#", Dots1QModel.module_tree[3]["mlp"]["experts"])
-        self.assertIn("shared_experts", Dots1QModel.module_tree[3]["mlp"])
+        mlp_key = next(
+            key for key in Dots1QModel.module_tree[3].keys()
+            if Dots1QModel._parse_module_flags(key)[0] == "mlp"
+        )
+        self.assertIn("gate_proj:0", Dots1QModel.module_tree[3][mlp_key][""])
+        self.assertIn("#", Dots1QModel.module_tree[3][mlp_key]["experts"])
+        self.assertIn("shared_experts", Dots1QModel.module_tree[3][mlp_key])
 
         qcfg = QuantizeConfig(bits=4, group_size=128, quant_method=METHOD.GPTQ)
         layer_modules = Dots1QModel.simple_layer_modules(config, qcfg)
