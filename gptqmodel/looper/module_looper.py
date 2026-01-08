@@ -976,19 +976,9 @@ class ModuleLooper():
             results: Dict[int, torch.Tensor | tuple | None] = {}
 
             processed_rows = 0
-            
-            # Apply compute device filter if provided to determine which devices to use for forward execution
-            if self.gptq_model.quantize_config.compute_device_filter is not None:
-                forward_devices = self.gptq_model.quantize_config.compute_device_filter(devices)
-                if len(forward_devices) < 1:
-                    log.warn(
-                        "compute_device_filter returned empty device list. "
-                        "Using all devices for forward execution."
-                    )
-                    forward_devices = devices
-            else:
-                # If no filter is provided, use all devices (default behavior)
-                forward_devices = devices
+
+            # If no filter is provided, use all devices (default behavior)
+            forward_devices = devices
             
             device_segments: Dict[torch.device, List[int]] = {}
             segment_start = 0
