@@ -32,13 +32,29 @@ class TestMoEFlagParsing:
         assert "moe" in flags
         assert "!" in flags
     
+    def test_parse_module_flags_with_optional_capture(self):
+        """Test parsing with :? and order variations."""
+        name, flags = BaseQModel._parse_module_flags("mlp:moe:?")
+        assert name == "mlp"
+        assert "moe" in flags
+        assert "?" in flags
+        
+        name, flags = BaseQModel._parse_module_flags("mlp:?:moe")
+        assert name == "mlp"
+        assert "moe" in flags
+        assert "?" in flags
+    
     def test_has_moe_flag(self):
         """Test MoE flag detection."""
         assert BaseQModel.has_moe_flag("mlp:moe") is True
         assert BaseQModel.has_moe_flag("experts:moe") is True
         assert BaseQModel.has_moe_flag("gate:moe:!") is True
+        assert BaseQModel.has_moe_flag("mlp:moe:?") is True
+        assert BaseQModel.has_moe_flag("mlp:?:moe") is True
         assert BaseQModel.has_moe_flag("gate_proj") is False
         assert BaseQModel.has_moe_flag("gate_proj:!") is False
+        assert BaseQModel.has_moe_flag("mlp:mode:?") is False
+        assert BaseQModel.has_moe_flag("mlp:?:mode") is False
  
     
     def test_has_moe_flag_non_string(self):
@@ -109,6 +125,26 @@ class TestMoEModuleDetection:
         assert "mlp.experts" in moe_modules
         assert "mlp.gate" in moe_modules
     
+    def test_collect_moe_modules_with_optional_capture(self):
+        """Test MoE module collection with :? flag in module tree."""
+        module_tree = [
+            "model",
+            "layers",
+            "#",
+            {
+                "mlp:moe:?": {
+                    "experts": {
+                        "#": ("gate_proj:0",),
+                    },
+                },
+            }
+        ]
+        
+        MockModel = TestMockMoEModel.create_mock_model_class(module_tree)
+        moe_modules = MockModel.get_moe_modules()
+        
+        assert "mlp" in moe_modules
+    
     def test_is_moe_module_detection(self):
         """Test is_moe_module() detection."""
         module_tree = [
@@ -137,6 +173,26 @@ class TestMoEModuleDetection:
         # Non-MoE modules
         assert MockModel.is_moe_module("model.layers.0.self_attn.q_proj") is False
         assert MockModel.is_moe_module("model.layers.0.self_attn") is False
+    
+    def test_is_moe_module_with_optional_capture(self):
+        """Test is_moe_module() with :? flag in module tree."""
+        module_tree = [
+            "model",
+            "layers",
+            "#",
+            {
+                "mlp:?:moe": {
+                    "experts": {
+                        "#": ("gate_proj:0",),
+                    },
+                },
+            }
+        ]
+        
+        MockModel = TestMockMoEModel.create_mock_model_class(module_tree)
+        
+        assert MockModel.is_moe_module("model.layers.0.mlp") is True
+        assert MockModel.is_moe_module("model.layers.0.mlp.experts.3.gate_proj") is True
     
     def test_backward_compatibility_no_moe_flags(self):
         """Test that models without :moe flags still work."""

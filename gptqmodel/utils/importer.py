@@ -122,11 +122,12 @@ def _is_accelerate_offload_target(value: str) -> bool:
 
 def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> Optional[DEVICE]:
     normalized_device = None
+    accelerator = torch.accelerator.current_accelerator()
     if device is None:
         if device_map is not None:
             if isinstance(device_map, str):
                 if _is_accelerate_device_map_keyword(device_map):
-                    return None
+                    return DEVICE(accelerator.type) if accelerator is not None else DEVICE.CPU
                 devices = {device_map}
             else:
                 devices = set(device_map.values())
@@ -136,12 +137,10 @@ def normalize_device_device_map(device: Optional[Union[str, torch.device]], devi
                 if device is None:
                     continue
                 if isinstance(device, str):
-                    if _is_accelerate_device_map_keyword(device):
-                        return None
+                    if _is_accelerate_device_map_keyword(device) or device == "auto":
+                        return DEVICE(accelerator.type) if accelerator is not None else DEVICE.CPU
                     if _is_accelerate_offload_target(device):
                         continue
-                    if device == "auto":
-                        return None
                 normalized_devices.add(normalize_device(device))
             if len(normalized_devices) == 1:
                 d = normalized_devices.pop()
