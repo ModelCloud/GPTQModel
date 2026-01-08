@@ -21,8 +21,9 @@ from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
+from gptqmodel.utils.eval import EVAL
 from gptqmodel.utils.machete import _validate_machete_device_support, machete_import_exception
-
+from models.model_test import ModelTest
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -99,6 +100,8 @@ class TestAwq(unittest.TestCase):
             with open(tmp_dir_name + "/" + QUANT_CONFIG_FILENAME, "r") as f:
                 file_dict = json.loads(f.read())
                 assert model.quantize_config.to_dict() == file_dict
+                # Exclude `offload_to_disk_path`, which is a random value.
+                file_dict["meta"].pop("offload_to_disk_path")
                 logging.info(f"Saved config file: {file_dict}")
 
             cls.quantized_tempdirs[(checkpoint_format, group_size)] = tmp_dir
@@ -137,7 +140,10 @@ class TestAwq(unittest.TestCase):
             backend=backend,
         )
 
-        self.assertEqual(model.quantize_config.to_dict(), expected_config)
+        # Exclude `offload_to_disk_path`, which is a random value.
+        actual_quantize_config = model.quantize_config.to_dict()
+        actual_quantize_config["meta"].pop("offload_to_disk_path")
+        self.assertEqual(actual_quantize_config, expected_config)
 
         self.assert_awq_linear(model, backend)
 
@@ -200,3 +206,45 @@ class TestInferenceOnly(unittest.TestCase):
             raise AssertionError(" `paris` not found in `result`")
 
         del model
+
+
+class TestQwen3_8B_Base_awq(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen3-8B-Base" # "Qwen/Qwen3-8B-Base"
+    # DATASET_CONCAT_SIZE = 2048 # new
+    # STOP_AFTER_LAYER = 0
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+            "chat_template": True,
+            "exact_match,flexible-extract": {
+                "value": 0.2994,
+                "floor_pct": 0.04,
+            },
+        },
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
+            "acc": {
+                "value": 0.3166,
+                "floor_pct": 0.04,
+            },
+            "acc_norm": {
+                "value": 0.3464,
+                "floor_pct": 0.04,
+            },
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
+            "chat_template": False,
+            "acc": {
+                "value": 0.3692,
+                "floor_pct": 0.04,
+            },
+        },
+    }
+    FORMAT = FORMAT.GEMM
+    METHOD = METHOD.AWQ
+    QUANT_BATCH_SIZE = 1
+    EVAL_BATCH_SIZE = 64
+    SAVE_PATH = "QWEN3-8B-AWQ"
+    # DATASET_SIZE = 1
+
+    def test_qwen3_8b_base_awq(self):
+        self.quant_lm_eval()
