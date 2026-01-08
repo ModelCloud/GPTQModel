@@ -131,12 +131,7 @@ def test_awq_processor_enables_subset_early_stop():
 
 
 def test_module_looper_subset_callback_invoked():
-    quant_cfg = SimpleNamespace(
-        device=torch.device("cpu"),
-        vram_strategy=VramStrategy.EXCLUSIVE,
-        true_sequential=True,
-        lm_head=False,
-    )
+    quant_cfg = _make_quant_config()
     dummy_model = SimpleNamespace(
         support_batch_quantize=False,
         quantize_config=quant_cfg,
@@ -271,15 +266,9 @@ def test_stage_subset_early_stop_and_callbacks():
     mini_layer = _MiniLayer()
     replace_module_with_hooked_legacy(mini_layer)
 
-    dummy_quant_cfg = SimpleNamespace(
-        device=torch.device("cpu"),
-        vram_strategy=VramStrategy.EXCLUSIVE,
-        true_sequential=True,
-        lm_head=False,
-    )
     dummy_model = SimpleNamespace(
         support_batch_quantize=False,
-        quantize_config=dummy_quant_cfg,
+        quantize_config=quant_cfg,
         layer_callback=None,
         subset_callback=None,
         supported_vram_strategies=[VramStrategy.EXCLUSIVE, VramStrategy.BALANCED],
@@ -301,6 +290,15 @@ def test_stage_subset_early_stop_and_callbacks():
 
     full_modules = find_modules(mini_layer)
     subset_names = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+    subset = {
+        name: NamedModule(
+            full_modules[name],
+            name=name,
+            full_name=f"layers.0.{name}",
+            layer_index=0,
+        )
+        for name in subset_names
+    }
 
     run_subset_stage(
         looper=looper,
@@ -316,7 +314,7 @@ def test_stage_subset_early_stop_and_callbacks():
         layer_title="subset-check",
         layer_index=0,
         layers_prefix="layers",
-        subset_names=subset_names,
+        subset=subset,
         subset_index=0,
         subset_total=2,
         full=full_modules,
