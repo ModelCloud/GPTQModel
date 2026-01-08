@@ -193,8 +193,12 @@ class ModuleLooper():
         """Register or replace the subset event callback target."""
         self._subset_callback = callback
 
-    def _register_dangling_thread(self, watcher: threading.Thread) -> None:
+    def register_dangling_thread(self, watcher: threading.Thread) -> None:
         with self._dangling_threads_lock:
+            if self._dangling_threads:
+                self._dangling_threads = [
+                    thread for thread in self._dangling_threads if thread.is_alive()
+                ]
             self._dangling_threads.append(watcher)
 
     def _wait_dangling_threads(self) -> None:

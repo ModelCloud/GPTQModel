@@ -532,7 +532,7 @@ def run_layer_stage(
                         name="SubmoduleFinalizeWatcher",
                         daemon=True,
                     )
-                    looper._register_dangling_thread(finalizer_thread)
+                    looper.register_dangling_thread(finalizer_thread)
                     finalizer_thread.start()
                 else:
                     looper._emit_layer_complete(
