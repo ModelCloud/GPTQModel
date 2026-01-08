@@ -5,7 +5,7 @@
 
 import json
 import os.path
-from dataclasses import dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -390,9 +390,6 @@ class MoEConfig:
                 f"routing must be an instance of BaseMoERouting, "
                 f"got {type(self.routing).__name__}"
             )
-
-    def routing_bypass(self) -> bool:
-        return isinstance(self.routing, ExpertsRoutingBypass)
 
     def routing_override(self, num_experts: int) -> Union[int, None]:
         """

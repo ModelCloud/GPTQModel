@@ -62,7 +62,13 @@ from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
-from gptqmodel.quantization.config import FailSafe, GPTAQConfig, HessianConfig, QuantizeConfig, VramStrategy  # noqa: E402
+from gptqmodel.quantization.config import (  # noqa: E402
+    FailSafe,
+    GPTAQConfig,
+    HessianConfig,
+    QuantizeConfig,
+    VramStrategy,
+)
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
