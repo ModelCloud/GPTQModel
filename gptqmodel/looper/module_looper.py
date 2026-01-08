@@ -205,9 +205,9 @@ class ModuleLooper():
         with self._dangling_threads_lock:
             threads = list(self._dangling_threads)
             self._dangling_threads.clear()
-        for thread in threads:
-            if thread.is_alive():
-                thread.join()
+        alive_threads = [thread for thread in threads if thread.is_alive()]
+        for thread in alive_threads:
+            thread.join()
 
     def _resolve_layer_callback(self):
         for candidate in (
