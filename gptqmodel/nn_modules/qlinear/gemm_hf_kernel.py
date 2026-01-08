@@ -71,7 +71,7 @@ class HFKernelLinear(PackableQuantLinear):
             register_buffers=register_buffers,
             **kwargs)
 
-        self.transformed = False
+        self.linear_mode = None # either train or inference
         self.dequant_dtype = torch.int8
 
     @classmethod
@@ -214,11 +214,13 @@ class HFKernelLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if not self.training and not self.transformed and self.gemm_int4_forward_kernel is not None:
+        if not self.training and not x.requires_grad and self.linear_mode is None and self.gemm_int4_forward_kernel is not None:
             self.transform(x.device.type)
-            self.transformed = True
+            self.linear_mode = "inference"
+        elif self.linear_mode is None:
+            self.linear_mode = "train"
 
-        if self.transformed:
+        if self.linear_mode == "inference":
             out = self._fused_op_forward(x).reshape(out_shape)
         else:
             # make sure dequant dtype matches input x

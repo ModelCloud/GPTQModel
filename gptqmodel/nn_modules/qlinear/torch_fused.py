@@ -98,7 +98,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             register_buffers=register_buffers,
             **kwargs)
 
-        self.transformed = False
+        self.linear_mode = None # either train or infernce
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
 
     def post_init(self):
@@ -229,10 +229,10 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if not self.training and not self.transformed and TORCH_HAS_FUSED_OPS:
+        if not self.training and not x.requires_grad and self.linear_mode is None and TORCH_HAS_FUSED_OPS:
             # one-time transform per module for xpu aten fused ops
             self.transform(x.dtype, x.device.type)
-            self.transformed = True
+            self.linear_mode = "inference"
             if x.device.type == "cpu":
                 self.torch_fused_op = Int4PackedOp(
                     self.qweight, self.scales_and_zeros, self.group_size
@@ -244,8 +244,10 @@ class TorchFusedQuantLinear(PackableQuantLinear):
                 # self.torch_fused_op.forward = torch.compile(
                 #     self.torch_fused_op.forward, options={"max_autotune": True}
                 # )
+        elif self.linear_mode is None:
+            self.linear_mode = "train"
 
-        if self.transformed:
+        if self.linear_mode == "inference":
             out = self._fused_op_forward(x).reshape(out_shape)
         else:
             # make sure dequant dtype matches input x
@@ -263,7 +265,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
 
     @torch.no_grad
     def _fused_op_forward(self, x):
-        x = x[:, self.ret_idx].contiguous()
+        x = x[:, self.ret_idx.to(x.device)].contiguous()
         # fused ops optimized for xpu using torch.ops
         # note _weight_int4pack_mm_with_scales_and_zeros is added by intel for xpu only
         if x.device.type == "xpu":
