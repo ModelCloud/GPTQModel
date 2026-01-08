@@ -425,7 +425,6 @@ class GPTQ:
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
             xtx = torch.matmul(mat32.T, mat32)
-            del mat32
             torch_sync(device=xtx.device)
             return xtx
 
@@ -489,7 +488,6 @@ class GPTQ:
         if self._tp_pad_cols:
             pad = reshaped_inp.new_zeros((reshaped_inp.shape[0], self._tp_pad_cols))
             reshaped_inp = torch.cat((reshaped_inp, pad), dim=1)
-            del pad
         canonical_device = torch.device(inp_device)
 
         batch_token_size = reshaped_inp.shape[0]
@@ -1142,10 +1140,6 @@ class GPTQ:
                     Losses[:, i1:i2] = Losses1 / 2
                     W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-                del W1, Q1, Err1, Losses1
-                if Hinv is not None:
-                    del Hinv1
-
         # TODO: why is there a torch_sync here? There are no streaming ops here?
         # torch_sync(device=self.module.target_device)
 
@@ -1173,7 +1167,6 @@ class GPTQ:
 
         del Losses
         del self.H
-        del W
 
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
@@ -1187,7 +1180,6 @@ class GPTQ:
         if self.qcfg.desc_act and use_hessian:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
-            del perm, invperm
 
         elif self.qcfg.act_group_aware and use_hessian:
             inv_final = invert_perm(final_perm)
@@ -1198,7 +1190,6 @@ class GPTQ:
             scale = temp_scale
             temp_zero = [zero[i] for i in inv_global_perm_list]
             zero = temp_zero
-            del final_perm, inv_final, global_perm, inv_global_perm, local_perms
 
         if self._tp_pad_cols:
             valid_cols = self._original_columns

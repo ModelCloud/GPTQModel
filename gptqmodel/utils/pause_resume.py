@@ -8,11 +8,11 @@
 Provides thread-safe pause/resume capabilities with keyboard input handling.
 """
 
-import atexit
 import logging
 import sys
 import threading
 import time
+import atexit
 from contextlib import contextmanager
 from enum import Enum
 from typing import Callable, Dict, List, Optional

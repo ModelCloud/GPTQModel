@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class GLM4MoEGPTQ(BaseQModel):
@@ -25,9 +24,6 @@ class GLM4MoEGPTQ(BaseQModel):
 
     out_of_model_tensor_files = ["mtp.safetensors"]
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
-
     module_tree = [
         "model",
         "layers",
@@ -36,14 +32,20 @@ class GLM4MoEGPTQ(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": ("q_proj:0", "q_norm:0:!","k_proj:0", "k_norm:0:!", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp:moe": {  # MoE module - can be Glm4MoeMLP (layer 0) or Glm4MoeMoE (layers 1-46)
+            "mlp": {
                 "gate": ("gate:!",), # Glm4MoeTopKRouter, ~1.6MB float32 per layer.  We really do not quant to quantize this.
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
-                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_experts": {
+                    "gate_proj": ("gate_proj:0",),
+                    "up_proj": ("up_proj:0",),
+                    "down_proj": ("down_proj:1",),
+                },
                 # Standard MLP components for layer 0
-                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "gate_proj": ("gate_proj",),
+                "down_proj": ("down_proj",),
+                "up_proj": ("up_proj",),
             },
         }
     ]

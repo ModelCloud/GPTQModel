@@ -14,7 +14,6 @@ from concurrent.futures import as_completed
 from typing import TYPE_CHECKING, Dict, List, Optional
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
-from ..quantization.config import GcMode
 import torch
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
@@ -26,7 +25,7 @@ from ..utils.device import get_device, get_device_new
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import find_modules, get_module
 from ..utils.offload import offload_to_disk
-from ..utils.torch import CPU, torch_empty_cache, torch_sync
+from ..utils.torch import CPU, torch_sync
 from .stage_subset import SubsetForwardContext, run_subset_stage
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
@@ -264,9 +263,6 @@ def run_layer_stage(
                 #     )
 
                 try:
-                    # Reset current subset for MoE lifecycle hooks as we do not need to collect activation at this stage,
-                    # and need to collect only outputs produced by original forward
-                    looper._current_subset = None
                     layer_outputs = looper._run_forward_batches(
                         module=module,
                         processor=processor,
@@ -524,31 +520,18 @@ def run_layer_stage(
                         )
 
                 if finalize_futures_snapshot:
-                    if looper.gptq_model.quantize_config.wait_for_submodule_finalizers:
-                        # Synchronous: wait for all finalization to complete before proceeding to next layer
-                        # This ensures all packing and writing tasks are done
-                        _drain_finalize_futures(
+                    # Drain finalize futures asynchronously so the main loop can continue scheduling work.
+                    threading.Thread(
+                        target=_drain_finalize_futures,
+                        args=(
                             [future for future, *_ in finalize_futures_snapshot],
                             finalize_pb,
                             finalize_count,
                             layer_index,
-                        )
-                        if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
-                            torch_empty_cache()
-                    else:
-                        # Asynchronous (current/default behavior): drain in background thread
-                        # This allows next layer to start while current layer finalizes
-                        threading.Thread(
-                            target=_drain_finalize_futures,
-                            args=(
-                                [future for future, *_ in finalize_futures_snapshot],
-                                finalize_pb,
-                                finalize_count,
-                                layer_index,
-                            ),
-                            name="SubmoduleFinalizeWatcher",
-                            daemon=True,
-                        ).start()
+                        ),
+                        name="SubmoduleFinalizeWatcher",
+                        daemon=True,
+                    ).start()
                 else:
                     looper._emit_layer_complete(
                         layer_idx=layer_index,

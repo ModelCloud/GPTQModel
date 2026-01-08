@@ -34,10 +34,6 @@ class NamedModule(torch.nn.Module):
         # persistent work state for named module (used by some LoopProcessors)
         # store all `processed()` work state/data/result here
         self.state = {}
-        
-        # Forward hook mechanism (compatible with HookedLinear)
-        self.forward_hook = None
-        self.forward_hook_last = False
 
         # print(f"NamedModule init: name: `{name}, full-name: `{full_name}`")
 
@@ -132,18 +128,6 @@ class NamedModule(torch.nn.Module):
 
     # setattr is always called by python even if attr exists in `self`
     def __setattr__(self, name: str, value: Any) -> None:
-        # Proxy forward_hook to inner module if it supports it (e.g. HookedLinear)
-        if name in ["forward_hook", "forward_hook_last"]:
-            try:
-                module = object.__getattribute__(self, "module")
-                if hasattr(module, name):
-                    setattr(module, name, value)
-            except AttributeError:
-                pass  # module not set yet during __init__
-            # Also set on self for consistency
-            object.__setattr__(self, name, value)
-            return
-
         if name in [
             "module",
             "module_dtype",
@@ -153,7 +137,6 @@ class NamedModule(torch.nn.Module):
             "state",
             "_parent_lock",
             "target_device",
-            "target_device_stream",
             "register_buffer",
             "unregister_buffer",
             "register_parameter",
@@ -172,26 +155,6 @@ class NamedModule(torch.nn.Module):
         else:
             with lock:
                 setattr(module, name, value)
-    
-    def forward(self, *args, **kwargs):
-        """Forward pass with optional hook support (compatible with HookedLinear)."""
-        output = self.module(*args, **kwargs)
-        
-        # Call forward_hook if it exists and wasn't proxied to inner module
-        if self.forward_hook:
-            # Check if inner module has forward_hook (meaning we proxied it)
-            if not hasattr(self.module, 'forward_hook') or self.module.forward_hook is None:
-                # Extract first positional arg as input for hook
-                input_tensor = args[0] if args else None
-                self.forward_hook(self, (input_tensor,), output)
-                
-                # If forward_hook_last is True, this should stop execution (like HookedLinear)
-                # The hook may raise StopForward, which should propagate
-                if self.forward_hook_last:
-                    from ..nn_modules.hooked_linear import StopForward  # Local import to avoid circular dependency
-                    raise StopForward()
-        
-        return output
 
     def stream_state_payload_to_cpu(
         self,

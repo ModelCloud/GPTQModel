@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..moe_lifecycle import W1W3W2MoELifecycleHooks
 
 
 class LFM2MoeQModel(BaseQModel):
@@ -12,9 +11,6 @@ class LFM2MoeQModel(BaseQModel):
 
     dynamic_expert_index = "num_experts"
     layer_modules_strict = False
-
-    # MoE lifecycle hooks for w1/w3/w2 pattern
-    moe_lifecycle_hooks = W1W3W2MoELifecycleHooks()
 
     module_tree= [
         "model",
@@ -25,7 +21,7 @@ class LFM2MoeQModel(BaseQModel):
             "conv": ("in_proj", "out_proj"),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "ffn_norm": ("ffn_norm:!",),
-            "feed_forward:moe": {
+            "feed_forward": {
                 "gate": ("gate:!",),
                 "": ("w1:0", "w3:0", "w2:1"),
                 "experts": {
