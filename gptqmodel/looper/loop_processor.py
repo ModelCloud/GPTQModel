@@ -98,7 +98,7 @@ class LoopProcessor:
 
         self.inputs_cache: InputCache = InputCache(None, None, None, None)
         self.tasks = {}
-
+        
         self.pb = None
         self.fwd_time = None
         self.layer_count = None

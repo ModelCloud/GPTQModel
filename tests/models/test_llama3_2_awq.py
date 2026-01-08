@@ -3,13 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import os
-import sys
-
-TESTS_MODELS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if TESTS_MODELS_ROOT not in sys.path:
-    sys.path.insert(0, TESTS_MODELS_ROOT)
-
 from model_test import ModelTest
 
 from gptqmodel.quantization import FORMAT, METHOD

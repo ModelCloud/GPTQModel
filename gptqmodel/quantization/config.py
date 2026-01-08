@@ -385,6 +385,13 @@ class ExpertsRoutingOverride(BaseMoERouting):
             )
 
 
+# MoE quantization: forward whole calibration dataset to each expert instead of only routed data
+# This ensures all experts receive sufficient calibration samples but increases quantization time
+@dataclass
+class ExpertsRoutingBypass(BaseMoERouting):
+    pass
+
+
 @dataclass
 class MoEConfig:
     routing: BaseMoERouting
@@ -395,6 +402,9 @@ class MoEConfig:
                 f"routing must be an instance of BaseMoERouting, "
                 f"got {type(self.routing).__name__}"
             )
+
+    def routing_bypass(self) -> bool:
+        return isinstance(self.routing, ExpertsRoutingBypass)
 
     def routing_override(self, num_experts: int) -> Union[int, None]:
         """
@@ -666,14 +676,6 @@ class QuantizeConfig():
     # Hessian accumulation controls (GPTQ only)
     hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
 
-    # Works faster than data parallel with some configurations
-    auto_forward_data_parallel: bool = field(
-        default=True,
-        metadata={"help": "When multi-gpu is detected, we may data clone modules to each gpu for data parallelism "
-        "to speed up quantization forwarding. This causes extra time spent (especially for MoE layers) and vram pressure, "
-        "leading in some cases to slower forwarding or vram OOM"}
-    )
-
     # VRAM allocation strategy for MoE-heavy subsets
     vram_strategy: VramStrategy = field(default=VramStrategy.EXCLUSIVE)
 
@@ -689,10 +691,27 @@ class QuantizeConfig():
         metadata={"help": "Wait for all layer finalization tasks (packing, offloading to disk, etc) to complete before proceeding to next layer. May reduce vram pressure for some env."}
     )
 
+    # Callback function to filter devices for compute-intensive stages (quantization and forwarding)
+    # Takes a list of devices and returns either the original list or a filtered subset
+    compute_device_filter: Optional[callable] = field(
+        default=None,
+        metadata={"help": "Callback function to filter devices for compute-intensive stages. Function signature: fn(devices: List) -> List. "
+                  "Example to exclude device 0: compute_device_filter=lambda devices: [d for d in devices if d.index != 0]"}
+    )
+
     moe: MoEConfig = field(
         default=None,
         metadata={"help": "Mixture-of-Experts (MoE) configuration, including routing strategy and related overrides."}
     )
+
+    # Works faster than data parallel with some configurations
+    auto_forward_data_parallel: bool = field(
+        default=True,
+        metadata={"help": "When multi-gpu is detected, we may data clone modules to each gpu for data parallelism "
+        "to speed up quantization forwarding. This causes extra time spent (especially for MoE layers) and vram pressure, "
+        "leading in some cases to slower forwarding or vram OOM"}
+    )
+
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -1110,20 +1129,6 @@ class QuantizeConfig():
             normalized["hessian"] = meta_payload.get("hessian")
         if "gptaq" not in normalized and isinstance(meta_payload, dict) and "gptaq" in meta_payload:
             normalized["gptaq"] = meta_payload.get("gptaq")
-        if "gc_mode" not in normalized and isinstance(meta_payload, dict) and "gc_mode" in meta_payload:
-            normalized["gc_mode"] = meta_payload.get("gc_mode")
-        if (
-            "wait_for_submodule_finalizers" not in normalized
-            and isinstance(meta_payload, dict)
-            and "wait_for_submodule_finalizers" in meta_payload
-        ):
-            normalized["wait_for_submodule_finalizers"] = meta_payload.get("wait_for_submodule_finalizers")
-        if (
-            "auto_forward_data_parallel" not in normalized
-            and isinstance(meta_payload, dict)
-            and "auto_forward_data_parallel" in meta_payload
-        ):
-            normalized["auto_forward_data_parallel"] = meta_payload.get("auto_forward_data_parallel")
 
         cfg = cls(**normalized)
 
@@ -1190,8 +1195,11 @@ class QuantizeConfig():
             smooth = payload
 
         meta_payload = dict(self.meta) if self.meta else {}
+        meta_payload["gc_mode"] = self.gc_mode
+        meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
         if self.moe:
             meta_payload["moe"] = self.moe.to_dict()
+        meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
 
         if self.failsafe is None:
             meta_payload["failsafe"] = None
@@ -1217,9 +1225,6 @@ class QuantizeConfig():
         meta_payload["mse"] = self.mse
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
-        meta_payload["gc_mode"] = self.gc_mode
-        meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
-        meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
         meta_payload["hessian"] = {
             "chunk_size": self.hessian.chunk_size,
             "chunk_bytes": self.hessian.chunk_bytes,
@@ -1243,6 +1248,7 @@ class QuantizeConfig():
             META_FIELD: meta_payload,
             # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
+            # DO NOT EXPORT compute_device_filter since functions are not serializable
         }
 
         # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm
@@ -1293,6 +1299,11 @@ class QuantizeConfig():
         if self.moe is None:
             return None
         return self.moe.routing_override(num_experts)
+
+    def moe_routing_bypass(self) -> bool:
+        if self.moe is None:
+            return False
+        return self.moe.routing_bypass()
 
 # deprecated: will be removed in future update
 @dataclass
