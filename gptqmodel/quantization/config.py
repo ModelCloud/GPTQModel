@@ -270,6 +270,11 @@ class SmoothRowCol(SmoothMethod):
         self.axis = axis
 
 
+class GcMode(str, Enum):
+    INTERVAL = "interval"
+    ON_STAGE_END = "on_stage_end"
+
+
 @dataclass
 class FailSafe:
     strategy: FailSafeStrategy = FailSafeStrategy.RTN # enable failsafe by default due to moe routing behavior breaking calibration based quantization
@@ -672,6 +677,18 @@ class QuantizeConfig():
     # VRAM allocation strategy for MoE-heavy subsets
     vram_strategy: VramStrategy = field(default=VramStrategy.EXCLUSIVE)
 
+    gc_mode: GcMode = field(
+        default=GcMode.INTERVAL,
+        metadata={"help": "Garbage collection mode: 'interval' for regular GC or 'on_stage_end' for GC after stage end (after forward pass, quantize, layer finilization)."}
+    )
+
+    # Control whether to wait for layer finalization (packing, writing) before proceeding to next layer
+    # Default False preserves current behavior (async finalization in background while next layer starts)
+    wait_for_submodule_finalizers: bool = field(
+        default=False,
+        metadata={"help": "Wait for all layer finalization tasks (packing, offloading to disk, etc) to complete before proceeding to next layer. May reduce vram pressure for some env."}
+    )
+
     moe: MoEConfig = field(
         default=None,
         metadata={"help": "Mixture-of-Experts (MoE) configuration, including routing strategy and related overrides."}
@@ -879,6 +896,18 @@ class QuantizeConfig():
                 f"QuantizeConfig: `vram_strategy` must be one of {[v.value for v in VramStrategy]}."
             )
 
+        if isinstance(self.gc_mode, str):
+            try:
+                self.gc_mode = GcMode(self.gc_mode.lower())
+            except ValueError as exc:
+                raise ValueError(
+                    f"QuantizeConfig: `gc_mode` must be one of {[v.value for v in GcMode]}."
+                ) from exc
+        elif not isinstance(self.gc_mode, GcMode):
+            raise ValueError(
+                f"QuantizeConfig: `gc_mode` must be one of {[v.value for v in GcMode]}."
+            )
+
     def extension_set(self, key: str, value: Any):
         if self.adapter is None:
             self.adapter = {}
@@ -1081,6 +1110,14 @@ class QuantizeConfig():
             normalized["hessian"] = meta_payload.get("hessian")
         if "gptaq" not in normalized and isinstance(meta_payload, dict) and "gptaq" in meta_payload:
             normalized["gptaq"] = meta_payload.get("gptaq")
+        if "gc_mode" not in normalized and isinstance(meta_payload, dict) and "gc_mode" in meta_payload:
+            normalized["gc_mode"] = meta_payload.get("gc_mode")
+        if (
+            "wait_for_submodule_finalizers" not in normalized
+            and isinstance(meta_payload, dict)
+            and "wait_for_submodule_finalizers" in meta_payload
+        ):
+            normalized["wait_for_submodule_finalizers"] = meta_payload.get("wait_for_submodule_finalizers")
         if (
             "auto_forward_data_parallel" not in normalized
             and isinstance(meta_payload, dict)
@@ -1180,6 +1217,8 @@ class QuantizeConfig():
         meta_payload["mse"] = self.mse
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
+        meta_payload["gc_mode"] = self.gc_mode
+        meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
         meta_payload["hessian"] = {
             "chunk_size": self.hessian.chunk_size,

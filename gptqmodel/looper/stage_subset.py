@@ -20,10 +20,10 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
-from ..quantization.config import VramStrategy
+from ..quantization.config import GcMode, VramStrategy
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_sync
+from ..utils.torch import torch_empty_cache, torch_sync
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .module_looper import ModuleLooper
@@ -362,6 +362,10 @@ def run_subset_stage(
             if hasattr(subset[name], 'forward_hook'):
                 subset[name].forward_hook = None
                 subset[name].forward_hook_last = False
+
+        if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
+            torch_sync()
+            torch_empty_cache()
     else:
         if DEBUG_ON:
             logger.debug(
@@ -516,6 +520,9 @@ def run_subset_stage(
             continue
         processed_subset[name] = named_module
     torch_sync()
+
+    if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
+        torch_empty_cache()
 
     emit_subset_event("quant_complete")
 

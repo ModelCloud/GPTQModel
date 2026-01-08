@@ -42,7 +42,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, VramStrategy, dynamic_get
+from ..quantization.config import FORMAT, GcMode, METHOD, QUANTIZE_BLACK_LIST, VramStrategy, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.calibration import prepare_calibration_dataset
@@ -681,10 +681,19 @@ class BaseQModel(nn.Module):
         # prepare processor worker (looper)
         module_looper = ModuleLooper(self, processors=processors)
 
-        result = module_looper.loop(
-            backend=backend,
-            failsafe=self.quantize_config.failsafe,
+        # When gc_mode=ON_STAGE_END, disable auto-gc for the whole quantization process
+        # to prevent interference with manual cleanups performed at stage ends
+        gc_context = (
+            DEVICE_THREAD_POOL.no_auto_gc()
+            if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
+            else nullcontext()
         )
+
+        with gc_context:
+            result = module_looper.loop(
+                backend=backend,
+                failsafe=self.quantize_config.failsafe,
+            )
 
         timer = getattr(self, "quant_region_timer", None)
         if timer is not None:
