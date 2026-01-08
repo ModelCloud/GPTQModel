@@ -140,8 +140,9 @@ class ModuleLooper():
         self._vram_strategy = vram_strategy
 
         # Apply compute device filter if provided to determine which devices to use for quantization
-        if self.gptq_model.quantize_config.compute_device_filter is not None:
-            quant_devices_filtered = self.gptq_model.quantize_config.compute_device_filter(quant_devices)
+        compute_device_filter = getattr(self.gptq_model.quantize_config, "compute_device_filter", None)
+        if compute_device_filter is not None:
+            quant_devices_filtered = compute_device_filter(quant_devices)
             if len(quant_devices_filtered) >= 1:
                 quant_devices = quant_devices_filtered
             else:
@@ -161,7 +162,7 @@ class ModuleLooper():
         self._current_subset: Optional[Dict[str, Any]] = None
 
         # moe_routing_override is only required for MoE models (i.e., models with dynamic_expert_index).
-        if self.gptq_model.dynamic_expert_index:
+        if getattr(self.gptq_model, "dynamic_expert_index", None):
             num_experts = self.gptq_model.get_num_experts(self.gptq_model.model.config)
             self.moe_routing_override = self.gptq_model.quantize_config.moe_routing_override(num_experts)
         else:
@@ -571,7 +572,8 @@ class ModuleLooper():
         - Module contains an MoE block
         """
         # Check if feature is enabled
-        flag_enabled = self.gptq_model.quantize_config.moe_routing_bypass()
+        moe_routing_bypass = getattr(self.gptq_model.quantize_config, "moe_routing_bypass", None)
+        flag_enabled = moe_routing_bypass() if callable(moe_routing_bypass) else False
         if not flag_enabled:
             return False
         
