@@ -24,7 +24,7 @@ class GLM4MoEGPTQ(BaseQModel):
     layer_modules_strict = False
 
     out_of_model_tensor_files = ["mtp.safetensors"]
-    
+
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 

@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
+
 from ..base import BaseQModel
 
 
@@ -22,7 +23,7 @@ class Qwen3MoeQModel(BaseQModel):
 
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
-    
+
     module_tree = [
         "model",
         "layers",
