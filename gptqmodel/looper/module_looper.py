@@ -813,7 +813,7 @@ class ModuleLooper():
                     rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
 
                     # MoE lifecycle hooks integration - using context manager
-                with self.MoERoutingOverrideContext(module, self.moe_routing_override) if self.moe_routing_override else nullcontext:
+                with self.MoERoutingOverrideContext(module, self.moe_routing_override) if self.moe_routing_override else nullcontext():
                     module_output = None
                     try:
                         if is_lm_head_module:
@@ -965,7 +965,7 @@ class ModuleLooper():
                 if self.moe_routing_override:
                     ctx = self.MoERoutingOverrideContext(replica, self.moe_routing_override)
                 else:
-                    ctx = nullcontext
+                    ctx = nullcontext()
 
                 if ctx:
                     ctx.__enter__()
