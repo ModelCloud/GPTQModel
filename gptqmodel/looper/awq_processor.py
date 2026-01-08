@@ -1384,6 +1384,9 @@ class AWQProcessor(LoopProcessor):
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
+        self.pack_module(module)
+
+    def pack_module(self, module):
         # generate complete, safe to move to cpu
         # cleanup all memory or states vars persistently added by this processor
         module.stream_sync()
@@ -1392,25 +1395,20 @@ class AWQProcessor(LoopProcessor):
             if self.calculate_w_wq_diff:
                 module.weight.data = module.state.pop("wq").to(CPU)
 
-            module.state.pop("w", None) #
+            module.state.pop("w", None)  #
             module.state.pop("w_wq_diff", None)
 
             # need to clone to due to steamed pinned memory and access on diff thread
             q_zeros = module.state.pop("q_zeros").clone()
             q_scales = module.state.pop("q_scales").clone()
-
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
-
         quant_linear_cls = self._resolve_qlinear_kernel(module.full_name)
-
         layers = find_modules(self.gptq_model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
-
         # replace module with quantized module
         timer = getattr(self.gptq_model, "quant_region_timer", None)
-
         create_start = time.perf_counter() if timer is not None else None
         with log_time_block(
                 "create_quant_module",
@@ -1439,7 +1437,6 @@ class AWQProcessor(LoopProcessor):
                 time.perf_counter() - create_start,
                 source=module_label,
             )
-
         # pack module
         qModules = {
             name: submodule
