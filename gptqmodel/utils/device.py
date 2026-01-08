@@ -40,11 +40,11 @@ def get_device(obj: torch.Tensor | nn.Module) -> torch.device:
         return params[0].device
     elif len(buffers) > 0:
         return buffers[0].device
-    
+
     if isinstance(obj, (HookedLinear, HookedConv1D, HookedConv1d, HookedConv2d, HookedTransformerConv1D)):
         if hasattr(obj, 'weight') and isinstance(obj.weight, torch.Tensor):
             return obj.weight.device
-            
+
     return CPU
 
 def get_device_new(

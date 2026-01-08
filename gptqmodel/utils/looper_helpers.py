@@ -126,14 +126,14 @@ def rehome_module_to_device(
                 for p_name in ["weight", "bias"]:
                     if not hasattr(sub, p_name):
                         continue
-                    
+
                     p = getattr(sub, p_name)
                     if p is None or not isinstance(p, torch.Tensor):
                         continue
-                    
+
                     if only_mismatched and p.device == device:
                         continue
-                        
+
                     try:
                         if isinstance(p, torch.nn.Parameter):
                              with torch.no_grad():

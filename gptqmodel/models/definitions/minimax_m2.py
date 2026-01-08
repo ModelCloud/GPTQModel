@@ -20,7 +20,7 @@ class MiniMaxM2GPTQ(BaseQModel):
     layer_modules_strict = False
 
     dynamic_expert_index = "num_local_experts"
-    
+
     # MoE lifecycle hooks for w1/w3/w2 pattern
     moe_lifecycle_hooks = W1W3W2MoELifecycleHooks()
 
