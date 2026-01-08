@@ -209,7 +209,12 @@ def run_subset_stage(
         for named_module in subset.values():
             setattr(named_module, "moe_enabled", False)
 
-    subset_forward_serial = subset_forward_serial or not looper.gptq_model.quantize_config.auto_forward_data_parallel
+    auto_forward_data_parallel = getattr(
+        looper.gptq_model.quantize_config,
+        "auto_forward_data_parallel",
+        True,
+    )
+    subset_forward_serial = subset_forward_serial or not auto_forward_data_parallel
 
     handle = []
 
