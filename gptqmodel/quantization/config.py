@@ -332,6 +332,105 @@ class GPTAQConfig:
         elif not isinstance(self.device, torch.device):
             raise ValueError("GPTAQConfig: `device` must be a string or torch.device.")
 
+
+@dataclass
+class BaseMoERouting:
+    pass
+
+
+MOE_ALL_EXPERTS = "all"
+
+
+@dataclass
+class ExpertsRoutingOverride(BaseMoERouting):
+    num_experts_per_tok: Union[int, str] = MOE_ALL_EXPERTS
+
+    def __post_init__(self):
+        # Handle string values
+        if isinstance(self.num_experts_per_tok, str):
+            raw = self.num_experts_per_tok.strip()
+
+            # Numeric string -> int (must be > 0)
+            if raw.isdigit():
+                value = int(raw)
+                if value <= 0:
+                    raise ValueError(
+                        f"num_experts_per_tok must be a positive int or '{MOE_ALL_EXPERTS}', "
+                        f"got '{self.num_experts_per_tok}'"
+                    )
+                self.num_experts_per_tok = value
+                return
+
+            # Normalize keyword string
+            value = raw.lower()
+            if value != MOE_ALL_EXPERTS:
+                raise ValueError(
+                    f"num_experts_per_tok must be a positive int or '{MOE_ALL_EXPERTS}', "
+                    f"got '{self.num_experts_per_tok}'"
+                )
+
+            self.num_experts_per_tok = value
+            return
+
+        # Validate integer values
+        if not isinstance(self.num_experts_per_tok, int) or self.num_experts_per_tok <= 0:
+            raise ValueError(
+                f"num_experts_per_tok must be a positive int or '{MOE_ALL_EXPERTS}', "
+                f"got {self.num_experts_per_tok}"
+            )
+
+
+@dataclass
+class MoEConfig:
+    routing: BaseMoERouting
+
+    def __post_init__(self):
+        if not isinstance(self.routing, BaseMoERouting):
+            raise ValueError(
+                f"routing must be an instance of BaseMoERouting, "
+                f"got {type(self.routing).__name__}"
+            )
+
+    def routing_bypass(self) -> bool:
+        return isinstance(self.routing, ExpertsRoutingBypass)
+
+    def routing_override(self, num_experts: int) -> Union[int, None]:
+        """
+        Resolve MoE routing top-k override.
+
+        Returns the effective number of experts per token if routing override
+        is enabled, otherwise None.
+
+        - "all" resolves to `num_experts`
+        - integer value is returned directly
+        """
+        if isinstance(self.routing, ExpertsRoutingOverride):
+            # Resolve "all" to full expert count
+            if isinstance(self.routing.num_experts_per_tok, str) and self.routing.num_experts_per_tok.lower().strip() == MOE_ALL_EXPERTS:
+                return num_experts
+
+            assert isinstance(self.routing.num_experts_per_tok, int)
+            top_k = self.routing.num_experts_per_tok
+
+            # Clamp to valid range and warn user if needed
+            if top_k > num_experts:
+                log.info(f"MoEConfig: MoE routing override num_experts_per_tok ({top_k}) exceeds "
+                    f"num_experts ({num_experts}); clamping to {num_experts}.",)
+                top_k = num_experts
+
+            return top_k
+
+        return None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "routing": {
+                "class": self.routing.__class__.__name__,
+                **asdict(self.routing),
+            }
+        }
+
+
 QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.GPTQ: {
         FORMAT.GPTQ,
@@ -567,6 +666,11 @@ class QuantizeConfig():
 
     # VRAM allocation strategy for MoE-heavy subsets
     vram_strategy: VramStrategy = field(default=VramStrategy.EXCLUSIVE)
+
+    moe: MoEConfig = field(
+        default=None,
+        metadata={"help": "Mixture-of-Experts (MoE) configuration, including routing strategy and related overrides."}
+    )
 
     def __post_init__(self):
         fields_info = fields(self)
@@ -1038,6 +1142,9 @@ class QuantizeConfig():
             smooth = payload
 
         meta_payload = dict(self.meta) if self.meta else {}
+        if self.moe:
+            meta_payload["moe"] = self.moe.to_dict()
+
         if self.failsafe is None:
             meta_payload["failsafe"] = None
         else:
@@ -1130,6 +1237,11 @@ class QuantizeConfig():
             # there is only one scale int32 + one qzero int32 per entire module so overall it contributes to close to 0 bpw
             bpw = self.bits
         log.info(f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
+
+    def moe_routing_override(self, num_experts: int) -> Union[int, None]:
+        if self.moe is None:
+            return None
+        return self.moe.routing_override(num_experts)
 
 # deprecated: will be removed in future update
 @dataclass
