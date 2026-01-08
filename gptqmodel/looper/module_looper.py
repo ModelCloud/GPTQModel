@@ -100,6 +100,8 @@ class ModuleLooper():
         self._loop_stop_event = threading.Event()
         self._loop_stop_exc: Optional[BaseException] = None
         self._loop_stop_waited = False
+        self._dangling_threads: List[threading.Thread] = []
+        self._dangling_threads_lock = threading.Lock()
 
         disk_speed = estimate_disk_io_speed()
         disk_speed_mb = disk_speed / (1024 * 1024)
@@ -190,6 +192,18 @@ class ModuleLooper():
     def register_subset_callback(self, callback) -> None:
         """Register or replace the subset event callback target."""
         self._subset_callback = callback
+
+    def _register_dangling_thread(self, watcher: threading.Thread) -> None:
+        with self._dangling_threads_lock:
+            self._dangling_threads.append(watcher)
+
+    def _wait_dangling_threads(self) -> None:
+        with self._dangling_threads_lock:
+            watchers = list(self._dangling_threads)
+            self._dangling_threads.clear()
+        for watcher in watchers:
+            if watcher.is_alive():
+                watcher.join()
 
     def _resolve_layer_callback(self):
         for candidate in (
@@ -1276,6 +1290,11 @@ class ModuleLooper():
         self._check_loop_stop()
         # Ensure ANY remaining tasks the looper submitted have drained
         DEVICE_THREAD_POOL.wait()  # same as wait('all')
+        # Drain any watcher threads tracking submodule finalization progress.
+        self._wait_dangling_threads()
+        # Ensure any background stream sync tasks complete before returning.
+        from ..utils.stream import STREAM_DEVICE_POOL
+        STREAM_DEVICE_POOL.wait()
         self._check_loop_stop()
 
         # paranoid safety check

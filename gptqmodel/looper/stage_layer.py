@@ -521,7 +521,7 @@ def run_layer_stage(
 
                 if finalize_futures_snapshot:
                     # Drain finalize futures asynchronously so the main loop can continue scheduling work.
-                    threading.Thread(
+                    finalizer_thread = threading.Thread(
                         target=_drain_finalize_futures,
                         args=(
                             [future for future, *_ in finalize_futures_snapshot],
@@ -531,7 +531,9 @@ def run_layer_stage(
                         ),
                         name="SubmoduleFinalizeWatcher",
                         daemon=True,
-                    ).start()
+                    )
+                    looper._register_dangling_thread(finalizer_thread)
+                    finalizer_thread.start()
                 else:
                     looper._emit_layer_complete(
                         layer_idx=layer_index,
