@@ -201,13 +201,13 @@ class ModuleLooper():
                 ]
             self._dangling_threads.append(watcher)
 
-    def _wait_dangling_threads(self) -> None:
+    def wait_dangling_threads(self) -> None:
         with self._dangling_threads_lock:
-            watchers = list(self._dangling_threads)
+            threads = list(self._dangling_threads)
             self._dangling_threads.clear()
-        for watcher in watchers:
-            if watcher.is_alive():
-                watcher.join()
+        for thread in threads:
+            if thread.is_alive():
+                thread.join()
 
     def _resolve_layer_callback(self):
         for candidate in (
@@ -1295,7 +1295,7 @@ class ModuleLooper():
         # Ensure ANY remaining tasks the looper submitted have drained
         DEVICE_THREAD_POOL.wait()  # same as wait('all')
         # Drain any watcher threads tracking submodule finalization progress.
-        self._wait_dangling_threads()
+        self.wait_dangling_threads()
         # Ensure any background stream sync tasks complete before returning.
         from ..utils.stream import STREAM_DEVICE_POOL
         STREAM_DEVICE_POOL.wait()
