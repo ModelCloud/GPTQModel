@@ -13,8 +13,8 @@ from .config import (
                      BaseQuantizeConfig,
                      FailSafe,
                      FailSafeStrategy,
-                     HessianConfig,
                      GPTAQConfig,
+                     HessianConfig,
                      QuantizeConfig,
                      SmoothLog,
                      SmoothMAD,
@@ -26,6 +26,6 @@ from .config import (
                      SmoothRowCol,
                      SmoothSoftNorm,
 )
-from .gptq import GPTQ
 from .gptaq import GPTAQ
+from .gptq import GPTQ
 from .quantizer import Quantizer, quantize

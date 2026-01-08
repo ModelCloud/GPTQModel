@@ -6,9 +6,9 @@
 import torch
 
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY
 from gptqmodel.quantization.config import QuantizeConfig
 
 

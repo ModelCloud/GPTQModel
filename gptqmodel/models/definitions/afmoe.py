@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
+
 from ..base import BaseQModel
 
 
@@ -21,7 +22,7 @@ class AfMoeQModel(BaseQModel):
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
     moe_lifecycle_hooks.expert_block_names = ['experts:0']
     moe_lifecycle_hooks.shared_expert_block_names = ['shared_expert:0']
-    
+
     module_tree = [
         "model",
         "layers",
