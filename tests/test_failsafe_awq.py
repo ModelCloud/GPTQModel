@@ -6,6 +6,7 @@ import torch.nn as nn
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+from gptqmodel.utils.pause_resume import PauseResumeController
 
 
 def _dummy_prepare_dataset(
@@ -21,6 +22,9 @@ def _dummy_prepare_dataset(
 
 class _DummyProgressBar:
     def title(self, _):
+        return self
+
+    def subtitle(self, _):
         return self
 
     def draw(self):
@@ -53,6 +57,7 @@ def test_awq_failsafe_falls_back_to_rtn_when_no_activations(monkeypatch):
         require_fwd=False,
         calculate_w_wq_diff=False,
     )
+    processor._pause_controller = PauseResumeController()
     processor.pb = _DummyProgressBar()
 
     named = NamedModule(model.linear, name="linear", full_name="linear", layer_index=0)
@@ -60,21 +65,20 @@ def test_awq_failsafe_falls_back_to_rtn_when_no_activations(monkeypatch):
 
     calls = {}
 
-    def fake_pack(self, named_linears, start, scales_list):
+    def fake_pack(self, nm):
         calls["called"] = True
-        calls["scales_list"] = scales_list
-        calls["names"] = list(named_linears.keys())
-        for nm in named_linears.values():
-            nm.state["wq"] = nm.module.weight.detach().clone()
+        calls["name"] = nm.full_name
+        nm.state["wq"] = nm.module.weight.detach().clone()
 
     processor.pack_module = types.MethodType(fake_pack, processor)
 
     processor.process(named)
 
+    processor.submodule_finalize(named, gptq_model)
+
     layer_state = processor._get_layer_state(0)
 
     assert calls.get("called") is True
-    assert calls.get("scales_list") == []
-    assert calls.get("names") == ["linear"]
+    assert calls.get("name") == "linear"
     assert layer_state.quantized is True
     assert "wq" in named.state
