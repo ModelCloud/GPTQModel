@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class GLM4MoEGPTQ(BaseQModel):
@@ -25,8 +24,6 @@ class GLM4MoEGPTQ(BaseQModel):
 
     out_of_model_tensor_files = ["mtp.safetensors"]
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     module_tree = [
         "model",

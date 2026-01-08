@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class HymbaQModel(BaseQModel):
@@ -22,8 +21,6 @@ class HymbaQModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.final_layernorm"
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     module_tree = [
         "model",

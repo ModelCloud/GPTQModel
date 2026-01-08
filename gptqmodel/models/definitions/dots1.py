@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ..base import BaseQModel
 
@@ -20,8 +19,6 @@ class Dots1QModel(BaseQModel):
     # the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     module_tree = [
         "model",

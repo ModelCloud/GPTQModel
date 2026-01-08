@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class DeepSeekV3QModel(BaseQModel):
@@ -19,8 +18,6 @@ class DeepSeekV3QModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.norm"
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     # DeepSeek V3 uses dynamic modules based on lora(rank):
     layer_modules_strict = False

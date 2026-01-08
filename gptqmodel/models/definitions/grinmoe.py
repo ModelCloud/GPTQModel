@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..moe_lifecycle import W1W3W2MoELifecycleHooks
 
 
 class GrinMoeQModel(BaseQModel):
@@ -15,8 +14,6 @@ class GrinMoeQModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.norm"
 
-    # MoE lifecycle hooks for w1/w3/w2 pattern
-    moe_lifecycle_hooks = W1W3W2MoELifecycleHooks()
 
     module_tree = [
         "model",

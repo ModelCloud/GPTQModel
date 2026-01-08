@@ -6,7 +6,6 @@
 from transformers import AutoModelForImageTextToText
 
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Llama4QModel(BaseQModel):
@@ -19,8 +18,6 @@ class Llama4QModel(BaseQModel):
 
     dynamic_expert_index = "num_local_experts"
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     module_tree = [
         "language_model",

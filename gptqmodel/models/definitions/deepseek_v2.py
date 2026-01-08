@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 # Both DeepSeek-v2 and DeepSeek-v2-lite are supported in this model def
@@ -18,8 +17,6 @@ class DeepSeekV2QModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.norm"
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     # DeepSeek V2-Lite uses dynamic modules based on lora(rank):
     # https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/modeling_deepseek.py#L712

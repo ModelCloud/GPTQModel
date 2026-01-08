@@ -385,13 +385,6 @@ class ExpertsRoutingOverride(BaseMoERouting):
             )
 
 
-# MoE quantization: forward whole calibration dataset to each expert instead of only routed data
-# This ensures all experts receive sufficient calibration samples but increases quantization time
-@dataclass
-class ExpertsRoutingBypass(BaseMoERouting):
-    pass
-
-
 @dataclass
 class MoEConfig:
     routing: BaseMoERouting
@@ -402,9 +395,6 @@ class MoEConfig:
                 f"routing must be an instance of BaseMoERouting, "
                 f"got {type(self.routing).__name__}"
             )
-
-    def routing_bypass(self) -> bool:
-        return isinstance(self.routing, ExpertsRoutingBypass)
 
     def routing_override(self, num_experts: int) -> Union[int, None]:
         """
@@ -1299,11 +1289,6 @@ class QuantizeConfig():
         if self.moe is None:
             return None
         return self.moe.routing_override(num_experts)
-
-    def moe_routing_bypass(self) -> bool:
-        if self.moe is None:
-            return False
-        return self.moe.routing_bypass()
 
 # deprecated: will be removed in future update
 @dataclass

@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class LongCatFlashQModel(BaseQModel):
@@ -12,8 +11,6 @@ class LongCatFlashQModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.norm"
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     module_tree = [
         "model",

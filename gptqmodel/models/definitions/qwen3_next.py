@@ -5,7 +5,6 @@
 
 from ...quantization import METHOD
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Qwen3NextGPTQ(BaseQModel):
@@ -22,8 +21,6 @@ class Qwen3NextGPTQ(BaseQModel):
 
     dynamic_expert_index = "num_experts"
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     # -----------------------------------------------------------------------------
     # Preferred modern hierarchical spec. The loader will gracefully skip any

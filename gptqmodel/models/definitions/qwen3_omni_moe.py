@@ -11,7 +11,6 @@ from transformers import AutoModelForTextToWaveform, AutoProcessor
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class Qwen3OmniMoeGPTQ(BaseQModel):
@@ -28,8 +27,6 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
 
     pre_lm_head_norm_module = "thinker.model.norm"
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     module_tree = [
         "thinker",
