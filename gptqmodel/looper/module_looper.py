@@ -680,6 +680,10 @@ class ModuleLooper():
         single threaded path. The helper returns the ordered outputs that feed
         the next processor stage when ``need_outputs`` is set.
         """
+        if not force_serial:
+            quant_config = getattr(self.gptq_model, "quantize_config", None)
+            if quant_config is not None and not getattr(quant_config, "auto_forward_data_parallel", True):
+                force_serial = True
         if force_serial:
             return self._run_forward_batches_single(
                 module=module,

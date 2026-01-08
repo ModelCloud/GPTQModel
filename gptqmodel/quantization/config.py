@@ -661,6 +661,14 @@ class QuantizeConfig():
     # Hessian accumulation controls (GPTQ only)
     hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
 
+    # Works faster than data parallel with some configurations
+    auto_forward_data_parallel: bool = field(
+        default=True,
+        metadata={"help": "When multi-gpu is detected, we may data clone modules to each gpu for data parallelism "
+        "to speed up quantization forwarding. This causes extra time spent (especially for MoE layers) and vram pressure, "
+        "leading in some cases to slower forwarding or vram OOM"}
+    )
+
     # VRAM allocation strategy for MoE-heavy subsets
     vram_strategy: VramStrategy = field(default=VramStrategy.EXCLUSIVE)
 
@@ -1073,6 +1081,12 @@ class QuantizeConfig():
             normalized["hessian"] = meta_payload.get("hessian")
         if "gptaq" not in normalized and isinstance(meta_payload, dict) and "gptaq" in meta_payload:
             normalized["gptaq"] = meta_payload.get("gptaq")
+        if (
+            "auto_forward_data_parallel" not in normalized
+            and isinstance(meta_payload, dict)
+            and "auto_forward_data_parallel" in meta_payload
+        ):
+            normalized["auto_forward_data_parallel"] = meta_payload.get("auto_forward_data_parallel")
 
         cfg = cls(**normalized)
 
@@ -1166,6 +1180,7 @@ class QuantizeConfig():
         meta_payload["mse"] = self.mse
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
+        meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
         meta_payload["hessian"] = {
             "chunk_size": self.hessian.chunk_size,
             "chunk_bytes": self.hessian.chunk_bytes,
