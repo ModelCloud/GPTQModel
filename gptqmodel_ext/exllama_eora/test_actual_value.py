@@ -251,7 +251,7 @@ def test_eora_kernel():
     idx.data = torch.argsort(idx).to(torch.int32)
     gptq_shuffle(weight, idx, bits)
     
-    ## I confirmed this part to be identical to that of test_kernel_output.py
+    ## I confirmed this part to be identical to that of test_gptq.py
 
 
     out_shape = x.shape[:-1] + (weight.shape[-1],)
