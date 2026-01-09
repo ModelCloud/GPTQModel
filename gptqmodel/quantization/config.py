@@ -666,6 +666,14 @@ class QuantizeConfig():
     # Hessian accumulation controls (GPTQ only)
     hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
 
+    # Callback function to filter devices for compute-intensive stages (quantization and forwarding)
+    # Takes a list of devices and returns either the original list or a filtered subset
+    compute_device_filter: Optional[callable] = field(
+        default=None,
+        metadata={"help": "Callback function to filter devices for compute-intensive stages. Function signature: fn(devices: List) -> List. "
+                  "Example to exclude device 0: compute_device_filter=lambda devices: [d for d in devices if d.index != 0]"}
+    )
+
     # Works faster than data parallel with some configurations
     auto_forward_data_parallel: bool = field(
         default=True,
@@ -1243,6 +1251,7 @@ class QuantizeConfig():
             META_FIELD: meta_payload,
             # DO NOT EXPORT Adapter to config/json since adapter can be swapped out/in
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
+            # DO NOT EXPORT compute_device_filter since functions are not serializable
         }
 
         # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm

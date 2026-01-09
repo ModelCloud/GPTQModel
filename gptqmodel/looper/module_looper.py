@@ -63,6 +63,9 @@ from .stage_layer import run_layer_stage
 
 log = setup_logger()
 
+_IO_WRITE_SPEED_MB: Optional[float] = None
+_IO_WRITE_SPEED_LOCK = threading.Lock()
+
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from logbar.progress import ProgressBar
 
@@ -75,6 +78,18 @@ class FinalizeProgressInfo(NamedTuple):
 
 class StopMainLoop(Exception):
     """Signal that the module loop should abort immediately."""
+
+
+def io_write_performance() -> Optional[float]:
+    global _IO_WRITE_SPEED_MB
+    if _IO_WRITE_SPEED_MB is not None:
+        return _IO_WRITE_SPEED_MB
+    with _IO_WRITE_SPEED_LOCK:
+        if _IO_WRITE_SPEED_MB is not None:
+            return _IO_WRITE_SPEED_MB
+        disk_speed = estimate_disk_io_speed()
+        _IO_WRITE_SPEED_MB = disk_speed / (1024 * 1024)
+    return _IO_WRITE_SPEED_MB
 
 
 class ModuleLooper():
@@ -103,24 +118,41 @@ class ModuleLooper():
         self._dangling_threads: List[threading.Thread] = []
         self._dangling_threads_lock = threading.Lock()
 
-        disk_speed = estimate_disk_io_speed()
-        disk_speed_mb = disk_speed / (1024 * 1024)
-        if disk_speed < 200 * 1024 * 1024:
-            log.warn(
-                "Disk subsystem write throughput detected at "
-                f"{disk_speed_mb:.1f} MB/s; quantization may be slowed by IO."
-            )
-        else:
-            log.info(
-                "Disk subsystem write throughput detected at "
-                f"{disk_speed_mb:.1f} MB/s."
-            )
+        io_write_speed = io_write_performance()
+        if io_write_speed is not None:
+            if io_write_speed < 100:
+                log.error(
+                    "Disk subsystem write throughput detected at "
+                    f"{io_write_speed:.1f} MB/s; quantization may be severely slowed by IO."
+                )
+            elif io_write_speed < 200:
+                log.warn(
+                    "Disk subsystem write throughput detected at "
+                    f"{io_write_speed:.1f} MB/s; quantization may be slowed by IO."
+                )
+            else:
+                log.info(
+                    "Disk subsystem write throughput detected at "
+                    f"{io_write_speed:.1f} MB/s."
+                )
 
         quant_device_hint = getattr(self.gptq_model.quantize_config, "device", None)
         normalized_quant_device = normalize_device_like(quant_device_hint)
         quant_devices = select_forward_devices(normalized_quant_device) if normalized_quant_device else [CPU]
         if not quant_devices:
             quant_devices = [CPU]
+
+        # Apply compute device filter if provided to determine which devices to use for quantization
+        compute_device_filter = getattr(self.gptq_model.quantize_config, "compute_device_filter", None)
+        if compute_device_filter is not None:
+            quant_devices_filtered = compute_device_filter(quant_devices)
+            if len(quant_devices_filtered) >= 1:
+                quant_devices = quant_devices_filtered
+            else:
+                log.warn(
+                    "compute_device_filter returned empty device list. "
+                    "Using all devices for quantization."
+                )
 
         self._quant_devices = quant_devices
         self._quant_device_rr = 0
@@ -999,9 +1031,19 @@ class ModuleLooper():
 
             processed_rows = 0
 
-            # If no filter is provided, use all devices (default behavior)
-            forward_devices = devices
-            
+            # Apply compute device filter if provided to determine which devices to use for forward execution
+            if self.gptq_model.quantize_config.compute_device_filter is not None:
+                forward_devices = self.gptq_model.quantize_config.compute_device_filter(devices)
+                if len(forward_devices) < 1:
+                    log.warn(
+                        "compute_device_filter returned empty device list. "
+                        "Using all devices for forward execution."
+                    )
+                    forward_devices = devices
+            else:
+                # If no filter is provided, use all devices (default behavior)
+                forward_devices = devices
+
             device_segments: Dict[torch.device, List[int]] = {}
             segment_start = 0
             num_devices = len(forward_devices)
