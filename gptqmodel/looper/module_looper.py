@@ -122,6 +122,18 @@ class ModuleLooper():
         if not quant_devices:
             quant_devices = [CPU]
 
+        # Apply compute device filter if provided to determine which devices to use for quantization
+        compute_device_filter = getattr(self.gptq_model.quantize_config, "compute_device_filter", None)
+        if compute_device_filter is not None:
+            quant_devices_filtered = compute_device_filter(quant_devices)
+            if len(quant_devices_filtered) >= 1:
+                quant_devices = quant_devices_filtered
+            else:
+                log.warn(
+                    "compute_device_filter returned empty device list. "
+                    "Using all devices for quantization."
+                )
+
         self._quant_devices = quant_devices
         self._quant_device_rr = 0
         self._module_device_map: Dict[str, torch.device] = {}
@@ -999,9 +1011,19 @@ class ModuleLooper():
 
             processed_rows = 0
 
-            # If no filter is provided, use all devices (default behavior)
-            forward_devices = devices
-            
+            # Apply compute device filter if provided to determine which devices to use for forward execution
+            if self.gptq_model.quantize_config.compute_device_filter is not None:
+                forward_devices = self.gptq_model.quantize_config.compute_device_filter(devices)
+                if len(forward_devices) < 1:
+                    log.warn(
+                        "compute_device_filter returned empty device list. "
+                        "Using all devices for forward execution."
+                    )
+                    forward_devices = devices
+            else:
+                # If no filter is provided, use all devices (default behavior)
+                forward_devices = devices
+
             device_segments: Dict[torch.device, List[int]] = {}
             segment_start = 0
             num_devices = len(forward_devices)
