@@ -6,6 +6,7 @@
 import os
 import sys
 
+
 TESTS_MODELS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if TESTS_MODELS_ROOT not in sys.path:
     sys.path.insert(0, TESTS_MODELS_ROOT)

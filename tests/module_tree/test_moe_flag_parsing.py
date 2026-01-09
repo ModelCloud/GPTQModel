@@ -5,9 +5,8 @@
 Unit tests for :moe flag parsing and MoE module detection.
 """
 
-import pytest
 
-from gptqmodel.models.base import BaseQModel, MOE_FLAG
+from gptqmodel.models.base import MOE_FLAG, BaseQModel
 
 
 class TestMoEFlagParsing:

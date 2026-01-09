@@ -6,9 +6,8 @@
 import tempfile
 
 import torch
-from torch import nn
-
 from models.model_test import ModelTest
+from torch import nn
 
 from gptqmodel import GPTQModel
 from gptqmodel.models.writer import QUANT_LOG_NSAMPLES

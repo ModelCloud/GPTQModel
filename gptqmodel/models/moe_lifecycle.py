@@ -10,7 +10,7 @@ This module provides a base class for model-specific MoE lifecycle hooks that al
 customization of MoE forward passes and routing logic during quantization.
 """
 
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -19,6 +19,7 @@ from ..nn_modules.hooked_linear import StopForward
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
+
 
 log = setup_logger()
 

@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
+
 from ..base import BaseQModel
 
 
