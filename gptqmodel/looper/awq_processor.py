@@ -410,15 +410,13 @@ class AWQProcessor(LoopProcessor):
             # Drop modules with no captured activations so the layer can still quantize the rest
             for name in missing:
                 input_feat.pop(name, None)
-                with state.lock:
-                    state.modules.pop(name, None)
-                    state.pending_modules.discard(name)
+                state.modules.pop(name, None)
+                state.pending_modules.discard(name)
                 task_entry = self.tasks.pop(name, None)
                 if task_entry and "inputs" in task_entry:
                     task_entry["inputs"].clear()
 
-            with state.lock:
-                remaining_modules = dict(state.modules)
+            remaining_modules = dict(state.modules)
 
             if not remaining_modules:
                 log.warning(
@@ -475,14 +473,13 @@ class AWQProcessor(LoopProcessor):
                 "AWQProcessor: no module configuration generated for layer index %s; skipping quantization.",
                 layer_index,
             )
-            with state.lock:
-                state.quantized = True
-                state.modules.clear()
-                state.pending_modules.clear()
-                state.layer_module = None
-                state.processed_subsets.clear()
-                state.subset_total = None
-                state.previous_weight_scale = None
+            state.quantized = True
+            state.modules.clear()
+            state.pending_modules.clear()
+            state.layer_module = None
+            state.processed_subsets.clear()
+            state.subset_total = None
+            state.previous_weight_scale = None
             if hasattr(self._scale_context, "layer_index"):
                 delattr(self._scale_context, "layer_index")
             if hasattr(self._scale_context, "prev_scale"):
@@ -552,11 +549,10 @@ class AWQProcessor(LoopProcessor):
                 "AWQProcessor: no valid scaling groups for layer %s after filtering; marking layer as quantized.",
                 layer_index,
             )
-            with state.lock:
-                state.quantized = True
-                state.processed_subsets.clear()
-                state.subset_total = None
-                state.previous_weight_scale = None
+            state.quantized = True
+            state.processed_subsets.clear()
+            state.subset_total = None
+            state.previous_weight_scale = None
             if hasattr(self._scale_context, "layer_index"):
                 delattr(self._scale_context, "layer_index")
             if hasattr(self._scale_context, "prev_scale"):
