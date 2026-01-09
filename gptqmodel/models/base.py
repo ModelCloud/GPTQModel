@@ -350,7 +350,7 @@ class BaseQModel(nn.Module):
         if not isinstance(module_spec, str):
             return False
         _, flags = cls._parse_module_flags(module_spec)
-        return "moe" in flags
+        return MOE_FLAG.lstrip(":") in flags
 
     @classmethod
     def _collect_moe_modules_from_tree(cls, tree_node, parent_path="") -> Set[str]:
