@@ -11,6 +11,13 @@ from device_smi import Device
 from torch import nn as nn
 
 from ..models._const import CPU, CUDA_0
+from ..nn_modules.hooked_linear import (
+    HookedConv1D,
+    HookedConv1d,
+    HookedConv2d,
+    HookedLinear,
+    HookedTransformerConv1D,
+)
 
 
 # unit: GiB
@@ -33,8 +40,12 @@ def get_device(obj: torch.Tensor | nn.Module) -> torch.device:
         return params[0].device
     elif len(buffers) > 0:
         return buffers[0].device
-    else:
-        return CPU
+
+    if isinstance(obj, (HookedLinear, HookedConv1D, HookedConv1d, HookedConv2d, HookedTransformerConv1D)):
+        if hasattr(obj, 'weight') and isinstance(obj.weight, torch.Tensor):
+            return obj.weight.device
+
+    return CPU
 
 def get_device_new(
     obj: torch.Tensor | nn.Module,

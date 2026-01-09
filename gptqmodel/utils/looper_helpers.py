@@ -14,7 +14,14 @@ import torch
 from torch.nn import parallel as torch_parallel
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
-from ..nn_modules.hooked_linear import StopForward
+from ..nn_modules.hooked_linear import (
+    HookedConv1D,
+    HookedConv1d,
+    HookedConv2d,
+    HookedLinear,
+    HookedTransformerConv1D,
+    StopForward,
+)
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.device import get_device
 from ..utils.env import env_flag
@@ -114,6 +121,42 @@ def rehome_module_to_device(
     """Move registered tensors on ``module`` to ``device`` with defensive fallbacks."""
     with _rehome_lock:
         for sub in module.modules():
+            # Special handling for hooked modules that may not register params correctly
+            if isinstance(sub, (HookedLinear, HookedConv1D, HookedConv1d, HookedConv2d, HookedTransformerConv1D)):
+                for p_name in ["weight", "bias"]:
+                    if not hasattr(sub, p_name):
+                        continue
+
+                    p = getattr(sub, p_name)
+                    if p is None or not isinstance(p, torch.Tensor):
+                        continue
+
+                    if only_mismatched and p.device == device:
+                        continue
+
+                    try:
+                        if isinstance(p, torch.nn.Parameter):
+                             with torch.no_grad():
+                                new_p = torch.nn.Parameter(
+                                    p.data.to(device, non_blocking=True),
+                                    requires_grad=p.requires_grad,
+                                )
+                             setattr(sub, p_name, new_p)
+                        else:
+                            setattr(sub, p_name, p.to(device, non_blocking=True))
+                    except Exception:
+                        try:
+                            if isinstance(p, torch.nn.Parameter):
+                                with torch.no_grad():
+                                    new_p = torch.nn.Parameter(
+                                        p.data.to(device),
+                                        requires_grad=p.requires_grad,
+                                    )
+                                setattr(sub, p_name, new_p)
+                            else:
+                                setattr(sub, p_name, p.to(device))
+                        except Exception:
+                            pass
             if move_buffers:
                 np_set = getattr(sub, "_non_persistent_buffers_set", set())
                 for name, buf in list(getattr(sub, "_buffers", {}).items()):
@@ -428,4 +471,5 @@ def forward_batch_worker(
     del keep_mask
     if module_output is not None:
         del module_output
+
     return batch_index, result_output, kv_next

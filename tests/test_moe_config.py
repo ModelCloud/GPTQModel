@@ -13,6 +13,7 @@ from gptqmodel import GPTQModel
 from gptqmodel.models.writer import QUANT_LOG_NSAMPLES
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 from gptqmodel.quantization.config import (
+    ExpertsRoutingBypass,
     ExpertsRoutingOverride,
     MoEConfig,
     QuantizeConfig,
@@ -67,6 +68,10 @@ def assert_results(model, target_class, moe_config: MoEConfig):
         moe = qcfg.meta_get("moe")
         assert moe["routing"]["class"] == ExpertsRoutingOverride.__name__
         assert moe["routing"]["num_experts_per_tok"] == moe_config.routing.num_experts_per_tok
+
+    elif isinstance(moe_config.routing, ExpertsRoutingBypass):
+        # Bypass routing disables expert selection while preserving structure
+        assert qcfg.meta_get("moe")["routing"]["class"] == ExpertsRoutingBypass.__name__
 
 
 class TestMoEConfig(ModelTest):
@@ -159,4 +164,9 @@ class TestMoEConfig(ModelTest):
     def test_moe_routing_override(self):
         # Explicitly override expert routing during quantization
         self.MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride())
+        self.quantize_and_assert()
+
+    def test_moe_routing_bypass(self):
+        # Bypass routing logic while keeping MoE structure intact
+        self.MOE_CONFIG = MoEConfig(routing=ExpertsRoutingBypass())
         self.quantize_and_assert()

@@ -42,7 +42,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, GcMode, METHOD, QUANTIZE_BLACK_LIST, VramStrategy, dynamic_get
+from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, GcMode, VramStrategy, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.calibration import prepare_calibration_dataset
@@ -128,6 +128,7 @@ def apply_module_tree_override(module_tree, override):
 
 NOT_QUANTIZE_FLAG = ":!"
 CAPTURE_ONLY_FLAG = ":?"
+MOE_FLAG = ":moe"
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 
 
@@ -331,6 +332,155 @@ class BaseQModel(nn.Module):
         return [".".join(prefix_parts)] if prefix_parts else []
 
     @classmethod
+    def _parse_module_flags(cls, module_spec: str) -> tuple[str, List[str]]:
+        """
+        Parse a module specification into module name and flags.
+        Example: "gate:moe:!" -> ("gate", ["moe", "!"])
+        """
+        parts = module_spec.split(":") if isinstance(module_spec, str) else []
+        name = parts[0] if parts else module_spec
+        flags = [p for p in parts[1:] if p]
+        return name, flags
+
+    @classmethod
+    def has_moe_flag(cls, module_spec: str) -> bool:
+        """
+        Check if a module specification has the :moe flag.
+        """
+        if not isinstance(module_spec, str):
+            return False
+        _, flags = cls._parse_module_flags(module_spec)
+        return "moe" in flags
+
+    @classmethod
+    def _collect_moe_modules_from_tree(cls, tree_node, parent_path="", parent_is_moe=False) -> Set[str]:
+        """
+        Recursively collect all module paths that have the :moe flag.
+        Returns a set of full module paths (e.g., "mlp", "mlp.experts", "mlp.shared_experts").
+        """
+        moe_modules = set()
+
+        if isinstance(tree_node, dict):
+            for key, value in tree_node.items():
+                # Skip the layer index placeholder
+                if key == "#":
+                    # Recursively process the value if it's a dict
+                    if isinstance(value, dict):
+                        moe_modules.update(cls._collect_moe_modules_from_tree(value, parent_path, parent_is_moe))
+                    continue
+
+                # Build full path
+                module_name, _ = cls._parse_module_flags(key) if isinstance(key, str) else (key, [])
+                if parent_path:
+                    full_path = f"{parent_path}.{module_name}"
+                else:
+                    full_path = module_name
+
+                # Check if this key has :moe flag
+                is_moe = cls.has_moe_flag(key) if isinstance(key, str) else False
+                if is_moe or parent_is_moe:
+                    moe_modules.add(full_path)
+
+                # Recursively process nested structures
+                if isinstance(value, (dict, tuple, list)):
+                    moe_modules.update(
+                        cls._collect_moe_modules_from_tree(value, full_path, parent_is_moe or is_moe)
+                    )
+
+        elif isinstance(tree_node, (tuple, list)):
+            for item in tree_node:
+                if isinstance(item, str) and cls.has_moe_flag(item):
+                    module_name, _ = cls._parse_module_flags(item)
+                    if parent_path:
+                        moe_modules.add(f"{parent_path}.{module_name}")
+                    else:
+                        moe_modules.add(module_name)
+                elif isinstance(item, dict):
+                    moe_modules.update(cls._collect_moe_modules_from_tree(item, parent_path, parent_is_moe))
+
+        return moe_modules
+
+    @classmethod
+    def get_moe_modules(cls) -> Set[str]:
+        """
+        Get all MoE module paths from the model's module_tree.
+        Returns a set of module paths that have the :moe flag.
+
+        Example: {"mlp", "mlp.experts", "mlp.shared_experts", "mlp.gate"}
+        """
+        if cls.module_tree is None:
+            return set()
+
+        return cls._collect_moe_modules_from_tree(cls.module_tree)
+
+    @classmethod
+    def is_moe_module(cls, module_path: str) -> bool:
+        """
+        Check if a given module path is an MoE module based on :moe flags.
+
+        Args:
+            module_path: Full module path like "model.layers.0.mlp.experts.5.gate_proj"
+
+        Returns:
+            True if any parent in the path is marked with :moe flag
+        """
+        moe_modules = cls.get_moe_modules()
+
+        # Check if any MoE module is a prefix of this path
+        for moe_module in moe_modules:
+            # Handle layer index in path (e.g., "model.layers.0.mlp" should match "mlp")
+            if f".{moe_module}" in module_path or module_path.endswith(moe_module):
+                return True
+            # Also check for patterns like "mlp.experts.5" matching "mlp.experts"
+            path_parts = module_path.split(".")
+            for i in range(len(path_parts)):
+                partial_path = ".".join(path_parts[i:])
+                if partial_path.startswith(moe_module + ".") or partial_path == moe_module:
+                    return True
+
+        return False
+
+    @classmethod
+    def get_moe_module_name(cls) -> Optional[str]:
+        """
+        Get the name of the MoE module from module_tree.
+
+        Each layer can have only ONE MoE module marked with :moe flag.
+        For example:
+        - GLM-4: "mlp:moe" -> returns "mlp"
+        - MiniMax-M2: "block_sparse_moe:moe" -> returns "block_sparse_moe"
+
+        Returns:
+            The name of the MoE module (without flags), or None if no MoE module is defined
+        """
+        if cls.module_tree is None:
+            return None
+
+        # Find the dict that represents layer structure (after "#")
+        layer_structure = None
+        found_hash = False
+        for item in cls.module_tree:
+            if item == "#":
+                found_hash = True
+                continue
+            if found_hash and isinstance(item, dict):
+                layer_structure = item
+                break
+
+        if layer_structure is None:
+            return None
+
+        # Look for a key with :moe flag at the top level of layer structure
+        for key in layer_structure.keys():
+            if cls.has_moe_flag(key):
+                # Extract module name without flags
+                module_name, _ = cls._parse_module_flags(key)
+                return module_name
+
+        return None
+
+
+    @classmethod
     def build_moe_modules_if_need(cls, model_config, layer_modules, is_awq_quantize: bool = False):
         # MoE models
         if model_config is not None and cls.dynamic_expert_index is not None:
@@ -364,6 +514,7 @@ class BaseQModel(nn.Module):
                             moe_simple[-1].append(n)
                     # Currently, only need to add `capture_only_modules` to `['mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']`
                     # or ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
+                    # or ['mlp.shared_experts.gate_proj', 'mlp.shared_experts.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
                     add_capture_only_module = len(names) == (4 if any("shared_expert" in n for n in names) else 2)
                     if add_capture_only_module and capture_only_modules:
                         # Extend all elements in capture_only_modules
@@ -457,6 +608,45 @@ class BaseQModel(nn.Module):
         )
 
     def quantize(
+        self,
+        calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
+        calibration_concat_size: Optional[int] = None,
+        calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle
+        batch_size: int = 1,
+        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
+        # eora adapter generation needs config Lora(rank=1, path='lora.safetensors')
+        adapter: Adapter = None,
+        adapter_calibration_dataset: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]] = None,
+        # minimum length of calibration data, default is 10
+        calibration_data_min_length: int = 10,
+        calibration_concat_separator: Optional[str] = None,
+    ) -> Dict[str, List[Dict[str, str]]]:
+        import sys
+        import traceback
+
+        try:
+            return self.quantize_core(
+                calibration=calibration,
+                calibration_concat_size=calibration_concat_size,
+                calibration_sort=calibration_sort,
+                batch_size=batch_size,
+                tokenizer=tokenizer,
+                backend=backend,
+                adapter=adapter,
+                adapter_calibration_dataset=adapter_calibration_dataset,
+                calibration_data_min_length=calibration_data_min_length,
+                calibration_concat_separator=calibration_concat_separator,
+            )
+        except Exception:
+            # TODO: this is workaround for the overwritten of the last line of the trace
+            # on quantization crash, originally caused by logbar progress bar (probably)
+            traceback.print_exc()
+            print()
+            sys.exit(1)
+
+    def quantize_core(
         self,
         calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
@@ -683,11 +873,7 @@ class BaseQModel(nn.Module):
 
         # When gc_mode=ON_STAGE_END, disable auto-gc for the whole quantization process
         # to prevent interference with manual cleanups performed at stage ends
-        gc_context = (
-            DEVICE_THREAD_POOL.no_auto_gc()
-            if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
-            else nullcontext()
-        )
+        gc_context = DEVICE_THREAD_POOL.no_auto_gc() if self.quantize_config.gc_mode == GcMode.ON_STAGE_END else nullcontext()
 
         with gc_context:
             result = module_looper.loop(

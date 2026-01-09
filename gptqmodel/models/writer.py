@@ -145,7 +145,7 @@ def ModelWriter(cls):
             with open(os.path.join(save_dir, "quant_log.csv"), mode='w', newline='') as file:
                 w = csv.writer(file)
                 w.writerow([PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, QUANT_LOG_DAMP, PROCESS_LOG_TIME])
-                w.writerows([[entry.get(PROCESS_LOG_LAYER), entry.get(PROCESS_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
+                w.writerows([[entry.get(PROCESS_LOG_LAYER), entry.get(PROCESS_LOG_MODULE), entry.get(QUANT_LOG_LOSS), entry.get(QUANT_LOG_NSAMPLES),
                               entry.get(QUANT_LOG_DAMP), entry.get(PROCESS_LOG_TIME)] for entry in self.quant_log])
 
         pre_quantized_size_mb = get_model_files_size(self.model_local_path)
