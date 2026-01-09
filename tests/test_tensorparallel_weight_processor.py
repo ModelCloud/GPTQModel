@@ -21,10 +21,9 @@ def test_tensorparallel_pre_padding_applies_zero_pad_metadata():
     linear = torch.nn.Linear(10, 7, bias=False)
     named = NamedModule(linear, name="proj", full_name="layer.0.proj", layer_index=0)
 
-    qcfg = QuantizeConfig(bits=4, mock_quantization=True)
+    qcfg = QuantizeConfig(bits=4, mock_quantization=True, process={"gptq": {"act_group_aware": False}})
     qcfg.group_size = -1
     qcfg.desc_act = False
-    qcfg.act_group_aware = False
 
     calibration_stub = [{"input_ids": torch.ones((1, 1), dtype=torch.long)}]
 
@@ -70,10 +69,9 @@ def test_tensorparallel_weight_processor_with_positive_group_size():
     linear = torch.nn.Linear(10, 7, bias=False)
     NamedModule(linear, name="proj", full_name="layer.0.proj", layer_index=0)
 
-    qcfg = QuantizeConfig(bits=4, mock_quantization=True)
+    qcfg = QuantizeConfig(bits=4, mock_quantization=True, process={"gptq": {"act_group_aware": False}})
     qcfg.group_size = 128  # Positive group_size
     qcfg.desc_act = False
-    qcfg.act_group_aware = False
 
     calibration_stub = [{"input_ids": torch.ones((1, 1), dtype=torch.long)}]
 
@@ -100,10 +98,9 @@ def test_tensorparallel_weight_processor_with_negative_group_size():
     linear = torch.nn.Linear(10, 7, bias=False)
     NamedModule(linear, name="proj", full_name="layer.0.proj", layer_index=0)
 
-    qcfg = QuantizeConfig(bits=4, mock_quantization=True)
+    qcfg = QuantizeConfig(bits=4, mock_quantization=True, process={"gptq": {"act_group_aware": False}})
     qcfg.group_size = -1  # Negative group_size
     qcfg.desc_act = False
-    qcfg.act_group_aware = False
 
     calibration_stub = [{"input_ids": torch.ones((1, 1), dtype=torch.long)}]
 
@@ -132,10 +129,9 @@ def test_tensorparallel_weight_processor_group_size_lcm_calculation():
     calibration_stub = [{"input_ids": torch.ones((1, 1), dtype=torch.long)}]
 
     # Test with group_size = 32
-    qcfg = QuantizeConfig(bits=4, mock_quantization=True)
+    qcfg = QuantizeConfig(bits=4, mock_quantization=True, process={"gptq": {"act_group_aware": False}})
     qcfg.group_size = 32
     qcfg.desc_act = False
-    qcfg.act_group_aware = False
 
     preprocessor = TensorParallelWeightProcessor(
         tokenizer=None,

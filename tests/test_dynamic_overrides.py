@@ -28,13 +28,16 @@ def test_dynamic_overrides_apply_per_module(monkeypatch):
     monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
 
     qcfg = QuantizeConfig(
+        process={"gptq": {}},
         dynamic={
             "model.linear": {
                 "gptaq": {"alpha": 0.5, "device": "cpu"},
                 "failsafe": {"strategy": "median", "threshold": "2%"},
-                "hessian": {"chunk_size": 32, "chunk_bytes": 1024, "staging_dtype": "bfloat16"},
+                "process": {
+                    "gptq": {"hessian": {"chunk_size": 32, "chunk_bytes": 1024, "staging_dtype": "bfloat16"}}
+                },
             },
-        }
+        },
     )
 
     processor = _make_processor(qcfg)
@@ -56,9 +59,9 @@ def test_dynamic_overrides_apply_per_module(monkeypatch):
     assert dynamic_cfg.failsafe is not None
     assert dynamic_cfg.failsafe.strategy == "median"
     assert dynamic_cfg.failsafe.threshold == "2%"
-    assert dynamic_cfg.hessian.chunk_size == 32
-    assert dynamic_cfg.hessian.chunk_bytes == 1024
-    assert dynamic_cfg.hessian.staging_dtype == torch.bfloat16
+    assert dynamic_cfg.process.gptq.hessian.chunk_size == 32
+    assert dynamic_cfg.process.gptq.hessian.chunk_bytes == 1024
+    assert dynamic_cfg.process.gptq.hessian.staging_dtype == torch.bfloat16
 
     module_other = NamedModule(
         torch.nn.Linear(4, 4, bias=False),
@@ -73,6 +76,6 @@ def test_dynamic_overrides_apply_per_module(monkeypatch):
     assert other_cfg.gptaq is None
     assert other_cfg.failsafe.strategy == qcfg.failsafe.strategy
     assert other_cfg.failsafe.threshold == qcfg.failsafe.threshold
-    assert other_cfg.hessian.chunk_size == qcfg.hessian.chunk_size
-    assert other_cfg.hessian.chunk_bytes == qcfg.hessian.chunk_bytes
-    assert other_cfg.hessian.staging_dtype == qcfg.hessian.staging_dtype
+    assert other_cfg.process.gptq.hessian.chunk_size == qcfg.process.gptq.hessian.chunk_size
+    assert other_cfg.process.gptq.hessian.chunk_bytes == qcfg.process.gptq.hessian.chunk_bytes
+    assert other_cfg.process.gptq.hessian.staging_dtype == qcfg.process.gptq.hessian.staging_dtype

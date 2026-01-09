@@ -96,17 +96,18 @@ class AWQProcessor(LoopProcessor):
         self.qlinear_kernel = self._select_qlinear_kernel_for_format(qcfg.format)
 
         self.model = model
+        process_cfg = qcfg.process.awq if qcfg.process else None
         # Whether to apply clipping to the model during quantization. Some models may perform better with this set to False.
-        self.apply_clip = True
+        self.apply_clip = process_cfg.apply_clip if process_cfg else True
         # "The loss computation and per-channel mean is optimized into chunked computations."
         # " Adjust this parameter to increase or decrease memory usage for these computations."
         # " Default is 1GB (1024 * 1024 * 1024)."
-        self.max_chunk_memory = 1024 * 1024 * 1024
+        self.max_chunk_memory = process_cfg.max_chunk_memory if process_cfg else 1024 * 1024 * 1024
 
         self.format = qcfg.format
 
         # Whether to scale using both w/x or just x.
-        self.duo_scaling = True
+        self.duo_scaling = process_cfg.duo_scaling if process_cfg else True
 
         self._module_forward_kwargs: Dict[str, torch.Tensor] = {}
         self._initialize_sample_counts()

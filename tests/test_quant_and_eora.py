@@ -80,7 +80,7 @@ class Test(ModelTest):
                 bits=self.BITS,
                 group_size=self.GROUP_SIZE,
                 desc_act=self.DESC_ACT,  # bitblas only supports DESC_ACT=False
-                act_group_aware=self.ACT_GROUP_AWARE,
+                process={"gptq": {"act_group_aware": self.ACT_GROUP_AWARE}},
                 adapter=eora,
                 format=format,
                 quant_method=quant_method,

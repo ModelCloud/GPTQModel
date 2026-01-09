@@ -1413,7 +1413,13 @@ class ModuleLooper():
                 raise NotImplementedError(f"This type({type(lm_head_module)}) of lm_head quantization is currently not "
                                           f"supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}")
 
-            lm_head_quant_config = {"bits": 8, "group_size": 32, "sym": True, "desc_act": False, "mse": 2.4}
+            lm_head_quant_config = {
+                "bits": 8,
+                "group_size": 32,
+                "sym": True,
+                "desc_act": False,
+                "process": {"gptq": {"mse": 2.4}},
+            }
             if self.gptq_model.quantize_config.dynamic is None:
                 self.gptq_model.quantize_config.dynamic = {self.gptq_model.lm_head: lm_head_quant_config}
             elif self.gptq_model.quantize_config.dynamic_get(self.gptq_model.lm_head, default=None) is None:

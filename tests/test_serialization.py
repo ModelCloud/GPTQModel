@@ -19,7 +19,7 @@ import torch  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, FORMAT_FIELD_CHECKPOINT, QuantizeConfig  # noqa: E402
-from gptqmodel.quantization.config import GPTAQConfig, HessianConfig, VramStrategy  # noqa: E402
+from gptqmodel.quantization.config import GPTAQConfig, VramStrategy  # noqa: E402
 
 
 class TestSerialization(unittest.TestCase):
@@ -57,13 +57,17 @@ class TestSerialization(unittest.TestCase):
             offload_to_disk=True,
             offload_to_disk_path="./offload-test",
             pack_impl="gpu",
-            mse=0.125,
             mock_quantization=True,
-            hessian=HessianConfig(
-                chunk_size=256,
-                chunk_bytes=4096,
-                staging_dtype=torch.bfloat16,
-            ),
+            process={
+                "gptq": {
+                    "mse": 0.125,
+                    "hessian": {
+                        "chunk_size": 256,
+                        "chunk_bytes": 4096,
+                        "staging_dtype": "bfloat16",
+                    },
+                }
+            },
             vram_strategy=VramStrategy.BALANCED,
         )
 
@@ -77,10 +81,7 @@ class TestSerialization(unittest.TestCase):
             "offload_to_disk",
             "offload_to_disk_path",
             "pack_impl",
-            "mse",
             "mock_quantization",
-            "act_group_aware",
-            "hessian",
             "vram_strategy",
         ]
         for field in meta_only_fields:
@@ -92,13 +93,16 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(meta["offload_to_disk"], cfg.offload_to_disk)
         self.assertEqual(meta["offload_to_disk_path"], cfg.offload_to_disk_path)
         self.assertEqual(meta["pack_impl"], cfg.pack_impl)
-        self.assertEqual(meta["mse"], cfg.mse)
         self.assertEqual(meta["mock_quantization"], cfg.mock_quantization)
-        self.assertEqual(meta["act_group_aware"], cfg.act_group_aware)
-        self.assertEqual(meta["hessian"]["chunk_size"], cfg.hessian.chunk_size)
-        self.assertEqual(meta["hessian"]["chunk_bytes"], cfg.hessian.chunk_bytes)
-        self.assertEqual(meta["hessian"]["staging_dtype"], "bfloat16")
         self.assertEqual(meta["vram_strategy"], cfg.vram_strategy.value)
+
+        process_payload = payload.get("process")
+        self.assertIsInstance(process_payload, dict)
+        self.assertIs(process_payload["gptq"]["act_group_aware"], True)
+        self.assertEqual(process_payload["gptq"]["mse"], 0.125)
+        self.assertEqual(process_payload["gptq"]["hessian"]["chunk_size"], 256)
+        self.assertEqual(process_payload["gptq"]["hessian"]["chunk_bytes"], 4096)
+        self.assertEqual(process_payload["gptq"]["hessian"]["staging_dtype"], "bfloat16")
 
     def test_gptaq_config_none_serialization(self):
         cfg = QuantizeConfig()

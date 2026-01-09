@@ -35,7 +35,7 @@ def _run_add_batch(
     warmup_batches: int,
     chunk_bytes: Optional[int],
 ) -> Dict[str, float]:
-    qcfg = QuantizeConfig(hessian=HessianConfig(chunk_bytes=chunk_bytes))
+    qcfg = QuantizeConfig(process={"gptq": {"hessian": HessianConfig(chunk_bytes=chunk_bytes)}})
 
     module = _make_module(hidden_dim, device)
     gptq = GPTQ(module, qcfg=qcfg)
