@@ -63,6 +63,9 @@ from .stage_layer import run_layer_stage
 
 log = setup_logger()
 
+_DISK_SPEED_MB: Optional[float] = None
+_DISK_SPEED_LOCK = threading.Lock()
+
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from logbar.progress import ProgressBar
 
@@ -75,6 +78,18 @@ class FinalizeProgressInfo(NamedTuple):
 
 class StopMainLoop(Exception):
     """Signal that the module loop should abort immediately."""
+
+
+def io_write_perforamnce() -> Optional[float]:
+    global _DISK_SPEED_MB
+    if _DISK_SPEED_MB is not None:
+        return _DISK_SPEED_MB
+    with _DISK_SPEED_LOCK:
+        if _DISK_SPEED_MB is not None:
+            return _DISK_SPEED_MB
+        disk_speed = estimate_disk_io_speed()
+        _DISK_SPEED_MB = disk_speed / (1024 * 1024)
+    return _DISK_SPEED_MB
 
 
 class ModuleLooper():
@@ -103,18 +118,23 @@ class ModuleLooper():
         self._dangling_threads: List[threading.Thread] = []
         self._dangling_threads_lock = threading.Lock()
 
-        disk_speed = estimate_disk_io_speed()
-        disk_speed_mb = disk_speed / (1024 * 1024)
-        if disk_speed < 200 * 1024 * 1024:
-            log.warn(
-                "Disk subsystem write throughput detected at "
-                f"{disk_speed_mb:.1f} MB/s; quantization may be slowed by IO."
-            )
-        else:
-            log.info(
-                "Disk subsystem write throughput detected at "
-                f"{disk_speed_mb:.1f} MB/s."
-            )
+        io_write_speed = io_write_perforamnce()
+        if io_write_speed is not None:
+            if io_write_speed < 100:
+                log.error(
+                    "Disk subsystem write throughput detected at "
+                    f"{io_write_speed:.1f} MB/s; quantization may be severely slowed by IO."
+                )
+            elif io_write_speed < 200:
+                log.warn(
+                    "Disk subsystem write throughput detected at "
+                    f"{io_write_speed:.1f} MB/s; quantization may be slowed by IO."
+                )
+            else:
+                log.info(
+                    "Disk subsystem write throughput detected at "
+                    f"{io_write_speed:.1f} MB/s."
+                )
 
         quant_device_hint = getattr(self.gptq_model.quantize_config, "device", None)
         normalized_quant_device = normalize_device_like(quant_device_hint)
