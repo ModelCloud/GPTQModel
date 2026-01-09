@@ -339,6 +339,57 @@ class GPTAQConfig:
 
 
 @dataclass
+class AWQProcessConfig:
+    apply_clip: bool = field(default=True)
+    max_chunk_memory: int = field(default=1024 * 1024 * 1024)
+    duo_scaling: bool = field(default=True)
+
+    def __post_init__(self):
+        if not isinstance(self.apply_clip, bool):
+            self.apply_clip = bool(self.apply_clip)
+        if not isinstance(self.duo_scaling, bool):
+            self.duo_scaling = bool(self.duo_scaling)
+        if not isinstance(self.max_chunk_memory, int):
+            raise ValueError("AWQProcessConfig: `max_chunk_memory` must be an integer.")
+        if self.max_chunk_memory <= 0:
+            raise ValueError("AWQProcessConfig: `max_chunk_memory` must be a positive integer amount of bytes.")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "apply_clip": self.apply_clip,
+            "max_chunk_memory": self.max_chunk_memory,
+            "duo_scaling": self.duo_scaling,
+        }
+
+
+@dataclass
+class QuantizeProcessConfig:
+    awq: Optional[AWQProcessConfig] = field(default=None)
+
+    def __post_init__(self):
+        if isinstance(self.awq, dict):
+            self.awq = AWQProcessConfig(**self.awq)
+        elif self.awq is not None and not isinstance(self.awq, AWQProcessConfig):
+            raise ValueError("QuantizeProcessConfig: `awq` must be an AWQProcessConfig or dict.")
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "QuantizeProcessConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("QuantizeProcessConfig: `process` must be a dict.")
+        supported = {"awq"}
+        unknown = set(payload.keys()) - supported
+        if unknown:
+            raise ValueError(f"QuantizeProcessConfig: Unsupported process keys: {sorted(unknown)}.")
+        return cls(awq=payload.get("awq"))
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        if self.awq is not None:
+            out["awq"] = self.awq.to_dict()
+        return out
+
+
+@dataclass
 class BaseMoERouting:
     pass
 
@@ -659,6 +710,12 @@ class QuantizeConfig():
     # awq only:
     zero_point: bool = field(default=True)
 
+    # process (aka quant_method) specific properties
+    # note quant_method is legacy terminology, within the gptqmodel framework
+    # quant_methods are realized as stage/lifecycle processes
+    # change gptq/awq specific controls here
+    process: Optional[QuantizeProcessConfig] = field(default=None)
+
     # gptq only:
     # skip all heavy computations for testing model loading
     mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
@@ -845,6 +902,15 @@ class QuantizeConfig():
             self.gptaq = GPTAQConfig(**self.gptaq)
         elif not isinstance(self.gptaq, GPTAQConfig):
             raise ValueError("QuantizeConfig: `gptaq` must be a GPTAQConfig, dict, or None.")
+
+        if self.process is None:
+            pass
+        elif isinstance(self.process, QuantizeProcessConfig):
+            pass
+        elif isinstance(self.process, dict):
+            self.process = QuantizeProcessConfig.from_dict(self.process)
+        else:
+            raise ValueError("QuantizeConfig: `process` must be a QuantizeProcessConfig, dict, or None.")
 
         # resolve activation ordering compatibility and defaults
         desc_act_user_value = self.desc_act
@@ -1253,6 +1319,9 @@ class QuantizeConfig():
             # ADAPTER_FIELD: self.adapter.to_dict() if self.adapter else None,
             # DO NOT EXPORT compute_device_filter since functions are not serializable
         }
+
+        if self.process is not None:
+            out["process"] = self.process.to_dict()
 
         # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm
         if self.quant_method == METHOD.AWQ:
