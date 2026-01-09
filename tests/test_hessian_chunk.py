@@ -10,7 +10,7 @@ import time
 import tracemalloc
 import types
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Dict, Iterable, List, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Tuple
 
 import pytest
 import torch
@@ -52,6 +52,10 @@ def _instrument_chunks(gptq: GPTQ) -> None:
     gptq.borrow_materialized_chunk_fp32 = types.MethodType(wrapped, gptq)
 
 
+def _gptq_process(hessian: HessianConfig) -> Dict[str, Dict[str, Any]]:
+    return {"gptq": {"hessian": hessian}}
+
+
 def test_hessian_chunk_consistency_matches_full_precision():
     torch.manual_seed(0)
 
@@ -60,16 +64,20 @@ def test_hessian_chunk_consistency_matches_full_precision():
     module_chunked = _clone_module(base)
 
     qcfg_full = QuantizeConfig(
-        hessian=HessianConfig(
-            chunk_size=None,
-            chunk_bytes=1_000_000_000,
-            staging_dtype=torch.float32,
+        process=_gptq_process(
+            HessianConfig(
+                chunk_size=None,
+                chunk_bytes=1_000_000_000,
+                staging_dtype=torch.float32,
+            )
         ),
     )
     qcfg_chunked = QuantizeConfig(
-        hessian=HessianConfig(
-            chunk_size=16,
-            staging_dtype=torch.float32,
+        process=_gptq_process(
+            HessianConfig(
+                chunk_size=16,
+                staging_dtype=torch.float32,
+            )
         ),
     )
 
@@ -98,12 +106,12 @@ def test_hessian_staging_dtype_accuracy_cuda():
 
     calib = torch.randn(256, 64, device=device, dtype=torch.float16)
 
-    qcfg_default = QuantizeConfig(hessian=HessianConfig(staging_dtype=torch.float32))
+    qcfg_default = QuantizeConfig(process=_gptq_process(HessianConfig(staging_dtype=torch.float32)))
     gptq_default = GPTQ(_clone_module(base).to(device), qcfg_default)
     _, baseline_xtx, _ = gptq_default.process_batch(calib.clone())
 
     for staging_dtype in (torch.bfloat16, torch.float16):
-        qcfg = QuantizeConfig(hessian=HessianConfig(staging_dtype=staging_dtype))
+        qcfg = QuantizeConfig(process=_gptq_process(HessianConfig(staging_dtype=staging_dtype)))
         gptq = GPTQ(_clone_module(base).to(device), qcfg)
         _, staged_xtx, _ = gptq.process_batch(calib.clone())
 
@@ -126,11 +134,11 @@ def test_hessian_bf16_vs_fp32_staging_closeness():
     gptq_default = GPTQ(_clone_module(base).to(device), qcfg_default)
     _, default_xtx, _ = gptq_default.process_batch(calib.clone())
 
-    qcfg_fp32 = QuantizeConfig(hessian=HessianConfig(staging_dtype=torch.float32))
+    qcfg_fp32 = QuantizeConfig(process=_gptq_process(HessianConfig(staging_dtype=torch.float32)))
     gptq_fp32 = GPTQ(_clone_module(base).to(device), qcfg_fp32)
     _, fp32_xtx, _ = gptq_fp32.process_batch(calib.clone())
 
-    qcfg_bf16 = QuantizeConfig(hessian=HessianConfig(staging_dtype=torch.bfloat16))
+    qcfg_bf16 = QuantizeConfig(process=_gptq_process(HessianConfig(staging_dtype=torch.bfloat16)))
     gptq_bf16 = GPTQ(_clone_module(base).to(device), qcfg_bf16)
     _, bf16_xtx, _ = gptq_bf16.process_batch(calib.clone())
 
@@ -144,11 +152,11 @@ def test_hessian_chunk_invocations_and_workspace_shape():
 
     base = torch.nn.Linear(64, 32, bias=False).eval()
 
-    large_cfg = QuantizeConfig(hessian=HessianConfig(chunk_size=256))
+    large_cfg = QuantizeConfig(process=_gptq_process(HessianConfig(chunk_size=256)))
     large_gptq = GPTQ(_clone_module(base), large_cfg)
     _instrument_chunks(large_gptq)
 
-    small_cfg = QuantizeConfig(hessian=HessianConfig(chunk_size=16))
+    small_cfg = QuantizeConfig(process=_gptq_process(HessianConfig(chunk_size=16)))
     small_gptq = GPTQ(_clone_module(base), small_cfg)
     _instrument_chunks(small_gptq)
 
@@ -170,7 +178,7 @@ def test_hessian_chunk_invocations_and_workspace_shape():
     assert getattr(large_gptq, "_borrow_workspace_totals", {}).get("requests") == 0
 
     small_gptq.process_batch(calib.clone())
-    expected_chunks = math.ceil(calib.shape[0] / small_cfg.hessian.chunk_size)
+    expected_chunks = math.ceil(calib.shape[0] / small_cfg.process.gptq.hessian.chunk_size)
     assert small_gptq._chunk_invocations == expected_chunks
 
     small_summary = getattr(small_gptq, "_borrow_workspace_last_summary", None)
@@ -213,7 +221,7 @@ def test_hessian_chunk_bytes_budget():
     module = _clone_module(base)
 
     bytes_budget = 16 * 48 * 4
-    qcfg = QuantizeConfig(hessian=HessianConfig(chunk_size=None, chunk_bytes=bytes_budget))
+    qcfg = QuantizeConfig(process=_gptq_process(HessianConfig(chunk_size=None, chunk_bytes=bytes_budget)))
     gptq = GPTQ(module, qcfg)
     _instrument_chunks(gptq)
 
@@ -238,9 +246,11 @@ def test_hessian_workspace_thread_safety_cuda():
 
     base = torch.nn.Linear(128, 64, bias=False).to(device)
     cfg = QuantizeConfig(
-        hessian=HessianConfig(
-            chunk_size=128,
-            staging_dtype=torch.bfloat16,
+        process=_gptq_process(
+            HessianConfig(
+                chunk_size=128,
+                staging_dtype=torch.bfloat16,
+            )
         ),
     )
 
@@ -270,7 +280,7 @@ def test_hessian_workspace_thread_safety_cuda():
     cache_key = gptq_impl._workspace_cache_key(device)
     assert cache_key in gptq_impl._WORKSPACE_CACHE
     cached_workspace = gptq_impl._WORKSPACE_CACHE[cache_key]
-    expected_rows = cfg.hessian.chunk_size or rows
+    expected_rows = cfg.process.gptq.hessian.chunk_size or rows
     assert cached_workspace.shape[0] >= expected_rows
     assert cached_workspace.shape[1] == cols
 
@@ -331,9 +341,9 @@ def _benchmark_case(
     config_sample = cfg_factory()
 
     return {
-        "chunk_size": config_sample.hessian.chunk_size,
-        "chunk_bytes": config_sample.hessian.chunk_bytes,
-        "bf16": config_sample.hessian.staging_dtype == torch.bfloat16,
+        "chunk_size": config_sample.process.gptq.hessian.chunk_size,
+        "chunk_bytes": config_sample.process.gptq.hessian.chunk_bytes,
+        "bf16": config_sample.process.gptq.hessian.staging_dtype == torch.bfloat16,
         "mean_ms": mean_ms,
         "stdev_ms": stdev_ms,
         "mean_mem_mb": mean_mem,
@@ -374,29 +384,37 @@ def test_hessian_chunk_benchmark_table():
 
     configs: List[Callable[[], QuantizeConfig]] = [
         lambda: QuantizeConfig(
-            hessian=HessianConfig(
-                chunk_size=None,
-                chunk_bytes=512 * 1024 * 1024,
-                staging_dtype=torch.float32,
+            process=_gptq_process(
+                HessianConfig(
+                    chunk_size=None,
+                    chunk_bytes=512 * 1024 * 1024,
+                    staging_dtype=torch.float32,
+                )
             ),
         ),
         lambda: QuantizeConfig(
-            hessian=HessianConfig(
-                chunk_size=64,
-                staging_dtype=torch.float32,
+            process=_gptq_process(
+                HessianConfig(
+                    chunk_size=64,
+                    staging_dtype=torch.float32,
+                )
             ),
         ),
         lambda: QuantizeConfig(
-            hessian=HessianConfig(
-                chunk_size=32,
-                staging_dtype=torch.bfloat16,
+            process=_gptq_process(
+                HessianConfig(
+                    chunk_size=32,
+                    staging_dtype=torch.bfloat16,
+                )
             ),
         ),
         lambda: QuantizeConfig(
-            hessian=HessianConfig(
-                chunk_size=None,
-                chunk_bytes=64 * 1024 * 1024,
-                staging_dtype=torch.bfloat16,
+            process=_gptq_process(
+                HessianConfig(
+                    chunk_size=None,
+                    chunk_bytes=64 * 1024 * 1024,
+                    staging_dtype=torch.bfloat16,
+                )
             ),
         ),
     ]

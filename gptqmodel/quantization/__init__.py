@@ -14,6 +14,7 @@ from .config import (
                      AWQProcessConfig,
                      FailSafe,
                      FailSafeStrategy,
+                     GPTQProcessConfig,
                      GPTAQConfig,
                      HessianConfig,
                      QuantizeProcessConfig,

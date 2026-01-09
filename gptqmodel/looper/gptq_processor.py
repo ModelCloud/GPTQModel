@@ -19,7 +19,7 @@ from ..models._const import CPU
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTAQ, GPTQ
-from ..quantization.config import GPTAQConfig, HessianConfig, METHOD, QuantizeConfig
+from ..quantization.config import GPTAQConfig, GPTQProcessConfig, HessianConfig, METHOD, QuantizeConfig, QuantizeProcessConfig
 from ..utils.failsafe import normalize_failsafe
 from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger, log_time_block
@@ -72,33 +72,47 @@ class GPTQProcessor(LoopProcessor):
             return
 
         qcfg_clone = copy.deepcopy(self.qcfg)
+        process_cfg = qcfg_clone.process.gptq if qcfg_clone.process and qcfg_clone.process.gptq else GPTQProcessConfig()
+        if qcfg_clone.process is None:
+            qcfg_clone.process = QuantizeProcessConfig(gptq=process_cfg)
+        elif qcfg_clone.process.gptq is None:
+            qcfg_clone.process.gptq = process_cfg
 
         # dynamic overrides
         if self.qcfg.dynamic is not None:
             qcfg_clone.bits = self.qcfg.dynamic_get(module.full_name, "bits", qcfg_clone.bits)
             qcfg_clone.sym = self.qcfg.dynamic_get(module.full_name, "sym", qcfg_clone.sym)
-            qcfg_clone.mse = self.qcfg.dynamic_get(module.full_name, "mse", qcfg_clone.mse)
+            process_override = self.qcfg.dynamic_get(module.full_name, "process", None)
+            if isinstance(process_override, dict):
+                gptq_override = process_override.get("gptq")
+                if isinstance(gptq_override, dict) and "mse" in gptq_override:
+                    qcfg_clone.process.gptq.mse = gptq_override["mse"]
 
             qcfg_clone.group_size = self.qcfg.dynamic_get(module.full_name, "group_size", qcfg_clone.group_size)
             desc_act_override = self.qcfg.dynamic_get(module.full_name, "desc_act", None)
             if desc_act_override is not None:
                 qcfg_clone.desc_act = desc_act_override
-            act_group_aware_override = self.qcfg.dynamic_get(module.full_name, "act_group_aware", None)
-            if act_group_aware_override is not None:
-                qcfg_clone.act_group_aware = act_group_aware_override
+            act_group_aware_override = None
+            if isinstance(process_override, dict):
+                gptq_override = process_override.get("gptq")
+                if isinstance(gptq_override, dict) and "act_group_aware" in gptq_override:
+                    act_group_aware_override = gptq_override["act_group_aware"]
+                    qcfg_clone.process.gptq.act_group_aware = act_group_aware_override
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
             failsafe_override = self.qcfg.dynamic_get(module.full_name, "failsafe", None)
             if failsafe_override is not None:
                 qcfg_clone.failsafe = normalize_failsafe(failsafe_override, qcfg_clone.failsafe)
-            hessian_override = self.qcfg.dynamic_get(module.full_name, "hessian", None)
-            if hessian_override is not None:
-                if isinstance(hessian_override, dict):
-                    qcfg_clone.hessian = HessianConfig(**hessian_override)
-                elif isinstance(hessian_override, HessianConfig):
-                    qcfg_clone.hessian = hessian_override
-                else:
-                    raise ValueError("QuantizeConfig: dynamic `hessian` must be a HessianConfig or dict.")
+            if isinstance(process_override, dict):
+                gptq_override = process_override.get("gptq")
+                if isinstance(gptq_override, dict) and "hessian" in gptq_override:
+                    hessian_override = gptq_override["hessian"]
+                    if isinstance(hessian_override, dict):
+                        qcfg_clone.process.gptq.hessian = HessianConfig(**hessian_override)
+                    elif isinstance(hessian_override, HessianConfig):
+                        qcfg_clone.process.gptq.hessian = hessian_override
+                    else:
+                        raise ValueError("QuantizeConfig: dynamic `hessian` must be a HessianConfig or dict.")
             gptaq_override = self.qcfg.dynamic_get(module.full_name, "gptaq", None)
             if gptaq_override is not None:
                 if isinstance(gptaq_override, dict):

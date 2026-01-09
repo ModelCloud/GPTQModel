@@ -167,7 +167,7 @@ class TestMultiVsSingleGPU(ModelTest):
             bits=self.BITS,
             group_size=self.GROUP_SIZE,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
-            act_group_aware=self.ACT_GROUP_AWARE,
+            process={"gptq": {"act_group_aware": self.ACT_GROUP_AWARE}},
             failsafe=self.FAILSAFE,
             sym=self.SYM,
             v2=self.V2,

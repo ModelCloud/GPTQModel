@@ -51,8 +51,6 @@ META_FIELD_DAMP_AUTO_INCREMENT = "damp_auto_increment"
 META_FIELD_STATIC_GROUPS = "static_groups"
 META_FIELD_TRUE_SEQUENTIAL = "true_sequential"
 
-META_FIELD_MSE = "mse"
-META_FIELD_ACT_GROUP_AWARE = "act_group_aware"
 
 META_FIELD_GPTAQ_ENABLED = "gptaq"
 
@@ -340,8 +338,15 @@ class GPTAQConfig:
 
 @dataclass
 class AWQProcessConfig:
+    # Whether to apply clipping to the model during quantization. Some models may perform better with this set to False.
     apply_clip: bool = field(default=True)
+
+    # The loss computation and per-channel mean is optimized into chunked computations.
+    # Adjust this parameter to increase or decrease memory usage for these computations.
+    # Default is 1GB (1024 * 1024 * 1024)."
     max_chunk_memory: int = field(default=1024 * 1024 * 1024)
+
+    # Whether to scale using both w/x or just x.
     duo_scaling: bool = field(default=True)
 
     def __post_init__(self):
@@ -363,29 +368,79 @@ class AWQProcessConfig:
 
 
 @dataclass
+class GPTQProcessConfig:
+    # Hessian accumulation controls (GPTQ only)
+    hessian: HessianConfig = field(default_factory=HessianConfig)
+
+    # Activation-group-aware ordering (GPTQ only); auto-enabled when unset.
+    act_group_aware: Optional[bool] = field(default=None)
+
+    # mean square error calculation: may reduce error loss for some models
+    mse: float = field(default=0.0)
+
+    def __post_init__(self):
+        if isinstance(self.hessian, dict):
+            self.hessian = HessianConfig(**self.hessian)
+        elif not isinstance(self.hessian, HessianConfig):
+            raise ValueError("GPTQProcessConfig: `hessian` must be a HessianConfig or dict.")
+
+        if self.act_group_aware is not None:
+            self.act_group_aware = bool(self.act_group_aware)
+
+        if not isinstance(self.mse, (int, float)):
+            raise ValueError("GPTQProcessConfig: `mse` must be a numeric value.")
+        if self.mse < 0:
+            raise ValueError("GPTQProcessConfig: `mse` must be >= 0.")
+        self.mse = float(self.mse)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "hessian": {
+                "chunk_size": self.hessian.chunk_size,
+                "chunk_bytes": self.hessian.chunk_bytes,
+                "staging_dtype": str(self.hessian.staging_dtype).split(".")[-1],
+            },
+            "act_group_aware": self.act_group_aware,
+            "mse": self.mse,
+        }
+
+
+@dataclass
 class QuantizeProcessConfig:
+    """Per-method process configuration container.
+
+    Keys map to quantization methods (e.g. `gptq`, `awq`) and each value holds
+    the method-specific process settings.
+    """
     awq: Optional[AWQProcessConfig] = field(default=None)
+    gptq: Optional[GPTQProcessConfig] = field(default=None)
 
     def __post_init__(self):
         if isinstance(self.awq, dict):
             self.awq = AWQProcessConfig(**self.awq)
         elif self.awq is not None and not isinstance(self.awq, AWQProcessConfig):
             raise ValueError("QuantizeProcessConfig: `awq` must be an AWQProcessConfig or dict.")
+        if isinstance(self.gptq, dict):
+            self.gptq = GPTQProcessConfig(**self.gptq)
+        elif self.gptq is not None and not isinstance(self.gptq, GPTQProcessConfig):
+            raise ValueError("QuantizeProcessConfig: `gptq` must be a GPTQProcessConfig or dict.")
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "QuantizeProcessConfig":
         if not isinstance(payload, dict):
             raise ValueError("QuantizeProcessConfig: `process` must be a dict.")
-        supported = {"awq"}
+        supported = {"awq", "gptq"}
         unknown = set(payload.keys()) - supported
         if unknown:
             raise ValueError(f"QuantizeProcessConfig: Unsupported process keys: {sorted(unknown)}.")
-        return cls(awq=payload.get("awq"))
+        return cls(awq=payload.get("awq"), gptq=payload.get("gptq"))
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
         if self.awq is not None:
             out["awq"] = self.awq.to_dict()
+        if self.gptq is not None:
+            out["gptq"] = self.gptq.to_dict()
         return out
 
 
@@ -650,7 +705,6 @@ class QuantizeConfig():
     damp_auto_increment: float = field(default=None)
 
     desc_act: Optional[bool] = field(default=None)
-    act_group_aware: Optional[bool] = field(default=None)
     static_groups: bool = field(default=False)
     sym: bool = field(default=True)
     true_sequential: bool = field(default=True)
@@ -668,8 +722,6 @@ class QuantizeConfig():
     # is_distributed: bool = False,
     # tied_gptq_handle: Optional["GPTQ"] = None
 
-    # mean square error calculation: may reduce error loss for some models
-    mse: float = field(default=0.0)
 
     # properties that do not directly contributes to quantization or quant inference should be placed in meta
     # i.e. quantizer tool (producer) + version, timestamp, entity who made the quant, etc
@@ -719,9 +771,6 @@ class QuantizeConfig():
     # gptq only:
     # skip all heavy computations for testing model loading
     mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
-
-    # Hessian accumulation controls (GPTQ only)
-    hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
 
     # Callback function to filter devices for compute-intensive stages (quantization and forwarding)
     # Takes a list of devices and returns either the original list or a filtered subset
@@ -889,13 +938,6 @@ class QuantizeConfig():
         if self.damp_auto_increment < 0:
             raise ValueError("QuantizeConfig:: `damp_auto_increment` must greater than 0.")
 
-        if self.hessian is None:
-            self.hessian = HessianConfig()
-        elif isinstance(self.hessian, dict):
-            self.hessian = HessianConfig(**self.hessian)
-        elif not isinstance(self.hessian, HessianConfig):
-            raise ValueError("QuantizeConfig: `hessian` must be a HessianConfig, dict, or None.")
-
         if self.gptaq is None:
             pass
         elif isinstance(self.gptaq, dict):
@@ -904,7 +946,7 @@ class QuantizeConfig():
             raise ValueError("QuantizeConfig: `gptaq` must be a GPTAQConfig, dict, or None.")
 
         if self.process is None:
-            pass
+            self.process = QuantizeProcessConfig()
         elif isinstance(self.process, QuantizeProcessConfig):
             pass
         elif isinstance(self.process, dict):
@@ -912,9 +954,13 @@ class QuantizeConfig():
         else:
             raise ValueError("QuantizeConfig: `process` must be a QuantizeProcessConfig, dict, or None.")
 
+        if self.process.gptq is None and self.quant_method == METHOD.GPTQ:
+            self.process.gptq = GPTQProcessConfig()
+
         # resolve activation ordering compatibility and defaults
         desc_act_user_value = self.desc_act
-        act_group_aware_user_value = self.act_group_aware
+        process_gptq = self.process.gptq
+        act_group_aware_user_value = process_gptq.act_group_aware if process_gptq else None
 
         if desc_act_user_value is None:
             # GPTQ defaults to higher quality ordering disabled, others retain legacy default
@@ -924,18 +970,19 @@ class QuantizeConfig():
         else:
             self.desc_act = bool(desc_act_user_value)
 
-        if act_group_aware_user_value is None:
-            # auto-enable for GPTQ unless user explicitly disables it
-            self.act_group_aware = self.quant_method == METHOD.GPTQ
-        elif isinstance(act_group_aware_user_value, bool):
-            self.act_group_aware = act_group_aware_user_value
-        else:
-            self.act_group_aware = bool(act_group_aware_user_value)
+        if process_gptq is not None:
+            if act_group_aware_user_value is None:
+                # auto-enable for GPTQ unless user explicitly disables it
+                process_gptq.act_group_aware = self.quant_method == METHOD.GPTQ
+            elif isinstance(act_group_aware_user_value, bool):
+                process_gptq.act_group_aware = act_group_aware_user_value
+            else:
+                process_gptq.act_group_aware = bool(act_group_aware_user_value)
 
         self._resolve_activation_ordering(desc_act_user_value, act_group_aware_user_value)
 
         # validate hybrid act order
-        if self.act_group_aware and self.desc_act:
+        if process_gptq is not None and process_gptq.act_group_aware and self.desc_act:
             raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
 
         # validate meta
@@ -1005,12 +1052,16 @@ class QuantizeConfig():
                 "QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False` when both are explicitly set."
             )
 
-        if desc_act_enabled_by_user and act_group_aware_user_value is None and self.act_group_aware:
+        process_gptq = self.process.gptq if self.process else None
+        if process_gptq is None:
+            return
+
+        if desc_act_enabled_by_user and act_group_aware_user_value is None and process_gptq.act_group_aware:
             log.warn(
                 "QuantizeConfig: `desc_act=True` automatically disables `act_group_aware`. "
                 "Set `act_group_aware=False` explicitly to silence this warning."
             )
-            self.act_group_aware = False
+            process_gptq.act_group_aware = False
 
     def extension_get(self, key: str) -> Any:
             return self.adapter.get(key.lower()) if self.adapter else None
@@ -1180,8 +1231,6 @@ class QuantizeConfig():
         meta_payload = normalized.get(META_FIELD)
         if "failsafe" not in normalized and isinstance(meta_payload, dict) and "failsafe" in meta_payload:
             normalized["failsafe"] = meta_payload.get("failsafe")
-        if "hessian" not in normalized and isinstance(meta_payload, dict) and "hessian" in meta_payload:
-            normalized["hessian"] = meta_payload.get("hessian")
         if "gptaq" not in normalized and isinstance(meta_payload, dict) and "gptaq" in meta_payload:
             normalized["gptaq"] = meta_payload.get("gptaq")
         if "gc_mode" not in normalized and isinstance(meta_payload, dict) and "gc_mode" in meta_payload:
@@ -1288,17 +1337,10 @@ class QuantizeConfig():
         meta_payload["offload_to_disk"] = self.offload_to_disk
         meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
         meta_payload["pack_impl"] = self.pack_impl
-        meta_payload["mse"] = self.mse
         meta_payload["mock_quantization"] = self.mock_quantization
-        meta_payload["act_group_aware"] = self.act_group_aware
         meta_payload["gc_mode"] = self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
-        meta_payload["hessian"] = {
-            "chunk_size": self.hessian.chunk_size,
-            "chunk_bytes": self.hessian.chunk_bytes,
-            "staging_dtype": str(self.hessian.staging_dtype).split(".")[-1],
-        }
         meta_payload["vram_strategy"] = (
             self.vram_strategy.value if isinstance(self.vram_strategy, VramStrategy) else self.vram_strategy
         )

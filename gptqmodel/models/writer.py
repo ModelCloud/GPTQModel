@@ -26,11 +26,9 @@ from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX
 from ..adapter.peft import LoraConfig
 from ..quantization.config import (
     FORMAT,
-    META_FIELD_ACT_GROUP_AWARE,
     META_FIELD_DAMP_AUTO_INCREMENT,
     META_FIELD_DAMP_PERCENT,
     META_FIELD_GPTAQ_ENABLED,
-    META_FIELD_MSE,
     META_FIELD_QUANTIZER,
     META_FIELD_STATIC_GROUPS,
     META_FIELD_TRUE_SEQUENTIAL,
@@ -192,11 +190,6 @@ def ModelWriter(cls):
         )
 
         self.quantize_config.meta_set(
-            key=META_FIELD_MSE,
-            value=self.quantize_config.mse
-        )
-
-        self.quantize_config.meta_set(
             key=META_FIELD_GPTAQ_ENABLED,
             value=None if self.quantize_config.gptaq is None else {
                 "alpha": self.quantize_config.gptaq.alpha,
@@ -206,11 +199,6 @@ def ModelWriter(cls):
                     else str(self.quantize_config.gptaq.device)
                 ),
             }
-        )
-
-        self.quantize_config.meta_set(
-            key=META_FIELD_ACT_GROUP_AWARE,
-            value=self.quantize_config.act_group_aware
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.

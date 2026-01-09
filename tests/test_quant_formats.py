@@ -72,7 +72,7 @@ class TestQuantization(ModelTest):
                 format=format,
                 damp_percent=0.05,
                 quant_method=method,
-                mse=2.5,
+                process={"gptq": {"mse": 2.5}},
             )
         else:
             raise ValueError(f"Invalid quantization method: {method}")
@@ -129,4 +129,3 @@ class TestQuantization(ModelTest):
 
             del model
             torch_empty_cache()
-

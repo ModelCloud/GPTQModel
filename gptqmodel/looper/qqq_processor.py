@@ -17,7 +17,7 @@ from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
-from ..quantization.config import METHOD, QuantizeConfig
+from ..quantization.config import GPTQProcessConfig, METHOD, QuantizeConfig, QuantizeProcessConfig
 from ..utils.failsafe import normalize_failsafe
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger, log_time_block
@@ -65,20 +65,32 @@ class QQQProcessor(LoopProcessor):
             return
 
         qcfg_clone = copy.deepcopy(self.qcfg)
+        process_cfg = qcfg_clone.process.gptq if qcfg_clone.process and qcfg_clone.process.gptq else GPTQProcessConfig()
+        if qcfg_clone.process is None:
+            qcfg_clone.process = QuantizeProcessConfig(gptq=process_cfg)
+        elif qcfg_clone.process.gptq is None:
+            qcfg_clone.process.gptq = process_cfg
 
         # dynamic overrides
         if self.qcfg.dynamic is not None:
             qcfg_clone.bits = self.qcfg.dynamic_get(module.full_name, "bits", qcfg_clone.bits)
             qcfg_clone.sym = self.qcfg.dynamic_get(module.full_name, "sym", qcfg_clone.sym)
-            qcfg_clone.mse = self.qcfg.dynamic_get(module.full_name, "mse", qcfg_clone.mse)
+            process_override = self.qcfg.dynamic_get(module.full_name, "process", None)
+            if isinstance(process_override, dict):
+                gptq_override = process_override.get("gptq")
+                if isinstance(gptq_override, dict) and "mse" in gptq_override:
+                    qcfg_clone.process.gptq.mse = gptq_override["mse"]
 
             qcfg_clone.group_size = self.qcfg.dynamic_get(module.full_name, "group_size", qcfg_clone.group_size)
             desc_act_override = self.qcfg.dynamic_get(module.full_name, "desc_act", None)
             if desc_act_override is not None:
                 qcfg_clone.desc_act = desc_act_override
-            act_group_aware_override = self.qcfg.dynamic_get(module.full_name, "act_group_aware", None)
-            if act_group_aware_override is not None:
-                qcfg_clone.act_group_aware = act_group_aware_override
+            act_group_aware_override = None
+            if isinstance(process_override, dict):
+                gptq_override = process_override.get("gptq")
+                if isinstance(gptq_override, dict) and "act_group_aware" in gptq_override:
+                    act_group_aware_override = gptq_override["act_group_aware"]
+                    qcfg_clone.process.gptq.act_group_aware = act_group_aware_override
             qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
             qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
 
@@ -89,9 +101,9 @@ class QQQProcessor(LoopProcessor):
         tmp.failsafe = normalize_failsafe(failsafe, qcfg_clone.failsafe)
         tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
-        if self.qcfg.mse > 0.0:
+        if self.qcfg.process and self.qcfg.process.gptq and self.qcfg.process.gptq.mse > 0.0:
             mse = True
-            norm = self.qcfg.mse
+            norm = self.qcfg.process.gptq.mse
         else:
             mse = False
             norm = 100

@@ -21,7 +21,7 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..quantization.config import FailSafeStrategy, SmoothMSE
+from ..quantization.config import FailSafeStrategy, GPTQProcessConfig, QuantizeProcessConfig, SmoothMSE
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
@@ -311,7 +311,8 @@ class GPTQ:
     def preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
         device = torch.device(device)
 
-        staging_dtype = self.qcfg.hessian.staging_dtype
+        process_cfg = self.qcfg.process.gptq if self.qcfg.process and self.qcfg.process.gptq else GPTQProcessConfig()
+        staging_dtype = process_cfg.hessian.staging_dtype
         if staging_dtype == torch.float32:
             return torch.float32
 
@@ -332,11 +333,12 @@ class GPTQ:
         if rows == 0:
             return None
 
-        cfg_chunk = self.qcfg.hessian.chunk_size
+        process_cfg = self.qcfg.process.gptq if self.qcfg.process and self.qcfg.process.gptq else GPTQProcessConfig()
+        cfg_chunk = process_cfg.hessian.chunk_size
         if cfg_chunk is not None:
             return max(1, min(cfg_chunk, rows))
 
-        bytes_budget = self.qcfg.hessian.chunk_bytes
+        bytes_budget = process_cfg.hessian.chunk_bytes
         if bytes_budget is not None:
             bytes_per_row = self.columns * torch.tensor([], dtype=stage_dtype).element_size()
             if bytes_per_row > 0:
@@ -346,6 +348,10 @@ class GPTQ:
             return 1
 
         return None
+
+    def _process_act_group_aware(self) -> bool:
+        process_cfg = self.qcfg.process.gptq if self.qcfg.process and self.qcfg.process.gptq else GPTQProcessConfig()
+        return bool(process_cfg.act_group_aware)
 
     @contextlib.contextmanager
     def borrow_materialized_chunk_fp32(
@@ -780,8 +786,13 @@ class GPTQ:
         self.qcfg.damp_percent = percdamp
         self.qcfg.damp_auto_increment = damp_auto_increment
         self.qcfg.desc_act = actorder
+        process_cfg = self.qcfg.process.gptq if self.qcfg.process and self.qcfg.process.gptq else GPTQProcessConfig()
+        if self.qcfg.process is None:
+            self.qcfg.process = QuantizeProcessConfig(gptq=process_cfg)
+        elif self.qcfg.process.gptq is None:
+            self.qcfg.process.gptq = process_cfg
         if act_group_aware is not None:
-            self.qcfg.act_group_aware = act_group_aware
+            process_cfg.act_group_aware = act_group_aware
         self.qcfg._resolve_activation_ordering(actorder, act_group_aware)
         self.qcfg.static_groups = static_groups
         (Q, scale, zero, g_idx, duration, avg_loss, damp_percent, nsamples) = self.quantize(blocksize=blocksize)
@@ -967,7 +978,7 @@ class GPTQ:
             self.H = self.H[perm][:, perm]
             invperm = torch.argsort(perm)
 
-        elif self.qcfg.act_group_aware and use_hessian:
+        elif self._process_act_group_aware() and use_hessian:
             diag_h = torch.diag(self.H)
             local_perms, local_values = compute_local_perms(
                 diag_h, self.qcfg.group_size, return_values=True
@@ -1189,7 +1200,7 @@ class GPTQ:
             g_idx = g_idx[invperm]
             del perm, invperm
 
-        elif self.qcfg.act_group_aware and use_hessian:
+        elif self._process_act_group_aware() and use_hessian:
             inv_final = invert_perm(final_perm)
             Q = Q[:, inv_final]
             inv_global_perm = invert_perm(global_perm)

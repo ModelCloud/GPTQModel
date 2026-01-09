@@ -8,7 +8,7 @@
 import torch
 import torch.nn as nn
 
-from ..quantization import QuantizeConfig
+from ..quantization.config import GPTQProcessConfig, QuantizeConfig
 from ..utils.logger import setup_logger
 
 
@@ -112,7 +112,8 @@ class Quantizer(nn.Module):
                 else:
                     self.zero = torch.round(-xmin / self.scale)
 
-        if self.qcfg.mse > 0.0:
+        process_cfg = self.qcfg.process.gptq if self.qcfg.process and self.qcfg.process.gptq else GPTQProcessConfig()
+        if process_cfg.mse > 0.0:
             best = torch.full([x.shape[0]], float("inf"), device=dev)
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid
@@ -127,7 +128,7 @@ class Quantizer(nn.Module):
                 q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq, self.requires_groupwise_processing())
                 q -= x
                 q.abs_()
-                q.pow_(self.qcfg.mse)
+                q.pow_(process_cfg.mse)
                 err = torch.sum(q, 1)
                 tmp = err < best
                 if torch.any(tmp):

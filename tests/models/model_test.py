@@ -837,7 +837,6 @@ class ModelTest(unittest.TestCase):
             bits=self.BITS,
             group_size=self.GROUP_SIZE,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
-            act_group_aware=self.ACT_GROUP_AWARE,
             failsafe=self.FAILSAFE,
             sym=self.SYM,
             gptaq=GPTAQConfig() if self.GPTQA else None,
@@ -845,9 +844,14 @@ class ModelTest(unittest.TestCase):
             pack_impl="cpu",
             vram_strategy=self.VRAM_STRATEGY,
             damp_percent=self.DAMP_PERCENT,
-            mse=self.MSE,
             dynamic=self.DYNAMIC,
-            hessian=HessianConfig(chunk_size=self.HESSIAN_CHUNK_SIZE),
+            process={
+                "gptq": {
+                    "act_group_aware": self.ACT_GROUP_AWARE,
+                    "mse": self.MSE,
+                    "hessian": HessianConfig(chunk_size=self.HESSIAN_CHUNK_SIZE),
+                }
+            },
             moe=self.MOE_CONFIG,
         )
 
