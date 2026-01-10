@@ -40,7 +40,7 @@ EXPERTS = [
 PROJ_SUFFIXES = ["gate_proj", "up_proj", "down_proj"]
 
 
-def assert_results(model, target_class, moe_config: MoEConfig):
+def assert_results(model, target_class, moe_config):
     """
     Validate that:
     1) All selected MoE expert submodules (gate/up/down) exist and have expected types
@@ -62,6 +62,19 @@ def assert_results(model, target_class, moe_config: MoEConfig):
     if moe_config is None:
         # No MoE config → no MoE metadata should be emitted
         assert qcfg.meta_get("moe") is None
+
+    elif isinstance(moe_config, dict):
+        # Dictionary-based config - verify it was converted to MoEConfig
+        moe_dict = moe_config
+        moe = qcfg.meta_get("moe")
+        assert moe is not None, "MoE metadata should be present"
+        assert moe["routing"]["class"] == moe_dict["routing"]["class"]
+        # Verify routing-specific fields
+        if moe_dict["routing"]["class"] == "ExpertsRoutingBypass":
+            if "batch_size" in moe_dict["routing"]:
+                assert moe["routing"]["batch_size"] == moe_dict["routing"]["batch_size"]
+        elif moe_dict["routing"]["class"] == "ExpertsRoutingOverride":
+            assert moe["routing"]["num_experts_per_tok"] == moe_dict["routing"]["num_experts_per_tok"]
 
     elif isinstance(moe_config.routing, ExpertsRoutingOverride):
         # Override routing must be reflected exactly in metadata
@@ -169,4 +182,26 @@ class TestMoEConfig(ModelTest):
     def test_moe_routing_bypass(self):
         # Bypass routing logic while keeping MoE structure intact
         self.MOE_CONFIG = MoEConfig(routing=ExpertsRoutingBypass())
+        self.quantize_and_assert()
+
+    def test_moe_dict_initialization_bypass(self):
+        """Test dictionary-based initialization for ExpertsRoutingBypass"""
+        # Dictionary-based initialization with ExpertsRoutingBypass
+        self.MOE_CONFIG = {
+            "routing": {
+                "class": "ExpertsRoutingBypass",
+                "batch_size": 4
+            }
+        }
+        self.quantize_and_assert()
+
+    def test_moe_dict_initialization_override(self):
+        """Test dictionary-based initialization for ExpertsRoutingOverride"""
+        # Dictionary-based initialization with ExpertsRoutingOverride
+        self.MOE_CONFIG = {
+            "routing": {
+                "class": "ExpertsRoutingOverride",
+                "num_experts_per_tok": 2
+            }
+        }
         self.quantize_and_assert()
