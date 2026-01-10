@@ -564,6 +564,7 @@ class GPTQ:
                 result_accum = self.H
                 result_accum.zero_()
             else:
+                torch_sync(device) # try to avoid torch.AcceleratorError: CUDA error: unspecified launch failure
                 result_accum = torch.zeros(
                     (self.columns, self.columns),
                     dtype=torch.float32,
