@@ -82,7 +82,13 @@ def unpack_reorder_pack(qweight, qzeros, bits):
 
     # Subtract 1 from the izeros tensor (exllama adds 1 during inference)
     # We can remove it if we remove the +1 in the exllama code
-    izeros = izeros - 1
+    
+    # Fix: izeros=izeros-1
+    # Avoid negative values when izeros=0
+    # When izeros=0, subtracting 1 would result in -1, which is incorrectly
+    # packed as 15 in pack_exllama, causing zero_point calculation errors.
+    # Only subtract 1 when izeros > 0 to avoid this issue.
+    izeros = torch.where(izeros > 0, izeros - 1, izeros)
     # Pack the qweight and qzeros tensors
     qweight, qzeros = pack_exllama(iweight, izeros, bits)
 
