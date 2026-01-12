@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import importlib
 import os
+import pkgutil
 from collections import OrderedDict
 from typing import Dict, List, Optional, Type, Union
 
@@ -84,7 +86,21 @@ def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) 
     return matches[0]
 
 
+def _import_all_qlinear_kernels() -> None:
+    from ..nn_modules import qlinear as qlinear_pkg
+
+    for module_info in pkgutil.iter_modules(qlinear_pkg.__path__):
+        name = module_info.name
+        if name.startswith("_"):
+            continue
+        try:
+            importlib.import_module(f"{qlinear_pkg.__name__}.{name}")
+        except ImportError as exc:
+            log.debug(f"Skipping qlinear module import `{name}`: {exc}")
+
+
 def build_kernel_support_maps():
+    _import_all_qlinear_kernels()
     # Build auto-select order and format support from kernel declarations.
     auto_entries = {}
     support_entries = {}
