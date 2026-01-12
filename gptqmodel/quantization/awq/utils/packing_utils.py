@@ -80,6 +80,7 @@ def unpack_reorder_pack(qweight, qzeros, bits):
     iweight = torch.bitwise_and(iweight, (2**bits) - 1)
     izeros = torch.bitwise_and(izeros, (2**bits) - 1)
 
+    # TODO: Why is exlalma v2 kernel doing +1 inference causing us to do -1 here in packing?
     # Subtract 1 from the izeros tensor (exllama adds 1 during inference)
     # We can remove it if we remove the +1 in the exllama code
     
