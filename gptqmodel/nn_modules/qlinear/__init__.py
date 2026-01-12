@@ -338,13 +338,8 @@ class BaseQuantLinear(nn.Module):
             err = f"{cls} only supports `{cls.SUPPORTS_GROUP_SIZE}` group_size: actual group_size = `{group_size}`"
             return False, NotImplementedError(err)
 
-        # GPTQ validate sym
-        if METHOD.GPTQ in cls.SUPPORTS_METHODS and sym not in cls.SUPPORTS_SYM:
-            err = f"{cls} only supports symmetric `{cls.SUPPORTS_SYM}` quantization: actual sym = `{sym}`"
-            return False, NotImplementedError(err)
-
-        # AWQ validate sym
-        if METHOD.AWQ in cls.SUPPORTS_METHODS and sym not in cls.SUPPORTS_SYM:
+        # validate symmetric/asym quantization support
+        if sym not in cls.SUPPORTS_SYM:
             err = f"{cls} only supports symmetric `{cls.SUPPORTS_SYM}` quantization: actual sym = `{sym}`"
             return False, NotImplementedError(err)
 
