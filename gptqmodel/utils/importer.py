@@ -35,6 +35,7 @@ from ..nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from ..nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
 from ..nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 from ..quantization import FORMAT, METHOD
+from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from . import BACKEND
 from .rocm import IS_ROCM
@@ -82,7 +83,7 @@ def _get_kernel_backend(cls: Type[BaseQuantLinear]) -> BACKEND:
     return BACKEND(str(backend).lower())
 
 
-def _build_kernel_support_maps():
+def build_kernel_support_maps():
     # Build auto-select order and format support from kernel declarations.
     auto_entries = {}
     support_entries = {}
@@ -138,7 +139,65 @@ def _build_kernel_support_maps():
     return auto_select_backend_order_map, supports_backend_map
 
 
-AUTO_SELECT_BACKEND_ORDER_MAP, SUPPORTS_BACKEND_MAP = _build_kernel_support_maps()
+AUTO_BACKEND_KERNEL_MAPPING, BACKEND_TO_METHOD_FORMAT_MAPPING = build_kernel_support_maps()
+
+
+def debug_print_kernel_maps():
+    def render_tree(title, tree):
+        # Simple ANSI palette for depth coloring, aligned with print_module_tree.
+        depth_colors = [
+            "\033[36m",  # cyan
+            "\033[33m",  # yellow
+            "\033[35m",  # magenta
+            "\033[32m",  # green
+            "\033[34m",  # blue
+            "\033[31m",  # red
+        ]
+        trunk_color = "\033[90m"
+        reset = "\033[0m"
+
+        lines = [title]
+        methods = sorted(tree.keys(), key=lambda m: m.value)
+        for mi, method in enumerate(methods):
+            method_last = mi == len(methods) - 1
+            method_prefix = "└─ " if method_last else "├─ "
+            method_name = f"{depth_colors[0]}{method.value}{reset}"
+            lines.append(f"{trunk_color}{method_prefix}{reset}{method_name}")
+            fmt_prefix = "   " if method_last else "│  "
+            formats = sorted(tree[method].keys(), key=lambda f: f.value)
+            for fi, fmt in enumerate(formats):
+                fmt_last = fi == len(formats) - 1
+                fmt_trunk = "└─ " if fmt_last else "├─ "
+                fmt_name = f"{depth_colors[1]}{fmt.value}{reset}"
+                lines.append(f"{trunk_color}{fmt_prefix}{fmt_trunk}{reset}{fmt_name}")
+                child_prefix = fmt_prefix + ("   " if fmt_last else "│  ")
+                entries = tree[method][fmt]
+                for bi, entry in enumerate(entries):
+                    entry_last = bi == len(entries) - 1
+                    entry_trunk = "└─ " if entry_last else "├─ "
+                    entry_name = f"{depth_colors[2]}{entry}{reset}"
+                    lines.append(f"{trunk_color}{child_prefix}{entry_trunk}{reset}{entry_name}")
+        return "\n".join(lines)
+
+    auto_tree = {}
+    for method, fmt_map in AUTO_BACKEND_KERNEL_MAPPING.items():
+        auto_tree[method] = {}
+        for fmt, backend_map in fmt_map.items():
+            entries = [f"{backend.value} -> {cls.__name__}" for backend, cls in backend_map.items()]
+            auto_tree[method][fmt] = entries
+
+    supports_tree = {}
+    for method, fmt_map in BACKEND_TO_METHOD_FORMAT_MAPPING.items():
+        supports_tree[method] = {}
+        for fmt, backends in fmt_map.items():
+            supports_tree[method][fmt] = [backend.value for backend in backends]
+
+    print(render_tree("AUTO KERNEL SELECTION MAPPING", auto_tree))
+    print(render_tree("KERNEL BACKEND to METHOD/FORMAT MAPPING", supports_tree))
+
+
+if env_flag("DEBUG"):
+    debug_print_kernel_maps()
 
 
 def _is_accelerate_device_map_keyword(value: str) -> bool:
@@ -355,7 +414,7 @@ def select_quant_linear(
     if isinstance(quant_method, str):
         quant_method = METHOD(quant_method.lower())
 
-    supported_formats = SUPPORTS_BACKEND_MAP.get(quant_method)
+    supported_formats = BACKEND_TO_METHOD_FORMAT_MAPPING.get(quant_method)
     if supported_formats is None:
         raise ValueError(f"Unsupported quantization method: `{quant_method}`")
     if format not in supported_formats:
@@ -368,7 +427,7 @@ def select_quant_linear(
     validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        allow_quant_linears = list(AUTO_SELECT_BACKEND_ORDER_MAP[quant_method].get(format, {}).items())
+        allow_quant_linears = list(AUTO_BACKEND_KERNEL_MAPPING[quant_method].get(format, {}).items())
         if not allow_quant_linears:
             raise ValueError(f"No auto-select kernels found for `{quant_method}` with format `{format}`.")
 
