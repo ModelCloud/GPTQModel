@@ -8,6 +8,7 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.packing_utils import unpack_reorder_pack
 from ...utils.backend import BACKEND
@@ -23,6 +24,9 @@ none_tensor = torch.empty((1, 1), device="meta")
 
 
 class AwqExllamaQuantLinear(AWQuantLinear):
+    SUPPORTS_BACKEND = [BACKEND.EXLLAMA_V1]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMM: 70}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]

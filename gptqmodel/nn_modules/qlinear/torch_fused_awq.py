@@ -9,6 +9,7 @@ import torch
 
 from ...adapter.adapter import Adapter
 from ...looper.linear_mode import LinearMode
+from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import (
     dequantize_gemm,
     reverse_awq_order,
@@ -27,6 +28,10 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
     """Torch fused AWQ variant based on GPTQ fused kernels via CPU int4 packing."""
 
     QUANT_TYPE = "torch_fused_awq"
+
+    SUPPORTS_BACKEND = [BACKEND.TORCH_FUSED_AWQ]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMM: 20}
 
     # inherit from torch fused
     SUPPORTS_BITS = TorchFusedQuantLinear.SUPPORTS_BITS

@@ -23,6 +23,8 @@ from torch.nn import Parameter
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
+from ...quantization import FORMAT, METHOD
+from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 
 
@@ -55,6 +57,9 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
 
 
 class ExllamaEoraQuantLinear(BaseQuantLinear):
+    SUPPORTS_BACKEND = [BACKEND.EXLLAMA_EORA]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 0}
     SUPPORTS_BITS = [2,3,4] # fused eora only validated for 4 bits
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -78,6 +83,12 @@ class ExllamaEoraQuantLinear(BaseQuantLinear):
     QUANT_TYPE = "exllama_v2v"
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
+
+    @classmethod
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        if exllama_eora_import_exception is not None:
+            return False, ImportError(exllama_eora_import_exception)
+        return True, None
 
     def __init__(self,
          bits: int,

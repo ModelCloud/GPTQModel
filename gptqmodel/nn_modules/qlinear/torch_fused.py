@@ -12,6 +12,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...looper.linear_mode import LinearMode
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
@@ -51,6 +52,9 @@ class Int4PackedOp(torch.nn.Module):
 
 
 class TorchFusedQuantLinear(PackableQuantLinear):
+    SUPPORTS_BACKEND = [BACKEND.TORCH_FUSED]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 50, FORMAT.GPTQ_V2: 50}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]

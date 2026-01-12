@@ -12,6 +12,7 @@ from torch import nn
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.utils import get_best_device
 from ...utils.backend import BACKEND
@@ -83,6 +84,9 @@ class AwqGemmFn(torch.autograd.Function):
 
 
 class AwqGEMMQuantLinear(AWQuantLinear):
+    SUPPORTS_BACKEND = [BACKEND.GEMM]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMM: 60}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]

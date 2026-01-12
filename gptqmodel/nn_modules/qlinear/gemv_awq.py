@@ -9,6 +9,7 @@ from torch import nn
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.module import try_import
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
@@ -20,6 +21,9 @@ log = setup_logger()
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
 class AwqGEMVQuantLinear(AWQuantLinear):
+    SUPPORTS_BACKEND = [BACKEND.GEMV]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMV: 40}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
