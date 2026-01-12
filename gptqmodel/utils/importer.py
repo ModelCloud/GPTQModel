@@ -50,7 +50,7 @@ ACCELERATE_OFFLOAD_TARGETS = {"disk", "meta"}
 message_logged = False
 log = setup_logger()
 
-def _iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
+def iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
     kernels = []
     seen = set()
 
@@ -67,14 +67,12 @@ def _iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
     return kernels
 
 
-def _infer_quant_methods(cls: Type[BaseQuantLinear]) -> List[METHOD]:
-    supported = getattr(cls, "SUPPORTS_METHODS", None)
-    if supported is None:
-        raise ValueError(f"{cls.__name__} is missing SUPPORTS_METHODS for kernel registry.")
+def infer_quant_methods(cls: Type[BaseQuantLinear]) -> List[METHOD]:
+    supported = cls.SUPPORTS_METHODS
     return [METHOD(method) if isinstance(method, METHOD) else METHOD(str(method).lower()) for method in supported]
 
 
-def _get_kernel_backend(cls: Type[BaseQuantLinear]) -> BACKEND:
+def get_kernel_backend(cls: Type[BaseQuantLinear]) -> BACKEND:
     backend = getattr(cls, "SUPPORTS_BACKEND", None)
     if backend is None:
         raise ValueError(f"{cls.__name__} is missing SUPPORTS_BACKEND for kernel registry.")
@@ -88,16 +86,13 @@ def build_kernel_support_maps():
     auto_entries = {}
     support_entries = {}
 
-    for cls in _iter_quant_linear_kernels():
-        supports_formats = getattr(cls, "SUPPORTS_FORMATS", None)
-        if not supports_formats:
-            continue
-
+    for cls in iter_quant_linear_kernels():
+        supports_formats = cls.SUPPORTS_FORMATS
         if not isinstance(supports_formats, dict):
             raise ValueError(f"{cls.__name__}.SUPPORTS_FORMATS must be a dict of FORMAT -> priority.")
 
-        backend = _get_kernel_backend(cls)
-        for method in _infer_quant_methods(cls):
+        backend = get_kernel_backend(cls)
+        for method in infer_quant_methods(cls):
             for fmt, priority in supports_formats.items():
                 if not isinstance(fmt, FORMAT):
                     fmt = FORMAT(str(fmt).lower())
