@@ -609,9 +609,15 @@ class QuantizeConfig():
     damp_auto_increment: float = field(default=None)
 
     desc_act: Optional[bool] = field(default=None)
+
+    # GPTQ only
     act_group_aware: Optional[bool] = field(default=None)
     static_groups: bool = field(default=False)
+
+    # GPTQ only: symmetric quantization toggle. AWQ ignores this for quant math.
+    # Equivalent modes: GPTQ sym=True == AWQ zero_point=False (symmetric).
     sym: bool = field(default=True)
+
     true_sequential: bool = field(default=True)
 
     lm_head: bool = field(default=False)
@@ -627,6 +633,7 @@ class QuantizeConfig():
     # is_distributed: bool = False,
     # tied_gptq_handle: Optional["GPTQ"] = None
 
+    # GPTQ only
     # mean square error calculation: may reduce error loss for some models
     mse: float = field(default=0.0)
 
@@ -656,6 +663,7 @@ class QuantizeConfig():
 
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
+    # GPTQ only
     # deprecated: only used for compat
     is_marlin_format: bool = False
 
@@ -663,16 +671,19 @@ class QuantizeConfig():
     # if calibration is insufficient, fallback to a simple quantization strategy; encapsulated in FailSafe config
     failsafe: Optional[FailSafe] = field(default_factory=FailSafe)
 
+    # GPTQ only
     # gptaq only:
     gptaq: Optional[GPTAQConfig] = field(default=None)
 
-    # awq only:
+    # AWQ only: zero-point toggle (True=asymmetric, False=symmetric).
+    # Equivalent modes: AWQ zero_point=False == GPTQ sym=True.
     zero_point: bool = field(default=True)
 
     # gptq only:
     # skip all heavy computations for testing model loading
     mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
 
+    # GPTQ only
     # Hessian accumulation controls (GPTQ only)
     hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
 
