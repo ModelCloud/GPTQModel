@@ -75,7 +75,7 @@ class AwqGemmTritonFn(torch.autograd.Function):
 
 
 class AwqGEMMTritonQuantLinear(AWQuantLinear):
-    SUPPORTS_BACKEND = BACKEND.GEMM_TRITON
+    SUPPORTS_BACKEND = [BACKEND.GEMM_TRITON]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 50}
     SUPPORTS_BITS = [4]

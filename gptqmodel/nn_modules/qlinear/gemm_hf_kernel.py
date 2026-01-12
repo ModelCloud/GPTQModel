@@ -21,7 +21,7 @@ from ...utils.logger import setup_logger
 log = setup_logger()
 
 class HFKernelLinear(PackableQuantLinear):
-    SUPPORTS_BACKEND = BACKEND.HF_KERNEL
+    SUPPORTS_BACKEND = [BACKEND.HF_KERNEL]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 60, FORMAT.GPTQ_V2: 60}
     SUPPORTS_BITS = [4]

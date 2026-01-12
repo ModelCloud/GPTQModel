@@ -90,7 +90,7 @@ def test_select_quant_linear_smoke(kernel_cls, method, fmt):
         desc_act=desc_act,
         sym=sym,
         device=device,
-        backend=kernel_cls.SUPPORTS_BACKEND,
+        backend=kernel_cls.SUPPORTS_BACKEND[0],
         format=fmt,
         quant_method=method,
         pack_dtype=pack_dtype,

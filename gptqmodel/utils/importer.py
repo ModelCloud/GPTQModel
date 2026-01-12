@@ -74,10 +74,35 @@ def infer_quant_methods(cls: Type[BaseQuantLinear]) -> List[METHOD]:
     ]
 
 
-def get_kernel_backend(cls: Type[BaseQuantLinear]) -> BACKEND:
-    if isinstance(cls.SUPPORTS_BACKEND, BACKEND):
-        return cls.SUPPORTS_BACKEND
-    return BACKEND(str(cls.SUPPORTS_BACKEND).lower())
+def get_kernel_backends(cls: Type[BaseQuantLinear]) -> List[BACKEND]:
+    backends = []
+    for backend in cls.SUPPORTS_BACKEND:
+        if isinstance(backend, BACKEND):
+            backends.append(backend)
+        else:
+            backends.append(BACKEND(str(backend).lower()))
+    return backends
+
+
+def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) -> Type[BaseQuantLinear]:
+    matches = []
+    for cls in iter_quant_linear_kernels():
+        if backend not in get_kernel_backends(cls):
+            continue
+        if quant_method not in cls.SUPPORTS_METHODS:
+            continue
+        if fmt not in cls.SUPPORTS_FORMATS:
+            continue
+        matches.append(cls)
+
+    if not matches:
+        raise ValueError(f"Unsupported backend: `{backend}` for `{quant_method}` with format `{fmt}`")
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple kernels matched backend `{backend}` for `{quant_method}` with format `{fmt}`: "
+            f"{', '.join(cls.__name__ for cls in matches)}"
+        )
+    return matches[0]
 
 
 def build_kernel_support_maps():
@@ -90,18 +115,18 @@ def build_kernel_support_maps():
         if not isinstance(supports_formats, dict):
             raise ValueError(f"{cls.__name__}.SUPPORTS_FORMATS must be a dict of FORMAT -> priority.")
 
-        backend = get_kernel_backend(cls)
-        for method in infer_quant_methods(cls):
-            for fmt, priority in supports_formats.items():
-                if not isinstance(fmt, FORMAT):
-                    fmt = FORMAT(str(fmt).lower())
-                if not isinstance(priority, int):
-                    raise ValueError(f"{cls.__name__}.SUPPORTS_FORMATS[{fmt}] priority must be an int.")
+        for backend in get_kernel_backends(cls):
+            for method in infer_quant_methods(cls):
+                for fmt, priority in supports_formats.items():
+                    if not isinstance(fmt, FORMAT):
+                        fmt = FORMAT(str(fmt).lower())
+                    if not isinstance(priority, int):
+                        raise ValueError(f"{cls.__name__}.SUPPORTS_FORMATS[{fmt}] priority must be an int.")
 
-                support_entries.setdefault(method, {}).setdefault(fmt, []).append((priority, backend))
-                # Priority <= 0 keeps format support but opts out of auto-selection.
-                if priority > 0:
-                    auto_entries.setdefault(method, {}).setdefault(fmt, []).append((priority, backend, cls))
+                    support_entries.setdefault(method, {}).setdefault(fmt, []).append((priority, backend))
+                    # Priority <= 0 keeps format support but opts out of auto-selection.
+                    if priority > 0:
+                        auto_entries.setdefault(method, {}).setdefault(fmt, []).append((priority, backend, cls))
 
     supports_backend_map = {}
     auto_select_backend_order_map = {}
@@ -479,54 +504,7 @@ def select_quant_linear(
     # TODO check AWQ format supports BACKEND
 
     # Handle the case where backend is not AUTO.
-    if backend == BACKEND.TRITON:
-        qlinear = TritonV2QuantLinear
-    elif backend == BACKEND.BITBLAS:
-        qlinear = BitBLASQuantLinear
-    elif backend == BACKEND.MACHETE:
-        if quant_method == METHOD.AWQ:
-            qlinear = AwqMacheteQuantLinear
-        else:
-            qlinear = MacheteQuantLinear
-    elif backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16]:
-        if quant_method == METHOD.AWQ:
-            qlinear = AwqMarlinQuantLinear
-        else:
-            qlinear = MarlinQuantLinear
-    elif backend == BACKEND.EXLLAMA_EORA:
-        qlinear = ExllamaEoraQuantLinear
-    elif backend == BACKEND.EXLLAMA_V2:
-        if quant_method == METHOD.AWQ:
-            qlinear = AwqExllamaV2QuantLinear
-        else:
-            qlinear = ExllamaV2QuantLinear
-    elif backend == BACKEND.EXLLAMA_V1:
-        if quant_method == METHOD.AWQ:
-            qlinear = AwqExllamaQuantLinear
-        else:
-            qlinear = ExllamaQuantLinear
-    elif backend == BACKEND.QQQ:
-        qlinear = QQQQuantLinear
-    elif backend == BACKEND.GEMM:
-        qlinear = AwqGEMMQuantLinear
-    elif backend == BACKEND.GEMM_TRITON:
-        qlinear = AwqGEMMTritonQuantLinear
-    elif backend == BACKEND.GEMV:
-        qlinear = AwqGEMVQuantLinear
-    elif backend == BACKEND.GEMV_FAST:
-        qlinear = LLMAwqQuantLinear if format == FORMAT.LLM_AWQ else AwqGEMVFastQuantLinear
-    elif backend == BACKEND.TORCH_AWQ:
-        qlinear = AwqTorchQuantLinear
-    elif backend == BACKEND.TORCH:
-        qlinear = TorchQuantLinear
-    elif backend == BACKEND.HF_KERNEL:
-        qlinear = HFKernelLinear
-    elif backend == BACKEND.TORCH_FUSED:
-        qlinear = TorchFusedQuantLinear
-    elif backend == BACKEND.TORCH_FUSED_AWQ:
-        qlinear = TorchFusedAwqQuantLinear
-    else:
-        qlinear = TorchQuantLinear
+    qlinear = get_kernel_for_backend(backend, quant_method, format)
 
     validate, err = qlinear.validate(
         bits=bits,

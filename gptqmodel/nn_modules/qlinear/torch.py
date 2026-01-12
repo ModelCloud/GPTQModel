@@ -33,7 +33,7 @@ except Exception:  # pragma: no cover - optional dependency
 log = setup_logger()
 
 class TorchQuantLinear(PackableQuantLinear):
-    SUPPORTS_BACKEND = BACKEND.TORCH
+    SUPPORTS_BACKEND = [BACKEND.TORCH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20}
     SUPPORTS_BITS = [2, 3, 4, 8]

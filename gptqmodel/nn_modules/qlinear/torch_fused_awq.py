@@ -29,7 +29,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
 
     QUANT_TYPE = "torch_fused_awq"
 
-    SUPPORTS_BACKEND = BACKEND.TORCH_FUSED_AWQ
+    SUPPORTS_BACKEND = [BACKEND.TORCH_FUSED_AWQ]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 20}
 
