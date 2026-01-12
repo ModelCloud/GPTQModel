@@ -399,8 +399,6 @@ def create_quant_module(
             tmp_group_size = overrides.get("group_size", group_size)
             tmp_desc_act = overrides.get("desc_act", desc_act)
             tmp_sym = overrides.get("sym", sym)
-            if "zero_point" in overrides:
-                tmp_sym = not bool(overrides.get("zero_point"))
             tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
 
     # when loading a quantized model, device is target device passed in GPTQModel.load()
