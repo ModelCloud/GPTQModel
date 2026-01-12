@@ -9,6 +9,7 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
+from ...looper.linear_mode import LinearMode
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...utils.backend import BACKEND
@@ -33,6 +34,7 @@ def pack_scales_and_zeros(scales, zeros):
         )
         .contiguous()
     )
+
 
 class Int4PackedOp(torch.nn.Module):
     def __init__(self, qweight_uint8, scales_and_zeros, group_size):
@@ -98,7 +100,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             register_buffers=register_buffers,
             **kwargs)
 
-        self.linear_mode = None # either train or infernce
+        self.linear_mode = None # either train or inference
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
 
     def post_init(self):
@@ -232,7 +234,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         if not self.training and not x.requires_grad and self.linear_mode is None and TORCH_HAS_FUSED_OPS:
             # one-time transform per module for xpu aten fused ops
             self.transform(x.dtype, x.device.type)
-            self.linear_mode = "inference"
+            self.linear_mode = LinearMode.INFERENCE
             if x.device.type == "cpu":
                 self.torch_fused_op = Int4PackedOp(
                     self.qweight, self.scales_and_zeros, self.group_size
@@ -245,9 +247,9 @@ class TorchFusedQuantLinear(PackableQuantLinear):
                 #     self.torch_fused_op.forward, options={"max_autotune": True}
                 # )
         elif self.linear_mode is None:
-            self.linear_mode = "train"
+            self.linear_mode = LinearMode.TRAIN
 
-        if self.linear_mode == "inference":
+        if self.linear_mode == LinearMode.INFERENCE:
             out = self._fused_op_forward(x).reshape(out_shape)
         else:
             # make sure dequant dtype matches input x
