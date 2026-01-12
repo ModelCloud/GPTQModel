@@ -1,4 +1,3 @@
-import pytest
 
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 
