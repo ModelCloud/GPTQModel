@@ -11,6 +11,7 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 from ...utils.torch import HAS_XPU
@@ -74,6 +75,9 @@ class AwqGemmTritonFn(torch.autograd.Function):
 
 
 class AwqGEMMTritonQuantLinear(AWQuantLinear):
+    SUPPORTS_BACKEND = BACKEND.GEMM_TRITON
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMM: 50}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]

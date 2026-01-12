@@ -13,6 +13,7 @@ from transformers import PreTrainedModel
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 
@@ -20,6 +21,9 @@ from ...utils.logger import setup_logger
 log = setup_logger()
 
 class HFKernelLinear(PackableQuantLinear):
+    SUPPORTS_BACKEND = BACKEND.HF_KERNEL
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 60, FORMAT.GPTQ_V2: 60}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]

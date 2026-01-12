@@ -49,64 +49,96 @@ ACCELERATE_OFFLOAD_TARGETS = {"disk", "meta"}
 message_logged = False
 log = setup_logger()
 
-AUTO_SELECT_BACKEND_ORDER_MAP = {
-    METHOD.GPTQ: OrderedDict({
-        BACKEND.MACHETE: MacheteQuantLinear, # optimized for sm90+
-        BACKEND.MARLIN: MarlinQuantLinear, # optimized for bs > 1
-        # BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear, #
-        BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear, # optimized for bs > 1
-        BACKEND.EXLLAMA_V1: ExllamaQuantLinear, # optimized for bs == 1
-        BACKEND.HF_KERNEL: HFKernelLinear, # optimized from HuggingFace kernels-community
-        BACKEND.TORCH_FUSED: TorchFusedQuantLinear, # optimized for Intel XPU
-        BACKEND.TRITON: TritonV2QuantLinear, # good all around kernel that JIT compiles
-        # BACKEND.CUDA: DynamicCudaQuantLinear,
-        BACKEND.BITBLAS: BitBLASQuantLinear, # super slow AOT pre-compiler but fastest for bs=1
-        BACKEND.TORCH: TorchQuantLinear, # slightly slower than Triton but getting close in Torch 2.6.0+
-    }),
-    METHOD.QQQ: OrderedDict({
-        BACKEND.QQQ: QQQQuantLinear, # qqq kernel based on marlin
-    }),
-    METHOD.AWQ: OrderedDict({
-        BACKEND.MACHETE: AwqMacheteQuantLinear,
-        BACKEND.MARLIN: AwqMarlinQuantLinear,
-        BACKEND.EXLLAMA_V2: AwqExllamaV2QuantLinear,
-        BACKEND.EXLLAMA_V1: AwqExllamaQuantLinear,
-        BACKEND.GEMM: AwqGEMMQuantLinear,
-        BACKEND.GEMM_TRITON: AwqGEMMTritonQuantLinear,
-        BACKEND.GEMV: AwqGEMVQuantLinear,
-        BACKEND.GEMV_FAST: AwqGEMVFastQuantLinear,
-        BACKEND.TORCH_FUSED_AWQ: TorchFusedAwqQuantLinear,
-        BACKEND.TORCH_AWQ: AwqTorchQuantLinear,
-    }),
-}
+def _iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
+    kernels = []
+    seen = set()
 
-SUPPORTS_BACKEND_MAP = {
-    METHOD.GPTQ: {
-        FORMAT.GPTQ: [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.HF_KERNEL, BACKEND.TRITON, BACKEND.TORCH_FUSED, BACKEND.TORCH, BACKEND.MARLIN_FP16, BACKEND.EXLLAMA_EORA],
-        FORMAT.GPTQ_V2: [BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.HF_KERNEL, BACKEND.TORCH_FUSED, BACKEND.TRITON, BACKEND.TORCH],
-        FORMAT.MARLIN: [BACKEND.MARLIN, BACKEND.MARLIN_FP16],
-        FORMAT.BITBLAS: [BACKEND.BITBLAS],
-    },
-    METHOD.QQQ: {
-        FORMAT.QQQ: [BACKEND.QQQ],
-    },
-    METHOD.AWQ: {
-        FORMAT.GEMM: [
-            BACKEND.MACHETE,
-            BACKEND.MARLIN,
-            BACKEND.EXLLAMA_V2,
-            BACKEND.EXLLAMA_V1,
-            BACKEND.GEMM,
-            BACKEND.GEMM_TRITON,
-            BACKEND.TORCH_FUSED_AWQ,
-            BACKEND.TORCH_AWQ,
-        ],
-        FORMAT.GEMV: [BACKEND.GEMV],
-        FORMAT.GEMV_FAST: [BACKEND.GEMV_FAST],
-        FORMAT.LLM_AWQ: [BACKEND.GEMV_FAST],
-        FORMAT.MARLIN: [BACKEND.MACHETE, BACKEND.MARLIN],
-    }
-}
+    def _walk(cls):
+        for subcls in cls.__subclasses__():
+            if subcls in seen:
+                continue
+            seen.add(subcls)
+            _walk(subcls)
+            if "SUPPORTS_FORMATS" in subcls.__dict__:
+                kernels.append(subcls)
+
+    _walk(BaseQuantLinear)
+    return kernels
+
+
+def _infer_quant_methods(cls: Type[BaseQuantLinear]) -> List[METHOD]:
+    supported = getattr(cls, "SUPPORTS_METHODS", None)
+    if supported is None:
+        raise ValueError(f"{cls.__name__} is missing SUPPORTS_METHODS for kernel registry.")
+    return [METHOD(method) if isinstance(method, METHOD) else METHOD(str(method).lower()) for method in supported]
+
+
+def _get_kernel_backend(cls: Type[BaseQuantLinear]) -> BACKEND:
+    backend = getattr(cls, "SUPPORTS_BACKEND", None)
+    if backend is None:
+        raise ValueError(f"{cls.__name__} is missing SUPPORTS_BACKEND for kernel registry.")
+    if isinstance(backend, BACKEND):
+        return backend
+    return BACKEND(str(backend).lower())
+
+
+def _build_kernel_support_maps():
+    # Build auto-select order and format support from kernel declarations.
+    auto_entries = {}
+    support_entries = {}
+
+    for cls in _iter_quant_linear_kernels():
+        supports_formats = getattr(cls, "SUPPORTS_FORMATS", None)
+        if not supports_formats:
+            continue
+
+        if not isinstance(supports_formats, dict):
+            raise ValueError(f"{cls.__name__}.SUPPORTS_FORMATS must be a dict of FORMAT -> priority.")
+
+        backend = _get_kernel_backend(cls)
+        for method in _infer_quant_methods(cls):
+            for fmt, priority in supports_formats.items():
+                if not isinstance(fmt, FORMAT):
+                    fmt = FORMAT(str(fmt).lower())
+                if not isinstance(priority, int):
+                    raise ValueError(f"{cls.__name__}.SUPPORTS_FORMATS[{fmt}] priority must be an int.")
+
+                support_entries.setdefault(method, {}).setdefault(fmt, []).append((priority, backend))
+                # Priority <= 0 keeps format support but opts out of auto-selection.
+                if priority > 0:
+                    auto_entries.setdefault(method, {}).setdefault(fmt, []).append((priority, backend, cls))
+
+    supports_backend_map = {}
+    auto_select_backend_order_map = {}
+
+    for method, fmt_entries in support_entries.items():
+        supports_backend_map[method] = {}
+        for fmt, entries in fmt_entries.items():
+            entries.sort(key=lambda item: (item[0], item[1].value), reverse=True)
+            seen_backends = set()
+            ordered_backends = []
+            for _, backend in entries:
+                if backend in seen_backends:
+                    continue
+                seen_backends.add(backend)
+                ordered_backends.append(backend)
+            supports_backend_map[method][fmt] = ordered_backends
+
+    for method, fmt_entries in auto_entries.items():
+        auto_select_backend_order_map[method] = {}
+        for fmt, entries in fmt_entries.items():
+            entries.sort(key=lambda item: (item[0], item[1].value), reverse=True)
+            ordered = OrderedDict()
+            for _, backend, cls in entries:
+                if backend in ordered:
+                    continue
+                ordered[backend] = cls
+            auto_select_backend_order_map[method][fmt] = ordered
+
+    return auto_select_backend_order_map, supports_backend_map
+
+
+AUTO_SELECT_BACKEND_ORDER_MAP, SUPPORTS_BACKEND_MAP = _build_kernel_support_maps()
 
 
 def _is_accelerate_device_map_keyword(value: str) -> bool:
@@ -336,10 +368,9 @@ def select_quant_linear(
     validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        if format == FORMAT.LLM_AWQ:
-            allow_quant_linears = [(BACKEND.GEMV_FAST, LLMAwqQuantLinear)]
-        else:
-            allow_quant_linears = [(k, v) for k, v in AUTO_SELECT_BACKEND_ORDER_MAP[quant_method].items() if k in SUPPORTS_BACKEND_MAP[quant_method][format]]
+        allow_quant_linears = list(AUTO_SELECT_BACKEND_ORDER_MAP[quant_method].get(format, {}).items())
+        if not allow_quant_linears:
+            raise ValueError(f"No auto-select kernels found for `{quant_method}` with format `{format}`.")
 
         err = None
         global message_logged

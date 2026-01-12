@@ -14,6 +14,7 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import CPU, DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
@@ -49,6 +50,9 @@ def mul(
 
 
 class QQQQuantLinear(BaseQuantLinear):
+    SUPPORTS_BACKEND = BACKEND.QQQ
+    SUPPORTS_METHODS = [METHOD.QQQ]
+    SUPPORTS_FORMATS = {FORMAT.QQQ: 100}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 128]
     SUPPORTS_DESC_ACT = [True, False]

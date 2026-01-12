@@ -14,6 +14,7 @@ from ...quantization.awq.utils.packing_utils import (
     reverse_awq_order,
     unpack_awq,
 )
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
@@ -27,6 +28,10 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
     """Torch fused AWQ variant based on GPTQ fused kernels via CPU int4 packing."""
 
     QUANT_TYPE = "torch_fused_awq"
+
+    SUPPORTS_BACKEND = BACKEND.TORCH_FUSED_AWQ
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMM: 20}
 
     # inherit from torch fused
     SUPPORTS_BITS = TorchFusedQuantLinear.SUPPORTS_BITS

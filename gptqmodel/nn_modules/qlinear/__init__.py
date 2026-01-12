@@ -8,7 +8,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch as t  # conflict with torch.py
@@ -18,6 +18,7 @@ from torch.nn.modules.conv import _ConvNd
 
 from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
@@ -27,6 +28,9 @@ from ...utils.safe import THREADPOOLCTL
 log = setup_logger()
 
 class BaseQuantLinear(nn.Module):
+    SUPPORTS_BACKEND: BACKEND = None
+    SUPPORTS_METHODS: List[METHOD] = None
+    SUPPORTS_FORMATS: Dict[FORMAT, int] = None
     SUPPORTS_BITS: List[int] = None
     SUPPORTS_GROUP_SIZE: List[int] = None
     SUPPORTS_DESC_ACT: List[bool] = None

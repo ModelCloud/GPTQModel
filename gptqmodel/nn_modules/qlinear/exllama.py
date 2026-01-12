@@ -11,6 +11,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import BaseQuantLinear
@@ -22,6 +23,9 @@ log = setup_logger()
 NONE_TENSOR = torch.empty((1, 1), device="meta")
 
 class ExllamaQuantLinear(BaseQuantLinear):
+    SUPPORTS_BACKEND = BACKEND.EXLLAMA_V1
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 70, FORMAT.GPTQ_V2: 70}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]

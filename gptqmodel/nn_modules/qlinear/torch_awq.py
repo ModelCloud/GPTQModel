@@ -8,6 +8,7 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
@@ -17,6 +18,9 @@ log = setup_logger()
 
 
 class AwqTorchQuantLinear(AWQuantLinear):
+    SUPPORTS_BACKEND = BACKEND.TORCH_AWQ
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMM: 10}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
