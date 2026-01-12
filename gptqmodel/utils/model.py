@@ -273,6 +273,7 @@ def make_quant(
         group_size=group_size,
         desc_act=desc_act,
         sym=sym,
+        zero_point=qcfg.zero_point,
         backend=backend,
         format=format,
         quant_method=qcfg.quant_method,
@@ -308,6 +309,7 @@ def make_quant(
                 pack_dtype=pack_dtype,
                 backend=backend,
                 adapter=qcfg.adapter,
+                zero_point=qcfg.zero_point,
             )
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
@@ -330,12 +332,14 @@ def create_quant_module(
     module: nn.Module,
     submodule: nn.Module,
     sym: bool,
+    zero_point: bool,
     device: DEVICE,
     lm_head_name: str,
     pack_dtype: torch.dtype,
     backend: BACKEND = BACKEND.AUTO,
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
+
 ):
     # unwrap named module
     if isinstance(submodule, NamedModule):
@@ -382,6 +386,7 @@ def create_quant_module(
     tmp_group_size = group_size
     tmp_desc_act = desc_act
     tmp_sym = sym
+    tmp_zero_point = zero_point
     tmp_pack_dtype = pack_dtype
 
     # dynamic bits, group_size, sym, pack_dtype for each layer/module
@@ -398,6 +403,7 @@ def create_quant_module(
             tmp_group_size = overrides.get("group_size", group_size)
             tmp_desc_act = overrides.get("desc_act", desc_act)
             tmp_sym = overrides.get("sym", sym)
+            tmp_zero_point = overrides.get("zero_point", zero_point)
             tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
 
     # when loading a quantized model, device is target device passed in GPTQModel.load()
@@ -407,6 +413,7 @@ def create_quant_module(
         group_size=tmp_group_size,
         desc_act=tmp_desc_act,
         sym=tmp_sym,
+        zero_point=tmp_zero_point,
         pack_dtype=tmp_pack_dtype,
         in_features=in_features,
         out_features=out_features,
@@ -421,6 +428,7 @@ def create_quant_module(
         group_size=tmp_group_size,
         desc_act=tmp_desc_act,
         sym=tmp_sym,
+        zero_point=tmp_zero_point,
         in_features=in_features,
         out_features=out_features,
         pack_dtype=tmp_pack_dtype,
@@ -444,11 +452,13 @@ def create_quant_layer(
         quant_result: Dict[str, Dict[str, Any]],
         module,
         sym: bool,
+        zero_point: bool,
         device: DEVICE,
         lm_head_name: str,
         pack_dtype: torch.dtype,
         backend: BACKEND,
         adapter: Optional[Adapter] = None,
+
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
         return linear_cls
@@ -467,6 +477,7 @@ def create_quant_layer(
             module=module,
             submodule=submodule,
             sym=sym,
+            zero_point=zero_point,
             device=device,
             lm_head_name=lm_head_name,
             pack_dtype=pack_dtype,

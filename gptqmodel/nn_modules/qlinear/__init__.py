@@ -244,11 +244,11 @@ class BaseQuantLinear(nn.Module):
             group_size: int,
             desc_act: bool,
             sym: bool,
+            zero_point: bool,
             in_features:int=None,
             out_features:int=None,
             pack_dtype:t.dtype=None,
             dtype: Optional[t.dtype]=None,
-            zero_point: Optional[bool]=None,
             dynamic:Optional[dict]=None,
             device:Optional[DEVICE]=None,
             trainable:Optional[bool]=None,
@@ -259,10 +259,9 @@ class BaseQuantLinear(nn.Module):
         if not ok_once:
             return False, exp_once
 
-        return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
+        return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, zero_point=zero_point,
                              in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
-                             dtype=dtype, zero_point=zero_point,
-                             dynamic=dynamic, device=device, trainable=trainable, adapter=adapter)
+                             dtype=dtype, dynamic=dynamic, device=device, trainable=trainable, adapter=adapter)
 
     @classmethod
     # internal method and should not be overriden
@@ -301,7 +300,7 @@ class BaseQuantLinear(nn.Module):
             #     raise ValueError(f"{cls.__name__}.{name} cannot be an empty list.")
 
     @classmethod
-    def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, zero_point: Optional[bool]=None, dynamic:Optional[dict]=None, in_features:int=None,
+    def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, zero_point: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
                   out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
@@ -339,9 +338,17 @@ class BaseQuantLinear(nn.Module):
         if group_size not in cls.SUPPORTS_GROUP_SIZE and group_size != in_features:
             err = f"{cls} only supports `{cls.SUPPORTS_GROUP_SIZE}` group_size: actual group_size = `{group_size}`"
             return False, NotImplementedError(err)
-        if sym not in cls.SUPPORTS_SYM:
-            err = f"{cls} only supports `{cls.SUPPORTS_SYM}` bits: actual sym = `{sym}`"
+
+        # GPTQ validate sym
+        if METHOD.GPTQ in cls.SUPPORTS_METHODS and sym not in cls.SUPPORTS_SYM:
+            err = f"{cls} only supports symmetric `{cls.SUPPORTS_SYM}` quantization: actual sym = `{sym}`"
             return False, NotImplementedError(err)
+
+        # AWQ validate zero_point
+        if METHOD.AWQ in cls.SUPPORTS_METHODS and zero_point not in cls.SUPPORTS_SYM:
+            err = f"{cls} only supports symmetric `{cls.SUPPORTS_SYM}` quantization: actual zero_point (sym) = `{zero_point}`"
+            return False, NotImplementedError(err)
+
         if desc_act not in cls.SUPPORTS_DESC_ACT:
             err = f"{cls} only supports `{cls.SUPPORTS_DESC_ACT}` bits: actual desc_act = `{desc_act}`"
             return False, NotImplementedError(err)

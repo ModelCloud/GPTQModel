@@ -312,7 +312,7 @@ def hf_select_quant_linear_v2(
         sym: bool,
         format: Union[str, FORMAT], # awq `version` should be pre-mapped to format
         quant_method: Union[str, METHOD], # awq llm-awq `version` should be pre-mapped to method
-        zero_point: Optional[bool] = True, # awq only
+        zero_point: Optional[bool] = False, # awq only
         dtype: Optional[Union[str, torch.dtype]] = None,
         meta: Optional[Dict[str, any]] = None,
         pack: Optional[bool] = True,
@@ -365,11 +365,16 @@ def hf_select_quant_linear_v2(
         # llm-awq uses torch.int16 to pack qweight
         pack_dtype = torch.int16
 
+    # select quant linear requires strict zero_point
+    if zero_point is None:
+        zero_point = False
+
     return select_quant_linear(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
         sym=sym,
+        zero_point=zero_point,
         backend=backend,
         device=device,
         format=fmt,
@@ -379,7 +384,6 @@ def hf_select_quant_linear_v2(
         dynamic=None,
         pack_dtype=pack_dtype,
         dtype=normalized_dtype,
-        zero_point=zero_point,
         adapter=None,
     )
 
@@ -390,6 +394,7 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
+        zero_point: bool,
         device: Optional[DEVICE] = None,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
@@ -399,7 +404,6 @@ def select_quant_linear(
         dynamic=None,
         pack_dtype: torch.dtype = None,
         dtype: Optional[torch.dtype] = None,
-        zero_point: Optional[bool] = None,
         multi_select: bool = False, # return all valid kernels
         adapter: Optional[Adapter] = None,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
@@ -438,9 +442,9 @@ def select_quant_linear(
                 group_size=group_size,
                 desc_act=desc_act,
                 sym=sym,
+                zero_point=zero_point,
                 pack_dtype=pack_dtype,
                 dtype=dtype,
-                zero_point=zero_point,
                 dynamic=dynamic,
                 device=device,
                 trainable=trainable,

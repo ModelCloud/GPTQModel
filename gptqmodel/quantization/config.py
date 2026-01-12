@@ -678,7 +678,7 @@ class QuantizeConfig():
 
     # AWQ only: zero-point toggle (True=asymmetric, False=symmetric).
     # Equivalent modes: AWQ zero_point=False == GPTQ sym=True.
-    zero_point: bool = field(default=True)
+    zero_point: bool = field(default=False)
 
     # gptq only:
     # skip all heavy computations for testing model loading
