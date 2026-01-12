@@ -655,11 +655,6 @@ class BaseQModel(nn.Module):
                 # AWQ GEMV_FAST only supports pack_dtype is torch.int16
                 log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
                 self.quantize_config.pack_dtype = torch.int16
-            # TODO deprecated allow saving to marlin format
-            elif self.quantize_config.format == FORMAT.MARLIN:
-                # AWQ MARLIN only supports zero_point is false
-                log.warn("Quantize Model: Auto fix `zero_point` to `False`")
-                self.quantize_config.zero_point = False
 
         if self.support_batch_quantize is False:
             batch_size = 1
@@ -680,7 +675,6 @@ class BaseQModel(nn.Module):
             group_size=self.quantize_config.group_size,
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
-            zero_point=self.quantize_config.zero_point,
             backend=preferred_backend,
             format=self.quantize_config.format,
             quant_method=self.quantize_config.quant_method,
@@ -732,7 +726,6 @@ class BaseQModel(nn.Module):
                 group_size=self.quantize_config.group_size,
                 desc_act=self.quantize_config.desc_act,
                 sym=self.quantize_config.sym,
-                zero_point=self.quantize_config.zero_point,
                 pack=True,
                 dynamic=self.quantize_config.dynamic,
                 device=self.quantize_config.device,

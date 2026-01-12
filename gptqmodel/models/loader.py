@@ -870,7 +870,6 @@ def ModelLoader(cls):
             group_size=qcfg.group_size,
             desc_act=qcfg.desc_act,
             sym=qcfg.sym,
-            zero_point=qcfg.zero_point,
             backend=backend,
             format=qcfg.format,
             quant_method=qcfg.quant_method,

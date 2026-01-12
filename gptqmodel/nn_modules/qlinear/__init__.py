@@ -244,7 +244,6 @@ class BaseQuantLinear(nn.Module):
             group_size: int,
             desc_act: bool,
             sym: bool,
-            zero_point: bool,
             in_features:int=None,
             out_features:int=None,
             pack_dtype:t.dtype=None,
@@ -259,7 +258,7 @@ class BaseQuantLinear(nn.Module):
         if not ok_once:
             return False, exp_once
 
-        return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, zero_point=zero_point,
+        return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
                              in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
                              dtype=dtype, dynamic=dynamic, device=device, trainable=trainable, adapter=adapter)
 
@@ -300,7 +299,7 @@ class BaseQuantLinear(nn.Module):
             #     raise ValueError(f"{cls.__name__}.{name} cannot be an empty list.")
 
     @classmethod
-    def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, zero_point: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
+    def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
                   out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
@@ -344,9 +343,9 @@ class BaseQuantLinear(nn.Module):
             err = f"{cls} only supports symmetric `{cls.SUPPORTS_SYM}` quantization: actual sym = `{sym}`"
             return False, NotImplementedError(err)
 
-        # AWQ validate zero_point
-        if METHOD.AWQ in cls.SUPPORTS_METHODS and zero_point not in cls.SUPPORTS_SYM:
-            err = f"{cls} only supports symmetric `{cls.SUPPORTS_SYM}` quantization: actual zero_point (sym) = `{zero_point}`"
+        # AWQ validate sym
+        if METHOD.AWQ in cls.SUPPORTS_METHODS and sym not in cls.SUPPORTS_SYM:
+            err = f"{cls} only supports symmetric `{cls.SUPPORTS_SYM}` quantization: actual sym = `{sym}`"
             return False, NotImplementedError(err)
 
         if desc_act not in cls.SUPPORTS_DESC_ACT:

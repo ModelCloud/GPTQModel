@@ -615,8 +615,7 @@ class QuantizeConfig():
     act_group_aware: Optional[bool] = field(default=None)
     static_groups: bool = field(default=False)
 
-    # GPTQ only: symmetric quantization toggle. AWQ ignores this for quant math.
-    # Equivalent modes: GPTQ sym=True == AWQ zero_point=False (symmetric).
+    # symmetric quantization toggle (True=symmetric, False=asymmetric).
     sym: bool = field(default=True)
 
     true_sequential: bool = field(default=True)
@@ -675,10 +674,6 @@ class QuantizeConfig():
     # GPTQ only
     # gptaq only:
     gptaq: Optional[GPTAQConfig] = field(default=None)
-
-    # AWQ only: zero-point toggle (True=asymmetric, False=symmetric).
-    # Equivalent modes: AWQ zero_point=False == GPTQ sym=True.
-    zero_point: bool = field(default=False)
 
     # gptq only:
     # skip all heavy computations for testing model loading
@@ -1059,8 +1054,15 @@ class QuantizeConfig():
             FORMAT_FIELD_CODE: format if format else FORMAT.GPTQ,
         }
 
+        zero_point_seen = False
+        zero_point_value = None
         for key, val in quantize_cfg.items():
             key = key.lower()
+
+            if key == "zero_point":
+                zero_point_seen = True
+                zero_point_value = val
+                continue
 
             # remap keys according to compat map
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
@@ -1092,6 +1094,9 @@ class QuantizeConfig():
                 normalized[key] = val
             else:
                 log.info(f"QuantizeConfig: Ignoring unknown parameter in the quantization configuration: {key}.")
+
+        if zero_point_seen:
+            normalized["sym"] = not bool(zero_point_value)
 
         # fix method if format is not allowed for the method
         fmt = normalized.get(FORMAT_FIELD_CODE)
@@ -1264,7 +1269,6 @@ class QuantizeConfig():
             "dynamic": self.dynamic,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
-            "sym": self.sym,
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_CHECKPOINT: self.format,
@@ -1276,12 +1280,13 @@ class QuantizeConfig():
             # DO NOT EXPORT compute_device_filter since functions are not serializable
         }
 
-        # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm
         if self.quant_method == METHOD.AWQ:
-            out["zero_point"] = self.zero_point
+            out["zero_point"] = not self.sym
             # awq compat with vllm/sglang/transformers loaders
             out["version"] = self.format
             out[FORMAT_FIELD_CODE] = self.format
+        else:
+            out["sym"] = self.sym
         if self.quant_method == METHOD.GPTQ:
             out[FORMAT_FIELD_CODE] = self.format
 

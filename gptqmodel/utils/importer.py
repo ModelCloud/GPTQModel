@@ -312,7 +312,7 @@ def hf_select_quant_linear_v2(
         sym: bool,
         format: Union[str, FORMAT], # awq `version` should be pre-mapped to format
         quant_method: Union[str, METHOD], # awq llm-awq `version` should be pre-mapped to method
-        zero_point: Optional[bool] = False, # awq only
+        zero_point: Optional[bool] = None, # awq only (True=asymmetric, False=symmetric)
         dtype: Optional[Union[str, torch.dtype]] = None,
         meta: Optional[Dict[str, any]] = None,
         pack: Optional[bool] = True,
@@ -365,16 +365,15 @@ def hf_select_quant_linear_v2(
         # llm-awq uses torch.int16 to pack qweight
         pack_dtype = torch.int16
 
-    # select quant linear requires strict zero_point
-    if zero_point is None:
-        zero_point = False
+    effective_sym = sym
+    if zero_point is not None:
+        effective_sym = not bool(zero_point)
 
     return select_quant_linear(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
-        sym=sym,
-        zero_point=zero_point,
+        sym=effective_sym,
         backend=backend,
         device=device,
         format=fmt,
@@ -394,7 +393,6 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        zero_point: bool,
         device: Optional[DEVICE] = None,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
@@ -442,7 +440,6 @@ def select_quant_linear(
                 group_size=group_size,
                 desc_act=desc_act,
                 sym=sym,
-                zero_point=zero_point,
                 pack_dtype=pack_dtype,
                 dtype=dtype,
                 dynamic=dynamic,
@@ -496,7 +493,6 @@ def select_quant_linear(
         sym=sym,
         pack_dtype=pack_dtype,
         dtype=dtype,
-        zero_point=zero_point,
         dynamic=dynamic,
         device=device,
         trainable=trainable,
