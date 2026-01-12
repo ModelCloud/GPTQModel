@@ -68,17 +68,16 @@ def iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
 
 
 def infer_quant_methods(cls: Type[BaseQuantLinear]) -> List[METHOD]:
-    supported = cls.SUPPORTS_METHODS
-    return [METHOD(method) if isinstance(method, METHOD) else METHOD(str(method).lower()) for method in supported]
+    return [
+        METHOD(method) if isinstance(method, METHOD) else METHOD(str(method).lower())
+        for method in cls.SUPPORTS_METHODS
+    ]
 
 
 def get_kernel_backend(cls: Type[BaseQuantLinear]) -> BACKEND:
-    backend = getattr(cls, "SUPPORTS_BACKEND", None)
-    if backend is None:
-        raise ValueError(f"{cls.__name__} is missing SUPPORTS_BACKEND for kernel registry.")
-    if isinstance(backend, BACKEND):
-        return backend
-    return BACKEND(str(backend).lower())
+    if isinstance(cls.SUPPORTS_BACKEND, BACKEND):
+        return cls.SUPPORTS_BACKEND
+    return BACKEND(str(cls.SUPPORTS_BACKEND).lower())
 
 
 def build_kernel_support_maps():
