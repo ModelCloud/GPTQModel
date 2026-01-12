@@ -24,6 +24,7 @@ log = setup_logger()
 BITS_FIELD_CODE = "bits"
 GROUP_SIZE_FIELD_CODE = "group_size"
 FORMAT_FIELD_CODE = "format"
+SYMMETRIC_FIELD_CODE = "zero_point"
 FORMAT_FIELD_CHECKPOINT = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
@@ -474,6 +475,12 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     "version" : FORMAT_FIELD_CODE,
     # map format field (checkpoint_format) to class/code (format)
     FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
+}
+
+# compat
+QUANT_CONFIG_ARG_SYNONYMS_NEGATED = {
+     # AWQ compat
+    "zero_point" : SYMMETRIC_FIELD_CODE,
 }
 
 DYNAMIC_FIELD_SYNONYMS = {}
