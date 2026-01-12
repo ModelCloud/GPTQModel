@@ -80,9 +80,17 @@ def unpack_reorder_pack(qweight, qzeros, bits):
     iweight = torch.bitwise_and(iweight, (2**bits) - 1)
     izeros = torch.bitwise_and(izeros, (2**bits) - 1)
 
+    # TODO: Why is exlalma v2 kernel doing +1 inference causing us to do -1 here in packing?
     # Subtract 1 from the izeros tensor (exllama adds 1 during inference)
     # We can remove it if we remove the +1 in the exllama code
-    izeros = izeros - 1
+    
+    # TODO: Exllama v2 kernel may still mishandle true zero-points at 0 due to clamping below.
+    # Exllama adds +1 during inference, so we offset by -1 here.
+    # If izeros is 0, subtracting 1 underflows to -1; as uint8 this is 255,
+    # and 4-bit packing keeps the low nibble (0xF/15), corrupting zero-points.
+    # Clamp to 0 after the subtraction to avoid the underflow.
+    izeros = (izeros - 1).clamp(min=0)
+    
     # Pack the qweight and qzeros tensors
     qweight, qzeros = pack_exllama(iweight, izeros, bits)
 
