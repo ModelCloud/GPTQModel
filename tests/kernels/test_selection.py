@@ -7,8 +7,7 @@ import pytest
 
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel.quantization import FORMAT, METHOD
-from gptqmodel.utils.backend import BACKEND
+from gptqmodel.quantization import METHOD
 from gptqmodel.utils.importer import select_quant_linear
 from gptqmodel.utils.rocm import IS_ROCM
 from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU

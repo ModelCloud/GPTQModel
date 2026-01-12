@@ -7,8 +7,8 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...quantization import FORMAT, METHOD
+from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear

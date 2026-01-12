@@ -9,12 +9,12 @@ import torch
 
 from ...adapter.adapter import Adapter
 from ...looper.linear_mode import LinearMode
+from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import (
     dequantize_gemm,
     reverse_awq_order,
     unpack_awq,
 )
-from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
