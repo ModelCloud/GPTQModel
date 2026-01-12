@@ -600,6 +600,7 @@ class QuantizeConfig():
     # allow dynamic bitsize per layer, if None or some layer not set, use bits
     dynamic: Optional[Dict[str, Dict[str, Union[int, bool]]]] = field(default=None)
 
+    # GPTQ only
     # 128 offer good balance between inference speed, vram usage (bpw), and quality
     # use 32 for highest quality with slower inference and higher vram usage
     group_size: int = field(default=128)
