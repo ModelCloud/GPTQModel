@@ -24,7 +24,7 @@ log = setup_logger()
 BITS_FIELD_CODE = "bits"
 GROUP_SIZE_FIELD_CODE = "group_size"
 FORMAT_FIELD_CODE = "format"
-SYMMETRIC_FIELD_CODE = "zero_point"
+SYMMETRIC_FIELD_CODE = "sym"
 FORMAT_FIELD_CHECKPOINT = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
@@ -468,21 +468,23 @@ QUANTIZE_BLACK_LIST = {}
 # compat
 QUANT_CONFIG_ARG_SYNONYMS = {
     "w_bit": BITS_FIELD_CODE,
+
     # QQQ compat
     "wbits": BITS_FIELD_CODE,
     "q_group_size": GROUP_SIZE_FIELD_CODE,
+
     # AWQ compat
     "version" : FORMAT_FIELD_CODE,
+
     # map format field (checkpoint_format) to class/code (format)
     FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
 }
 
-# compat
+# compat (values are negated)
 QUANT_CONFIG_ARG_SYNONYMS_NEGATED = {
-     # AWQ compat
-    "zero_point" : SYMMETRIC_FIELD_CODE,
+    # AWQ compat
+    "zero_point": SYMMETRIC_FIELD_CODE,
 }
-
 DYNAMIC_FIELD_SYNONYMS = {}
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
@@ -1061,19 +1063,15 @@ class QuantizeConfig():
             FORMAT_FIELD_CODE: format if format else FORMAT.GPTQ,
         }
 
-        zero_point_seen = False
-        zero_point_value = None
         for key, val in quantize_cfg.items():
             key = key.lower()
-
-            if key == "zero_point":
-                zero_point_seen = True
-                zero_point_value = val
-                continue
 
             # remap keys according to compat map
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
                 key = QUANT_CONFIG_ARG_SYNONYMS[key]
+            elif key in QUANT_CONFIG_ARG_SYNONYMS_NEGATED and QUANT_CONFIG_ARG_SYNONYMS_NEGATED[key] in field_names:
+                key = QUANT_CONFIG_ARG_SYNONYMS_NEGATED[key]
+                val = not bool(val)
 
             if key == FORMAT_FIELD_CHECKPOINT:
                 val = val.lower()
@@ -1101,9 +1099,6 @@ class QuantizeConfig():
                 normalized[key] = val
             else:
                 log.info(f"QuantizeConfig: Ignoring unknown parameter in the quantization configuration: {key}.")
-
-        if zero_point_seen:
-            normalized["sym"] = not bool(zero_point_value)
 
         # fix method if format is not allowed for the method
         fmt = normalized.get(FORMAT_FIELD_CODE)
