@@ -153,6 +153,7 @@ jobs:
           import json
           import os
           import re
+          from pathlib import Path
 
           LEGACY_TESTS = '${LEGACY_TESTS}'
           IGNORED_TEST_FILES = '${IGNORED_TEST_FILES}'
