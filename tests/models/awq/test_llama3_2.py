@@ -6,6 +6,7 @@
 import os
 import sys
 
+import torch
 
 TESTS_MODELS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if TESTS_MODELS_ROOT not in sys.path:
@@ -57,6 +58,8 @@ class TestLlama3_2_awq(ModelTest):
     }
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
+    SYM = True
+    TORCH_DTYPE = torch.float16
 
     def test_llama3_2_awq(self):
         self.quant_lm_eval()

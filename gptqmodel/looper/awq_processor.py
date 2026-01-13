@@ -877,13 +877,17 @@ class AWQProcessor(LoopProcessor):
             max_int = 2 ** (self.qcfg.bits - 1) - 1
             min_int = -(2 ** (self.qcfg.bits - 1))
             scales = max_val / max_int
-            zeros = None
             w = torch.clamp(torch.round(w / scales), min_int, max_int) * scales
 
         assert torch.isnan(scales).sum() == 0
         assert torch.isnan(w).sum() == 0
 
         scales = scales.view(org_w_shape[0], -1)
+
+        # TODO FIX ME
+        if self.qcfg.sym:
+            zeros = torch.zeros_like(scales)
+
         w = w.reshape(org_w_shape)
 
         return w, scales, zeros
