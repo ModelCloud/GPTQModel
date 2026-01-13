@@ -24,7 +24,7 @@ none_tensor = torch.empty((1, 1), device="meta")
 
 
 class AwqExllamaQuantLinear(AWQuantLinear):
-    SUPPORTS_BACKEND = [BACKEND.EXLLAMA_V1]
+    SUPPORTS_BACKENDS = [BACKEND.EXLLAMA_V1]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 70}
     SUPPORTS_BITS = [4]

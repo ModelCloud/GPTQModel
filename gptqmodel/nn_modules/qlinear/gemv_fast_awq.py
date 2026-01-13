@@ -64,7 +64,7 @@ def pack_intweight(unpacked_qweight, interleave, kstride):
 
 
 class AwqGEMVFastQuantLinear(AWQuantLinear):
-    SUPPORTS_BACKEND = [BACKEND.GEMV_FAST]
+    SUPPORTS_BACKENDS = [BACKEND.GEMV_FAST]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMV_FAST: 30}
     SUPPORTS_BITS = [4]
@@ -255,7 +255,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
 
 class LLMAwqQuantLinear(AwqGEMVFastQuantLinear):
-    SUPPORTS_BACKEND = [BACKEND.GEMV_FAST]
+    SUPPORTS_BACKENDS = [BACKEND.GEMV_FAST]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.LLM_AWQ: 100}
     SUPPORTS_BITS = [4]

@@ -35,7 +35,7 @@ log = setup_logger()
 
 
 class MacheteQuantLinear(BaseQuantLinear):
-    SUPPORTS_BACKEND = [BACKEND.MACHETE]
+    SUPPORTS_BACKENDS = [BACKEND.MACHETE]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 100}
     SUPPORTS_BITS = [4, 8]

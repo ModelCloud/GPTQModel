@@ -23,7 +23,7 @@ log = setup_logger()
 NONE_TENSOR = torch.empty((1, 1), device="meta")
 
 class ExllamaQuantLinear(BaseQuantLinear):
-    SUPPORTS_BACKEND = [BACKEND.EXLLAMA_V1]
+    SUPPORTS_BACKENDS = [BACKEND.EXLLAMA_V1]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 70, FORMAT.GPTQ_V2: 70}
     SUPPORTS_BITS = [4]

@@ -21,7 +21,7 @@ log = setup_logger()
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
 
 class AwqGEMVQuantLinear(AWQuantLinear):
-    SUPPORTS_BACKEND = [BACKEND.GEMV]
+    SUPPORTS_BACKENDS = [BACKEND.GEMV]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMV: 40}
     SUPPORTS_BITS = [4]

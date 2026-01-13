@@ -57,7 +57,7 @@ def infer_quant_methods(cls: Type[BaseQuantLinear]) -> List[METHOD]:
 
 def get_kernel_backends(cls: Type[BaseQuantLinear]) -> List[BACKEND]:
     backends = []
-    for backend in cls.SUPPORTS_BACKEND:
+    for backend in cls.SUPPORTS_BACKENDS:
         if isinstance(backend, BACKEND):
             backends.append(backend)
         else:

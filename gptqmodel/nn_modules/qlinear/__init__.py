@@ -28,7 +28,7 @@ from ...utils.safe import THREADPOOLCTL
 log = setup_logger()
 
 class BaseQuantLinear(nn.Module):
-    SUPPORTS_BACKEND: List[BACKEND] = None
+    SUPPORTS_BACKENDS: List[BACKEND] = None
     SUPPORTS_METHODS: List[METHOD] = None
     SUPPORTS_FORMATS: Dict[FORMAT, int] = None
     SUPPORTS_BITS: List[int] = None
