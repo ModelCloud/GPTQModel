@@ -11,7 +11,7 @@ AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 
 
 def unpack_awq(qweight: torch.Tensor, qzeros: torch.Tensor, bits: int):
-    shifts = torch.arange(0, 32, bits, device=qzeros.device)
+    shifts = torch.arange(0, 32, bits, device=qweight.device)
 
     # unpacking columnwise
     iweights = torch.bitwise_right_shift(qweight[:, :, None], shifts[None, None, :]).to(
@@ -35,7 +35,7 @@ def reverse_awq_order(iweights: torch.Tensor, izeros: torch.Tensor, bits: int):
     reverse_order_tensor = torch.arange(
         iweights.shape[-1],
         dtype=torch.int32,
-        device=izeros.device,
+        device=iweights.device,
     )
     reverse_order_tensor = reverse_order_tensor.view(-1, 32 // bits)
     reverse_order_tensor = reverse_order_tensor[:, AWQ_REVERSE_ORDER]
@@ -86,19 +86,23 @@ def unpack_reorder_pack(qweight, qzeros, bits):
     return qweight, qzeros
 
 
-def dequantize_gemm(qweight, qzeros, scales, bits, group_size):
+def dequantize_gemm(qweight, qzeros, scales, bits, group_size, sym):
     # Unpack the qweight and qzeros tensors
-    iweight, izeros = unpack_awq(qweight, qzeros, bits)
+    iweight, izeros = unpack_awq(qweight, None if sym else qzeros, bits)
     # Reverse the order of the iweight and izeros tensors
     iweight, izeros = reverse_awq_order(iweight, izeros, bits)
 
     # overflow checks
     iweight = torch.bitwise_and(iweight, (2**bits) - 1)
-    izeros = torch.bitwise_and(izeros, (2**bits) - 1)
+    if not sym:
+        izeros = torch.bitwise_and(izeros, (2**bits) - 1)
 
     # fp16 weights
     scales = scales.repeat_interleave(group_size, dim=0)
-    izeros = izeros.repeat_interleave(group_size, dim=0)
-    iweight = (iweight - izeros) * scales
+    if not sym:
+        izeros = izeros.repeat_interleave(group_size, dim=0)
+        iweight = (iweight - izeros) * scales
+    else:
+        iweight = iweight * scales
 
     return iweight

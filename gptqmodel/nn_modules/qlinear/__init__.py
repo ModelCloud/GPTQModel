@@ -79,6 +79,7 @@ class BaseQuantLinear(nn.Module):
         self.group_size = group_size if group_size != -1 else in_features
         self.bits = bits
         self.desc_act = desc_act
+        self.sym = sym
         self.pack_dtype = pack_dtype
         self.backend = backend
         self.maxq = 2 ** self.bits - 1

@@ -85,7 +85,14 @@ class AwqTorchQuantLinear(AWQuantLinear):
         device = x.device
         x_flat = x.reshape(-1, x.shape[-1])
 
-        weight = dequantize_gemm(self.qweight, self.qzeros, self.scales, self.bits, self.group_size)
+        weight = dequantize_gemm(
+            qweight=self.qweight,
+            qzeros=self.qzeros,
+            scales=self.scales,
+            bits=self.bits,
+            group_size=self.group_size,
+            sym=self.sym,
+        )
         assert weight.dtype == torch.float16, f"weight {weight.dtype} is not float16"
         if weight.dtype != x_flat.dtype or weight.device != device:
             weight = weight.to(device=device, dtype=x_flat.dtype)
