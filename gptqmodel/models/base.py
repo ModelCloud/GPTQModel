@@ -666,7 +666,10 @@ class BaseQModel(nn.Module):
 
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):
-            preferred_backend = BACKEND.TORCH
+            if self.quantize_config.quant_method == METHOD.AWQ:
+                preferred_backend = BACKEND.TORCH_AWQ
+            else:
+                preferred_backend = BACKEND.TORCH
 
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
