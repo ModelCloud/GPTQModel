@@ -20,9 +20,9 @@
 </p>
 
 ## Latest News
-* 01/13/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): 🎉 New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FaileSafeStrategy` GPT-QModel now has 3 separate control setting for efficient MoE experts quantization.
-`AWQ` `qcfg.zero_point` property has merged with (shared) `sym` symmetry property with `GPTQ`: `zero_point=True` is now `sym=False`. 
-Fixed `AWQ` `sym=True` packing/inference and quantization compat with some Qwen3 models. 
+* 01/13/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): 🎉 New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
+`AWQ` `qcfg.zero_point` property has been merged with an unified `sym` symmetry property; `zero_point=True` is now `sym=False`.
+Fixed `AWQ` `sym=True` packing/inference and quantization compatibility with some Qwen3 models.
 
 * 12/31/2025 5.7.0-dev: 🎉 New `FailSafe` config and `FailSafeStrategy`, auto enabled by default, to address un-even routing of MoE experts resulting quantization issue of some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce outliers impact of `FailSafe` quantization using `RTN` by default. Different `FaileSafeStategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
 New Voxtral, Glm-4v model support plus audio dataset calibration for Qwen2-Omni. `AWQ` compat fix for `GLM 4.5-Air`.
