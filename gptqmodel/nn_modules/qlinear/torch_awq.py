@@ -91,7 +91,6 @@ class AwqTorchQuantLinear(AWQuantLinear):
             scales=self.scales,
             bits=self.bits,
             group_size=self.group_size,
-            sym=self.sym,
         )
         assert weight.dtype == torch.float16, f"weight {weight.dtype} is not float16"
         if weight.dtype != x_flat.dtype or weight.device != device:
