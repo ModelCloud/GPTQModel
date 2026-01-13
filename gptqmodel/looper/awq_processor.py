@@ -884,9 +884,14 @@ class AWQProcessor(LoopProcessor):
 
         scales = scales.view(org_w_shape[0], -1)
 
-        # TODO FIX ME
+        # NOTE:
+        # Symmetric quantization produces signed int values (e.g. int4 ∈ [-8, 7]),
+        # which cannot be packed directly. To make it packable, we shift the signed
+        # representation to unsigned by adding 2^(bits-1), i.e. q_u = q_s + 2^(bits-1).
+        # This is equivalent to using an affine form with zero_point = 2^(bits-1),
+        # without changing the numerical behavior of symmetric quantization.
         if self.qcfg.sym:
-            zeros = torch.zeros_like(scales)
+            zeros = torch.full_like(scales, 2 ** (self.qcfg.bits - 1))
 
         w = w.reshape(org_w_shape)
 

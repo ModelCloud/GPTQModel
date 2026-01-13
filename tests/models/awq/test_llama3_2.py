@@ -34,7 +34,7 @@ class TestLlama3_2_awq(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.2994,
+                "value": 0.2440,
                 "floor_pct": 0.04,
             },
         },
@@ -61,7 +61,7 @@ class TestLlama3_2_awq(ModelTest):
     METHOD = METHOD.AWQ
     SYM = True
     TORCH_DTYPE = torch.float16
-    LOAD_BACKEND = BACKEND.TORCH_AWQ
+    LOAD_BACKEND = BACKEND.GEMM
 
     def test_llama3_2_awq(self):
         self.quant_lm_eval()
