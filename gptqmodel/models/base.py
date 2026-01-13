@@ -655,10 +655,6 @@ class BaseQModel(nn.Module):
                 # AWQ GEMV_FAST only supports pack_dtype is torch.int16
                 log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
                 self.quantize_config.pack_dtype = torch.int16
-            elif self.quantize_config.format == FORMAT.MARLIN:
-                # AWQ MARLIN only supports zero_point is false
-                log.info("Quantize Model: Auto fix `zero_point` to `False`")
-                self.quantize_config.zero_point = False
 
         if self.support_batch_quantize is False:
             batch_size = 1
@@ -670,7 +666,10 @@ class BaseQModel(nn.Module):
 
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):
-            preferred_backend = BACKEND.TORCH
+            if self.quantize_config.quant_method == METHOD.AWQ:
+                preferred_backend = BACKEND.TORCH_AWQ
+            else:
+                preferred_backend = BACKEND.TORCH
 
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
@@ -685,6 +684,7 @@ class BaseQModel(nn.Module):
             device=DEVICE(self.quantize_config.device),
             pack=True,
             pack_dtype=self.quantize_config.pack_dtype,
+
         )
 
         # Use the provided tokenizer if one is passed to quantize()

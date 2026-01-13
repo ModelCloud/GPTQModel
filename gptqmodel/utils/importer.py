@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import importlib
 import os
+import pkgutil
 from collections import OrderedDict
 from typing import Dict, List, Optional, Type, Union
 
@@ -55,7 +57,7 @@ def infer_quant_methods(cls: Type[BaseQuantLinear]) -> List[METHOD]:
 
 def get_kernel_backends(cls: Type[BaseQuantLinear]) -> List[BACKEND]:
     backends = []
-    for backend in cls.SUPPORTS_BACKEND:
+    for backend in cls.SUPPORTS_BACKENDS:
         if isinstance(backend, BACKEND):
             backends.append(backend)
         else:
@@ -84,7 +86,21 @@ def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) 
     return matches[0]
 
 
+def _import_all_qlinear_kernels() -> None:
+    from ..nn_modules import qlinear as qlinear_pkg
+
+    for module_info in pkgutil.iter_modules(qlinear_pkg.__path__):
+        name = module_info.name
+        if name.startswith("_"):
+            continue
+        try:
+            importlib.import_module(f"{qlinear_pkg.__name__}.{name}")
+        except ImportError as exc:
+            log.debug(f"Skipping qlinear module import `{name}`: {exc}")
+
+
 def build_kernel_support_maps():
+    _import_all_qlinear_kernels()
     # Build auto-select order and format support from kernel declarations.
     auto_entries = {}
     support_entries = {}
@@ -312,7 +328,7 @@ def hf_select_quant_linear_v2(
         sym: bool,
         format: Union[str, FORMAT], # awq `version` should be pre-mapped to format
         quant_method: Union[str, METHOD], # awq llm-awq `version` should be pre-mapped to method
-        zero_point: Optional[bool] = True, # awq only
+        zero_point: Optional[bool] = None, # awq only (True=asymmetric, False=symmetric)
         dtype: Optional[Union[str, torch.dtype]] = None,
         meta: Optional[Dict[str, any]] = None,
         pack: Optional[bool] = True,
@@ -365,11 +381,15 @@ def hf_select_quant_linear_v2(
         # llm-awq uses torch.int16 to pack qweight
         pack_dtype = torch.int16
 
+    effective_sym = sym
+    if zero_point is not None:
+        effective_sym = not bool(zero_point)
+
     return select_quant_linear(
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
-        sym=sym,
+        sym=effective_sym,
         backend=backend,
         device=device,
         format=fmt,
@@ -379,7 +399,6 @@ def hf_select_quant_linear_v2(
         dynamic=None,
         pack_dtype=pack_dtype,
         dtype=normalized_dtype,
-        zero_point=zero_point,
         adapter=None,
     )
 
@@ -399,7 +418,6 @@ def select_quant_linear(
         dynamic=None,
         pack_dtype: torch.dtype = None,
         dtype: Optional[torch.dtype] = None,
-        zero_point: Optional[bool] = None,
         multi_select: bool = False, # return all valid kernels
         adapter: Optional[Adapter] = None,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
@@ -440,7 +458,6 @@ def select_quant_linear(
                 sym=sym,
                 pack_dtype=pack_dtype,
                 dtype=dtype,
-                zero_point=zero_point,
                 dynamic=dynamic,
                 device=device,
                 trainable=trainable,
@@ -492,7 +509,6 @@ def select_quant_linear(
         sym=sym,
         pack_dtype=pack_dtype,
         dtype=dtype,
-        zero_point=zero_point,
         dynamic=dynamic,
         device=device,
         trainable=trainable,

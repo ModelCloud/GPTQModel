@@ -336,6 +336,7 @@ def create_quant_module(
     backend: BACKEND = BACKEND.AUTO,
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
+
 ):
     # unwrap named module
     if isinstance(submodule, NamedModule):
@@ -449,6 +450,7 @@ def create_quant_layer(
         pack_dtype: torch.dtype,
         backend: BACKEND,
         adapter: Optional[Adapter] = None,
+
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
         return linear_cls
@@ -1775,4 +1777,3 @@ def restore_moe_topk(state: MoETopKState):
     for module, name, old in state:
         if hasattr(module, name):
             setattr(module, name, old)
-

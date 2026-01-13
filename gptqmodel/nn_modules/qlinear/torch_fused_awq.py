@@ -29,7 +29,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
 
     QUANT_TYPE = "torch_fused_awq"
 
-    SUPPORTS_BACKEND = [BACKEND.TORCH_FUSED_AWQ]
+    SUPPORTS_BACKENDS = [BACKEND.TORCH_FUSED_AWQ]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 20}
 
@@ -188,11 +188,12 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
 
     def awq_weight_dequantize(self, device, dtype):
         return dequantize_gemm(
-            self.qweight,
-            self.qzeros,
-            self.scales,
-            self.bits,
-            self.group_size,
+            qweight=self.qweight,
+            qzeros=self.qzeros,
+            scales=self.scales,
+            bits=self.bits,
+            group_size=self.group_size,
+            sym=self.sym,
         ).to(device=device, dtype=dtype)
 
     def transform(self, dtype, device):

@@ -6,6 +6,7 @@
 import os
 import sys
 
+import torch
 
 TESTS_MODELS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if TESTS_MODELS_ROOT not in sys.path:
@@ -15,6 +16,7 @@ from model_test import ModelTest
 
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.eval import EVAL
+from gptqmodel import BACKEND
 
 
 # | Metric                         |   MARLIN |
@@ -57,6 +59,9 @@ class TestLlama3_2_awq(ModelTest):
     }
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
+    SYM = True
+    TORCH_DTYPE = torch.float16
+    LOAD_BACKEND = BACKEND.TORCH_AWQ
 
     def test_llama3_2_awq(self):
         self.quant_lm_eval()

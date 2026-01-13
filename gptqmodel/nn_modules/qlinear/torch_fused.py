@@ -52,7 +52,7 @@ class Int4PackedOp(torch.nn.Module):
 
 
 class TorchFusedQuantLinear(PackableQuantLinear):
-    SUPPORTS_BACKEND = [BACKEND.TORCH_FUSED]
+    SUPPORTS_BACKENDS = [BACKEND.TORCH_FUSED]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 50, FORMAT.GPTQ_V2: 50}
     SUPPORTS_BITS = [4]

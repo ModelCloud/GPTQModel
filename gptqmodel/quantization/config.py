@@ -24,6 +24,7 @@ log = setup_logger()
 BITS_FIELD_CODE = "bits"
 GROUP_SIZE_FIELD_CODE = "group_size"
 FORMAT_FIELD_CODE = "format"
+SYMMETRIC_FIELD_CODE = "sym"
 FORMAT_FIELD_CHECKPOINT = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
@@ -467,15 +468,23 @@ QUANTIZE_BLACK_LIST = {}
 # compat
 QUANT_CONFIG_ARG_SYNONYMS = {
     "w_bit": BITS_FIELD_CODE,
+
     # QQQ compat
     "wbits": BITS_FIELD_CODE,
     "q_group_size": GROUP_SIZE_FIELD_CODE,
+
     # AWQ compat
     "version" : FORMAT_FIELD_CODE,
+
     # map format field (checkpoint_format) to class/code (format)
     FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
 }
 
+# compat (values are negated)
+QUANT_CONFIG_ARG_SYNONYMS_NEGATED = {
+    # AWQ compat
+    "zero_point": SYMMETRIC_FIELD_CODE,
+}
 DYNAMIC_FIELD_SYNONYMS = {}
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
@@ -615,8 +624,7 @@ class QuantizeConfig():
     act_group_aware: Optional[bool] = field(default=None)
     static_groups: bool = field(default=False)
 
-    # GPTQ only: symmetric quantization toggle. AWQ ignores this for quant math.
-    # Equivalent modes: GPTQ sym=True == AWQ zero_point=False (symmetric).
+    # symmetric quantization toggle (True=symmetric, False=asymmetric).
     sym: bool = field(default=True)
 
     true_sequential: bool = field(default=True)
@@ -675,10 +683,6 @@ class QuantizeConfig():
     # GPTQ only
     # gptaq only:
     gptaq: Optional[GPTAQConfig] = field(default=None)
-
-    # AWQ only: zero-point toggle (True=asymmetric, False=symmetric).
-    # Equivalent modes: AWQ zero_point=False == GPTQ sym=True.
-    zero_point: bool = field(default=True)
 
     # gptq only:
     # skip all heavy computations for testing model loading
@@ -1065,6 +1069,9 @@ class QuantizeConfig():
             # remap keys according to compat map
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
                 key = QUANT_CONFIG_ARG_SYNONYMS[key]
+            elif key in QUANT_CONFIG_ARG_SYNONYMS_NEGATED and QUANT_CONFIG_ARG_SYNONYMS_NEGATED[key] in field_names:
+                key = QUANT_CONFIG_ARG_SYNONYMS_NEGATED[key]
+                val = not bool(val)
 
             if key == FORMAT_FIELD_CHECKPOINT:
                 val = val.lower()
@@ -1264,7 +1271,6 @@ class QuantizeConfig():
             "dynamic": self.dynamic,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
-            "sym": self.sym,
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_CHECKPOINT: self.format,
@@ -1276,12 +1282,13 @@ class QuantizeConfig():
             # DO NOT EXPORT compute_device_filter since functions are not serializable
         }
 
-        # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm
         if self.quant_method == METHOD.AWQ:
-            out["zero_point"] = self.zero_point
+            out["zero_point"] = not self.sym
             # awq compat with vllm/sglang/transformers loaders
             out["version"] = self.format
             out[FORMAT_FIELD_CODE] = self.format
+        else:
+            out["sym"] = self.sym
         if self.quant_method == METHOD.GPTQ:
             out[FORMAT_FIELD_CODE] = self.format
 
