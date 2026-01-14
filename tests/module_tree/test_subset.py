@@ -290,15 +290,6 @@ def test_stage_subset_early_stop_and_callbacks():
 
     full_modules = find_modules(mini_layer)
     subset_names = ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
-    subset = {
-        name: NamedModule(
-            full_modules[name],
-            name=name,
-            full_name=f"layers.0.{name}",
-            layer_index=0,
-        )
-        for name in subset_names
-    }
 
     # Create subset from names
     subset = looper.create_named_modules(
