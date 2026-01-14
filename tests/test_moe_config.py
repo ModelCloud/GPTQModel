@@ -201,7 +201,7 @@ class TestMoEConfig(ModelTest):
         self.MOE_CONFIG = {
             "routing": {
                 "class": "ExpertsRoutingOverride",
-                "num_experts_per_tok": 2
+                "num_experts_per_tok": "all"
             }
         }
         self.quantize_and_assert()
