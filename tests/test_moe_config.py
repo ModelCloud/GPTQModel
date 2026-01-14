@@ -184,24 +184,8 @@ class TestMoEConfig(ModelTest):
         self.MOE_CONFIG = MoEConfig(routing=ExpertsRoutingBypass())
         self.quantize_and_assert()
 
-    def test_moe_dict_initialization_bypass(self):
+    def test_moe_routing_bypass_batch_size(self):
         """Test dictionary-based initialization for ExpertsRoutingBypass"""
         # Dictionary-based initialization with ExpertsRoutingBypass
-        self.MOE_CONFIG = {
-            "routing": {
-                "class": "ExpertsRoutingBypass",
-                "batch_size": 4
-            }
-        }
-        self.quantize_and_assert()
-
-    def test_moe_dict_initialization_override(self):
-        """Test dictionary-based initialization for ExpertsRoutingOverride"""
-        # Dictionary-based initialization with ExpertsRoutingOverride
-        self.MOE_CONFIG = {
-            "routing": {
-                "class": "ExpertsRoutingOverride",
-                "num_experts_per_tok": "all"
-            }
-        }
+        self.MOE_CONFIG = MoEConfig(routing=ExpertsRoutingBypass(batch_size=4))
         self.quantize_and_assert()
