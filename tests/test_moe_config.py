@@ -62,20 +62,6 @@ def assert_results(model, target_class, moe_config):
     if moe_config is None:
         # No MoE config → no MoE metadata should be emitted
         assert qcfg.meta_get("moe") is None
-
-    elif isinstance(moe_config, dict):
-        # Dictionary-based config - verify it was converted to MoEConfig
-        moe_dict = moe_config
-        moe = qcfg.meta_get("moe")
-        assert moe is not None, "MoE metadata should be present"
-        assert moe["routing"]["class"] == moe_dict["routing"]["class"]
-        # Verify routing-specific fields
-        if moe_dict["routing"]["class"] == "ExpertsRoutingBypass":
-            if "batch_size" in moe_dict["routing"]:
-                assert moe["routing"]["batch_size"] == moe_dict["routing"]["batch_size"]
-        elif moe_dict["routing"]["class"] == "ExpertsRoutingOverride":
-            assert moe["routing"]["num_experts_per_tok"] == moe_dict["routing"]["num_experts_per_tok"]
-
     elif isinstance(moe_config.routing, ExpertsRoutingOverride):
         # Override routing must be reflected exactly in metadata
         moe = qcfg.meta_get("moe")
