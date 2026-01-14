@@ -1,14 +1,15 @@
 import unittest
-from unittest.mock import MagicMock, patch, call
-from gptqmodel.quantization.config import (
-    GcMode,
-    ExpertsRoutingBypass,
-    MoEConfig,
-    ExpertsRoutingOverride,
-    BaseMoERouting,
-)
+from unittest.mock import MagicMock, patch
+
 import torch
-from gptqmodel.looper.stage_subset import run_subset_stage, SubsetStageResult
+
+from gptqmodel.looper.stage_subset import run_subset_stage
+from gptqmodel.quantization.config import (
+    ExpertsRoutingBypass,
+    ExpertsRoutingOverride,
+    GcMode,
+    MoEConfig,
+)
 
 
 class TestMoEExpertBatching(unittest.TestCase):
