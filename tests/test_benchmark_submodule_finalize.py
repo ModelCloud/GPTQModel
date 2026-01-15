@@ -18,6 +18,7 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.threadx import DeviceThreadPool
+from gptqmodel.utils.pause_resume import PauseResumeController
 
 
 def _dummy_prepare_dataset(
@@ -33,6 +34,9 @@ def _dummy_prepare_dataset(
 
 class _DummyProgressBar:
     def title(self, _):
+        return self
+
+    def subtitle(self, _):
         return self
 
     def draw(self):
@@ -149,6 +153,7 @@ def test_submodule_finalize_timing():
         require_fwd=False,
         calculate_w_wq_diff=False,
     )
+    processor._pause_controller = PauseResumeController()
     processor.pb = _DummyProgressBar()
 
     processor.preprocess(named_module)
@@ -302,7 +307,7 @@ def _prepare_modules(processor, qcfg, device, module_count):
         named_module.target_device = device
         named_module.module.target_device = device
 
-        processor.preprocess(named_module, failsafe=False)
+        processor.preprocess(named_module, failsafe=None)
         processor.process(named_module)
 
         base_model.to("cpu")
@@ -362,6 +367,7 @@ def test_submodule_finalize_threadpool_serialization(cpu_workers):
         require_fwd=False,
         calculate_w_wq_diff=False,
     )
+    processor._pause_controller = PauseResumeController()
     processor.pb = _DummyProgressBar()
 
     module_count = min(cpu_workers * 2, 32)
