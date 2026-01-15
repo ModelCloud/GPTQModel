@@ -13,6 +13,7 @@ class _DummyModel:
             vram_strategy="exclusive",
             compute_device_filter=compute_device_filter,
             auto_forward_data_parallel=True,
+            moe_routing_bypass=lambda: False,
         )
         self.layer_callback = None
 

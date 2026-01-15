@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from enum import Enum
 
 
-@dataclass(frozen=True)
 class LinearMode(str, Enum):
     INFERENCE = "inference"
     TRAIN = "train"

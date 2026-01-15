@@ -50,7 +50,7 @@ class TestIntegration(unittest.TestCase):
         dataset = [
             "gptqmodel is an easy-to-use model quantization library with user-friendly apis, based on GPTQ algorithm."]
         gptq_config = GPTQConfig(bits=4, dataset=dataset, tokenizer=tokenizer)
-        quantized_model = AutoModelForCausalLM.from_pretrained(model_id, device_map=device_map,
+        quantized_model = AutoModelForCausalLM.from_pretrained(model_id, device_map=device_map, use_safetensors=False,
                                                                quantization_config=gptq_config)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
