@@ -6,17 +6,18 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-from parameterized import parameterized  # noqa: E402
-
-from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
-
 import torch
+from parameterized import parameterized  # noqa: E402
 from peft.tuners.lora.gptq import GPTQLoraLinear
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
+
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -47,7 +48,7 @@ from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 # |-------------|------:|------|-----:|--------|---|-----:|---|-----:|
 # |arc_challenge|      1|none  |     0|acc     |↑  |0.3140|±  |0.0136|
 # |             |       |none  |     0|acc_norm|↑  |0.3567|±  |0.0140|
-class Test(ModelTest):
+class TestQuantAndEORA(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"  # "meta-llama/Llama-3.2-1B-Instruct"
 
     EVAL_TASKS = {
@@ -177,7 +178,7 @@ class Test(ModelTest):
 log = LogBar.shared()
 
 
-class Test(ModelTest):
+class TestTransformers(ModelTest):
     # NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/"
     # NATIVE_MODEL_ID = "/monster/data/model/tinyllama-15M-stories"
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"

@@ -6,25 +6,25 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
 import os  # noqa: E402
-import unittest  # noqa: E402
 import sys  # noqa: E402
 import threading  # noqa: E402
+import unittest  # noqa: E402
 
 import pytest  # noqa: E402
-
 import torch  # noqa: E402
 import torch.utils.benchmark as benchmark  # noqa: E402
 from logbar import LogBar  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+import gptqmodel  # noqa: F401  # ensures monkey patches run before Triton import
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 
-import gptqmodel  # noqa: F401  # ensures monkey patches run before Triton import
 
 log = LogBar.shared()
 

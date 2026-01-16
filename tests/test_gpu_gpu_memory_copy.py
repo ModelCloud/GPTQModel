@@ -8,8 +8,8 @@ import math
 import time
 
 import torch
-
 from models.model_test import ModelTest
+
 
 # cpu_gpu_bandwidth_test.py
 # Measure HtoD and DtoH bandwidth with pageable vs pinned CPU memory.
@@ -149,12 +149,6 @@ def cpu_cpu():
     print(f"  CPU to GPU Pinned  : {bw_htod_pinned:.2f}")
     print(f"  GPU to CPU Pageable: {bw_dtoh_pageable:.2f}")
     print(f"  GPU to CPU Pinned  : {bw_dtoh_pinned:.2f}")
-
-
-def gib_to_elems_fp16(gib: float) -> int:
-    # 1 GiB = 1024**3 bytes; fp16 = 2 bytes/elem
-    return int((gib * (1024 ** 3)) // 2)
-
 
 def format_gibs_per_s(bytes_moved, seconds):
     return (bytes_moved / (1024 ** 3)) / seconds

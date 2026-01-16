@@ -14,7 +14,6 @@ from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.torch import timed_gc_collect
 
-
 ######### test_gptq_queue.py ##########
 @torch.no_grad()
 def test_out_of_order_batches_finalize_matches_reference():

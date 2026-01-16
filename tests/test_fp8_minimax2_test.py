@@ -16,9 +16,6 @@ import os
 import sys
 from typing import Dict, List
 
-import pytest
-import torch
-
 from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import QuantizeConfig
