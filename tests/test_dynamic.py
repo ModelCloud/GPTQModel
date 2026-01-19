@@ -6,20 +6,25 @@
 # -- do not touch
 import os
 
-from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
 # -- end do not touch
 import json  # noqa: E402
 import tempfile  # noqa: E402
 
+import torch  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel.looper.gptq_processor import GPTQProcessor  # noqa: E402
+from gptqmodel.looper.loop_processor import LoopProcessor  # noqa: E402
+from gptqmodel.looper.named_module import NamedModule  # noqa: E402
+from gptqmodel.looper.native_processor import NATIVE_INPUTS_STATE_KEY  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
 from gptqmodel.quantization import QuantizeConfig  # noqa: E402
 from gptqmodel.utils import safetensor  # noqa: E402
@@ -58,7 +63,6 @@ class TestDynamic(ModelTest):
             r".*\.up_proj.*": {"bits": 8, "group_size": 128},  # match layer 1 gate module
             r".*\.gate_proj.*": {"bits": 8, "group_size": 128},  # match layer 2 gate module
             r".*\.down_proj.*": {"bits": 4, "group_size": 32},
-
 
             # r".*\.0\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 1 gate module
             # r".*\.1\..*gate.*": {"bits": 8, "group_size": 128},  # match layer 2 gate module
@@ -124,7 +128,7 @@ class TestDynamic(ModelTest):
         lower_bound = expected_ppl * (1 - tolerance)
         upper_bound = expected_ppl * (1 + tolerance)
         assert lower_bound <= dynamic_bits_ppl <= upper_bound, \
-            f"PPL expected: `{expected_ppl}` ±{tolerance*100}%, actual = `{dynamic_bits_ppl}`"
+            f"PPL expected: `{expected_ppl}` ±{tolerance * 100}%, actual = `{dynamic_bits_ppl}`"
 
     def test_skip_module(self):
         dynamic = {
@@ -145,4 +149,73 @@ class TestDynamic(ModelTest):
             del model
 
             q_model = GPTQModel.load(tmp_dir)
-            self.assertInference(model=q_model,tokenizer=self.tokenizer,keywords=["paris", "king"])
+            self.assertInference(model=q_model, tokenizer=self.tokenizer, keywords=["paris", "king"])
+
+
+######## test_dynamic_overrides.py #######
+
+
+def _make_processor(qcfg: QuantizeConfig) -> GPTQProcessor:
+    return GPTQProcessor(
+        tokenizer=None,
+        qcfg=qcfg,
+        calibration=[{"input_ids": [0], "attention_mask": [1]}],
+        prepare_dataset_func=lambda calibration_dataset, **_kwargs: calibration_dataset,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        batch_size=1,
+    )
+
+
+def test_dynamic_overrides_apply_per_module(monkeypatch):
+    monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
+
+    qcfg = QuantizeConfig(
+        dynamic={
+            "model.linear": {
+                "gptaq": {"alpha": 0.5, "device": "cpu"},
+                "failsafe": {"strategy": "median", "threshold": "2%"},
+                "hessian": {"chunk_size": 32, "chunk_bytes": 1024, "staging_dtype": "bfloat16"},
+            },
+        }
+    )
+
+    processor = _make_processor(qcfg)
+
+    module = NamedModule(
+        torch.nn.Linear(4, 4, bias=False),
+        name="linear",
+        full_name="model.linear",
+        layer_index=0,
+    )
+    module.state[NATIVE_INPUTS_STATE_KEY] = []
+    processor.preprocess(module)
+
+    dynamic_cfg = processor.qcfg_dynamic
+    assert dynamic_cfg is not None
+    assert dynamic_cfg.gptaq is not None
+    assert dynamic_cfg.gptaq.alpha == 0.5
+    assert dynamic_cfg.gptaq.device == "cpu"
+    assert dynamic_cfg.failsafe is not None
+    assert dynamic_cfg.failsafe.strategy == "median"
+    assert dynamic_cfg.failsafe.threshold == "2%"
+    assert dynamic_cfg.hessian.chunk_size == 32
+    assert dynamic_cfg.hessian.chunk_bytes == 1024
+    assert dynamic_cfg.hessian.staging_dtype == torch.bfloat16
+
+    module_other = NamedModule(
+        torch.nn.Linear(4, 4, bias=False),
+        name="other",
+        full_name="model.other",
+        layer_index=0,
+    )
+    processor.preprocess(module_other)
+
+    other_cfg = processor.qcfg_dynamic
+    assert other_cfg is not None
+    assert other_cfg.gptaq is None
+    assert other_cfg.failsafe.strategy == qcfg.failsafe.strategy
+    assert other_cfg.failsafe.threshold == qcfg.failsafe.threshold
+    assert other_cfg.hessian.chunk_size == qcfg.hessian.chunk_size
+    assert other_cfg.hessian.chunk_bytes == qcfg.hessian.chunk_bytes
+    assert other_cfg.hessian.staging_dtype == qcfg.hessian.staging_dtype

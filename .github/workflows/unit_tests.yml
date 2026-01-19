@@ -60,7 +60,7 @@ env:
   CUDA_VISIBLE_DEVICES: 0
   TORCH_CUDA_ARCH_LIST: '8.6 8.9 9.0 12.0'
   PYTORCH_ALLOC_CONF: 'expandable_segments:True'
-  MAX_JOBS: 8 # compile concurrency
+  MAX_JOBS: 12 # compile concurrency
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.249
   UV_INDEX_URL: http://10.0.14.249/simple
@@ -153,6 +153,7 @@ jobs:
           import json
           import os
           import re
+          from pathlib import Path
 
           LEGACY_TESTS = '${LEGACY_TESTS}'
           IGNORED_TEST_FILES = '${IGNORED_TEST_FILES}'
@@ -165,7 +166,12 @@ jobs:
           transformers_test_files = [f.strip().removesuffix('.py') for f in f'{LEGACY_TESTS}'.split(',') if f.strip()]
           transformers_test_files = [f for f in transformers_test_files if not input_test_files_list or f in input_test_files_list]
 
-          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
+          all_tests = [
+              str(p.relative_to('tests').with_suffix(''))
+              for p in Path('tests').rglob('test_*.py')
+              if p.stem not in IGNORED_TEST_FILES
+              # and 'models' not in p.relative_to('tests').parts
+          ]
           all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
 
           torch_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files and 'mlx' not in f]

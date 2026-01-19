@@ -17,8 +17,8 @@ from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.quantization.config import QuantizeConfig
-from gptqmodel.utils.threadx import DeviceThreadPool
 from gptqmodel.utils.pause_resume import PauseResumeController
+from gptqmodel.utils.threadx import DeviceThreadPool
 
 
 def _dummy_prepare_dataset(
