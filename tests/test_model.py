@@ -326,11 +326,12 @@ def test_dequantize_model_compressed_tensors_pack(tmp_path):
     write_index(model_dir, shard_name, list(tensors.keys()))
 
     import gptqmodel.utils.model_dequant as model_dequant_module
-    from gptqmodel.utils.model_dequant import detect_format, load_json
 
     module_path = Path(model_dequant_module.__file__).resolve()
     assert REPO_ROOT in module_path.parents
-    detected = detect_format(model_dir, load_json(model_dir / "config.json"))
+    detected = model_dequant_module.detect_format(
+        model_dir, model_dequant_module.load_json(model_dir / "config.json")
+    )
     assert detected == "compressed-pack"
 
     dequantize_model(model_dir, output_dir, target_dtype=torch.float32, device="cpu")
