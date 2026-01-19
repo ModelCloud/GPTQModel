@@ -495,11 +495,8 @@ class TestThreadxJanitor(ModelTest):
 
 mps_available = hasattr(torch, "backends") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
 
-pytestmark = [
-    pytest.mark.mps,
-    pytest.mark.skipif(not mps_available, reason="MPS not available"),
-]
-
+@pytest.mark.mps
+@pytest.mark.skipif(not mps_available, reason="MPS not available")
 def test_mps_worker_basic():
     d_mps = torch.device("mps")
     p = DeviceThreadPool(devices=[d_mps], inference_mode=True, empty_cache_every_n=3)
@@ -513,6 +510,8 @@ def test_mps_worker_basic():
     finally:
         p.shutdown()
 
+@pytest.mark.mps
+@pytest.mark.skipif(not mps_available, reason="MPS not available")
 def test_mps_linear_forward_and_counters(monkeypatch):
     d_mps = torch.device("mps")
     calls = []
