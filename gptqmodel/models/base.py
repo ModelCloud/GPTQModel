@@ -651,8 +651,8 @@ class BaseQModel(nn.Module):
             )
 
         if self.quantize_config.quant_method == METHOD.AWQ:
-            if self.quantize_config.format == FORMAT.GEMV_FAST:
-                # AWQ GEMV_FAST only supports pack_dtype is torch.int16
+            if self.quantize_config.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
+                # AWQ GEMV_FAST / LLM_AWQ only supports pack_dtype is torch.int16
                 log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
                 self.quantize_config.pack_dtype = torch.int16
 
@@ -667,7 +667,7 @@ class BaseQModel(nn.Module):
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):
             if self.quantize_config.quant_method == METHOD.AWQ:
-                preferred_backend = BACKEND.TORCH_AWQ
+                preferred_backend = BACKEND.TORCH_AWQ if self.quantize_config.format != FORMAT.LLM_AWQ else BACKEND.GEMV_FAST
             else:
                 preferred_backend = BACKEND.TORCH
 
