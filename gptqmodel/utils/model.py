@@ -746,7 +746,7 @@ def pack_module(
             module_name=name,
         ):
             module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
-    elif quant_linear_cls.QUANT_TYPE.startswith("awq_"):
+    elif quant_linear_cls.QUANT_TYPE.startswith("awq_") or quant_linear_cls.QUANT_TYPE == "llm-awq":
         packer_label = "module.pack"
         with log_time_block(
             packer_label,

@@ -78,6 +78,7 @@ class TestAwq(unittest.TestCase):
             (FORMAT.GEMM, 128),
             (FORMAT.GEMV, 128),
             (FORMAT.GEMV_FAST, 128),
+            (FORMAT.LLM_AWQ, 128),
         }
 
         for checkpoint_format, group_size in quantize_targets:
@@ -124,6 +125,7 @@ class TestAwq(unittest.TestCase):
         (FORMAT.GEMM, BACKEND.MARLIN, 128),
         (FORMAT.GEMV, BACKEND.GEMV, 128),
         (FORMAT.GEMV_FAST, BACKEND.GEMV_FAST, 128),
+        (FORMAT.LLM_AWQ, BACKEND.GEMV_FAST, 128),
     ])
     def test_quant_and_inference(self, checkpoint_format, backend, group_size: int):
         if backend == BACKEND.MACHETE:

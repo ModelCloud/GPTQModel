@@ -22,7 +22,7 @@ from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
-from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
+from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear, LLMAwqQuantLinear
 from ..nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
@@ -125,6 +125,8 @@ class AWQProcessor(LoopProcessor):
             return AwqGEMVQuantLinear
         if fmt == FORMAT.GEMV_FAST:
             return AwqGEMVFastQuantLinear
+        if fmt == FORMAT.LLM_AWQ:
+            return LLMAwqQuantLinear
         # We do not allow saving to marlin format
         # if fmt == FORMAT.MARLIN:
         #     return AwqMarlinQuantLinear

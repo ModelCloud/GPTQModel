@@ -389,8 +389,8 @@ def ModelLoader(cls):
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
 
-        if qcfg.quant_method == METHOD.AWQ and qcfg.format in [FORMAT.GEMV_FAST]:
-            # GEMV_FAST only supports torch.float16
+        if qcfg.quant_method == METHOD.AWQ and qcfg.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
+            # GEMV_FAST and LLM_AWQ only supports torch.float16
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
 
