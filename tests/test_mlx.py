@@ -51,8 +51,8 @@ class TestExport(ModelTest):
 
 class TestMlxGenerate(ModelTest):
     @classmethod
-    def setUpClass(self):
-        self.pretrained_model_id = "/monster/data/model/Qwen2.5-0.5B-Instruct/gptq_4bits_01-07_14-18-11_maxlen1024_ns1024_descFalse_damp0.1/"
+    def setUpClass(cls):
+        cls.pretrained_model_id = "/monster/data/model/Qwen2.5-0.5B-Instruct/gptq_4bits_01-07_14-18-11_maxlen1024_ns1024_descFalse_damp0.1/"
 
     def test_mlx_generate(self):
         mlx_model = GPTQModel.load(
