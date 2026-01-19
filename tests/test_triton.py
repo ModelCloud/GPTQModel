@@ -22,8 +22,7 @@ from logbar import LogBar  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-import gptqmodel  # noqa: F401  # ensures monkey patches run before Triton import
-from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402  # ensures monkey patches run before Triton import
 
 
 log = LogBar.shared()
