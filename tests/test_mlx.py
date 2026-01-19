@@ -20,14 +20,14 @@ from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 
+NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/gptq_4bits_01-07_14-18-11_maxlen1024_ns1024_descFalse_damp0.1/"
 
 class TestExport(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct/gptq_4bits_01-07_14-18-11_maxlen1024_ns1024_descFalse_damp0.1/"
 
     @classmethod
-    def setUpClass(self):
-        self.tokenizer = AutoTokenizer.from_pretrained(self.NATIVE_MODEL_ID, use_fast=True)
-        self.calibration_dataset = self.load_dataset(self.tokenizer, self.DATASET_SIZE)
+    def setUpClass(cls):
+        cls.tokenizer = AutoTokenizer.from_pretrained(cls.NATIVE_MODEL_ID, use_fast=True)
+        cls.calibration_dataset = cls.load_dataset(cls.tokenizer, cls.DATASET_SIZE)
 
     def test_export_mlx(self):
         with tempfile.TemporaryDirectory() as export_dir:
@@ -50,13 +50,9 @@ class TestExport(ModelTest):
 ######### test_mlx_generate.py ##########
 
 class TestMlxGenerate(ModelTest):
-    @classmethod
-    def setUpClass(cls):
-        cls.pretrained_model_id = "/monster/data/model/Qwen2.5-0.5B-Instruct/gptq_4bits_01-07_14-18-11_maxlen1024_ns1024_descFalse_damp0.1/"
-
     def test_mlx_generate(self):
         mlx_model = GPTQModel.load(
-            self.pretrained_model_id,
+            NATIVE_MODEL_ID,
             backend=BACKEND.MLX
         )
 
