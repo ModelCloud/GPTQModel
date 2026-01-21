@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import torch
 import torch.nn as nn
-from parameterized import parameterized
 
 from models.model_test import ModelTest
 
