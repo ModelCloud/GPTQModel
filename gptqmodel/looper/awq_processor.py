@@ -391,7 +391,7 @@ class AWQProcessor(LoopProcessor):
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
         if missing and not self.failsafe:
             raise RuntimeError(
-                f"AWQProcessor invariant violated: missing activation features for modules {missing} "
+                f"AWQProcessor error: missing activation features for modules {missing} "
                 f"with failsafe disabled."
             )
 
