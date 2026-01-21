@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 import torch
 
+from .awq_processor import AWQProcessor
+from .qqq_processor import QQQProcessor
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
@@ -410,11 +412,11 @@ def run_subset_stage(
 
     moe_skip_modules = []
     failsafe_enabled = failsafe is not None
-    if isinstance(processor, GPTQProcessor):
+    if isinstance(processor, GPTQProcessor) or isinstance(processor, QQQProcessor) or isinstance(processor, AWQProcessor):
         for name in subset:
             # Skip MoE experts that never fired; they likely lacked calibration
             # traffic and would produce invalid statistics.
-            if processor.tasks[name].fwd_counter == 0:
+            if not processor.has_captured_input_ids(name):
                 # only log for moe if `failsafe` is not enabled
                 if not failsafe_enabled:
                     logger.error(

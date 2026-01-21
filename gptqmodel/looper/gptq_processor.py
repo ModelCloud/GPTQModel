@@ -436,3 +436,6 @@ class GPTQProcessor(LoopProcessor):
         # TODO fix me..this hacks inherited base class logic, why not override name in gptaq?
         qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
         return "gptaq" if qcfg.gptaq is not None else "gptq"
+
+    def has_captured_input_ids(self, name: str) -> bool:
+        return self.tasks[name].fwd_counter == 0
