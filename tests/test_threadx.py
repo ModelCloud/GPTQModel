@@ -12,8 +12,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-from models.model_test import ModelTest
-
 from gptqmodel.utils import threadx as threadx_mod
 from gptqmodel.utils.threadx import DeviceThreadPool
 
