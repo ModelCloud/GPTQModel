@@ -497,58 +497,13 @@ jobs:
       - name: Install wheel
         run: |
           uv pip uninstall gptqmodel
-          uv pip install -U transformers tabulate
-          if [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
-             [ "${{ matrix.test_script }}" == "test_inference_speed" ] || \
-             [ "${{ matrix.test_script }}" == "test_q4_bitblas" ] || \
-             [ "${{ matrix.test_script }}" == "test_save_loaded_quantized_model" ]; then
-            echo "===== install bitblas==0.0.1.dev13 ====="
-            uv pip install bitblas==0.0.1.dev13 -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          if [[ "${{ matrix.test_script }}" == *auto_round* ]]; then
-            uv pip install auto_round
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
-            uv pip install intel_extension_for_pytorch -U
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "models/test_pangu_alpha" ]]; then
-            uv pip install jieba
-          fi
-
-          if [ "${{ matrix.test_script }}" == "models/test_cohere2" ] || [ "${{ matrix.test_script }}" == "models/test_gemma" ]; then
-            echo "===== install transformers from git ====="
-            uv pip install -U transformers -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
+          
+          python .github/scripts/install_deps.py ${{ matrix.test_script }}
+     
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
-            uv pip install -U logbar==0.0.4
           fi
-
-          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
-            uv pip install git+https://github.com/huggingface/peft trl wandb
-          fi
-
-          if [[ "${{ matrix.test_script }}" == *ipex* ]] && [[ "${{ matrix.test_script }}" != *xpu* ]]; then
-            uv pip uninstall torchvision torch flash_attn # fix ipex can't be used with torch+cu126
-            uv pip install torchvision torch
-            uv pip install -U intel_extension_for_pytorch -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          if [[ "${{ matrix.test_script }}" == *"mlx"* ]]; then
-            uv pip install mlx_lm --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "test_modelscope" ]]; then
-            echo "===== installing modelscope ====="
-            uv pip install modelscope --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          uv pip install git+https://github.com/ModelCloud/Tokenicer -U
 
           # ipex doesn't need to compile kernels. xpu can't install cuda package
           if [[ "${{ matrix.test_script }}" != *ipex* && "${{ matrix.test_script }}" != *xpu* ]]; then
@@ -561,21 +516,12 @@ jobs:
             uv pip install . --no-build-isolation
           fi
 
-          if [ "${{ matrix.test_script }}" == "test_transformers" ]; then
-            echo "===== install optimum from git ====="
-            uv pip install -U git+https://github.com/huggingface/optimum.git -i http://$RUNNER/simple/ --trusted-host $RUNNER
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "test_sglang" ]]; then
-            uv pip install transformers==4.48.3
-            uv pip install numpy==1.26.3
-          fi
-
           echo "===== uninstall torchao ====="
           uv pip uninstall torchao
 
-          echo "== pip list =="
+          echo "::group::pip list"
           pip list
+          echo "::endgroup::"
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
