@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import torch
 import torch.nn as nn
-from tests.models.model_test import ModelTest
 
 from gptqmodel.utils import threadx as threadx_mod
 from gptqmodel.utils.threadx import DeviceThreadPool
@@ -390,7 +389,7 @@ class _DummyLock:
     def writer(self):
         yield
 
-class TestThreadxJanitor(ModelTest):
+class TestThreadxJanitor():
 
     DeviceThreadPool = threadx_mod.DeviceThreadPool
 

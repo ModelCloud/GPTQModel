@@ -693,4 +693,4 @@ def test_gptq_failsafe_threshold_triggers_rtn_when_samples_below_percent():
     _, _, _, _, _, avg_loss, _, nsamples = gptq.quantize(blocksize=4)
 
     assert nsamples == 1
-    assert avg_loss == "midpoint failsafe"
+    assert avg_loss == "failsafe(rtn): 0.0062505"
