@@ -339,6 +339,29 @@ class AWQProcessor(LoopProcessor):
 
         self._module_forward_kwargs = refreshed
 
+    def _should_failsafe_group(
+        self,
+        layer_names: List[str],
+        input_feat: Dict[str, torch.Tensor],
+    ) -> bool:
+        from ..utils.failsafe import should_use_failsafe
+
+        captured_tokens = 0
+        for name in layer_names:
+            feat = input_feat.get(name)
+            if feat is None or feat.numel() == 0:
+                return True
+
+            hidden = feat.shape[-1] if feat.dim() >= 1 else 1
+            captured_tokens += feat.numel() // max(hidden, 1)
+
+        expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
+        return should_use_failsafe(
+            self.failsafe,
+            float(captured_tokens),
+            float(expected_tokens) if expected_tokens else None,
+        )
+
     def _quantize_layer(self, layer_index: int, state: _AWQLayerState) -> None:
         if state.quantized:
             return
@@ -365,75 +388,12 @@ class AWQProcessor(LoopProcessor):
         )
 
         input_feat = self._layer_input_features(state)
-        if self.failsafe:
-            from ..utils.failsafe import resolve_failsafe_strategy, resolve_threshold, should_use_failsafe
-
-            strategy = resolve_failsafe_strategy(self.failsafe)
-
-            captured_tokens = 0
-            for tensor in input_feat.values():
-                if tensor is None or tensor.numel() == 0:
-                    continue
-                hidden = tensor.shape[-1] if tensor.dim() >= 1 else 1
-                tokens = int(tensor.numel() / max(hidden, 1))
-                captured_tokens += tokens
-
-            expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
-            fallback_needed = should_use_failsafe(
-                self.failsafe,
-                float(captured_tokens),
-                float(expected_tokens) if expected_tokens else None,
-            )
-            missing_activation = not input_feat or all(t.numel() == 0 for t in input_feat.values())
-            if fallback_needed or missing_activation:
-                reason = "failsafe threshold" if fallback_needed else "no activation captures"
-                if fallback_needed:
-                    threshold_raw, is_percent = resolve_threshold(self.failsafe, expected_tokens)
-                    extra = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
-                    log.warn(
-                        "AWQProcessor: layer %s -> Using `%s` failsafe quantization (captured=%s tokens, threshold=%s%s, max_total=%s).",
-                        layer_index,
-                        strategy.value,
-                        captured_tokens,
-                        self.failsafe,
-                        extra,
-                        expected_tokens,
-                    )
-                self._quantize_layer_failsafe(layer_index, state, reason)
-                return
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
-        if missing:
-            log.warning(
-                "AWQProcessor: layer %s skipping %d modules with missing features (sample=%s)",
-                layer_index,
-                len(missing),
-                missing[:8],
+        if missing and not self.failsafe:
+            raise RuntimeError(
+                f"AWQProcessor error: missing activation features for modules {missing} "
+                f"with failsafe disabled."
             )
-            # Drop modules with no captured activations so the layer can still quantize the rest
-            for name in missing:
-                input_feat.pop(name, None)
-                state.modules.pop(name, None)
-                state.pending_modules.discard(name)
-                task_entry = self.tasks.pop(name, None)
-                if task_entry and "inputs" in task_entry:
-                    task_entry["inputs"].clear()
-
-            remaining_modules = dict(state.modules)
-
-            if not remaining_modules:
-                log.warning(
-                    "AWQProcessor: layer %s has no modules with captured activations; marking quantized.",
-                    layer_index,
-                )
-                state.quantized = True
-                state.processed_subsets.clear()
-                state.subset_total = None
-                state.previous_weight_scale = None
-                if hasattr(self._scale_context, "layer_index"):
-                    delattr(self._scale_context, "layer_index")
-                if hasattr(self._scale_context, "prev_scale"):
-                    delattr(self._scale_context, "prev_scale")
-                return
 
         # Filtering MLP modules like Qwen3MoeSparseMoeBlock
         def unwrap(m):
@@ -450,25 +410,11 @@ class AWQProcessor(LoopProcessor):
         setattr(self._scale_context, "layer_index", layer_index)
         setattr(self._scale_context, "prev_scale", state.previous_weight_scale)
 
-        while True:
-            try:
-                module_config = self.gptq_model.awq_get_modules_for_scaling(
-                    layer_module_ref,
-                    input_feat,
-                    module_kwargs_global,
-                )
-                break
-            except KeyError as missing_key:
-                missing_name = missing_key.args[0]
-                if missing_name in input_feat or not input_feat:
-                    raise
-                surrogate = next(iter(input_feat.values()))
-                input_feat[missing_name] = surrogate
-                log.debug(
-                    "AWQProcessor: layer %s using surrogate activation for missing module `%s`.",
-                    layer_index,
-                    missing_name,
-                )
+        module_config = self.gptq_model.awq_get_modules_for_scaling(
+            layer_module_ref,
+            input_feat,
+            module_kwargs_global,
+        )
 
         if not module_config:
             log.warning(
@@ -498,9 +444,19 @@ class AWQProcessor(LoopProcessor):
 
         filtered_module_config: List[Dict] = []
         skipped_groups: List[Tuple[List[str], List[str]]] = []
+        failsafe_names = set()
         for cfg in sanitized_module_config:
             layers_sample = cfg.get("layers") or []
             prev_module = cfg.get("prev_op")
+
+            layer_names = [
+                get_op_name(layer_module_ref, layer) if isinstance(layer, torch.nn.Module) else str(layer)
+                for layer in layers_sample
+            ]
+            if self.failsafe and self._should_failsafe_group(layer_names, input_feat):
+                failsafe_names.update(layer_names)
+                continue
+
             first_layer_module = layers_sample[0] if layers_sample else None
             # Some configs alias prev_op to the first layer (e.g. gate_proj); treat that as valid
             same_module = prev_module is first_layer_module
@@ -527,10 +483,7 @@ class AWQProcessor(LoopProcessor):
                     tuple(first_layer_module.weight.shape),
                 )
                 continue
-            layer_names = [
-                get_op_name(layer_module_ref, layer) if isinstance(layer, torch.nn.Module) else str(layer)
-                for layer in layers_sample
-            ]
+
             missing_layers = [name for name in layer_names if name not in input_feat]
             if missing_layers:
                 skipped_groups.append((layer_names, missing_layers))
@@ -546,7 +499,7 @@ class AWQProcessor(LoopProcessor):
             )
 
         sanitized_module_config = filtered_module_config
-        if not sanitized_module_config:
+        if not sanitized_module_config and not failsafe_names:
             log.warning(
                 "AWQProcessor: no valid scaling groups for layer %s after filtering; marking layer as quantized.",
                 layer_index,
@@ -632,7 +585,7 @@ class AWQProcessor(LoopProcessor):
         if self.apply_clip:
             clip_list = self._search_best_clip(
                 layer_module_ref,
-                {name: named.module for name, named in named_childs.items()},
+                {name: named.module for name, named in named_childs.items() if name not in failsafe_names},
                 input_feat,
             )
             apply_clip(layer_module_ref, clip_list)
@@ -641,9 +594,24 @@ class AWQProcessor(LoopProcessor):
                 get_op_name(self.model, layer_module_ref) + ".",
             )
 
-        named_childs = {name: named for name, named in named_childs.items() if name in input_feat}
+        failsafe_named_childs = {
+            n: named_childs[n]
+            for n in failsafe_names
+            if n in named_childs
+        }
+
+        named_childs = {name: named for name, named in named_childs.items() if name in input_feat and name not in failsafe_names}
 
         self.apply_quant(named_childs, scales_list)
+
+        if failsafe_named_childs:
+            log.warning(
+                "AWQProcessor: layer %s fallback quant %d modules: %s",
+                layer_index,
+                len(failsafe_named_childs),
+                list(failsafe_named_childs)[:6],
+            )
+            self.apply_quant(failsafe_named_childs, scales_list=[])
 
         state.quantized = True
         state.modules.clear()
@@ -1404,6 +1372,8 @@ class AWQProcessor(LoopProcessor):
             module.state.pop("w", None)  #
             module.state.pop("w_wq_diff", None)
 
+            if module.state.get("q_zeros") is None:
+                print("modddd", module.full_name)
             # need to clone to due to steamed pinned memory and access on diff thread
             q_zeros = module.state.pop("q_zeros").clone()
             q_scales = module.state.pop("q_scales").clone()
@@ -1491,3 +1461,8 @@ class AWQProcessor(LoopProcessor):
     @classmethod
     def name(cls) -> str:
         return "awq"
+
+    def has_captured_input_ids(self, name: str) -> bool:
+        entry = self.tasks.get(name) or {}
+        tensors: List[torch.Tensor] = entry.get("inputs", [])
+        return tensors is not None and len(tensors) > 0 and all(t.numel() > 0 for t in tensors)
