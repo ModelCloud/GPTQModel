@@ -285,8 +285,6 @@ def run_layer_stage(
                         force_serial=subset_forward_serial,
                         preserve_module_devices=preserve_devices,
                     )
-                    print("layer output", layer_index, len(layer_outputs))
-                    print("layer input", len(layer_inputs))
                 finally:
                     if forward_device_map:
                         looper._restore_forward_device_overrides(
