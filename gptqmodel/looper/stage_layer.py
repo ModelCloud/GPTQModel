@@ -105,7 +105,7 @@ def run_layer_stage(
                 modules = [sum(modules, [])]
 
             layer_inputs = processor.inputs_cache.layer_inputs
-            if is_lm_head_module:
+            if is_lm_head_module and layer_inputs:
                 layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
             position_ids = processor.inputs_cache.position_ids
@@ -285,6 +285,8 @@ def run_layer_stage(
                         force_serial=subset_forward_serial,
                         preserve_module_devices=preserve_devices,
                     )
+                    print("layer output", layer_index, len(layer_outputs))
+                    print("layer input", len(layer_inputs))
                 finally:
                     if forward_device_map:
                         looper._restore_forward_device_overrides(
