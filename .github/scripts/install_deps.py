@@ -3,6 +3,7 @@ import yaml
 import subprocess
 from pathlib import Path
 
+base_dir = os.path.dirname(os.path.abspath(__file__))
 
 def resolve_test_path(raw_name: str) -> Path:
     return Path("tests") / f"{raw_name}.py"
@@ -62,7 +63,7 @@ if __name__ == "__main__":
     raw_name = sys.argv[1].removeprefix("tests/").removesuffix(".py")
     test_path = resolve_test_path(raw_name)
 
-    with open("deps.yaml") as f:
+    with open(os.path.join(base_dir, "deps.yaml")) as f:
         deps = yaml.safe_load(f)
 
     specific_pkgs, common_pkgs = collect_pkgs(test_path, deps)
