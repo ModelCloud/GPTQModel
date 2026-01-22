@@ -105,7 +105,7 @@ def run_layer_stage(
                 modules = [sum(modules, [])]
 
             layer_inputs = processor.inputs_cache.layer_inputs
-            if is_lm_head_module:
+            if is_lm_head_module and layer_inputs:
                 layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
             position_ids = processor.inputs_cache.position_ids

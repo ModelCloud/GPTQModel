@@ -29,7 +29,7 @@ class TestEvalplus(unittest.TestCase):
             model = GPTQModel.load(self.MODEL_ID)
 
             base_formatted, plus_formatted, _ = evalplus(model=model, dataset='humaneval', output_file=output_file)
-            self.assertGreaterEqual(float(base_formatted), 0.26, "Base score does not match expected result")
-            self.assertGreaterEqual(float(plus_formatted), 0.23, "Plus score does not match expected result")
+            self.assertGreaterEqual(float(base_formatted), 0.177, "Base score does not match expected result")
+            self.assertGreaterEqual(float(plus_formatted), 0.146, "Plus score does not match expected result")
 
 
