@@ -84,7 +84,6 @@ def test_awq_torch_matches_manual_dequant(dtype):
         scales=module.scales,
         bits=bits,
         group_size=group_size,
-        sym=module.sym,
     ).to(dtype=dtype)
 
     expected = torch.matmul(x.to(dtype), dequant_weight)

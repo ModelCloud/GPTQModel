@@ -409,7 +409,7 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        device: Optional[DEVICE] = None,
+        device: DEVICE,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         quant_method: METHOD = METHOD.GPTQ,
@@ -421,10 +421,6 @@ def select_quant_linear(
         multi_select: bool = False, # return all valid kernels
         adapter: Optional[Adapter] = None,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
-    # TODO: this looks wrong
-    if device is None:
-        device = DEVICE.CUDA
-
     if isinstance(format, str):
         format = FORMAT(format.lower())
     if isinstance(quant_method, str):
