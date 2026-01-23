@@ -225,8 +225,8 @@ def _is_accelerate_offload_target(value: str) -> bool:
     return value.strip().lower() in ACCELERATE_OFFLOAD_TARGETS
 
 
-def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> Optional[DEVICE]:
-    normalized_device = None
+def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> DEVICE:
+    normalized_device = DEVICE.CPU
     accelerator = torch.accelerator.current_accelerator()
     if device is None:
         if device_map is not None:
