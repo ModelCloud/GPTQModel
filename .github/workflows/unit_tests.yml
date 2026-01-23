@@ -497,9 +497,10 @@ jobs:
       - name: Install wheel
         run: |
           uv pip uninstall gptqmodel
-          
-          python .github/scripts/install_deps.py ${{ matrix.test_script }}
-     
+          # make sure torch & torchvision are corresponded
+          uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+          uv pip install -r requirements.txt
+
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
@@ -516,6 +517,10 @@ jobs:
             uv pip install . --no-build-isolation
           fi
 
+          python .github/scripts/install_deps.py ${{ matrix.test_script }}
+          # deps may reinstalled torch
+          uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+          
           echo "===== uninstall torchao ====="
           uv pip uninstall torchao
 
