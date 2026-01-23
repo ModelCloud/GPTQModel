@@ -43,6 +43,10 @@ tests:
     - transformers==4.48.3
     - numpy==1.26.3
 
+  test_integration.py:
+    - https://github.com/huggingface/transformers
+    - https://github.com/huggingface/optimum
+
 tests/models:
   test_pangu_alpha.py:
     - jieba
