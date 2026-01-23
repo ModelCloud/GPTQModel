@@ -156,22 +156,11 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
 | QQQ                       | ✅          | x | x | x | x             | 
 | Rotation                  | ✅          | x | x | x | x             |  
-| GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             | 
-
-## Multi-Modal
-
-Native support for some of the most popular multi-modal models:
-
-| Model         |   |   |   |
-|---------------|---|---|---|
-| Qwen 2.5 Omni | ✅ |  Qwen2 VL          | ✅ |
-| Ovis 1.6 + 2  | ✅ | Phi-4 MultiModal  | ✅ | 
-
-
+| GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 
 ## Features
-* ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
-* 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.GPTQ`
+* ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
+* 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
 * ✨ GPTQ, AWQ, and QQQ quantization format with hardware-accelerated inference kernels. 
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
@@ -297,7 +286,7 @@ model.quantize(calibration_dataset, batch_size=1)
 model.save(quant_path)
 ```
 
-#### Quantization of MoE
+#### MoE Quantization
 
 Some MoE (mixture of experts) models have extremely uneven/biased routing (distribution of tokens) to the `experts` causing some expert modules to receive close-to-zero activated tokens, thus failing to complete calibration-based quantization (GPTQ/AWQ).
 To better quantize these heavily biased `MoE` routed modules, GPT-QModel exposes 3 controls:
@@ -321,7 +310,7 @@ print(model.tokenizer.decode(result)) # string output
 
 ### EoRA Accuracy Recovery: Enhanced Post-Quant Error Recovery via Lora
 
-GPT-QModel supports EoRA, a LoRA method that can further improve the accuracy of the quantized model.
+GPT-QModel supports EoRA, a LoRA method developed by Nvidia that can further improve the accuracy of the quantized model.
 ```py
 # EoRa is currently only validated for GPTQ
 # higher rank improves accuracy at the cost of VRAM usage
@@ -425,7 +414,7 @@ dynamic = {
 
 ### Group Aware Reordering (GAR)
 
-Group Aware Reordering (GAR) is an enhanced activation reordering scheme designed to significantly improve the accuracy of quantized models without incurring additional inference overhead. Unlike traditional activation reordering, GAR restricts permutations to within individual groups or rearrangements of entire groups. This ensures each group's associated scales and zero-points remain efficiently accessible during inference, thereby avoiding any inference-time overhead.
+Group Aware Reordering (GAR) is an enhanced activation reordering scheme developed by Intel to improve the accuracy of quantized models without incurring additional inference overhead. Unlike traditional activation reordering, GAR restricts permutations to within individual groups or rearrangements of entire groups. This ensures each group's associated scales and zero-points remain efficiently accessible during inference, thereby avoiding any inference-time overhead.
 
 How to enable GAR:
 
