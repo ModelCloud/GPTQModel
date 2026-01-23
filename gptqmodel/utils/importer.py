@@ -225,8 +225,8 @@ def _is_accelerate_offload_target(value: str) -> bool:
     return value.strip().lower() in ACCELERATE_OFFLOAD_TARGETS
 
 
-def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> Optional[DEVICE]:
-    normalized_device = None
+def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> DEVICE:
+    normalized_device = DEVICE.CPU
     accelerator = torch.accelerator.current_accelerator()
     if device is None:
         if device_map is not None:
@@ -409,7 +409,7 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        device: Optional[DEVICE] = None,
+        device: DEVICE,
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         quant_method: METHOD = METHOD.GPTQ,
@@ -421,10 +421,6 @@ def select_quant_linear(
         multi_select: bool = False, # return all valid kernels
         adapter: Optional[Adapter] = None,
 ) -> Union[Type[BaseQuantLinear], List[Type[BaseQuantLinear]]]:
-    # TODO: this looks wrong
-    if device is None:
-        device = DEVICE.CUDA
-
     if isinstance(format, str):
         format = FORMAT(format.lower())
     if isinstance(quant_method, str):

@@ -878,6 +878,7 @@ def pack_model(
         backend=backend,
         lm_head_name=lm_head_name,
         pack=True,
+        device=DEVICE.CPU,
     )
 
     qModules = find_modules(model, [quant_linear_cls])
