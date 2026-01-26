@@ -22,6 +22,7 @@ from gptqmodel.quantization.config import (
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.failsafe import should_use_failsafe
 from gptqmodel.utils.pause_resume import PauseResumeController
+from module_tree.test_subset import _StubAWQProcessor
 
 
 class TestGPTQHessianSimilarity(unittest.TestCase):
@@ -219,18 +220,8 @@ def test_awq_failsafe_falls_back_to_rtn_when_no_activations(monkeypatch):
         format=FORMAT.GEMM,
         quant_method=METHOD.AWQ,
     )
-    processor = AWQProcessor(
-        tokenizer=None,
+    processor = _StubAWQProcessor(
         qcfg=qcfg,
-        calibration=None,
-        prepare_dataset_func=_dummy_prepare_dataset,
-        calibration_concat_size=None,
-        calibration_sort=None,
-        batch_size=1,
-        gptq_model=gptq_model,
-        model=model,
-        require_fwd=False,
-        calculate_w_wq_diff=False,
     )
     processor._pause_controller = PauseResumeController()
     processor.pb = _DummyProgressBar()
