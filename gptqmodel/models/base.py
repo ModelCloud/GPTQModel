@@ -675,6 +675,8 @@ class BaseQModel(nn.Module):
                     preferred_backend = BACKEND.GEMV_FAST
                 else:
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
+            elif self.quantize_config.quant_method == METHOD.QQQ:
+                preferred_backend = BACKEND.QQQ
             else:
                 preferred_backend = BACKEND.TORCH
 

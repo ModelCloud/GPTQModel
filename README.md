@@ -4,7 +4,7 @@
 </div>
 <h1 align="center">GPT-QModel</h1>
 </p>
-<p align="center">LLM model quantization (compression) toolkit with hw acceleration support for Nvidia CUDA, AMD ROCm, Intel XPU and Intel/AMD/Apple CPU via HF, vLLM, and SGLang.</p>
+<p align="center">LLM model quantization (compression) toolkit with hw acceleration support for Nvidia CUDA, AMD ROCm, Intel XPU, and Intel/AMD/Apple CPUs via HF, vLLM, and SGLang.</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg"></a>
     <a href="https://pypi.org/project/gptqmodel/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/gptqmodel"></a>
@@ -20,17 +20,21 @@
 </p>
 
 ## Latest News
-* 01/13/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): 🎉 New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
-`AWQ` `qcfg.zero_point` property has been merged with an unified `sym` symmetry property; `zero_point=True` is now `sym=False`.
+* 01/23/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): ✨New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
+`AWQ` `qcfg.zero_point` property has been merged with a unified `sym` symmetry property; `zero_point=True` is now `sym=False`.
 Fixed `AWQ` `sym=True` packing/inference and quantization compatibility with some Qwen3 models.
 
-* 12/31/2025 5.7.0-dev: 🎉 New `FailSafe` config and `FailSafeStrategy`, auto enabled by default, to address un-even routing of MoE experts resulting quantization issue of some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce outliers impact of `FailSafe` quantization using `RTN` by default. Different `FaileSafeStategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
-New Voxtral, Glm-4v model support plus audio dataset calibration for Qwen2-Omni. `AWQ` compat fix for `GLM 4.5-Air`.
+* 12/31/2025 5.7.0-dev: ✨New `FailSafe` config and `FailSafeStrategy`, auto-enabled by default, to address uneven routing of MoE experts resulting in quantization issues for some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce the impact of outliers in `FailSafe` quantization using `RTN` by default. Different `FailSafeStrategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
+New Voxtral and Glm-4v model support, plus audio dataset calibration for Qwen2-Omni. `AWQ` compatibility fix for `GLM 4.5-Air`.
 
-* 12/17/2025 [5.6.2-12 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.12): Fixed `uv` compatibility. Both `uv` and `pip` install will now show UI progress for external wheel/dependency downloads. Fixed `MacOS` and `AWQMarlin` kernel loading import regressions. Resolved most `multi-arch` compile issue on `Ubuntu`, `Arch`, `RedHat` and other distros. Fixed `multi-arch` build issues and `Tritonv2` kernel launch bug on multi-GPUs. Fixed 3-bit Triton GPTQ kernel dequant/inference and `license` property compatibility issue with latest pip/setuptools.
+* 12/17/2025 [5.6.2-12 Patch](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.12): Fixed `uv` compatibility. Both `uv` and `pip` installs will now show UI progress for external wheel/dependency downloads. Fixed `MacOS` and `AWQMarlin` kernel loading import regressions. Resolved most `multi-arch` compile issues on `Ubuntu`, `Arch`, `RedHat` and other distros. Fixed `multi-arch` build issues and `Tritonv2` kernel launch bug on multi-GPUs. Fixed 3-bit Triton GPTQ kernel dequant/inference and `license` property compatibility issue with latest pip/setuptools.
 * 12/9/2025 [5.6.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.6.0): ✨New `HF Kernel` for CPU optimized for `AMX`, `AVX2` and `AVX512`. Auto module tree for auto-model support. Added Afmoe and Dosts1 model support. Fixed pre-layer pass quantization speed regression. Improved HF Transformers, Peft and Optimum support for both GPTQ and AWQ. Fixed many AWQ compatibility bugs and regressions. 
 * 11/9/2025 [5.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.4.0): ✨New Intel CPU and XPU hardware-optimized AWQ `TorchFusedAWQ` kernel. Torch Fused kernels now compatible with `torch.compile`. Fixed AWQ MoE model compatibility and reduced VRAM usage.
-* 11/3/2025 [5.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.2.0): 🎉Minimax M2 support with [ModelCloud BF16 M2 Model](https://huggingface.co/ModelCloud/MiniMax-M2-BF16). New `VramStrategy.Balanced` quantization property for reduced memory usage for large MoE on multi-3090 (24GB) devices. ✨Marin model. New AWQ Torch reference kernel. Fix AWQ Marlin kernel for bf16. Fix GLM 4.5/4.6 MoE missing `mtp` layers on model save (HF bug). Modular refactor. 🎉AWQ support out of beta with full feature support including multi-GPU quant and MoE VRAM saving. ✨Brumby (attention free) model support. ✨IBM Granite Nano support. New `calibration_concat_separator` config option.
+* 11/3/2025 [5.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.2.0): ✨Minimax M2 support with [ModelCloud BF16 M2 Model](https://huggingface.co/ModelCloud/MiniMax-M2-BF16). New `VramStrategy.Balanced` quantization property for reduced memory usage for large MoE on multi-3090 (24GB) devices. ✨Marin model. New AWQ Torch reference kernel. Fixed AWQ Marlin kernel for bf16. Fixed GLM 4.5/4.6 MoE missing `mtp` layers on model save (HF bug). Modular refactor. 🎉AWQ support out of beta with full feature support including multi-GPU quant and MoE VRAM saving. ✨Brumby (attention free) model support. ✨IBM Granite Nano support. New `calibration_concat_separator` config option.
+
+<details>
+
+<summary>Archived News</summary>
 * 10/24/2025 [5.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.0.0): 🎉 Data-parallel quant support for `MoE` models on multi-GPU using `nogil` Python. `offload_to_disk` support enabled by 
 default to massively reduce `CPU` RAM usage. New `Intel` and `AMD` CPU hardware-accelerated `TorchFused` kernel. Packing stage is now 4x faster and now inlined with quantization. `VRAM` pressure for large models reduced during quantization.
 `act_group_aware` is  16k+ times faster and now the default when `desc_act=False` for higher quality recovery without inference penalty of `desc_act=True`. New beta quality `AWQ` support with full `gemm`, 
@@ -38,32 +42,29 @@ default to massively reduce `CPU` RAM usage. New `Intel` and `AMD` CPU hardware-
 `Bitblas` kernel updated to support Bitblas `0.1.0.post1` release.
 Quantization is now faster with reduced VRAM usage. Enhanced logging support with `LogBar`.
 
-<details>
-
-<summary>Archived News</summary>
 * 09/16/2025 [4.2.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.5): `hyb_act` renamed to `act_group_aware`. Removed finicky `torch` import within `setup.py`. Packing bug fix and prebuilt PyTorch 2.8 wheels. 
-* 09/12/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.0): ✨ New Models Support: Qwen3-Next, Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compatibility. Patch-fixed GIL=0 CUDA error for multi-GPU. Fix compatibility with autoround + new transformers. 
+* 09/12/2025 [4.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.2.0): ✨ New Models Support: Qwen3-Next, Apertus, Kimi K2, Klear, FastLLM, Nemotron H. New `fail_safe` `boolean` toggle to `.quantize()` to patch-fix non-activated `MoE` modules due to highly uneven MoE model training. Fixed LavaQwen2 compatibility. Patch-fixed GIL=0 CUDA error for multi-GPU. Fixed compatibility with autoround + new transformers. 
 
 * 09/04/2025 [4.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.1.0): ✨ Meituan LongCat Flash Chat, Llama 4, GPT-OSS (BF16), and GLM-4.5-Air support. New experimental `mock_quantization` config to skip complex computational code paths during quantization to accelerate model quant testing. 
 * 08/21/2025 [4.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v4.0.0): 🎉 New Group Aware Reordering (GAR) support. New models support: Bytedance Seed-OSS, Baidu Ernie, Huawei PanGu, Gemma3, Xiaomi Mimo, Qwen 3/MoE, Falcon H1, GPT-Neo. Memory leak and multiple model compatibility fixes related to Transformers >= 4.54. Python >= 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x CPU core scaling of packing stage. Early access PyTorch 2.8 fused-ops on Intel XPU for up to 50% speedup.
 
-* 10/17/2025 5.0.0-dev `main`: 👀: EoRA now multi-GPU compatible. Fixed both quality stability of multi-GPU quantization and VRAM usage. New LFM and Ling models support.
+* 10/17/2025 5.0.0-dev `main`: 👀: EoRA now multi-GPU compatible. Fixed both quality stability in multi-GPU quantization and VRAM usage. New LFM and Ling models support.
 * 09/30/2025 5.0.0-dev `main`: 👀: New Data Parallel + Multi-GPU + Python 3.13T (PYTHON_GIL=0) equals 80%+ overall quant time reduction of large MoE models vs v4.2.5. 
 * 09/29/2025 5.0.0-dev `main`: 🎉 New Qwen3 Omni model support. AWQ Marlin kernel integrated + many disk offload, threading, and memory usage fixes. 
 * 09/24/2025 5.0.0-dev `main`: 🎉 Up to 90% CPU memory saving for large MoE models with faster/inline packing! 26% quant time reduction for Qwen3 MoE! AWQ Marlin kernel added. AWQ Gemm loading bug fixes. `act_group_aware` now faster and auto enabled for GPTQ when `desc_act` is False for higher quality recovery. 
-* 09/19/2025 5.0.0-dev `main`: 👀 CPU memory saving of ~73.5% during quantization stage with new `offload_to_disk` quantization config property default to `True`. 
+* 09/19/2025 5.0.0-dev `main`: 👀 CPU memory saving of ~73.5% during quantization stage with new `offload_to_disk` quantization config property defaults to `True`. 
 * 09/18/2025 5.0.0-dev `main`: 🎉 AWQ quantization support! Complete refactor and simplification of model definitions in preparation for future quantization formats.
-* 08/19/2025 4.0.0-dev `main`: Fix quantization memory usage due to some model's incorrect application of `config.use_cache` during inference. Fixed `Transformers` >= 4.54.0 compatibility which changed layer forward return signature for some models. 
-* 08/18/2025 4.0.0-dev `main`: GPT-Neo model support. Memory leak fix in error capture (stacktrace) and fixed `lm_head` quantization compatibility for many models.
+* 08/19/2025 4.0.0-dev `main`: Fixed quantization memory usage due to some models' incorrect application of `config.use_cache` during inference. Fixed `Transformers` >= 4.54.0 compatibility which changed layer forward return signature for some models. 
+* 08/18/2025 4.0.0-dev `main`: GPT-Neo model support. Memory leak fix in error capture (stack trace) and fixed `lm_head` quantization compatibility for many models.
 * 07/31/2025 4.0.0-dev `main`: New Group Aware Reordering (GAR) support and preliminary PyTorch 2.8 fused-ops for Intel XPU for up to 50% speedup. 
 * 07/03/2025 4.0.0-dev `main`: New Baidu Ernie and Huawei PanGu model support.
 * 07/02/2025 4.0.0-dev `main`: Gemma3 4B model compatibility fix.
 * 05/29/2025 4.0.0-dev `main`: Falcon H1 model support. Fixed Transformers `4.52+` compatibility with Qwen 2.5 VL models.
 * 05/19/2025 4.0.0-dev `main`: Qwen 2.5 Omni model support. 
-* 05/05/2025 4.0.0-dev `main`: Python 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x Cpu Core scaling of packing stage. 
+* 05/05/2025 4.0.0-dev `main`: Python 3.13t free-threading support added with near N x GPU linear scaling for quantization of MoE models and also linear N x CPU core scaling of packing stage. 
 * 04/29/2025 3.1.0-dev (Now 4.) `main`: Xiaomi Mimo model support. Qwen 3 and 3 MoE model support. New arg for `quantize(..., calibration_dataset_min_length=10)` to filter out bad calibration data that exists in public dataset (wikitext). 
 * 04/13/2025 [3.0.0](https://github.com/ModelCloud/Model/releases/tag/v3.0.0): 🎉 New experimental ` v2` quantization option for improved model quantization accuracy validated by `GSM8K_PLATINUM` [benchmarks](https://github.com/ModelCloud/Model#quantization-using-gptq-v2) vs original `gptq`. New `Phi4-MultiModal` model support. New Nvidia Nemotron-Ultra model support. New `Dream` model support. New experimental `multi-GPU` quantization support. Reduced VRAM usage. Faster quantization.
-* 04/2/2025 [2.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.2.0): New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16` dtype loading for models based on model config. Fix kernel compile for PyTorch/ROCm. Slightly faster quantization and auto-resolve some low-level OOM issues for smaller VRAM GPUs. 
+* 04/2/2025 [2.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.2.0): New `Qwen 2.5 VL` model support. New `samples` log column during quantization to track module activation in MoE models. `Loss` log column now color-coded to highlight modules that are friendly/resistant to quantization. Progress (per-step) stats during quantization now streamed to log file. Auto `bfloat16` dtype loading for models based on model config. Fixed kernel compile for PyTorch/ROCm. Slightly faster quantization and auto-resolve some low-level OOM issues for smaller VRAM GPUs. 
 * 03/12/2025 [2.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v2.1.0): ✨ New `QQQ` quantization method and inference support!
 New Google `Gemma 3` zero-day model support.
 New Alibaba `Ovis 2` VL model support. 
@@ -78,7 +79,7 @@ Synced `Marlin` kernel inference quality fix from upstream. Added `MARLIN_FP16`,
 Fixed `generation_config.json` save and load. Fixed Transformers v4.49.0 compatibility. Fixed compatibility of models without `bos`. Fixed `group_size=-1` and `bits=3` packing regression. 
 Fixed Qwen 2.5 MoE regressions. 
 Added CI tests to track regression in kernel inference quality and sweep all bits/group_sizes. Delegate logging/progress bar to [LogBar](https://github.com/modelcloud/logbar) package.
-Fix ROCm version auto-detection in `setup` install.
+Fixed ROCm version auto-detection in `setup` install.
 * 02/12/2025 [1.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.9.0): ⚡ Offload `tokenizer` fixes to [Toke(n)icer](https://github.com/modelcloud/tokenicer) package. Optimized `lm_head` quant time and VRAM usage.
   Optimized `DeepSeek v3/R1` model quant VRAM usage. Fixed `Optimum` compatibility regression in `v1.8.1`. 3x speed-up for `Torch` kernel when using PyTorch >= 2.5.0 with `model.optimize()`. New `calibration_dataset_concat_size` option to enable calibration data `concat` mode to mimic original GPTQ data packing strategy which may improve quant speed and accuracy for datasets like `wikitext2`. 
 * 02/08/2025 [1.8.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.8.1): ⚡ `DeepSeek v3/R1` model support. New flexible weight `packing`: allow quantized weights to be packed to `[int32, int16, int8]` dtypes. 
@@ -114,7 +115,7 @@ Fixed `bits=3` packing and `group_size=-1` regression in v1.7.4.
 * 10/11/2024 ✨ [1.0.8](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.8) Add wheel for Python 3.12 and CUDA 11.8.
 * 10/08/2024 ✨ [1.0.7](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.7) Fixed Marlin (faster) kernel was not auto-selected for some models.
 
-* 09/26/2024 ✨ [1.0.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.6) Fixed quantized Llama 3.2 vision quantized loader.
+* 09/26/2024 ✨ [1.0.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.6) Fixed Llama 3.2 vision quantized loader.
 * 09/26/2024 ✨ [1.0.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.5) Partial Llama 3.2 Vision model support (mllama): only text-layer quantization layers are supported for now.
 
 * 09/26/2024 ✨ [1.0.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v1.0.4) Integrated Liger Kernel support for ~1/2 memory reduction on some models during quantization. Added control toggle to disable parallel packing. 
@@ -139,15 +140,15 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 </details>
 
 ## What is GPT-QModel?
-GPT-QModel is a production-ready LLM model compression/quantization toolkit with hw accelerated inference support for both CPU/GPU via HF Transformers, vLLM, and SGLang.
+GPT-QModel is a production-ready LLM model compression/quantization toolkit with hw-accelerated inference support for both CPU/GPU via HF Transformers, vLLM, and SGLang.
 
-GPT-QModel currently supports GPTQ, AWQ, QQQ, GPTAQ, EoRa, GAR with more quantization methods and enhancements planned. 
+GPT-QModel currently supports GPTQ, AWQ, QQQ, GPTAQ, EoRa, GAR, with more quantization methods and enhancements planned. 
 
 ## Quantization Support
 
 GPT-QModel is a modular design supporting multiple quantization methods and feature extensions.
 
-| Quantization Feature      | GPT-QModel | Transformers | vLLM | SGLang | Lora Training |
+| Feature      | GPT-QModel | Transformers | vLLM | SGLang | Lora Training |
 |---------------------------|------------|---|---|---|---------------|
 | GPTQ                      | ✅          | ✅ | ✅ | ✅ | ✅             | 
 | AWQ                       | ✅          | ✅ | ✅ | ✅ | ✅             |
@@ -155,36 +156,23 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
 | QQQ                       | ✅          | x | x | x | x             | 
 | Rotation                  | ✅          | x | x | x | x             |  
-| GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             | 
-
-## Multi-Modal
-
-Native support for some of the most popular multi-modal models:
-
-| Multi-Modal              |   | 
-|-------------------|---|
-| Qwen 2.5 Omni     | ✅ | 
-| Qwen2 VL          | ✅ | 
-| Ovis 1.6 + 2      | ✅ | 
-| Phi-4 MultiModal  | ✅ | 
-
-
+| GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 
 ## Features
-* ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft (main)](https://github.com/huggingface/peft)
-* 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized model with format = `FORMAT.GPTQ`
+* ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
+* 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
 * ✨ GPTQ, AWQ, and QQQ quantization format with hardware-accelerated inference kernels. 
-* 🚀 Quantize MoE models with ease even with extreme routing activations bias via `FailSafe`.
+* 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
-* ✨ Linux, MacOS, Windows platform quantization and accelerated inference support for CUDA (Nvidia), XPU (Intel), ROCm (AMD), MPS (Apple Silicon), CPU (Intel/AMD/Apple Silicon).
-* ✨ `Dynamic` mixed quantization control on a per-module basis. Each layer/module can have a unique quantization config or be excluded from quantization altogether. 
+* ✨ Linux, MacOS, Windows platform support for CUDA (Nvidia), XPU (Intel), ROCm (AMD), MPS (Apple Silicon), CPU (Intel/AMD/Apple Silicon).
+* ✨ `Dynamic` per-module mixed quantization control: each layer/module can have a unique quantization config or be excluded from quantization. 
 * 🚀 Intel Torch 2.8 fused kernel support for XPU [`Arc` + `Datacenter Max`] and CPU [`avx`, `amx`].
-* 🚀 Python 3.13.3t (free-threading, GIL disabled) support for multi-GPU accelerated quantization for MoE models and multi-core CPU boost for post-quant packing.
-* ✨ Asymmetric `Sym=False` support. Model weights sharding support with optional hash check of model weights on load.
+* 🚀 Python 3.13.3t (free-threading, GIL disabled) support for multi-GPU accelerated quantization for MoE models and multi-core CPU boost for packing.
+* ✨ Asymmetric `Sym=False` support. 
 * ✨ `lm_head` module quant inference support for further VRAM reduction.
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) optimized tile based inference.
-* 💯 100% CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
+* 💯 CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
 
 
 ## Quality: GPTQ 4bit can match native BF16:
@@ -241,7 +229,7 @@ uv pip install -v gptqmodel --no-build-isolation
 # clone repo
 git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 
-# python3-dev is required, ninja is to speed up compile, need to upgrade to latest `setuptools` to avoid errors
+# python3-dev is required, ninja speeds up compilation, and you need to upgrade to the latest `setuptools` to avoid errors
 apt install python3-dev ninja setuptools -U
 
 # pip: compile and install
@@ -264,13 +252,6 @@ print(model.tokenizer.decode(result)) # string output
 To use models from [ModelScope](https://www.modelscope.cn/) instead of HuggingFace Hub, set an environment variable:
 ```shell
 export GPTQMODEL_USE_MODELSCOPE=True
-```
-```py
-from gptqmodel import GPTQModel
-# load Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4 from modelscope
-model = GPTQModel.load("Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4")
-result = model.generate("Uncovering deep insights begins with")[0] # tokens
-print(model.tokenizer.decode(result)) # string output
 ```
 
 ### OpenAI API compatible endpoint
@@ -305,7 +286,21 @@ model.quantize(calibration_dataset, batch_size=1)
 model.save(quant_path)
 ```
 
-# Quantization Inference
+#### MoE Quantization
+
+Some MoE (mixture of experts) models have extremely uneven/biased routing (distribution of tokens) to the `experts` causing some expert modules to receive close-to-zero activated tokens, thus failing to complete calibration-based quantization (GPTQ/AWQ).
+To better quantize these heavily biased `MoE` routed modules, GPT-QModel exposes 3 controls:
+
+* `Moe.Routing = ExpertsRoutingOverride`: Manually override the `num_experts_per_tok` used for model `routing` math, i.e., if a model only routes 4 experts per token out of 48 total experts, you can set this equal to 24 for 50% routing or 48 for 100% routing.
+`ExpertsRoutingOverride` requires the model exposes `num_experts_per_tok` or equivalent configuration control.
+* `Moe.Routing = ExpertsRoutingBypass`: Brute-force and bypass all `routing` math so all `experts` receive `all` activated tokens. This is akin to `ExpertsRoutingOverride.num_experts_per_tok` set to total number of experts. 
+`ExpertsRoutingBypass` is enabled/tested for some models and, due to the lifecycle complexity, it needs to be validated for every model.
+* `FailSafe`: This is `enabled` by `default` and is a naive weight-only quantization technique using simple (naive) quantization methods such as `nearest` with optional `smoothing`. 
+There are various `FailSafeStrategy` options, along with `SmoothMethod` options, to complement this feature. `FailSafe` does not require `activations` but has higher quantization error loss than normally activated GPTQ/AWQ. It is fast and applicable for all MoE models.
+
+`FailSafe` can be combined with `ExpertsRoutingOverride`. There is no single best way to quantize MoE, and we recommend users to test all three methods.
+
+### Quantized Inference
 ```py
 # test post-quant inference
 model = GPTQModel.load(quant_path)
@@ -313,10 +308,11 @@ result = model.generate("Uncovering deep insights begins with")[0] # tokens
 print(model.tokenizer.decode(result)) # string output
 ```
 
-### Quantization + EoRA Accuracy Recovery 
+### EoRA Accuracy Recovery: Enhanced Post-Quant Error Recovery via Lora
 
-GPT-QModel now supports EoRA, a LoRA method that can further improve the accuracy of the quantized model
+GPT-QModel supports EoRA, a LoRA method developed by Nvidia that can further improve the accuracy of the quantized model.
 ```py
+# EoRa is currently only validated for GPTQ
 # higher rank improves accuracy at the cost of VRAM usage
 # suggestion: test rank 64 and 32 before 128 or 256 as latter may overfit while increasing memory usage
 eora = Lora(
@@ -325,7 +321,7 @@ eora = Lora(
   rank=32,
 )
 
-# provide a previously gptq quantized model path
+# provide a previously GPTQ-quantized model path
 GPTQModel.adapter.generate(
   adapter=eora,
   model_id_or_path=model_id,
@@ -344,20 +340,20 @@ tokens = model.generate("Capital of France is")[0]
 result = model.tokenizer.decode(tokens)
 
 print(f"Result: {result}")
-# For more detail of EoRA please see GPTQModel/examples/eora
+# For more details on EoRA, please see GPTQModel/examples/eora
 # Please use the benchmark tools in later part of this README to evaluate EoRA effectiveness
 ```
 
-For more advanced features of model quantization, please reference to [this script](https://github.com/ModelCloud/GPTQModel/blob/main/examples/quantization/basic_usage_wikitext2.py)
+For more advanced features of model quantization, please refer to [this script](https://github.com/ModelCloud/GPTQModel/blob/main/examples/quantization/basic_usage_wikitext2.py)
 
 ### How to Add Support for a New Model
 
-Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as guide to PR for to new models. Most models follow the same pattern.
+Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as a guide for PRs to add new models. Most models follow the same pattern.
 
 ### Evaluation and Quality Benchmarks
 
 GPTQModel inference is integrated into both [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) and [evalplus](https://github.com/evalplus/evalplus)  
-We highly recommend avoid using `ppl` and use `lm-eval`/`evalplus` to validate post-quantization model quality. `ppl` should only be used for regression tests and is not a good indicator of model output quality.  
+We highly recommend avoiding `ppl` and using `lm-eval`/`evalplus` to validate post-quantization model quality. `ppl` should only be used for regression tests and is not a good indicator of model output quality.  
 
 ```
 # gptqmodel is integrated into lm-eval >= v0.4.7
@@ -391,20 +387,20 @@ evalplus_data = GPTQModel.eval(model_id,
 ```
 ### Dynamic Quantization (Per Module QuantizeConfig Override)
 
-`QuantizeConfig.dynamic` is dynamic control which allows specific matching `modules` to be skipped for quantization (negative matching)
-or have a unique `[bits, group_size, sym, desc_act, mse, pack_dtype]` property override per matching `module` vs base `QuantizeConfig` (postive match with override). 
+`QuantizeConfig.dynamic` is a dynamic control that allows specific matching `modules` to be skipped for quantization (negative matching)
+or have a unique `[bits, group_size, sym, desc_act, mse, pack_dtype]` property override per matching `module` vs base `QuantizeConfig` (positive match with override). 
 
-Sample `QuantizerConfig.dynamic` usage:
+Sample `QuantizeConfig.dynamic` usage:
 
 ```py
 dynamic = { 
     # `.*\.` matches the layers_node prefix 
-    # layer index start at 0 
+    # layer index starts at 0 
     
     # positive match: layer 19, gate module 
     r"+:.*\.18\..*gate.*": {"bits": 4, "group_size": 32},  
     
-    # positgive match: layer 20, gate module (prefix defaults to positive if missing)
+    # positive match: layer 20, gate module (prefix defaults to positive if missing)
     r".*\.19\..*gate.*": {"bits": 8, "group_size": 64},  
     
     # negative match: skip layer 21, gate module
@@ -418,7 +414,7 @@ dynamic = {
 
 ### Group Aware Reordering (GAR)
 
-Group Aware Reordering (GAR) is an enhanced activation reordering scheme designed to significantly improve the accuracy of quantized models without incurring additional inference overhead. Unlike traditional activation reordering, GAR restricts permutations to within individual groups or rearrangements of entire groups. This ensures each group's associated scales and zero-points remain efficiently accessible during inference, thereby avoiding any inference-time overhead.
+Group Aware Reordering (GAR) is an enhanced activation reordering scheme developed by Intel to improve the accuracy of quantized models without incurring additional inference overhead. Unlike traditional activation reordering, GAR restricts permutations to within individual groups or rearrangements of entire groups. This ensures each group's associated scales and zero-points remain efficiently accessible during inference, thereby avoiding any inference-time overhead.
 
 How to enable GAR:
 
@@ -440,9 +436,17 @@ Enable GPTAQ quantization by setting `gptaq = GPTAQConfig(...)`.
 # If OOM on 1 GPU, please set CUDA_VISIBLE_DEVICES=0,1 to 2 GPUs and gptqmodel will auto use second GPU
 quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=GPTAQConfig(alpha=0.25, device="auto"))
 ```
+### Migrating from AutoGPTQ and AutoAWQ:
 
+GPT-QModel has fully supplanted AutoGPTQ and AutoAWQ for HF Transformers/Optimum/Peft integration. Model inference has drop-in support with zero changes. 
 
-### Attribution of Quantization Methods:
+For model quantization, there are some config changes for AutoAWQ:
+
+* AutoAWQ: `version` property is now `format`. `zero_point` is now `sym` (Symmetric Quantization): `sym = True` is equivalent to `zero_point = False`
+
+Models quantized by GPT-QModel are inference compatible with HF Transformers (minus `dynamic`), vLLM, and SGLang. 
+
+## Attributions:
 
 * GPTQ: IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
 * AWQ: main-authors: Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song
@@ -451,7 +455,7 @@ quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=GPTAQConfig(alpha=0.
 * GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 
-## Citation
+## Citations:
 
 ```bibtex
 # GPT-QModel

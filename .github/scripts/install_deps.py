@@ -1,12 +1,32 @@
 import sys
+import os
 import yaml
 import subprocess
 from pathlib import Path
 
+base_dir = os.path.dirname(os.path.abspath(__file__))
 
 def resolve_test_path(raw_name: str) -> Path:
     return Path("tests") / f"{raw_name}.py"
 
+def normalize_pkg_spec(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return s
+
+    # 已是 git 形式，直接用
+    if s.startswith("git+"):
+        return s
+
+    # 裸 github URL
+    if s.startswith("https://github.com/"):
+        s = s.rstrip("/")
+        if not s.endswith(".git"):
+            s += ".git"
+        return "git+" + s
+
+    # 其它（普通 pip 包）
+    return s
 
 def collect_pkgs(test_path: Path, deps: dict):
     specific_pkgs = set()
@@ -49,10 +69,12 @@ def pip_install(pkgs):
         print("  -", p)
 
     cmd = [
-        sys.executable, "-m", "pip", "install",
+        sys.executable,
+        "-m", "pip", "install",
         "--disable-pip-version-check",
         "--no-cache-dir",
     ]
+    pkgs = [normalize_pkg_spec(p) for p in pkgs]
     cmd.extend(pkgs)
 
     subprocess.check_call(cmd, shell=False)
@@ -62,7 +84,7 @@ if __name__ == "__main__":
     raw_name = sys.argv[1].removeprefix("tests/").removesuffix(".py")
     test_path = resolve_test_path(raw_name)
 
-    with open("deps.yaml") as f:
+    with open(os.path.join(base_dir, "deps.yaml")) as f:
         deps = yaml.safe_load(f)
 
     specific_pkgs, common_pkgs = collect_pkgs(test_path, deps)

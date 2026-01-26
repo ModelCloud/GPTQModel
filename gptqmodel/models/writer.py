@@ -54,7 +54,7 @@ from ..utils.model import (
 from ..utils.structure import alias_all_from_turtle_if_meta
 from ..utils.torch import torch_empty_cache
 from ..version import __version__
-from ._const import DEFAULT_MAX_SHARD_SIZE
+from ._const import DEFAULT_MAX_SHARD_SIZE, DEVICE
 
 
 log = setup_logger()
@@ -556,6 +556,7 @@ def ModelWriter(cls):
                 backend=BACKEND.AUTO,
                 lm_head_name=cls.lm_head,
                 pack=True,
+                device=DEVICE.CPU,
             )
 
         load_checkpoint_in_model_then_tie_weights(
