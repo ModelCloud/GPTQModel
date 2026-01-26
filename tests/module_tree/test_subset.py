@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import os
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional
@@ -12,13 +13,14 @@ import torch
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
+from gptqmodel.models import BaseQModel
 
 repo_root = Path(__file__).resolve().parents[2]
 repo_str = str(repo_root)
 if repo_str not in sys.path:
     sys.path.insert(0, repo_str)
 
-from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
@@ -210,6 +212,9 @@ class _StubAWQProcessor(LoopProcessor):
         self.hook_calls: List[str] = []
         self.process_calls: List[str] = []
 
+        self._layer_states: Dict[int, _AWQLayerState] = {}
+        self._layer_states_lock = threading.Lock()
+
     @classmethod
     def name(cls) -> str:
         return "stub-awq"
@@ -231,10 +236,27 @@ class _StubAWQProcessor(LoopProcessor):
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
     ):
+        layer_index = module.layer_index
+        state = self._get_layer_state(layer_index)
         self.process_calls.append(module.name)
+        state.quantized = True
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
         return True
+
+    def _get_layer_state(self, layer_index: int) -> _AWQLayerState:
+        with self._layer_states_lock:
+            state = self._layer_states.get(layer_index)
+            if state is None:
+                state = _AWQLayerState()
+                self._layer_states[layer_index] = state
+        return state
+
+    def pack_module(self, module):
+        pass
+
+    def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
+        self.pack_module(module)
 
 
 class _MiniSelfAttn(torch.nn.Module):
