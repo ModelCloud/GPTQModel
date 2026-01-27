@@ -477,11 +477,11 @@ class GPTQModel:
 
         if isinstance(model_or_id_or_path, str):
             load_backend = backend
-            load_kwargs = {}
-
             if llm_backend == "vllm":
                 disallowed_keys = {"pretrained", "tokenizer", "gptqmodel", "trust_remote_code", "backend", "model_id_or_path"}
                 load_kwargs = {k: v for k, v in model_args.items() if k not in disallowed_keys}
+            else:
+                load_kwargs = model_args
 
             backend_name = load_backend.value if isinstance(load_backend, BACKEND) else str(load_backend)
             log.info(f"Eval: loading using backend = `{backend_name}`")
