@@ -476,7 +476,7 @@ class TestModelSave(unittest.TestCase):
 class DummyQModel:
     def __init__(self):
         self.support_batch_quantize = False
-        self.quantize_config = types.SimpleNamespace(device=None)
+        self.quantize_config = types.SimpleNamespace(device=None, moe_routing_bypass=lambda: None)
         self.layer_callback = None
 
 
