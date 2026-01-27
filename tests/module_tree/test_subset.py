@@ -15,6 +15,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBl
 
 from gptqmodel.models import BaseQModel
 
+
 repo_root = Path(__file__).resolve().parents[2]
 repo_str = str(repo_root)
 if repo_str not in sys.path:

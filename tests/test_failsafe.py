@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
+from module_tree.test_subset import _StubAWQProcessor
 
-from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import (
     FORMAT,
@@ -22,7 +22,6 @@ from gptqmodel.quantization.config import (
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.failsafe import should_use_failsafe
 from gptqmodel.utils.pause_resume import PauseResumeController
-from module_tree.test_subset import _StubAWQProcessor
 
 
 class TestGPTQHessianSimilarity(unittest.TestCase):

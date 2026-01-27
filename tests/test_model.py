@@ -16,7 +16,6 @@ from gptqmodel.utils.torch import torch_empty_cache
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
-import builtins
 import json
 import sys
 import types
@@ -445,7 +444,6 @@ class TestModelSave(unittest.TestCase):
         model.quantize(self.calibration_dataset, batch_size=1)
 
         with tempfile.TemporaryDirectory() as tmp_dir_name:
-            tmp_dir_name = "Qwen3-30B-A3B-layers-1-GPTQ-TEST"
             model.save(tmp_dir_name)
 
             del model
