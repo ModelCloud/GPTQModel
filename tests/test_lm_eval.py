@@ -58,6 +58,9 @@ class TestLmEval(unittest.TestCase):
                 backend = BACKEND.EXLLAMA_V2, # for path loading, can override backend
                 output_path=tmp_dir,
                 tasks=[self.task],
+                model_args={
+                    "device": "cuda"
+                }
             )
 
            print('--------lm_eval Eval Result---------')
