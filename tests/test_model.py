@@ -437,7 +437,7 @@ class TestModelSave(unittest.TestCase):
         )
 
         model = GPTQModel.load(
-            "/monster/data/model/Qwen3-Omni-30B-A3B-Instruct-layers-1/",
+            "/monster/data/model/Qwen3-30B-A3B-layers-1/",
             quantize_config=quantize_config,
         )
 
@@ -445,28 +445,29 @@ class TestModelSave(unittest.TestCase):
         model.quantize(self.calibration_dataset, batch_size=1)
 
         with tempfile.TemporaryDirectory() as tmp_dir_name:
+            tmp_dir_name = "Qwen3-30B-A3B-layers-1-GPTQ-TEST"
             model.save(tmp_dir_name)
 
             del model
             torch_empty_cache()
 
-            new_model = GPTQModel.load(tmp_dir_name)
+            new_model = GPTQModel.load(tmp_dir_name, device="cuda")
             print("new_model", new_model)
 
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[2].gate_proj, MarlinQuantLinear)
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[2].up_proj, MarlinQuantLinear)
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[2].down_proj, MarlinQuantLinear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].gate_proj, MarlinQuantLinear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].up_proj, MarlinQuantLinear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].down_proj, MarlinQuantLinear)
 
             # No calibration data was routed to these MoE expert modules.
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[3].gate_proj, nn.Linear)
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[3].up_proj, nn.Linear)
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[3].down_proj, nn.Linear)
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[26].gate_proj, nn.Linear)
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[26].up_proj, nn.Linear)
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[26].down_proj, nn.Linear)
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[118].gate_proj, nn.Linear)
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[118].up_proj, nn.Linear)
-            self.assertIsInstance(new_model.thinker.model.layers[0].mlp.experts[118].down_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[10].gate_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[10].up_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[10].down_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[15].gate_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[15].up_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[15].down_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[20].gate_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[20].up_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[20].down_proj, nn.Linear)
 
 
 
