@@ -435,4 +435,4 @@ class GPTQProcessor(LoopProcessor):
         return "gptaq" if qcfg.gptaq is not None else "gptq"
 
     def has_captured_input_ids(self, name: str) -> bool:
-        return self.tasks[name].fwd_counter == 0
+        return self.tasks[name].fwd_counter > 0

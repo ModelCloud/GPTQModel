@@ -307,4 +307,4 @@ class QQQProcessor(LoopProcessor):
         return "qqq"
 
     def has_captured_input_ids(self, name: str) -> bool:
-        return self.tasks[name].fwd_counter == 0
+        return self.tasks[name].fwd_counter > 0
