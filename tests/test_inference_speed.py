@@ -49,4 +49,4 @@ class TestInferenceSpeed(InferenceSpeed):
         # (there is a cache when running bitblas for the second time),
         # so only the results of the second run of bitblas are asserted.
         # The first run of bitblas only prints relevant information
-        self.inference(model_path=model_path, backend=backend, tokens_per_second=tokens_per_second, optimize=optimize, fullgraph=fullgraph, warmup_runs=1)
+        self.inference(model_path=model_path, backend=backend, tokens_per_second=tokens_per_second, optimize=optimize, fullgraph=fullgraph, warmup_runs=1, device="cuda")
