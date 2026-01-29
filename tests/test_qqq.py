@@ -43,6 +43,7 @@ class TestGroupSize(unittest.TestCase):
     def test_load_group_128(self):
         model = GPTQModel.load(
             "/monster/data/model/QQQ-Llama-3-8b-g128",
+            device="cuda"
         )
 
         self.assert_qqq_linear(model)
@@ -81,6 +82,7 @@ class TestGroupSize(unittest.TestCase):
 
             model = GPTQModel.load(
                 tmp_dir_name,
+                device="cuda"
             )
 
             self.assert_qqq_linear(model)
