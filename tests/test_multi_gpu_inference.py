@@ -21,7 +21,7 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 class TestMultiGPUInference(unittest.TestCase):
     @classmethod
     def setUpClass(self):
-        self.MODEL_PATH = "/monster/data/model/LongCat-Flash-Chat/gptq_4bits_groupsize128_maxlen2048_ns256_descTrue_damp0.025_mse2.4_09-03_15-48-35"
+        self.MODEL_PATH = "/monster/data/model/Qwen2.5-Coder-32B-Instruct-GPTQ-Int4"
         self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL_PATH, trust_remote_code=True)
 
     def test_multi_gpu_inference(self):
@@ -53,4 +53,4 @@ class TestMultiGPUInference(unittest.TestCase):
             skip_special_tokens=False
         )
 
-        self.assertIn("2</longcat_s>", result.lower(), "The generated result should contain '2</longcat_s>'")
+        self.assertIn("2<|im_end|>", result.lower(), "The generated result should contain '2<|im_end|>'")
