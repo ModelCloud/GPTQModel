@@ -111,7 +111,7 @@ class BaseQuantLinear(nn.Module):
 
         # pack_factor is only used for bits 2, 4, and 8. bit3 3 does not use this variable.
         self.pack_factor = self.pack_dtype_bits // self.bits
-        _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, in_features=in_features, out_features=out_features, pack_dtype=pack_dtype)
+        _, err = self.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, in_features=in_features, out_features=out_features, pack_dtype=pack_dtype)
         if err:
             raise err
 
