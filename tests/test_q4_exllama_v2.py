@@ -8,6 +8,7 @@ import os
 
 from gptqmodel.models._const import DEVICE
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
