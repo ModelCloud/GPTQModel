@@ -225,8 +225,12 @@ def _is_accelerate_offload_target(value: str) -> bool:
     return value.strip().lower() in ACCELERATE_OFFLOAD_TARGETS
 
 
-def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> DEVICE:
-    normalized_device = DEVICE.CPU
+def hf_normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> DEVICE:
+    return normalize_device_device_map(device=device, device_map=device_map, default=DEVICE.CPU)
+
+
+def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]], default: Optional[DEVICE] = None) -> DEVICE:
+    normalized_device = default
     accelerator = torch.accelerator.current_accelerator()
     if device is None:
         if device_map is not None:
@@ -300,7 +304,7 @@ def hf_select_quant_linear(
         backend = BACKEND(backend.lower())
 
     if device_map is not None:
-        device = normalize_device_device_map(None, device_map)
+        device = hf_normalize_device_device_map(None, device_map)
     else:
         device = DEVICE.CPU
 
@@ -373,7 +377,7 @@ def hf_select_quant_linear_v2(
     pack_dtype = _normalize_dtype(pack_dtype_override, "pack_dtype") if pack_dtype_override is not None else default_pack_dtype
 
     if device_map is not None:
-        device = normalize_device_device_map(None, device_map)
+        device = hf_normalize_device_device_map(None, device_map)
     else:
         device = DEVICE.CPU
 

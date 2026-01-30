@@ -324,7 +324,7 @@ def ModelLoader(cls):
 
         # TODO need to normalize backend and others in a unified api
         if isinstance(backend, str):
-            backend =  (backend)
+            backend = (backend)
         device = auto_select_device(device, backend)
 
         if backend == BACKEND.VLLM:
