@@ -11,7 +11,13 @@ from .utils.nogil_patcher import patch_safetensors_save_file, patch_triton_autot
 # isort: on
 
 patch_safetensors_save_file()
-patch_triton_autotuner()
+
+# TODO: waiting for official fix from triton
+#  monkeypatching triton threading issues is fragile
+try:
+    patch_triton_autotuner()
+except Exception:
+    pass
 
 from .utils.env import env_flag
 from .utils.logger import setup_logger
