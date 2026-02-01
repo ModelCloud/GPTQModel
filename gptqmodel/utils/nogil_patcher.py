@@ -18,6 +18,8 @@ from .safe import ThreadSafe
 _PATCHED_ATTR = "_gptqmodel_locked_save_file"
 
 TRITON_MIN_VERSION_STR = "3.5.0"
+# Alternate distribution names used by Windows and XPU builds.
+TRITON_COMPATIBLE_PKGS = ("triton", "triton-windows", "pytorch_triton_xpu")
 
 
 def patch_safetensors_save_file() -> None:
@@ -36,28 +38,36 @@ def patch_safetensors_save_file() -> None:
 
 __all__ = ["patch_safetensors_save_file", "patch_triton_autotuner"]
 
-
+# TODO: triton has unfixed threading bugs in the autotuner code
 def patch_triton_autotuner() -> None:
     try:
         import triton # noqa
         from triton.runtime import autotuner as module
     except ImportError:
+        # skip
         return
 
-    try:
-        triton_version_str = version("triton")
-    except importlib.metadata.PackageNotFoundError:
+    # Try alternative distribution names used by Windows or XPU builds.
+    triton_version_str = None
+    for package_name in TRITON_COMPATIBLE_PKGS:
         try:
-            triton_version_str = version("pytorch_triton_xpu")
-        except Exception:
-            raise ValueError("Can't get triton version")
+            triton_version_str = version(package_name)
+            break
+        except importlib.metadata.PackageNotFoundError:
+            triton_version_str = None
+
+    # skip
+    if not triton_version_str:
+        return
 
     try:
         triton_ver = Version(triton_version_str)
         triton_min_version = Version(TRITON_MIN_VERSION_STR)
+        # skip
         if triton_ver < triton_min_version:
             return
     except InvalidVersion:
+        # skip
         if triton_version_str < TRITON_MIN_VERSION_STR:
             return
 
