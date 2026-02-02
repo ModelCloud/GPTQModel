@@ -13,6 +13,7 @@ from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, move_to
 from .._const import CPU
 from ..base import BaseQModel
+from ...utils.offload import offload_to_disk
 
 
 class BaseQwen2VLGPTQ(BaseQModel):
@@ -38,9 +39,28 @@ class BaseQwen2VLGPTQ(BaseQModel):
     require_load_processor = True
 
     def pre_quantize_generate_hook_start(self):
+        self.model.language_model.embed_tokens = move_to(self.model.language_model.embed_tokens, device=self.quantize_config.device)
+        self.model.language_model.rotary_emb = move_to(self.model.language_model.rotary_emb, device=self.quantize_config.device)
         self.model.visual = move_to(self.model.visual, device=self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
+        if self.quantize_config.offload_to_disk:
+            offload_to_disk(model=self.model.language_model,
+                            module=self.model.language_model.embed_tokens,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            offload_to_disk(model=self.model.language_model,
+                            module=self.model.language_model.rotary_emb,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            offload_to_disk(model=self.model,
+                            module=self.model.visual,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            return
+
+        self.model.language_model.embed_tokens = move_to(self.model.language_model.embed_tokens, device=CPU)
+        self.model.language_model.rotary_emb = move_to(self.model.language_model.rotary_emb, device=CPU)
         self.model.visual = move_to(self.model.visual, device=CPU)
 
     @staticmethod
