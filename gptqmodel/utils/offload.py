@@ -157,7 +157,7 @@ def _offload_to_disk_impl(module: List[str] | nn.Module, model: nn.Module, disk_
 
         _offload_disk(module=module, name=full_name, disk_path=disk_path)
 
-    if hasattr(module, "config") and getattr(module.config,
+    if hasattr(module, "config") and hasattr(module, "tie_weights") and getattr(module.config,
                                              "tie_word_embeddings", False):
         module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after offload
 
