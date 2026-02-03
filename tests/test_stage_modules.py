@@ -1,18 +1,21 @@
 import threading
 import types
+from typing import Dict
 
 import torch
 
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.looper.stage_layer import run_layer_stage
 from gptqmodel.looper.stage_subset import SubsetForwardContext, SubsetStageResult
+from gptqmodel.utils.pause_resume import PauseResumeController
 
 
 class _DummyQModel:
     def __init__(self):
         self.support_batch_quantize = False
-        self.quantize_config = types.SimpleNamespace(device=None, vram_strategy="exclusive")
+        self.quantize_config = types.SimpleNamespace(device=None, vram_strategy="exclusive", moe_routing_bypass=lambda : False)
         self.layer_callback = None
 
 
@@ -59,6 +62,7 @@ class _TinyModel(torch.nn.Module):
     def __init__(self, layer):
         super().__init__()
         self.layer = layer
+        self.config = types.SimpleNamespace(model_type="llama")
         self.visual_tokenizer = types.SimpleNamespace(dtype=torch.float32)
 
     def forward(self, *, hidden_states, attention_mask=None, position_ids=None, use_cache=False, **kwargs):
@@ -279,6 +283,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             self._moe_subset_threshold = 16
             self._vram_strategy = types.SimpleNamespace()
             self._layer_events = []
+            self.pause_controller = PauseResumeController()
 
         def _check_loop_stop(self):
             return False
@@ -292,13 +297,20 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         def _subset_event_dispatch(self, *kwargs):
             pass
 
+        def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor,
+                                 failsafe, layer_module=None) -> Dict[str, NamedModule]:
+            subset = {}
+            name = "self_attn.q_proj"
+            subset[name] = NamedModule(module, name=name, full_name=full, layer_index=layer_index)
+            return subset
+
     looper = DummyLooper()
     processor = looper.processors[0]
     pb = DummyPB(range(1))
     processor.layer_count = 1
     processor.pb = pb
 
-    layers = [torch.nn.Identity()]
+    layers = [torch.nn.Linear(in_features=64, out_features=64)]
     layer_modules = [["foo"]]
     logger = DummyLogger()
 
