@@ -52,11 +52,21 @@ class OvisQModel(BaseQModel):
         self.model.llm.generation_config.max_length = 8192
 
     def pre_quantize_generate_hook_start(self):
+        self.shell_module_materialize(self.model.llm.model.embed_tokens, self.quantize_config.device)
+        self.shell_module_materialize(self.model.llm.model.rotary_emb, self.quantize_config.device)
         self.shell_module_materialize(self.model.visual_tokenizer, self.quantize_config.device)
         self.shell_module_materialize(self.model.vte, self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
         if self.quantize_config.offload_to_disk:
+            offload_to_disk(model=self.model.llm.model,
+                            module=self.model.llm.model.embed_tokens,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            offload_to_disk(model=self.model.llm.model,
+                            module=self.model.llm.model.rotary_emb,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
             offload_to_disk(model=self.model,
                             module=self.model.visual_tokenizer,
                             disk_path=self.quantize_config.offload_to_disk_path,
@@ -67,6 +77,8 @@ class OvisQModel(BaseQModel):
                             )
             return
 
+        self.model.llm.model.embed_tokens = move_to(self.model.llm.model.embed_tokens, device=CPU)
+        self.model.llm.model.rotary_emb = move_to(self.model.llm.model.rotary_emb, device=CPU)
         self.model.visual_tokenizer = move_to(self.model.visual_tokenizer, device=CPU)
         self.model.vte = move_to(self.model.vte, device=CPU)
 
