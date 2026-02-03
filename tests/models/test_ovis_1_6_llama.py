@@ -18,8 +18,10 @@ class TestOvis1_6_Llama(ModelTest):
     USE_FLASH_ATTN = False
 
     def test_ovis_1_6(self):
+        # lm_eval does not support Ovis, and will throw an error during execution:
+        # TypeError: Ovis.forward() missing 3 required positional arguments: 'attention_mask', 'labels', and 'pixel_values'
         model, tokenizer = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
-                                           dtype=self.TORCH_DTYPE, multimodal_max_length=8192, batch_size=1)
+                                           dtype=self.TORCH_DTYPE, multimodal_max_length=8192, batch_size=1, call_perform_post_quant_validation=False)
 
         text_tokenizer = model.get_text_tokenizer()
         visual_tokenizer = model.get_visual_tokenizer()

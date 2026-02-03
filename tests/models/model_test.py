@@ -840,7 +840,7 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, **kwargs):
+    def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):
         quantize_config = QuantizeConfig(
             quant_method=self.METHOD,
             format=self.FORMAT,
@@ -906,7 +906,7 @@ class ModelTest(unittest.TestCase):
         is_quantized = model.quantized
 
         # ovis cannot load processor
-        is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
+        is_ovis_model = model.config.model_type == "ovis"
         need_create_processor = is_image_to_text_model and not is_ovis_model
 
         debug_short_circuit = False
@@ -952,7 +952,10 @@ class ModelTest(unittest.TestCase):
                     tokenizer.save_pretrained(path)
                     self._print_post_quant_artifacts(path)
 
-                    reuse_candidates, eval_records = self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
+                    reuse_candidates = {}
+                    eval_records = {}
+                    if call_perform_post_quant_validation:
+                        reuse_candidates, eval_records = self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
                     self._post_quant_eval_records = eval_records
                     target_backend = self._current_load_backend()
 
