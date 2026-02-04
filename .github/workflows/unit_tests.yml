@@ -148,7 +148,6 @@ jobs:
         id: files
         run: |
           test_files=$(python3 .github/scripts/list_test_files.py \
-          --legacy-tests "$LEGACY_TESTS" \
           --ignored-test-files "$IGNORED_TEST_FILES" \
           --test-names "${{ github.event.inputs.test_names }}" \
           --test-regex "${{ github.event.inputs.test_regex }}")
