@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import List, Tuple, Union, Optional
 
+def _sort_key(p: str):
+    return "/" in p, p
 
 def _split_csv(s: Optional[str]) -> List[str]:
     if not s:
@@ -64,7 +66,7 @@ def getFiles(
            and re.match(test_regex, f)
     }
 
-    return sorted(torch_test_files), sorted(m4_test_files)
+    return sorted(torch_test_files, key=_sort_key), sorted(m4_test_files, key=_sort_key)
 
 
 def main() -> None:
