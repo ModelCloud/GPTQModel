@@ -498,16 +498,22 @@ def ModelWriter(cls):
         if self.tokenizer:
             self.tokenizer.save_pretrained(save_dir)
 
-            # fixed this issue: https://github.com/huggingface/transformers/issues/35832
-            saved_tokenizer_config = get_tokenizer_config(save_dir)
-            config_tokenizer_class = saved_tokenizer_config.get("tokenizer_class")
-            # if the tokenizer is fast, but the tokenizer_config.json does not have Fast suffix, add "Fast" suffix
-            if config_tokenizer_class and (not config_tokenizer_class.endswith("Fast")) and (
-                isinstance(self.tokenizer.tokenizer, PreTrainedTokenizerFast)
-                ):
-                saved_tokenizer_config["tokenizer_class"] = saved_tokenizer_config["tokenizer_class"] + "Fast"
-                with open(os.path.join(save_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
-                    json.dump(saved_tokenizer_config, f, indent=2, ensure_ascii=False)
+            # Use source model's tokenizer_class for cross-version compatibility
+            # (transformers 5.0 save_pretrained writes "TokenizersBackend" which older versions can't load)
+            source_tokenizer_config = get_tokenizer_config(self.model_local_path)
+            source_tokenizer_class = source_tokenizer_config.get("tokenizer_class")
+
+            if source_tokenizer_class:
+                # fix https://github.com/huggingface/transformers/issues/35832
+                # if source tokenizer_class lacks "Fast" suffix but tokenizer is actually fast, add it
+                if (not source_tokenizer_class.endswith("Fast")) and isinstance(self.tokenizer.tokenizer, PreTrainedTokenizerFast):
+                    source_tokenizer_class = source_tokenizer_class + "Fast"
+
+                saved_tokenizer_config = get_tokenizer_config(save_dir)
+                if saved_tokenizer_config.get("tokenizer_class") != source_tokenizer_class:
+                    saved_tokenizer_config["tokenizer_class"] = source_tokenizer_class
+                    with open(os.path.join(save_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
+                        json.dump(saved_tokenizer_config, f, indent=2, ensure_ascii=False)
 
 
     cls.save_quantized = save_quantized
