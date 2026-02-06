@@ -170,13 +170,14 @@ jobs:
     if: needs.list-test-files.outputs.torch-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0128
-      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all --entrypoint /entrypoint.sh
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/pyenv:/opt/pyenv
+        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
+        - /monster/ci/uv:/opt/uv
         - /monster/ci/dist:/opt/dist
 
     steps:
@@ -195,37 +196,34 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Print Env
+      - name: Setup uv env
+        shell: bash
         run: |
-          echo "::group::pyenv versions"
-          pyenv versions
-          echo "::endgroup::"
-
-          python_version=${{ env.PYTHON_VERSION }}
+          python_version='${{ env.PYTHON_VERSION }}'
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
+      
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_build"
-
-          echo "env name: $env_name"
-
-          if [ -d "$(pyenv root)/versions/$env_name" ]; then
-            echo "env exists, skip"
-            pyenv local $env_name
-            pyenv activate $env_name
-          else
-            echo "creating venv..."
-            pyenv virtualenv "$python_version" "$env_name"
-            pyenv local $env_name
-            pyenv activate $env_name
-            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          ENV_DIR="$VENV_ROOT/$env_name"
+      
+          mkdir -p "$UV_PYTHON_DIR" "$VENV_ROOT"
+      
+          # create venv if missing
+          if [ ! -d "$ENV_DIR" ]; then
+            uv venv "$ENV_DIR"
+            uv run bash -c \
+              "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" \
+              @ "${{ needs.check-vm.outputs.cuda_version }}" \
+              "${{ env.TORCH_VERSION }}" \
+              "$python_version"
           fi
+      
+          echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
+          echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
 
-          pyenv local $env_name
-          pyenv activate $env_name
-
-          echo "::group::pyenv versions"
-          pyenv versions
+          echo "::group::uv python list"
+          uv python list
           echo "::endgroup::"
           
           echo "== python =="
@@ -324,13 +322,14 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0128
-      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all --entrypoint /entrypoint.sh
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/pyenv:/opt/pyenv
+        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
+        - /monster/ci/uv:/opt/uv
         - /monster/ci/dist:/opt/dist
     strategy:
       fail-fast: false
@@ -354,33 +353,40 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Print Env
+      - name: Setup uv env
+        shell: bash
         run: |
-          python_version=${{ env.PYTHON_VERSION }}
+          python_version='${{ env.PYTHON_VERSION }}'
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
-          test_name=${{ matrix.test_script }}
-          test_name=${test_name//\//_}
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
-         
-          if [ -d "$(pyenv root)/versions/$env_name" ]; then
-            echo "env exists, skip"
-            pyenv local $env_name
-            pyenv activate $env_name
-          else
-            echo "creating venv..."
-            pyenv virtualenv "$python_version" "$env_name"
-            pyenv local $env_name
-            pyenv activate $env_name
-            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_build"
+          ENV_DIR="$VENV_ROOT/$env_name"
+          
+          mkdir -p "$UV_PYTHON_DIR" "$VENV_ROOT"
+          
+          # create venv if missing
+          if [ ! -d "$ENV_DIR" ]; then
+            uv venv "$ENV_DIR"
+            uv run bash -c \
+              "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" \
+              @ "${{ needs.check-vm.outputs.cuda_version }}" \
+              "${{ env.TORCH_VERSION }}" \
+              "$python_version"
           fi
+          
+          echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
+          echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
 
-          pyenv local $env_name
-          pyenv activate $env_name
+          echo "::group::uv python list"
+          uv python list
+          echo "::endgroup::"
+          
+          python -V
 
-          echo "::group::pyenv versions"
-          pyenv versions
+          echo "::group::uv python list"
+          uv python list
           echo "::endgroup::"
           
           echo "== python =="
@@ -469,7 +475,7 @@ jobs:
 
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
-            source /etc/profile.d/pyenv.sh && pyenv activate xpu
+            # source /etc/profile.d/pyenv.sh && pyenv activate xpu
           fi
 
           # ipex doesn't need to compile kernels. xpu can't install cuda package
@@ -589,7 +595,7 @@ jobs:
           fi
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             export CUDA_VISIBLE_DEVICES=""
-            source /etc/profile.d/pyenv.sh && pyenv activate xpu
+            # source /etc/profile.d/pyenv.sh && pyenv activate xpu
             pip uninstall vllm -y
             pip list
           fi
