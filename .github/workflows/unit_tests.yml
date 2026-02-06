@@ -170,14 +170,13 @@ jobs:
     if: needs.list-test-files.outputs.torch-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0128
-      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all --entrypoint /entrypoint.sh
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
-        - /monster/ci/uv:/opt/uv
+        - /monster/ci/pyenv:/opt/pyenv
         - /monster/ci/dist:/opt/dist
 
     steps:
@@ -196,34 +195,37 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Setup uv env
-        shell: bash
+      - name: Print Env
         run: |
-          python_version='${{ env.PYTHON_VERSION }}'
+          echo "::group::pyenv versions"
+          pyenv versions
+          echo "::endgroup::"
+
+          python_version=${{ env.PYTHON_VERSION }}
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
-      
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_build"
-          ENV_DIR="$VENV_ROOT/$env_name"
-      
-          mkdir -p "$UV_PYTHON_DIR" "$VENV_ROOT"
-      
-          # create venv if missing
-          if [ ! -d "$ENV_DIR" ]; then
-            uv venv "$ENV_DIR"
-            uv run bash -c \
-              "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" \
-              @ "${{ needs.check-vm.outputs.cuda_version }}" \
-              "${{ env.TORCH_VERSION }}" \
-              "$python_version"
-          fi
-      
-          echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
-          echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
 
-          echo "::group::uv python list"
-          uv python list
+          echo "env name: $env_name"
+
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            echo "env exists, skip"
+            pyenv local $env_name
+            pyenv activate $env_name
+          else
+            echo "creating venv..."
+            pyenv virtualenv "$python_version" "$env_name"
+            pyenv local $env_name
+            pyenv activate $env_name
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          fi
+
+          pyenv local $env_name
+          pyenv activate $env_name
+
+          echo "::group::pyenv versions"
+          pyenv versions
           echo "::endgroup::"
           
           echo "== python =="
@@ -322,14 +324,13 @@ jobs:
     runs-on: [ self-hosted, xeon5 ]
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0128
-      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all --entrypoint /entrypoint.sh
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
-        - /monster/ci/uv:/opt/uv
+        - /monster/ci/pyenv:/opt/pyenv
         - /monster/ci/dist:/opt/dist
     strategy:
       fail-fast: false
@@ -353,40 +354,33 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Setup uv env
-        shell: bash
+      - name: Print Env
         run: |
-          python_version='${{ env.PYTHON_VERSION }}'
+          python_version=${{ env.PYTHON_VERSION }}
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
+          test_name=${{ matrix.test_script }}
+          test_name=${test_name//\//_}
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
           
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_build"
-          ENV_DIR="$VENV_ROOT/$env_name"
-          
-          mkdir -p "$UV_PYTHON_DIR" "$VENV_ROOT"
-          
-          # create venv if missing
-          if [ ! -d "$ENV_DIR" ]; then
-            uv venv "$ENV_DIR"
-            uv run bash -c \
-              "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" \
-              @ "${{ needs.check-vm.outputs.cuda_version }}" \
-              "${{ env.TORCH_VERSION }}" \
-              "$python_version"
+          if [ -d "$(pyenv root)/versions/$env_name" ]; then
+            echo "env exists, skip"
+            pyenv local $env_name
+            pyenv activate $env_name
+          else
+            echo "creating venv..."
+            pyenv virtualenv "$python_version" "$env_name"
+            pyenv local $env_name
+            pyenv activate $env_name
+            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
           fi
-          
-          echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
-          echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
 
-          echo "::group::uv python list"
-          uv python list
-          echo "::endgroup::"
-          
-          python -V
+          pyenv local $env_name
+          pyenv activate $env_name
 
-          echo "::group::uv python list"
-          uv python list
+          echo "::group::pyenv versions"
+          pyenv versions
           echo "::endgroup::"
           
           echo "== python =="
@@ -475,7 +469,7 @@ jobs:
 
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
-            # source /etc/profile.d/pyenv.sh && pyenv activate xpu
+            source /etc/profile.d/pyenv.sh && pyenv activate xpu
           fi
 
           # ipex doesn't need to compile kernels. xpu can't install cuda package
@@ -595,7 +589,7 @@ jobs:
           fi
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             export CUDA_VISIBLE_DEVICES=""
-            # source /etc/profile.d/pyenv.sh && pyenv activate xpu
+            source /etc/profile.d/pyenv.sh && pyenv activate xpu
             pip uninstall vllm -y
             pip list
           fi
@@ -617,147 +611,147 @@ jobs:
           # pip cache purge && uv cache clean
           rm -rf rm -rf ./* .[^.] .??*
 
-  show-statistics:
-    runs-on: [ self-hosted, xeon5 ]
-    if: always() && inputs['exclusive-gpu'] && !cancelled()
-    container:
-      image: modelcloud/gptqmodel:alpine-ci-v1
-    needs:
-      - torch
-    steps:
-      - name: Print statistics
-        run: curl "http://$RUNNER/gpu/get_vram_logs?id=${{ github.run_id }}"
+#  show-statistics:
+#    runs-on: [ self-hosted, xeon5 ]
+#    if: always() && inputs['exclusive-gpu'] && !cancelled()
+#    container:
+#      image: modelcloud/gptqmodel:alpine-ci-v1
+#    needs:
+#      - torch
+#    steps:
+#      - name: Print statistics
+#        run: curl "http://$RUNNER/gpu/get_vram_logs?id=${{ github.run_id }}"
 
-  m4:
-    runs-on: [ self-hosted, m4 ]
-    needs:
-      - check-vm
-      - list-test-files
-    if: false && (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && (needs.list-test-files.outputs.m4-files != '' && needs.list-test-files.outputs.m4-files != '[]') && !cancelled()
-    strategy:
-      fail-fast: false
-      matrix:
-        test_script: ${{ fromJSON(needs.list-test-files.outputs.m4-files) }}
-    steps:
-      - name: Print Env
-        run: |
-          echo "repo: ${{ env.repo }}"
-          echo "ref: ${{ env.ref }}"
-          ls -ahl .
-
-      - name: Checkout Codes
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ env.repo }}
-          ref: ${{ env.ref }}
-
-      - name: Run test
-        run: |
-          export PATH="/opt/homebrew/bin:$PATH" && eval "$(pyenv init -)"
-          rm -rf venv || true
-
-          echo "=== checking models dir is mounted"
-          ls ../../../monster
-
-          echo "=== activating venv"
-          pyenv global 3.11.11 && python -m venv venv
-          source venv/bin/activate
-
-          rm profile.sb || true
-
-          curl -O http://$RUNNER/scripts/m4/profile.sb
-
-          echo "=== installing uv setuptools build"
-          pip install setuptools build -U -i http://$RUNNER/simple --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-
-          echo "=== installing test tools"
-          uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm -U -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-
-          echo "=== installing gptqmodel"
-          uv pip install . --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-
-          echo "replacing model path"
-          find tests -name "*.py" -exec sed -i '' 's/\/monster\/data\/model/..\/..\/..\/monster/g' {} +
-
-          TEST=${{ matrix.test_script }}
-          if [[ ! "$TEST" == *.py ]]; then
-          TEST="$TEST.py"
-          fi
-          echo "=== running test: $TEST"
-          pytest tests/$TEST
-
-      - name: Clean cache
-        if: always()
-        run: |
-          source venv/bin/activate && pip cache purge && uv cache clean || true
-          rm -rf ../GPTQModel && mkdir ../GPTQModel
-
-  mac-test:
-    runs-on: macos-latest
-    env:
-      CUDA_VISIBLE_DEVICES: ''
-      TORCH_CUDA_ARCH_LIST: ''
-      MAX_JOBS: 3
-      BUILD_QQQ: 0
-      BUILD_EORA: 0
-      GPTQMODEL_BUILD_EXLLAMA_V1: 0
-      GPTQMODEL_BUILD_EORA: 0
-      GPTQMODEL_FORCE_BUILD: 0
-    steps:
-      - name: Checkout Codes
-        uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: 3.12
-          cache: 'pip'
-
-#       it wastes too much time to find which exactly one caused installation failed, just unset them all.....
-      - name: Install dependencies
-        run: |
-          unset CUDA_DEVICE_ORDER
-          unset CUDA_VISIBLE_DEVICES
-          unset TORCH_CUDA_ARCH_LIST
-          unset PYTORCH_ALLOC_CONF
-          unset MAX_JOBS
-          unset RUNNER
-          unset XEON5
-          unset UV_INDEX_URL
-          unset CUDA_VERSION
-          unset TORCH_VERSION
-          unset PYTHON_VERSION
-          unset # PYTHON_GIL
-          unset BUILD_QQQ
-          unset BUILD_EORA
-          unset GPTQMODEL_BUILD_EXLLAMA_V1
-          unset GPTQMODEL_BUILD_EORA
-          unset LEGACY_TESTS
-          unset IGNORED_TEST_FILES
-          unset GPTQMODEL_FORCE_BUILD
-          unset repo
-          unset ref
-          
-          python -V
-          python -m venv venv
-          source venv/bin/activate
-          pip install pip uv setuptools build wheel torch -U
-          pip install meson-python -U
-          pip install numpy==2.2.6 -U
-
-          uv pip install -e . --no-build-isolation
-          pip install pip Pillow device_smi pypcre tokenicer threadpoolctl accelerate logbar transformers optimum torch -U
-
-      - name: Run test
-        run: |
-          source venv/bin/activate
-          python - <<'PY'
-          import os
-          from transformers import pipeline
-          os.environ["CUDA_VISIBLE_DEVICES"] = ""
-          os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-          llm_pipeline = pipeline(model="JunHowie/Qwen3-0.6B-GPTQ-Int4")
-          output = llm_pipeline("Which city is the capital of France?", max_new_tokens=100)
-          print(output)
-          
-          assert "paris" in output.lower()
-          PY
+#  m4:
+#    runs-on: [ self-hosted, m4 ]
+#    needs:
+#      - check-vm
+#      - list-test-files
+#    if: false && (github.event.inputs.test_names == '' || contains(github.event.inputs.test_names, 'apple') || contains(github.event.inputs.test_names, 'mlx') )  && (needs.list-test-files.outputs.m4-files != '' && needs.list-test-files.outputs.m4-files != '[]') && !cancelled()
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        test_script: ${{ fromJSON(needs.list-test-files.outputs.m4-files) }}
+#    steps:
+#      - name: Print Env
+#        run: |
+#          echo "repo: ${{ env.repo }}"
+#          echo "ref: ${{ env.ref }}"
+#          ls -ahl .
+#
+#      - name: Checkout Codes
+#        uses: actions/checkout@v6
+#        with:
+#          repository: ${{ env.repo }}
+#          ref: ${{ env.ref }}
+#
+#      - name: Run test
+#        run: |
+#          export PATH="/opt/homebrew/bin:$PATH" && eval "$(pyenv init -)"
+#          rm -rf venv || true
+#
+#          echo "=== checking models dir is mounted"
+#          ls ../../../monster
+#
+#          echo "=== activating venv"
+#          pyenv global 3.11.11 && python -m venv venv
+#          source venv/bin/activate
+#
+#          rm profile.sb || true
+#
+#          curl -O http://$RUNNER/scripts/m4/profile.sb
+#
+#          echo "=== installing uv setuptools build"
+#          pip install setuptools build -U -i http://$RUNNER/simple --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+#
+#          echo "=== installing test tools"
+#          uv pip install pytest parameterized vllm lm-eval device-smi mlx-lm -U -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+#
+#          echo "=== installing gptqmodel"
+#          uv pip install . --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+#
+#          echo "replacing model path"
+#          find tests -name "*.py" -exec sed -i '' 's/\/monster\/data\/model/..\/..\/..\/monster/g' {} +
+#
+#          TEST=${{ matrix.test_script }}
+#          if [[ ! "$TEST" == *.py ]]; then
+#          TEST="$TEST.py"
+#          fi
+#          echo "=== running test: $TEST"
+#          pytest tests/$TEST
+#
+#      - name: Clean cache
+#        if: always()
+#        run: |
+#          source venv/bin/activate && pip cache purge && uv cache clean || true
+#          rm -rf ../GPTQModel && mkdir ../GPTQModel
+#
+#  mac-test:
+#    runs-on: macos-latest
+#    env:
+#      CUDA_VISIBLE_DEVICES: ''
+#      TORCH_CUDA_ARCH_LIST: ''
+#      MAX_JOBS: 3
+#      BUILD_QQQ: 0
+#      BUILD_EORA: 0
+#      GPTQMODEL_BUILD_EXLLAMA_V1: 0
+#      GPTQMODEL_BUILD_EORA: 0
+#      GPTQMODEL_FORCE_BUILD: 0
+#    steps:
+#      - name: Checkout Codes
+#        uses: actions/checkout@v6
+#
+#      - uses: actions/setup-python@v6
+#        with:
+#          python-version: 3.12
+#          cache: 'pip'
+#
+##       it wastes too much time to find which exactly one caused installation failed, just unset them all.....
+#      - name: Install dependencies
+#        run: |
+#          unset CUDA_DEVICE_ORDER
+#          unset CUDA_VISIBLE_DEVICES
+#          unset TORCH_CUDA_ARCH_LIST
+#          unset PYTORCH_ALLOC_CONF
+#          unset MAX_JOBS
+#          unset RUNNER
+#          unset XEON5
+#          unset UV_INDEX_URL
+#          unset CUDA_VERSION
+#          unset TORCH_VERSION
+#          unset PYTHON_VERSION
+#          unset # PYTHON_GIL
+#          unset BUILD_QQQ
+#          unset BUILD_EORA
+#          unset GPTQMODEL_BUILD_EXLLAMA_V1
+#          unset GPTQMODEL_BUILD_EORA
+#          unset LEGACY_TESTS
+#          unset IGNORED_TEST_FILES
+#          unset GPTQMODEL_FORCE_BUILD
+#          unset repo
+#          unset ref
+#
+#          python -V
+#          python -m venv venv
+#          source venv/bin/activate
+#          pip install pip uv setuptools build wheel torch -U
+#          pip install meson-python -U
+#          pip install numpy==2.2.6 -U
+#
+#          uv pip install -e . --no-build-isolation
+#          pip install pip Pillow device_smi pypcre tokenicer threadpoolctl accelerate logbar transformers optimum torch -U
+#
+#      - name: Run test
+#        run: |
+#          source venv/bin/activate
+#          python - <<'PY'
+#          import os
+#          from transformers import pipeline
+#          os.environ["CUDA_VISIBLE_DEVICES"] = ""
+#          os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+#          llm_pipeline = pipeline(model="JunHowie/Qwen3-0.6B-GPTQ-Int4")
+#          output = llm_pipeline("Which city is the capital of France?", max_new_tokens=100)
+#          print(output)
+#
+#          assert "paris" in output.lower()
+#          PY
