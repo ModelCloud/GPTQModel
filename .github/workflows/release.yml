@@ -358,7 +358,7 @@ jobs:
         if: env.SHOULD_RUN == 1
         run: |
           wget http://${RUNNER}/scripts/env/init_compiler_no_env.sh
-          bash init_compiler_no_env.sh ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
+          bash init_compiler_no_env.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
 
           echo "::group::uv python list"
           uv python list
