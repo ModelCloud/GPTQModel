@@ -291,6 +291,7 @@ jobs:
         run: |
           echo "::group::python version"
           which python
+          which pip
           python --version
           echo "::endgroup::"
           
@@ -417,14 +418,12 @@ jobs:
           echo "::endgroup::"
           
           which python
+          which pip
           python -V
 
           echo "::group::uv python list"
           uv python list
           echo "::endgroup::"
-          
-          echo "== python =="
-          python --version
 
           echo "== nvcc =="
           nvcc --version
