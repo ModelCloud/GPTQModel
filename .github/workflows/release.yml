@@ -390,7 +390,7 @@ jobs:
           [ $(stat -c%s "dist/$whl") -lt 104857600 ] && echo "wheel size < 100M" && exit 1 || echo "$whl size check passed."
 
           if [ "${{ matrix.python }}" != "313t" ]; then # twine doesn't support python 3.13 yet
-            pip install twine
+            uv pip install twine
             twine check dist/$whl
           fi
 
@@ -554,7 +554,6 @@ jobs:
 
       - name: Install requirements
         run: |
-          pip install build setuptools uv -U
           uv pip install torch twine ninja --system
 
       - name: Compile

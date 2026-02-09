@@ -475,7 +475,6 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip install uv -U
           uv pip uninstall gptqmodel
           # make sure torch & torchvision are corresponded
           uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
@@ -503,10 +502,6 @@ jobs:
           
           echo "===== uninstall torchao pynvml ====="
           uv pip uninstall torchao pynvml
-
-          echo "::group::pip list"
-          pip list
-          echo "::endgroup::"
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
@@ -604,8 +599,8 @@ jobs:
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             export CUDA_VISIBLE_DEVICES=""
             # source /etc/profile.d/pyenv.sh && pyenv activate xpu
-            pip uninstall vllm -y
-            pip list
+            uv pip uninstall vllm -y
+            uv pip list
           fi
 
           start_time=$(date +%s)
