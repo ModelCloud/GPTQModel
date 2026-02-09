@@ -399,13 +399,12 @@ jobs:
           echo UV_CACHE_DIR=$UV_CACHE_DIR
           echo VENV_ROOT=$VENV_ROOT
 
-
-  - name: Setup uv env
-      shell: bash
-      run: |
+      - name: Setup uv env
+        shell: bash
+        run: |
           python_version='${{ env.PYTHON_VERSION }}'
           if [[ "$python_version" != *"."* ]]; then
-            python_version="${python_version/3/3.}"
+           python_version="${python_version/3/3.}"
           fi
           
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
@@ -416,7 +415,7 @@ jobs:
           
           # create venv if missing
           if [ ! -d "$ENV_DIR" ]; then
-            uv venv "$ENV_DIR"
+           uv venv "$ENV_DIR"
           fi
           
           echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
@@ -459,221 +458,221 @@ jobs:
 
           echo "== torch =="
           uv pip show torch || true
-
-      #      - name: Install requirements
-      #        run: |
-      #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
-
-      #      - name: Download source from local
-      #        continue-on-error: true
-      #        run: |
-      #          curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
-      #          ls -ahl .
-      #          sha256=$(sha256sum $file_name)
-      #          echo "sha256=$sha256"
-      #          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
-
-      # - name: Download source from github
-      #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
-      #   uses: actions/download-artifact@v7
-      #   with:
-      #     name: source
-      #     path: dist
-      #     run-id: ${{ github.run_id }}
-
-      #     - name: Uncompress source
-      #      continue-on-error: true
-      #     run: |
-      #      find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
-      #     ls -ahl .
-      #    tar -zxf gptqmodel_source.tar.gz
-
-      - name: Download wheel from local
-        continue-on-error: true
-        run: |
-          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
-          [ -d $DIR ] || exit 1
-          echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
-
-          ls -ahl $DIR
           
-          mkdir dist || true
+          #      - name: Install requirements
+          #        run: |
+          #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          
+          #      - name: Download source from local
+          #        continue-on-error: true
+          #        run: |
+          #          curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ github.run_id }}/gptqmodel_source.tar.gz
+          #          ls -ahl .
+          #          sha256=$(sha256sum $file_name)
+          #          echo "sha256=$sha256"
+          #          echo "SOURCE_DOWNLOADED=1" >> $GITHUB_ENV
+          
+          # - name: Download source from github
+          #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
+          #   uses: actions/download-artifact@v7
+          #   with:
+          #     name: source
+          #     path: dist
+          #     run-id: ${{ github.run_id }}
+          
+          #     - name: Uncompress source
+          #      continue-on-error: true
+          #     run: |
+          #      find . -mindepth 1 ! -name "gptqmodel_source.tar.gz" -exec rm -rf {} +
+          #     ls -ahl .
+          #    tar -zxf gptqmodel_source.tar.gz
 
-          cp $DIR/*.whl dist/
+          - name: Download wheel from local
+            continue-on-error: true
+            run: |
+              DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
+              [ -d $DIR ] || exit 1
+              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
+          
+              ls -ahl $DIR
+          
+              mkdir dist || true
+          
+              cp $DIR/*.whl dist/
+          
+          #          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://$RUNNER/gpu/whl/download")
+          
+          #          echo "file_name=$file_name"
+          #
+          #          if echo "$file_name" | grep -q "gptqmodel"; then
+          #              mkdir dist || true
+          #              cd dist
+          #              curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/$file_name
+          #              ls -ahl .
+          #              sha256=$(sha256sum $file_name)
+          #              echo "sha256=$sha256"
+          #              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
+          #          fi
 
-      #          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://$RUNNER/gpu/whl/download")
+          - name: Download artifact from github
+            if: env.WHL_DOWNLOADED == '' && !cancelled()
+            uses: actions/download-artifact@v7
+            with:
+              name: whl
+              path: dist
+              run-id: ${{ needs.check-vm.outputs.run_id }}
 
-      #          echo "file_name=$file_name"
-      #
-      #          if echo "$file_name" | grep -q "gptqmodel"; then
-      #              mkdir dist || true
-      #              cd dist
-      #              curl -s -O  http://$RUNNER/whl/${{ env.repo }}/${{ needs.check-vm.outputs.run_id }}/$file_name
-      #              ls -ahl .
-      #              sha256=$(sha256sum $file_name)
-      #              echo "sha256=$sha256"
-      #              echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
-      #          fi
-
-      - name: Download artifact from github
-        if: env.WHL_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v7
-        with:
-          name: whl
-          path: dist
-          run-id: ${{ needs.check-vm.outputs.run_id }}
-
-      - name: Install wheel
-        run: |
-          pip install uv -U
-          uv pip uninstall gptqmodel
-          # make sure torch & torchvision are corresponded
-          uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
-          uv pip install -r requirements.txt
-
-          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
-            echo "===== switching to xpu env ====="
-            # source /etc/profile.d/pyenv.sh && pyenv activate xpu
-          fi
-
-          # ipex doesn't need to compile kernels. xpu can't install cuda package
-          if [[ "${{ matrix.test_script }}" != *ipex* && "${{ matrix.test_script }}" != *xpu* ]]; then
-            echo "===== install dist/whl ====="
-            uv pip install dist/*.whl -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          else
-            echo "===== install with local files for xpu env ====="
-            export CUDA_VISIBLE_DEVICES=""
-            unset TORCH_CUDA_ARCH_LIST
-            uv pip install . --no-build-isolation
-          fi
-
-          python .github/scripts/install_deps.py ${{ matrix.test_script }}
-          # deps may reinstalled torch
-          uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+          - name: Install wheel
+            run: |
+              pip install uv -U
+              uv pip uninstall gptqmodel
+              # make sure torch & torchvision are corresponded
+              uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+              uv pip install -r requirements.txt
           
-          echo "===== uninstall torchao pynvml ====="
-          uv pip uninstall torchao pynvml
-
-          echo "::group::pip list"
-          pip list
-          echo "::endgroup::"
-
-      - name: Find suitable GPU
-        if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
-        run: |
-          set -Eeuo pipefail
-          
-          # -------------------- Configuration --------------------
-          BASE_URL="http://${XEON5}"
-          RUN_ID="${{ github.run_id }}"
-          TEST="${{ matrix.test_script }}"
-          RUNNER="${RUNNER_NAME:-unknown}"
-          EXCLUSIVE="${{ github.event.inputs['exclusive-gpu'] }}"
-          
-          SLEEP_SEC=5
-          TIMEOUT_SEC=18000   # Max wait time: 300 minutes
-          # -------------------------------------------------------
-          
-          # URL encode helper to avoid breaking query parameters
-          urlencode(){ python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],""))' "$1"; }
-          
-          test_q=$(urlencode "$TEST")
-          runner_q=$(urlencode "$RUNNER")
-          exclusive_q=$(urlencode "$EXCLUSIVE")
-          
-          start_s=$(date +%s)
-          gpu_id=""
-          
-          echo "Requesting GPU from allocator"
-          echo "run_id=$RUN_ID test=$TEST runner=$RUNNER exclusive=$EXCLUSIVE"
-          
-          while true; do
-            # Refresh timestamp every request to avoid cache or duplicated requests
-            ts_ms=$(date +%s%3N)
-            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&exclusive=$exclusive_q"
-          
-            # Call allocator
-            # - May return:
-            #   * integer >= 0  : allocated GPU ID
-            #   * integer < 0   : no GPU available yet
-            #   * empty / HTML : temporary server / proxy error
-            resp="$(
-              curl -fsS --connect-timeout 3 --max-time 10 \
-                   --retry 3 --retry-delay 1 --retry-all-errors \
-                   "$url" 2>/dev/null || true
-            )"
-          
-            # Normalize response
-            resp="${resp//$'\r'/}"
-            resp="${resp//$'\n'/}"
-          
-            # If response is empty or not an integer, treat as temporary error
-            if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+$ ]]; then
-              echo "Allocator returned invalid response: '$resp' (temporary error)"
-              curl -fsS "$BASE_URL/gpu/status" || true
-              sleep "$SLEEP_SEC"
-              continue
-            fi
-          
-            # Negative integer means no GPU available yet
-            if (( resp < 0 )); then
-              elapsed=$(( $(date +%s) - start_s ))
-              if (( elapsed >= TIMEOUT_SEC )); then
-                echo "Timed out after ${TIMEOUT_SEC}s waiting for GPU (last response=$resp)"
-                curl -fsS "$BASE_URL/gpu/status" || true
-                exit 1
+              if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
+                echo "===== switching to xpu env ====="
+                # source /etc/profile.d/pyenv.sh && pyenv activate xpu
               fi
           
-              echo "No GPU available (response=$resp). Waiting ${SLEEP_SEC}s... elapsed=${elapsed}s"
+              # ipex doesn't need to compile kernels. xpu can't install cuda package
+              if [[ "${{ matrix.test_script }}" != *ipex* && "${{ matrix.test_script }}" != *xpu* ]]; then
+                echo "===== install dist/whl ====="
+                uv pip install dist/*.whl -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+              else
+                echo "===== install with local files for xpu env ====="
+                export CUDA_VISIBLE_DEVICES=""
+                unset TORCH_CUDA_ARCH_LIST
+                uv pip install . --no-build-isolation
+              fi
+          
+              python .github/scripts/install_deps.py ${{ matrix.test_script }}
+              # deps may reinstalled torch
+              uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+          
+              echo "===== uninstall torchao pynvml ====="
+              uv pip uninstall torchao pynvml
+          
+              echo "::group::pip list"
+              pip list
+              echo "::endgroup::"
+
+          - name: Find suitable GPU
+            if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
+            run: |
+              set -Eeuo pipefail
+          
+              # -------------------- Configuration --------------------
+              BASE_URL="http://${XEON5}"
+              RUN_ID="${{ github.run_id }}"
+              TEST="${{ matrix.test_script }}"
+              RUNNER="${RUNNER_NAME:-unknown}"
+              EXCLUSIVE="${{ github.event.inputs['exclusive-gpu'] }}"
+          
+              SLEEP_SEC=5
+              TIMEOUT_SEC=18000   # Max wait time: 300 minutes
+              # -------------------------------------------------------
+          
+              # URL encode helper to avoid breaking query parameters
+              urlencode(){ python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],""))' "$1"; }
+          
+              test_q=$(urlencode "$TEST")
+              runner_q=$(urlencode "$RUNNER")
+              exclusive_q=$(urlencode "$EXCLUSIVE")
+          
+              start_s=$(date +%s)
+              gpu_id=""
+          
+              echo "Requesting GPU from allocator"
+              echo "run_id=$RUN_ID test=$TEST runner=$RUNNER exclusive=$EXCLUSIVE"
+          
+              while true; do
+                # Refresh timestamp every request to avoid cache or duplicated requests
+                ts_ms=$(date +%s%3N)
+                url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&exclusive=$exclusive_q"
+          
+                # Call allocator
+                # - May return:
+                #   * integer >= 0  : allocated GPU ID
+                #   * integer < 0   : no GPU available yet
+                #   * empty / HTML : temporary server / proxy error
+                resp="$(
+                  curl -fsS --connect-timeout 3 --max-time 10 \
+                       --retry 3 --retry-delay 1 --retry-all-errors \
+                       "$url" 2>/dev/null || true
+                )"
+          
+                # Normalize response
+                resp="${resp//$'\r'/}"
+                resp="${resp//$'\n'/}"
+          
+                # If response is empty or not an integer, treat as temporary error
+                if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+$ ]]; then
+                  echo "Allocator returned invalid response: '$resp' (temporary error)"
+                  curl -fsS "$BASE_URL/gpu/status" || true
+                  sleep "$SLEEP_SEC"
+                  continue
+                fi
+          
+                # Negative integer means no GPU available yet
+                if (( resp < 0 )); then
+                  elapsed=$(( $(date +%s) - start_s ))
+                  if (( elapsed >= TIMEOUT_SEC )); then
+                    echo "Timed out after ${TIMEOUT_SEC}s waiting for GPU (last response=$resp)"
+                    curl -fsS "$BASE_URL/gpu/status" || true
+                    exit 1
+                  fi
+          
+                  echo "No GPU available (response=$resp). Waiting ${SLEEP_SEC}s... elapsed=${elapsed}s"
+                  curl -fsS "$BASE_URL/gpu/status" || true
+                  sleep "$SLEEP_SEC"
+                  continue
+                fi
+          
+                # Successful allocation
+                gpu_id="$resp"
+                echo "Allocated GPU ID: $gpu_id"
+                break
+              done
+          
+              # Export environment variables for subsequent steps
+              echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> "$GITHUB_ENV"
+              echo "STEP_TIMESTAMP=$(date +%s%3N)" >> "$GITHUB_ENV"
+              echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
+          
+              # Final status snapshot
               curl -fsS "$BASE_URL/gpu/status" || true
-              sleep "$SLEEP_SEC"
-              continue
-            fi
+
+
+          - name: Run tests
+            if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
+            run: |
+              if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
+                export CUDA_VISIBLE_DEVICES=""
+              fi
+              if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
+                export CUDA_VISIBLE_DEVICES=""
+                # source /etc/profile.d/pyenv.sh && pyenv activate xpu
+                pip uninstall vllm -y
+                pip list
+              fi
           
-            # Successful allocation
-            gpu_id="$resp"
-            echo "Allocated GPU ID: $gpu_id"
-            break
-          done
-          
-          # Export environment variables for subsequent steps
-          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> "$GITHUB_ENV"
-          echo "STEP_TIMESTAMP=$(date +%s%3N)" >> "$GITHUB_ENV"
-          echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
-          
-          # Final status snapshot
-          curl -fsS "$BASE_URL/gpu/status" || true
+              start_time=$(date +%s)
+              pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
+              execution_time=$(( $(date +%s) - start_time ))
+              echo "$((execution_time / 60))m $((execution_time % 60))s"
+              curl "http://$XEON5/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
+          - name: Release GPU
+            if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
+            run: curl -X GET "http://$RUNNER/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
 
-      - name: Run tests
-        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
-        run: |
-          if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
-            export CUDA_VISIBLE_DEVICES=""
-          fi
-          if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
-            export CUDA_VISIBLE_DEVICES=""
-            # source /etc/profile.d/pyenv.sh && pyenv activate xpu
-            pip uninstall vllm -y
-            pip list
-          fi
-
-          start_time=$(date +%s)
-          pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
-          execution_time=$(( $(date +%s) - start_time ))
-          echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://$XEON5/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
-
-      - name: Release GPU
-        if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
-        run: curl -X GET "http://$RUNNER/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
-
-      - name: Clean cache
-        if: always()
-        run: |
-          # rm ~/.cache/evalplus/*pkl || true
-          # pip cache purge && uv cache clean
-          rm -rf rm -rf ./* .[^.] .??*
+          - name: Clean cache
+            if: always()
+            run: |
+              # rm ~/.cache/evalplus/*pkl || true
+              # pip cache purge && uv cache clean
+              rm -rf rm -rf ./* .[^.] .??*
 
 #  show-statistics:
 #    runs-on: [ self-hosted, xeon5 ]
