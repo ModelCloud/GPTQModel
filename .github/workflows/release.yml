@@ -358,6 +358,7 @@ jobs:
             export UV_PROJECT_ENVIRONMENT=$ENV_DIR
             export PATH=$ENV_DIR/bin:$PATH
             python -V
+            which python
 
             echo "setting env... cuda=`${{ matrix.cuda }}` torch=`${{ matrix.torch }}` python=`$python_version`"
             wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
@@ -370,6 +371,7 @@ jobs:
             export UV_PROJECT_ENVIRONMENT=$ENV_DIR
             export PATH=$ENV_DIR/bin:$PATH
             python -V
+            which python
           fi
           #################
 
@@ -380,6 +382,7 @@ jobs:
           
           echo "== python =="
           python --version
+          which python
 
           echo "== nvcc =="
           nvcc --version

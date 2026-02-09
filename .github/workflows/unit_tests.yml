@@ -402,8 +402,9 @@ jobs:
           export UV_PROJECT_ENVIRONMENT=$ENV_DIR
           export PATH=$ENV_DIR/bin:$PATH
           python -V
+          which python
           
-            echo "setting env... cuda=`${{ needs.check-vm.outputs.cuda_version }}` torch=`${{ env.TORCH_VERSION }}` python=`$python_version`"
+          echo "setting env... cuda=`${{ needs.check-vm.outputs.cuda_version }}` torch=`${{ env.TORCH_VERSION }}` python=`$python_version`"
           wget http://${RUNNER}/scripts/env/init_compiler_no_env.sh
           bash init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
 
@@ -412,6 +413,7 @@ jobs:
           ls -ahl /opt/uv/venvs
           echo "::endgroup::"
           
+          which python
           python -V
 
           echo "::group::uv python list"
