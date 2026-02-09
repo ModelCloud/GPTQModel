@@ -335,6 +335,7 @@ jobs:
           echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
           echo UV_CACHE_DIR=$UV_CACHE_DIR
           echo VENV_ROOT=$VENV_ROOT
+          ls /root -ahl
 
       - name: Setup uv env
         if: env.SHOULD_RUN == 1
