@@ -249,6 +249,8 @@ jobs:
           
           echo "== python =="
           python --version
+          which python
+          which pip
 
           echo "== nvcc =="
           nvcc --version
