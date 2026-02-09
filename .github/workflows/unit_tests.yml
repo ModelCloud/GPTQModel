@@ -406,7 +406,7 @@ jobs:
             python_version="${python_version/3/3.}"
           fi
           
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${test_name}"
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${{ matrix.test_script }}"
           ENV_DIR="$VENV_ROOT/$env_name"
           
           echo "UV_PYTHON_INSTALL_DIR: $UV_PYTHON_INSTALL_DIR"
