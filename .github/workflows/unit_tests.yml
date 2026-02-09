@@ -536,6 +536,7 @@ jobs:
             # Refresh timestamp every request to avoid cache or duplicated requests
             ts_ms=$(date +%s%3N)
             url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&exclusive=$exclusive_q"
+            echo "requesting GPU with: $url"
           
             # Call allocator
             # - May return:
