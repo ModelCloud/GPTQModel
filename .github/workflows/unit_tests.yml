@@ -226,8 +226,8 @@ jobs:
             python -V
 
             echo "uv run bash"
-            wget http://${RUNNER}/scripts/env/init_compiler_no_env.sh
-            bash init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+            wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
+            bash init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
           fi
           
           echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
