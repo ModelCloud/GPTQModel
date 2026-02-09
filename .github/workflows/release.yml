@@ -353,11 +353,13 @@ jobs:
             echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
             echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
           
+            echo UV_PROJECT_ENVIRONMENT=$ENV_DIR
+          
             export UV_PROJECT_ENVIRONMENT=$ENV_DIR
             export PATH=$ENV_DIR/bin:$PATH
             python -V
 
-            echo "setting env..."
+            echo "setting env... cuda=`${{ matrix.cuda }}` torch=`${{ matrix.torch }}` python=`$python_version`"
             wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
             bash init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
           else
