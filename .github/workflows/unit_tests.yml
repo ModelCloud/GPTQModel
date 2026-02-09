@@ -199,7 +199,6 @@ jobs:
           git checkout pr-${PR_NUMBER}
 
       - name: Print env
-        shell: bash
         run: |
           echo PATH=$PATH
           echo UV_INSTALL_DIR=$UV_INSTALL_DIR
@@ -390,7 +389,6 @@ jobs:
           git checkout pr-${PR_NUMBER}
 
       - name: Print env
-        shell: bash
         run: |
           echo PATH=$PATH
           echo UV_INSTALL_DIR=$UV_INSTALL_DIR
@@ -402,7 +400,6 @@ jobs:
           ls /root -ahl
 
       - name: Setup uv env
-        shell: bash
         run: |
           python_version='${{ env.PYTHON_VERSION }}'
           if [[ "$python_version" != *"."* ]]; then

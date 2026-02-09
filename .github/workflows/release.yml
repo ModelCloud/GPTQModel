@@ -326,7 +326,6 @@ jobs:
           git checkout pr-${PR_NUMBER}
 
       - name: Print env
-        shell: bash
         run: |
           echo PATH=$PATH
           echo UV_INSTALL_DIR=$UV_INSTALL_DIR
