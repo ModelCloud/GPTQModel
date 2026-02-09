@@ -228,6 +228,14 @@ jobs:
             echo "uv run bash"
             wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
             bash init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          else
+            echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
+            echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
+            echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
+          
+            export UV_PROJECT_ENVIRONMENT=$ENV_DIR
+            export PATH=$ENV_DIR/bin:$PATH
+            python -V
           fi
           
           echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
@@ -236,6 +244,7 @@ jobs:
 
           echo "::group::uv python list"
           uv python list
+          ls -ahl /opt/uv/envs
           echo "::endgroup::"
           
           echo "== python =="
@@ -245,10 +254,10 @@ jobs:
           nvcc --version
 
           echo "== torch =="
-          pip show torch
+          uv pip show torch
 
           echo "::group::pip list"
-          pip list
+          uv pip list
           echo "::endgroup::"
 
       - name: Compress dir
