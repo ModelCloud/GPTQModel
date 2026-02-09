@@ -336,8 +336,8 @@ jobs:
           echo VENV_ROOT=$VENV_ROOT
           ls /root -ahl
 
-      - name: Setup uv env
-        if: env.SHOULD_RUN == 1
+
+      - name: Activate uv env
         run: |
           if [[ "${{ matrix.cuda }}" -lt 128 ]]; then # CUDA >= 12.8 supports 12.0 (5090)
             echo "CUDA_ARCH_LIST=8.0 8.6 8.9 9.0" >> $GITHUB_ENV
@@ -353,7 +353,10 @@ jobs:
           
           env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${python_version}_release"
           /opt/uv/setup_uv_venv.sh $env_name
-          
+
+      - name: Setup uv env
+        if: env.SHOULD_RUN == 1
+        run: |
           wget http://${RUNNER}/scripts/env/init_compiler_no_env.sh
           bash init_compiler_no_env.sh ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
 

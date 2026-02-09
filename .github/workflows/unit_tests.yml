@@ -209,12 +209,8 @@ jobs:
           echo VENV_ROOT=$VENV_ROOT
           ls /root -ahl
 
-      - name: Setup uv env
+      - name: Activate uv env
         run: |
-          ls /opt -ahl
-          ls /opt/uv -ahl
-          ls /root -ahl
-          
           python_version='${{ env.PYTHON_VERSION }}'
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
@@ -223,6 +219,12 @@ jobs:
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_build"
           /opt/uv/setup_uv_venv.sh $env_name
 
+
+      - name: Setup uv env
+        run: |
+          wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
+          bash init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          
           echo "::group::uv python list"
           uv python list
           ls -ahl /opt/uv/venvs
@@ -369,7 +371,7 @@ jobs:
           echo VENV_ROOT=$VENV_ROOT
           ls /root -ahl
 
-      - name: Setup uv env
+      - name: Activate uv env
         run: |
           python_version='${{ env.PYTHON_VERSION }}'
           if [[ "$python_version" != *"."* ]]; then
@@ -379,6 +381,8 @@ jobs:
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${{ matrix.test_script }}"
           /opt/uv/setup_uv_venv.sh $env_name
 
+      - name: Setup uv env
+        run: |
           python -V
           which python
           which pip || true
