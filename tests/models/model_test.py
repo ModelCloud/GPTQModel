@@ -949,7 +949,6 @@ class ModelTest(unittest.TestCase):
                     self.clear_directory(path)
 
                     model.save(path)
-                    tokenizer.save_pretrained(path)
                     self._print_post_quant_artifacts(path)
 
                     reuse_candidates = {}
