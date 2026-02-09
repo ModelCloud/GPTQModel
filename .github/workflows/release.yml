@@ -374,7 +374,7 @@ jobs:
             export PATH=$ENV_DIR/bin:$PATH
             python -V
             which python
-            which pip
+            which pip || true
           fi
           #################
 
@@ -386,7 +386,7 @@ jobs:
           echo "== python =="
           python --version
           which python
-          which pip
+          which pip || true
 
           echo "== nvcc =="
           nvcc --version

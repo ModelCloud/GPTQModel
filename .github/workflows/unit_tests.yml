@@ -250,7 +250,7 @@ jobs:
           echo "== python =="
           python --version
           which python
-          which pip
+          which pip || true
 
           echo "== nvcc =="
           nvcc --version
@@ -293,7 +293,7 @@ jobs:
         run: |
           echo "::group::python version"
           which python
-          which pip
+          which pip || true
           python --version
           echo "::endgroup::"
           
@@ -408,7 +408,7 @@ jobs:
           export PATH=$ENV_DIR/bin:$PATH
           python -V
           which python
-          which pip
+          which pip || true
           
           echo "setting env... cuda=`${{ needs.check-vm.outputs.cuda_version }}` torch=`${{ env.TORCH_VERSION }}` python=`$python_version`"
           wget http://${RUNNER}/scripts/env/init_compiler_no_env.sh
@@ -420,7 +420,7 @@ jobs:
           echo "::endgroup::"
           
           which python
-          which pip
+          which pip || true
           python -V
 
           echo "::group::uv python list"
