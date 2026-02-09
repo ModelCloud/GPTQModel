@@ -357,9 +357,9 @@ jobs:
             export PATH=$ENV_DIR/bin:$PATH
             python -V
 
-            echo "uv run bash"
+            echo "setting env..."
             wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
-            bash init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+            bash init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
           else
             echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
             echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
@@ -373,7 +373,7 @@ jobs:
 
           echo "::group::uv python list"
           uv python list
-          ls -ahl /opt/uv/envs
+          ls -ahl /opt/uv/venvs
           echo "::endgroup::"
           
           echo "== python =="
