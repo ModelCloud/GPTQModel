@@ -390,18 +390,22 @@ jobs:
           # create venv if missing
           if [ ! -d "$ENV_DIR" ]; then
             uv venv "$ENV_DIR"
-            uv run bash -c \
-              "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" \
-              @ "${{ needs.check-vm.outputs.cuda_version }}" \
-              "${{ env.TORCH_VERSION }}" \
-              "$python_version"
-          fi
           
-          echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
-          echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
+            wget http://${RUNNER}/scripts/env/init_compiler_no_env.sh
+            bash init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          else
+            echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
+            echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
+            echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
+          
+            export UV_PROJECT_ENVIRONMENT=$ENV_DIR
+            export PATH=$ENV_DIR/bin:$PATH
+            python -V
+          fi
 
           echo "::group::uv python list"
           uv python list
+          ls -ahl /opt/uv/envs
           echo "::endgroup::"
           
           python -V
