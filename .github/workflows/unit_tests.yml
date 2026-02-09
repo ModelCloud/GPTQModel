@@ -260,7 +260,7 @@ jobs:
           echo "::endgroup::"
 
           echo "== torch =="
-          uv pip show torch
+          uv pip show torch || true
 
       - name: Compress dir
         run: |
@@ -435,7 +435,7 @@ jobs:
           echo "::endgroup::"
 
           echo "== torch =="
-          uv pip show torch
+          uv pip show torch || true
 
       #      - name: Install requirements
       #        run: |

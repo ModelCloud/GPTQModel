@@ -396,7 +396,7 @@ jobs:
           echo "::endgroup::"
 
           echo "== torch =="
-          uv pip show torch
+          uv pip show torch || true
 
       - name: Compile
         if: env.SHOULD_RUN == 1
