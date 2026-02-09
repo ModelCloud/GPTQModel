@@ -253,12 +253,12 @@ jobs:
           echo "== nvcc =="
           nvcc --version
 
-          echo "== torch =="
-          uv pip show torch
-
           echo "::group::pip list"
           uv pip list
           echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch
 
       - name: Compress dir
         run: |
@@ -421,12 +421,12 @@ jobs:
           echo "== nvcc =="
           nvcc --version
 
-          echo "== torch =="
-          pip show torch
-
           echo "::group::pip list"
-          pip list
+          uv pip list
           echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch
 
       #      - name: Install requirements
       #        run: |
