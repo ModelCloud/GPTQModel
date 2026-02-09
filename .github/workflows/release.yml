@@ -351,11 +351,13 @@ jobs:
           
             echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
             echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
+            echo "VIRTUAL_ENV=$ENV_DIR" >> "$GITHUB_ENV"
             echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
           
             echo UV_PROJECT_ENVIRONMENT=$ENV_DIR
           
             export UV_PROJECT_ENVIRONMENT=$ENV_DIR
+            export VIRTUAL_ENV=$ENV_DIR
             export PATH=$ENV_DIR/bin:$PATH
             python -V
             which python
@@ -372,6 +374,7 @@ jobs:
             export PATH=$ENV_DIR/bin:$PATH
             python -V
             which python
+            which pip
           fi
           #################
 
@@ -383,6 +386,7 @@ jobs:
           echo "== python =="
           python --version
           which python
+          which pip
 
           echo "== nvcc =="
           nvcc --version
