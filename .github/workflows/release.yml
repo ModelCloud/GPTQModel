@@ -351,43 +351,8 @@ jobs:
           export UV_PYTHON=$python_version
           echo "UV_PYTHON=$python_version" >> "$GITHUB_ENV"
           
-          #################
           env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${python_version}_release"
-          ENV_DIR="$VENV_ROOT/$env_name"
-          mkdir -p "$UV_PYTHON_INSTALL_DIR" "$VENV_ROOT"
-          
-          if [ ! -d "$ENV_DIR" ]; then
-            echo "creating venv $ENV_DIR"
-            uv venv "$ENV_DIR"
-          
-            echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
-            echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
-            echo "VIRTUAL_ENV=$ENV_DIR" >> "$GITHUB_ENV"
-            echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
-          
-            echo UV_PROJECT_ENVIRONMENT=$ENV_DIR
-          
-            export UV_PROJECT_ENVIRONMENT=$ENV_DIR
-            export VIRTUAL_ENV=$ENV_DIR
-            export PATH=$ENV_DIR/bin:$PATH
-            python -V
-            which python
-
-            echo "setting env... cuda=`${{ matrix.cuda }}` torch=`${{ matrix.torch }}` python=`$python_version`"
-            wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
-            bash init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
-          else
-            echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
-            echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
-            echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
-          
-            export UV_PROJECT_ENVIRONMENT=$ENV_DIR
-            export PATH=$ENV_DIR/bin:$PATH
-            python -V
-            which python
-            which pip || true
-          fi
-          #################
+          /opt/uv/setup_uv_venv.sh $env_name
 
           echo "::group::uv python list"
           uv python list
@@ -485,34 +450,7 @@ jobs:
           echo "UV_PYTHON=3.14" >> "$GITHUB_ENV"
 
           env_name="cu128_torch2.8.0_py314_release_source"
-          ENV_DIR="$VENV_ROOT/$env_name"
-          mkdir -p "$UV_PYTHON_INSTALL_DIR" "$VENV_ROOT"
-          
-          if [ ! -d "$ENV_DIR" ]; then
-            echo "creating venv $ENV_DIR"
-            uv venv "$ENV_DIR"
-          
-            echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
-            echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
-            echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
-          
-            export UV_PROJECT_ENVIRONMENT=$ENV_DIR
-            export PATH=$ENV_DIR/bin:$PATH
-            python -V
-
-            echo "uv run bash"
-            wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
-            bash init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
-          else
-            echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
-            echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
-            echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
-          
-            export UV_PROJECT_ENVIRONMENT=$ENV_DIR
-            export PATH=$ENV_DIR/bin:$PATH
-            python -V
-          fi
-          #################
+          /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Fetch PR by number
         if: ${{ github.event.inputs.pr_number != 0 }}

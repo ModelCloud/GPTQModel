@@ -221,37 +221,7 @@ jobs:
           fi
           
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_build"
-          ENV_DIR="$VENV_ROOT/$env_name"
-          mkdir -p "$UV_PYTHON_INSTALL_DIR" "$VENV_ROOT"
-          
-          if [ ! -d "$ENV_DIR" ]; then
-            echo "creating venv $ENV_DIR"
-            uv venv "$ENV_DIR"
-          
-            echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
-            echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
-            echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
-          
-            export UV_PROJECT_ENVIRONMENT=$ENV_DIR
-            export PATH=$ENV_DIR/bin:$PATH
-            python -V
-
-            echo "uv run bash"
-            wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
-            bash init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
-          else
-            echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
-            echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
-            echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
-          
-            export UV_PROJECT_ENVIRONMENT=$ENV_DIR
-            export PATH=$ENV_DIR/bin:$PATH
-            python -V
-          fi
-          
-          echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
-          echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
-          echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
+          /opt/uv/setup_uv_venv.sh $env_name
 
           echo "::group::uv python list"
           uv python list
@@ -407,26 +377,8 @@ jobs:
           fi
           
           env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${{ matrix.test_script }}"
-          ENV_DIR="$VENV_ROOT/$env_name"
-          
-          echo "UV_PYTHON_INSTALL_DIR: $UV_PYTHON_INSTALL_DIR"
-          mkdir -p "$UV_PYTHON_INSTALL_DIR" "$VENV_ROOT"
-          
-          # create venv if missing
-          if [ ! -d "$ENV_DIR" ]; then
-            uv venv "$ENV_DIR"
-          fi
-          
-          echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
-          echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
-          echo "VIRTUAL_ENV=$ENV_DIR" >> "$GITHUB_ENV"
-          echo "$ENV_DIR/bin" >> "$GITHUB_PATH"
-          
-          echo UV_PROJECT_ENVIRONMENT=$ENV_DIR
-          
-          export UV_PROJECT_ENVIRONMENT=$ENV_DIR
-          export VIRTUAL_ENV=$ENV_DIR
-          export PATH=$ENV_DIR/bin:$PATH
+          /opt/uv/setup_uv_venv.sh $env_name
+
           python -V
           which python
           which pip || true
