@@ -198,6 +198,17 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
+      - name: Print env
+        shell: bash
+        run: |
+          echo PATH=$PATH
+          echo UV_INSTALL_DIR=$UV_INSTALL_DIR
+          echo UV_PYTHON_BIN_DIR=$UV_PYTHON_BIN_DIR
+          echo UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR
+          echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
+          echo UV_CACHE_DIR=$UV_CACHE_DIR
+          echo VENV_ROOT=$VENV_ROOT
+
       - name: Setup uv env
         run: |
           ls /opt -ahl
@@ -377,9 +388,21 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Setup uv env
+      - name: Print env
         shell: bash
         run: |
+          echo PATH=$PATH
+          echo UV_INSTALL_DIR=$UV_INSTALL_DIR
+          echo UV_PYTHON_BIN_DIR=$UV_PYTHON_BIN_DIR
+          echo UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR
+          echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
+          echo UV_CACHE_DIR=$UV_CACHE_DIR
+          echo VENV_ROOT=$VENV_ROOT
+
+
+  - name: Setup uv env
+      shell: bash
+      run: |
           python_version='${{ env.PYTHON_VERSION }}'
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"

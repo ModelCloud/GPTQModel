@@ -325,7 +325,18 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Print Env
+      - name: Print env
+        shell: bash
+        run: |
+          echo PATH=$PATH
+          echo UV_INSTALL_DIR=$UV_INSTALL_DIR
+          echo UV_PYTHON_BIN_DIR=$UV_PYTHON_BIN_DIR
+          echo UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR
+          echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
+          echo UV_CACHE_DIR=$UV_CACHE_DIR
+          echo VENV_ROOT=$VENV_ROOT
+
+      - name: Setup uv env
         if: env.SHOULD_RUN == 1
         run: |
           if [[ "${{ matrix.cuda }}" -lt 128 ]]; then # CUDA >= 12.8 supports 12.0 (5090)
