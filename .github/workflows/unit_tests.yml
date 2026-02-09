@@ -247,7 +247,7 @@ jobs:
             export UV_PROJECT_ENVIRONMENT=$ENV_DIR
             export PATH=$ENV_DIR/bin:$PATH
             python -V
-          fia
+          fi
           
           echo "setting UV_PROJECT_ENVIRONMENT=$ENV_DIR"
           echo "UV_PROJECT_ENVIRONMENT=$ENV_DIR" >> "$GITHUB_ENV"
