@@ -344,11 +344,12 @@ jobs:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0206
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
+        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
+        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
         - /dev/dri/by-path:/dev/dri/by-path
         - /monster/ci/models:/monster/data/model
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
-        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
         - /monster/ci/uv:/opt/uv
         - /monster/ci/dist:/opt/dist
     strategy:
