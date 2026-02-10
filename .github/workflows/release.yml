@@ -367,7 +367,7 @@ jobs:
       - name: Compile
         if: env.SHOULD_RUN == 1
         run: |
-          pip install setuptools wheel build -U
+          pip install pip setuptools wheel build -U
           python -m build --no-isolation
 
       - name: Test install
