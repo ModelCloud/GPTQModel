@@ -393,7 +393,7 @@ jobs:
             echo "::endgroup::"
           
             echo "::group::Retry with MAX_JOBS=1"
-            MAX_JOBS=1 python -m build -v --no-isolation
+            MAX_JOBS=1 python -m build -vvv --no-isolation
             echo "::endgroup::"
           else
             echo "::endgroup::"
