@@ -375,6 +375,10 @@ jobs:
           ls -ahl
           echo "::endgroup::"
 
+          echo "::group::git status"
+          git status
+          echo "::endgroup::"
+
       - name: Setup Compile env
         if: env.SHOULD_RUN == 1
         run: uv pip install setuptools wheel build -U
@@ -382,8 +386,12 @@ jobs:
       - name: Compile
         if: env.SHOULD_RUN == 1
         run: |
-          pip install pip setuptools wheel build -U
-          python -m build --no-isolation
+          set -e
+          echo "== First build =="
+          if ! python -m build -v --no-isolation; then
+            echo "== Build failed, retry with MAX_JOBS=1 =="
+            MAX_JOBS=1 python -m build -v --no-isolation
+          fi
 
       - name: Test install
         if: env.SHOULD_RUN == 1
