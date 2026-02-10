@@ -482,7 +482,7 @@ jobs:
 
       - name: Compile
         run: |
-          uv pip install build wheel twine setuptools torch -U
+          uv pip install build wheel twine setuptools torch ninja -U
           python -m build --no-isolation --sdist
 
       - name: Check dist
