@@ -417,6 +417,10 @@ jobs:
           echo "== torch =="
           uv pip show torch || true
 
+          echo "::group::project files"
+          ls -ahl
+          echo "::endgroup::"
+
       #      - name: Install requirements
       #        run: |
       #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version

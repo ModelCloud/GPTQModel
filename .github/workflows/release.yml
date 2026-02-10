@@ -371,6 +371,10 @@ jobs:
           echo "== torch =="
           uv pip show torch || true
 
+          echo "::group::project files"
+          ls -ahl
+          echo "::endgroup::"
+
       - name: Compile
         if: env.SHOULD_RUN == 1
         run: |
