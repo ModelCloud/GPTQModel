@@ -357,9 +357,12 @@ jobs:
       - name: Setup uv env
         if: env.SHOULD_RUN == 1
         run: |
-          wget http://${RUNNER}/scripts/env/init_compiler_no_env.sh
-          bash init_compiler_no_env.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
+          wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
+          bash init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
 
+      - name: Print uv env
+        if: env.SHOULD_RUN == 1
+        run: |
           echo "::group::uv python list"
           uv python list
           ls -ahl /opt/uv/venvs
