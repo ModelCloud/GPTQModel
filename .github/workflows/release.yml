@@ -376,6 +376,7 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::git status"
+          git config --global --add safe.directory $(pwd)
           git status
           echo "::endgroup::"
 
