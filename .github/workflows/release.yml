@@ -325,18 +325,6 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Print env
-        run: |
-          echo PATH=$PATH
-          echo UV_INSTALL_DIR=$UV_INSTALL_DIR
-          echo UV_PYTHON_BIN_DIR=$UV_PYTHON_BIN_DIR
-          echo UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR
-          echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
-          echo UV_CACHE_DIR=$UV_CACHE_DIR
-          echo VENV_ROOT=$VENV_ROOT
-          ls /root -ahl
-
-
       - name: Activate uv env
         run: |
           if [[ "${{ matrix.cuda }}" -lt 128 ]]; then # CUDA >= 12.8 supports 12.0 (5090)
@@ -440,9 +428,10 @@ jobs:
     needs:
       - check-vm
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_1021
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_0206
       volumes:
-        - /monster/ci/pyenv:/opt/pyenv
+        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
+        - /monster/ci/uv:/opt/uv
     env:
       RELEASE_MODE: 0
     steps:
@@ -454,7 +443,6 @@ jobs:
 
       - name: Print Env
         run: |
-          #################
           export UV_PYTHON=3.14
           echo "UV_PYTHON=3.14" >> "$GITHUB_ENV"
 
