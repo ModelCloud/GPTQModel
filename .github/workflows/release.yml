@@ -375,6 +375,10 @@ jobs:
           ls -ahl
           echo "::endgroup::"
 
+      - name: Setup Compile env
+        if: env.SHOULD_RUN == 1
+        run: uv pip install -U setuptools wheel build -U
+
       - name: Compile
         if: env.SHOULD_RUN == 1
         run: |
