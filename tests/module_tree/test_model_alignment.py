@@ -15,6 +15,7 @@ from gptqmodel.models.definitions.qwen3 import Qwen3QModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "models"))
 from model_test import ModelTest  # noqa: E402
+from torch import nn
 
 
 class TestDots1Struct(ModelTest):
@@ -32,7 +33,11 @@ class TestDots1Struct(ModelTest):
 
         moe_layer = shell.model.layers[config.first_k_dense_replace]
         self.assertTrue(hasattr(moe_layer.mlp, "experts"))
-        self.assertEqual(len(moe_layer.mlp.experts), config.n_routed_experts)
+        if isinstance(moe_layer.mlp.experts, nn.ModuleList):
+            expert_num = len(moe_layer.mlp.experts)
+        else:
+            expert_num = moe_layer.mlp.experts.num_experts
+        self.assertEqual(expert_num, config.n_routed_experts)
         self.assertTrue(hasattr(moe_layer.mlp, "shared_experts"))
 
         self.assertIn("q_norm:!", Dots1QModel.module_tree[3]["self_attn"])

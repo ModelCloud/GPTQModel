@@ -353,7 +353,7 @@ class BaseQModel(nn.Module):
         return MOE_FLAG.lstrip(":") in flags
 
     @classmethod
-    def _collect_moe_modules_from_tree(cls, tree_node, parent_path="") -> Set[str]:
+    def _collect_moe_modules_from_tree(cls, tree_node, parent_path="", parent_is_moe=False) -> Set[str]:
         """
         Recursively collect all module paths that have the :moe flag.
         Returns a set of full module paths (e.g., "mlp", "mlp.experts", "mlp.shared_experts").
@@ -366,27 +366,26 @@ class BaseQModel(nn.Module):
                 if key == "#":
                     # Recursively process the value if it's a dict
                     if isinstance(value, dict):
-                        moe_modules.update(cls._collect_moe_modules_from_tree(value, parent_path))
+                        moe_modules.update(cls._collect_moe_modules_from_tree(value, parent_path, parent_is_moe))
                     continue
 
                 # Build full path
+                module_name, _ = cls._parse_module_flags(key) if isinstance(key, str) else (key, [])
                 if parent_path:
-                    full_path = f"{parent_path}.{key}"
+                    full_path = f"{parent_path}.{module_name}"
                 else:
-                    full_path = key
+                    full_path = module_name
 
                 # Check if this key has :moe flag
-                if cls.has_moe_flag(key):
-                    # Extract just the module name without flags
-                    module_name, _ = cls._parse_module_flags(key)
-                    if parent_path:
-                        moe_modules.add(f"{parent_path}.{module_name}")
-                    else:
-                        moe_modules.add(module_name)
+                is_moe = cls.has_moe_flag(key) if isinstance(key, str) else False
+                if is_moe or parent_is_moe:
+                    moe_modules.add(full_path)
 
                 # Recursively process nested structures
                 if isinstance(value, (dict, tuple, list)):
-                    moe_modules.update(cls._collect_moe_modules_from_tree(value, full_path.split(":")[0]))
+                    moe_modules.update(
+                        cls._collect_moe_modules_from_tree(value, full_path, parent_is_moe or is_moe)
+                    )
 
         elif isinstance(tree_node, (tuple, list)):
             for item in tree_node:
@@ -397,7 +396,7 @@ class BaseQModel(nn.Module):
                     else:
                         moe_modules.add(module_name)
                 elif isinstance(item, dict):
-                    moe_modules.update(cls._collect_moe_modules_from_tree(item, parent_path))
+                    moe_modules.update(cls._collect_moe_modules_from_tree(item, parent_path, parent_is_moe))
 
         return moe_modules
 
