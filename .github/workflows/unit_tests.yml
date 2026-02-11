@@ -41,7 +41,7 @@ on:
       max-parallel:
         description: 'Parallel jobs'
         required: false
-        default: '20'
+        default: '10'
       exclusive-gpu:
         description: 'One Test Per GPU'
         type: boolean
