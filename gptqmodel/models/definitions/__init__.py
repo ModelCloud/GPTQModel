@@ -5,72 +5,113 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 # Many model architectures inherit from LlamaGPTQ, so it’s necessary to import llama first to avoid circular imports.
+from __future__ import annotations
+
+import importlib
+from typing import Dict, Tuple
+
 from .llama import LlamaQModel
 
-# other model
-from .baichuan import BaiChuanQModel
-from .bloom import BloomQModel
-from .brumby import BrumbyQModel
-from .chatglm import ChatGLMQModel
-from .codegen import CodeGenQModel
-from .dbrx import DbrxQModel
-from .dbrx_converted import DbrxConvertedQModel
-from .decilm import DeciLMQModel
-from .deepseek_v2 import DeepSeekV2QModel
-from .deepseek_v3 import DeepSeekV3QModel
-from .dots1 import Dots1QModel
-from .dream import DreamQModel
-from .exaone import ExaOneQModel
-from .exaone4 import Exaone4QModel
-from .ernie4_5 import Ernie4_5QModel
-from .ernie4_5_moe import Ernie4_5_MoeQModel
-from .gemma2 import Gemma2QModel
-from .gemma3 import Gemma3QModel
-from .glm import GlmQModel
-from .gpt2 import GPT2QModel
-from .gpt_bigcode import GptBigCodeQModel
-from .gpt_neo import GptNeoQModel
-from .gpt_neox import GPTNeoXQModel
-from .gptj import GptJQModel
-from .grinmoe import GrinMoeQModel
-from .hymba import HymbaQModel
-from .instella import InstellaQModel
-from .internlm import InternLMQModel
-from .internlm2 import InternLM2QModel
-from .llama4 import Llama4QModel
-from .mimo import MimoQModel
-from .minicpm3 import MiniCpm3QModel
-from .minimax_m2 import MiniMaxM2GPTQ
-from .mixtral import MixtralQModel
-from .mllama import MLlamaQModel
-from .mobilellm import MobileLLMQModel
-from .moss import MossQModel
-from .mpt import MptQModel
-from .opt import OptQModel
-from .ovis import OvisQModel
-from .phi import PhiQModel
-from .phi3 import Phi3QModel
-from .qwen import QwenQModel
-from .qwen2 import Qwen2QModel
-from .qwen2_5_vl import Qwen2_5_VLQModel
-from .qwen2_moe import Qwen2MoeQModel
-from .qwen2_vl import Qwen2VLQModel
-from .qwen3 import Qwen3QModel
-from .qwen3_moe import Qwen3MoeQModel
-from .qwen3_vl import Qwen3_VLQModel
-from .rw import RwgQModel
-from .starcoder2 import Starcoder2QModel
-from .telechat2 import TeleChat2QModel
-from .xverse import XverseQModel
-from .falcon_h1 import FalconH1QModel
-from .pangu_alpha import PanguAlphaQModel
-from .longcat_flash import LongCatFlashQModel
-from .apertus import ApertusQModel
-from .klear import KlearQModel
-from .llava_qwen2 import LlavaQwen2QModel
-from .nemotron_h import NemotronHQModel
-from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
-from .mistral3 import Mistral3GPTQ
-from .afmoe import AfMoeQModel
-from .glm4v import Glm4vGPTQ
-from .voxtral import VoxtralGPTQ
+_LAZY: Dict[str, Tuple[str, str]] = {
+    "BaiChuanQModel": ("baichuan", "BaiChuanQModel"),
+    "BloomQModel": ("bloom", "BloomQModel"),
+    "BrumbyQModel": ("brumby", "BrumbyQModel"),
+    "ChatGLMQModel": ("chatglm", "ChatGLMQModel"),
+    "CodeGenQModel": ("codegen", "CodeGenQModel"),
+    "DbrxQModel": ("dbrx", "DbrxQModel"),
+    "DbrxConvertedQModel": ("dbrx_converted", "DbrxConvertedQModel"),
+    "DeciLMQModel": ("decilm", "DeciLMQModel"),
+    "DeepSeekV2QModel": ("deepseek_v2", "DeepSeekV2QModel"),
+    "DeepSeekV3QModel": ("deepseek_v3", "DeepSeekV3QModel"),
+    "Dots1QModel": ("dots1", "Dots1QModel"),
+    "DreamQModel": ("dream", "DreamQModel"),
+    "ExaOneQModel": ("exaone", "ExaOneQModel"),
+    "Exaone4QModel": ("exaone4", "Exaone4QModel"),
+    "Ernie4_5QModel": ("ernie4_5", "Ernie4_5QModel"),
+    "Ernie4_5_MoeQModel": ("ernie4_5_moe", "Ernie4_5_MoeQModel"),
+    "Gemma2QModel": ("gemma2", "Gemma2QModel"),
+    "Gemma3QModel": ("gemma3", "Gemma3QModel"),
+    "GlmQModel": ("glm", "GlmQModel"),
+    "GPT2QModel": ("gpt2", "GPT2QModel"),
+    "GptBigCodeQModel": ("gpt_bigcode", "GptBigCodeQModel"),
+    "GptNeoQModel": ("gpt_neo", "GptNeoQModel"),
+    "GPTNeoXQModel": ("gpt_neox", "GPTNeoXQModel"),
+    "GptJQModel": ("gptj", "GptJQModel"),
+    "GrinMoeQModel": ("grinmoe", "GrinMoeQModel"),
+    "HymbaQModel": ("hymba", "HymbaQModel"),
+    "InstellaQModel": ("instella", "InstellaQModel"),
+    "InternLMQModel": ("internlm", "InternLMQModel"),
+    "InternLM2QModel": ("internlm2", "InternLM2QModel"),
+    "Llama4QModel": ("llama4", "Llama4QModel"),
+    "MimoQModel": ("mimo", "MimoQModel"),
+    "MiniCpm3QModel": ("minicpm3", "MiniCpm3QModel"),
+    "MiniMaxM2GPTQ": ("minimax_m2", "MiniMaxM2GPTQ"),
+    "MixtralQModel": ("mixtral", "MixtralQModel"),
+    "MLlamaQModel": ("mllama", "MLlamaQModel"),
+    "MobileLLMQModel": ("mobilellm", "MobileLLMQModel"),
+    "MossQModel": ("moss", "MossQModel"),
+    "MptQModel": ("mpt", "MptQModel"),
+    "OptQModel": ("opt", "OptQModel"),
+    "OvisQModel": ("ovis", "OvisQModel"),
+    "PhiQModel": ("phi", "PhiQModel"),
+    "Phi3QModel": ("phi3", "Phi3QModel"),
+    "QwenQModel": ("qwen", "QwenQModel"),
+    "Qwen2QModel": ("qwen2", "Qwen2QModel"),
+    "Qwen2_5_VLQModel": ("qwen2_5_vl", "Qwen2_5_VLQModel"),
+    "Qwen2MoeQModel": ("qwen2_moe", "Qwen2MoeQModel"),
+    "Qwen2VLQModel": ("qwen2_vl", "Qwen2VLQModel"),
+    "Qwen3QModel": ("qwen3", "Qwen3QModel"),
+    "Qwen3MoeQModel": ("qwen3_moe", "Qwen3MoeQModel"),
+    "Qwen3_VLQModel": ("qwen3_vl", "Qwen3_VLQModel"),
+    "RwgQModel": ("rw", "RwgQModel"),
+    "Starcoder2QModel": ("starcoder2", "Starcoder2QModel"),
+    "TeleChat2QModel": ("telechat2", "TeleChat2QModel"),
+    "XverseQModel": ("xverse", "XverseQModel"),
+    "FalconH1QModel": ("falcon_h1", "FalconH1QModel"),
+    "PanguAlphaQModel": ("pangu_alpha", "PanguAlphaQModel"),
+    "LongCatFlashQModel": ("longcat_flash", "LongCatFlashQModel"),
+    "ApertusQModel": ("apertus", "ApertusQModel"),
+    "KlearQModel": ("klear", "KlearQModel"),
+    "LlavaQwen2QModel": ("llava_qwen2", "LlavaQwen2QModel"),
+    "NemotronHQModel": ("nemotron_h", "NemotronHQModel"),
+    "Qwen3OmniMoeGPTQ": ("qwen3_omni_moe", "Qwen3OmniMoeGPTQ"),
+    "Mistral3GPTQ": ("mistral3", "Mistral3GPTQ"),
+    "AfMoeQModel": ("afmoe", "AfMoeQModel"),
+    "Glm4vGPTQ": ("glm4v", "Glm4vGPTQ"),
+    "VoxtralGPTQ": ("voxtral", "VoxtralGPTQ"),
+}
+
+
+def __getattr__(name: str):
+    spec = _LAZY.get(name)
+    if spec is None:
+        raise AttributeError(f"module {__name__} has no attribute {name}")
+    mod_name, attr_name = spec
+    module = importlib.import_module(f".{mod_name}", __name__)
+    obj = getattr(module, attr_name)
+    globals()[name] = obj
+    return obj
+
+
+def __dir__():
+    return sorted(set(globals().keys()) | set(_LAZY.keys()))
+
+
+__all__ = [
+    "BaiChuanQModel", "BloomQModel", "BrumbyQModel", "ChatGLMQModel",
+    "CodeGenQModel", "DbrxQModel", "DbrxConvertedQModel", "DeciLMQModel",
+    "DeepSeekV2QModel", "DeepSeekV3QModel", "Dots1QModel", "DreamQModel",
+    "ExaOneQModel", "Exaone4QModel", "Ernie4_5QModel", "Ernie4_5_MoeQModel",
+    "Gemma2QModel", "Gemma3QModel", "GlmQModel", "GPT2QModel",
+    "GptBigCodeQModel", "GptNeoQModel", "GPTNeoXQModel", "GptJQModel",
+    "GrinMoeQModel", "HymbaQModel", "InstellaQModel", "InternLMQModel",
+    "InternLM2QModel", "Llama4QModel", "MimoQModel", "MiniCpm3QModel",
+    "MiniMaxM2GPTQ", "MixtralQModel", "MLlamaQModel", "MobileLLMQModel",
+    "MossQModel", "MptQModel", "OptQModel", "OvisQModel", "PhiQModel",
+    "Phi3QModel", "QwenQModel", "Qwen2QModel", "Qwen2_5_VLQModel",
+    "Qwen2MoeQModel", "Qwen2VLQModel", "Qwen3QModel", "Qwen3MoeQModel",
+    "Qwen3_VLQModel", "RwgQModel", "Starcoder2QModel", "TeleChat2QModel",
+    "XverseQModel", "FalconH1QModel", "PanguAlphaQModel", "LongCatFlashQModel",
+    "ApertusQModel", "KlearQModel", "LlavaQwen2QModel", "NemotronHQModel",
+    "Qwen3OmniMoeGPTQ", "Mistral3GPTQ", "AfMoeQModel", "Glm4vGPTQ", "VoxtralGPTQ",
+]
