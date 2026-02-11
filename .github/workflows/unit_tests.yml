@@ -217,7 +217,7 @@ jobs:
       - name: Setup uv env
         run: |
           wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
-          bash init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          bash -euo pipefail init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
           
           echo "::group::uv python list"
           uv python list
@@ -404,7 +404,7 @@ jobs:
 
           echo "setting env... cuda=`${{ needs.check-vm.outputs.cuda_version }}` torch=`${{ env.TORCH_VERSION }}` python=`${{ env.PYTHON_VERSION }}`"
           wget http://${RUNNER}/scripts/env/init_compiler_no_env.sh
-          bash init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+          bash init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
 
       - name: Print uv env
         run: |
@@ -440,7 +440,7 @@ jobs:
 
       #      - name: Install requirements
       #        run: |
-      #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
+      #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version${{ env.PYTHON_VERSION }}
 
       #      - name: Download source from local
       #        continue-on-error: true
