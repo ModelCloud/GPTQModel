@@ -1,6 +1,7 @@
 [build-system]
 requires = [
     "setuptools>=80.9",
+    "setuptools-scm[toml]>=8.0",
     "ninja>=1.13.0", # required for faster compilataion
 ]
 build-backend = "setuptools.build_meta"
@@ -102,3 +103,8 @@ openai = [
 mlx = [
     "mlx_lm>=0.24.0",
 ]
+
+[tool.setuptools_scm]
+# Keep setuptools_scm from adding its own "+g<hash>" local suffix so setup.py
+# can continue to produce local wheel versions like "+cu128torch2.8".
+local_scheme = "no-local-version"
