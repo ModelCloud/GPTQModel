@@ -9,8 +9,10 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
+from ...looper.linear_mode import LinearMode
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
@@ -34,6 +36,7 @@ def pack_scales_and_zeros(scales, zeros):
         .contiguous()
     )
 
+
 class Int4PackedOp(torch.nn.Module):
     def __init__(self, qweight_uint8, scales_and_zeros, group_size):
         super().__init__()
@@ -49,6 +52,9 @@ class Int4PackedOp(torch.nn.Module):
 
 
 class TorchFusedQuantLinear(PackableQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.TORCH_FUSED]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 50, FORMAT.GPTQ_V2: 50}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -98,7 +104,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             register_buffers=register_buffers,
             **kwargs)
 
-        self.linear_mode = None # either train or infernce
+        self.linear_mode = None # either train or inference
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
 
     def post_init(self):
@@ -232,7 +238,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
         if not self.training and not x.requires_grad and self.linear_mode is None and TORCH_HAS_FUSED_OPS:
             # one-time transform per module for xpu aten fused ops
             self.transform(x.dtype, x.device.type)
-            self.linear_mode = "inference"
+            self.linear_mode = LinearMode.INFERENCE
             if x.device.type == "cpu":
                 self.torch_fused_op = Int4PackedOp(
                     self.qweight, self.scales_and_zeros, self.group_size
@@ -245,9 +251,9 @@ class TorchFusedQuantLinear(PackableQuantLinear):
                 #     self.torch_fused_op.forward, options={"max_autotune": True}
                 # )
         elif self.linear_mode is None:
-            self.linear_mode = "train"
+            self.linear_mode = LinearMode.TRAIN
 
-        if self.linear_mode == "inference":
+        if self.linear_mode == LinearMode.INFERENCE:
             out = self._fused_op_forward(x).reshape(out_shape)
         else:
             # make sure dequant dtype matches input x

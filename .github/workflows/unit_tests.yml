@@ -60,7 +60,7 @@ env:
   CUDA_VISIBLE_DEVICES: 0
   TORCH_CUDA_ARCH_LIST: '8.6 8.9 9.0 12.0'
   PYTORCH_ALLOC_CONF: 'expandable_segments:True'
-  MAX_JOBS: 8 # compile concurrency
+  MAX_JOBS: 12 # compile concurrency
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.249
   UV_INDEX_URL: http://10.0.14.249/simple
@@ -72,8 +72,7 @@ env:
   BUILD_EORA: 1
   GPTQMODEL_BUILD_EXLLAMA_V1: 1
   GPTQMODEL_BUILD_EORA: 1
-  LEGACY_TESTS: "models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
-  IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py"
+  IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py,models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
@@ -127,7 +126,6 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       torch-files: ${{ steps.files.outputs.torch-files }}
-      transformers-files: ${{ steps.files.outputs.transformers-files }}
       m4-files: ${{ steps.files.outputs.m4-files }}
 
     steps:
@@ -149,45 +147,18 @@ jobs:
       - name: List files
         id: files
         run: |
-          script="
-          import json
-          import os
-          import re
+          test_files=$(python3 .github/scripts/list_test_files.py \
+          --ignored-test-files "$IGNORED_TEST_FILES" \
+          --test-names "${{ github.event.inputs.test_names }}" \
+          --test-regex "${{ github.event.inputs.test_regex }}")
 
-          LEGACY_TESTS = '${LEGACY_TESTS}'
-          IGNORED_TEST_FILES = '${IGNORED_TEST_FILES}'
-
-          TEST_NAMES='${{ github.event.inputs.test_names }}'
-          TEST_REGEX='${{ github.event.inputs.test_regex }}'
-
-          input_test_files_list = [f.strip().removesuffix('.py') for f in TEST_NAMES.split(',') if f.strip()]
-
-          transformers_test_files = [f.strip().removesuffix('.py') for f in f'{LEGACY_TESTS}'.split(',') if f.strip()]
-          transformers_test_files = [f for f in transformers_test_files if not input_test_files_list or f in input_test_files_list]
-
-          all_tests = [f.removesuffix('.py') for f in os.listdir('tests/') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
-          all_tests_models = ['models/'+f.removesuffix('.py') for f in os.listdir('tests/models') if f.startswith('test_') and f.endswith('.py') and f.strip().removesuffix('py') not in f'{IGNORED_TEST_FILES}']
-
-          torch_test_files = [f for f in all_tests+all_tests_models if (not input_test_files_list or f in input_test_files_list) and f not in transformers_test_files and 'mlx' not in f]
-
-          torch_test_files = [test for test in torch_test_files if re.match(f'{TEST_REGEX}', test) and 'ipex' not in test and 'xpu' not in test]
-          transformers_test_files = [test for test in transformers_test_files if re.match(f'{TEST_REGEX}', test)]
-
-          m4_test_files = [f for f in all_tests if ('mlx' in f or 'apple' in f) and (f.strip().removesuffix('.py') in input_test_files_list if input_test_files_list else True)]
-
-          print(f'{json.dumps(torch_test_files)}|{json.dumps(transformers_test_files)}|{json.dumps(m4_test_files)}')
-          "
-
-          test_files=$(python3 -c "$script")
-          IFS='|' read -r torch_test_files transformers_test_files mlx_files <<< "$test_files"
+          IFS='|' read -r torch_test_files mlx_files <<< "$test_files"
 
           echo "torch-files=$torch_test_files" >> "$GITHUB_OUTPUT"
-          echo "transformers-files=$transformers_test_files" >> "$GITHUB_OUTPUT"
           echo "m4-files=$mlx_files" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
           echo "Torch Test files: $torch_test_files"
-          echo "Transformers Test files: $transformers_test_files"
           echo "MLX Test files: $mlx_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
@@ -196,9 +167,9 @@ jobs:
     needs:
       - check-vm
       - list-test-files
-    if: needs.list-test-files.outputs.torch-files != '[]' || needs.list-test-files.outputs.transformers-files != '[]'
+    if: needs.list-test-files.outputs.torch-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_1021
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0128
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
@@ -352,7 +323,7 @@ jobs:
       - check-vm
     runs-on: [ self-hosted, xeon5 ]
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_1021
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0128
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /dev/dri/by-path:/dev/dri/by-path
@@ -490,59 +461,16 @@ jobs:
 
       - name: Install wheel
         run: |
+          pip install uv -U
           uv pip uninstall gptqmodel
-          uv pip install -U transformers tabulate
-          if [ "${{ matrix.test_script }}" == "test_perplexity" ] || \
-             [ "${{ matrix.test_script }}" == "test_inference_speed" ] || \
-             [ "${{ matrix.test_script }}" == "test_q4_bitblas" ] || \
-             [ "${{ matrix.test_script }}" == "test_save_loaded_quantized_model" ]; then
-            echo "===== install bitblas==0.0.1.dev13 ====="
-            uv pip install bitblas==0.0.1.dev13 -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          if [[ "${{ matrix.test_script }}" == *auto_round* ]]; then
-            uv pip install auto_round
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
-            uv pip install intel_extension_for_pytorch -U
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "models/test_pangu_alpha" ]]; then
-            uv pip install jieba
-          fi
-
-          if [ "${{ matrix.test_script }}" == "models/test_cohere2" ] || [ "${{ matrix.test_script }}" == "models/test_gemma" ]; then
-            echo "===== install transformers from git ====="
-            uv pip install -U transformers -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
+          # make sure torch & torchvision are corresponded
+          uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+          uv pip install -r requirements.txt
 
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
             source /etc/profile.d/pyenv.sh && pyenv activate xpu
-            uv pip install -U logbar==0.0.4
           fi
-
-          if [[ "${{ matrix.test_script }}" == "test_olora_finetuning_xpu" ]]; then
-            uv pip install git+https://github.com/huggingface/peft trl wandb
-          fi
-
-          if [[ "${{ matrix.test_script }}" == *ipex* ]] && [[ "${{ matrix.test_script }}" != *xpu* ]]; then
-            uv pip uninstall torchvision torch flash_attn # fix ipex can't be used with torch+cu126
-            uv pip install torchvision torch
-            uv pip install -U intel_extension_for_pytorch -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          if [[ "${{ matrix.test_script }}" == *"mlx"* ]]; then
-            uv pip install mlx_lm --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          if [[ "${{ matrix.test_script }}" == "test_modelscope" ]]; then
-            echo "===== installing modelscope ====="
-            uv pip install modelscope --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
-          fi
-
-          uv pip install git+https://github.com/ModelCloud/Tokenicer -U
 
           # ipex doesn't need to compile kernels. xpu can't install cuda package
           if [[ "${{ matrix.test_script }}" != *ipex* && "${{ matrix.test_script }}" != *xpu* ]]; then
@@ -555,21 +483,16 @@ jobs:
             uv pip install . --no-build-isolation
           fi
 
-          if [ "${{ matrix.test_script }}" == "test_transformers" ]; then
-            echo "===== install optimum from git ====="
-            uv pip install -U git+https://github.com/huggingface/optimum.git -i http://$RUNNER/simple/ --trusted-host $RUNNER
-          fi
+          python .github/scripts/install_deps.py ${{ matrix.test_script }}
+          # deps may reinstalled torch
+          uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+          
+          echo "===== uninstall torchao pynvml ====="
+          uv pip uninstall torchao pynvml
 
-          if [[ "${{ matrix.test_script }}" == "test_sglang" ]]; then
-            uv pip install transformers==4.48.3
-            uv pip install numpy==1.26.3
-          fi
-
-          echo "===== uninstall torchao ====="
-          uv pip uninstall torchao
-
-          echo "== pip list =="
+          echo "::group::pip list"
           pip list
+          echo "::endgroup::"
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}

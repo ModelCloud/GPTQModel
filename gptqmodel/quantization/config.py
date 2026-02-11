@@ -24,6 +24,7 @@ log = setup_logger()
 BITS_FIELD_CODE = "bits"
 GROUP_SIZE_FIELD_CODE = "group_size"
 FORMAT_FIELD_CODE = "format"
+SYMMETRIC_FIELD_CODE = "sym"
 FORMAT_FIELD_CHECKPOINT = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 QUANT_METHOD_FIELD = "quant_method"
@@ -465,6 +466,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.GEMV,
         FORMAT.GEMV_FAST,
         FORMAT.MARLIN,
+        FORMAT.LLM_AWQ,
     },
 }
 
@@ -474,15 +476,23 @@ QUANTIZE_BLACK_LIST = {}
 # compat
 QUANT_CONFIG_ARG_SYNONYMS = {
     "w_bit": BITS_FIELD_CODE,
+
     # QQQ compat
     "wbits": BITS_FIELD_CODE,
     "q_group_size": GROUP_SIZE_FIELD_CODE,
+
     # AWQ compat
     "version" : FORMAT_FIELD_CODE,
+
     # map format field (checkpoint_format) to class/code (format)
     FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
 }
 
+# compat (values are negated)
+QUANT_CONFIG_ARG_SYNONYMS_NEGATED = {
+    # AWQ compat
+    "zero_point": SYMMETRIC_FIELD_CODE,
+}
 DYNAMIC_FIELD_SYNONYMS = {}
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
@@ -608,6 +618,7 @@ class QuantizeConfig():
     # allow dynamic bitsize per layer, if None or some layer not set, use bits
     dynamic: Optional[Dict[str, Dict[str, Union[int, bool]]]] = field(default=None)
 
+    # GPTQ only
     # 128 offer good balance between inference speed, vram usage (bpw), and quality
     # use 32 for highest quality with slower inference and higher vram usage
     group_size: int = field(default=128)
@@ -617,9 +628,14 @@ class QuantizeConfig():
     damp_auto_increment: float = field(default=None)
 
     desc_act: Optional[bool] = field(default=None)
+
+    # GPTQ only
     act_group_aware: Optional[bool] = field(default=None)
     static_groups: bool = field(default=False)
+
+    # symmetric quantization toggle (True=symmetric, False=asymmetric).
     sym: bool = field(default=True)
+
     true_sequential: bool = field(default=True)
 
     lm_head: bool = field(default=False)
@@ -635,6 +651,7 @@ class QuantizeConfig():
     # is_distributed: bool = False,
     # tied_gptq_handle: Optional["GPTQ"] = None
 
+    # GPTQ only
     # mean square error calculation: may reduce error loss for some models
     mse: float = field(default=0.0)
 
@@ -664,6 +681,7 @@ class QuantizeConfig():
 
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
+    # GPTQ only
     # deprecated: only used for compat
     is_marlin_format: bool = False
 
@@ -671,16 +689,15 @@ class QuantizeConfig():
     # if calibration is insufficient, fallback to a simple quantization strategy; encapsulated in FailSafe config
     failsafe: Optional[FailSafe] = field(default_factory=FailSafe)
 
+    # GPTQ only
     # gptaq only:
     gptaq: Optional[GPTAQConfig] = field(default=None)
-
-    # awq only:
-    zero_point: bool = field(default=True)
 
     # gptq only:
     # skip all heavy computations for testing model loading
     mock_quantization: bool = field(default=False, metadata={"help": "Skip heavy computations for fast model loading validation"})
 
+    # GPTQ only
     # Hessian accumulation controls (GPTQ only)
     hessian: Optional[HessianConfig] = field(default_factory=HessianConfig)
 
@@ -763,7 +780,7 @@ class QuantizeConfig():
                 self.damp_auto_increment = 0.01
 
         # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
-        if self.quant_method == METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM]:
+        if self.quant_method == METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM, FORMAT.LLM_AWQ]:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
 
@@ -1068,6 +1085,9 @@ class QuantizeConfig():
             # remap keys according to compat map
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
                 key = QUANT_CONFIG_ARG_SYNONYMS[key]
+            elif key in QUANT_CONFIG_ARG_SYNONYMS_NEGATED and QUANT_CONFIG_ARG_SYNONYMS_NEGATED[key] in field_names:
+                key = QUANT_CONFIG_ARG_SYNONYMS_NEGATED[key]
+                val = not bool(val)
 
             if key == FORMAT_FIELD_CHECKPOINT:
                 val = val.lower()
@@ -1267,7 +1287,6 @@ class QuantizeConfig():
             "dynamic": self.dynamic,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
-            "sym": self.sym,
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD:self.quant_method,
             FORMAT_FIELD_CHECKPOINT: self.format,
@@ -1279,12 +1298,13 @@ class QuantizeConfig():
             # DO NOT EXPORT compute_device_filter since functions are not serializable
         }
 
-        # TODO FIXME: upstream gpt-qmodel config for awq recognition to transformers/sglang/vllm
         if self.quant_method == METHOD.AWQ:
-            out["zero_point"] = self.zero_point
+            out["zero_point"] = not self.sym
             # awq compat with vllm/sglang/transformers loaders
             out["version"] = self.format
             out[FORMAT_FIELD_CODE] = self.format
+        else:
+            out["sym"] = self.sym
         if self.quant_method == METHOD.GPTQ:
             out[FORMAT_FIELD_CODE] = self.format
 

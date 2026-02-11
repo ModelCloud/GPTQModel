@@ -12,6 +12,7 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.exllamav2 import ScratchSpace
 from ...utils.logger import setup_logger
@@ -30,6 +31,9 @@ def _torch_device(idx):
     return f"cuda:{idx}"
 
 class ExllamaV2QuantLinear(BaseQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.EXLLAMA_V2]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 80, FORMAT.GPTQ_V2: 80}
     SUPPORTS_BITS = [4]
     # TODO: intel is reporting v2 has accuracy issues with group-size == 16 for this kernel
     # disable for now until we can validate this issue: ref https://github.com/ModelCloud/GPTQModel/issues/1515

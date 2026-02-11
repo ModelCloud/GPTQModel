@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import contextlib
 import copy
 import threading
 import time
@@ -21,12 +20,10 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
 from ..quantization import GPTAQ, GPTQ
 from ..quantization.config import GPTAQConfig, HessianConfig, METHOD, QuantizeConfig
 from ..utils.failsafe import normalize_failsafe
-from ..utils.importer import select_quant_linear
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.device import get_device
-from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
+from ..utils.model import create_quant_module, find_modules, pack_module
 from ..utils.module_locks import parent_module_lock
-from ..utils.torch import tf32_disable_guard
 
 log = setup_logger()
 lock = threading.Lock()
@@ -436,3 +433,6 @@ class GPTQProcessor(LoopProcessor):
         # TODO fix me..this hacks inherited base class logic, why not override name in gptaq?
         qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
         return "gptaq" if qcfg.gptaq is not None else "gptq"
+
+    def has_captured_input_ids(self, name: str) -> bool:
+        return self.tasks[name].fwd_counter > 0

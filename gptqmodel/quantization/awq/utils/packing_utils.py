@@ -11,7 +11,7 @@ AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 
 
 def unpack_awq(qweight: torch.Tensor, qzeros: torch.Tensor, bits: int):
-    shifts = torch.arange(0, 32, bits, device=qzeros.device)
+    shifts = torch.arange(0, 32, bits, device=qweight.device)
 
     # unpacking columnwise
     iweights = torch.bitwise_right_shift(qweight[:, :, None], shifts[None, None, :]).to(
@@ -35,7 +35,7 @@ def reverse_awq_order(iweights: torch.Tensor, izeros: torch.Tensor, bits: int):
     reverse_order_tensor = torch.arange(
         iweights.shape[-1],
         dtype=torch.int32,
-        device=izeros.device,
+        device=iweights.device,
     )
     reverse_order_tensor = reverse_order_tensor.view(-1, 32 // bits)
     reverse_order_tensor = reverse_order_tensor[:, AWQ_REVERSE_ORDER]
@@ -80,9 +80,6 @@ def unpack_reorder_pack(qweight, qzeros, bits):
     iweight = torch.bitwise_and(iweight, (2**bits) - 1)
     izeros = torch.bitwise_and(izeros, (2**bits) - 1)
 
-    # Subtract 1 from the izeros tensor (exllama adds 1 during inference)
-    # We can remove it if we remove the +1 in the exllama code
-    izeros = izeros - 1
     # Pack the qweight and qzeros tensors
     qweight, qzeros = pack_exllama(iweight, izeros, bits)
 

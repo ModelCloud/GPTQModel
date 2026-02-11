@@ -17,6 +17,7 @@ from packaging import version
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...utils import BACKEND
 from ...utils.logger import setup_logger
 
@@ -237,6 +238,8 @@ class BitblasQuantizationConfig:
 
 
 class BitblasQuantLinear(BaseQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.BITBLAS]
+    SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30}
     SUPPORTS_BITS = BITBLAS_SUPPORTED_BITS
     SUPPORTS_GROUP_SIZE = BITBLAS_SUPPORTED_GROUP_SIZES
     SUPPORTS_DESC_ACT = [False, True]
@@ -255,7 +258,7 @@ class BitblasQuantLinear(BaseQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     QUANT_TYPE = "gptq_bitblas"
-    SUPPORTS_QUANT_METHODS = ["gptq"]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
 
     OPT_FEATURES = BITBLAS_OPTIMIZE_FEATURES
     TORCH_DTYPE = torch.float16

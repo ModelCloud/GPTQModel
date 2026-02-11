@@ -8,7 +8,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch as t  # conflict with torch.py
@@ -18,6 +18,7 @@ from torch.nn.modules.conv import _ConvNd
 
 from ...adapter.adapter import LORA_MERGED_WEIGHT_PATHS, Adapter
 from ...models._const import DEVICE, PLATFORM
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
@@ -27,6 +28,9 @@ from ...utils.safe import THREADPOOLCTL
 log = setup_logger()
 
 class BaseQuantLinear(nn.Module):
+    SUPPORTS_BACKENDS: List[BACKEND] = None
+    SUPPORTS_METHODS: List[METHOD] = None
+    SUPPORTS_FORMATS: Dict[FORMAT, int] = None
     SUPPORTS_BITS: List[int] = None
     SUPPORTS_GROUP_SIZE: List[int] = None
     SUPPORTS_DESC_ACT: List[bool] = None
@@ -75,6 +79,7 @@ class BaseQuantLinear(nn.Module):
         self.group_size = group_size if group_size != -1 else in_features
         self.bits = bits
         self.desc_act = desc_act
+        self.sym = sym
         self.pack_dtype = pack_dtype
         self.backend = backend
         self.maxq = 2 ** self.bits - 1
@@ -106,7 +111,7 @@ class BaseQuantLinear(nn.Module):
 
         # pack_factor is only used for bits 2, 4, and 8. bit3 3 does not use this variable.
         self.pack_factor = self.pack_dtype_bits // self.bits
-        _, err = self._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, in_features=in_features, out_features=out_features, pack_dtype=pack_dtype)
+        _, err = self.validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym, in_features=in_features, out_features=out_features, pack_dtype=pack_dtype)
         if err:
             raise err
 
@@ -244,7 +249,6 @@ class BaseQuantLinear(nn.Module):
             out_features:int=None,
             pack_dtype:t.dtype=None,
             dtype: Optional[t.dtype]=None,
-            zero_point: Optional[bool]=None,
             dynamic:Optional[dict]=None,
             device:Optional[DEVICE]=None,
             trainable:Optional[bool]=None,
@@ -257,8 +261,7 @@ class BaseQuantLinear(nn.Module):
 
         return cls._validate(bits=bits, group_size=group_size, desc_act=desc_act, sym=sym,
                              in_features=in_features, out_features=out_features, pack_dtype=pack_dtype,
-                             dtype=dtype, zero_point=zero_point,
-                             dynamic=dynamic, device=device, trainable=trainable, adapter=adapter)
+                             dtype=dtype, dynamic=dynamic, device=device, trainable=trainable, adapter=adapter)
 
     @classmethod
     # internal method and should not be overriden
@@ -297,7 +300,7 @@ class BaseQuantLinear(nn.Module):
             #     raise ValueError(f"{cls.__name__}.{name} cannot be an empty list.")
 
     @classmethod
-    def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, zero_point: Optional[bool]=None, dynamic:Optional[dict]=None, in_features:int=None,
+    def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
                   out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         cls.verify_supports_params()
 
@@ -335,9 +338,12 @@ class BaseQuantLinear(nn.Module):
         if group_size not in cls.SUPPORTS_GROUP_SIZE and group_size != in_features:
             err = f"{cls} only supports `{cls.SUPPORTS_GROUP_SIZE}` group_size: actual group_size = `{group_size}`"
             return False, NotImplementedError(err)
+
+        # validate symmetric/asym quantization support
         if sym not in cls.SUPPORTS_SYM:
-            err = f"{cls} only supports `{cls.SUPPORTS_SYM}` bits: actual sym = `{sym}`"
+            err = f"{cls} only supports symmetric `{cls.SUPPORTS_SYM}` quantization: actual sym = `{sym}`"
             return False, NotImplementedError(err)
+
         if desc_act not in cls.SUPPORTS_DESC_ACT:
             err = f"{cls} only supports `{cls.SUPPORTS_DESC_ACT}` bits: actual desc_act = `{desc_act}`"
             return False, NotImplementedError(err)

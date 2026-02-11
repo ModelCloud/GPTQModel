@@ -434,10 +434,18 @@ class ModelTest(unittest.TestCase):
             return effective
         return self.LOAD_BACKEND
 
+    def _torch_backend(self) -> BACKEND:
+        return BACKEND.TORCH_AWQ if self.METHOD == METHOD.AWQ else BACKEND.TORCH
+
+    def _torch_fused_backend(self) -> BACKEND:
+        return BACKEND.TORCH_FUSED_AWQ if self.METHOD == METHOD.AWQ else BACKEND.TORCH_FUSED
+
     def perform_post_quant_validation(self, model_path, trust_remote_code=False):
         inference_records = {}
         eval_records = {}
         reuse_candidates = {}
+        torch_backend = self._torch_backend()
+        torch_fused_backend = self._torch_fused_backend()
 
         if self.FORMAT is FORMAT.GPTQ:
             if self.LOAD_BACKEND == BACKEND.MARLIN:
@@ -467,14 +475,14 @@ class ModelTest(unittest.TestCase):
                 marlin_supported = False
 
             if not marlin_supported:
-                fallback_backend = BACKEND.TORCH
+                fallback_backend = torch_backend
                 compare_backends = tuple(
-                    BACKEND.TORCH if backend == BACKEND.MARLIN else backend
+                    torch_backend if backend == BACKEND.MARLIN else backend
                     for backend in compare_backends
                 )
                 log.info(
                     f"Marlin backend unsupported for current quant config (group_size={requested_group_size}, sym={requested_sym}); "
-                    "falling back to BACKEND.TORCH for validation."
+                    f"falling back to {torch_backend} for validation."
                 )
 
         if fallback_backend is not None and self.LOAD_BACKEND == BACKEND.MARLIN:
@@ -491,7 +499,7 @@ class ModelTest(unittest.TestCase):
             use_cuda_map = (
                 self.EVAL_SINGLE_GPU
                 and torch.cuda.is_available()
-                and backend != BACKEND.TORCH_FUSED
+                and backend != torch_fused_backend
             )
             if use_cuda_map:
                 model = self.loadQuantModel(
@@ -651,7 +659,8 @@ class ModelTest(unittest.TestCase):
     def render_inference_summary(self, inference_records):
         if not inference_records:
             return
-        ordered_backends = [backend for backend in (BACKEND.MARLIN, BACKEND.TORCH) if backend in inference_records]
+        torch_backend = self._torch_backend()
+        ordered_backends = [backend for backend in (BACKEND.MARLIN, torch_backend) if backend in inference_records]
         if not ordered_backends:
             return
 
@@ -712,7 +721,8 @@ class ModelTest(unittest.TestCase):
     def render_eval_summary(self, eval_records):
         if not eval_records:
             return
-        ordered_backends = [backend for backend in (BACKEND.MARLIN, BACKEND.TORCH) if backend in eval_records]
+        torch_backend = self._torch_backend()
+        ordered_backends = [backend for backend in (BACKEND.MARLIN, torch_backend) if backend in eval_records]
         if not ordered_backends:
             return
 
@@ -724,7 +734,7 @@ class ModelTest(unittest.TestCase):
 
         table_rows = []
         tolerance = 0.01
-        torch_reference = flattened_records.get(BACKEND.TORCH, {})
+        torch_reference = flattened_records.get(torch_backend, {})
 
         for metric in metrics:
             display_metric = metric.replace(":", " :: ")
@@ -736,7 +746,7 @@ class ModelTest(unittest.TestCase):
                 if value is None:
                     row.append(self._colorize("N/A", False))
                     continue
-                if backend == BACKEND.TORCH:
+                if backend == torch_backend:
                     row.append(self._colorize(f"{value:.4f}", True))
                 else:
                     matched = reference_value is not None and abs(value - reference_value) <= tolerance
@@ -830,7 +840,7 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, **kwargs):
+    def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):
         quantize_config = QuantizeConfig(
             quant_method=self.METHOD,
             format=self.FORMAT,
@@ -864,12 +874,13 @@ class ModelTest(unittest.TestCase):
 
 
         log.info(f"args: {args}")
+        torch_fused_backend = self._torch_fused_backend()
         model = GPTQModel.load(
             model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             dtype=dtype,
-            device_map={"": "cpu"} if self.LOAD_BACKEND == BACKEND.TORCH_FUSED else "auto",
+            device_map={"": "cpu"} if self.LOAD_BACKEND == torch_fused_backend else "auto",
             **args,
         )
 
@@ -895,7 +906,7 @@ class ModelTest(unittest.TestCase):
         is_quantized = model.quantized
 
         # ovis cannot load processor
-        is_ovis_model = model.__class__.__name__ == "OvisGPTQ"
+        is_ovis_model = model.config.model_type == "ovis"
         need_create_processor = is_image_to_text_model and not is_ovis_model
 
         debug_short_circuit = False
@@ -938,20 +949,23 @@ class ModelTest(unittest.TestCase):
                     self.clear_directory(path)
 
                     model.save(path)
-                    tokenizer.save_pretrained(path)
                     self._print_post_quant_artifacts(path)
 
-                    reuse_candidates, eval_records = self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
+                    reuse_candidates = {}
+                    eval_records = {}
+                    if call_perform_post_quant_validation:
+                        reuse_candidates, eval_records = self.perform_post_quant_validation(path, trust_remote_code=trust_remote_code)
                     self._post_quant_eval_records = eval_records
                     target_backend = self._current_load_backend()
 
                     q_model = reuse_candidates.pop(target_backend, None)
                     if q_model is None:
                         # When single-GPU evaluation is requested, keep the reload scoped to cuda:0.
+                        torch_fused_backend = self._torch_fused_backend()
                         use_cuda_map = (
                             self.EVAL_SINGLE_GPU
                             and torch.cuda.is_available()
-                            and target_backend != BACKEND.TORCH_FUSED
+                            and target_backend != torch_fused_backend
                         )
                         if use_cuda_map:
                             q_model = self.loadQuantModel(
@@ -1006,8 +1020,9 @@ class ModelTest(unittest.TestCase):
                 log.warn("flash-attn requested but not available; falling back to framework defaults")
 
         active_backend = backend if backend is not None else self._current_load_backend()
+        torch_fused_backend = self._torch_fused_backend()
 
-        default_device_map = {"": "cpu"} if active_backend == BACKEND.TORCH_FUSED else "auto"
+        default_device_map = {"": "cpu"} if active_backend == torch_fused_backend else "auto"
         explicit_device = "device" in load_kwargs
         inserted_device_map = False
         if "device_map" not in load_kwargs and not explicit_device:
@@ -1018,7 +1033,7 @@ class ModelTest(unittest.TestCase):
         if (
             (inserted_device_map or load_kwargs.get("device_map") == "auto")
             and not explicit_device
-            and active_backend != BACKEND.TORCH_FUSED
+            and active_backend != torch_fused_backend
             and torch.cuda.is_available()
         ):
             visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")

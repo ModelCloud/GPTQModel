@@ -31,7 +31,15 @@ class DeepSeekV3QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:1", "kv_b_proj:1", "o_proj:2"),
+            # DeepSeek-V3:
+            #   self_attn uses split Q projections:
+            #     - q_a_proj
+            #     - q_b_proj
+            #
+            # Moonlight:
+            #   self_attn uses a single Q projection:
+            #     - q_proj
+            "self_attn": ("q_proj:0", "q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:1", "kv_b_proj:1", "o_proj:2"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "": ("gate_proj:0", "up_proj:0", "down_proj:1"),

@@ -8,6 +8,8 @@ import math
 import torch
 
 from ...adapter.adapter import Adapter
+from ...looper.linear_mode import LinearMode
+from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import (
     dequantize_gemm,
     reverse_awq_order,
@@ -26,6 +28,10 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
     """Torch fused AWQ variant based on GPTQ fused kernels via CPU int4 packing."""
 
     QUANT_TYPE = "torch_fused_awq"
+
+    SUPPORTS_BACKENDS = [BACKEND.TORCH_FUSED_AWQ]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMM: 20}
 
     # inherit from torch fused
     SUPPORTS_BITS = TorchFusedQuantLinear.SUPPORTS_BITS
@@ -182,11 +188,12 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
 
     def awq_weight_dequantize(self, device, dtype):
         return dequantize_gemm(
-            self.qweight,
-            self.qzeros,
-            self.scales,
-            self.bits,
-            self.group_size,
+            qweight=self.qweight,
+            qzeros=self.qzeros,
+            scales=self.scales,
+            bits=self.bits,
+            group_size=self.group_size,
+            sym=self.sym,
         ).to(device=device, dtype=dtype)
 
     def transform(self, dtype, device):
@@ -203,9 +210,14 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
         self.assert_supported_dtype(x_flat.dtype)
-        if not self.training and not self.transformed and TORCH_HAS_FUSED_OPS:
+        if (
+            not self.training
+            and not x_flat.requires_grad
+            and self.linear_mode is None
+            and TORCH_HAS_FUSED_OPS
+        ):
             self.transform(x_flat.dtype, x_flat.device.type)
-            self.transformed = True
+            self.linear_mode = LinearMode.INFERENCE
             if x_flat.device.type == "cpu":
                 self.torch_fused_op = Int4PackedOp(
                     self.qweight, self.scales_and_zeros, self.group_size
@@ -213,8 +225,10 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
                 import torch._inductor.config as config
                 config.freezing = True
                 config.max_autotune = True
+        elif self.linear_mode is None:
+            self.linear_mode = LinearMode.TRAIN
 
-        if self.transformed:
+        if self.linear_mode == LinearMode.INFERENCE:
             # log.debug("awq calling fused op")
             out = self._fused_op_forward(x_flat)
         else:

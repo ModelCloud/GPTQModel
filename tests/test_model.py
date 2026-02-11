@@ -2,11 +2,38 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# -- do not touch
+import os
+import tempfile
+
+from datasets import load_dataset
+from transformers import AutoTokenizer
+
+from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
+from gptqmodel.utils.torch import torch_empty_cache
+
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# -- end do not touch
 
 import json
 import sys
+import types
+import unittest  # noqa: E402
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
+# isort: off
+# isort: on
+from parameterized import parameterized  # noqa: E402
+from torch import nn
+
+from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
+from gptqmodel.looper.module_looper import ModuleLooper, StopMainLoop
+from gptqmodel.models import loader
+
+
+############ test_model_dequant.py ############
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -298,11 +325,12 @@ def test_dequantize_model_compressed_tensors_pack(tmp_path):
     write_index(model_dir, shard_name, list(tensors.keys()))
 
     import gptqmodel.utils.model_dequant as model_dequant_module
-    from gptqmodel.utils.model_dequant import detect_format, load_json
 
     module_path = Path(model_dequant_module.__file__).resolve()
     assert REPO_ROOT in module_path.parents
-    detected = detect_format(model_dir, load_json(model_dir / "config.json"))
+    detected = model_dequant_module.detect_format(
+        model_dir, model_dequant_module.load_json(model_dir / "config.json")
+    )
     assert detected == "compressed-pack"
 
     dequantize_model(model_dir, output_dir, target_dtype=torch.float32, device="cpu")
@@ -326,3 +354,238 @@ def test_dequantize_model_compressed_tensors_pack(tmp_path):
     assert f"{prefix_q}.weight" in new_index["weight_map"]
     assert f"{prefix_k}.weight" in new_index["weight_map"]
     assert f"{prefix_q}.weight_scale" not in new_index["weight_map"]
+
+############ test_model_require_pkgs.py ############
+
+class DummyRequirePkgModel:
+    require_pkgs = ["fakepkg>=1.0.0"]
+
+
+def test_check_versions_passes_when_version_matches(monkeypatch):
+    monkeypatch.setattr(loader, "version", lambda _: "1.0.0")
+
+    loader.check_versions(
+        DummyRequirePkgModel,
+        DummyRequirePkgModel.require_pkgs
+    )
+
+
+def test_check_versions_raises_when_version_mismatch(monkeypatch):
+    # not install
+    def fake_version(pkg):
+        raise PackageNotFoundError(pkg)
+
+    monkeypatch.setattr(loader, "version", fake_version)
+
+    with pytest.raises(ValueError, match="not installed"):
+        loader.check_versions(
+            DummyRequirePkgModel,
+            DummyRequirePkgModel.require_pkgs
+        )
+
+    # version mismatch
+    monkeypatch.setattr(loader, "version", lambda _: "0.1.0")
+
+    with pytest.raises(ValueError, match="but current fakepkg version"):
+        loader.check_versions(
+            DummyRequirePkgModel,
+            DummyRequirePkgModel.require_pkgs
+        )
+
+############ test_model_save.py ############
+
+class TestModelSave(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pretrained_model_id = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
+
+        cls.tokenizer = AutoTokenizer.from_pretrained(cls.pretrained_model_id, use_fast=True)
+
+        traindata = load_dataset(path="/monster/data/model/dataset/nm-calibration", name="LLM", split="train")
+        cls.calibration_dataset = traindata.select(range(1))
+
+    @parameterized.expand([
+        True,
+        False,
+    ])
+    def test_model_save_with_non_persistent_buffer(self, offload_to_disk):
+        quantize_config = QuantizeConfig(
+            bits=4,
+            offload_to_disk=offload_to_disk,
+        )
+
+        model = GPTQModel.load(
+            self.pretrained_model_id,
+            quantize_config=quantize_config,
+        )
+        model.quantize(self.calibration_dataset, batch_size=1)
+        with tempfile.TemporaryDirectory() as tmp_dir_name:
+            model.save(tmp_dir_name)
+
+            del model
+            torch_empty_cache()
+
+            with safe_open(tmp_dir_name+"/model.safetensors", framework="pt") as f:
+                print("weight_map", f.keys())
+                self.assertNotIn('model.rotary_emb.inv_freq', f.keys())
+
+    def test_moe(self):
+        quantize_config = QuantizeConfig(
+            failsafe=None,
+        )
+
+        model = GPTQModel.load(
+            "/monster/data/model/Qwen3-30B-A3B-layers-1/",
+            quantize_config=quantize_config,
+        )
+
+        assert len(self.calibration_dataset) == 1
+        model.quantize(self.calibration_dataset, batch_size=1)
+
+        with tempfile.TemporaryDirectory() as tmp_dir_name:
+            model.save(tmp_dir_name)
+
+            del model
+            torch_empty_cache()
+
+            new_model = GPTQModel.load(tmp_dir_name, device="cuda")
+            print("new_model", new_model)
+
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].gate_proj, MarlinQuantLinear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].up_proj, MarlinQuantLinear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[2].down_proj, MarlinQuantLinear)
+
+            # No calibration data was routed to these MoE expert modules.
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[10].gate_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[10].up_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[10].down_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[15].gate_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[15].up_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[15].down_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[20].gate_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[20].up_proj, nn.Linear)
+            self.assertIsInstance(new_model.model.model.layers[0].mlp.experts[20].down_proj, nn.Linear)
+
+
+
+############ test_module_looper_callback.py ############
+
+class DummyQModel:
+    def __init__(self):
+        self.support_batch_quantize = False
+        self.quantize_config = types.SimpleNamespace(device=None, moe_routing_bypass=lambda: None)
+        self.layer_callback = None
+
+
+def make_looper(layer_callback=None):
+    model = DummyQModel()
+    if layer_callback is not None:
+        model.layer_callback = layer_callback
+    processors = [types.SimpleNamespace()]
+    return ModuleLooper(model=model, processors=processors)
+
+
+def test_callbackup_invokes_model_layer_callback():
+    calls = []
+
+    class Recorder:
+        def layer_complete(self, *, layer_idx, submodule_finalized):
+            calls.append((layer_idx, submodule_finalized))
+
+    looper = make_looper(layer_callback=Recorder())
+
+    looper.callbackup(layer_idx=3, submodule_finalized=False)
+    looper.callbackup(layer_idx=3, submodule_finalized=True)
+
+    assert calls == [(3, False), (3, True)]
+
+
+def test_callbackup_stop_request_via_returning_class():
+    def stopper(**_):
+        return StopMainLoop
+
+    looper = make_looper(layer_callback=stopper)
+
+    with pytest.raises(StopMainLoop):
+        looper.callbackup(layer_idx=1, submodule_finalized=False)
+
+
+def test_callbackup_stop_request_via_instance():
+    def stopper(**_):
+        return StopMainLoop("stop")
+
+    looper = make_looper(layer_callback=stopper)
+
+    with pytest.raises(StopMainLoop):
+        looper.callbackup(layer_idx=1, submodule_finalized=False)
+
+
+def test_emit_layer_complete_records_stop(monkeypatch):
+    err = ValueError("boom")
+
+    def raising_callback(*, layer_idx, submodule_finalized):
+        raise err
+
+    looper = make_looper(layer_callback=raising_callback)
+
+    looper._emit_layer_complete(
+        layer_idx=7,
+        submodule_finalized=False,
+        raise_in_place=False,
+    )
+
+    assert looper._loop_stop_exc is err
+    assert looper._loop_stop_event.is_set()
+
+    monkeypatch.setattr(
+        "gptqmodel.looper.module_looper.DEVICE_THREAD_POOL.wait",
+        lambda *_, **__: None,
+    )
+
+    with pytest.raises(ValueError) as exc:
+        looper._check_loop_stop()
+
+    assert exc.value is err
+
+
+def test_emit_layer_complete_propagates_when_requested():
+    err = RuntimeError("direct")
+
+    def raising_callback(*, layer_idx, submodule_finalized):
+        raise err
+
+    looper = make_looper(layer_callback=raising_callback)
+
+    with pytest.raises(RuntimeError) as exc:
+        looper._emit_layer_complete(
+            layer_idx=2,
+            submodule_finalized=True,
+            raise_in_place=True,
+        )
+
+    assert exc.value is err
+
+
+def test_emit_layer_complete_stops_cleanly_on_stop_main_loop(monkeypatch):
+    class Stopper:
+        def layer_complete(self, *, layer_idx, submodule_finalized):
+            raise StopMainLoop()
+
+    looper = make_looper(layer_callback=Stopper())
+
+    looper._emit_layer_complete(
+        layer_idx=0,
+        submodule_finalized=True,
+        raise_in_place=True,
+    )
+
+    assert looper._loop_stop_exc is None
+    assert looper._loop_stop_event.is_set()
+
+    monkeypatch.setattr(
+        "gptqmodel.looper.module_looper.DEVICE_THREAD_POOL.wait",
+        lambda *_, **__: None,
+    )
+
+    assert looper._check_loop_stop() is True

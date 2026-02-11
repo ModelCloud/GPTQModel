@@ -174,11 +174,12 @@ class TestPauseResumeController:
             kbhit_mock = Mock(side_effect=[True, False, True, False, False, False, False, False])
             getch_mock = Mock(return_value=b'p')
 
-            with patch('msvcrt.kbhit', kbhit_mock), \
-                 patch('msvcrt.getch', getch_mock):
+            controller = PauseResumeController()
+            controller.set_status_callback(state_change_callback)
 
-                controller = PauseResumeController()
-                controller.set_status_callback(state_change_callback)
+            with controller.lifecycle(), \
+                    patch('msvcrt.kbhit', kbhit_mock), \
+                    patch('msvcrt.getch', getch_mock):
 
                 # Wait for the listener thread to detect the first key press
                 assert state_changed.wait(timeout=1), "Timeout waiting for first state change"
@@ -199,10 +200,11 @@ class TestPauseResumeController:
             # It yields a keypress, then nothing, then a keypress, then nothing forever.
             def select_generator():
                 yield ([sys.stdin], [], [])  # First press
-                yield ([], [], [])           # No press, allows 0.1s delay
+                yield ([], [], [])  # No press, allows 0.1s delay
+                time.sleep(0.1)
                 yield ([sys.stdin], [], [])  # Second press
                 while True:
-                    yield ([], [], [])       # No press thereafter
+                    yield ([], [], [])  # No press thereafter
 
             select_gen = select_generator()
             select_mock = Mock(side_effect=lambda *args: next(select_gen))
@@ -211,15 +213,15 @@ class TestPauseResumeController:
             # Mock tcgetattr to return a valid list to prevent TypeError in the listener's finally block
             tcgetattr_mock = Mock(return_value=["iflag", "oflag", "cflag", "lflag", "ispeed", "ospeed", "cc"])
 
-            with patch('select.select', select_mock), \
-                 patch('sys.stdin.read', read_mock), \
-                 patch('termios.tcgetattr', tcgetattr_mock), \
-                 patch('termios.tcsetattr'), \
-                 patch('tty.setcbreak'):
+            controller = PauseResumeController()
+            controller.set_status_callback(state_change_callback)
 
-                controller = PauseResumeController()
-                controller.set_status_callback(state_change_callback)
-
+            with controller.lifecycle(), \
+                    patch('select.select', select_mock), \
+                    patch('sys.stdin.read', read_mock), \
+                    patch('termios.tcgetattr', tcgetattr_mock), \
+                    patch('termios.tcsetattr'), \
+                    patch('tty.setcbreak'):
                 # Wait for the listener thread to detect the first key press
                 assert state_changed.wait(timeout=2), "Timeout waiting for first state change"
                 assert controller.get_state() == PauseResumeState.PAUSE_REQUESTED
@@ -232,8 +234,6 @@ class TestPauseResumeController:
                 assert state_changed.wait(timeout=2), "Timeout waiting for second state change"
                 assert controller.get_state() == PauseResumeState.RUNNING
                 assert read_mock.call_count == 2
-
-                controller.cleanup()
 
     def test_thread_safety(self):
         """Test thread safety of pause/resume operations."""

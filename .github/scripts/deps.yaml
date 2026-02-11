@@ -1,0 +1,58 @@
+common:
+  - tokenicer
+  - transformers
+  - tabulate
+
+tests:
+  test_q4_bitblas.py:
+    - bitblas>=0.1.0.post1
+
+  test_perplexity.py:
+    - bitblas>=0.1.0.post1
+
+  test_inference_speed.py:
+    - bitblas>=0.1.0.post1
+
+  test_save_loaded_quantized_model.py:
+    - bitblas>=0.1.0.post1
+
+  test_olora_finetuning_xpu.py:
+    - intel_extension_for_pytorch
+    - trl
+    - wandb
+
+  test_inference_result_xpu.py:
+    - intel_extension_for_pytorch
+
+  test_save_loaded_quantized_model_ipex.py:
+    - intel_extension_for_pytorch
+
+  test_torch_xpu.py:
+    - intel_extension_for_pytorch
+
+  test_q4_ipex.py:
+    - intel_extension_for_pytorch
+
+  test_mlx.py:
+    - mlx_lm
+
+  test_modelscope.py:
+    - modelscope
+
+  test_sglang.py:
+    - transformers==4.48.3
+    - numpy==1.26.3
+
+  test_integration.py:
+    - https://github.com/huggingface/transformers
+    - https://github.com/huggingface/optimum
+
+tests/models:
+  test_pangu_alpha.py:
+    - jieba
+
+  test_cohere2:
+    - jieba
+
+  test_gemma:
+    - jieba

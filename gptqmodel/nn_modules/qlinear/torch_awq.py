@@ -7,6 +7,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
+from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -17,6 +18,9 @@ log = setup_logger()
 
 
 class AwqTorchQuantLinear(AWQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.TORCH_AWQ]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMM: 10}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
@@ -81,7 +85,13 @@ class AwqTorchQuantLinear(AWQuantLinear):
         device = x.device
         x_flat = x.reshape(-1, x.shape[-1])
 
-        weight = dequantize_gemm(self.qweight, self.qzeros, self.scales, self.bits, self.group_size)
+        weight = dequantize_gemm(
+            qweight=self.qweight,
+            qzeros=self.qzeros,
+            scales=self.scales,
+            bits=self.bits,
+            group_size=self.group_size,
+        )
         assert weight.dtype == torch.float16, f"weight {weight.dtype} is not float16"
         if weight.dtype != x_flat.dtype or weight.device != device:
             weight = weight.to(device=device, dtype=x_flat.dtype)

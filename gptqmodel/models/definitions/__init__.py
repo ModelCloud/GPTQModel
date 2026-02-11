@@ -21,6 +21,7 @@ from .deepseek_v3 import DeepSeekV3QModel
 from .dots1 import Dots1QModel
 from .dream import DreamQModel
 from .exaone import ExaOneQModel
+from .exaone4 import Exaone4QModel
 from .ernie4_5 import Ernie4_5QModel
 from .ernie4_5_moe import Ernie4_5_MoeQModel
 from .gemma2 import Gemma2QModel

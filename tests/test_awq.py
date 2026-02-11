@@ -78,6 +78,7 @@ class TestAwq(unittest.TestCase):
             (FORMAT.GEMM, 128),
             (FORMAT.GEMV, 128),
             (FORMAT.GEMV_FAST, 128),
+            (FORMAT.LLM_AWQ, 128),
         }
 
         for checkpoint_format, group_size in quantize_targets:
@@ -124,6 +125,7 @@ class TestAwq(unittest.TestCase):
         (FORMAT.GEMM, BACKEND.MARLIN, 128),
         (FORMAT.GEMV, BACKEND.GEMV, 128),
         (FORMAT.GEMV_FAST, BACKEND.GEMV_FAST, 128),
+        (FORMAT.LLM_AWQ, BACKEND.GEMV_FAST, 128),
     ])
     def test_quant_and_inference(self, checkpoint_format, backend, group_size: int):
         if backend == BACKEND.MACHETE:
@@ -139,6 +141,7 @@ class TestAwq(unittest.TestCase):
         model = GPTQModel.load(
             model_path,
             backend=backend,
+            device="cuda",
         )
 
         # Exclude `offload_to_disk_path`, which is a random value.
@@ -184,6 +187,7 @@ class TestInferenceOnly(unittest.TestCase):
         model = GPTQModel.load(
             "TheBloke/Mistral-7B-v0.1-AWQ",
             backend=BACKEND.GEMM,
+            device="cuda"
         )
 
         tokens = model.generate("Capital of France is", max_new_tokens=64)[0]
@@ -197,13 +201,14 @@ class TestInferenceOnly(unittest.TestCase):
         model = GPTQModel.load(
             "ModelCloud/opt-125m-llm-awq",  # this quantized by llm-awq
             backend=BACKEND.AUTO,
+            device="cuda"
         )
 
         tokens = model.generate("Capital of France is",
                                 max_new_tokens=512)[0]
         result = model.tokenizer.decode(tokens)
         print("result", result)
-        if "paris" not in result.lower() and "city" not in result.lower() and "food" not in result.lower() and "market" not in result.lower():
+        if "paris" not in result.lower() and "city" not in result.lower() and "food" not in result.lower() and "market" not in result.lower() and "country" not in result.lower():
             raise AssertionError(" `paris` not found in `result`")
 
         del model

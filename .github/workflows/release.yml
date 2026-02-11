@@ -70,7 +70,7 @@ env:
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
-  MAX_JOBS: 8
+  MAX_JOBS: 12
   GPTQMODEL_BUILD_QQQ: 0
   GPTQMODEL_BUILD_EORA: 0
   GPTQMODEL_BUILD_EXLLAMA_V1: 0
@@ -366,7 +366,9 @@ jobs:
 
       - name: Compile
         if: env.SHOULD_RUN == 1
-        run: python -m build --no-isolation
+        run: |
+          pip install pip setuptools wheel build -U
+          python -m build --no-isolation
 
       - name: Test install
         if: env.SHOULD_RUN == 1

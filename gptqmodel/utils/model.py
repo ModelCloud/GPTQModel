@@ -336,6 +336,7 @@ def create_quant_module(
     backend: BACKEND = BACKEND.AUTO,
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
+
 ):
     # unwrap named module
     if isinstance(submodule, NamedModule):
@@ -449,6 +450,7 @@ def create_quant_layer(
         pack_dtype: torch.dtype,
         backend: BACKEND,
         adapter: Optional[Adapter] = None,
+
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
         return linear_cls
@@ -744,7 +746,7 @@ def pack_module(
             module_name=name,
         ):
             module.pack(linear=layer, scales=q_scales, s_extra=q_scales_extra)
-    elif quant_linear_cls.QUANT_TYPE.startswith("awq_"):
+    elif quant_linear_cls.QUANT_TYPE.startswith("awq_") or quant_linear_cls.QUANT_TYPE == "llm-awq":
         packer_label = "module.pack"
         with log_time_block(
             packer_label,
@@ -876,6 +878,7 @@ def pack_model(
         backend=backend,
         lm_head_name=lm_head_name,
         pack=True,
+        device=DEVICE.CPU,
     )
 
     qModules = find_modules(model, [quant_linear_cls])
@@ -1775,4 +1778,3 @@ def restore_moe_topk(state: MoETopKState):
     for module, name, old in state:
         if hasattr(module, name):
             setattr(module, name, old)
-

@@ -3,14 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import contextlib
 import copy
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
 from torch.nn import Module
 
-from .. import BACKEND
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -21,8 +19,8 @@ from ..quantization.config import METHOD, QuantizeConfig
 from ..utils.failsafe import normalize_failsafe
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger, log_time_block
-from ..utils.model import create_quant_module, find_modules, move_to, pack_model, pack_module
-from ..utils.torch import CPU, DEVICE_0, tf32_disable_guard, torch_streamCtx, torch_sync
+from ..utils.model import create_quant_module, find_modules, move_to, pack_module
+from ..utils.torch import CPU
 
 log = setup_logger()
 
@@ -307,3 +305,6 @@ class QQQProcessor(LoopProcessor):
     @classmethod
     def name(cls) -> str:
         return "qqq"
+
+    def has_captured_input_ids(self, name: str) -> bool:
+        return self.tasks[name].fwd_counter > 0

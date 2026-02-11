@@ -8,6 +8,7 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.packing_utils import unpack_reorder_pack
 from ...utils.backend import BACKEND
@@ -24,6 +25,9 @@ none_tensor = torch.empty((1, 1), device="meta")
 
 
 class AwqExllamaV2QuantLinear(AWQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.EXLLAMA_V2]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.GEMM: 80}
     SUPPORTS_BITS = [4]
     # TODO: intel is reporting v2 has accuracy issues with group-size == 16 for this kernel
     # disable for now until we can validate this issue: ref https://github.com/ModelCloud/GPTQModel/issues/1515

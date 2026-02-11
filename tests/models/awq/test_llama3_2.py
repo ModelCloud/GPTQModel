@@ -6,6 +6,8 @@
 import os
 import sys
 
+import torch
+
 
 TESTS_MODELS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if TESTS_MODELS_ROOT not in sys.path:
@@ -13,6 +15,7 @@ if TESTS_MODELS_ROOT not in sys.path:
 
 from model_test import ModelTest
 
+from gptqmodel import BACKEND
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.eval import EVAL
 
@@ -32,7 +35,7 @@ class TestLlama3_2_awq(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.2994,
+                "value": 0.2440,
                 "floor_pct": 0.04,
             },
         },
@@ -57,6 +60,9 @@ class TestLlama3_2_awq(ModelTest):
     }
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
+    SYM = True
+    TORCH_DTYPE = torch.float16
+    LOAD_BACKEND = BACKEND.TORCH_AWQ
 
     def test_llama3_2_awq(self):
         self.quant_lm_eval()

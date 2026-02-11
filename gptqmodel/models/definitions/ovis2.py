@@ -10,7 +10,9 @@ from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMi
 
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
-from ...utils.model import MODALITY
+from ...utils.model import MODALITY, move_to
+from ...utils.offload import offload_to_disk
+from .._const import CPU
 from ..base import BaseQModel
 
 
@@ -35,6 +37,37 @@ class Ovis2QModel(BaseQModel):
     modality = [MODALITY.IMAGE_TO_TEXT]
 
     require_load_processor = True
+
+    def pre_quantize_generate_hook_start(self):
+        self.shell_module_materialize(self.model.model.language_model.embed_tokens, self.quantize_config.device)
+        self.shell_module_materialize(self.model.model.language_model.rotary_emb, self.quantize_config.device)
+        self.shell_module_materialize(self.model.model.vision_tower, self.quantize_config.device)
+        self.shell_module_materialize(self.model.model.visual_embeddings_table, self.quantize_config.device)
+
+    def pre_quantize_generate_hook_end(self):
+        if self.quantize_config.offload_to_disk:
+            offload_to_disk(model=self.model.model.language_model,
+                            module=self.model.model.language_model.embed_tokens,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            offload_to_disk(model=self.model.model.language_model,
+                            module=self.model.model.language_model.rotary_emb,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            offload_to_disk(model=self.model.model,
+                            module=self.model.model.vision_tower,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            offload_to_disk(model=self.model.model,
+                            module=self.model.model.visual_embeddings_table,
+                            disk_path=self.quantize_config.offload_to_disk_path,
+                            )
+            return
+
+        self.model.model.language_model.embed_tokens = move_to(self.model.model.language_model.embed_tokens, device=CPU)
+        self.model.model.language_model.rotary_emb = move_to(self.model.model.language_model.rotary_emb, device=CPU)
+        self.model.model.vision_tower = move_to(self.model.model.vision_tower, device=CPU)
+        self.model.model.visual_embeddings_table = move_to(self.model.model.visual_embeddings_table, device=CPU)
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample

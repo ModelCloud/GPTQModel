@@ -38,7 +38,7 @@ class TestSave(unittest.TestCase):
         inp = tokenizer(prompt, return_tensors="pt").to(device)
 
         # origin model produce correct output
-        origin_model = GPTQModel.load(MODEL_ID, backend=backend)
+        origin_model = GPTQModel.load(MODEL_ID, backend=backend, device=device)
         origin_model_res = origin_model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
         origin_model_predicted_text = tokenizer.decode(origin_model_res[0])
 
@@ -46,7 +46,7 @@ class TestSave(unittest.TestCase):
             origin_model.save(tmpdir)
 
             # saved model produce wrong output
-            new_model = GPTQModel.load(tmpdir, backend=backend)
+            new_model = GPTQModel.load(tmpdir, backend=backend, device=device)
 
             new_model_res = new_model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
             new_model_predicted_text = tokenizer.decode(new_model_res[0])

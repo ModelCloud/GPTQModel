@@ -147,22 +147,22 @@ class StageInputsCapture:
 
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
-        is_ovis = self.gptq_model.__class__.__name__ == "OvisGPTQ"
+        is_ovis = self.gptq_model.model.config.model_type == "ovis"
 
         self.gptq_model.pre_quantize_generate_hook_start()
 
         # TODO: why data_device sometimes set to cuda (self.gptq_model.quantize_config.device) and sometimes to CPU (cur_layer_device)?
         try:
             for batch_index, example in enumerate(calibration_data, start=1):
+                if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
+                    data_device = self.gptq_model.quantize_config.device
+                else:
+                    data_device = (
+                        self.gptq_model.quantize_config.device
+                        if "pixel_values" in example.keys()
+                        else cur_layer_device
+                    )
                 for k, v in example.items():
-                    if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
-                        data_device = self.gptq_model.quantize_config.device
-                    else:
-                        data_device = (
-                            self.gptq_model.quantize_config.device
-                            if k == "pixel_values"
-                            else cur_layer_device
-                        )
                     if isinstance(v, list):
                         for index in range(len(v)):
                             if len(v[index].shape) == 1:

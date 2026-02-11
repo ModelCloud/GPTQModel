@@ -353,7 +353,7 @@ class BaseQModel(nn.Module):
         return MOE_FLAG.lstrip(":") in flags
 
     @classmethod
-    def _collect_moe_modules_from_tree(cls, tree_node, parent_path="") -> Set[str]:
+    def _collect_moe_modules_from_tree(cls, tree_node, parent_path="", parent_is_moe=False) -> Set[str]:
         """
         Recursively collect all module paths that have the :moe flag.
         Returns a set of full module paths (e.g., "mlp", "mlp.experts", "mlp.shared_experts").
@@ -366,27 +366,26 @@ class BaseQModel(nn.Module):
                 if key == "#":
                     # Recursively process the value if it's a dict
                     if isinstance(value, dict):
-                        moe_modules.update(cls._collect_moe_modules_from_tree(value, parent_path))
+                        moe_modules.update(cls._collect_moe_modules_from_tree(value, parent_path, parent_is_moe))
                     continue
 
                 # Build full path
+                module_name, _ = cls._parse_module_flags(key) if isinstance(key, str) else (key, [])
                 if parent_path:
-                    full_path = f"{parent_path}.{key}"
+                    full_path = f"{parent_path}.{module_name}"
                 else:
-                    full_path = key
+                    full_path = module_name
 
                 # Check if this key has :moe flag
-                if cls.has_moe_flag(key):
-                    # Extract just the module name without flags
-                    module_name, _ = cls._parse_module_flags(key)
-                    if parent_path:
-                        moe_modules.add(f"{parent_path}.{module_name}")
-                    else:
-                        moe_modules.add(module_name)
+                is_moe = cls.has_moe_flag(key) if isinstance(key, str) else False
+                if is_moe or parent_is_moe:
+                    moe_modules.add(full_path)
 
                 # Recursively process nested structures
                 if isinstance(value, (dict, tuple, list)):
-                    moe_modules.update(cls._collect_moe_modules_from_tree(value, full_path.split(":")[0]))
+                    moe_modules.update(
+                        cls._collect_moe_modules_from_tree(value, full_path, parent_is_moe or is_moe)
+                    )
 
         elif isinstance(tree_node, (tuple, list)):
             for item in tree_node:
@@ -397,7 +396,7 @@ class BaseQModel(nn.Module):
                     else:
                         moe_modules.add(module_name)
                 elif isinstance(item, dict):
-                    moe_modules.update(cls._collect_moe_modules_from_tree(item, parent_path))
+                    moe_modules.update(cls._collect_moe_modules_from_tree(item, parent_path, parent_is_moe))
 
         return moe_modules
 
@@ -651,14 +650,10 @@ class BaseQModel(nn.Module):
             )
 
         if self.quantize_config.quant_method == METHOD.AWQ:
-            if self.quantize_config.format == FORMAT.GEMV_FAST:
-                # AWQ GEMV_FAST only supports pack_dtype is torch.int16
+            if self.quantize_config.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
+                # AWQ GEMV_FAST / LLM_AWQ only supports pack_dtype is torch.int16
                 log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
                 self.quantize_config.pack_dtype = torch.int16
-            elif self.quantize_config.format == FORMAT.MARLIN:
-                # AWQ MARLIN only supports zero_point is false
-                log.info("Quantize Model: Auto fix `zero_point` to `False`")
-                self.quantize_config.zero_point = False
 
         if self.support_batch_quantize is False:
             batch_size = 1
@@ -670,7 +665,19 @@ class BaseQModel(nn.Module):
 
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):
-            preferred_backend = BACKEND.TORCH
+            if self.quantize_config.quant_method == METHOD.AWQ:
+                if self.quantize_config.format == FORMAT.GEMM:
+                    preferred_backend = BACKEND.TORCH_AWQ
+                elif self.quantize_config.format == FORMAT.GEMV:
+                    preferred_backend = BACKEND.GEMV
+                elif self.quantize_config.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
+                    preferred_backend = BACKEND.GEMV_FAST
+                else:
+                    raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
+            elif self.quantize_config.quant_method == METHOD.QQQ:
+                preferred_backend = BACKEND.QQQ
+            else:
+                preferred_backend = BACKEND.TORCH
 
         # Validate quant linear before quantization starts
         _ = select_quant_linear(
@@ -685,6 +692,7 @@ class BaseQModel(nn.Module):
             device=DEVICE(self.quantize_config.device),
             pack=True,
             pack_dtype=self.quantize_config.pack_dtype,
+
         )
 
         # Use the provided tokenizer if one is passed to quantize()

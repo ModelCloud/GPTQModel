@@ -15,6 +15,7 @@ from transformers import PreTrainedModel
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, HAS_CUDA, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import torch_compile
@@ -32,6 +33,9 @@ except Exception:  # pragma: no cover - optional dependency
 log = setup_logger()
 
 class TorchQuantLinear(PackableQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.TORCH]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20}
     SUPPORTS_BITS = [2, 3, 4, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
     SUPPORTS_DESC_ACT = [True, False]

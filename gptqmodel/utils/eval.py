@@ -148,8 +148,11 @@ def evalplus(
              greedy=True)
 
     if output_file is None:
-        output_file = model.strip("./").replace("/", "--") + "_gptqmodel_temp_0.0_eval_results.json"
-        output_file = os.path.join("evalplus_results", dataset, output_file)
+        base_name = model.strip("./").replace("/", "--") + "_gptqmodel_temp_0.0"
+        legacy_file = os.path.join("evalplus_results", dataset, base_name + "_eval_results.json")
+        new_file = os.path.join("evalplus_results", dataset, base_name + ".eval_results.json")
+        # Check legacy format first for backwards compatibility, then new format
+        output_file = legacy_file if os.path.exists(legacy_file) else new_file
 
     if not os.path.exists(output_file):
         raise FileNotFoundError(f"No such file: {output_file}")

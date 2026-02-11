@@ -955,10 +955,11 @@ class ModuleLooper():
 
                 # Set mask using TLS (thread-safe)
                 self._set_processor_mask(processor, keep_mask)
-
-                additional_inputs: Dict[str, torch.Tensor] = {}
+                additional_inputs: Dict[str, Optional[torch.Tensor]] = {}
                 if self.support_batch_quantize and attn_tensor is not None:
                     additional_inputs["attention_mask"] = attn_tensor
+                else:
+                    additional_inputs["attention_mask"] = None
 
                 if position_ids:
                     pos = position_ids[batch_idx]
