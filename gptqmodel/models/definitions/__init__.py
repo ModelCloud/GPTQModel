@@ -4,8 +4,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from .afmoe import AfMoeQModel
-from .apertus import ApertusQModel
+# Many model architectures inherit from LlamaGPTQ, so it’s necessary to import llama first to avoid circular imports.
+from .llama import LlamaQModel
+
 # other model
 from .baichuan import BaiChuanQModel
 from .bloom import BloomQModel
@@ -19,15 +20,13 @@ from .deepseek_v2 import DeepSeekV2QModel
 from .deepseek_v3 import DeepSeekV3QModel
 from .dots1 import Dots1QModel
 from .dream import DreamQModel
-from .ernie4_5 import Ernie4_5QModel
-from .ernie4_5_moe import Ernie4_5_MoeQModel
 from .exaone import ExaOneQModel
 from .exaone4 import Exaone4QModel
-from .falcon_h1 import FalconH1QModel
+from .ernie4_5 import Ernie4_5QModel
+from .ernie4_5_moe import Ernie4_5_MoeQModel
 from .gemma2 import Gemma2QModel
 from .gemma3 import Gemma3QModel
 from .glm import GlmQModel
-from .glm4v import Glm4vGPTQ
 from .gpt2 import GPT2QModel
 from .gpt_bigcode import GptBigCodeQModel
 from .gpt_neo import GptNeoQModel
@@ -38,25 +37,17 @@ from .hymba import HymbaQModel
 from .instella import InstellaQModel
 from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
-from .klear import KlearQModel
-# Many model architectures inherit from LlamaGPTQ, so it’s necessary to import llama first to avoid circular imports.
-from .llama import LlamaQModel
 from .llama4 import Llama4QModel
-from .llava_qwen2 import LlavaQwen2QModel
-from .longcat_flash import LongCatFlashQModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel
 from .minimax_m2 import MiniMaxM2GPTQ
-from .mistral3 import Mistral3GPTQ
 from .mixtral import MixtralQModel
 from .mllama import MLlamaQModel
 from .mobilellm import MobileLLMQModel
 from .moss import MossQModel
 from .mpt import MptQModel
-from .nemotron_h import NemotronHQModel
 from .opt import OptQModel
 from .ovis import OvisQModel
-from .pangu_alpha import PanguAlphaQModel
 from .phi import PhiQModel
 from .phi3 import Phi3QModel
 from .qwen import QwenQModel
@@ -66,10 +57,20 @@ from .qwen2_moe import Qwen2MoeQModel
 from .qwen2_vl import Qwen2VLQModel
 from .qwen3 import Qwen3QModel
 from .qwen3_moe import Qwen3MoeQModel
-from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .qwen3_vl import Qwen3_VLQModel
 from .rw import RwgQModel
 from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel
-from .voxtral import VoxtralGPTQ
 from .xverse import XverseQModel
+from .falcon_h1 import FalconH1QModel
+from .pangu_alpha import PanguAlphaQModel
+from .longcat_flash import LongCatFlashQModel
+from .apertus import ApertusQModel
+from .klear import KlearQModel
+from .llava_qwen2 import LlavaQwen2QModel
+from .nemotron_h import NemotronHQModel
+from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
+from .mistral3 import Mistral3GPTQ
+from .afmoe import AfMoeQModel
+from .glm4v import Glm4vGPTQ
+from .voxtral import VoxtralGPTQ
