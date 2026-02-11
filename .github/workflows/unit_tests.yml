@@ -274,22 +274,35 @@ jobs:
         if: github.event.inputs.artifact_id == '' && !cancelled()
         timeout-minutes: 45
         run: |
+          set -euo pipefail
+          
           echo "::group::python version"
           which python
           which pip || true
           python --version
           echo "::endgroup::"
           
+          build_once() {
+            echo "::group::compile logs"
+            python setup.py bdist_wheel 2>&1 | tee /tmp/build.log
+            echo "::endgroup::"
+          }
           
+          echo "==> Attempt #1 (no extra env)"
+          if build_once; then
+            echo "Build succeeded on attempt #1"
+            exit 0
+          fi
+          
+          echo "==> Attempt #1 failed, retrying with env vars..."
           export VERBOSE=1
           export CMAKE_VERBOSE_MAKEFILE=ON
           export TORCH_EXTENSIONS_DIR=/tmp/torch_extensions
           export MAX_JOBS=1
           export NVCC_THREADS=1
           
-          echo "::group::compile logs"
-          python setup.py bdist_wheel 2>&1 | tee /tmp/build.log
-          echo "::endgroup::"
+          echo "==> Attempt #2 (with env)"
+          build_once
 
       - name: check wheel
         if: github.event.inputs.artifact_id == '' && !cancelled()
