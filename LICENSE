@@ -1,14 +1,3 @@
-docker run --rm -it --gpus all --ipc=host \
--v /monster/ci/env/entrypoint_pyenv.sh:/entrypoint.sh:ro \
--v /opt/docker:/workspace \
--v /monster/ci/models:/monster/data/model \
--v /monster/ci/pyenv:/opt/pyenv \
--v /monster/ci/env:/opt/env \
--v /monster/ci/env/pip.conf:/etc/pip.conf \
--v /home/work/GPTQModel-main:/opt/GPTQModel \
-10.0.13.31:5000/nvidia/cuda:130-ubuntu22.04_0206 \
-/bin/bash -l
-
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
