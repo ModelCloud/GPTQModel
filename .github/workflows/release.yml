@@ -122,9 +122,10 @@ jobs:
         include:
           # pytorch 2.9.1
           # cuda 130
-          - cuda: 130
-            torch: 2.9.1
-            python: 314t
+          # not supported now, unknow error
+          #          - cuda: 130
+          #            torch: 2.9.1
+          #            python: 314t
           - cuda: 130
             torch: 2.9.1
             python: 314
