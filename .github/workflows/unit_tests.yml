@@ -280,13 +280,26 @@ jobs:
           python --version
           echo "::endgroup::"
           
+          
+          export VERBOSE=1
+          export CMAKE_VERBOSE_MAKEFILE=ON
+          export TORCH_EXTENSIONS_DIR=/tmp/torch_extensions
+          export MAX_JOBS=1
+          export NVCC_THREADS=1
+          
           echo "::group::compile logs"
-          python setup.py bdist_wheel
+          python setup.py bdist_wheel 2>&1 | tee /tmp/build.log
           echo "::endgroup::"
 
       - name: check wheel
         if: github.event.inputs.artifact_id == '' && !cancelled()
         run: |
+          grep -nE "ptxas fatal|nvcc fatal|error:|fatal error|ninja: build stopped" /tmp/build.log | head -n 50
+          
+          echo "::group::compile logs"
+          cat /tmp/build.log
+          echo "::endgroup::"
+          
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           sha256=$(sha256sum dist/$whl)
