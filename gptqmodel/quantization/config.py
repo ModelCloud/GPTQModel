@@ -390,7 +390,14 @@ class ExpertsRoutingOverride(BaseMoERouting):
 # This ensures all experts receive sufficient calibration samples but increases quantization time
 @dataclass
 class ExpertsRoutingBypass(BaseMoERouting):
-    pass
+    # Number of modules to process in a single batch to reduce VRAM pressure during quantization
+    # For example, with batch_size=10 and 20 expert modules (gate_proj + up_proj for 10 experts):
+    # - First batch processes 10 modules (could be gate_proj for experts 0-9, or a mix depending on sorting)
+    # - Second batch processes remaining 10 modules
+    batch_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of modules to process in a single batch during MoE quantization"}
+    )
 
 
 @dataclass
@@ -567,6 +574,7 @@ def _parse_smooth_method(setting: Any) -> Optional[SmoothMethod]:
         return _build_smooth_method_from_dict(setting)
     raise ValueError("QuantizeConfig: `failsafe.smooth` must be a SmoothMethod, string, or dict.")
 
+
 def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
                 default: Union[int, bool] = None, sub_key: str = None) -> Union[Dict, int, bool]:
 
@@ -726,7 +734,14 @@ class QuantizeConfig():
 
     moe: MoEConfig = field(
         default=None,
-        metadata={"help": "Mixture-of-Experts (MoE) configuration, including routing strategy and related overrides."}
+        metadata={"help": "Mixture-of-Experts (MoE) configuration for routing strategy and expert batching. "
+                  "Example with bypass routing (forward all data to each expert): "
+                  "moe={'routing': {'class': 'ExpertsRoutingBypass', 'batch_size': None}} - processes all experts in one batch (default). "
+                  "moe={'routing': {'class': 'ExpertsRoutingBypass', 'batch_size': 4}} - processes 4 experts at a time to reduce VRAM pressure. "
+                  "Example with routing override (limit experts per token): "
+                  "moe={'routing': {'class': 'ExpertsRoutingOverride', 'num_experts_per_tok': 2}}. "
+                  "Example to forward to all experts: "
+                  "moe={'routing': {'class': 'ExpertsRoutingOverride', 'num_experts_per_tok': 'all'}}"}
     )
 
     def __post_init__(self):

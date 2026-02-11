@@ -40,7 +40,7 @@ EXPERTS = [
 PROJ_SUFFIXES = ["gate_proj", "up_proj", "down_proj"]
 
 
-def assert_results(model, target_class, moe_config: MoEConfig):
+def assert_results(model, target_class, moe_config):
     """
     Validate that:
     1) All selected MoE expert submodules (gate/up/down) exist and have expected types
@@ -62,7 +62,6 @@ def assert_results(model, target_class, moe_config: MoEConfig):
     if moe_config is None:
         # No MoE config → no MoE metadata should be emitted
         assert qcfg.meta_get("moe") is None
-
     elif isinstance(moe_config.routing, ExpertsRoutingOverride):
         # Override routing must be reflected exactly in metadata
         moe = qcfg.meta_get("moe")
@@ -169,4 +168,10 @@ class TestMoEConfig(ModelTest):
     def test_moe_routing_bypass(self):
         # Bypass routing logic while keeping MoE structure intact
         self.MOE_CONFIG = MoEConfig(routing=ExpertsRoutingBypass())
+        self.quantize_and_assert()
+
+    def test_moe_routing_bypass_batch_size(self):
+        """Test dictionary-based initialization for ExpertsRoutingBypass"""
+        # Dictionary-based initialization with ExpertsRoutingBypass
+        self.MOE_CONFIG = MoEConfig(routing=ExpertsRoutingBypass(batch_size=4))
         self.quantize_and_assert()
