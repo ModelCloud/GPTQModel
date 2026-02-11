@@ -640,7 +640,14 @@ jobs:
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
-        run: curl -X GET "http://$RUNNER/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
+        run: |
+          resp=$(curl -s -X GET "http://$RUNNER/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}")
+
+          echo "response: $resp"
+          if [ "$resp" != "${{ env.CUDA_VISIBLE_DEVICES }}" ]; then
+            echo "Error: response ($resp) != expected (${{ env.CUDA_VISIBLE_DEVICES }})"
+            exit 1
+          fi
 
       - name: Clean cache
         if: always()
