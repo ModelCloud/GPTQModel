@@ -66,7 +66,7 @@ env:
   UV_INDEX_URL: http://10.0.14.249/simple
   CUDA_VERSION: 128
   TORCH_VERSION: 2.8.0
-  PYTHON_VERSION: 312 # use 312, no need to recompile libs like flash_attn...
+  PYTHON_VERSION: 3.12 # use 312, no need to recompile libs like flash_attn...
   UV_PYTHON: python3.12
   # PYTHON_GIL: 0 // test libs don't support yet
   BUILD_QQQ: 1
@@ -211,14 +211,8 @@ jobs:
 
       - name: Activate uv env
         run: |
-          python_version='${{ env.PYTHON_VERSION }}'
-          if [[ "$python_version" != *"."* ]]; then
-            python_version="${python_version/3/3.}"
-          fi
-          
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_build"
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_build"
           /opt/uv/setup_uv_venv.sh $env_name
-
 
       - name: Setup uv env
         run: |
@@ -399,12 +393,7 @@ jobs:
 
       - name: Activate uv env
         run: |
-          python_version='${{ env.PYTHON_VERSION }}'
-          if [[ "$python_version" != *"."* ]]; then
-            python_version="${python_version/3/3.}"
-          fi
-          
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${python_version}_test_${{ matrix.test_script }}"
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_test_${{ matrix.test_script }}"
           /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Setup uv env
@@ -412,8 +401,8 @@ jobs:
           python -V
           which python
           which pip || true
-          
-          echo "setting env... cuda=`${{ needs.check-vm.outputs.cuda_version }}` torch=`${{ env.TORCH_VERSION }}` python=`$python_version`"
+
+          echo "setting env... cuda=`${{ needs.check-vm.outputs.cuda_version }}` torch=`${{ env.TORCH_VERSION }}` python=`${{ env.PYTHON_VERSION }}`"
           wget http://${RUNNER}/scripts/env/init_compiler_no_env.sh
           bash init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
 
