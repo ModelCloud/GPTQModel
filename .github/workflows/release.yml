@@ -70,7 +70,7 @@ env:
   GPTQMODEL_FORCE_BUILD: 1
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
-  MAX_JOBS: 12
+  MAX_JOBS: 8
   GPTQMODEL_BUILD_QQQ: 0
   GPTQMODEL_BUILD_EORA: 0
   GPTQMODEL_BUILD_EXLLAMA_V1: 0
@@ -122,9 +122,10 @@ jobs:
         include:
           # pytorch 2.9.1
           # cuda 130
-          - cuda: 130
-            torch: 2.9.1
-            python: 314t
+          # not supported now, unknow error
+          #          - cuda: 130
+          #            torch: 2.9.1
+          #            python: 314t
           - cuda: 130
             torch: 2.9.1
             python: 314
@@ -292,9 +293,11 @@ jobs:
     needs:
       - check-vm
     container:
-      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_1021
+      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_0206
       volumes:
-        - /monster/ci/pyenv:/opt/pyenv
+        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
+        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
+        - /monster/ci/uv:/opt/uv
     steps:
       - name: Check matrix
         run: |
@@ -323,8 +326,7 @@ jobs:
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
-      - name: Print Env
-        if: env.SHOULD_RUN == 1
+      - name: Activate uv env
         run: |
           if [[ "${{ matrix.cuda }}" -lt 128 ]]; then # CUDA >= 12.8 supports 12.0 (5090)
             echo "CUDA_ARCH_LIST=8.0 8.6 8.9 9.0" >> $GITHUB_ENV
@@ -334,41 +336,69 @@ jobs:
           if [[ "$python_version" != *"."* ]]; then
             python_version="${python_version/3/3.}"
           fi
-          env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${python_version}_release"
-          if [ -d "$(pyenv root)/versions/$env_name" ]; then
-            echo "env: ${env_name} exists, skip"
-            pyenv local $env_name
-            pyenv activate $env_name
-          else
-            echo "creating venv: ${env_name}..."
-            pyenv virtualenv "$python_version" "$env_name" || true
-            pyenv local $env_name
-            pyenv activate $env_name
-            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ ${{ matrix.cuda }} ${{ matrix.torch }} $python_version
-          fi
 
-          echo "::group::pyenv versions"
-          pyenv versions
+          export UV_PYTHON=$python_version
+          echo "UV_PYTHON=$python_version" >> "$GITHUB_ENV"
+          
+          env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${python_version}_release"
+          /opt/uv/setup_uv_venv.sh $env_name
+
+      - name: Setup uv env
+        if: env.SHOULD_RUN == 1
+        run: |
+          wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
+          bash init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
+
+      - name: Print uv env
+        if: env.SHOULD_RUN == 1
+        run: |
+          echo "::group::uv python list"
+          uv python list
+          ls -ahl /opt/uv/venvs
           echo "::endgroup::"
           
           echo "== python =="
           python --version
+          which python
+          which pip || true
 
           echo "== nvcc =="
           nvcc --version
 
-          echo "== torch =="
-          pip show torch
-
           echo "::group::pip list"
-          pip list
+          uv pip list
           echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch || true
+
+          echo "::group::project files"
+          ls -ahl
+          echo "::endgroup::"
+
+          echo "::group::git status"
+          git config --global --add safe.directory $(pwd)
+          git status
+          echo "::endgroup::"
+
+      - name: Setup Compile env
+        if: env.SHOULD_RUN == 1
+        run: uv pip install setuptools wheel build -U
 
       - name: Compile
         if: env.SHOULD_RUN == 1
         run: |
-          pip install pip setuptools wheel build -U
-          python -m build --no-isolation
+          set -e
+          echo "::group::First Run"
+          if ! python -m build -v --no-isolation; then
+            echo "::endgroup::"
+          
+            echo "::group::Retry"
+            python setup.py bdist_wheel
+            echo "::endgroup::"
+          else
+            echo "::endgroup::"
+          fi
 
       - name: Test install
         if: env.SHOULD_RUN == 1
@@ -380,7 +410,7 @@ jobs:
           [ $(stat -c%s "dist/$whl") -lt 104857600 ] && echo "wheel size < 100M" && exit 1 || echo "$whl size check passed."
 
           if [ "${{ matrix.python }}" != "313t" ]; then # twine doesn't support python 3.13 yet
-            pip install twine
+            uv pip install twine
             twine check dist/$whl
           fi
 
@@ -400,7 +430,7 @@ jobs:
         uses: actions/upload-artifact@v6
         continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
-          overwrite: true
+          overwrite: false
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}
 
@@ -421,9 +451,10 @@ jobs:
     needs:
       - check-vm
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_1021
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_0206
       volumes:
-        - /monster/ci/pyenv:/opt/pyenv
+        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
+        - /monster/ci/uv:/opt/uv
     env:
       RELEASE_MODE: 0
     steps:
@@ -435,18 +466,11 @@ jobs:
 
       - name: Print Env
         run: |
-          env_name="py313_release_source"
-          if [ -d "$(pyenv root)/versions/$env_name" ]; then
-            echo "env: ${env_name} exists, skip"
-            pyenv local $env_name
-            pyenv activate $env_name
-          else
-            echo "creating venv: ${env_name}..."
-            pyenv virtualenv 3.13 "$env_name" || true
-            pyenv local $env_name
-            pyenv activate $env_name
-            bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler.sh)" @ 128 2.8.0 313
-          fi
+          export UV_PYTHON=3.14
+          echo "UV_PYTHON=3.14" >> "$GITHUB_ENV"
+
+          env_name="cu128_torch2.8.0_py314_release_source"
+          /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Fetch PR by number
         if: ${{ github.event.inputs.pr_number != 0 }}
@@ -459,6 +483,7 @@ jobs:
 
       - name: Compile
         run: |
+          uv pip install build wheel twine setuptools torch ninja -U
           python -m build --no-isolation --sdist
 
       - name: Check dist
@@ -545,13 +570,12 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: 3.13
+          python-version: 3.14
           cache: 'pip'
 
       - name: Install requirements
         run: |
-          pip install build setuptools uv -U
-          uv pip install torch twine ninja --system
+          uv pip install torch twine ninja setuptools setuptools-scm[toml]>=8.0 --system
 
       - name: Compile
         run: |
