@@ -574,7 +574,7 @@ jobs:
 
       - name: Install requirements
         run: |
-          uv pip install torch twine ninja --system
+          uv pip install torch twine ninja setuptools setuptools-scm[toml]>=8.0 --system
 
       - name: Compile
         run: |
