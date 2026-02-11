@@ -407,7 +407,6 @@ jobs:
           bash init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version
 
       - name: Print uv env
-        if: env.SHOULD_RUN == 1
         run: |
           echo "::group::uv python list"
           uv python list
