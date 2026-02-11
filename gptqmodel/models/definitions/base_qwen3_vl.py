@@ -3,9 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import torch
 from PIL import Image
+from qwen_vl_utils.vision_process import fetch_video
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
@@ -65,19 +67,49 @@ class BaseQwen3VLGPTQ(BaseQModel):
 
     @staticmethod
     def process_vision_info(
-            conversations: list[dict] | list[list[dict]],
-    ) -> Optional[list[Image.Image]]:
+        conversations: Union[List[Dict[str, Any]], List[List[Dict[str, Any]]]],
+        return_video_kwargs: bool = False,
+        return_video_metadata: bool = False,
+        image_patch_size: int = 14,
+    ) -> Tuple[
+        Optional[List[Image.Image]],
+        Optional[List[Union[torch.Tensor, List[Image.Image]]]],
+        Optional[Dict[str, Any]],
+    ]:
+
         vision_infos = extract_vision_info(conversations)
-        # Read images
+        ## Read images or videos
         image_inputs = []
+        video_inputs = []
+        video_sample_fps_list = []
         for vision_info in vision_infos:
             if "image" in vision_info or "image_url" in vision_info:
-                image_inputs.append(fetch_image(vision_info))
+                image_inputs.append(
+                    fetch_image(vision_info, image_patch_size=image_patch_size)
+                )
+            elif "video" in vision_info:
+                video_input, video_sample_fps = fetch_video(
+                    vision_info,
+                    return_video_sample_fps=True,
+                    image_patch_size=image_patch_size,
+                    return_video_metadata=return_video_metadata,
+                )
+                video_sample_fps_list.append(video_sample_fps)
+                video_inputs.append(video_input)
             else:
-                raise ValueError("image, image_url should in content.")
+                raise ValueError("image, image_url or video should in content.")
         if len(image_inputs) == 0:
             image_inputs = None
-        return image_inputs
+        if len(video_inputs) == 0:
+            video_inputs = None
+
+        video_kwargs = {"do_sample_frames": False}
+        if not return_video_metadata:  # BC for qwen2.5vl
+            video_kwargs.update({"fps": video_sample_fps_list})
+
+        if return_video_kwargs:
+            return image_inputs, video_inputs, video_kwargs
+        return image_inputs, video_inputs
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
         return sample
@@ -92,11 +124,11 @@ class BaseQwen3VLGPTQ(BaseQModel):
             text = processor.apply_chat_template(
                 batch, tokenize=False, add_generation_prompt=True
             )
-            image_inputs = self.process_vision_info(batch)
+            image_inputs, video_inputs = self.process_vision_info(batch)
             inputs = processor(
                 text=text,
                 images=image_inputs,
-                videos=None,
+                videos=video_inputs,
                 padding=True,
                 return_tensors="pt",
             )
