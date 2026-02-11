@@ -47,6 +47,12 @@ tests:
     - https://github.com/huggingface/transformers
     - https://github.com/huggingface/optimum
 
+  test_bits.py:
+    - peft
+
+  test_eval.py:
+    - peft
+
 tests/models:
   test_pangu_alpha.py:
     - jieba
