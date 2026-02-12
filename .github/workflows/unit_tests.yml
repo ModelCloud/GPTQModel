@@ -217,7 +217,7 @@ jobs:
 
       - name: Setup uv env
         run: |
-          bash -euo pipefail bash /opt/env/init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
+          bash -euo pipefail /opt/env/init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
           
           echo "::group::uv python list"
           uv python list
