@@ -357,6 +357,7 @@ jobs:
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
         - /monster/ci/uv:/opt/uv
+        - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
     strategy:
       fail-fast: false
