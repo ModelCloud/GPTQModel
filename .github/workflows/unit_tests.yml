@@ -253,7 +253,7 @@ jobs:
       #      - name: Upload source to local
       #        continue-on-error: true
       #        run: |
-      ##         curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://$RUNNER/gpu/whl/upload
+      ##         curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://$RUNNER/gpu2/whl/upload
       #          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
       #          [ -d $DIR ] || mkdir -p $DIR
       #          cp dist/gptqmodel_source.tar.gz $DIR/
@@ -479,7 +479,7 @@ jobs:
 
           cp $DIR/*.whl dist/
 
-      #          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://$RUNNER/gpu/whl/download")
+      #          file_name=$(curl -s  -F "runid=${{ needs.check-vm.outputs.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "fuzz=1" "http://$RUNNER/gpu2/whl/download")
 
       #          echo "file_name=$file_name"
       #
@@ -560,7 +560,7 @@ jobs:
           while true; do
             # Refresh timestamp every request to avoid cache or duplicated requests
             ts_ms=$(date +%s%3N)
-            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&exclusive=$exclusive_q"
+            url="$BASE_URL/gpu2/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&exclusive=$exclusive_q"
             echo "requesting GPU with: $url"
           
             # Call allocator
@@ -581,7 +581,7 @@ jobs:
             # If response is empty or not an integer, treat as temporary error
             if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+$ ]]; then
               echo "Allocator returned invalid response: '$resp' (temporary error)"
-              curl -fsS "$BASE_URL/gpu/status" || true
+              curl -fsS "$BASE_URL/gpu2/status" || true
               sleep "$SLEEP_SEC"
               continue
             fi
@@ -591,12 +591,12 @@ jobs:
               elapsed=$(( $(date +%s) - start_s ))
               if (( elapsed >= TIMEOUT_SEC )); then
                 echo "Timed out after ${TIMEOUT_SEC}s waiting for GPU (last response=$resp)"
-                curl -fsS "$BASE_URL/gpu/status" || true
+                curl -fsS "$BASE_URL/gpu2/status" || true
                 exit 1
               fi
           
               echo "No GPU available (response=$resp). Waiting ${SLEEP_SEC}s... elapsed=${elapsed}s"
-              curl -fsS "$BASE_URL/gpu/status" || true
+              curl -fsS "$BASE_URL/gpu2/status" || true
               sleep "$SLEEP_SEC"
               continue
             fi
@@ -613,7 +613,7 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
           
           # Final status snapshot
-          curl -fsS "$BASE_URL/gpu/status" || true
+          curl -fsS "$BASE_URL/gpu2/status" || true
 
 
       - name: Run tests
@@ -633,12 +633,12 @@ jobs:
           pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://$XEON5/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
+          curl "http://$XEON5/gpu2/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
         run: |
-          resp=$(curl -s -X GET "http://$RUNNER/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}")
+          resp=$(curl -s -X GET "http://$RUNNER/gpu2/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}")
 
           echo "response: $resp"
           if [ "$resp" != "${{ env.CUDA_VISIBLE_DEVICES }}" ]; then
@@ -662,7 +662,7 @@ jobs:
 #      - torch
 #    steps:
 #      - name: Print statistics
-#        run: curl "http://$RUNNER/gpu/get_vram_logs?id=${{ github.run_id }}"
+#        run: curl "http://$RUNNER/gpu2/get_vram_logs?id=${{ github.run_id }}"
 
 #  m4:
 #    runs-on: [ self-hosted, m4 ]
