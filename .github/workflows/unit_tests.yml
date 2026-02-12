@@ -217,7 +217,6 @@ jobs:
 
       - name: Setup uv env
         run: |
-          wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
           bash -euo pipefail bash /opt/env/init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
           
           echo "::group::uv python list"
