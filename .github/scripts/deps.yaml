@@ -53,6 +53,12 @@ tests:
   test_eval.py:
     - peft
 
+  test_hymba.py:
+    - causal_conv1d
+
+  test_nemotron_ultra.py:
+    - causal_conv1d
+
 tests/models:
   test_pangu_alpha.py:
     - jieba
