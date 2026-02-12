@@ -65,6 +65,7 @@ env:
   XEON5: 10.0.14.249
   UV_INDEX_URL: http://10.0.14.249/simple
   CUDA_VERSION: 128
+  UV_TORCH_BACKEND: 128
   TORCH_VERSION: 2.8.0
   PYTHON_VERSION: 3.12 # use 312, no need to recompile libs like flash_attn...
   UV_PYTHON: python3.12
