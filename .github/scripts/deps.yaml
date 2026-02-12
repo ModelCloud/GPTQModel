@@ -51,6 +51,9 @@ tests:
   test_bits.py:
     - peft
 
+  test_mmlupro.py:
+    - peft
+
   test_eval.py:
     - peft
     - evalplus
