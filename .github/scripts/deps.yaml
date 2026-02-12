@@ -42,6 +42,7 @@ tests:
   test_sglang.py:
     - transformers==4.48.3
     - numpy==1.26.3
+    - sglang
 
   test_integration.py:
     - https://github.com/huggingface/transformers
@@ -52,6 +53,11 @@ tests:
 
   test_eval.py:
     - peft
+    - evalplus
+    - vllm
+
+  test_evalplus.py:
+    - evalplus
 
   test_hymba.py:
     - causal_conv1d
