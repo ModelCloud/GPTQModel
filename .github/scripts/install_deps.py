@@ -1,7 +1,7 @@
-import sys
 import os
-import yaml
 import subprocess
+import sys
+import yaml
 from pathlib import Path
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -80,6 +80,23 @@ def pip_install(pkgs):
     subprocess.check_call(cmd, shell=False)
 
 
+def uv_install(pkgs):
+    if not pkgs:
+        return
+
+    print("Installing deps with uv:")
+    for p in pkgs:
+        print("  -", p)
+
+    cmd = [
+        "uv", "pip", "install", "--no-cache",
+    ]
+
+    pkgs = [normalize_pkg_spec(p) for p in pkgs]
+    cmd.extend(pkgs)
+
+    subprocess.check_call(cmd, shell=False)
+
 if __name__ == "__main__":
     raw_name = sys.argv[1].removeprefix("tests/").removesuffix(".py")
     test_path = resolve_test_path(raw_name)
@@ -89,7 +106,6 @@ if __name__ == "__main__":
 
     specific_pkgs, common_pkgs = collect_pkgs(test_path, deps)
 
-    pip_install(sorted(specific_pkgs))
+    uv_install(sorted(specific_pkgs))
 
-    pip_install(sorted(common_pkgs))
-
+    uv_install(sorted(common_pkgs))

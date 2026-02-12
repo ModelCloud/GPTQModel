@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Tuple, Union, Optional
 
 def _sort_key(p: str):
-    return "/" in p, p
+    return ("moe" in p, "/" in p, p)
 
 def _split_csv(s: Optional[str]) -> List[str]:
     if not s:

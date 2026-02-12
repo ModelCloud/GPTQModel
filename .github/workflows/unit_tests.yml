@@ -65,6 +65,7 @@ env:
   XEON5: 10.0.14.249
   UV_INDEX_URL: http://10.0.14.249/simple
   CUDA_VERSION: 128
+  UV_TORCH_BACKEND: cu128
   TORCH_VERSION: 2.8.0
   PYTHON_VERSION: 3.12 # use 312, no need to recompile libs like flash_attn...
   UV_PYTHON: python3.12
@@ -180,6 +181,7 @@ jobs:
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
         - /monster/ci/uv:/opt/uv
+        - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
 
     steps:
@@ -216,8 +218,7 @@ jobs:
 
       - name: Setup uv env
         run: |
-          wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
-          bash -euo pipefail init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
+          bash /opt/env/init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
           
           echo "::group::uv python list"
           uv python list
@@ -357,13 +358,14 @@ jobs:
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
         - /monster/ci/uv:/opt/uv
+        - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
       matrix:
         test_script: ${{ fromJSON(needs.list-test-files.outputs.torch-files) }}
-    if: always() && !cancelled() && (needs.build.result == 'success' || github.event.inputs.artifact_id != '') && needs.list-test-files.outputs.torch-files != '[]'
+    if: always() && !cancelled() && (needs.build.result == 'success') && needs.list-test-files.outputs.torch-files != '[]' #  || github.event.inputs.artifact_id != ''
     steps:
       - name: Checkout Codes
         uses: actions/checkout@v6
@@ -402,9 +404,8 @@ jobs:
           which python
           which pip || true
 
-          echo "setting env... cuda=`${{ needs.check-vm.outputs.cuda_version }}` torch=`${{ env.TORCH_VERSION }}` python=`${{ env.PYTHON_VERSION }}`"
-          wget http://${RUNNER}/scripts/env/init_compiler_no_env.sh
-          bash init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
+          echo "setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=${{ env.PYTHON_VERSION }}"
+          bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
 
       - name: Print uv env
         run: |
@@ -505,7 +506,7 @@ jobs:
         run: |
           uv pip uninstall gptqmodel
           # make sure torch & torchvision are corresponded
-          uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+          uv pip install -U torchvision torchaudio torch==${{ env.TORCH_VERSION }} --torch-backend=cu${{ needs.check-vm.outputs.cuda_version }}
           uv pip install -r requirements.txt
 
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
@@ -526,7 +527,7 @@ jobs:
 
           python .github/scripts/install_deps.py ${{ matrix.test_script }}
           # deps may reinstalled torch
-          uv pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+          uv pip install -U torchvision torchaudio torch==${{ env.TORCH_VERSION }} --torch-backend=cu${{ needs.check-vm.outputs.cuda_version }}
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
@@ -569,10 +570,12 @@ jobs:
             #   * integer < 0   : no GPU available yet
             #   * empty / HTML : temporary server / proxy error
             resp="$(
-              curl -fsS --connect-timeout 3 --max-time 10 \
+              curl -fsSL --connect-timeout 3 --max-time 10 \
                    --retry 3 --retry-delay 1 --retry-all-errors \
                    "$url" 2>/dev/null || true
             )"
+          
+            echo "resp={$resp}"
           
             # Normalize response
             resp="${resp//$'\r'/}"
@@ -581,7 +584,7 @@ jobs:
             # If response is empty or not an integer, treat as temporary error
             if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+$ ]]; then
               echo "Allocator returned invalid response: '$resp' (temporary error)"
-              curl -fsS "$BASE_URL/gpu/status" || true
+              curl -fsSL "$BASE_URL/gpu/status" || true
               sleep "$SLEEP_SEC"
               continue
             fi
@@ -591,12 +594,12 @@ jobs:
               elapsed=$(( $(date +%s) - start_s ))
               if (( elapsed >= TIMEOUT_SEC )); then
                 echo "Timed out after ${TIMEOUT_SEC}s waiting for GPU (last response=$resp)"
-                curl -fsS "$BASE_URL/gpu/status" || true
+                curl -fsSL "$BASE_URL/gpu/status" || true
                 exit 1
               fi
           
               echo "No GPU available (response=$resp). Waiting ${SLEEP_SEC}s... elapsed=${elapsed}s"
-              curl -fsS "$BASE_URL/gpu/status" || true
+              curl -fsSL "$BASE_URL/gpu/status" || true
               sleep "$SLEEP_SEC"
               continue
             fi
@@ -613,7 +616,7 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
           
           # Final status snapshot
-          curl -fsS "$BASE_URL/gpu/status" || true
+          curl -fsSL "$BASE_URL/gpu/status" || true
 
 
       - name: Run tests
@@ -633,12 +636,14 @@ jobs:
           pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
-          curl "http://$XEON5/gpu/log_test_vram?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
+          curl "http://$XEON5/gpu/log_test_vram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
         run: |
-          resp=$(curl -s -X GET "http://$RUNNER/gpu/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}")
+          url="http://$XEON5/gpu/release?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
+          echo "$url"
+          resp=$(curl -fsSL $url)
 
           echo "response: $resp"
           if [ "$resp" != "${{ env.CUDA_VISIBLE_DEVICES }}" ]; then
