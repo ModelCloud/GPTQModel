@@ -569,7 +569,7 @@ jobs:
             #   * integer < 0   : no GPU available yet
             #   * empty / HTML : temporary server / proxy error
             resp="$(
-              curl -fsS --connect-timeout 3 --max-time 10 \
+              curl -fsSL --connect-timeout 3 --max-time 10 \
                    --retry 3 --retry-delay 1 --retry-all-errors \
                    "$url" 2>/dev/null || true
             )"
@@ -583,7 +583,7 @@ jobs:
             # If response is empty or not an integer, treat as temporary error
             if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+$ ]]; then
               echo "Allocator returned invalid response: '$resp' (temporary error)"
-              curl -fsS "$BASE_URL/gpu2/status" || true
+              curl -fsSL "$BASE_URL/gpu2/status" || true
               sleep "$SLEEP_SEC"
               continue
             fi
@@ -593,12 +593,12 @@ jobs:
               elapsed=$(( $(date +%s) - start_s ))
               if (( elapsed >= TIMEOUT_SEC )); then
                 echo "Timed out after ${TIMEOUT_SEC}s waiting for GPU (last response=$resp)"
-                curl -fsS "$BASE_URL/gpu2/status" || true
+                curl -fsSL "$BASE_URL/gpu2/status" || true
                 exit 1
               fi
           
               echo "No GPU available (response=$resp). Waiting ${SLEEP_SEC}s... elapsed=${elapsed}s"
-              curl -fsS "$BASE_URL/gpu2/status" || true
+              curl -fsSL "$BASE_URL/gpu2/status" || true
               sleep "$SLEEP_SEC"
               continue
             fi
@@ -615,7 +615,7 @@ jobs:
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
           
           # Final status snapshot
-          curl -fsS "$BASE_URL/gpu2/status" || true
+          curl -fsSL "$BASE_URL/gpu2/status" || true
 
 
       - name: Run tests
