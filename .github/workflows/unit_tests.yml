@@ -180,6 +180,7 @@ jobs:
         - /monster/ci/dataset:/monster/data/model/dataset
         - /monster/ci/huggingface:/github/home/.cache/huggingface
         - /monster/ci/uv:/opt/uv
+        - /monster/ci/env:/opt/env
         - /monster/ci/dist:/opt/dist
 
     steps:
@@ -217,7 +218,7 @@ jobs:
       - name: Setup uv env
         run: |
           wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
-          bash -euo pipefail init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
+          bash -euo pipefail bash /opt/env/init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
           
           echo "::group::uv python list"
           uv python list
@@ -403,8 +404,7 @@ jobs:
           which pip || true
 
           echo "setting env... cuda=`${{ needs.check-vm.outputs.cuda_version }}` torch=`${{ env.TORCH_VERSION }}` python=`${{ env.PYTHON_VERSION }}`"
-          wget http://${RUNNER}/scripts/env/init_compiler_no_env.sh
-          bash init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
+          bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
 
       - name: Print uv env
         run: |
