@@ -298,6 +298,7 @@ jobs:
         - /monster/ci/env/entrypoint.sh:/entrypoint.sh
         - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
         - /monster/ci/uv:/opt/uv
+        - /monster/ci/env:/opt/env
     steps:
       - name: Check matrix
         run: |
@@ -339,6 +340,7 @@ jobs:
 
           export UV_PYTHON=$python_version
           echo "UV_PYTHON=$python_version" >> "$GITHUB_ENV"
+          echo "UV_TORCH_BACKEND=cu${{ matrix.cuda }}" >> "$GITHUB_ENV"
           
           env_name="cu${{ matrix.cuda }}_torch${{ matrix.torch }}_py${python_version}_release"
           /opt/uv/setup_uv_venv.sh $env_name
@@ -346,8 +348,7 @@ jobs:
       - name: Setup uv env
         if: env.SHOULD_RUN == 1
         run: |
-          wget http://${RUNNER}/scripts/env/init_compiler_torch_only.sh
-          bash init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
+          /opt/env/init_compiler_torch_only.sh ${{ matrix.cuda }} ${{ matrix.torch }} $UV_PYTHON
 
       - name: Print uv env
         if: env.SHOULD_RUN == 1
