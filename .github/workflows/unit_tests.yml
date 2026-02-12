@@ -640,7 +640,9 @@ jobs:
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
         run: |
-          resp=$(curl -s -X GET "http://$RUNNER/gpu2/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}")
+          url="http://$RUNNER/gpu2/release?id=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
+          echo "$url"
+          resp=$(curl -fsSL $url)
 
           echo "response: $resp"
           if [ "$resp" != "${{ env.CUDA_VISIBLE_DEVICES }}" ]; then
