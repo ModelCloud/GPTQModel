@@ -574,6 +574,8 @@ jobs:
                    "$url" 2>/dev/null || true
             )"
           
+            echo "resp={$resp}"
+          
             # Normalize response
             resp="${resp//$'\r'/}"
             resp="${resp//$'\n'/}"
