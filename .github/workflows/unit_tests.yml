@@ -633,7 +633,16 @@ jobs:
           
           start_monitor() {
             while true; do
-              curl -X POST "http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&exclusive=${{ github.event.inputs['exclusive-gpu'] }}&gpu=${CUDA_VISIBLE_DEVICES}" || true
+              resp=$(curl -fsSL "http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&exclusive=${{ github.event.inputs['exclusive-gpu'] }}&gpu=${CUDA_VISIBLE_DEVICES}" 2>/dev/null || echo "")
+          
+              if [ "$(echo "$resp" | tr -d '[:space:]')" = "-1" ]; then
+                echo "Server returned -1, terminating job..."
+                # 先杀掉pytest
+                pkill -9 -f "pytest.*${{ matrix.test_script }}" 2>/dev/null || true
+                # 再退出整个脚本
+                exit 1
+              fi
+          
               sleep 60
             done
           }
@@ -641,14 +650,16 @@ jobs:
           start_monitor &
           MONITOR_PID=$!
           
-          trap "kill $MONITOR_PID 2>/dev/null || true" EXIT
+          cleanup() {
+            kill $MONITOR_PID 2>/dev/null || true
+            wait $MONITOR_PID 2>/dev/null || true
+          }
+          trap cleanup EXIT
           
           start_time=$(date +%s)
           pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
-          
-          kill $MONITOR_PID 2>/dev/null || true
           
           curl "http://$XEON5/gpu/log_test_vram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
