@@ -627,15 +627,29 @@ jobs:
           fi
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             export CUDA_VISIBLE_DEVICES=""
-            # source /etc/profile.d/pyenv.sh && pyenv activate xpu
             uv pip uninstall vllm -y
             uv pip list
           fi
-
+          
+          start_monitor() {
+            while true; do
+              curl -X POST "http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&exclusive=${{ github.event.inputs['exclusive-gpu'] }}" || true
+              sleep 60
+            done
+          }
+          
+          start_monitor &
+          MONITOR_PID=$!
+          
+          trap "kill $MONITOR_PID 2>/dev/null || true" EXIT
+          
           start_time=$(date +%s)
           pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
+          
+          kill $MONITOR_PID 2>/dev/null || true
+          
           curl "http://$XEON5/gpu/log_test_vram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Release GPU
