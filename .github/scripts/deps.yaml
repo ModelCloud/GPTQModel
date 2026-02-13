@@ -51,6 +51,9 @@ tests:
   test_bits.py:
     - peft
 
+  test_lora.py:
+    - peft
+
   test_mmlupro.py:
     - peft
 
@@ -61,9 +64,6 @@ tests:
 
   test_evalplus.py:
     - evalplus
-
-  test_hymba.py:
-    - causal_conv1d
 
   test_nemotron_ultra.py:
     - causal_conv1d
@@ -77,3 +77,19 @@ tests/models:
 
   test_gemma:
     - jieba
+
+  test_hymba.py:
+    - causal_conv1d
+    - mamba_ssm
+
+  test_internlm.py:
+    - transformers<=4.44.2
+
+  test_ovis_1_6_llama.py:
+    - transformers<=4.44.2
+
+  test_phi_4.py:
+    - peft
+
+  test_phi_3_moe.py:
+    - transformers<=4.44.2
