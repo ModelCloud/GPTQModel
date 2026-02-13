@@ -632,15 +632,16 @@ jobs:
           fi
           
           start_monitor() {
+            echo "start to keep alive..."
             while true; do
               resp=$(curl -fsSL "http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&exclusive=${{ github.event.inputs['exclusive-gpu'] }}&gpu=${CUDA_VISIBLE_DEVICES}" 2>/dev/null || echo "")
           
               if [ "$(echo "$resp" | tr -d '[:space:]')" = "-1" ]; then
                 echo "Server returned -1, terminating job..."
-                # 先杀掉pytest
                 pkill -9 -f "pytest.*${{ matrix.test_script }}" 2>/dev/null || true
-                # 再退出整个脚本
                 exit 1
+              else
+                echo "gpu is keeping alive..."
               fi
           
               sleep 60
