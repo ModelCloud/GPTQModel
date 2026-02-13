@@ -67,6 +67,7 @@ tests:
 
   test_hymba.py:
     - causal_conv1d
+    - mamba_ssm
 
   test_nemotron_ultra.py:
     - causal_conv1d
