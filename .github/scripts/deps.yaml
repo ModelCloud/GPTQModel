@@ -51,6 +51,9 @@ tests:
   test_bits.py:
     - peft
 
+  test_lora.py:
+    - peft
+
   test_mmlupro.py:
     - peft
 
