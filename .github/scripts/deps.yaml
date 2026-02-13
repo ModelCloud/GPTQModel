@@ -65,10 +65,6 @@ tests:
   test_evalplus.py:
     - evalplus
 
-  test_hymba.py:
-    - causal_conv1d
-    - mamba_ssm
-
   test_nemotron_ultra.py:
     - causal_conv1d
 
@@ -81,3 +77,10 @@ tests/models:
 
   test_gemma:
     - jieba
+
+  test_hymba.py:
+    - causal_conv1d
+    - mamba_ssm
+
+  test_internlm.py:
+    - transformers<=4.44.2
