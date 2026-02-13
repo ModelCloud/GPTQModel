@@ -641,7 +641,7 @@ jobs:
                 pkill -9 -f "pytest.*${{ matrix.test_script }}" 2>/dev/null || true
                 exit 1
               else
-                echo "gpu is keeping alive..."
+                echo "gpu is kept alive..."
               fi
           
               sleep 60
@@ -652,6 +652,7 @@ jobs:
           MONITOR_PID=$!
           
           cleanup() {
+            echo "trap cleanup EXIT..."
             kill $MONITOR_PID 2>/dev/null || true
             wait $MONITOR_PID 2>/dev/null || true
           }

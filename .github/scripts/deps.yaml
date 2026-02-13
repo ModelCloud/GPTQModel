@@ -90,3 +90,6 @@ tests/models:
 
   test_phi_4.py:
     - peft
+
+  test_phi_3_moe.py:
+    - transformers<=4.44.2
