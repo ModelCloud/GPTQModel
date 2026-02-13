@@ -84,3 +84,9 @@ tests/models:
 
   test_internlm.py:
     - transformers<=4.44.2
+
+  test_ovis_1_6_llama.py:
+    - transformers<=4.44.2
+
+  test_phi_4.py:
+    - peft
