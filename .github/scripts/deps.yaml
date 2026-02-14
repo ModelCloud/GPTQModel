@@ -2,6 +2,7 @@ common:
   - tokenicer
   - transformers
   - tabulate
+  - swig # for models/tests
 
 tests:
   test_q4_bitblas.py:
