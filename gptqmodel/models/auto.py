@@ -123,6 +123,7 @@ from .definitions.mllama import MLlamaQModel  # noqa: E402
 from .definitions.mobilellm import MobileLLMQModel  # noqa: E402
 from .definitions.moss import MossQModel  # noqa: E402
 from .definitions.mpt import MptQModel  # noqa: E402
+from .definitions.nemotron3_nano import Nemotron3NanoQModel  # noqa: E402
 from .definitions.nemotron_h import NemotronHQModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
@@ -248,7 +249,7 @@ MODEL_MAP = {
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
     "llava_qwen2": LlavaQwen2QModel,
-    "nemotron_h": NemotronHQModel,
+    "nemotron_h": Nemotron3NanoQModel,
     "bailing_moe": BailingMoeQModel,
     "lfm2_moe": LFM2MoeQModel,
     "mistral3": Mistral3GPTQ,
