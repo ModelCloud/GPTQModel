@@ -406,6 +406,7 @@ jobs:
 
           echo "setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=${{ env.PYTHON_VERSION }}"
           bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
+          python .github/scripts/install_deps.py ${{ matrix.test_script }}
 
       - name: Print uv env
         run: |
@@ -525,7 +526,6 @@ jobs:
             uv pip install . --no-build-isolation
           fi
 
-          python .github/scripts/install_deps.py ${{ matrix.test_script }}
           # deps may reinstalled torch
           uv pip install -U torchvision torchaudio torch==${{ env.TORCH_VERSION }} --torch-backend=cu${{ needs.check-vm.outputs.cuda_version }}
 
