@@ -667,7 +667,7 @@ jobs:
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
           
-          curl "http://$XEON5/gpu/log_test_vram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
+          curl "http://$XEON5/gpu/logVram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
