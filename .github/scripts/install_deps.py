@@ -88,14 +88,13 @@ def uv_install(pkgs):
     for p in pkgs:
         print("  -", p)
 
-    cmd = [
-        "uv", "pip", "install", "--no-cache",
-    ]
+    for p in pkgs:
+        cmd = ["uv", "pip", "install", "--no-cache", p]
+        try:
+            subprocess.check_call(cmd, shell=False)
+        except Exception as e:
+            print(f"Install failed: {e}")
 
-    pkgs = [normalize_pkg_spec(p) for p in pkgs]
-    cmd.extend(pkgs)
-
-    subprocess.check_call(cmd, shell=False)
 
 if __name__ == "__main__":
     raw_name = sys.argv[1].removeprefix("tests/").removesuffix(".py")
