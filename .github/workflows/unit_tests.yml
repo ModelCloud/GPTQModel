@@ -507,7 +507,7 @@ jobs:
         run: |
           uv pip uninstall gptqmodel
           # make sure torch & torchvision are corresponded
-          uv pip install -U torchvision torchaudio torch==${{ env.TORCH_VERSION }} --torch-backend=cu${{ needs.check-vm.outputs.cuda_version }}
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
           uv pip install -r requirements.txt
 
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
@@ -527,7 +527,7 @@ jobs:
           fi
 
           # deps may reinstalled torch
-          uv pip install -U torchvision torchaudio torch==${{ env.TORCH_VERSION }} --torch-backend=cu${{ needs.check-vm.outputs.cuda_version }}
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
