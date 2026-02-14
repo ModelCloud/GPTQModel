@@ -658,8 +658,12 @@ jobs:
           }
           trap cleanup EXIT
           
+          log_dir=/opt/dist/${{ needs.check-vm.outputs.run_id }}/logs
+          [ -d $log_dir ] || mkdir -p $log_dir
+          
           start_time=$(date +%s)
-          pytest --durations=0 tests/${{ matrix.test_script }}.py || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
+          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee $log_dir/${{ matrix.test_script }}.log
+          test ${PIPESTATUS[0]} -eq 0 || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
           
