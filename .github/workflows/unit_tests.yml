@@ -632,9 +632,10 @@ jobs:
           fi
           
           start_monitor() {
-            echo "start to keep alive..."
+            keep_alive_url="http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&exclusive=${{ github.event.inputs['exclusive-gpu'] }}&gpu=${CUDA_VISIBLE_DEVICES}"
+            echo "start to keep alive... ${keep_alive_url}"
             while true; do
-              resp=$(curl -fsSL "http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&exclusive=${{ github.event.inputs['exclusive-gpu'] }}&gpu=${CUDA_VISIBLE_DEVICES}" 2>/dev/null || echo "")
+              resp=$(curl -fsSL $keep_alive_url 2>/dev/null || echo "")
           
               if [ "$(echo "$resp" | tr -d '[:space:]')" = "-1" ]; then
                 echo "Server returned -1, terminating job..."
