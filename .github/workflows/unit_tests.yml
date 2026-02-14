@@ -660,13 +660,16 @@ jobs:
           
           log_dir=/opt/dist/${{ needs.check-vm.outputs.run_id }}/logs
           [ -d $log_dir ] || mkdir -p $log_dir
+          log_file=$log_dir/${{ matrix.test_script }}.log
           
           start_time=$(date +%s)
-          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee $log_dir/${{ matrix.test_script }}.log
+          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee $log_file
           test ${PIPESTATUS[0]} -eq 0 || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
           
+          ls -ahl $log_dir || true
+
           curl "http://$XEON5/gpu/logVram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Release GPU
