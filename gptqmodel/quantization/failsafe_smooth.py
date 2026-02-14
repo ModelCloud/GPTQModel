@@ -170,6 +170,6 @@ def mse_optimal_quant(
     scale_best = torch.clamp((max_val - min_val) * best_p / maxq, min=eps)
     zero_best = base_zero if qcfg.sym else torch.round(-min_val * best_p / scale_best)
     q = torch.clamp(torch.round(block_f / scale_best + zero_best), 0, maxq)
-    dequant_base = (q - zero_best) * scale_best
+    dequant_best = (q - zero_best) * scale_best
 
-    return dequant_base, scale_best, zero_best
+    return dequant_best, scale_best, zero_best
