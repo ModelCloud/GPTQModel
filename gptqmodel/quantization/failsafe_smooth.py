@@ -111,6 +111,15 @@ def smooth_block(
     return block, None
 
 
+def _eval_mse(block_f, min_val, max_val, base_zero, qcfg, maxq, shrink, eps):
+    """Compute MSE for shrinkage factors [rows, n, 1]."""
+    scale = torch.clamp((max_val.unsqueeze(1) * shrink - min_val.unsqueeze(1) * shrink) / maxq, min=eps)
+    zero = base_zero.unsqueeze(1).expand_as(scale) if qcfg.sym else torch.round(-min_val.unsqueeze(1) * shrink / scale)
+    q = torch.clamp(torch.round(block_f.unsqueeze(1) / scale + zero), 0, maxq)
+
+    return ((q - zero) * scale - block_f.unsqueeze(1)).pow(2).mean(dim=2)
+
+
 def mse_optimal_quant(
     block: torch.Tensor,
     qcfg: QuantizeConfig,
@@ -120,9 +129,9 @@ def mse_optimal_quant(
     maxshrink: float,
     eps: float = 1e-8,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Ternary search: O(log steps)"""
     block_f = block.float()
     rows = block_f.shape[0]
-    cols = block_f.shape[1]
 
     if qcfg.sym:
         max_abs = block_f.abs().max(dim=1, keepdim=True).values
@@ -134,32 +143,33 @@ def mse_optimal_quant(
         max_val = block_f.max(dim=1, keepdim=True).values
         base_zero = None
 
-    steps = max(int(steps), 1)
+    steps = max(int(math.log(max(steps, 2)) / math.log(1.5)) + 1, 3)
     shrink = max(min(maxshrink, 1.0), 1e-3)
-    p = torch.linspace(1.0, shrink, steps, device=block_f.device, dtype=block_f.dtype).view(1, steps, 1)
 
-    min_p = min_val.unsqueeze(1) * p
-    max_p = max_val.unsqueeze(1) * p
-    scale = (max_p - min_p) / maxq
-    scale = torch.clamp(scale, min=eps)
+    # Left, Right pointer
+    l, r = torch.full((rows, 1), shrink, device=block_f.device, dtype=block_f.dtype), torch.ones((rows, 1), device=block_f.device, dtype=block_f.dtype)
+    best_err, best_p = torch.full((rows,), float('inf'), device=block_f.device), r.clone()
 
-    if qcfg.sym:
-        zero = base_zero.unsqueeze(1).expand(rows, steps, 1)
-    else:
-        zero = torch.round(-min_p / scale)
+    for _ in range(steps):
+        mid1, mid2 = l + (r - l) / 3.0, r - (r - l) / 3.0
+        err = _eval_mse(block_f, min_val, max_val, base_zero, qcfg, maxq, torch.stack([mid1, mid2], dim=1).view(rows, 2, 1), eps)
 
-    block_expanded = block_f.unsqueeze(1)
-    q = torch.round(block_expanded / scale + zero)
-    q = torch.clamp(q, 0, maxq)
-    dequant = (q - zero) * scale
-    err = (dequant - block_expanded).pow(2).mean(dim=2)
+        for i, p in enumerate([mid1, mid2]):
+            better = err[:, i] < best_err
+            best_err, best_p = torch.where(better, err[:, i], best_err), torch.where(better.unsqueeze(1), p, best_p)
 
-    best_idx = err.argmin(dim=1)
-    best_idx_exp = best_idx.view(rows, 1, 1).expand(rows, 1, cols)
-    dequant_best = torch.gather(dequant, 1, best_idx_exp).squeeze(1)
+        move_r = err[:, 0] < err[:, 1]
+        r, l = torch.where(move_r.unsqueeze(1), mid2, r), torch.where(move_r.unsqueeze(1), l, mid1)
 
-    best_idx_scale = best_idx.view(rows, 1, 1)
-    scale_best = torch.gather(scale, 1, best_idx_scale).squeeze(1)
-    zero_best = torch.gather(zero, 1, best_idx_scale).squeeze(1)
+    # Refine
+    delta = (r - l) * 0.1
+    refinement = torch.stack([torch.clamp(best_p - delta, shrink, 1.0), best_p, torch.clamp(best_p + delta, shrink, 1.0)], dim=1).view(rows, 3, 1)
+    best_p = torch.gather(refinement.squeeze(2), 1, _eval_mse(block_f, min_val, max_val, base_zero, qcfg, maxq, refinement, eps).argmin(dim=1).unsqueeze(1))
+
+    # Final quantization
+    scale_best = torch.clamp((max_val - min_val) * best_p / maxq, min=eps)
+    zero_best = base_zero if qcfg.sym else torch.round(-min_val * best_p / scale_best)
+    q = torch.clamp(torch.round(block_f / scale_best + zero_best), 0, maxq)
+    dequant_best = (q - zero_best) * scale_best
 
     return dequant_best, scale_best, zero_best
