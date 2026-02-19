@@ -744,6 +744,14 @@ class QuantizeConfig():
                   "moe={'routing': {'class': 'ExpertsRoutingOverride', 'num_experts_per_tok': 'all'}}"}
     )
 
+    # Device for storing calibration data when separate from compute device
+    # This device will be excluded from forward pass to preserve VRAM for calibration data
+    # Special value "balanced" distributes samples across all GPUs via round-robin
+    calibration_data_device: Optional[Union[str, torch.device]] = field(
+        default=None,
+        metadata={"help": "Device for storing calibration data. 'balanced' = round-robin across GPUs, or specify device like 'cuda:1'."}
+    )
+
     def __post_init__(self):
         fields_info = fields(self)
 
@@ -957,6 +965,16 @@ class QuantizeConfig():
             raise ValueError(
                 f"QuantizeConfig: `gc_mode` must be one of {[v.value for v in GcMode]}."
             )
+
+        # Normalize calibration_data_device to canonical form if it's a specific device (not "balanced")
+        if self.calibration_data_device is not None:
+            if isinstance(self.calibration_data_device, str):
+                if self.calibration_data_device.lower() == "balanced":
+                    self.calibration_data_device = "balanced"
+                else:
+                    # Import here to avoid circular import
+                    from ..utils.looper_helpers import _canonical_device
+                    self.calibration_data_device = _canonical_device(torch.device(self.calibration_data_device))
 
     def extension_set(self, key: str, value: Any):
         if self.adapter is None:
