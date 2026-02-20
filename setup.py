@@ -865,7 +865,7 @@ class CachedWheelsCommand(_bdist_wheel):
         if FORCE_BUILD or xpu_avail:
             return super().run()
 
-        python_version = f"cp{sys.version_info.major}{sys.version_info.minor}{sys.abiflags}"
+        python_version = f"cp{sys.version_info.major}{sys.version_info.minor}{sys.abiflag}"
 
         wheel_filename = f"gptqmodel-{gptqmodel_version}+{get_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
 
