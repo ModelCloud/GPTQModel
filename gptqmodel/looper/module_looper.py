@@ -852,6 +852,12 @@ class ModuleLooper():
 
         devices = select_forward_devices(cur_layer_device)
 
+        # Exclude calibration data device from forward pass to preserve VRAM for calibration data
+        # Only when a specific device is set (not for "balanced" mode which uses all devices)
+        calib_device_cfg = self.gptq_model.quantize_config.calibration_data_device
+        if calib_device_cfg is not None and calib_device_cfg != "balanced":
+            devices = [d for d in devices if d != calib_device_cfg]
+
         if len(devices) <= 1:
             return self._run_forward_batches_single(
                 module=module,
@@ -943,6 +949,9 @@ class ModuleLooper():
                     if module_target is not None:
                         exec_device = module_target
 
+                # Capture input device before moving - used for output placement
+                input_device = layer_inputs[batch_idx][0].device if layer_inputs[batch_idx] else cur_layer_device
+                
                 layer_input = [move_to(inp, device=exec_device) for inp in layer_inputs[batch_idx]]
 
                 raw_mask = attention_masks[batch_idx]
@@ -1011,7 +1020,9 @@ class ModuleLooper():
 
                 if need_outputs and module_output is not None:
                     primary = module_output[0] if isinstance(module_output, tuple) else module_output
-                    primary = move_to(primary, device=cur_layer_device)
+                    # Move output back to the same device where input was stored
+                    # This preserves calibration data placement
+                    primary = move_to(primary, device=input_device)
                     outputs.append([primary])
 
                 # Release module_output promptly after extracting what we need
@@ -1174,23 +1185,43 @@ class ModuleLooper():
             segment_start = 0
             num_devices = len(forward_devices)
 
-            for index, device in enumerate(forward_devices):
-                # Split the outstanding batches across forward_devices so that each accelerator
-                # receives a contiguous slice.
-                remaining_batches = max(total_batches - segment_start, 0)
-                remaining_devices = max(num_devices - index, 1)
-                segment_length = remaining_batches // remaining_devices
-                remainder = remaining_batches % remaining_devices
-                if remainder > 0:
-                    segment_length += 1
-
-                if segment_length <= 0:
+            # Check if balanced mode is active - if so, assign batches where data already resides
+            calib_device_cfg = self.gptq_model.quantize_config.calibration_data_device
+            is_balanced_mode = calib_device_cfg == "balanced"
+            
+            if is_balanced_mode:
+                # In balanced mode, assign each batch to the device where its input resides
+                for device in forward_devices:
                     device_segments[device] = []
-                    continue
+                for batch_idx in range(total_batches):
+                    if layer_inputs[batch_idx]:
+                        batch_device = layer_inputs[batch_idx][0].device
+                        # Check if this device is in our forward_devices, otherwise use first one
+                        if batch_device in device_segments:
+                            device_segments[batch_device].append(batch_idx)
+                        else:
+                            # Fallback: data is on a device not in forward_devices, use round-robin
+                            fallback_device = forward_devices[batch_idx % num_devices]
+                            device_segments[fallback_device].append(batch_idx)
+            else:
+                # Default behavior: split batches contiguously across devices
+                for index, device in enumerate(forward_devices):
+                    # Split the outstanding batches across forward_devices so that each accelerator
+                    # receives a contiguous slice.
+                    remaining_batches = max(total_batches - segment_start, 0)
+                    remaining_devices = max(num_devices - index, 1)
+                    segment_length = remaining_batches // remaining_devices
+                    remainder = remaining_batches % remaining_devices
+                    if remainder > 0:
+                        segment_length += 1
 
-                segment_end = min(segment_start + segment_length, total_batches)
-                device_segments[device] = list(range(segment_start, segment_end))
-                segment_start = segment_end
+                    if segment_length <= 0:
+                        device_segments[device] = []
+                        continue
+
+                    segment_end = min(segment_start + segment_length, total_batches)
+                    device_segments[device] = list(range(segment_start, segment_end))
+                    segment_start = segment_end
 
             max_segment_length = 0
             for indices in device_segments.values():
@@ -1279,7 +1310,10 @@ class ModuleLooper():
                 primary = module_output[0]
             else:
                 primary = module_output
-            primary = move_to(primary, device=cur_layer_device)
+            # Move output back to the same device where input was stored
+            # This preserves calibration data placement
+            input_device = layer_inputs[idx][0].device if layer_inputs[idx] else cur_layer_device
+            primary = move_to(primary, device=input_device)
             ordered_outputs.append([primary])
 
         return ordered_outputs

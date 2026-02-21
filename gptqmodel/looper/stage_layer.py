@@ -128,10 +128,9 @@ def run_layer_stage(
                     failsafe=failsafe,
                     layer_module=module,
                 )
-                # Skip empty subsets caused by per-layer structure differences or dynamic config exclusions;
-                # otherwise awq_processor may fail to quantize
-                if subset:
-                    subsets.append(subset)
+                # Note: Empty subsets are handled by _handle_empty_subset in run_subset_stage
+                # which skips quantization but still produces forward_context for replay
+                subsets.append(subset)
 
             subset_total = len(subsets)
             for index, subset in enumerate(subsets):
