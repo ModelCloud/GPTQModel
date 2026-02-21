@@ -109,6 +109,7 @@ from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
+from .definitions.llada2 import LLaDA2MoeQModel 
 from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
@@ -251,6 +252,7 @@ MODEL_MAP = {
     "nemotron_h": NemotronHQModel,
     "bailing_moe": BailingMoeQModel,
     "lfm2_moe": LFM2MoeQModel,
+    "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
     "afmoe": AfMoeQModel,
     "voxtral": VoxtralGPTQ,
