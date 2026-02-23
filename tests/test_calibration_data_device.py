@@ -612,7 +612,7 @@ class _DummyGPTQModelForLooper:
         self.lm_head = None
         self.quant_region_timer = None
         self.moe_lifecycle_hooks = None
-        self.supported_vram_strategies = None
+        # Don't set supported_vram_strategies so getattr uses default value
 
 
 def test_compute_device_filter_applied_to_quant_devices(monkeypatch):
@@ -1174,13 +1174,18 @@ class TestCalibrationDataDeviceIntegration:
         _skip_if_model_missing(self.NATIVE_MODEL_ID)
 
         from transformers import AutoTokenizer
-        from models.model_test import ModelTest
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.NATIVE_MODEL_ID, use_fast=True)
         if not self.tokenizer.pad_token_id:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        self.calibration_dataset = ModelTest.load_dataset(self.tokenizer, self.DATASET_SIZE)
+        # Use simple text samples instead of external dataset
+        self.calibration_data = [
+            "The quick brown fox jumps over the lazy dog.",
+            "Machine learning is transforming technology.",
+            "Natural language processing enables computers to understand text.",
+            "Quantization reduces model size while maintaining accuracy.",
+        ]
 
     def test_calibration_data_device_cpu_integration(self, tmp_path):
         """Integration test: quantization with calibration_data_device='cpu'."""
@@ -1193,7 +1198,7 @@ class TestCalibrationDataDeviceIntegration:
         )
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
-        model.quantize(self.calibration_dataset, batch_size=1)
+        model.quantize(self.calibration_data, batch_size=1)
 
         save_path = str(tmp_path / "quantized")
         model.save(save_path)
@@ -1220,7 +1225,7 @@ class TestCalibrationDataDeviceIntegration:
         )
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
-        model.quantize(self.calibration_dataset, batch_size=1)
+        model.quantize(self.calibration_data, batch_size=1)
 
         save_path = str(tmp_path / "quantized_balanced")
         model.save(save_path)
@@ -1248,7 +1253,7 @@ class TestCalibrationDataDeviceIntegration:
         )
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
-        model.quantize(self.calibration_dataset, batch_size=1)
+        model.quantize(self.calibration_data, batch_size=1)
 
         save_path = str(tmp_path / "quantized_cuda1")
         model.save(save_path)
