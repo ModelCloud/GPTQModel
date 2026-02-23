@@ -953,6 +953,8 @@ def test_output_moved_to_input_device_in_single_mode(monkeypatch):
     # Input is on CPU (calibration data device)
     layer_inputs = [[torch.zeros(1, 1, device=torch.device("cpu"))]]
 
+    # Use is_lm_head_module=True to avoid passing attention_mask/use_cache kwargs
+    # that plain nn.Linear doesn't accept
     module = torch.nn.Linear(1, 1)
 
     outputs = looper._run_forward_batches_single(
@@ -963,7 +965,7 @@ def test_output_moved_to_input_device_in_single_mode(monkeypatch):
         position_ids=[],
         attention_masks=[None],
         cur_layer_device=torch.device("cpu"),
-        is_lm_head_module=False,
+        is_lm_head_module=True,  # Avoid kwargs that nn.Linear doesn't accept
         shared_kv_cache_dict={},
         layer_index=0,
         need_outputs=True,
@@ -1179,12 +1181,13 @@ class TestCalibrationDataDeviceIntegration:
         if not self.tokenizer.pad_token_id:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        # Use simple text samples instead of external dataset
+        # Use longer text samples to pass calibration_data_min_length check (default=10 tokens)
+        # These samples are long enough to not be filtered out
         self.calibration_data = [
-            "The quick brown fox jumps over the lazy dog.",
-            "Machine learning is transforming technology.",
-            "Natural language processing enables computers to understand text.",
-            "Quantization reduces model size while maintaining accuracy.",
+            "The quick brown fox jumps over the lazy dog. This sentence contains every letter of the alphabet and is commonly used for testing purposes in typography and keyboard layouts.",
+            "Machine learning is transforming technology by enabling computers to learn from data and make predictions or decisions without being explicitly programmed for each specific task.",
+            "Natural language processing enables computers to understand text and human language, allowing for applications like chatbots, translation services, and sentiment analysis tools.",
+            "Quantization reduces model size while maintaining accuracy by converting floating-point numbers to lower precision representations, making models faster and more memory efficient.",
         ]
 
     def test_calibration_data_device_cpu_integration(self, tmp_path):
