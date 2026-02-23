@@ -852,12 +852,6 @@ class ModuleLooper():
 
         devices = select_forward_devices(cur_layer_device)
 
-        # Exclude calibration data device from forward pass to preserve VRAM for calibration data
-        # Only when a specific device is set (not for "balanced" mode which uses all devices)
-        calib_device_cfg = self.gptq_model.quantize_config.calibration_data_device
-        if calib_device_cfg is not None and calib_device_cfg != "balanced":
-            devices = [d for d in devices if d != calib_device_cfg]
-
         if len(devices) <= 1:
             return self._run_forward_batches_single(
                 module=module,
