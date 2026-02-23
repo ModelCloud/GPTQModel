@@ -239,13 +239,38 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
         "gptqmodel.looper.stage_inputs_capture.DEVICE_THREAD_POOL",
         _create_mock_thread_pool(),
     )
+
+    # Mock ctx to be a proper context manager that combines multiple context managers
+    def mock_ctx(*context_managers):
+        class CombinedContextManager:
+            def __enter__(self):
+                for cm in context_managers:
+                    cm.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                for cm in reversed(context_managers):
+                    cm.__exit__(*args)
+                return False
+        return CombinedContextManager()
+
     monkeypatch.setattr(
         "gptqmodel.looper.stage_inputs_capture.ctx",
-        lambda *args: lambda f: f,
+        mock_ctx,
     )
+
+    # Mock device_ctx to be a proper context manager
+    def mock_device_ctx(device):
+        class DeviceContextManager:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+        return DeviceContextManager()
+
     monkeypatch.setattr(
         "gptqmodel.looper.stage_inputs_capture.device_ctx",
-        lambda d: lambda: None,
+        mock_device_ctx,
     )
 
     capture = StageInputsCapture(looper, logger=_create_mock_logger())
@@ -293,8 +318,9 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
         # Filter out cuda:0 (e.g., reserved for model layers)
         return [d for d in devices if d != torch.device("cuda:0")]
 
+    # Patch at source module since import happens inside the function
     monkeypatch.setattr(
-        "gptqmodel.looper.stage_inputs_capture.select_forward_devices",
+        "gptqmodel.utils.looper_helpers.select_forward_devices",
         fake_select_forward_devices,
     )
 
@@ -355,13 +381,38 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
         "gptqmodel.looper.stage_inputs_capture.DEVICE_THREAD_POOL",
         _create_mock_thread_pool(),
     )
+
+    # Mock ctx to be a proper context manager that combines multiple context managers
+    def mock_ctx(*context_managers):
+        class CombinedContextManager:
+            def __enter__(self):
+                for cm in context_managers:
+                    cm.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                for cm in reversed(context_managers):
+                    cm.__exit__(*args)
+                return False
+        return CombinedContextManager()
+
     monkeypatch.setattr(
         "gptqmodel.looper.stage_inputs_capture.ctx",
-        lambda *args: lambda f: f,
+        mock_ctx,
     )
+
+    # Mock device_ctx to be a proper context manager
+    def mock_device_ctx(device):
+        class DeviceContextManager:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+        return DeviceContextManager()
+
     monkeypatch.setattr(
         "gptqmodel.looper.stage_inputs_capture.device_ctx",
-        lambda d: lambda: None,
+        mock_device_ctx,
     )
     monkeypatch.setattr(
         "gptqmodel.looper.stage_inputs_capture.move_to",
@@ -414,8 +465,9 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
     def compute_device_filter_returns_empty(devices):
         return []  # Invalid filter returning empty
 
+    # Patch at source module since import happens inside the function
     monkeypatch.setattr(
-        "gptqmodel.looper.stage_inputs_capture.select_forward_devices",
+        "gptqmodel.utils.looper_helpers.select_forward_devices",
         fake_select_forward_devices,
     )
 
@@ -472,13 +524,38 @@ def test_stage_capture_balanced_mode_empty_filter_fallback(monkeypatch):
         "gptqmodel.looper.stage_inputs_capture.DEVICE_THREAD_POOL",
         _create_mock_thread_pool(),
     )
+
+    # Mock ctx to be a proper context manager that combines multiple context managers
+    def mock_ctx(*context_managers):
+        class CombinedContextManager:
+            def __enter__(self):
+                for cm in context_managers:
+                    cm.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                for cm in reversed(context_managers):
+                    cm.__exit__(*args)
+                return False
+        return CombinedContextManager()
+
     monkeypatch.setattr(
         "gptqmodel.looper.stage_inputs_capture.ctx",
-        lambda *args: lambda f: f,
+        mock_ctx,
     )
+
+    # Mock device_ctx to be a proper context manager
+    def mock_device_ctx(device):
+        class DeviceContextManager:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+        return DeviceContextManager()
+
     monkeypatch.setattr(
         "gptqmodel.looper.stage_inputs_capture.device_ctx",
-        lambda d: lambda: None,
+        mock_device_ctx,
     )
     monkeypatch.setattr(
         "gptqmodel.looper.stage_inputs_capture.move_to",
