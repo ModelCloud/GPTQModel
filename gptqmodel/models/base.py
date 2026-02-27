@@ -179,6 +179,10 @@ class BaseQModel(nn.Module):
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     loader = AutoModelForCausalLM
 
+    # Some models have multiple configurations.
+    # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
+    config_class = None
+
     # monkey patch api for trust_remote_code=True models that have broken transformer compat
     require_monkeypatch = False
 
