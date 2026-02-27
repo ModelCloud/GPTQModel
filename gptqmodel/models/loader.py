@@ -156,6 +156,11 @@ def ModelLoader(cls):
 
         tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
 
+        # Some models have multiple configurations.
+        # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
+        if cls.config_class is not None and cls.config_class == config.sub_configs.get("text_config", None):
+            config = config.get_text_config()
+
         if quantize_config is None:
             model_init_kwargs["device_map"] =device_map if device_map else "auto"
             model_init_kwargs["dtype"] = dtype
@@ -535,6 +540,11 @@ def ModelLoader(cls):
                 elif is_flash_attn_2_available():
                     args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
                     log.info("Loader: Auto enabling flash attention2")
+
+            # Some models have multiple configurations.
+            # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
+            if cls.config_class == config.sub_configs.get("text_config", None):
+                config = config.get_text_config()
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, dtype=dtype, **args
