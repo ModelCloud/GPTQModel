@@ -428,7 +428,7 @@ jobs:
 
       - name: Upload artifact
         if: env.SHOULD_RUN == 1
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
           overwrite: false
@@ -504,7 +504,7 @@ jobs:
           echo "UPLOADED=1" >> $GITHUB_ENV
 
       - name: Upload to artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         continue-on-error: ${{ env.UPLOADED == '1' }}
         with:
           name: ${{ env.WHL_NAME }}
@@ -591,7 +591,7 @@ jobs:
           twine check dist/$whl
 
       - name: Upload to artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.WHL_NAME }}
           path: dist/${{ env.WHL_NAME }}

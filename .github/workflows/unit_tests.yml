@@ -260,7 +260,7 @@ jobs:
       #          cp dist/gptqmodel_source.tar.gz $DIR/
 
       - name: Upload source to github artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: source
           path: dist/gptqmodel_source.tar.gz
@@ -332,7 +332,7 @@ jobs:
 
       - name: Upload wheel to github artifact
         if: github.event.inputs.artifact_id == '' && !cancelled()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: whl
           path: dist/${{ env.WHL_NAME }}
@@ -455,7 +455,7 @@ jobs:
 
       # - name: Download source from github
       #   if: env.SOURCE_DOWNLOADED == '' && !cancelled()
-      #   uses: actions/download-artifact@v7
+      #   uses: actions/download-artifact@v8
       #   with:
       #     name: source
       #     path: dist
@@ -497,7 +497,7 @@ jobs:
 
       - name: Download artifact from github
         if: env.WHL_DOWNLOADED == '' && !cancelled()
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: whl
           path: dist
