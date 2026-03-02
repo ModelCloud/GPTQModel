@@ -20,6 +20,7 @@
 </p>
 
 ## Latest News
+* 02/28/2026 [main]: ✨Qwen 3.5 model support added. 
 * 02/09/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): ✨New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
 `AWQ` `qcfg.zero_point` property has been merged with a unified `sym` symmetry property; `zero_point=True` is now `sym=False`.
 Fixed `AWQ` `sym=True` packing/inference and quantization compatibility with some Qwen3 models. Exaone 4.0 support.
@@ -195,7 +196,7 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 | DeepSeek-V2-Lite  | ✅ | Granite       | ✅ | LongLLaMA      | ✅ | Ovis 1.6/2     | ✅ | Seed-OSS            | ✅ |
 | Dream             | ✅ | GRIN-MoE      | ✅ | Instella       | ✅ | Phi 1-4        | ✅ | Voxtral             | ✅ |
 | ERNIE 4.5         | ✅ | GLM 4/4V/4MoE | ✅ | MiniCPM3       | ✅ | PanGu-α        | ✅ | XVERSE              | ✅ |
-| Brumby            | ✅ | Hymba         | ✅ | Mistral        | ✅ | Qwen 1/2/3     | ✅ | Minimax M2          | ✅ |
+| Brumby            | ✅ | Hymba         | ✅ | Mistral        | ✅ | Qwen 1/2/3/3.5     | ✅ | Minimax M2          | ✅ |
 
 
 ## Platform and HW Support 
