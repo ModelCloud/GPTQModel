@@ -224,6 +224,7 @@ MODEL_MAP = {
     "qwen3_omni_moe": Qwen3OmniMoeGPTQ,
     "qwen3_vl": Qwen3_VLQModel,
     "qwen3_5": Qwen3_5QModel,
+    "qwen3_5_text": Qwen3_5QModel,
     "qwen3_5_moe": Qwen3_5_MoeQModel,
     "dbrx": DbrxQModel,
     "dbrx_converted": DbrxConvertedQModel,

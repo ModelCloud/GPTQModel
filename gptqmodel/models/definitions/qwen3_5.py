@@ -29,8 +29,6 @@ class Qwen3_5QModel(LlamaQModel):
                 "norm:!",
                 "in_proj_qkv:0",
                 "in_proj_z:1",
-                "in_proj_b:1",
-                "in_proj_a:1",
                 "out_proj:2",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
