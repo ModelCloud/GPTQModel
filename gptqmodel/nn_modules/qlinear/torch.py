@@ -365,11 +365,27 @@ class TorchQuantLinear(PackableQuantLinear):
         self._zeros_cache_state = cache_state
         return zeros
 
-    def _stream_g_idx_long(self):
-        cache_state = (self.g_idx.data_ptr(), self.g_idx.device)
-        if self._g_idx_long_cache is None or self._g_idx_long_cache_state != cache_state:
+    def _stream_g_idx_long(self, target_device: torch.device = None):
+        if target_device is None:
+            if self.qweight is not None:
+                target_device = self.qweight.device
+            else:
+                target_device = self.g_idx.device
+
+        if self._g_idx_long_cache is not None and self._g_idx_long_cache.device == target_device:
+            return self._g_idx_long_cache
+
+        if self.g_idx.device == target_device:
             self._g_idx_long_cache = self.g_idx.long()
-            self._g_idx_long_cache_state = cache_state
+        else:
+            non_blocking = self.g_idx.device.type == "cpu" and target_device.type in {"cuda", "xpu"}
+            self._g_idx_long_cache = self.g_idx.to(
+                device=target_device,
+                dtype=torch.long,
+                non_blocking=non_blocking,
+            )
+
+        self._g_idx_long_cache_state = (target_device.type, target_device.index)
         return self._g_idx_long_cache
 
     def _stream_reset_cache(self):
@@ -378,6 +394,16 @@ class TorchQuantLinear(PackableQuantLinear):
         self._g_idx_long_cache = None
         self._g_idx_long_cache_state = None
         self._stream_workspace.clear()
+
+    def _maybe_offload_g_idx_to_cpu(self):
+        if self.training or self.g_idx is None:
+            return
+        if self.g_idx.device.type not in {"cuda", "xpu"}:
+            return
+        # Keep original device g_idx when Triton dequant is active/usable.
+        if self._triton_dequant_enabled and self._can_use_triton_dequant():
+            return
+        self.g_idx = self.g_idx.to(device="cpu")
 
     def _device_cache_key(self, device: torch.device) -> int:
         if device.index is not None:
@@ -554,7 +580,8 @@ class TorchQuantLinear(PackableQuantLinear):
 
     def _dequantize_weight_cached_248(self, num_itr: int = 1) -> torch.Tensor:
         zeros = self._stream_decode_qzeros()
-        g_idx_long = self._stream_g_idx_long()
+        g_idx_long = self._stream_g_idx_long(target_device=self.qweight.device)
+        self._maybe_offload_g_idx_to_cpu()
 
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(

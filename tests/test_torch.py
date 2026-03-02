@@ -184,6 +184,29 @@ def test_lookahead_prefetch_single_step():
     assert torch.float16 not in consumer._prefetched_weights
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda required for g_idx offload test")
+def test_cached_dequant_offloads_g_idx_to_cpu_on_cuda():
+    module = _make_module(torch.device("cuda"))
+    module._triton_dequant_enabled = False
+    module._stream_reset_cache()
+
+    assert module.g_idx.device.type == "cuda"
+    assert module._g_idx_long_cache is None
+
+    with torch.inference_mode():
+        weights = module.dequantize_weight(num_itr=1)
+
+    assert weights.device.type == "cuda"
+    assert module._g_idx_long_cache is not None
+    assert module._g_idx_long_cache.device.type == "cuda"
+    assert module.g_idx.device.type == "cpu"
+
+    # Cached path should remain usable after offloading original g_idx.
+    with torch.inference_mode():
+        weights_after = module.dequantize_weight(num_itr=1)
+    assert weights_after.device.type == "cuda"
+
+
 def test_configure_default_lookahead_chain():
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
