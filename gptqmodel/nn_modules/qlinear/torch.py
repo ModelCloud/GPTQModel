@@ -91,7 +91,11 @@ class TorchQuantLinear(PackableQuantLinear):
         self._stream_tile_cols = int(os.environ.get("GPTQ_TORCH_STREAM_TILE", "512"))
         self._stream_double_buffers = 2
         self._g_idx_long_cache = None
+        self._g_idx_long_cache_state = None
         self._zeros_cache = None
+        self._zeros_cache_state = None
+        self._stream_dequant_streams = {}
+        self._stream_workspace = {}
         self._cache_enabled = bool(int(os.environ.get("GPTQ_TORCH_CACHE_WEIGHTS", "0")))
         triton_flag = os.environ.get("GPTQ_TORCH_TRITON_DEQUANT")
         if triton_flag is None:
@@ -105,6 +109,7 @@ class TorchQuantLinear(PackableQuantLinear):
         self._lookahead_next = None
         self._prefetched_weights = {}
         self._prefetch_events = {}
+        self._prefetch_streams = {}
 
         # if self.group_size != self.in_features:
         #     self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
@@ -137,6 +142,9 @@ class TorchQuantLinear(PackableQuantLinear):
             and self._can_use_triton_dequant()
         ):
             return self._dequantize_weight_triton()
+
+        if not self.training and self.bits in (2, 4, 8):
+            return self._dequantize_weight_cached_248(num_itr=num_itr)
 
         return super().dequantize_weight(num_itr=num_itr)
 
@@ -176,9 +184,11 @@ class TorchQuantLinear(PackableQuantLinear):
                         self.qzeros_data_v1 = self.qzeros.data.clone()
                         convert_gptq_v1_to_v2_format_module(self, bits=self.bits, pack_dtype=self.pack_dtype)
                         self.qzeros_data_v2 = self.qzeros.data
+                        self._stream_reset_cache()
                     else:
                         self.qzeros.data = self.qzeros_data_v2
                         self.qzero_format(format=2)
+                        self._stream_reset_cache()
 
             # training switching to inference/eval
             else:
@@ -186,6 +196,7 @@ class TorchQuantLinear(PackableQuantLinear):
                     # switch qzero back to v1 for inference/eval
                     self.qzeros.data = self.qzeros_data_v1
                     self.qzero_format(format=1)
+                    self._stream_reset_cache()
 
         return super().train(mode=mode)
 
@@ -202,6 +213,8 @@ class TorchQuantLinear(PackableQuantLinear):
         cached = self._maybe_get_cached_weights(x)
         if cached is not None:
             out = torch.matmul(x, cached).reshape(out_shape)
+            if self.bias is not None:
+                out.add_(self.bias)
         elif self._should_use_streaming(x):
             out = self._forward_streaming(x, out_shape)
         else:
@@ -217,7 +230,6 @@ class TorchQuantLinear(PackableQuantLinear):
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
         self._update_cached_weights(weights)
         out = torch.matmul(x, weights).reshape(out_shape)
-
         if self.bias is not None:
             out.add_(self.bias)
 
@@ -232,13 +244,10 @@ class TorchQuantLinear(PackableQuantLinear):
         device = x.device
 
         out = torch.empty((x.shape[0], self.out_features), dtype=x.dtype, device=device)
-        buffers = [
-            torch.empty((self.in_features, tile), dtype=x.dtype, device=device)
-            for _ in range(self._stream_double_buffers)
-        ]
+        buffers = self._stream_get_workspace(device=device, dtype=x.dtype, tile=tile)
         widths = [0 for _ in range(self._stream_double_buffers)]
 
-        stream_dequant = torch.cuda.Stream(device=device)
+        stream_dequant = self._stream_get_dequant_stream(device)
         zeros = self._stream_decode_qzeros()
         g_idx = self._stream_g_idx_long()
 
@@ -263,7 +272,6 @@ class TorchQuantLinear(PackableQuantLinear):
             compute_stream.wait_stream(stream_dequant)
             width = widths[buffer_idx]
             start = tile_idx * tile
-            start + width
 
             out_slice = out.narrow(1, start, width)
             out_slice.zero_()
@@ -314,8 +322,8 @@ class TorchQuantLinear(PackableQuantLinear):
         if tensor is None:
             return None
         event = self._prefetch_events.pop(dtype, None)
-        if event is not None and HAS_CUDA:
-            event.synchronize()
+        if event is not None and HAS_CUDA and tensor.device.type == "cuda":
+            torch.cuda.current_stream(device=tensor.device).wait_event(event)
         return tensor
 
     def _stream_dequantize_tile(
@@ -344,7 +352,8 @@ class TorchQuantLinear(PackableQuantLinear):
         return width
 
     def _stream_decode_qzeros(self):
-        if self._zeros_cache is not None and self._zeros_cache.device == self.qzeros.device:
+        cache_state = (self.qzeros.data_ptr(), self.qzeros.device, self.scales.shape)
+        if self._zeros_cache is not None and self._zeros_cache_state == cache_state:
             return self._zeros_cache
 
         zeros = torch.bitwise_right_shift(
@@ -353,16 +362,51 @@ class TorchQuantLinear(PackableQuantLinear):
         ).to(self.dequant_dtype)
         zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
         self._zeros_cache = zeros
+        self._zeros_cache_state = cache_state
         return zeros
 
     def _stream_g_idx_long(self):
-        if self._g_idx_long_cache is None or self._g_idx_long_cache.device != self.g_idx.device:
+        cache_state = (self.g_idx.data_ptr(), self.g_idx.device)
+        if self._g_idx_long_cache is None or self._g_idx_long_cache_state != cache_state:
             self._g_idx_long_cache = self.g_idx.long()
+            self._g_idx_long_cache_state = cache_state
         return self._g_idx_long_cache
 
     def _stream_reset_cache(self):
         self._zeros_cache = None
+        self._zeros_cache_state = None
         self._g_idx_long_cache = None
+        self._g_idx_long_cache_state = None
+        self._stream_workspace.clear()
+
+    def _device_cache_key(self, device: torch.device) -> int:
+        if device.index is not None:
+            return device.index
+        return torch.cuda.current_device()
+
+    def _stream_get_dequant_stream(self, device: torch.device) -> torch.cuda.Stream:
+        key = self._device_cache_key(device)
+        stream = self._stream_dequant_streams.get(key)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            self._stream_dequant_streams[key] = stream
+        return stream
+
+    def _stream_get_workspace(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+        tile: int,
+    ) -> list[torch.Tensor]:
+        key = (self._device_cache_key(device), dtype, tile, self.in_features)
+        workspace = self._stream_workspace.get(key)
+        if workspace is None:
+            workspace = [
+                torch.empty((self.in_features, tile), dtype=dtype, device=device)
+                for _ in range(self._stream_double_buffers)
+            ]
+            self._stream_workspace[key] = workspace
+        return workspace
 
     def _should_use_streaming(self, x: torch.Tensor) -> bool:
         if not self._streaming_enabled:
@@ -451,7 +495,7 @@ class TorchQuantLinear(PackableQuantLinear):
         device = self.list_buffers()[0].device
         if device.type != "cuda":
             return
-        stream = torch.cuda.Stream(device=device)
+        stream = self._prefetch_get_stream(device)
         with torch.cuda.stream(stream):
             num_itr = max(1, self.g_idx.shape[0] // self.in_features)
             weights = self.dequantize_weight(num_itr=num_itr).to(dtype)
@@ -459,6 +503,14 @@ class TorchQuantLinear(PackableQuantLinear):
         event.record(stream)
         self._prefetched_weights[dtype] = weights
         self._prefetch_events[dtype] = event
+
+    def _prefetch_get_stream(self, device: torch.device) -> torch.cuda.Stream:
+        key = self._device_cache_key(device)
+        stream = self._prefetch_streams.get(key)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            self._prefetch_streams[key] = stream
+        return stream
 
     # clear gptq only weights: useful in de-quantization
     def _empty_gptq_only_weights(self):
@@ -499,6 +551,35 @@ class TorchQuantLinear(PackableQuantLinear):
             self.maxq,
         )
         return weights
+
+    def _dequantize_weight_cached_248(self, num_itr: int = 1) -> torch.Tensor:
+        zeros = self._stream_decode_qzeros()
+        g_idx_long = self._stream_g_idx_long()
+
+        weight = torch.bitwise_and(
+            torch.bitwise_right_shift(
+                self.qweight.unsqueeze(1).expand(-1, self.pack_factor, -1),
+                self.wf_unsqueeze_neg_one,
+            ).to(self.dequant_dtype),
+            self.maxq,
+        )
+        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
+
+        if num_itr == 1:
+            return self.scales[g_idx_long] * (weight - zeros[g_idx_long])
+
+        num_dim = self.g_idx.shape[0] // num_itr
+        weights = []
+        for i in range(num_itr):
+            start = i * num_dim
+            end = (i + 1) * num_dim
+            scale_i = self.scales[:, start:end]
+            weight_i = weight[:, start:end]
+            zeros_i = zeros[:, start:end]
+            g_idx_i = g_idx_long[start:end]
+            weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
+
+        return torch.cat(weights, dim=1)
 
 def dequantize_model(model: PreTrainedModel):
     for name, module in model.named_modules():

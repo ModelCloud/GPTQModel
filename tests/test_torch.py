@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.lookahead import configure_default_lookahead
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
@@ -238,3 +239,63 @@ def test_configure_default_lookahead_chain():
     for module in (gate_proj, up_proj, down_proj):
         assert module._lookahead_next is None
         assert module._lookahead_enabled
+
+
+def test_cpu_dequant_parity_and_g_idx_cache_allocation():
+    bits = 4
+    group_size = 128
+    in_features = 1024
+    out_features = 1024
+
+    torch.manual_seed(0)
+    linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
+
+    module = TorchQuantLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=torch.int32,
+        bias=False,
+    )
+    # Keep this unit deterministic by bypassing torch.compile wrappers.
+    module.optimize = lambda *args, **kwargs: None
+    module.pack_block(linear, scales.T, zeros.T, g_idx=g_idx)
+    module.post_init()
+    module.eval()
+    module = module.to(device=torch.device("cpu"))
+
+    # Cache should be lazy and absent before first fast-path dequant call.
+    assert module._g_idx_long_cache is None
+    assert module._g_idx_long_cache_state is None
+
+    with torch.inference_mode():
+        baseline = PackableQuantLinear.dequantize_weight(module, num_itr=1)
+        current = module.dequantize_weight(num_itr=1)
+
+    torch.testing.assert_close(current, baseline, rtol=0, atol=0)
+
+    # First call materializes persistent int64 g_idx cache.
+    assert module._g_idx_long_cache is not None
+    assert module._g_idx_long_cache.dtype == torch.int64
+    assert module._g_idx_long_cache.device.type == "cpu"
+
+    expected_cache_bytes = module.g_idx.numel() * torch.tensor(0, dtype=torch.int64).element_size()
+    actual_cache_bytes = module._g_idx_long_cache.numel() * module._g_idx_long_cache.element_size()
+    assert actual_cache_bytes == expected_cache_bytes
+
+    # Cache should be reused across subsequent dequant calls.
+    cache_ptr = module._g_idx_long_cache.data_ptr()
+    with torch.inference_mode():
+        _ = module.dequantize_weight(num_itr=1)
+    assert module._g_idx_long_cache.data_ptr() == cache_ptr
+
+    # Explicit reset should drop cache and allow re-allocation on next call.
+    module._stream_reset_cache()
+    assert module._g_idx_long_cache is None
+    assert module._g_idx_long_cache_state is None
+    with torch.inference_mode():
+        _ = module.dequantize_weight(num_itr=1)
+    assert module._g_idx_long_cache is not None
