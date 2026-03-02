@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 
+from .definitions.qwen3_5_moe import Qwen3_5_MoeQModel
 from ..utils.logger import setup_logger
 
 
@@ -224,6 +225,7 @@ MODEL_MAP = {
     "qwen3_vl": Qwen3_VLQModel,
     "qwen3_5": Qwen3_5QModel,
     "qwen3_5_text": Qwen3_5QModel,
+    "qwen3_5_moe": Qwen3_5_MoeQModel,
     "dbrx": DbrxQModel,
     "dbrx_converted": DbrxConvertedQModel,
     "deepseek_v2": DeepSeekV2QModel,
