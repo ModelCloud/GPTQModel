@@ -136,6 +136,8 @@ class TorchQuantLinear(PackableQuantLinear):
         self._reset_prefetch_state()
 
     def dequantize_weight(self, num_itr: int = 1):
+        # Triton dequant currently handles the common single-iteration layout.
+        # Multi-iteration requests (num_itr > 1) are routed to the torch path below.
         if (
             num_itr == 1
             and self._triton_dequant_enabled
@@ -143,6 +145,8 @@ class TorchQuantLinear(PackableQuantLinear):
         ):
             return self._dequantize_weight_triton()
 
+        # Eval-time fast path for 2/4/8-bit torch dequant.
+        # This is also the fallback when Triton is enabled but not eligible.
         if not self.training and self.bits in (2, 4, 8):
             return self._dequantize_weight_cached_248(num_itr=num_itr)
 
