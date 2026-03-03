@@ -600,14 +600,18 @@ class TorchQuantLinear(PackableQuantLinear):
             return self.scales[g_idx_long] * (weight - zeros[g_idx_long])
 
         num_dim = self.g_idx.shape[0] // num_itr
+        out_dim = weight.shape[1] // num_itr
         weights = []
         for i in range(num_itr):
-            start = i * num_dim
-            end = (i + 1) * num_dim
-            scale_i = self.scales[:, start:end]
-            weight_i = weight[:, start:end]
-            zeros_i = zeros[:, start:end]
-            g_idx_i = g_idx_long[start:end]
+            row_start = i * num_dim
+            row_end = (i + 1) * num_dim
+            col_start = i * out_dim
+            col_end = (i + 1) * out_dim if i < (num_itr - 1) else weight.shape[1]
+
+            scale_i = self.scales[:, col_start:col_end]
+            weight_i = weight[row_start:row_end, col_start:col_end]
+            zeros_i = zeros[:, col_start:col_end]
+            g_idx_i = g_idx_long[row_start:row_end]
             weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
 
         return torch.cat(weights, dim=1)

@@ -322,3 +322,38 @@ def test_cpu_dequant_parity_and_g_idx_cache_allocation():
     with torch.inference_mode():
         _ = module.dequantize_weight(num_itr=1)
     assert module._g_idx_long_cache is not None
+
+
+def test_cpu_cached_dequant_num_itr_matches_packable():
+    bits = 4
+    group_size = 128
+    in_features = 1024
+    out_features = 1024
+    num_itr = 4
+
+    torch.manual_seed(0)
+    linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
+
+    module = TorchQuantLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=torch.int32,
+        bias=False,
+    )
+    module.optimize = lambda *args, **kwargs: None
+    module.pack_block(linear, scales.T, zeros.T, g_idx=g_idx)
+    module.post_init()
+    module.eval()
+    module = module.to(device=torch.device("cpu"))
+
+    with torch.inference_mode():
+        baseline = PackableQuantLinear.dequantize_weight(module, num_itr=num_itr)
+        current = module.dequantize_weight(num_itr=num_itr)
+
+    assert baseline.shape == (in_features // num_itr, out_features)
+    assert current.shape == baseline.shape
+    torch.testing.assert_close(current, baseline, rtol=0, atol=0)
