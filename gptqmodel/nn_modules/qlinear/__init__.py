@@ -507,12 +507,18 @@ class PackableQuantLinear(BaseQuantLinear):
             weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
         else:
             num_dim = self.g_idx.shape[0] // num_itr
+            out_dim = weight.shape[1] // num_itr
             weights = []
             for i in range(num_itr):
-                scale_i = self.scales[:, i * num_dim: (i + 1) * num_dim]
-                weight_i = weight[:, i * num_dim: (i + 1) * num_dim]
-                zeros_i = zeros[:, i * num_dim: (i + 1) * num_dim]
-                g_idx_i = self.g_idx[i * num_dim: (i + 1) * num_dim].long()
+                row_start = i * num_dim
+                row_end = (i + 1) * num_dim
+                col_start = i * out_dim
+                col_end = (i + 1) * out_dim if i < (num_itr - 1) else weight.shape[1]
+
+                scale_i = self.scales[:, col_start:col_end]
+                weight_i = weight[row_start:row_end, col_start:col_end]
+                zeros_i = zeros[:, col_start:col_end]
+                g_idx_i = self.g_idx[row_start:row_end].long()
                 weights.append(scale_i[g_idx_i] * (weight_i - zeros_i[g_idx_i]))
             weights = t.cat(weights, dim=1)
 
