@@ -22,7 +22,7 @@ INT8_SCALE_BUFFER_NAME = "int8_channel_scale"
 
 
 def _has_int8_mm_op() -> bool:
-    return hasattr(torch.ops.aten, "_weight_int8pack_mm")
+    return TORCH_HAS_FUSED_OPS and hasattr(torch.ops.aten, "_weight_int8pack_mm")
 
 
 def _requantize_to_int8(float_weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -121,8 +121,6 @@ class TorchInt8QuantLinear(BaseQuantLinear):
 
     def post_init(self):
         super().post_init()
-        if not TORCH_HAS_FUSED_OPS:
-            raise RuntimeError("TorchInt8QuantLinear requires torch fused CPU int8 ops.")
         # One-time conversion: GPTQ packed storage (2/4/8-bit) -> int8 packed CPU kernel storage.
         # Keep only int8 tensors after conversion to reduce memory footprint.
         self.transform_cpu(dtype=torch.float32)
