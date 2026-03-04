@@ -32,7 +32,14 @@ deviation_cols = log.columns(
     ],
     padding=1,
 )
-_deviation_header_printed = False
+
+
+def _log_deviation_header_once() -> None:
+    if getattr(_log_deviation_header_once, "_printed", False):
+        return
+    log.info("\nTorchInt8 CPU Deviation vs Torch Baseline")
+    deviation_cols.info.header()
+    _log_deviation_header_once._printed = True
 
 
 def _has_int8_weight_mm() -> bool:
@@ -79,7 +86,6 @@ def _mock_gptq_linear(
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("desc_act", [False, True])
 def test_torch_int8_cpu_kernel_deviation_against_torch(dtype: torch.dtype, desc_act: bool):
-    global _deviation_header_printed
     torch.manual_seed(7)
 
     bits = 4
@@ -133,10 +139,7 @@ def test_torch_int8_cpu_kernel_deviation_against_torch(dtype: torch.dtype, desc_
     mean_abs = float(diff.mean().item())
     max_rel = float(rel.max().item())
 
-    if not _deviation_header_printed:
-        log.info("\nTorchInt8 CPU Deviation vs Torch Baseline")
-        deviation_cols.info.header()
-        _deviation_header_printed = True
+    _log_deviation_header_once()
     deviation_cols.info(
         str(dtype),
         str(desc_act),
