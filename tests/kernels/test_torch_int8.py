@@ -135,10 +135,10 @@ def test_torch_int8_cpu_kernel_deviation_against_torch(dtype: torch.dtype, desc_
     _copy_gptq_buffers(src=baseline, dst=candidate)
     baseline.post_init()
     candidate.post_init()
-    assert candidate.qweight is None
-    assert candidate.qzeros is None
-    assert candidate.scales is None
-    assert candidate.g_idx is None
+    assert getattr(candidate, "qweight", None) is None
+    assert getattr(candidate, "qzeros", None) is None
+    assert getattr(candidate, "scales", None) is None
+    assert getattr(candidate, "g_idx", None) is None
     assert candidate.int8_weight_nk is not None
     assert candidate.int8_channel_scale is not None
     baseline.eval()
@@ -174,3 +174,7 @@ def test_torch_int8_cpu_kernel_deviation_against_torch(dtype: torch.dtype, desc_
 def test_torch_int8_kernel_is_cpu_only():
     with pytest.raises(NotImplementedError):
         TorchInt8QuantLinear.validate_device(DEVICE.XPU)
+
+
+def test_torch_int8_supports_expected_bits():
+    assert TorchInt8QuantLinear.SUPPORTS_BITS == [2, 4, 8]
