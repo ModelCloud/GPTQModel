@@ -514,7 +514,7 @@ def select_quant_linear(
         trainable=trainable,
     )
 
-    log.info(f"{'Packing' if pack else ''} Kernel: selected: `{qlinear.__name__}`")
+    log.info(f"{'Packing ' if pack else ''}Kernel: selected: `{qlinear.__name__}`")
     if not validate:
         raise ValueError(err)
     else:
