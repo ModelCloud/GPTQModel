@@ -56,10 +56,9 @@ class BenchmarkIntelCpuXPU(unittest.TestCase):
         BACKEND.TORCH: TorchQuantLinear,
         BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
         BACKEND.TORCH_INT8: TorchInt8QuantLinear,
-        # BACKEND.HF_KERNEL: HFKernelLinear,
+        BACKEND.HF_KERNEL: HFKernelLinear,
     }
-    # Temporarily skip HF kernel benchmark in this suite (can be enabled via env).
-    skip_backends = {BACKEND.HF_KERNEL}
+    skip_backends = set()
 
     def _trimmed_stats(self, times_s: list[float], generated_tokens: list[int]) -> tuple[float, float, float, float, int]:
         if not times_s:
