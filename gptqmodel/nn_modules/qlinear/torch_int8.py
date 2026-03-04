@@ -11,7 +11,6 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
-from ...looper.linear_mode import LinearMode
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
 from ...quantization import FORMAT, METHOD
@@ -80,8 +79,6 @@ class TorchInt8QuantLinear(BaseQuantLinear):
     REQUIRES_FORMAT_V2 = True
 
     QUANT_TYPE = "torch_int8"
-    INT8_WEIGHT_BUFFER = INT8_WEIGHT_BUFFER_NAME
-    INT8_SCALE_BUFFER = INT8_SCALE_BUFFER_NAME
     GPTQ_BUFFER_NAMES = ("qzeros", "qweight", "g_idx", "scales")
     UNPACK_BUFFER_NAMES = ("wf_unsqueeze_zero", "wf_unsqueeze_neg_one")
 
@@ -113,7 +110,6 @@ class TorchInt8QuantLinear(BaseQuantLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        self.linear_mode = None  # lazily initialized to inference mode
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
         self.int8_module: Optional[Int8PackedModule] = None
 
@@ -125,23 +121,20 @@ class TorchInt8QuantLinear(BaseQuantLinear):
 
     def post_init(self):
         super().post_init()
+        if not TORCH_HAS_FUSED_OPS:
+            raise RuntimeError("TorchInt8QuantLinear requires torch fused CPU int8 ops.")
         # One-time conversion: GPTQ packed storage (2/4/8-bit) -> int8 packed CPU kernel storage.
         # Keep only int8 tensors after conversion to reduce memory footprint.
         self.transform_cpu(dtype=torch.float32)
         self._empty_gptq_only_weights()
         self._drop_unpack_buffers()
+        self.int8_module = Int8PackedModule(self.int8_weight_nk, self.int8_channel_scale).eval()
         self.optimize()
 
     def optimize(self):
         if self.optimized:
             return
         super().optimize()
-
-    def _get_int8_weight(self) -> Optional[torch.Tensor]:
-        return getattr(self, self.INT8_WEIGHT_BUFFER, None)
-
-    def _get_int8_scale(self) -> Optional[torch.Tensor]:
-        return getattr(self, self.INT8_SCALE_BUFFER, None)
 
     def _has_all_gptq_buffers(self) -> bool:
         return all(getattr(self, name, None) is not None for name in self.GPTQ_BUFFER_NAMES)
@@ -182,8 +175,8 @@ class TorchInt8QuantLinear(BaseQuantLinear):
             self._delete_attr_if_exists(name)
 
     def dequantize_weight(self, num_itr: int = 1):
-        int8_weight = self._get_int8_weight()
-        int8_scale = self._get_int8_scale()
+        int8_weight = self.int8_weight_nk if hasattr(self, "int8_weight_nk") else None
+        int8_scale = self.int8_channel_scale if hasattr(self, "int8_channel_scale") else None
 
         # Int8 fallback for dequantized export path after original GPTQ tensors are released.
         if int8_weight is not None and int8_scale is not None and not self._has_all_gptq_buffers():
@@ -251,15 +244,15 @@ class TorchInt8QuantLinear(BaseQuantLinear):
         int8_weight_nk = int8_weight_kn.t().contiguous()
         channel_scale = channel_scale.to(dtype=dtype).contiguous()
 
-        if self.INT8_WEIGHT_BUFFER not in self._buffers:
-            self.register_buffer(self.INT8_WEIGHT_BUFFER, int8_weight_nk, persistent=False)
+        if INT8_WEIGHT_BUFFER_NAME not in self._buffers:
+            self.register_buffer(INT8_WEIGHT_BUFFER_NAME, int8_weight_nk, persistent=False)
         else:
-            setattr(self, self.INT8_WEIGHT_BUFFER, int8_weight_nk)
+            self.int8_weight_nk = int8_weight_nk
 
-        if self.INT8_SCALE_BUFFER not in self._buffers:
-            self.register_buffer(self.INT8_SCALE_BUFFER, channel_scale, persistent=False)
+        if INT8_SCALE_BUFFER_NAME not in self._buffers:
+            self.register_buffer(INT8_SCALE_BUFFER_NAME, channel_scale, persistent=False)
         else:
-            setattr(self, self.INT8_SCALE_BUFFER, channel_scale)
+            self.int8_channel_scale = channel_scale
 
     def transform(self, dtype: torch.dtype, device: str):
         if device != "cpu":
@@ -269,22 +262,11 @@ class TorchInt8QuantLinear(BaseQuantLinear):
     def forward(self, x: torch.Tensor):
         if self.training:
             raise NotImplementedError("TorchInt8QuantLinear does not support training mode.")
+        if self.int8_module is None:
+            raise RuntimeError("TorchInt8QuantLinear int8 module is not initialized. Ensure post_init() has been called.")
 
         # Common decode path is 2D [M, K]. Skip reshape/out-shape overhead on this hot path.
         if x.dim() == 2:
-            if self.linear_mode is None:
-                if not TORCH_HAS_FUSED_OPS:
-                    raise RuntimeError("TorchInt8QuantLinear requires torch fused CPU int8 ops.")
-                if self._get_int8_weight() is None or self._get_int8_scale() is None:
-                    self.transform(x.dtype, x.device.type)
-                    self._empty_gptq_only_weights()
-                    self._drop_unpack_buffers()
-                self.linear_mode = LinearMode.INFERENCE
-                self.int8_module = Int8PackedModule(self._get_int8_weight(), self._get_int8_scale()).eval()
-
-            if self.linear_mode != LinearMode.INFERENCE:
-                raise RuntimeError("TorchInt8QuantLinear failed to initialize inference mode.")
-
             out = self._fused_op_forward(x)
             if self.bias is not None:
                 out.add_(self.bias)
@@ -294,19 +276,6 @@ class TorchInt8QuantLinear(BaseQuantLinear):
 
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-
-        if self.linear_mode is None:
-            if not TORCH_HAS_FUSED_OPS:
-                raise RuntimeError("TorchInt8QuantLinear requires torch fused CPU int8 ops.")
-            if self._get_int8_weight() is None or self._get_int8_scale() is None:
-                self.transform(x.dtype, x.device.type)
-                self._empty_gptq_only_weights()
-                self._drop_unpack_buffers()
-            self.linear_mode = LinearMode.INFERENCE
-            self.int8_module = Int8PackedModule(self._get_int8_weight(), self._get_int8_scale()).eval()
-
-        if self.linear_mode != LinearMode.INFERENCE:
-            raise RuntimeError("TorchInt8QuantLinear failed to initialize inference mode.")
 
         out = self._fused_op_forward(x).reshape(out_shape)
 
