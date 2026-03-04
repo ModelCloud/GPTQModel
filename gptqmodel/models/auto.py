@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 
-from .definitions.qwen3_5_moe import Qwen3_5_MoeQModel
 from ..utils.logger import setup_logger
 
 
@@ -60,8 +59,9 @@ from typing import Any, Dict, List, Optional, Type, Union  # noqa: E402
 import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
+from packaging.version import Version  # noqa: E402
 from tokenicer import Tokenicer  # noqa: E402
-from transformers import AutoConfig, GenerationConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
+from transformers import AutoConfig, GenerationConfig, PreTrainedModel, PreTrainedTokenizerBase, __version__ as TRANSFORMERS_VERSION  # noqa: E402
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
@@ -144,12 +144,19 @@ from .definitions.qwen3_moe import Qwen3MoeQModel  # noqa: E402
 from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .definitions.qwen3_vl import Qwen3_VLQModel
-from .definitions.qwen3_5 import Qwen3_5QModel  # noqa: E402
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.voxtral import VoxtralGPTQ  # noqa: E402
 from .definitions.xverse import XverseQModel  # noqa: E402
+
+TRANSFORMERS_SUPPORTS_QWEN3_5 = Version(TRANSFORMERS_VERSION) >= Version("5.2.0")
+if TRANSFORMERS_SUPPORTS_QWEN3_5:
+    from .definitions.qwen3_5 import Qwen3_5QModel  # noqa: E402
+    from .definitions.qwen3_5_moe import Qwen3_5_MoeQModel  # noqa: E402
+else:
+    Qwen3_5QModel = None
+    Qwen3_5_MoeQModel = None
 
 
 # make quants and inference more determinisitc
@@ -223,9 +230,6 @@ MODEL_MAP = {
     "qwen2_5_omni": Qwen2_5_OmniGPTQ,
     "qwen3_omni_moe": Qwen3OmniMoeGPTQ,
     "qwen3_vl": Qwen3_VLQModel,
-    "qwen3_5": Qwen3_5QModel,
-    "qwen3_5_text": Qwen3_5QModel,
-    "qwen3_5_moe": Qwen3_5_MoeQModel,
     "dbrx": DbrxQModel,
     "dbrx_converted": DbrxConvertedQModel,
     "deepseek_v2": DeepSeekV2QModel,
@@ -262,6 +266,13 @@ MODEL_MAP = {
     "afmoe": AfMoeQModel,
     "voxtral": VoxtralGPTQ,
 }
+
+if Qwen3_5QModel is not None:
+    MODEL_MAP["qwen3_5"] = Qwen3_5QModel
+    MODEL_MAP["qwen3_5_text"] = Qwen3_5QModel
+
+if Qwen3_5_MoeQModel is not None:
+    MODEL_MAP["qwen3_5_moe"] = Qwen3_5_MoeQModel
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
