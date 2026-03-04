@@ -19,6 +19,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils import BACKEND
+from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 
 
@@ -97,6 +98,10 @@ def _load_cuda_libraries() -> bool:
 
 
 def _is_bitblas_available() -> bool:
+    # Allow disabling BitBLAS probing in environments where TVM import is unstable.
+    if env_flag("GPTQMODEL_DISABLE_BITBLAS", default="0"):
+        return False
+
     try:
         import bitblas
     except Exception as exc:
