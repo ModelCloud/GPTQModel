@@ -168,7 +168,7 @@ def test_torch_int8_cpu_kernel_deviation_against_torch(dtype: torch.dtype, desc_
     assert max_abs <= 0.5
     assert mean_abs <= 0.08
     torch.testing.assert_close(out, ref, rtol=0.08, atol=0.5)
-    assert candidate.int8_op is not None
+    assert candidate.int8_module is not None
 
 
 def test_torch_int8_kernel_is_cpu_only():

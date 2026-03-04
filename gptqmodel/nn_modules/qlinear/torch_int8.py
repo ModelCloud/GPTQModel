@@ -71,7 +71,7 @@ class TorchInt8QuantLinear(BaseQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_DEVICES = [DEVICE.CPU]
-    SUPPORTS_PLATFORM = [PLATFORM.ALL]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
@@ -82,7 +82,7 @@ class TorchInt8QuantLinear(BaseQuantLinear):
     QUANT_TYPE = "torch_int8"
     INT8_WEIGHT_BUFFER = INT8_WEIGHT_BUFFER_NAME
     INT8_SCALE_BUFFER = INT8_SCALE_BUFFER_NAME
-    GPTQ_ONLY_BUFFER_NAMES = ("qzeros", "qweight", "g_idx", "scales")
+    GPTQ_BUFFER_NAMES = ("qzeros", "qweight", "g_idx", "scales")
     UNPACK_BUFFER_NAMES = ("wf_unsqueeze_zero", "wf_unsqueeze_neg_one")
 
     def __init__(
@@ -115,7 +115,7 @@ class TorchInt8QuantLinear(BaseQuantLinear):
         )
         self.linear_mode = None  # lazily initialized to inference mode
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
-        self.int8_op: Optional[Int8PackedModule] = None
+        self.int8_module: Optional[Int8PackedModule] = None
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -144,7 +144,7 @@ class TorchInt8QuantLinear(BaseQuantLinear):
         return getattr(self, self.INT8_SCALE_BUFFER, None)
 
     def _has_all_gptq_buffers(self) -> bool:
-        return all(getattr(self, name, None) is not None for name in self.GPTQ_ONLY_BUFFER_NAMES)
+        return all(getattr(self, name, None) is not None for name in self.GPTQ_BUFFER_NAMES)
 
     def _delete_attr_if_exists(self, attr_name: str):
         if hasattr(self, attr_name):
@@ -280,8 +280,7 @@ class TorchInt8QuantLinear(BaseQuantLinear):
                     self._empty_gptq_only_weights()
                     self._drop_unpack_buffers()
                 self.linear_mode = LinearMode.INFERENCE
-                if x.device.type == "cpu":
-                    self.int8_op = Int8PackedModule(self._get_int8_weight(), self._get_int8_scale()).eval()
+                self.int8_module = Int8PackedModule(self._get_int8_weight(), self._get_int8_scale()).eval()
 
             if self.linear_mode != LinearMode.INFERENCE:
                 raise RuntimeError("TorchInt8QuantLinear failed to initialize inference mode.")
@@ -304,8 +303,7 @@ class TorchInt8QuantLinear(BaseQuantLinear):
                 self._empty_gptq_only_weights()
                 self._drop_unpack_buffers()
             self.linear_mode = LinearMode.INFERENCE
-            if x.device.type == "cpu":
-                self.int8_op = Int8PackedModule(self._get_int8_weight(), self._get_int8_scale()).eval()
+            self.int8_module = Int8PackedModule(self._get_int8_weight(), self._get_int8_scale()).eval()
 
         if self.linear_mode != LinearMode.INFERENCE:
             raise RuntimeError("TorchInt8QuantLinear failed to initialize inference mode.")
@@ -323,12 +321,12 @@ class TorchInt8QuantLinear(BaseQuantLinear):
     def _fused_op_forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.device.type != "cpu":
             raise NotImplementedError("TorchInt8QuantLinear fused path is CPU-only.")
-        if self.int8_op is None:
-            raise RuntimeError("TorchInt8QuantLinear int8 op is not initialized.")
-        return self.int8_op(x.contiguous())
+        if self.int8_module is None:
+            raise RuntimeError("TorchInt8QuantLinear int8 module is not initialized.")
+        return self.int8_module(x.contiguous())
 
     def _empty_gptq_only_weights(self):
-        for name in self.GPTQ_ONLY_BUFFER_NAMES:
+        for name in self.GPTQ_BUFFER_NAMES:
             self._delete_attr_if_exists(name)
 
 
