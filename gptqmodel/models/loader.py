@@ -52,6 +52,7 @@ from ..utils.model import (
     simple_dispatch_model,
 )
 from ._const import DEVICE, normalize_device
+import defuser
 
 
 log = setup_logger()
@@ -247,6 +248,7 @@ def ModelLoader(cls):
 
         if quantize_config.offload_to_disk:
             model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
+            defuser.convert_hf_model(model)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)
 
@@ -269,6 +271,7 @@ def ModelLoader(cls):
         else:
             print("loading model directly to CPU (not using meta device or turtle_model)-----------")
             model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
+            defuser.convert_hf_model(model)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)
 
@@ -549,12 +552,11 @@ def ModelLoader(cls):
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, dtype=dtype, **args
             )
+            defuser.convert_hf_model(model)
             model.checkpoint_file_name = model_save_name
 
             # Get the first layer to determine layer type
             layers, _ = get_module_by_name_prefix(model, cls.extract_layers_node())
-
-            layers[0]
 
             modules = find_modules(model)
             ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
