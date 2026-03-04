@@ -15,14 +15,13 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.torch import TORCH_HAS_FUSED_OPS
 
 INT8_WEIGHT_BUFFER_NAME = "int8_weight_nk"
 INT8_SCALE_BUFFER_NAME = "int8_channel_scale"
 
 
 def _has_int8_mm_op() -> bool:
-    return TORCH_HAS_FUSED_OPS and hasattr(torch.ops.aten, "_weight_int8pack_mm")
+    return hasattr(torch.ops.aten, "_weight_int8pack_mm")
 
 
 def _requantize_to_int8(float_weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
