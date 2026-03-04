@@ -8,9 +8,11 @@ import subprocess
 import sys
 import tarfile
 from pathlib import Path
+from shutil import rmtree
+
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
-from shutil import rmtree
+
 
 CUTLASS_VERSION = "3.5.0"
 CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{CUTLASS_VERSION}.tar.gz"
