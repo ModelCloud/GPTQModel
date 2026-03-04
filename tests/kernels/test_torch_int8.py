@@ -79,6 +79,16 @@ def _mock_gptq_linear(
     return linear, scales, zeros, g_idx
 
 
+def _copy_gptq_buffers(src: TorchQuantLinear, dst: TorchInt8QuantLinear) -> None:
+    dst.qweight.copy_(src.qweight)
+    dst.qzeros.copy_(src.qzeros)
+    dst.scales.copy_(src.scales)
+    dst.g_idx.copy_(src.g_idx)
+    dst.qzero_format(format=src.qzero_format())
+    if src.bias is not None and dst.bias is not None:
+        dst.bias.copy_(src.bias)
+
+
 @pytest.mark.skipif(
     not TORCH_HAS_FUSED_OPS or not _has_int8_weight_mm(),
     reason="Torch int8 fused op requires a recent PyTorch CPU build with aten::_weight_int8pack_mm.",
@@ -122,9 +132,15 @@ def test_torch_int8_cpu_kernel_deviation_against_torch(dtype: torch.dtype, desc_
     baseline.optimize = lambda *args, **kwargs: None
     candidate.optimize = lambda *args, **kwargs: None
     baseline.pack_block(linear, scales.T, zeros.T, g_idx=g_idx)
-    candidate.pack_block(linear, scales.T, zeros.T, g_idx=g_idx)
+    _copy_gptq_buffers(src=baseline, dst=candidate)
     baseline.post_init()
     candidate.post_init()
+    assert candidate.qweight is None
+    assert candidate.qzeros is None
+    assert candidate.scales is None
+    assert candidate.g_idx is None
+    assert candidate.int8_weight_nk is not None
+    assert candidate.int8_channel_scale is not None
     baseline.eval()
     candidate.eval()
 

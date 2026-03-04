@@ -13,7 +13,7 @@ from transformers import PreTrainedModel
 from ...adapter.adapter import Adapter, Lora
 from ...looper.linear_mode import LinearMode
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.torch import TORCH_HAS_FUSED_OPS
@@ -54,7 +54,7 @@ class Int8PackedModule(torch.nn.Module):
         return torch.ops.aten._weight_int8pack_mm(x, self.int8_weight_nk, scales)
 
 
-class TorchInt8QuantLinear(PackableQuantLinear):
+class TorchInt8QuantLinear(BaseQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.TORCH_INT8]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     # Keep auto-selection unchanged; this kernel is enabled via explicit backend selection.
@@ -119,6 +119,11 @@ class TorchInt8QuantLinear(PackableQuantLinear):
 
     def post_init(self):
         super().post_init()
+        # One-time conversion: int4 GPTQ storage -> int8 packed CPU kernel storage.
+        # Keep only int8 tensors after conversion to reduce memory footprint.
+        self.transform_cpu(dtype=torch.float32)
+        self._empty_gptq_only_weights()
+        self._drop_unpack_buffers()
         self.optimize()
 
     def optimize(self):
@@ -126,37 +131,98 @@ class TorchInt8QuantLinear(PackableQuantLinear):
             return
         super().optimize()
 
-    def _build_ret_idx(self) -> torch.Tensor:
-        existing = getattr(self, "ret_idx", None)
-        total = self.g_idx.shape[0]
-        if isinstance(existing, torch.Tensor) and existing.numel() == total:
-            return existing
+    def _ensure_unpack_buffers(self):
+        if (
+            hasattr(self, "wf_unsqueeze_zero")
+            and hasattr(self, "wf_unsqueeze_neg_one")
+            and self.wf_unsqueeze_zero is not None
+            and self.wf_unsqueeze_neg_one is not None
+        ):
+            return
 
-        device = self.g_idx.device
-        ret_idx = torch.zeros(total, dtype=torch.int32, device=device)
-        group_size = max(int(self.group_size), 1)
-        groups = total // group_size
-        remainder = total % group_size
-        g_idx = self.g_idx.to(torch.int32)
-        g_idx_2 = g_idx * group_size
+        if self.bits not in [2, 4, 8]:
+            raise NotImplementedError("TorchInt8QuantLinear unpack only supports bits in [2, 4, 8].")
 
-        if remainder > 0:
-            mask = g_idx == groups
-            if mask.any():
-                g_idx_2[mask] += torch.arange(remainder, device=device, dtype=torch.int32)
+        wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0)
+        device = self.qweight.device
+        wf_zero = wf.unsqueeze(0).to(device=device)
+        wf_neg_one = wf.unsqueeze(-1).to(device=device)
 
-        if groups > 0:
-            base = torch.arange(group_size, device=device, dtype=torch.int32)
-            for i in range(groups):
-                mask = g_idx == i
-                if not mask.any():
-                    continue
-                count = int(mask.sum().item())
-                g_idx_2[mask] += base[:count]
+        if "wf_unsqueeze_zero" not in self._buffers:
+            self.register_buffer("wf_unsqueeze_zero", wf_zero, persistent=False)
+        else:
+            self.wf_unsqueeze_zero = wf_zero
 
-        ret_idx[g_idx_2] = torch.arange(total, device=device, dtype=torch.int32)
-        self.ret_idx = ret_idx
-        return ret_idx
+        if "wf_unsqueeze_neg_one" not in self._buffers:
+            self.register_buffer("wf_unsqueeze_neg_one", wf_neg_one, persistent=False)
+        else:
+            self.wf_unsqueeze_neg_one = wf_neg_one
+
+    def _drop_unpack_buffers(self):
+        if "wf_unsqueeze_zero" in self._buffers:
+            self.wf_unsqueeze_zero = None
+        if "wf_unsqueeze_neg_one" in self._buffers:
+            self.wf_unsqueeze_neg_one = None
+
+    def dequantize_weight(self, num_itr: int = 1):
+        # Int8 fallback for dequantized export path after original int4 tensors are released.
+        if (
+            hasattr(self, "int8_weight_nk")
+            and self.int8_weight_nk is not None
+            and (self.qweight is None or self.qzeros is None or self.scales is None or self.g_idx is None)
+        ):
+            weight_kn = self.int8_weight_nk.t().to(torch.float32)
+            scales = self.int8_channel_scale.to(torch.float32)
+            return weight_kn * scales.unsqueeze(0)
+
+        if num_itr != 1:
+            raise NotImplementedError("TorchInt8QuantLinear dequantize_weight only supports num_itr == 1.")
+
+        self._ensure_unpack_buffers()
+
+        zeros = torch.bitwise_right_shift(
+            torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+            self.wf_unsqueeze_zero,
+        ).to(self.dequant_dtype)
+        zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
+
+        weight = torch.bitwise_and(
+            torch.bitwise_right_shift(
+                torch.unsqueeze(self.qweight, 1).expand(-1, self.pack_factor, -1),
+                self.wf_unsqueeze_neg_one,
+            ).to(self.dequant_dtype),
+            self.maxq,
+        )
+        weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
+
+        return self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
+
+    @torch.inference_mode()
+    def pack_block(
+        self,
+        linear: nn.Module,
+        scales: torch.Tensor,
+        zeros: torch.Tensor,
+        g_idx: torch.Tensor,
+        block_in: int = 8192,
+        workers: int = 1,
+    ):
+        raise NotImplementedError(
+            "TorchInt8QuantLinear is not packable. Load GPTQ int4 tensors and let post_init() convert to int8."
+        )
+
+    def pack(
+        self,
+        linear: nn.Module,
+        scales: torch.Tensor,
+        zeros: torch.Tensor,
+        g_idx: torch.Tensor,
+        block_in: int = 8192,
+        workers: int = 1,
+    ):
+        raise NotImplementedError(
+            "TorchInt8QuantLinear is not packable. Load GPTQ int4 tensors and let post_init() convert to int8."
+        )
 
     def transform_cpu(self, dtype: torch.dtype):
         # [K, N] from GPTQ int4 tensors.
@@ -190,7 +256,10 @@ class TorchInt8QuantLinear(PackableQuantLinear):
             if self.linear_mode is None:
                 if not TORCH_HAS_FUSED_OPS:
                     raise RuntimeError("TorchInt8QuantLinear requires torch fused CPU int8 ops.")
-                self.transform(x.dtype, x.device.type)
+                if not hasattr(self, "int8_weight_nk") or self.int8_weight_nk is None:
+                    self.transform(x.dtype, x.device.type)
+                    self._empty_gptq_only_weights()
+                    self._drop_unpack_buffers()
                 self.linear_mode = LinearMode.INFERENCE
                 if x.device.type == "cpu":
                     self.int8_op = Int8PackedModule(self.int8_weight_nk, self.int8_channel_scale).eval()
@@ -211,7 +280,10 @@ class TorchInt8QuantLinear(PackableQuantLinear):
         if self.linear_mode is None:
             if not TORCH_HAS_FUSED_OPS:
                 raise RuntimeError("TorchInt8QuantLinear requires torch fused CPU int8 ops.")
-            self.transform(x.dtype, x.device.type)
+            if not hasattr(self, "int8_weight_nk") or self.int8_weight_nk is None:
+                self.transform(x.dtype, x.device.type)
+                self._empty_gptq_only_weights()
+                self._drop_unpack_buffers()
             self.linear_mode = LinearMode.INFERENCE
             if x.device.type == "cpu":
                 self.int8_op = Int8PackedModule(self.int8_weight_nk, self.int8_channel_scale).eval()
