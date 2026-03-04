@@ -13,6 +13,7 @@ from torch import Tensor
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
+from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8QuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from gptqmodel.utils.model import find_modules
@@ -30,6 +31,7 @@ class TestKernelOutput(unittest.TestCase):
     target_qliner_map = {
         BACKEND.TORCH: TorchQuantLinear,
         BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
+        BACKEND.TORCH_INT8: TorchInt8QuantLinear,
         BACKEND.HF_KERNEL: HFKernelLinear,
     }
     target = 'model.layers.6.self_attn.v_proj'
@@ -73,6 +75,7 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.TORCH, 0.0000, 0.0005),
         # (BACKEND.TRITON,  0.0000, 0.0005),
         (BACKEND.TORCH_FUSED,  r_tolerance, a_tolerance),
+        (BACKEND.TORCH_INT8,  r_tolerance, a_tolerance),
         (BACKEND.HF_KERNEL,  r_tolerance, a_tolerance),
     ])
     def test_kernel_output(self, backend: BACKEND, r_tolerance: float, a_tolerance: float):
@@ -153,6 +156,7 @@ class TestTorchFusedAndHFKernelDevices(unittest.TestCase):
 
     @parameterized.expand([
         ("cpu", "cpu", BACKEND.TORCH_FUSED),
+        ("cpu", "cpu", BACKEND.TORCH_INT8),
         ("cpu", "cpu", BACKEND.HF_KERNEL),
         ("xpu", "xpu:0", BACKEND.TORCH_FUSED),
     ])
