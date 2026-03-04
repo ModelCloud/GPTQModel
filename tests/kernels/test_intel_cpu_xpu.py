@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
 import unittest
 
 import torch
@@ -18,6 +19,8 @@ from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
 from gptqmodel.utils.model import find_modules
 
+
+os.environ.setdefault("GPTQMODEL_DISABLE_BITBLAS", "1")
 
 log = LogBar.shared()
 

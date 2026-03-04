@@ -184,7 +184,6 @@ class TorchInt8QuantLinear(PackableQuantLinear):
 
     def transform_cpu(self, dtype: torch.dtype):
         # [K, N] from GPTQ int4 tensors.
-        self._build_ret_idx()
         float_weight = self.dequantize_weight(num_itr=1).to(torch.float32)
         int8_weight_kn, channel_scale = _requantize_to_int8(float_weight)
 
@@ -243,9 +242,7 @@ class TorchInt8QuantLinear(PackableQuantLinear):
             raise NotImplementedError("TorchInt8QuantLinear fused path is CPU-only.")
         if self.int8_op is None:
             raise RuntimeError("TorchInt8QuantLinear int8 op is not initialized.")
-
-        x = x[:, self.ret_idx.to(device=x.device)].contiguous()
-        return self.int8_op(x)
+        return self.int8_op(x.contiguous())
 
     def _empty_gptq_only_weights(self):
         self.qzeros = None
