@@ -39,7 +39,7 @@ def _requantize_to_int8(float_weight: torch.Tensor) -> tuple[torch.Tensor, torch
     return weight_int8, channel_scale
 
 
-class Int8PackedOp(torch.nn.Module):
+class Int8PackedModule(torch.nn.Module):
     """CPU fused int8 matmul wrapper around aten::_weight_int8pack_mm."""
 
     def __init__(self, int8_weight_nk: torch.Tensor, channel_scales: torch.Tensor):
@@ -109,7 +109,7 @@ class TorchInt8QuantLinear(PackableQuantLinear):
         )
         self.linear_mode = None  # lazily initialized to inference mode
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
-        self.int8_op: Optional[Int8PackedOp] = None
+        self.int8_op: Optional[Int8PackedModule] = None
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -185,6 +185,26 @@ class TorchInt8QuantLinear(PackableQuantLinear):
         if self.training:
             raise NotImplementedError("TorchInt8QuantLinear does not support training mode.")
 
+        # Common decode path is 2D [M, K]. Skip reshape/out-shape overhead on this hot path.
+        if x.dim() == 2:
+            if self.linear_mode is None:
+                if not TORCH_HAS_FUSED_OPS:
+                    raise RuntimeError("TorchInt8QuantLinear requires torch fused CPU int8 ops.")
+                self.transform(x.dtype, x.device.type)
+                self.linear_mode = LinearMode.INFERENCE
+                if x.device.type == "cpu":
+                    self.int8_op = Int8PackedModule(self.int8_weight_nk, self.int8_channel_scale).eval()
+
+            if self.linear_mode != LinearMode.INFERENCE:
+                raise RuntimeError("TorchInt8QuantLinear failed to initialize inference mode.")
+
+            out = self._fused_op_forward(x)
+            if self.bias is not None:
+                out.add_(self.bias)
+            if self.adapter:
+                out = self.adapter.apply(x=x, out=out)
+            return out
+
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
 
@@ -194,7 +214,7 @@ class TorchInt8QuantLinear(PackableQuantLinear):
             self.transform(x.dtype, x.device.type)
             self.linear_mode = LinearMode.INFERENCE
             if x.device.type == "cpu":
-                self.int8_op = Int8PackedOp(self.int8_weight_nk, self.int8_channel_scale).eval()
+                self.int8_op = Int8PackedModule(self.int8_weight_nk, self.int8_channel_scale).eval()
 
         if self.linear_mode != LinearMode.INFERENCE:
             raise RuntimeError("TorchInt8QuantLinear failed to initialize inference mode.")
