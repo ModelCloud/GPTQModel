@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from PIL import Image
-from qwen_vl_utils.vision_process import fetch_video
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
@@ -16,6 +15,21 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
+
+
+QWEN_VL_UTILS_INSTALL_HINT = (
+    "qwen_vl_utils is required for Qwen3-VL video inputs. "
+    "Install it with `pip install qwen-vl-utils`."
+)
+
+
+def _load_fetch_video():
+    try:
+        from qwen_vl_utils.vision_process import fetch_video
+    except ImportError as exc:
+        raise ImportError(QWEN_VL_UTILS_INSTALL_HINT) from exc
+
+    return fetch_video
 
 
 class BaseQwen3VLGPTQ(BaseQModel):
@@ -82,12 +96,15 @@ class BaseQwen3VLGPTQ(BaseQModel):
         image_inputs = []
         video_inputs = []
         video_sample_fps_list = []
+        fetch_video = None
         for vision_info in vision_infos:
             if "image" in vision_info or "image_url" in vision_info:
                 image_inputs.append(
                     fetch_image(vision_info, image_patch_size=image_patch_size)
                 )
             elif "video" in vision_info:
+                if fetch_video is None:
+                    fetch_video = _load_fetch_video()
                 video_input, video_sample_fps = fetch_video(
                     vision_info,
                     return_video_sample_fps=True,
