@@ -64,7 +64,7 @@ class TorchInt8QuantLinear(PackableQuantLinear):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = True
+    SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
@@ -107,7 +107,7 @@ class TorchInt8QuantLinear(PackableQuantLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        self.linear_mode = None  # train or inference
+        self.linear_mode = None  # lazily initialized to inference mode
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
         self.int8_op: Optional[Int8PackedOp] = None
 
@@ -158,30 +158,6 @@ class TorchInt8QuantLinear(PackableQuantLinear):
         self.ret_idx = ret_idx
         return ret_idx
 
-    def train(self, mode: bool = True):
-        old_train = self.training
-        if mode == old_train:
-            return self
-
-        from ...utils.model import convert_gptq_v1_to_v2_format_module
-
-        if self.SUPPORTS_TRAINING_USE_TORCH_KERNEL:
-            if mode:
-                if self.qzero_format() == 1:
-                    if not hasattr(self, "qzeros_data_v1"):
-                        self.qzeros_data_v1 = self.qzeros.data.clone()
-                        convert_gptq_v1_to_v2_format_module(self, bits=self.bits, pack_dtype=self.pack_dtype)
-                        self.qzeros_data_v2 = self.qzeros.data
-                    else:
-                        self.qzeros.data = self.qzeros_data_v2
-                        self.qzero_format(format=2)
-            else:
-                if hasattr(self, "qzeros_data_v1"):
-                    self.qzeros.data = self.qzeros_data_v1
-                    self.qzero_format(format=1)
-
-        return super().train(mode=mode)
-
     def transform_cpu(self, dtype: torch.dtype):
         # [K, N] from GPTQ int4 tensors.
         float_weight = self.dequantize_weight(num_itr=1).to(torch.float32)
@@ -206,28 +182,24 @@ class TorchInt8QuantLinear(PackableQuantLinear):
         self.transform_cpu(dtype)
 
     def forward(self, x: torch.Tensor):
+        if self.training:
+            raise NotImplementedError("TorchInt8QuantLinear does not support training mode.")
+
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
 
-        if (
-            not self.training
-            and not x.requires_grad
-            and self.linear_mode is None
-            and TORCH_HAS_FUSED_OPS
-        ):
+        if self.linear_mode is None:
+            if not TORCH_HAS_FUSED_OPS:
+                raise RuntimeError("TorchInt8QuantLinear requires torch fused CPU int8 ops.")
             self.transform(x.dtype, x.device.type)
             self.linear_mode = LinearMode.INFERENCE
             if x.device.type == "cpu":
                 self.int8_op = Int8PackedOp(self.int8_weight_nk, self.int8_channel_scale).eval()
-        elif self.linear_mode is None:
-            self.linear_mode = LinearMode.TRAIN
 
-        if self.linear_mode == LinearMode.INFERENCE:
-            out = self._fused_op_forward(x).reshape(out_shape)
-        else:
-            num_itr = self.g_idx.shape[0] // x.shape[-1]
-            weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
-            out = torch.matmul(x, weights).reshape(out_shape)
+        if self.linear_mode != LinearMode.INFERENCE:
+            raise RuntimeError("TorchInt8QuantLinear failed to initialize inference mode.")
+
+        out = self._fused_op_forward(x).reshape(out_shape)
 
         if self.bias is not None:
             out.add_(self.bias)
