@@ -51,10 +51,9 @@ class Int8PackedModule(torch.nn.Module):
         self.register_buffer(INT8_SCALE_BUFFER_NAME, channel_scales, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        scales = getattr(self, INT8_SCALE_BUFFER_NAME)
-        if scales.dtype != x.dtype:
-            scales = scales.to(dtype=x.dtype)
-        return torch.ops.aten._weight_int8pack_mm(x, getattr(self, INT8_WEIGHT_BUFFER_NAME), scales)
+        if self.int8_channel_scale.dtype != x.dtype:
+            self.int8_channel_scale = self.int8_channel_scale.to(dtype=x.dtype)
+        return torch.ops.aten._weight_int8pack_mm(x, self.int8_weight_nk, self.int8_channel_scale)
 
 
 class TorchInt8QuantLinear(BaseQuantLinear):
