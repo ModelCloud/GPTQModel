@@ -33,7 +33,8 @@ classifiers = [
 ]
 dependencies = [
     "accelerate>=1.10.1",
-    "numpy==2.2.6",
+    "numpy==2.2.6; python_version < '3.14'",
+    "numpy>=2.3.0; python_version >= '3.14'",
     "torch>=2.8.0",
     "safetensors>=0.6.2",
     "transformers>=4.57.1",
@@ -42,7 +43,7 @@ dependencies = [
     "device-smi>=0.5.3",
     "protobuf>=6.32.0",
     "pillow>=11.3.0",
-    "hf_transfer>=0.1.9",
+    "hf_transfer>=0.1.9; python_version < '3.14'",
     "huggingface_hub>=0.34.4",
     "tokenicer>=0.0.7",
     "logbar>=0.2.1",
