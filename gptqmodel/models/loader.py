@@ -555,19 +555,21 @@ def ModelLoader(cls):
             defuser.convert_hf_model(model)
             model.checkpoint_file_name = model_save_name
 
+            extract_layers_node = cls.extract_layers_node()
             # Get the first layer to determine layer type
-            layers, _ = get_module_by_name_prefix(model, cls.extract_layers_node())
+            layers, _ = get_module_by_name_prefix(model, extract_layers_node)
 
             modules = find_modules(model)
             ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
 
+            simple_layer_modules = cls.simple_layer_modules(config, qcfg)
             for name in list(modules.keys()):
                 # allow loading of quantized lm_head
                 if qcfg.lm_head and name == cls.lm_head:
                     continue
 
-                if not any(name.startswith(prefix) for prefix in cls.extract_layers_node()) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
-                        not name.endswith(ignore_module) for sublist in cls.simple_layer_modules(config, qcfg) for ignore_module in sublist
+                if not any(name.startswith(prefix) for prefix in extract_layers_node) or any(name.startswith(ignore_module) for ignore_module in ignore_modules) or all(
+                        not name.endswith(ignore_module) for sublist in simple_layer_modules for ignore_module in sublist
                 ):
                     # log non-lm-head quantized modules only
                     if name is not cls.lm_head:
@@ -777,7 +779,7 @@ def ModelLoader(cls):
             return device_map
 
         log.info(f"Loader: device = {device}")
-        layers, _ = get_module_by_name_prefix(model, cls.extract_layers_node())
+        layers, _ = get_module_by_name_prefix(model, extract_layers_node)
         num_gpus = 1
         if device is DEVICE.CUDA:
             num_gpus = torch.cuda.device_count()
