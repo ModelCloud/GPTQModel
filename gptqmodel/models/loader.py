@@ -248,7 +248,7 @@ def ModelLoader(cls):
 
         if quantize_config.offload_to_disk:
             model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
-            defuser.convert_hf_model(model)
+            defuser.convert_hf_model(model, cleanup_original=False)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)
 
@@ -271,7 +271,7 @@ def ModelLoader(cls):
         else:
             print("loading model directly to CPU (not using meta device or turtle_model)-----------")
             model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
-            defuser.convert_hf_model(model)
+            defuser.convert_hf_model(model, cleanup_original=False)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)
 
@@ -552,7 +552,7 @@ def ModelLoader(cls):
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, dtype=dtype, **args
             )
-            defuser.convert_hf_model(model)
+            defuser.convert_hf_model(model, cleanup_original=True)
             model.checkpoint_file_name = model_save_name
 
             extract_layers_node = cls.extract_layers_node()
