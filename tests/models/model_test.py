@@ -898,9 +898,9 @@ class ModelTest(unittest.TestCase):
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
 
         # mpt model need
-        if not model.config.pad_token_id:
+        if hasattr(model.config, "pad_token_id") and not model.config.pad_token_id:
             model.config.pad_token_id = tokenizer.pad_token_id or 0
-        if not model.config.eos_token_id:
+        if hasattr(model.config, "eos_token_id") and not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
         is_quantized = model.quantized
