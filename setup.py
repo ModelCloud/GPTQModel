@@ -224,6 +224,31 @@ def _detect_torch_version() -> str | None:
         raise Exception("Unable to detect torch version via uv/pip/conda/importlib. Please install torch >= 2.7.1")
 
 
+def _detect_torch_accelerator_backend() -> str | None:
+    """Return accelerator backend for installed torch build.
+
+    Returns:
+      - "cuda" when torch is built with CUDA support
+      - "rocm" when torch is built with ROCm support
+      - "cpu" when torch is CPU-only
+      - None when torch cannot be imported
+    """
+    try:
+        import torch  # type: ignore
+    except Exception:
+        return None
+
+    version_info = getattr(torch, "version", None)
+    if version_info is None:
+        return None
+
+    if getattr(version_info, "hip", None):
+        return "rocm"
+    if getattr(version_info, "cuda", None):
+        return "cuda"
+    return "cpu"
+
+
 def _major_minor(v: str) -> str:
     if v:
         parts = v.split(".")
@@ -324,6 +349,7 @@ CUDA_VERSION = _read_env("CUDA_VERSION")
 ROCM_VERSION = _read_env("ROCM_VERSION")
 TORCH_CUDA_ARCH_LIST = _read_env("TORCH_CUDA_ARCH_LIST")
 NVCC_VERSION = _read_env("NVCC_VERSION")
+TORCH_ACCELERATOR_BACKEND = _read_env("TORCH_ACCELERATOR_BACKEND")
 
 # respect user env then detect
 if not TORCH_VERSION:
@@ -334,16 +360,25 @@ if not ROCM_VERSION:
     ROCM_VERSION = _detect_rocm_version()
 if not NVCC_VERSION:
     NVCC_VERSION = _detect_nvcc_version()
+if not TORCH_ACCELERATOR_BACKEND:
+    TORCH_ACCELERATOR_BACKEND = _detect_torch_accelerator_backend()
 
 SKIP_ROCM_VERSION_CHECK = _read_env("SKIP_ROCM_VERSION_CHECK")
 FORCE_BUILD = _bool_env("GPTQMODEL_FORCE_BUILD", False)
 
 # BUILD_CUDA_EXT:
 # - If user sets explicitly, respect it.
-# - Otherwise auto: enable only if CUDA or ROCm detected.
+# - Otherwise auto: enable only when torch backend and toolkit match.
 BUILD_CUDA_EXT = _read_env("BUILD_CUDA_EXT")
 if BUILD_CUDA_EXT is None:
-    BUILD_CUDA_EXT = "1" if (CUDA_VERSION or ROCM_VERSION) else "0"
+    if TORCH_ACCELERATOR_BACKEND == "cuda":
+        BUILD_CUDA_EXT = "1" if CUDA_VERSION else "0"
+    elif TORCH_ACCELERATOR_BACKEND == "rocm":
+        BUILD_CUDA_EXT = "1" if ROCM_VERSION else "0"
+    elif TORCH_ACCELERATOR_BACKEND == "cpu":
+        BUILD_CUDA_EXT = "0"
+    else:
+        BUILD_CUDA_EXT = "1" if (CUDA_VERSION or ROCM_VERSION) else "0"
 
 if ROCM_VERSION and not SKIP_ROCM_VERSION_CHECK:
     try:

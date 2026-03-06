@@ -1,5 +1,6 @@
 accelerate>=1.10.1
-numpy==2.2.6
+numpy==2.2.6; python_version < "3.14"
+numpy>=2.3.0; python_version >= "3.14"
 torch>=2.8.0
 safetensors>=0.6.2
 transformers>=4.57.1
@@ -9,7 +10,7 @@ device-smi>=0.5.2
 protobuf>=6.32.0
 pillow>=11.3.0
 pypcre>=0.2.11
-hf_transfer>=0.1.9
+hf_transfer>=0.1.9; python_version < "3.14"
 huggingface_hub>=0.34.4
 tokenicer>=0.0.8
 logbar>=0.2.1
@@ -18,5 +19,5 @@ datasets>=3.6.0
 pyarrow>=21.0
 dill>=0.3.8
 torchao>=0.14.1
-kernels>=0.11.1
+kernels>=0.12.2
 defuser>=0.0.4

@@ -6,6 +6,8 @@
 
 from typing import Optional, Tuple
 
+import platform
+import re
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
@@ -46,6 +48,56 @@ class HFKernelLinear(PackableQuantLinear):
     QUANT_TYPE = "hf_kernel"
 
     gemm_int4_forward_kernel = None
+    KERNEL_REPO_ID = "kernels-community/quantization-gptq"
+
+    @classmethod
+    def _load_cpu_kernel_variant(cls, repo_id: str):
+        """
+        kernels.get_kernel() picks variants from the local torch build. On CUDA-enabled torch
+        wheels running CPU-only inference, that can miss CPU-only kernel repos. Fall back to an
+        explicit CPU variant selection from repo build artifacts.
+        """
+        from kernels.utils import _import_from_path, install_kernel_all_variants, package_name_from_repo_id
+
+        build_dir = install_kernel_all_variants(repo_id, revision="main")
+        if not build_dir.exists():
+            raise FileNotFoundError(f"Kernel build directory missing for `{repo_id}`: {build_dir}")
+
+        cpu_variants = [path for path in build_dir.iterdir() if path.is_dir() and "-cpu-" in path.name]
+        if not cpu_variants:
+            raise FileNotFoundError(f"No CPU kernel variants found under `{build_dir}`")
+
+        torch_ver = re.match(r"^(\d+)\.(\d+)", torch.__version__)
+        if torch_ver:
+            major, minor = torch_ver.groups()
+            torch_prefix = f"torch{major}{minor}"
+        else:
+            torch_prefix = "torch"
+
+        cpu_arch = platform.machine()
+        os_name = platform.system().lower()
+        if os_name == "darwin":
+            cpu_arch = "aarch64" if cpu_arch == "arm64" else cpu_arch
+        elif os_name == "windows":
+            cpu_arch = "x86_64" if cpu_arch == "AMD64" else cpu_arch
+
+        cxxabi = "cxx11" if torch.compiled_with_cxx11_abi() else "cxx98"
+        exact_name = f"{torch_prefix}-{cxxabi}-cpu-{cpu_arch}-{os_name}"
+
+        selected = next((item for item in cpu_variants if item.name == exact_name), None)
+        if selected is None:
+            selected = next((item for item in cpu_variants if item.name.startswith(torch_prefix)), None)
+        if selected is None:
+            selected = max(
+                cpu_variants,
+                key=lambda item: int(re.match(r"^torch(\d+)", item.name).group(1))
+                if re.match(r"^torch(\d+)", item.name)
+                else -1,
+            )
+
+        package_name = package_name_from_repo_id(repo_id)
+        module = _import_from_path(package_name, selected)
+        return module, selected.name
 
     def __init__(
         self,
@@ -70,7 +122,7 @@ class HFKernelLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TORCH),
+            backend=kwargs.pop("backend", BACKEND.HF_KERNEL),
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs)
@@ -83,11 +135,28 @@ class HFKernelLinear(PackableQuantLinear):
         try:
             from kernels import get_kernel
 
-            cls.gemm_int4_forward_kernel = staticmethod(get_kernel("kernels-community/quantization_gptq").gemm_int4_forward)
-            return True, None
+            repo_id = cls.KERNEL_REPO_ID
+            try:
+                cls.gemm_int4_forward_kernel = staticmethod(get_kernel(repo_id).gemm_int4_forward)
+                log.info("HFKernelLinear: loaded CPU gemm_4bit kernel from `%s`.", repo_id)
+                return True, None
+            except Exception:
+                module, variant_name = cls._load_cpu_kernel_variant(repo_id)
+                cls.gemm_int4_forward_kernel = staticmethod(module.gemm_int4_forward)
+                log.info(
+                    "HFKernelLinear: loaded CPU gemm_4bit kernel from `%s` variant `%s`.",
+                    repo_id,
+                    variant_name,
+                )
+                return True, None
         except Exception as exc:  # pragma: no cover - best effort fallback
-            log.warning("Failed to load CPU gemm_4bit kernel: %s. Use fallback path. \
-                        Please make sure you already `pip install kernels` and the kernels >= 0.11.1", str(exc))
+            cls.gemm_int4_forward_kernel = None
+            log.warning(
+                "Failed to load CPU gemm_4bit kernel from `%s`: %s. "
+                "Please make sure `pip install -U kernels` is installed.",
+                cls.KERNEL_REPO_ID,
+                str(exc),
+            )
             return False, exc
 
     def post_init(self):
