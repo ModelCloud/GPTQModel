@@ -13,7 +13,7 @@ import time
 from concurrent.futures import as_completed
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from defuser.modeling.fused_moe.replace_modules import materialize_model_
+from defuser.modeling.fused_moe.replace_modules import materialize_model
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..quantization.config import GcMode
@@ -90,7 +90,7 @@ def run_layer_stage(
             else:
                 layer_descriptor = str(layer_index)
 
-        materialize_model_(module)
+        materialize_model(module)
 
         cur_layer_device = get_device(module)
         full = find_modules(module, name=looper.gptq_model.lm_head if is_lm_head_module else "")
