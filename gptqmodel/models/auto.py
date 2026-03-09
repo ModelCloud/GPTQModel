@@ -61,7 +61,8 @@ import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from packaging.version import Version  # noqa: E402
 from tokenicer import Tokenicer  # noqa: E402
-from transformers import AutoConfig, GenerationConfig, PreTrainedModel, PreTrainedTokenizerBase, __version__ as TRANSFORMERS_VERSION  # noqa: E402
+from transformers import AutoConfig, GenerationConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
@@ -88,8 +89,8 @@ from .definitions.dots1 import Dots1QModel  # noqa: E402
 from .definitions.dream import DreamQModel  # noqa: E402
 from .definitions.ernie4_5 import Ernie4_5QModel  # noqa: E402
 from .definitions.ernie4_5_moe import Ernie4_5_MoeQModel  # noqa: E402
-from .definitions.exaone4 import Exaone4QModel  # noqa: E402
 from .definitions.exaone import ExaOneQModel  # noqa: E402
+from .definitions.exaone4 import Exaone4QModel  # noqa: E402
 from .definitions.falcon_h1 import FalconH1QModel  # noqa: E402
 from .definitions.gemma2 import Gemma2QModel  # noqa: E402
 from .definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel  # noqa: E402
@@ -110,7 +111,7 @@ from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
-from .definitions.llada2 import LLaDA2MoeQModel 
+from .definitions.llada2 import LLaDA2MoeQModel
 from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
@@ -149,6 +150,7 @@ from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.voxtral import VoxtralGPTQ  # noqa: E402
 from .definitions.xverse import XverseQModel  # noqa: E402
+
 
 TRANSFORMERS_SUPPORTS_QWEN3_5 = Version(TRANSFORMERS_VERSION) >= Version("5.2.0")
 if TRANSFORMERS_SUPPORTS_QWEN3_5:

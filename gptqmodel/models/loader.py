@@ -23,6 +23,7 @@ if ensure_modelscope_available():
 else:
     from huggingface_hub import snapshot_download
 
+import defuser
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
@@ -52,7 +53,6 @@ from ..utils.model import (
     simple_dispatch_model,
 )
 from ._const import DEVICE, normalize_device
-import defuser
 
 
 log = setup_logger()

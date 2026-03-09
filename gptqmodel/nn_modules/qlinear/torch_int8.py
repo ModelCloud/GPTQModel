@@ -17,6 +17,7 @@ from ...nn_modules.qlinear import BaseQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 
+
 INT8_WEIGHT_BUFFER_NAME = "int8_weight_nk"
 INT8_SCALE_BUFFER_NAME = "int8_channel_scale"
 

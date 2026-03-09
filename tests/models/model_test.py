@@ -138,6 +138,7 @@ class ModelTest(unittest.TestCase):
     EXPECT_LM_HEAD_LOSS = None
     STOP_AFTER_LAYER: Optional[int] = None
     MOE_CONFIG: Optional[MoEConfig] = None
+    OFFLOAD_TO_DISK: bool = True
 
     GENERIC_TEST_PROMPTS = [
         {"prompt": "Which city is the capital city of France?", "keywords": ["paris"]},
@@ -859,6 +860,7 @@ class ModelTest(unittest.TestCase):
             dynamic=self.DYNAMIC,
             hessian=HessianConfig(chunk_size=self.HESSIAN_CHUNK_SIZE),
             moe=self.MOE_CONFIG,
+            offload_to_disk=self.OFFLOAD_TO_DISK,
         )
 
         log.info(f"Quant config: {quantize_config}")
