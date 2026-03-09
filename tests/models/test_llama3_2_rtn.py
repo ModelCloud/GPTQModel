@@ -53,16 +53,4 @@ class TestLlama3_2_rtn(ModelTest):
     }
 
     def test_llama3_2_rtn(self):
-        model, tokenizer = self.quantModel(
-            self.NATIVE_MODEL_ID,
-            batch_size=self.QUANT_BATCH_SIZE,
-            trust_remote_code=self.TRUST_REMOTE_CODE,
-            dtype=self.TORCH_DTYPE,
-            call_perform_post_quant_validation=False,
-        )
-        try:
-            prompt = self.INFERENCE_PROMPT
-            output = self.generate_with_limit(model, tokenizer, prompt, max_new_tokens=32)
-            self.assertGreater(len(output), len(prompt))
-        finally:
-            self._cleanup_quantized_model(model, enabled=self.DELETE_QUANTIZED_MODEL)
+        self.quant_lm_eval()
