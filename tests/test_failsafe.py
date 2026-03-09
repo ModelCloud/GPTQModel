@@ -27,6 +27,22 @@ from gptqmodel.utils.failsafe import should_use_failsafe
 from gptqmodel.utils.pause_resume import PauseResumeController
 
 
+def test_smooth_mad_uses_sigma_normalized_window():
+    torch.manual_seed(0)
+
+    # With sigma-normalized MAD, SmoothMAD(k=2.75) should clip only far-tail
+    # outliers instead of behaving like an approximately 1.85 sigma window.
+    block = torch.randn(2048, 128)
+    clipped, _ = smooth_block(
+        block,
+        FailSafe(strategy=FailSafeStrategy.RTN, threshold=True, smooth=SmoothMAD(k=2.75)),
+        group_size=128,
+    )
+
+    clip_ratio = (clipped != block).float().mean().item()
+    assert clip_ratio < 0.03, f"clip_ratio={clip_ratio:.4f} is too high for sigma-normalized MAD smoothing"
+
+
 class TestGPTQHessianSimilarity(unittest.TestCase):
     """
     This test verifies that Hessian-based GPTQ produces quantized weights

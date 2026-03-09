@@ -5,7 +5,7 @@
 from gptqmodel.quantization.config import FailSafe, QuantizeConfig, SmoothMAD
 
 
-def test_quantize_config_serializes_failsafe_in_meta():
+def test_quantize_config_serializes_default_failsafe_in_meta_without_smoother():
     cfg = QuantizeConfig()
     payload = cfg.to_dict()
 
@@ -16,11 +16,10 @@ def test_quantize_config_serializes_failsafe_in_meta():
     meta_failsafe = payload["meta"]["failsafe"]
     assert meta_failsafe["strategy"] == cfg.failsafe.strategy.value
     assert meta_failsafe["threshold"] == cfg.failsafe.threshold
-    assert meta_failsafe["smooth"]["type"] == "mad"
-    assert meta_failsafe["smooth"]["k"] == cfg.failsafe.smooth.k
+    assert meta_failsafe["smooth"] is None
 
 
-def test_quantize_config_reads_failsafe_from_meta():
+def test_quantize_config_reads_default_failsafe_from_meta_without_smoother():
     cfg = QuantizeConfig()
     payload = cfg.to_dict()
 
@@ -28,5 +27,17 @@ def test_quantize_config_reads_failsafe_from_meta():
     assert isinstance(reloaded.failsafe, FailSafe)
     assert reloaded.failsafe.strategy == cfg.failsafe.strategy
     assert reloaded.failsafe.threshold == cfg.failsafe.threshold
+    assert reloaded.failsafe.smooth is None
+
+
+def test_quantize_config_round_trips_explicit_failsafe_smoother():
+    cfg = QuantizeConfig(failsafe=FailSafe(smooth=SmoothMAD(k=1.75)))
+    payload = cfg.to_dict()
+
+    meta_failsafe = payload["meta"]["failsafe"]
+    assert meta_failsafe["smooth"]["type"] == "mad"
+    assert meta_failsafe["smooth"]["k"] == 1.75
+
+    reloaded = QuantizeConfig.from_quant_config(payload)
     assert isinstance(reloaded.failsafe.smooth, SmoothMAD)
     assert reloaded.failsafe.smooth.k == cfg.failsafe.smooth.k
