@@ -17,7 +17,7 @@ from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, exllama_set_max_input_length  # noqa: E402
-from gptqmodel.models._const import EXLLAMA_DEFAULT_MAX_INPUT_LENGTH, DEVICE  # noqa: E402
+from gptqmodel.models._const import DEVICE, EXLLAMA_DEFAULT_MAX_INPUT_LENGTH  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.utils.importer import select_quant_linear  # noqa: E402
