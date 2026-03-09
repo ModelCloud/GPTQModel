@@ -267,6 +267,8 @@ def make_quant(
     if not pack and format in (FORMAT.GPTQ, FORMAT.GPTQ_V2) and backend == BACKEND.BITBLAS:
         backend = BACKEND.TORCH
 
+    export_quant_method = qcfg.export_quant_method()
+
     # returns multiple validated kernels
     quant_linear_candidates = select_quant_linear(
         bits=bits,
@@ -275,7 +277,7 @@ def make_quant(
         sym=sym,
         backend=backend,
         format=format,
-        quant_method=qcfg.quant_method,
+        quant_method=export_quant_method,
         pack=pack,
         dynamic=dynamic,
         device=device,
@@ -588,7 +590,7 @@ def convert_gptq_v1_to_v2_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if cfg.quant_method in [METHOD.GPTQ] and not qlinear_kernel.REQUIRES_FORMAT_V2:
+    if cfg.export_quant_method() == METHOD.GPTQ and not qlinear_kernel.REQUIRES_FORMAT_V2:
         log.info(
             f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
         return model
@@ -665,7 +667,7 @@ def convert_gptq_v2_to_v1_format(
 ):
 
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if quantize_config.quant_method in [METHOD.GPTQ] and not qlinear_kernel.REQUIRES_FORMAT_V2:
+    if quantize_config.export_quant_method() == METHOD.GPTQ and not qlinear_kernel.REQUIRES_FORMAT_V2:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
@@ -819,7 +821,7 @@ def pack_module(
 
         if (
             quantize_config is not None
-            and quantize_config.quant_method == METHOD.GPTQ
+            and quantize_config.export_quant_method() == METHOD.GPTQ
             and quantize_config.format == FORMAT.GPTQ
             and getattr(quant_linear_cls, "REQUIRES_FORMAT_V2", False)
         ):

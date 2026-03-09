@@ -29,7 +29,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization import GPTQ
-from ..quantization.config import FailSafe, FailSafeStrategy, METHOD, QuantizeConfig, RTNQuantizeConfig
+from ..quantization.config import FailSafe, FailSafeStrategy, QuantizeConfig, RTNQuantizeConfig
 from ..quantization.gptq import get_number_of_rows_and_cols
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, pack_module
@@ -212,7 +212,6 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
 
     def finalize(self, model: BaseQModel, **kwargs):
         model.quantized = True
-        model.quantize_config.quant_method = METHOD.GPTQ
         super().finalize(model=model, **kwargs)
 
     def name(self) -> str:

@@ -498,6 +498,42 @@ QUANT_METHOD_FORMAT_MAPPING = {
     },
 }
 
+GPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.GPTQ,
+    FORMAT.GPTQ_V2,
+    FORMAT.MARLIN,
+    FORMAT.BITBLAS,
+)
+AWQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.GEMM,
+    FORMAT.GEMV,
+    FORMAT.GEMV_FAST,
+    FORMAT.MARLIN,
+    FORMAT.LLM_AWQ,
+)
+QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.QQQ,
+)
+RTN_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.GPTQ,
+    FORMAT.GPTQ_V2,
+    FORMAT.GEMM,
+    FORMAT.GEMV,
+    FORMAT.GEMV_FAST,
+    FORMAT.LLM_AWQ,
+)
+
+_UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
+    FORMAT.GPTQ: METHOD.GPTQ,
+    FORMAT.GPTQ_V2: METHOD.GPTQ,
+    FORMAT.BITBLAS: METHOD.GPTQ,
+    FORMAT.GEMM: METHOD.AWQ,
+    FORMAT.GEMV: METHOD.AWQ,
+    FORMAT.GEMV_FAST: METHOD.AWQ,
+    FORMAT.LLM_AWQ: METHOD.AWQ,
+    FORMAT.QQQ: METHOD.QQQ,
+}
+
 # inference only methods should go here
 QUANTIZE_BLACK_LIST = {}
 
@@ -914,6 +950,44 @@ def _normalize_rtn_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional[METHOD] = None) -> METHOD:
+    if format_value == FORMAT.MARLIN:
+        if fallback_method is None:
+            raise ValueError("QuantizeConfig: FORMAT.MARLIN requires an explicit quantization method family.")
+        return fallback_method
+
+    method = _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT.get(format_value)
+    if method is None:
+        if fallback_method is not None:
+            return fallback_method
+        raise ValueError(f"QuantizeConfig: Unable to resolve export method for format `{format_value}`.")
+    return method
+
+
+def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(payload)
+    method = normalized.get(QUANT_METHOD_FIELD)
+
+    if target_cls is AWQQuantizeConfig:
+        expected_method = METHOD.AWQ
+    elif target_cls is QQQQuantizeConfig:
+        expected_method = METHOD.QQQ
+        if normalized.get(FORMAT_FIELD_CODE) != FORMAT.QQQ:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.QQQ
+    else:
+        expected_method = METHOD.GPTQ
+
+    if method != expected_method:
+        log.warn(
+            f"QuantizeConfig: `{QUANT_METHOD_FIELD}`=`{method}` is incompatible with `{target_cls.__name__}`. "
+            f"Auto-fix method to `{expected_method}`."
+        )
+        normalized[QUANT_METHOD_FIELD] = expected_method
+
+    return normalized
+
+
 class QuantizeConfigMeta(type):
     def __call__(cls, *args, **kwargs):
         if cls is QuantizeConfig:
@@ -946,7 +1020,7 @@ class BaseQuantizeConfig:
 
     quant_method: METHOD = field(default=METHOD.GPTQ)
 
-    # default to GPTQ v1 format for broad checkpoint compatibility.
+    # Serialized/exported checkpoint layout. This is the authoritative post-quantization format.
     format: FORMAT = field(default=FORMAT.GPTQ)
 
     # properties that do not directly contribute to quantization or inference should be placed in meta
@@ -1024,6 +1098,15 @@ class BaseQuantizeConfig:
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return tuple(METHOD)
 
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        valid_formats = QUANT_METHOD_FORMAT_MAPPING.get(self.quant_method, None)
+        if valid_formats is None:
+            raise ValueError(f"QuantizeConfig: Unsupported `quant_method`: {self.quant_method}")
+        return tuple(valid_formats)
+
+    def export_quant_method(self) -> METHOD:
+        return _resolve_export_quant_method(self.format, fallback_method=self.quant_method)
+
     def default_desc_act(self) -> bool:
         return True
 
@@ -1040,12 +1123,10 @@ class BaseQuantizeConfig:
                 f"{self.__class__.__name__}: `quant_method` must be one of {[v.value for v in allowed_methods]}."
             )
 
-        valid_formats = QUANT_METHOD_FORMAT_MAPPING.get(self.quant_method, None)
-        if valid_formats is None:
-            raise ValueError(f"QuantizeConfig: Unsupported `quant_method`: {self.quant_method}")
+        valid_formats = self.supported_export_formats()
         if self.format not in valid_formats:
             raise ValueError(
-                f"QuantizeConfig: checkpoint `format` used is {self.format}, and the quantization method is {self.quant_method}. "
+                f"{self.__class__.__name__}: unsupported export `format` `{self.format}`."
             )
 
         self.failsafe = _normalize_failsafe(self.failsafe)
@@ -1215,46 +1296,6 @@ class BaseQuantizeConfig:
             normalized[PACK_DTYPE_FIELD] = torch.int16
             log.info("Detected llm-awq quantization format; FORMAT automatically set to FORMAT.LLM_AWQ.")
 
-        fmt = normalized.get(FORMAT_FIELD_CODE)
-        method = normalized.get(QUANT_METHOD_FIELD)
-
-        if method == METHOD.QQQ and fmt != FORMAT.QQQ:
-            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
-            normalized[FORMAT_FIELD_CODE] = FORMAT.QQQ
-            fmt = FORMAT.QQQ
-
-        if fmt is not None:
-            allowed_methods = [m for m, fmts in QUANT_METHOD_FORMAT_MAPPING.items() if fmt in fmts]
-            if method not in allowed_methods:
-                if fmt in {FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ}:
-                    new_method = METHOD.AWQ
-                elif fmt in {FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.BITBLAS}:
-                    new_method = METHOD.GPTQ
-                elif fmt == FORMAT.QQQ:
-                    new_method = METHOD.QQQ
-                elif fmt == FORMAT.MARLIN:
-                    new_method = method if method in {METHOD.GPTQ, METHOD.AWQ} else METHOD.GPTQ
-                else:
-                    new_method = allowed_methods[0] if allowed_methods else METHOD.GPTQ
-                if new_method != method:
-                    log.warn(
-                        f"QuantizeConfig: `{FORMAT_FIELD_CODE}`=`{fmt}` is incompatible with `{QUANT_METHOD_FIELD}`=`{method}`. Auto-fix method to `{new_method}`."
-                    )
-                    normalized[QUANT_METHOD_FIELD] = new_method
-
-        if format_auto_inferred:
-            log.info(
-                f"QuantizeConfig: `{FORMAT_FIELD_CHECKPOINT}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}"
-            )
-
-        if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
-            normalized["desc_act"] = False
-
-        if "sym" not in normalized:
-            log.warn(
-                "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
-            )
-
         meta_payload = normalized.get(META_FIELD)
         meta_field_map = {
             "failsafe": "failsafe",
@@ -1284,6 +1325,21 @@ class BaseQuantizeConfig:
         target_cls = cls if cls not in {BaseQuantizeConfig, QuantizeConfig} else _resolve_quantize_config_class(normalized)
         if target_cls is RTNQuantizeConfig:
             normalized = _normalize_rtn_kwargs(normalized)
+        normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, normalized)
+
+        if format_auto_inferred:
+            log.info(
+                f"QuantizeConfig: `{FORMAT_FIELD_CHECKPOINT}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}"
+            )
+
+        if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
+            normalized["desc_act"] = False
+
+        if "sym" not in normalized:
+            log.warn(
+                "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
+            )
+
         target_field_names = {field.name for field in fields(target_cls)}
         filtered = {k: v for k, v in normalized.items() if k in target_field_names}
         return target_cls(**filtered)
@@ -1425,6 +1481,9 @@ class GPTQQuantizeConfig(QuantizeConfig):
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.GPTQ,)
 
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return GPTQ_EXPORT_FORMATS
+
     def default_desc_act(self) -> bool:
         return False
 
@@ -1508,10 +1567,13 @@ class AWQQuantizeConfig(QuantizeConfig):
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.AWQ,)
 
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return AWQ_EXPORT_FORMATS
+
     def __post_init__(self):
         self.quant_method = _normalize_quant_method(self.quant_method)
         self.format = _normalize_format(self.format)
-        if self.format not in QUANT_METHOD_FORMAT_MAPPING[METHOD.AWQ]:
+        if self.format not in self.supported_export_formats():
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
         super().__post_init__()
@@ -1530,6 +1592,9 @@ class QQQQuantizeConfig(GPTQQuantizeConfig):
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.QQQ,)
 
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return QQQ_EXPORT_FORMATS
+
     def default_desc_act(self) -> bool:
         return True
 
@@ -1538,13 +1603,12 @@ class QQQQuantizeConfig(GPTQQuantizeConfig):
 class RTNQuantizeConfig(GPTQQuantizeConfig):
     smooth: Optional[SmoothMethod] = field(default_factory=SmoothMAD)
 
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return RTN_EXPORT_FORMATS
+
     def __post_init__(self):
         self.smooth = _parse_smooth_method(self.smooth)
         super().__post_init__()
-        if self.format not in {FORMAT.GPTQ, FORMAT.GPTQ_V2}:
-            raise ValueError(
-                "RTNQuantizeConfig: `format` must be `FORMAT.GPTQ` or `FORMAT.GPTQ_V2`."
-            )
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)
@@ -1580,10 +1644,14 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[QuantizeConf
         return RTNQuantizeConfig
     if calibrationless is not None:
         return RTNQuantizeConfig
-    if method == METHOD.AWQ or format_value in QUANT_METHOD_FORMAT_MAPPING[METHOD.AWQ]:
-        return AWQQuantizeConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
         return QQQQuantizeConfig
+    if method == METHOD.AWQ:
+        return AWQQuantizeConfig
+    if format_value in {FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ}:
+        return AWQQuantizeConfig
+    if format_value == FORMAT.MARLIN:
+        return AWQQuantizeConfig if method == METHOD.AWQ else GPTQQuantizeConfig
     return GPTQQuantizeConfig
 
 

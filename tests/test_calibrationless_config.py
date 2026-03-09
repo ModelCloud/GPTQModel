@@ -7,10 +7,11 @@ from gptqmodel.quantization.config import QuantizeConfig, RTNQuantizeConfig, Smo
 
 
 def test_quantize_config_calibrationless_round_trip():
+    smooth = SmoothMAD(k=1.75)
     cfg = RTNQuantizeConfig(
         bits=4,
         group_size=128,
-        smooth={"type": "mad", "k": 1.75},
+        smooth=smooth,
     )
 
     assert cfg.uses_calibrationless_lifecycle() is True
@@ -37,6 +38,29 @@ def test_rtn_quantize_config_defaults_to_direct_smoother():
     assert isinstance(cfg, QuantizeConfig)
     assert cfg.uses_calibrationless_lifecycle() is True
     assert isinstance(cfg.smooth, SmoothMAD)
+    assert cfg.export_quant_method() is not None
+
+
+def test_rtn_quantize_config_supports_awq_export_round_trip():
+    smooth = SmoothMAD(k=1.5)
+    cfg = RTNQuantizeConfig(
+        bits=4,
+        group_size=128,
+        format="gemm",
+        smooth=smooth,
+    )
+
+    assert cfg.format == "gemm"
+    assert cfg.export_quant_method().value == "awq"
+
+    payload = cfg.to_dict()
+    reloaded = QuantizeConfig.from_quant_config(payload)
+
+    assert isinstance(reloaded, RTNQuantizeConfig)
+    assert reloaded.format == cfg.format
+    assert reloaded.export_quant_method() == cfg.export_quant_method()
+    assert isinstance(reloaded.smooth, SmoothMAD)
+    assert reloaded.smooth.k == pytest.approx(1.5)
 
 
 def test_legacy_calibrationless_payload_still_dispatches_to_rtn():

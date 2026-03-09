@@ -107,7 +107,7 @@ def test_baseqmodel_quantize_uses_calibrationless_gptq_pipeline():
         group_size=32,
         desc_act=False,
         sym=True,
-        smooth={"type": "mad", "k": smooth.k},
+        smooth=smooth,
         offload_to_disk=False,
         device=device_type,
     )
@@ -154,3 +154,45 @@ def test_baseqmodel_quantize_uses_calibrationless_gptq_pipeline():
         assert actual_error <= expected_error + 0.01
         assert actual_error < 0.05
         torch.testing.assert_close(qmodule.g_idx.detach().cpu(), expected_g_idx)
+
+
+def test_baseqmodel_quantize_allows_rtn_awq_export():
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device_type = device.type
+
+    native = _TinyModel().to(device=device, dtype=torch.float16).eval()
+    smooth = SmoothMAD(k=2.25)
+
+    qcfg = RTNQuantizeConfig(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        format=FORMAT.GEMM,
+        smooth=smooth,
+        offload_to_disk=False,
+        device=device_type,
+    )
+
+    model = _TinyQModel(
+        model=native,
+        quantized=False,
+        quantize_config=qcfg,
+        tokenizer=None,
+    )
+
+    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+
+    assert "calibrationless_gptq" in result
+    assert model.quantized is True
+    assert model.quantize_config.format == FORMAT.GEMM
+    assert model.quantize_config.export_quant_method() == METHOD.AWQ
+    assert getattr(model.qlinear_kernel, "__name__", "") == "AwqTorchQuantLinear"
+
+    qmodules = find_modules(model.model, [model.qlinear_kernel])
+    assert len(qmodules) == 4
+
+    for qmodule in qmodules.values():
+        assert qmodule.qweight.device.type == "cpu"
+        assert qmodule.qzeros.device.type == "cpu"
+        assert qmodule.scales.device.type == "cpu"

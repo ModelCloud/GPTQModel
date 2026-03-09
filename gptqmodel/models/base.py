@@ -653,7 +653,9 @@ class BaseQModel(nn.Module):
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
 
-        if self.quantize_config.quant_method == METHOD.AWQ:
+        export_quant_method = self.quantize_config.export_quant_method()
+
+        if export_quant_method == METHOD.AWQ:
             if self.quantize_config.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
                 # AWQ GEMV_FAST / LLM_AWQ only supports pack_dtype is torch.int16
                 log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
@@ -669,8 +671,9 @@ class BaseQModel(nn.Module):
 
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):
-            if self.quantize_config.quant_method == METHOD.AWQ:
+            if export_quant_method == METHOD.AWQ:
                 if self.quantize_config.format == FORMAT.GEMM:
+                    # Prefer the pure-torch GEMM packer so export does not depend on CUDA AWQ extension ABI.
                     preferred_backend = BACKEND.TORCH_AWQ
                 elif self.quantize_config.format == FORMAT.GEMV:
                     preferred_backend = BACKEND.GEMV
@@ -692,7 +695,7 @@ class BaseQModel(nn.Module):
             sym=self.quantize_config.sym,
             backend=preferred_backend,
             format=self.quantize_config.format,
-            quant_method=self.quantize_config.quant_method,
+            quant_method=export_quant_method,
             device=DEVICE(self.quantize_config.device),
             pack=True,
             pack_dtype=self.quantize_config.pack_dtype,
@@ -729,7 +732,7 @@ class BaseQModel(nn.Module):
                 multi_select=False,
                 backend=preferred_backend,
                 format=self.quantize_config.format,
-                quant_method=self.quantize_config.quant_method,
+                quant_method=export_quant_method,
             )
 
         # rotate model

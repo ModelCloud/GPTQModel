@@ -3,11 +3,13 @@
 
 from gptqmodel.quantization.config import (
     AWQQuantizeConfig,
+    CalibrationlessConfig,
     FORMAT,
     GPTQQuantizeConfig,
     METHOD,
     QuantizeConfig,
     RTNQuantizeConfig,
+    SmoothMAD,
 )
 
 
@@ -30,12 +32,31 @@ def test_quantize_config_dispatches_awq_constructor():
 
 
 def test_quantize_config_dispatches_rtn_constructor():
-    cfg = QuantizeConfig(calibrationless={"smooth": {"type": "mad", "k": 2.0}})
+    cfg = QuantizeConfig(calibrationless=CalibrationlessConfig(smooth=SmoothMAD(k=2.0)))
 
     assert isinstance(cfg, RTNQuantizeConfig)
     assert isinstance(cfg, QuantizeConfig)
     assert cfg.uses_calibrationless_lifecycle() is True
     assert cfg.smooth is not None
+    assert cfg.export_quant_method() == METHOD.GPTQ
+
+
+def test_quantize_config_dispatches_rtn_awq_export_constructor():
+    cfg = QuantizeConfig(
+        format=FORMAT.GEMM,
+        calibrationless=CalibrationlessConfig(smooth=SmoothMAD(k=2.0)),
+    )
+
+    assert isinstance(cfg, RTNQuantizeConfig)
+    assert cfg.format == FORMAT.GEMM
+    assert cfg.export_quant_method() == METHOD.AWQ
+
+
+def test_quantize_config_dispatches_gptq_marlin_constructor():
+    cfg = QuantizeConfig(quant_method=METHOD.GPTQ, format=FORMAT.MARLIN)
+
+    assert isinstance(cfg, GPTQQuantizeConfig)
+    assert cfg.export_quant_method() == METHOD.GPTQ
 
 
 def test_from_quant_config_dispatches_awq_and_loads_zero_point():

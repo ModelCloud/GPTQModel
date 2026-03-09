@@ -80,6 +80,60 @@ class AwqTorchQuantLinear(AWQuantLinear):
             f"bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}"
         )
 
+    def pack(self, linear: torch.nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
+        del g_idx
+        assert scales is not None and zeros is not None
+
+        scales = scales.t().contiguous()
+        zeros = zeros.t().contiguous()
+        scale_zeros = zeros * scales
+
+        self.register_buffer("scales", scales.clone().half())
+        if linear.bias is not None:
+            self.register_buffer("bias", linear.bias.clone().half())
+        else:
+            self.bias = None
+
+        pack_num = 32 // self.bits
+
+        intweight = []
+        for idx in range(self.in_features):
+            intweight.append(
+                torch.round(
+                    (linear.weight.data[:, idx] + scale_zeros[idx // self.group_size])
+                    / self.scales[idx // self.group_size]
+                ).to(torch.int32)[:, None]
+            )
+        intweight = torch.cat(intweight, dim=1).t().contiguous()
+
+        qweight = torch.zeros(
+            (intweight.shape[0], intweight.shape[1] // 32 * self.bits),
+            dtype=torch.int32,
+            device=intweight.device,
+        )
+        qzeros = torch.zeros(
+            (zeros.shape[0], zeros.shape[1] // 32 * self.bits),
+            dtype=torch.int32,
+            device=zeros.device,
+        )
+
+        if self.bits != 4:
+            raise NotImplementedError("Only 4-bit are supported for now.")
+        order_map = [0, 2, 4, 6, 1, 3, 5, 7]
+
+        for col in range(intweight.shape[1] // pack_num):
+            for i in range(pack_num):
+                qweight_col = intweight[:, col * pack_num + order_map[i]]
+                qweight[:, col] |= qweight_col << (i * self.bits)
+
+        for col in range(zeros.shape[1] // pack_num):
+            for i in range(pack_num):
+                qzero_col = zeros[:, col * pack_num + order_map[i]].to(torch.int32)
+                qzeros[:, col] |= qzero_col << (i * self.bits)
+
+        self.register_buffer("qweight", qweight)
+        self.register_buffer("qzeros", qzeros)
+
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
         device = x.device
