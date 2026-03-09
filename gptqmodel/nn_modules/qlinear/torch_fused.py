@@ -102,6 +102,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             backend=kwargs.pop("backend", BACKEND.TORCH),
             adapter=adapter,
             register_buffers=register_buffers,
+            enable_wf_unsqueeze=kwargs.pop("enable_wf_unsqueeze", True),
             **kwargs)
 
         self.linear_mode = None # either train or inference

@@ -57,6 +57,8 @@ def test_awq_fused_post_init_calls_adapter(monkeypatch, kernel_cls):
     assert device_type == "cpu"
     assert lora_A is not None
     assert lora_B is not None
+    assert getattr(module, "wf_unsqueeze_zero", None) is None
+    assert getattr(module, "wf_unsqueeze_neg_one", None) is None
 
 
 def test_hf_kernel_awq_backend_selection(monkeypatch):
