@@ -56,7 +56,6 @@ class WeightOnlyRTNProcessor(LoopProcessor):
             fwd_after_process=False,
         )
         self.lock = threading.Lock()
-        self.qcfg_dynamic: Optional[RTNQuantizeConfig] = None
 
     def _annotate_tp_padding(self, module: NamedModule, qcfg: BaseQuantizeConfig) -> None:
         target_multiple = math.lcm(*self._TP_TARGETS)
@@ -75,12 +74,11 @@ class WeightOnlyRTNProcessor(LoopProcessor):
             "original_columns": columns,
         }
 
-    def quantize_module(self, module: NamedModule) -> None:
+    def quantize_module(self, module: NamedModule) -> Optional[RTNQuantizeConfig]:
         qcfg_clone = clone_rtn_config_for_module(self.qcfg, module.full_name)
         if qcfg_clone is None:
-            return
+            return None
 
-        self.qcfg_dynamic = qcfg_clone
         self._annotate_tp_padding(module, qcfg_clone)
 
         task = RTN(module=module, qcfg=qcfg_clone)
@@ -115,8 +113,16 @@ class WeightOnlyRTNProcessor(LoopProcessor):
         self.log_new_row(stat)
 
         module.weight.data = wq
+        return qcfg_clone
 
-    def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
+    def submodule_finalize(
+        self,
+        module: NamedModule,
+        model: BaseQModel,
+        *,
+        qcfg: Optional[RTNQuantizeConfig] = None,
+        **kwargs,
+    ):
         module.stream_sync()
         with self.lock:
             q_zeros = module.state.pop("q_zeros").clone()
@@ -127,7 +133,7 @@ class WeightOnlyRTNProcessor(LoopProcessor):
         assert q_scales.device == CPU
         assert q_g_idx.device == CPU
 
-        active_qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
+        active_qcfg = qcfg or self.qcfg
         layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))

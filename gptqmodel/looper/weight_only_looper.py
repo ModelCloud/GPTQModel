@@ -197,7 +197,9 @@ class WeightOnlyLooper:
 
                         # Weight-only quantization happens entirely within the
                         # processor; no captured activations are needed.
-                        self.processor.quantize_module(named)
+                        active_qcfg = self.processor.quantize_module(named)
+                        if active_qcfg is None:
+                            continue
 
                         # Finalization and optional disk offload expect the
                         # packed module to be back on CPU memory.
@@ -205,7 +207,11 @@ class WeightOnlyLooper:
                         named.target_device = CPU
                         named.module.target_device = CPU
 
-                        self.processor.submodule_finalize(named, self.gptq_model)
+                        self.processor.submodule_finalize(
+                            named,
+                            self.gptq_model,
+                            qcfg=active_qcfg,
+                        )
                         self._offload_quantized_module(named)
 
                 # Submodule-level offload may swap packed tensors to meta/disk placeholders.

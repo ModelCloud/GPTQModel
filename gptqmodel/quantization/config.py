@@ -968,21 +968,37 @@ def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional
 
 def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(payload)
-    method = normalized.get(QUANT_METHOD_FIELD)
 
     if target_cls is AWQQuantizeConfig:
         expected_method = METHOD.AWQ
     elif target_cls is QQQQuantizeConfig:
         expected_method = METHOD.QQQ
-        if normalized.get(FORMAT_FIELD_CODE) != FORMAT.QQQ:
+        format_value = normalized.get(FORMAT_FIELD_CODE)
+        normalized_format = None
+        if format_value is not None:
+            try:
+                normalized_format = _normalize_format(format_value)
+                normalized[FORMAT_FIELD_CODE] = normalized_format
+            except ValueError:
+                normalized_format = None
+        if normalized_format is not None and normalized_format != FORMAT.QQQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.QQQ
     else:
         expected_method = METHOD.GPTQ
 
-    if method != expected_method:
+    method = normalized.get(QUANT_METHOD_FIELD)
+    normalized_method = None
+    if method is not None:
+        try:
+            normalized_method = _normalize_quant_method(method)
+            normalized[QUANT_METHOD_FIELD] = normalized_method
+        except ValueError:
+            normalized_method = None
+
+    if normalized_method is not None and normalized_method != expected_method:
         log.warn(
-            f"QuantizeConfig: `{QUANT_METHOD_FIELD}`=`{method}` is incompatible with `{target_cls.__name__}`. "
+            f"QuantizeConfig: `{QUANT_METHOD_FIELD}`=`{normalized_method}` is incompatible with `{target_cls.__name__}`. "
             f"Auto-fix method to `{expected_method}`."
         )
         normalized[QUANT_METHOD_FIELD] = expected_method
@@ -995,15 +1011,18 @@ def _filter_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str
     return {key: value for key, value in payload.items() if key in target_field_names}
 
 
+def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, payload)
+    if target_cls is RTNQuantizeConfig:
+        normalized = _normalize_rtn_kwargs(normalized)
+    return _filter_quantize_config_payload_for_target_cls(target_cls, normalized)
+
+
 class QuantizeConfigMeta(type):
     def __call__(cls, *args, **kwargs):
         if cls is QuantizeConfig:
             target_cls = _resolve_quantize_config_class(kwargs)
-            target_kwargs = dict(kwargs)
-            target_kwargs = _normalize_quantize_config_payload_for_target_cls(target_cls, target_kwargs)
-            if target_cls is RTNQuantizeConfig:
-                target_kwargs = _normalize_rtn_kwargs(target_kwargs)
-            target_kwargs = _filter_quantize_config_payload_for_target_cls(target_cls, target_kwargs)
+            target_kwargs = _prepare_target_quantize_config_kwargs(target_cls, kwargs)
             return type.__call__(target_cls, *args, **target_kwargs)
         return super().__call__(*args, **kwargs)
 
@@ -1332,8 +1351,6 @@ class BaseQuantizeConfig:
                     normalized[normalized_key] = meta_payload.get(meta_key)
 
         target_cls = cls if cls not in {BaseQuantizeConfig, QuantizeConfig} else _resolve_quantize_config_class(normalized)
-        if target_cls is RTNQuantizeConfig:
-            normalized = _normalize_rtn_kwargs(normalized)
         normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, normalized)
 
         if format_auto_inferred:
@@ -1349,9 +1366,9 @@ class BaseQuantizeConfig:
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
 
-        target_field_names = {field.name for field in fields(target_cls)}
-        filtered = {k: v for k, v in normalized.items() if k in target_field_names}
-        return target_cls(**filtered)
+        if target_cls is RTNQuantizeConfig:
+            normalized = _normalize_rtn_kwargs(normalized)
+        return target_cls(**_filter_quantize_config_payload_for_target_cls(target_cls, normalized))
 
     @classmethod
     def from_pretrained(cls, save_dir: str, **kwargs):
