@@ -7,7 +7,7 @@ import os
 
 
 # isort: off
-from .utils.nogil_patcher import patch_safetensors_save_file, patch_triton_autotuner  # noqa: E402
+from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noqa: E402
 # isort: on
 
 patch_safetensors_save_file()
@@ -15,7 +15,7 @@ patch_safetensors_save_file()
 # TODO: waiting for official fix from triton
 #  monkeypatching triton threading issues is fragile
 try:
-    patch_triton_autotuner()
+    TritonPatch.apply()
 except Exception:
     pass
 

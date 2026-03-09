@@ -36,7 +36,21 @@ def patch_safetensors_save_file() -> None:
     safetensors_torch.save_file = wrapper
 
 
-__all__ = ["patch_safetensors_save_file", "patch_triton_autotuner"]
+__all__ = ["TritonPatch", "patch_safetensors_save_file", "patch_triton_autotuner"]
+
+
+class TritonPatch:
+    _apply_lock = threading.Lock()
+    _applied = False
+
+    @classmethod
+    def apply(cls) -> None:
+        with cls._apply_lock:
+            if cls._applied:
+                return
+
+            patch_triton_autotuner()
+            cls._applied = True
 
 # TODO: triton has unfixed threading bugs in the autotuner code
 def patch_triton_autotuner() -> None:
