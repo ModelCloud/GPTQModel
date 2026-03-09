@@ -32,14 +32,21 @@ def test_quantize_config_weight_only_round_trip():
     assert reloaded.requires_calibration_dataset() is False
 
 
-def test_rtn_quantize_config_defaults_to_direct_smoother():
+def test_rtn_quantize_config_defaults_to_no_smoother():
     cfg = RTNQuantizeConfig(bits=4, group_size=128)
 
     assert isinstance(cfg, BaseQuantizeConfig)
     assert not isinstance(cfg, GPTQQuantizeConfig)
     assert cfg.uses_weight_only_lifecycle() is True
-    assert isinstance(cfg.smooth, SmoothMAD)
+    assert cfg.smooth is None
     assert cfg.export_quant_method() is not None
+
+    payload = cfg.to_dict()
+    assert payload["meta"]["weight_only"]["smooth"] is None
+
+    reloaded = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(reloaded, RTNQuantizeConfig)
+    assert reloaded.smooth is None
 
 
 def test_rtn_quantize_config_supports_awq_export_round_trip():

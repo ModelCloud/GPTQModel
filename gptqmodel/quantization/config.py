@@ -300,7 +300,8 @@ class FailSafe:
 @dataclass
 class WeightOnlyConfig:
     method: WeightOnlyMethod = WeightOnlyMethod.RTN
-    smooth: Optional[SmoothMethod] = field(default_factory=SmoothMAD)
+    # Whole-model RTN is noticeably more stable without a smoother by default.
+    smooth: Optional[SmoothMethod] = None
 
     def __post_init__(self):
         if isinstance(self.method, str):
@@ -1611,7 +1612,8 @@ class QQQQuantizeConfig(GPTQQuantizeConfig):
 class RTNQuantizeConfig(BaseQuantizeConfig):
     quant_method: METHOD = field(default=METHOD.GPTQ)
     format: FORMAT = field(default=FORMAT.GPTQ)
-    smooth: Optional[SmoothMethod] = field(default_factory=SmoothMAD)
+    # Whole-model RTN is noticeably more stable without a smoother by default.
+    smooth: Optional[SmoothMethod] = None
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.GPTQ,)

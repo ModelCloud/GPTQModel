@@ -22,6 +22,12 @@ from .config import (
 )
 
 
+# For Gaussian-like rows, raw MAD ~= 0.67449 * sigma. Normalize MAD so the
+# configured `k` behaves like a sigma-width window instead of clipping far more
+# aggressively than intended.
+MAD_TO_STD_SCALE = 1.4826
+
+
 def _quantile(abs_block: torch.Tensor, percentile: float) -> torch.Tensor:
     if percentile <= 0.0:
         return abs_block.min(dim=1, keepdim=True).values
@@ -83,7 +89,7 @@ def smooth_block(
 
     if isinstance(method, SmoothMAD):
         median = block_f.median(dim=1, keepdim=True).values
-        mad = (block_f - median).abs().median(dim=1, keepdim=True).values
+        mad = (block_f - median).abs().median(dim=1, keepdim=True).values * MAD_TO_STD_SCALE
         k = float(method.k)
         lo = median - k * mad
         hi = median + k * mad
