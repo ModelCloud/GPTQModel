@@ -67,8 +67,9 @@ env:
   CUDA_VERSION: 131
   UV_TORCH_BACKEND: cu130
   TORCH_VERSION: 2.10.0
-  PYTHON_VERSION: 3.14
-  UV_PYTHON: python3.14
+  # vllm doesn't support 3.14
+  PYTHON_VERSION: 3.13
+  UV_PYTHON: python3.13
   # PYTHON_GIL: 0 // test libs don't support yet
   BUILD_QQQ: 1
   BUILD_EORA: 1
