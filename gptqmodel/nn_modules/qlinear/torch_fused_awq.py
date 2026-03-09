@@ -9,6 +9,7 @@ import torch
 
 from ...adapter.adapter import Adapter
 from ...looper.linear_mode import LinearMode
+from ...nn_modules.qlinear import BaseQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import (
     dequantize_gemm,
@@ -128,6 +129,8 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
         self.register_buffer("wf_unsqueeze_zero", wf.unsqueeze(0).to(device=device), persistent=False)
         self.register_buffer("wf_unsqueeze_neg_one", wf.unsqueeze(-1).to(device=device), persistent=False)
 
+        # Lora: Keep adapter post-init behavior aligned with BaseQuantLinear.
+        BaseQuantLinear.post_init(self)
         self.linear_mode = None
         self.dequant_dtype = torch.int16 if self.bits == 8 else torch.int8
         self.optimize()
