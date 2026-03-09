@@ -527,3 +527,26 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
       year={2024}
 }
 ```
+
+## Quick Notes
+
+### Limit log level
+
+`GPTQModel` uses a shared `LogBar` logger. Set the level once near process startup:
+
+```python
+from logbar import LogBar
+
+LogBar.shared().setLevel("WARNING")  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+```
+
+### Apply Triton nogil patch early in multi-package scripts
+
+If your script imports multiple Triton users (for example `gptqmodel`, `vllm`, and `sglang`), apply the patch at the very top before other Triton-related imports:
+
+```python
+from gptqmodel import TritonPatch
+
+# Fix Triton crashing under nogil/free-threading Python 3.13+ where the kernel cache storage in Triton is not thread-safe
+TritonPatch.apply()
+```
