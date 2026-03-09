@@ -50,7 +50,7 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, dynamic_get
+from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, _normalize_quant_bits, dynamic_get, quant_bits_width
 from . import has_gil_disabled
 from .backend import BACKEND
 from .ctx import ctx
@@ -262,11 +262,6 @@ def make_quant(
     sym = qcfg.sym
     dynamic = qcfg.dynamic
     pack_dtype = qcfg.pack_dtype
-    quant_linear_kwargs: Dict[str, Any] = {}
-
-    gguf_qtype = getattr(qcfg, "gguf_qtype", None)
-    if format == FORMAT.GGUF and gguf_qtype is not None:
-        quant_linear_kwargs["gguf_qtype"] = gguf_qtype
 
     # Bitblas needs to be loaded as gptq's quant linear first, and then converted to bitblas format.
     if not pack and format in (FORMAT.GPTQ, FORMAT.GPTQ_V2) and backend == BACKEND.BITBLAS:
@@ -315,7 +310,7 @@ def make_quant(
                 pack_dtype=pack_dtype,
                 backend=backend,
                 adapter=qcfg.adapter,
-                quant_linear_kwargs=quant_linear_kwargs,
+                format=format,
             )
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
@@ -331,7 +326,7 @@ def make_quant(
 def create_quant_module(
     name: str,
     linear_cls: Type[BaseQuantLinear],
-    bits: int,
+    bits,
     desc_act: bool,
     dynamic,
     group_size: int,
@@ -341,10 +336,10 @@ def create_quant_module(
     device: DEVICE,
     lm_head_name: str,
     pack_dtype: torch.dtype,
+    format: FORMAT,
     backend: BACKEND = BACKEND.AUTO,
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
-    quant_linear_kwargs: Optional[Dict[str, Any]] = None,
 
 ):
     # unwrap named module
@@ -388,7 +383,7 @@ def create_quant_module(
     bias = submodule.bias is not None
 
     # need copies as dynamic config may override these in for loop
-    tmp_bits = bits
+    tmp_bits = _normalize_quant_bits(bits, format_value=format)
     tmp_group_size = group_size
     tmp_desc_act = desc_act
     tmp_sym = sym
@@ -404,16 +399,19 @@ def create_quant_module(
         # positive module match
         if overrides:
             # override base QuantizeConfig for every quant config key/value
-            tmp_bits = overrides.get("bits", bits)
+            tmp_bits = _normalize_quant_bits(overrides.get("bits", bits), format_value=format)
             tmp_group_size = overrides.get("group_size", group_size)
             tmp_desc_act = overrides.get("desc_act", desc_act)
             tmp_sym = overrides.get("sym", sym)
             tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
 
+    validate_bits = quant_bits_width(tmp_bits)
+    constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits
+
     # when loading a quantized model, device is target device passed in GPTQModel.load()
     # check in_features and out_features validate
     _, err = linear_cls.validate(
-        bits=tmp_bits,
+        bits=validate_bits,
         group_size=tmp_group_size,
         desc_act=tmp_desc_act,
         sym=tmp_sym,
@@ -427,7 +425,7 @@ def create_quant_module(
         raise err
 
     new_layer = linear_cls(
-        bits=tmp_bits,
+        bits=constructor_bits,
         group_size=tmp_group_size,
         desc_act=tmp_desc_act,
         sym=tmp_sym,
@@ -441,14 +439,13 @@ def create_quant_module(
         backend=backend,
         register_buffers=register_buffers,
         adapter=adapter,
-        **(quant_linear_kwargs or {}),
     )
     new_layer.device = ori_layer_device
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
 
 def create_quant_layer(
         linear_cls: Type[BaseQuantLinear],
-        bits: int,
+        bits,
         desc_act: bool,
         dynamic,
         group_size: int,
@@ -460,7 +457,7 @@ def create_quant_layer(
         pack_dtype: torch.dtype,
         backend: BACKEND,
         adapter: Optional[Adapter] = None,
-        quant_linear_kwargs: Optional[Dict[str, Any]] = None,
+        format: FORMAT = FORMAT.GPTQ,
 
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
@@ -483,9 +480,9 @@ def create_quant_layer(
             device=device,
             lm_head_name=lm_head_name,
             pack_dtype=pack_dtype,
+            format=format,
             backend=backend,
             adapter=adapter,
-            quant_linear_kwargs=quant_linear_kwargs,
         )
 
     return linear_cls

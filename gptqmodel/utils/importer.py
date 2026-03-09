@@ -16,6 +16,7 @@ from gptqmodel.adapter.adapter import Adapter
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..quantization import FORMAT, METHOD
+from ..quantization.config import _normalize_quant_bits, quant_bits_width
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from . import BACKEND
@@ -418,7 +419,7 @@ def hf_select_quant_linear_v2(
 
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
-        bits: int,
+        bits,
         group_size: int,
         desc_act: bool,
         sym: bool,
@@ -438,6 +439,7 @@ def select_quant_linear(
         format = FORMAT(format.lower())
     if isinstance(quant_method, str):
         quant_method = METHOD(quant_method.lower())
+    bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
 
     supported_formats = BACKEND_TO_METHOD_FORMAT_MAPPING.get(quant_method)
     if supported_formats is None:

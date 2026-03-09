@@ -142,9 +142,6 @@ class WeightOnlyRTNProcessor(LoopProcessor):
         create_start = time.perf_counter() if timer is not None else None
         with log_time_block("create_quant_module", logger=log, module_name=module_label):
             with parent_module_lock(parent_key):
-                quant_linear_kwargs = {}
-                if active_qcfg.format == "gguf" and active_qcfg.gguf_qtype is not None:
-                    quant_linear_kwargs["gguf_qtype"] = active_qcfg.gguf_qtype
                 create_quant_module(
                     name=module.full_name,
                     linear_cls=model.qlinear_kernel,
@@ -158,8 +155,8 @@ class WeightOnlyRTNProcessor(LoopProcessor):
                     device=active_qcfg.device,
                     lm_head_name=model.lm_head,
                     pack_dtype=active_qcfg.pack_dtype,
+                    format=active_qcfg.format,
                     register_buffers=False,
-                    quant_linear_kwargs=quant_linear_kwargs,
                 )
         if timer is not None and create_start is not None:
             timer.record("submodule_finalize_create", time.perf_counter() - create_start, source=module_label)

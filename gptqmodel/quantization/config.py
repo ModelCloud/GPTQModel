@@ -6,8 +6,10 @@
 import copy
 import json
 import os.path
+from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
+from functools import total_ordering
 from os.path import join
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -112,6 +114,259 @@ class WeightOnlyMethod(str, Enum):
     GGUF = "gguf"
     FP8 = "fp8"
     NVFP4 = "nvfp4"
+
+
+_GGUF_BITS_ALIAS_INFO = {
+    "q4_0": {"bits": 4, "version": "q", "variant": "0", "quality": None},
+    "q8_0": {"bits": 8, "version": "q", "variant": "0", "quality": None},
+    "q4_k": {"bits": 4, "version": "q", "variant": "k", "quality": None},
+    "q4_k_s": {"bits": 4, "version": "q", "variant": "k", "quality": "s"},
+    "q4_k_m": {"bits": 4, "version": "q", "variant": "k", "quality": "m"},
+    "q5_k": {"bits": 5, "version": "q", "variant": "k", "quality": None},
+    "q5_k_s": {"bits": 5, "version": "q", "variant": "k", "quality": "s"},
+    "q5_k_m": {"bits": 5, "version": "q", "variant": "k", "quality": "m"},
+    "q6_k": {"bits": 6, "version": "q", "variant": "k", "quality": None},
+}
+_GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH = {
+    4: "q4_0",
+    5: "q5_k_m",
+    6: "q6_k",
+    8: "q8_0",
+}
+
+
+@total_ordering
+class BaseComplexBits(ABC):
+    @classmethod
+    @abstractmethod
+    def from_string(cls, value: str) -> "BaseComplexBits":
+        raise NotImplementedError
+
+    @abstractmethod
+    def to_string(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def width(self) -> int:
+        return self.bits
+
+    @property
+    def name(self) -> str:
+        return self.to_string()
+
+    def _coerce_bits(self, other: Any) -> Any:
+        if isinstance(other, BaseComplexBits):
+            return other.bits
+        if isinstance(other, int):
+            return other
+        if isinstance(other, str) and other.strip().isdigit():
+            return int(other.strip())
+        return NotImplemented
+
+    def __str__(self) -> str:
+        return self.to_string()
+
+    def __hash__(self) -> int:
+        return hash(self.bits)
+
+    def __int__(self) -> int:
+        return self.bits
+
+    def __index__(self) -> int:
+        return self.bits
+
+    def __float__(self) -> float:
+        return float(self.bits)
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, BaseComplexBits):
+            return self.to_string() == other.to_string()
+        if isinstance(other, int):
+            return self.bits == other
+        if isinstance(other, str):
+            normalized = other.strip().lower().replace("-", "_")
+            if normalized.isdigit():
+                return self.bits == int(normalized)
+            return self.to_string() == normalized
+        return False
+
+    def __lt__(self, other: Any) -> bool:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return self.bits < coerced
+
+    def __add__(self, other: Any) -> int:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return self.bits + coerced
+
+    def __radd__(self, other: Any) -> int:
+        return self.__add__(other)
+
+    def __sub__(self, other: Any) -> int:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return self.bits - coerced
+
+    def __rsub__(self, other: Any) -> int:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return coerced - self.bits
+
+    def __mul__(self, other: Any) -> int:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return self.bits * coerced
+
+    def __rmul__(self, other: Any) -> int:
+        return self.__mul__(other)
+
+    def __floordiv__(self, other: Any) -> int:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return self.bits // coerced
+
+    def __rfloordiv__(self, other: Any) -> int:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return coerced // self.bits
+
+    def __truediv__(self, other: Any) -> float:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return self.bits / coerced
+
+    def __rtruediv__(self, other: Any) -> float:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return coerced / self.bits
+
+    def __mod__(self, other: Any) -> int:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return self.bits % coerced
+
+    def __rmod__(self, other: Any) -> int:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return coerced % self.bits
+
+    def __pow__(self, other: Any) -> int:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return self.bits ** coerced
+
+    def __rpow__(self, other: Any) -> int:
+        coerced = self._coerce_bits(other)
+        if coerced is NotImplemented:
+            return NotImplemented
+        return coerced ** self.bits
+
+
+@dataclass(frozen=True, eq=False)
+class GGUFBits(BaseComplexBits):
+    bits: int
+    version: str
+    variant: str
+    quality: Optional[str] = None
+
+    def __post_init__(self):
+        if self.bits <= 0:
+            raise ValueError("GGUFBits: `bits` must be a positive integer.")
+        if self.version not in {"q", "iq"}:
+            raise ValueError("GGUFBits: `version` must be `q` or `iq`.")
+        if self.variant not in {"0", "k"}:
+            raise ValueError("GGUFBits: `variant` must be `0` or `k`.")
+        if self.quality not in {None, "xs", "s", "m", "l"}:
+            raise ValueError("GGUFBits: `quality` must be one of `[None, xs, s, m, l]`.")
+
+    @classmethod
+    def from_string(cls, value: str) -> "GGUFBits":
+        normalized = str(value).strip().lower().replace("-", "_")
+        info = _GGUF_BITS_ALIAS_INFO.get(normalized)
+        if info is None:
+            supported = ", ".join(sorted(_GGUF_BITS_ALIAS_INFO))
+            raise ValueError(f"Unsupported GGUF bits `{value}`. Supported values: {supported}.")
+        return cls(
+            bits=info["bits"],
+            version=info["version"],
+            variant=info["variant"],
+            quality=info["quality"],
+        )
+
+    def to_string(self) -> str:
+        alias = f"{self.version}{self.bits}_{self.variant}"
+        if self.quality is not None:
+            alias = f"{alias}_{self.quality}"
+        return alias
+
+    @classmethod
+    def from_alias(cls, value: str) -> "GGUFBits":
+        return cls.from_string(value)
+
+    def serialize(self) -> str:
+        return self.to_string()
+
+    def __repr__(self) -> str:
+        return f"GGUFBits({self.to_string()!r})"
+
+
+# Backward-compatible alias for the earlier wrapper-based refactor.
+QuantBits = GGUFBits
+
+
+def _normalize_quant_bits(bits: Union[int, str, GGUFBits], format_value: Optional[Union[str, FORMAT]] = None) -> Union[int, GGUFBits]:
+    if isinstance(format_value, str):
+        format_value = _normalize_format(format_value)
+
+    if isinstance(bits, GGUFBits):
+        normalized = bits
+    elif isinstance(bits, int):
+        normalized = bits
+    elif isinstance(bits, str):
+        raw = bits.strip().lower().replace("-", "_")
+        normalized = int(raw) if raw.isdigit() else GGUFBits.from_alias(raw)
+    else:
+        raise ValueError(f"QuantizeConfig: unsupported bits specification `{bits}`.")
+
+    normalized_width = normalized.bits if isinstance(normalized, GGUFBits) else normalized
+    if normalized_width not in [2, 3, 4, 5, 6, 8]:
+        raise ValueError("QuantizeConfig: `bits` must resolve to one of `[2, 3, 4, 5, 6, 8]`.")
+
+    if format_value == FORMAT.GGUF and not isinstance(normalized, GGUFBits):
+        default_alias = _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH.get(normalized_width)
+        if default_alias is None:
+            raise ValueError(
+                f"QuantizeConfig: no default GGUF bits alias exists for `{normalized_width}`-bit quantization."
+            )
+        normalized = GGUFBits.from_alias(default_alias)
+
+    if isinstance(normalized, GGUFBits) and format_value is not None and format_value != FORMAT.GGUF:
+        raise ValueError("QuantizeConfig: GGUF bit encodings require `format=gguf`.")
+
+    return normalized
+
+
+def quant_bits_width(bits: Union[int, str, GGUFBits]) -> int:
+    normalized = _normalize_quant_bits(bits)
+    return normalized.bits if isinstance(normalized, GGUFBits) else normalized
+
+
+def serialize_quant_bits(bits: Union[int, str, GGUFBits]) -> Union[int, str]:
+    normalized = _normalize_quant_bits(bits)
+    return normalized.serialize() if isinstance(normalized, GGUFBits) else normalized
 
 @dataclass
 class SmoothMethod:
@@ -303,7 +558,6 @@ class WeightOnlyConfig:
     method: WeightOnlyMethod = WeightOnlyMethod.RTN
     # Whole-model RTN is noticeably more stable without a smoother by default.
     smooth: Optional[SmoothMethod] = None
-    gguf_qtype: Optional[str] = None
 
     def __post_init__(self):
         if isinstance(self.method, str):
@@ -947,11 +1201,11 @@ def _extract_weight_only_smooth(payload: Any) -> Any:
     raise ValueError("QuantizeConfig: `weight_only` must be a WeightOnlyConfig, dict, string, or None.")
 
 
-def _extract_weight_only_gguf_qtype(payload: Any) -> Any:
+def _extract_weight_only_legacy_gguf_bits(payload: Any) -> Any:
     if payload is None:
         return None
     if isinstance(payload, WeightOnlyConfig):
-        return payload.gguf_qtype
+        return getattr(payload, "gguf_qtype", None)
     if isinstance(payload, dict):
         return payload.get("gguf_qtype")
     if isinstance(payload, str):
@@ -961,6 +1215,7 @@ def _extract_weight_only_gguf_qtype(payload: Any) -> Any:
 
 def _normalize_rtn_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(payload)
+    legacy_gguf_bits = normalized.pop("gguf_qtype", None)
     weight_only = normalized.pop("weight_only", None)
     weight_only_method = _peek_weight_only_method(weight_only)
 
@@ -970,8 +1225,10 @@ def _normalize_rtn_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if "smooth" not in normalized:
         normalized["smooth"] = _extract_weight_only_smooth(weight_only)
-    if "gguf_qtype" not in normalized:
-        normalized["gguf_qtype"] = _extract_weight_only_gguf_qtype(weight_only)
+    if legacy_gguf_bits is None:
+        legacy_gguf_bits = _extract_weight_only_legacy_gguf_bits(weight_only)
+    if legacy_gguf_bits is not None and BITS_FIELD_CODE not in normalized:
+        normalized[BITS_FIELD_CODE] = legacy_gguf_bits
     return normalized
 
 
@@ -1052,10 +1309,10 @@ class QuantizeConfigMeta(type):
 
 @dataclass
 class BaseQuantizeConfig:
-    bits: int = field(default=4, metadata={"choices": [2, 3, 4, 5, 6, 8]})
+    bits: Union[int, str, GGUFBits] = field(default=4, metadata={"choices": [2, 3, 4, 5, 6, 8]})
 
     # allow dynamic bitsize per layer, if None or some layer not set, use bits
-    dynamic: Optional[Dict[str, Dict[str, Union[int, bool]]]] = field(default=None)
+    dynamic: Optional[Dict[str, Dict[str, Union[int, str, bool, GGUFBits]]]] = field(default=None)
 
     # 128 offers a good balance between inference speed, VRAM usage, and quality.
     group_size: int = field(default=128)
@@ -1167,6 +1424,7 @@ class BaseQuantizeConfig:
         self.quant_method = _normalize_quant_method(self.quant_method)
         self.format = _normalize_format(self.format)
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
+        self.bits = _normalize_quant_bits(self.bits, format_value=self.format)
 
         allowed_methods = self.allowed_quant_methods()
         if allowed_methods and self.quant_method not in allowed_methods:
@@ -1182,7 +1440,8 @@ class BaseQuantizeConfig:
 
         self.failsafe = _normalize_failsafe(self.failsafe)
 
-        if self.bits not in fields_info[0].metadata["choices"]:
+        valid_bit_widths = fields_info[0].metadata["choices"]
+        if quant_bits_width(self.bits) not in valid_bit_widths:
             raise ValueError(f"QuantizeConfig: `bits` must be in the set of `{fields_info[0].metadata['choices']}`.")
 
         if self.dynamic is not None:
@@ -1193,10 +1452,13 @@ class BaseQuantizeConfig:
 
             for layer, layer_dict in self.dynamic.items():
                 for key, value in layer_dict.items():
-                    if key == "bits" and value not in fields_info[0].metadata["choices"]:
-                        raise ValueError(
-                            f"QuantizeConfig: Layer `{layer}` only support quantization of  `{fields_info[0].metadata['choices']}` bits."
-                        )
+                    if key == "bits":
+                        normalized_bits = _normalize_quant_bits(value, format_value=self.format)
+                        layer_dict[key] = normalized_bits
+                        if quant_bits_width(normalized_bits) not in valid_bit_widths:
+                            raise ValueError(
+                                f"QuantizeConfig: Layer `{layer}` only support quantization of  `{fields_info[0].metadata['choices']}` bits."
+                            )
                     if key == "group_size" and value != -1 and value <= 0:
                         raise ValueError(_resolve_dynamic_group_size_error())
 
@@ -1455,7 +1717,7 @@ class BaseQuantizeConfig:
         self._update_meta_payload(meta_payload)
 
         out = {
-            "bits": self.bits,
+            "bits": serialize_quant_bits(self.bits),
             "dynamic": self.dynamic,
             "group_size": self.group_size,
             "desc_act": self.desc_act,
@@ -1471,21 +1733,24 @@ class BaseQuantizeConfig:
         if dynamic:
             for _, v in dynamic.items():
                 v.pop("adapter", None)
+                if "bits" in v:
+                    v["bits"] = serialize_quant_bits(v["bits"])
 
         out = {k: v for k, v in out.items() if v is not None and (v not in [None, {}])}
         dict_scale_dtype_to_str(out)
         return out
 
     def calculate_bits_per_weight(self):
+        bit_width = quant_bits_width(self.bits)
         if self.group_size != -1:
-            per_group_bits = self.group_size * self.bits
+            per_group_bits = self.group_size * bit_width
             per_group_bits += 16
-            per_group_bits += self.bits
+            per_group_bits += bit_width
             per_group_bits += 4
             bpw = per_group_bits / self.group_size
             bpw += 0.1
         else:
-            bpw = self.bits
+            bpw = bit_width
         log.info(f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, group_size: {self.group_size}]")
 
     def moe_routing_override(self, num_experts: int) -> Union[int, None]:
@@ -1654,7 +1919,6 @@ class RTNQuantizeConfig(BaseQuantizeConfig):
     format: FORMAT = field(default=FORMAT.GPTQ)
     # Whole-model RTN is noticeably more stable without a smoother by default.
     smooth: Optional[SmoothMethod] = None
-    gguf_qtype: Optional[str] = None
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.GPTQ,)
@@ -1676,7 +1940,6 @@ class RTNQuantizeConfig(BaseQuantizeConfig):
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         meta_payload["weight_only"] = {
             "smooth": _serialize_smooth_method(self.smooth),
-            "gguf_qtype": self.gguf_qtype,
         }
 
     def uses_weight_only_lifecycle(self) -> bool:
@@ -1693,7 +1956,10 @@ def clone_rtn_config_for_module(
     qcfg_clone = copy.deepcopy(qcfg)
 
     if qcfg.dynamic is not None:
-        qcfg_clone.bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
+        qcfg_clone.bits = _normalize_quant_bits(
+            qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits),
+            format_value=qcfg_clone.format,
+        )
         qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
         qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
 

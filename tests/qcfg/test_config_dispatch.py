@@ -5,6 +5,7 @@ from gptqmodel.quantization.config import (
     AWQQuantizeConfig,
     BaseQuantizeConfig,
     FORMAT,
+    GGUFBits,
     GPTQQuantizeConfig,
     METHOD,
     QuantizeConfig,
@@ -88,6 +89,11 @@ def test_quantize_config_dispatches_rtn_gguf_export_constructor():
 
     assert isinstance(cfg, RTNQuantizeConfig)
     assert cfg.format == FORMAT.GGUF
+    assert isinstance(cfg.bits, GGUFBits)
+    assert cfg.bits == "q4_0"
+    assert cfg.bits.bits == 4
+    assert cfg.bits.version == "q"
+    assert cfg.bits.variant == "0"
     assert cfg.export_quant_method() == METHOD.GPTQ
 
 
@@ -98,19 +104,27 @@ def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method():
 
     assert isinstance(cfg, RTNQuantizeConfig)
     assert cfg.format == FORMAT.GGUF
+    assert isinstance(cfg.bits, GGUFBits)
+    assert cfg.bits == "q4_0"
+    assert cfg.bits.bits == 4
+    assert cfg.bits.variant == "0"
     assert cfg.export_quant_method() == METHOD.GPTQ
 
 
 def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method_preserving_qtype():
     cfg = QuantizeConfig(
-        bits=5,
-        weight_only=WeightOnlyConfig(method="gguf", gguf_qtype="q5_k_m"),
+        bits="q5_k_m",
+        weight_only=WeightOnlyConfig(method="gguf"),
     )
 
     assert isinstance(cfg, RTNQuantizeConfig)
-    assert cfg.bits == 5
+    assert isinstance(cfg.bits, GGUFBits)
+    assert cfg.bits == "q5_k_m"
+    assert cfg.bits.bits == 5
+    assert cfg.bits.version == "q"
+    assert cfg.bits.variant == "k"
+    assert cfg.bits.quality == "m"
     assert cfg.format == FORMAT.GGUF
-    assert cfg.gguf_qtype == "q5_k_m"
     assert cfg.export_quant_method() == METHOD.GPTQ
 
 

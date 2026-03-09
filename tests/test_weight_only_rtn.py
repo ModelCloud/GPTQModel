@@ -20,6 +20,7 @@ from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.quantization.config import (
     FORMAT,
+    GGUFBits,
     METHOD,
     QuantizeConfig,
     RTNQuantizeConfig,
@@ -110,9 +111,8 @@ def _error_stats(reference: torch.Tensor, candidate: torch.Tensor) -> dict[str, 
 def _build_rtn_microbench_case(
     dtype: torch.dtype,
     *,
-    bits: int = 4,
-    gguf_qtype: str | None = None,
-) -> dict[str, torch.Tensor | int | str | torch.dtype | torch.device | None]:
+    bits: int | str = 4,
+) -> dict[str, torch.Tensor | int | str | GGUFBits | torch.dtype | torch.device | None]:
     device = _microbench_device(dtype)
 
     torch.manual_seed(1234)
@@ -142,15 +142,21 @@ def _build_rtn_microbench_case(
     inputs = inputs_master.to(device=device, dtype=dtype)
     native_output = linear(inputs)
 
+    format = FORMAT.GPTQ
+    if isinstance(bits, GGUFBits):
+        format = FORMAT.GGUF
+    elif isinstance(bits, str) and not bits.strip().isdigit():
+        format = FORMAT.GGUF
+
     qcfg = RTNQuantizeConfig(
         bits=bits,
         group_size=group_size,
         desc_act=False,
         sym=True,
+        format=format,
         smooth=SmoothMAD(k=2.25),
         offload_to_disk=False,
         device=device.type,
-        gguf_qtype=gguf_qtype,
     )
     rtn_weight, scales, zeros, g_idx, *_ = RTN(linear, qcfg=qcfg).quantize()
     rtn_output = F.linear(inputs, rtn_weight.to(device=device, dtype=dtype), linear.bias)
@@ -166,8 +172,8 @@ def _build_rtn_microbench_case(
         "in_features": in_features,
         "out_features": out_features,
         "group_size": group_size,
-        "bits": bits,
-        "gguf_qtype": gguf_qtype,
+        "bits": qcfg.bits,
+        "bit_width": int(qcfg.bits),
         "inputs": inputs,
         "native_output": native_output,
         "rtn_output": rtn_output,
@@ -181,7 +187,7 @@ def _build_rtn_microbench_case(
 
 def _build_rtn_gptq_module(case: dict[str, torch.Tensor | int | torch.dtype | torch.device]) -> TorchQuantLinear:
     module = TorchQuantLinear(
-        bits=case["bits"],
+        bits=case["bit_width"],
         group_size=case["group_size"],
         sym=True,
         desc_act=False,
@@ -223,7 +229,7 @@ def _build_rtn_gptq_module(case: dict[str, torch.Tensor | int | torch.dtype | to
 
 def _build_rtn_awq_module(case: dict[str, torch.Tensor | int | torch.dtype | torch.device]) -> AwqTorchQuantLinear:
     module = AwqTorchQuantLinear(
-        bits=case["bits"],
+        bits=case["bit_width"],
         group_size=case["group_size"],
         sym=True,
         desc_act=False,
@@ -242,7 +248,7 @@ def _build_rtn_awq_module(case: dict[str, torch.Tensor | int | torch.dtype | tor
 
 
 def _build_rtn_gguf_module(
-    case: dict[str, torch.Tensor | int | str | torch.dtype | torch.device | None],
+    case: dict[str, torch.Tensor | int | str | GGUFBits | torch.dtype | torch.device | None],
 ) -> GGUFTorchQuantLinear:
     module = GGUFTorchQuantLinear(
         bits=case["bits"],
@@ -253,7 +259,6 @@ def _build_rtn_gguf_module(
         out_features=case["out_features"],
         bias=True,
         register_buffers=False,
-        gguf_qtype=case["gguf_qtype"],
     )
     module.pack(
         linear=case["cpu_linear"],
@@ -370,15 +375,21 @@ def test_baseqmodel_quantize_allows_rtn_awq_export():
 
 
 @pytest.mark.parametrize(
-    ("bits", "gguf_qtype", "tensor_qtype"),
+    ("bits", "tensor_qtype", "bit_width", "variant", "quality"),
     [
-        (4, "q4_k_m", "Q4_K"),
-        (5, "q5_k_s", "Q5_K"),
-        (5, "q5_k_m", "Q5_K"),
-        (6, "q6_k", "Q6_K"),
+        ("q4_k_m", "Q4_K", 4, "k", "m"),
+        ("q5_k_s", "Q5_K", 5, "k", "s"),
+        ("q5_k_m", "Q5_K", 5, "k", "m"),
+        ("q6_k", "Q6_K", 6, "k", None),
     ],
 )
-def test_baseqmodel_quantize_allows_rtn_gguf_export(bits: int, gguf_qtype: str, tensor_qtype: str):
+def test_baseqmodel_quantize_allows_rtn_gguf_export(
+    bits: str,
+    tensor_qtype: str,
+    bit_width: int,
+    variant: str,
+    quality: str | None,
+):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     device_type = device.type
 
@@ -394,7 +405,6 @@ def test_baseqmodel_quantize_allows_rtn_gguf_export(bits: int, gguf_qtype: str, 
         smooth=smooth,
         offload_to_disk=False,
         device=device_type,
-        gguf_qtype=gguf_qtype,
     )
 
     model = _TinyQModel(
@@ -418,7 +428,12 @@ def test_baseqmodel_quantize_allows_rtn_gguf_export(bits: int, gguf_qtype: str, 
     for qmodule in qmodules.values():
         assert qmodule.qweight.device.type == "cpu"
         assert qmodule.qweight.dtype == torch.uint8
-        assert qmodule.gguf_qtype == gguf_qtype
+        assert isinstance(qmodule.bits, GGUFBits)
+        assert qmodule.bits == bits
+        assert qmodule.bits.bits == bit_width
+        assert qmodule.bits.version == "q"
+        assert qmodule.bits.variant == variant
+        assert qmodule.bits.quality == quality
         assert qmodule.gguf_tensor_qtype == tensor_qtype
 
 
@@ -472,7 +487,7 @@ def test_rtn_microbench_awq_export_stays_close_to_rtn():
 def test_rtn_microbench_gguf_export_matches_reference_bytes():
     gguf = pytest.importorskip("gguf")
 
-    case = _build_rtn_microbench_case(torch.float16, bits=4, gguf_qtype="q4_0")
+    case = _build_rtn_microbench_case(torch.float16, bits="q4_0")
     module = _build_rtn_gguf_module(case)
 
     reference = gguf.quantize(
@@ -483,23 +498,41 @@ def test_rtn_microbench_gguf_export_matches_reference_bytes():
     np.testing.assert_array_equal(module.qweight.detach().cpu().numpy(), reference)
 
 
+def test_rtn_microbench_gguf_export_accepts_structured_bits():
+    dtype = torch.float16 if torch.cuda.is_available() else torch.bfloat16
+    bits = GGUFBits(bits=5, version="q", variant="k", quality="m")
+
+    case = _build_rtn_microbench_case(dtype, bits=bits)
+    module = _build_rtn_gguf_module(case)
+
+    assert isinstance(case["bits"], GGUFBits)
+    assert case["bits"] == "q5_k_m"
+    assert isinstance(module.bits, GGUFBits)
+    assert module.bits == "q5_k_m"
+    assert module.gguf_tensor_qtype == "Q5_K"
+
+    output_stats = _error_stats(case["rtn_output"], module(case["inputs"]))
+
+    assert output_stats["mae"] < 6e-4
+    assert output_stats["max"] < 0.012
+
+
 @pytest.mark.parametrize(
-    ("bits", "gguf_qtype", "tensor_qtype"),
+    ("bits", "tensor_qtype"),
     [
-        (4, "q4_k_m", "Q4_K"),
-        (5, "q5_k_s", "Q5_K"),
-        (5, "q5_k_m", "Q5_K"),
-        (6, "q6_k", "Q6_K"),
+        ("q4_k_m", "Q4_K"),
+        ("q5_k_s", "Q5_K"),
+        ("q5_k_m", "Q5_K"),
+        ("q6_k", "Q6_K"),
     ],
 )
 def test_rtn_microbench_gguf_export_layout_round_trips_with_reference_dequantizer(
-    bits: int,
-    gguf_qtype: str,
+    bits: str,
     tensor_qtype: str,
 ):
     gguf = pytest.importorskip("gguf")
 
-    case = _build_rtn_microbench_case(torch.float16, bits=bits, gguf_qtype=gguf_qtype)
+    case = _build_rtn_microbench_case(torch.float16, bits=bits)
     module = _build_rtn_gguf_module(case)
 
     reference = gguf.dequantize(
@@ -517,23 +550,22 @@ def test_rtn_microbench_gguf_export_layout_round_trips_with_reference_dequantize
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
-    ("bits", "gguf_qtype", "weight_mae_max", "output_mae_max", "output_max_max"),
+    ("bits", "weight_mae_max", "output_mae_max", "output_max_max"),
     [
-        (4, "q4_k_m", 0.0015, 7e-4, 0.015),
-        (5, "q5_k_s", 0.0010, 6e-4, 0.012),
-        (5, "q5_k_m", 0.0010, 6e-4, 0.012),
-        (6, "q6_k", 7e-4, 5e-4, 0.010),
+        ("q4_k_m", 0.0015, 7e-4, 0.015),
+        ("q5_k_s", 0.0010, 6e-4, 0.012),
+        ("q5_k_m", 0.0010, 6e-4, 0.012),
+        ("q6_k", 7e-4, 5e-4, 0.010),
     ],
 )
 def test_rtn_microbench_gguf_export_stays_close_to_rtn(
     dtype: torch.dtype,
-    bits: int,
-    gguf_qtype: str,
+    bits: str,
     weight_mae_max: float,
     output_mae_max: float,
     output_max_max: float,
 ):
-    case = _build_rtn_microbench_case(dtype, bits=bits, gguf_qtype=gguf_qtype)
+    case = _build_rtn_microbench_case(dtype, bits=bits)
     module = _build_rtn_gguf_module(case)
 
     packed_weight = module.dequantize_weight().T.detach().cpu().to(case["rtn_weight_cpu"].dtype)
@@ -548,20 +580,19 @@ def test_rtn_microbench_gguf_export_stays_close_to_rtn(
 
 
 @pytest.mark.parametrize(
-    ("bits", "gguf_qtype", "output_mae_max", "output_max_max"),
+    ("bits", "output_mae_max", "output_max_max"),
     [
-        (4, "q4_k_m", 7e-4, 0.015),
-        (5, "q5_k_m", 6e-4, 0.012),
-        (6, "q6_k", 5e-4, 0.010),
+        ("q4_k_m", 7e-4, 0.015),
+        ("q5_k_m", 6e-4, 0.012),
+        ("q6_k", 5e-4, 0.010),
     ],
 )
 def test_rtn_microbench_gguf_reload_from_state_dict_stays_close_to_rtn(
-    bits: int,
-    gguf_qtype: str,
+    bits: str,
     output_mae_max: float,
     output_max_max: float,
 ):
-    case = _build_rtn_microbench_case(torch.float16, bits=bits, gguf_qtype=gguf_qtype)
+    case = _build_rtn_microbench_case(torch.float16, bits=bits)
     module = _build_rtn_gguf_module(case)
 
     reloaded = GGUFTorchQuantLinear(
@@ -573,7 +604,6 @@ def test_rtn_microbench_gguf_reload_from_state_dict_stays_close_to_rtn(
         out_features=case["out_features"],
         bias=True,
         register_buffers=True,
-        gguf_qtype=gguf_qtype,
     )
     reloaded.load_state_dict({k: v.detach().cpu() for k, v in module.state_dict().items()})
     reloaded.post_init()

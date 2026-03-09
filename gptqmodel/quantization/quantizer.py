@@ -8,7 +8,7 @@
 import torch
 import torch.nn as nn
 
-from .config import BaseQuantizeConfig
+from .config import BaseQuantizeConfig, _normalize_quant_bits
 from ..utils.logger import setup_logger
 
 
@@ -48,12 +48,14 @@ class Quantizer(nn.Module):
         grid=100,
         maxshrink=0.8,
         trits=False,
-        bits:int=4, # for hf compat
-        sym:bool=False, # for hf compat
+        bits: int | str | None = None, # for hf compat
+        sym: bool | None = None, # for hf compat
     ):
         if self.name == HF_OPTIMUM:
-            self.qcfg.bits = bits
-            self.qcfg.sym = sym
+            if bits is not None:
+                self.qcfg.bits = _normalize_quant_bits(bits, format_value=self.qcfg.format)
+            if sym is not None:
+                self.qcfg.sym = sym
 
         if self.requires_groupwise_processing():
             self.maxq = torch.tensor(2 ** (self.qcfg.bits - 1) - 1)

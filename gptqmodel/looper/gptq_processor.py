@@ -384,6 +384,7 @@ class GPTQProcessor(LoopProcessor):
                     device=self.qcfg.device,
                     lm_head_name=model.lm_head,
                     pack_dtype=self.qcfg.pack_dtype,
+                    format=self.qcfg.format,
                     register_buffers=False,
                 )
         if timer is not None and create_start is not None:

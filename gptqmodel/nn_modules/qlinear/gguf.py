@@ -14,7 +14,7 @@ from torch.nn.modules.conv import _ConvNd
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...quantization import FORMAT, METHOD
+from ...quantization.config import FORMAT, GGUFBits, METHOD, _normalize_quant_bits
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import BaseQuantLinear
@@ -38,13 +38,7 @@ _GGUF_TYPE_INFO = {
     "Q5_K": {"bits": 5, "block_size": 256, "type_size": 176},
     "Q6_K": {"bits": 6, "block_size": 256, "type_size": 210},
 }
-_GGUF_DEFAULT_QTYPE_BY_BITS = {
-    4: "q4_0",
-    5: "q5_k_m",
-    6: "q6_k",
-    8: "q8_0",
-}
-_GGUF_QTYPE_ALIAS_TO_TENSOR = {
+_GGUF_BITS_ALIAS_TO_TENSOR_QTYPE = {
     "q4_0": "Q4_0",
     "q8_0": "Q8_0",
     "q4_k": "Q4_K",
@@ -59,22 +53,20 @@ _GGUF_SCALE_QUANT_MAX = 63
 _GGUF_Q6_SCALE_QUANT_MAX = 127
 
 
-def _normalize_gguf_qtype(bits: int, gguf_qtype: str | None) -> tuple[str, str]:
-    alias = _GGUF_DEFAULT_QTYPE_BY_BITS[bits] if gguf_qtype is None else str(gguf_qtype).strip().lower()
-    alias = alias.replace("-", "_")
-
-    tensor_qtype = _GGUF_QTYPE_ALIAS_TO_TENSOR.get(alias)
+def _normalize_gguf_bits(bits) -> tuple[GGUFBits, str]:
+    bits_spec = _normalize_quant_bits(bits, format_value=FORMAT.GGUF)
+    tensor_qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE.get(bits_spec.name)
     if tensor_qtype is None:
-        supported = ", ".join(sorted(_GGUF_QTYPE_ALIAS_TO_TENSOR))
-        raise ValueError(f"Unsupported gguf_qtype `{gguf_qtype}`. Supported values: {supported}.")
+        supported = ", ".join(sorted(_GGUF_BITS_ALIAS_TO_TENSOR_QTYPE))
+        raise ValueError(f"Unsupported GGUF bits `{bits}`. Supported values: {supported}.")
 
     qtype_info = _GGUF_TYPE_INFO[tensor_qtype]
-    if qtype_info["bits"] != bits:
+    if qtype_info["bits"] != bits_spec.width:
         raise ValueError(
-            f"GGUF qtype `{alias}` requires {qtype_info['bits']}-bit RTN export, but got bits={bits}."
+            f"GGUF bits `{bits_spec.name}` require {qtype_info['bits']}-bit RTN export, but got bits={bits_spec.width}."
         )
 
-    return alias, tensor_qtype
+    return bits_spec, tensor_qtype
 
 
 def _gguf_quantize_q4_0(blocks: np.ndarray) -> np.ndarray:
@@ -400,7 +392,7 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
 
     def __init__(
         self,
-        bits: int,
+        bits,
         group_size: int,
         sym: bool,
         desc_act: bool,
@@ -412,7 +404,7 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         register_buffers: bool = True,
         **kwargs,
     ):
-        self.gguf_qtype, self.gguf_tensor_qtype = _normalize_gguf_qtype(bits, kwargs.pop("gguf_qtype", None))
+        bits_spec, self.gguf_tensor_qtype = _normalize_gguf_bits(bits)
         qtype_info = _GGUF_TYPE_INFO[self.gguf_tensor_qtype]
         self.gguf_block_size = qtype_info["block_size"]
         self.gguf_type_size = qtype_info["type_size"]
@@ -420,7 +412,7 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         self._cached_weights: Dict[Tuple[str, int | None, torch.dtype], torch.Tensor] = {}
 
         super().__init__(
-            bits=bits,
+            bits=int(bits_spec),
             group_size=group_size,
             sym=sym,
             desc_act=desc_act,
@@ -433,6 +425,8 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
             register_buffers=False,
             **kwargs,
         )
+
+        self.bits = bits_spec
 
         if register_buffers:
             self._allocate_buffers(bias=bias)
@@ -468,7 +462,7 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
     def extra_repr(self) -> str:
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
-            f"bias={self.bias is not None}, bits={self.bits}, gguf_qtype={self.gguf_qtype}"
+            f"bias={self.bias is not None}, bits={self.bits}"
         )
 
     def _cache_key(self, device: torch.device, dtype: torch.dtype) -> Tuple[str, int | None, torch.dtype]:

@@ -1491,6 +1491,7 @@ class AWQProcessor(LoopProcessor):
                     device=self.qcfg.device,
                     lm_head_name=self.gptq_model.lm_head,
                     pack_dtype=self.qcfg.pack_dtype,
+                    format=self.qcfg.format,
                     register_buffers=False,
                 )
         if timer is not None and create_start is not None:

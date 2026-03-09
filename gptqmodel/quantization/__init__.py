@@ -5,9 +5,11 @@
 
 from .config import (
                      AWQQuantizeConfig,
+                     BaseComplexBits,
                      FORMAT,
                      FORMAT_FIELD_CHECKPOINT,
                      FORMAT_FIELD_CODE,
+                     GGUFBits,
                      GPTQQuantizeConfig,
                      METHOD,
                      QUANT_CONFIG_FILENAME,
@@ -17,6 +19,7 @@ from .config import (
                      FailSafeStrategy,
                      GPTAQConfig,
                      HessianConfig,
+                     QuantBits,
                      QuantizeConfig,
                      RTNQuantizeConfig,
                      SmoothLog,

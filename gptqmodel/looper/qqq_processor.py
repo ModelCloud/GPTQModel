@@ -255,6 +255,7 @@ class QQQProcessor(LoopProcessor):
                 device=self.qcfg.device,
                 lm_head_name=model.lm_head,
                 pack_dtype=self.qcfg.pack_dtype,
+                format=self.qcfg.format,
                 register_buffers=False,
             )
 
