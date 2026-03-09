@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import copy
 import json
 import os.path
 from dataclasses import asdict, dataclass, field, fields
@@ -1600,27 +1601,105 @@ class QQQQuantizeConfig(GPTQQuantizeConfig):
 
 
 @dataclass
-class RTNQuantizeConfig(GPTQQuantizeConfig):
+class RTNQuantizeConfig(BaseQuantizeConfig):
+    quant_method: METHOD = field(default=METHOD.GPTQ)
+    format: FORMAT = field(default=FORMAT.GPTQ)
     smooth: Optional[SmoothMethod] = field(default_factory=SmoothMAD)
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.GPTQ,)
 
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
         return RTN_EXPORT_FORMATS
+
+    def default_desc_act(self) -> bool:
+        return False
 
     def __post_init__(self):
         self.smooth = _parse_smooth_method(self.smooth)
         super().__post_init__()
 
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["sym"] = self.sym
+        out[FORMAT_FIELD_CODE] = self.format
+
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
-        super()._update_meta_payload(meta_payload)
         meta_payload["calibrationless"] = {
             "smooth": _serialize_smooth_method(self.smooth),
         }
+
+    def to_gptq_work_config(self, *, failsafe: Optional[FailSafe] = None) -> GPTQQuantizeConfig:
+        """Build the internal GPTQ-compatible work config used by the RTN lifecycle.
+
+        RTN reuses GPTQ's quantizer implementation to emit GPTQ-compatible weight
+        tensors, but that worker config stays internal so RTN's public config
+        surface remains calibration-less and method-specific. Export format stays
+        on the outer RTN config; the worker config is always GPTQ-format.
+        """
+        return GPTQQuantizeConfig(
+            bits=self.bits,
+            dynamic=self.dynamic,
+            group_size=self.group_size,
+            desc_act=self.desc_act,
+            sym=self.sym,
+            true_sequential=self.true_sequential,
+            lm_head=self.lm_head,
+            quant_method=METHOD.GPTQ,
+            format=FORMAT.GPTQ,
+            meta=dict(self.meta) if self.meta else None,
+            device=self.device,
+            pack_dtype=self.pack_dtype,
+            pack_impl=self.pack_impl,
+            adapter=self.adapter,
+            offload_to_disk=self.offload_to_disk,
+            offload_to_disk_path=self.offload_to_disk_path,
+            rotation=self.rotation,
+            failsafe=failsafe if failsafe is not None else self.failsafe,
+            is_marlin_format=self.is_marlin_format,
+            compute_device_filter=self.compute_device_filter,
+            auto_forward_data_parallel=self.auto_forward_data_parallel,
+            vram_strategy=self.vram_strategy,
+            gc_mode=self.gc_mode,
+            wait_for_submodule_finalizers=self.wait_for_submodule_finalizers,
+            moe=self.moe,
+            act_group_aware=False,
+            static_groups=False,
+            mse=0.0,
+            gptaq=None,
+            mock_quantization=False,
+            hessian=HessianConfig(),
+        )
 
     def uses_calibrationless_lifecycle(self) -> bool:
         return True
 
 
-def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[QuantizeConfig]:
+def clone_rtn_config_for_module(
+    qcfg: RTNQuantizeConfig,
+    module_full_name: str,
+) -> Optional[RTNQuantizeConfig]:
+    if qcfg.dynamic_get(layer_name=module_full_name) is False:
+        return None
+
+    qcfg_clone = copy.deepcopy(qcfg)
+
+    if qcfg.dynamic is not None:
+        qcfg_clone.bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
+        qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
+        qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
+
+        desc_act_override = qcfg.dynamic_get(module_full_name, "desc_act", None)
+        if desc_act_override is not None:
+            qcfg_clone.desc_act = desc_act_override
+
+        smooth_override = qcfg.dynamic_get(module_full_name, "smooth", None)
+        if smooth_override is not None:
+            qcfg_clone.smooth = _parse_smooth_method(smooth_override)
+
+    return qcfg_clone
+
+
+def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantizeConfig]:
     method = payload.get(QUANT_METHOD_FIELD, METHOD.GPTQ)
     format_value = payload.get(FORMAT_FIELD_CODE, FORMAT.GPTQ)
     calibrationless = payload.get("calibrationless")

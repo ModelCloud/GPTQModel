@@ -31,7 +31,7 @@ from transformers.utils.generic import ContextManagers
 from ..adapter.adapter import Adapter
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
+from ..quantization.config import BaseQuantizeConfig, FORMAT, METHOD, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
 from ..utils.hf import no_init_weights
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
@@ -125,7 +125,7 @@ def ModelLoader(cls):
     def from_pretrained(
             cls,
             pretrained_model_id_or_path: str,
-            quantize_config: QuantizeConfig,
+            quantize_config: BaseQuantizeConfig,
             trust_remote_code: bool = False,
             dtype: [str | torch.dtype] = "auto",
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
@@ -189,8 +189,8 @@ def ModelLoader(cls):
         # non-quantized models are always loaded into cpu
         cpu_device_map = {"": "cpu"}
 
-        if quantize_config is None or not isinstance(quantize_config, QuantizeConfig):
-            raise AttributeError("`quantize_config` must be passed and be an instance of QuantizeConfig.")
+        if quantize_config is None or not isinstance(quantize_config, BaseQuantizeConfig):
+            raise AttributeError("`quantize_config` must be passed and be an instance of BaseQuantizeConfig.")
 
         quantize_config.calculate_bits_per_weight()
 

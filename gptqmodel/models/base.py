@@ -42,7 +42,7 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, QUANTIZE_BLACK_LIST, GcMode, VramStrategy, dynamic_get
+from ..quantization.config import BaseQuantizeConfig, FORMAT, METHOD, QUANTIZE_BLACK_LIST, GcMode, VramStrategy, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.backend import BACKEND
 from ..utils.calibration import prepare_calibration_dataset
@@ -223,7 +223,7 @@ class BaseQModel(nn.Module):
         self,
         model: PreTrainedModel,
         quantized: bool,
-        quantize_config: Optional[QuantizeConfig],
+        quantize_config: Optional[BaseQuantizeConfig],
         tokenizer: Optional[PreTrainedTokenizerBase] = None,
         qlinear_kernel: nn.Module = None,
         load_quantized_model: bool = False,
@@ -626,7 +626,7 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
-        if self.quantize_config is None or not isinstance(self.quantize_config, QuantizeConfig):
+        if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
 
         if self.quantized:

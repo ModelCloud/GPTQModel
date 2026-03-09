@@ -12,7 +12,6 @@ from typing import Dict, Optional
 
 import torch
 
-from ..looper.gptq_processor import clone_gptq_config_for_module
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -29,7 +28,13 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization import GPTQ
-from ..quantization.config import FailSafe, FailSafeStrategy, QuantizeConfig, RTNQuantizeConfig
+from ..quantization.config import (
+    BaseQuantizeConfig,
+    FailSafe,
+    FailSafeStrategy,
+    RTNQuantizeConfig,
+    clone_rtn_config_for_module,
+)
 from ..quantization.gptq import get_number_of_rows_and_cols
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, pack_module
@@ -45,7 +50,7 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
     def __init__(
         self,
         tokenizer,
-        qcfg: QuantizeConfig,
+        qcfg: RTNQuantizeConfig,
     ):
         super().__init__(
             tokenizer=tokenizer,
@@ -60,20 +65,16 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
             fwd_after_process=False,
         )
         self.lock = threading.Lock()
-        self.qcfg_dynamic: Optional[QuantizeConfig] = None
+        self.qcfg_dynamic: Optional[RTNQuantizeConfig] = None
 
-    def _zero_calibration_failsafe(self) -> FailSafe:
-        if not isinstance(self.qcfg, RTNQuantizeConfig):
-            raise NotImplementedError(
-                "Calibration-less GPTQ processor only supports `RTNQuantizeConfig` today."
-            )
+    def _zero_calibration_failsafe(self, qcfg: RTNQuantizeConfig) -> FailSafe:
         return FailSafe(
             strategy=FailSafeStrategy.RTN,
             threshold=True,
-            smooth=self.qcfg.smooth,
+            smooth=qcfg.smooth,
         )
 
-    def _annotate_tp_padding(self, module: NamedModule, qcfg: QuantizeConfig) -> None:
+    def _annotate_tp_padding(self, module: NamedModule, qcfg: BaseQuantizeConfig) -> None:
         target_multiple = math.lcm(*self._TP_TARGETS)
         if qcfg.group_size > 0:
             target_multiple = math.lcm(target_multiple, qcfg.group_size)
@@ -91,20 +92,19 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
         }
 
     def quantize_module(self, module: NamedModule) -> None:
-        qcfg_clone = clone_gptq_config_for_module(
-            self.qcfg,
-            module.full_name,
-            failsafe=self._zero_calibration_failsafe(),
-        )
+        qcfg_clone = clone_rtn_config_for_module(self.qcfg, module.full_name)
         if qcfg_clone is None:
             return
 
         self.qcfg_dynamic = qcfg_clone
         self._annotate_tp_padding(module, qcfg_clone)
+        work_qcfg = qcfg_clone.to_gptq_work_config(
+            failsafe=self._zero_calibration_failsafe(qcfg_clone),
+        )
 
-        task = GPTQ(module=module, qcfg=qcfg_clone)
+        task = GPTQ(module=module, qcfg=work_qcfg)
         task.quantizer.configure(perchannel=True)
-        task.failsafe = qcfg_clone.failsafe
+        task.failsafe = work_qcfg.failsafe
         task.expected_nsamples = 0
 
         if getattr(self, "_pause_controller", None) is not None and self.pb is not None:

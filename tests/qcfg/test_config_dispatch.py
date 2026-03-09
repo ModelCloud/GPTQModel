@@ -3,6 +3,7 @@
 
 from gptqmodel.quantization.config import (
     AWQQuantizeConfig,
+    BaseQuantizeConfig,
     CalibrationlessConfig,
     FORMAT,
     GPTQQuantizeConfig,
@@ -34,8 +35,9 @@ def test_quantize_config_dispatches_awq_constructor():
 def test_quantize_config_dispatches_rtn_constructor():
     cfg = QuantizeConfig(calibrationless=CalibrationlessConfig(smooth=SmoothMAD(k=2.0)))
 
+    assert isinstance(cfg, BaseQuantizeConfig)
     assert isinstance(cfg, RTNQuantizeConfig)
-    assert isinstance(cfg, QuantizeConfig)
+    assert not isinstance(cfg, GPTQQuantizeConfig)
     assert cfg.uses_calibrationless_lifecycle() is True
     assert cfg.smooth is not None
     assert cfg.export_quant_method() == METHOD.GPTQ

@@ -3,7 +3,7 @@
 
 import pytest
 
-from gptqmodel.quantization.config import QuantizeConfig, RTNQuantizeConfig, SmoothMAD
+from gptqmodel.quantization.config import BaseQuantizeConfig, GPTQQuantizeConfig, QuantizeConfig, RTNQuantizeConfig, SmoothMAD
 
 
 def test_quantize_config_calibrationless_round_trip():
@@ -35,7 +35,8 @@ def test_quantize_config_calibrationless_round_trip():
 def test_rtn_quantize_config_defaults_to_direct_smoother():
     cfg = RTNQuantizeConfig(bits=4, group_size=128)
 
-    assert isinstance(cfg, QuantizeConfig)
+    assert isinstance(cfg, BaseQuantizeConfig)
+    assert not isinstance(cfg, GPTQQuantizeConfig)
     assert cfg.uses_calibrationless_lifecycle() is True
     assert isinstance(cfg.smooth, SmoothMAD)
     assert cfg.export_quant_method() is not None
