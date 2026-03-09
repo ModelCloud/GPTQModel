@@ -409,6 +409,57 @@ def _run_single_subset_pass(
     return processed_subset, returned_outputs
 
 
+def _handle_empty_subset(
+    layer_index: int,
+    subset_index: int,
+    subset_total: int,
+    processor_name: str,
+    subset_event_cb: Optional[Callable[..., None]],
+    layer_inputs: List[List[torch.Tensor]],
+    logger,
+    looper,
+) -> SubsetStageResult:
+    """Handle empty subset with consistent logging, events, and memory cleanup."""
+    if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            f"StageSubset: layer={layer_index} subset={subset_index + 1}/{subset_total} "
+            f"processor={processor_name} skipping empty subset"
+        )
+
+    # Emit subset lifecycle events for consistency with monitoring systems
+    # Only emit events that match processor requirements
+    subset_lifecycle_stages = ["forward_start", "forward_end", "quant_start", "quant_complete"]
+    for stage in subset_lifecycle_stages:
+        if subset_event_cb:
+            try:
+                subset_event_cb(
+                    stage=stage,
+                    layer_idx=layer_index,
+                    subset_index=subset_index,
+                    subset_total=subset_total,
+                    module_names=[],
+                    processor=processor_name,
+                )
+            except Exception as e:
+                logger.warning(f"Subset event callback failed for stage {stage}: {e}")
+
+    # Create consistent forward context
+    # Note: subset_forward_serial should be determined consistently with normal path
+    forward_context = SubsetForwardContext(
+        subset={},
+        forward_device_map={},
+        subset_forward_serial=not looper.gptq_model.quantize_config.auto_forward_data_parallel,  # Consistent with empty subset behavior
+        subset_total=subset_total,
+        subset_index=subset_index,
+    )
+
+    return SubsetStageResult(
+        processed_subset={},
+        layer_inputs=layer_inputs,
+        forward_context=forward_context,
+    )
+
+
 def run_subset_stage(
     looper: 'ModuleLooper',
     *,
@@ -442,6 +493,15 @@ def run_subset_stage(
     processor_name = processor.name() if hasattr(processor, "name") else type(processor).__name__
     processor_name_lower = processor_name.lower()
     is_awq_processor = processor_name_lower.startswith("awq")
+
+    # OPTIMIZATION: Early exit for empty created subsets
+    # This handles cases where module names exist but no actual modules are found
+    # (e.g., when expert modules are excluded or absent on current layer)
+    if not subset:
+        return _handle_empty_subset(
+            layer_index, subset_index, subset_total, processor_name, subset_event_cb,
+            layer_inputs, logger, looper
+        )
 
     def emit_subset_event(stage: str) -> None:
         if subset_event_cb is None:

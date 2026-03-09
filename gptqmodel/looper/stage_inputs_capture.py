@@ -82,7 +82,33 @@ class StageInputsCapture:
             device=CPU,
         )
         cur_layer_device = CPU
-        data_device = cur_layer_device
+        # Use calibration_data_device if specified, otherwise use cur_layer_device
+        calib_device_cfg = self.gptq_model.quantize_config.calibration_data_device
+        
+        # Prepare devices for balanced mode
+        balanced_devices: List[torch.device] = []
+        balanced_mode = False
+        if calib_device_cfg == "balanced":
+            balanced_mode = True
+            # Get all available devices of same type
+            from ..utils.looper_helpers import select_forward_devices
+            all_devices = select_forward_devices(cur_layer_device)
+            # Apply compute_device_filter if set
+            compute_device_filter = self.gptq_model.quantize_config.compute_device_filter
+            if compute_device_filter is not None:
+                balanced_devices = compute_device_filter(all_devices)
+                if not balanced_devices:
+                    balanced_devices = all_devices
+            else:
+                balanced_devices = all_devices
+            data_device = balanced_devices[0] if balanced_devices else cur_layer_device
+        elif calib_device_cfg is not None:
+            data_device = calib_device_cfg
+        else:
+            data_device = cur_layer_device
+        
+        # Round-robin counter for balanced mode
+        balanced_rr_counter = [0]  # Use list to allow modification in nested function
 
         cache_forward_pb = None
         processed_rows = 0
@@ -104,26 +130,33 @@ class StageInputsCapture:
             ).draw()
 
         def store_input_hook(module, args, kwargs):
+            # Select device for this batch (round-robin for balanced mode)
+            if balanced_mode and balanced_devices:
+                batch_device = balanced_devices[balanced_rr_counter[0] % len(balanced_devices)]
+                balanced_rr_counter[0] += 1
+            else:
+                batch_device = data_device
+            
             layer_input: List[torch.Tensor] = []
             if kwargs.get("hidden_states") is not None:
-                layer_input.append(move_to(kwargs["hidden_states"], device=data_device))
+                layer_input.append(move_to(kwargs["hidden_states"], device=batch_device))
             else:
-                layer_input.append(move_to(args[0], device=data_device))
+                layer_input.append(move_to(args[0], device=batch_device))
 
             layer_inputs.append(layer_input)
 
             if kwargs.get("attention_mask") is not None:
-                attention_masks.append(kwargs["attention_mask"].to(device=data_device))
+                attention_masks.append(kwargs["attention_mask"].to(device=batch_device))
             else:
                 attention_masks.append(None)
 
             pos_ids = kwargs.get("position_ids", None)
             if pos_ids is not None:
-                position_ids.append(move_to(pos_ids, device=data_device))
+                position_ids.append(move_to(pos_ids, device=batch_device))
             one_kwargs: Dict[str, Any] = {}
             for (k, v) in kwargs.items():
                 if k not in ["hidden_states", "attention_mask", "position_ids"]:
-                    one_kwargs[k] = nested_move_to(v, device=data_device)
+                    one_kwargs[k] = nested_move_to(v, device=batch_device)
             layer_input_kwargs.append(one_kwargs)
 
             # In normal repeating layer/sbuset early stop happens on the last module forward
@@ -155,9 +188,9 @@ class StageInputsCapture:
         try:
             for batch_index, example in enumerate(calibration_data, start=1):
                 if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
-                    data_device = self.gptq_model.quantize_config.device
+                    model_input_device = self.gptq_model.quantize_config.device
                 else:
-                    data_device = (
+                    model_input_device = (
                         self.gptq_model.quantize_config.device
                         if "pixel_values" in example.keys()
                         else cur_layer_device
@@ -171,12 +204,12 @@ class StageInputsCapture:
                                 v[index].to(self.gptq_model.model.visual_tokenizer.dtype)
                                 if is_ovis
                                 else v[index],
-                                device=data_device,
+                                device=model_input_device,
                             )
                     else:
                         if len(v.shape) == 1:
                             v = v.unsqueeze(0)
-                        example[k] = move_to(v, device=data_device)
+                        example[k] = move_to(v, device=model_input_device)
                 try:
                     if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
                         example["attention_mask"] = example["attention_mask"].long()
