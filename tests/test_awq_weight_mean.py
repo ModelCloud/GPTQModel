@@ -12,7 +12,7 @@ from parameterized import parameterized
 from pytest import MonkeyPatch
 from torch import nn
 
-from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 
 
@@ -104,6 +104,42 @@ class _TestAWQProcessor(AWQProcessor):
 
     def _module_forward(self, x: torch.Tensor, module: torch.nn.Module, module_kwargs):
         return module(x)
+
+
+def test_awq_record_input_feature_preserves_sample_axis_for_2d_inputs():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    state = _AWQLayerState(modules={"self_attn.q_proj": object()})
+
+    processor.tasks["self_attn.q_proj"] = {"inputs": []}
+    processor._record_input_feature("self_attn.q_proj", torch.randn(16, QWEN3_HIDDEN_SIZE))
+    processor._record_input_feature("self_attn.q_proj", torch.randn(16, QWEN3_HIDDEN_SIZE))
+
+    features = processor._layer_input_features(state)
+
+    assert features["self_attn.q_proj"].shape == (2, 16, QWEN3_HIDDEN_SIZE)
+
+
+def test_awq_module_forward_splits_accumulated_batches_even_when_quant_batch_size_is_one():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    processor._quant_batch_size = 1
+
+    class _Recorder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(1))
+            self.calls = []
+
+        def forward(self, x):
+            self.calls.append(int(x.shape[0]))
+            return x
+
+    module = _Recorder()
+    x = torch.randn(4, 8, 16)
+
+    out = AWQProcessor._module_forward(processor, x, module, {})
+
+    assert out.shape == x.shape
+    assert module.calls == [1, 1, 1, 1]
 
 
 @parameterized.expand([
