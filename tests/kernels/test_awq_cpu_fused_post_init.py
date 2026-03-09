@@ -9,6 +9,7 @@ import torch
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_int8_awq import TorchInt8AwqQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import select_quant_linear
@@ -19,6 +20,7 @@ from gptqmodel.utils.importer import select_quant_linear
     [
         pytest.param(TorchFusedAwqQuantLinear, id="torch_fused_awq"),
         pytest.param(HFKernelAwqLinear, id="hf_kernel_awq"),
+        pytest.param(TorchInt8AwqQuantLinear, id="torch_int8_awq"),
     ],
 )
 def test_awq_fused_post_init_calls_adapter(monkeypatch, kernel_cls):

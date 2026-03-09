@@ -32,6 +32,7 @@ class BACKEND(str, Enum):
     GEMM_TRITON = "gemm_triton"
     GEMV = "gemv"
     GEMV_FAST = "gemv_fast"
+    TORCH_INT8_AWQ = "torch_int8_awq"  # optimized CPU int8 fused kernel for AWQ
     TORCH_FUSED_AWQ = "torch_fused_awq"  # AWQ variant of torch fused kernel
     HF_KERNEL_AWQ = "hf_kernel_awq"  # AWQ variant of HF kernel
     TORCH_AWQ = "torch_awq"

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# Credit: int8 kernel sync adapted from Yintong Lu (yintong-lu), vLLM PR #35697.
 
 
 from typing import Optional, Tuple
@@ -38,6 +39,34 @@ def _requantize_to_int8(float_weight: torch.Tensor) -> tuple[torch.Tensor, torch
         .to(torch.int8)
     )
     return weight_int8, channel_scale
+
+
+def _cached_int8_dequantize(module: nn.Module) -> Optional[torch.Tensor]:
+    int8_weight = getattr(module, INT8_WEIGHT_BUFFER_NAME, None)
+    int8_scale = getattr(module, INT8_SCALE_BUFFER_NAME, None)
+    if int8_weight is None or int8_scale is None:
+        return None
+
+    weight_kn = int8_weight.t().to(torch.float32)
+    scales = int8_scale.to(torch.float32)
+    return weight_kn * scales.unsqueeze(0)
+
+
+def _write_int8_buffers(module: nn.Module, float_weight: torch.Tensor, dtype: torch.dtype) -> None:
+    int8_weight_kn, channel_scale = _requantize_to_int8(float_weight.to(torch.float32))
+
+    int8_weight_nk = int8_weight_kn.t().contiguous()
+    channel_scale = channel_scale.to(dtype=dtype).contiguous()
+
+    if INT8_WEIGHT_BUFFER_NAME not in module._buffers:
+        module.register_buffer(INT8_WEIGHT_BUFFER_NAME, int8_weight_nk, persistent=False)
+    else:
+        module.int8_weight_nk = int8_weight_nk
+
+    if INT8_SCALE_BUFFER_NAME not in module._buffers:
+        module.register_buffer(INT8_SCALE_BUFFER_NAME, channel_scale, persistent=False)
+    else:
+        module.int8_channel_scale = channel_scale
 
 
 class Int8PackedModule(torch.nn.Module):
@@ -172,14 +201,10 @@ class TorchInt8QuantLinear(BaseQuantLinear):
             self._delete_attr_if_exists(name)
 
     def dequantize_weight(self, num_itr: int = 1):
-        int8_weight = self.int8_weight_nk if hasattr(self, "int8_weight_nk") else None
-        int8_scale = self.int8_channel_scale if hasattr(self, "int8_channel_scale") else None
-
         # Int8 fallback for dequantized export path after original GPTQ tensors are released.
-        if int8_weight is not None and int8_scale is not None and not self._has_all_gptq_buffers():
-            weight_kn = int8_weight.t().to(torch.float32)
-            scales = int8_scale.to(torch.float32)
-            return weight_kn * scales.unsqueeze(0)
+        dequantized = _cached_int8_dequantize(self)
+        if dequantized is not None and not self._has_all_gptq_buffers():
+            return dequantized
 
         if num_itr != 1:
             raise NotImplementedError("TorchInt8QuantLinear dequantize_weight only supports num_itr == 1.")
@@ -236,20 +261,7 @@ class TorchInt8QuantLinear(BaseQuantLinear):
     def transform_cpu(self, dtype: torch.dtype):
         # [K, N] from GPTQ packed tensors (2/4/8-bit).
         float_weight = self.dequantize_weight(num_itr=1).to(torch.float32)
-        int8_weight_kn, channel_scale = _requantize_to_int8(float_weight)
-
-        int8_weight_nk = int8_weight_kn.t().contiguous()
-        channel_scale = channel_scale.to(dtype=dtype).contiguous()
-
-        if INT8_WEIGHT_BUFFER_NAME not in self._buffers:
-            self.register_buffer(INT8_WEIGHT_BUFFER_NAME, int8_weight_nk, persistent=False)
-        else:
-            self.int8_weight_nk = int8_weight_nk
-
-        if INT8_SCALE_BUFFER_NAME not in self._buffers:
-            self.register_buffer(INT8_SCALE_BUFFER_NAME, channel_scale, persistent=False)
-        else:
-            self.int8_channel_scale = channel_scale
+        _write_int8_buffers(self, float_weight=float_weight, dtype=dtype)
 
     def transform(self, dtype: torch.dtype, device: str):
         if device != "cpu":
@@ -297,17 +309,23 @@ class TorchInt8QuantLinear(BaseQuantLinear):
 
 
 def dequantize_model(model: PreTrainedModel):
+    from .torch_int8_awq import TorchInt8AwqQuantLinear
+
+    supported_int8_qlinears = (TorchInt8QuantLinear, TorchInt8AwqQuantLinear)
+
     for name, module in model.named_modules():
-        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchInt8QuantLinear):
+        if isinstance(module, BaseQuantLinear) and not isinstance(module, supported_int8_qlinears):
             raise ValueError(
-                "Only models loaded using TorchInt8QuantLinear are supported for dequantization. "
-                "Please load model using backend=BACKEND.TORCH_INT8"
+                "Only models loaded using TorchInt8QuantLinear or TorchInt8AwqQuantLinear are supported "
+                "for dequantization. Please load model using backend=BACKEND.TORCH_INT8 or "
+                "backend=BACKEND.TORCH_INT8_AWQ"
             )
 
-        if isinstance(module, TorchInt8QuantLinear):
-            new_module = nn.Linear(module.in_features, module.out_features)
+        if isinstance(module, supported_int8_qlinears):
+            new_module = nn.Linear(module.in_features, module.out_features, bias=module.bias is not None)
             new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
-            new_module.bias = torch.nn.Parameter(module.bias)
+            if module.bias is not None:
+                new_module.bias = torch.nn.Parameter(module.bias.detach().to("cpu", torch.float16))
 
             parent = model
             if "." in name:
@@ -322,4 +340,14 @@ def dequantize_model(model: PreTrainedModel):
     return model
 
 
-__all__ = ["TorchInt8QuantLinear", "dequantize_model"]
+__all__ = [
+    "INT8_SCALE_BUFFER_NAME",
+    "INT8_WEIGHT_BUFFER_NAME",
+    "Int8PackedModule",
+    "TorchInt8QuantLinear",
+    "_cached_int8_dequantize",
+    "_has_int8_mm_op",
+    "_requantize_to_int8",
+    "_write_int8_buffers",
+    "dequantize_model",
+]
