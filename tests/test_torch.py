@@ -148,6 +148,27 @@ def _make_module(device: torch.device):
     return module
 
 
+def test_gptq_post_init_creates_wf_unpack_buffers():
+    module = TorchQuantLinear(
+        bits=4,
+        group_size=32,
+        sym=True,
+        desc_act=False,
+        in_features=64,
+        out_features=64,
+        bias=False,
+        pack_dtype=torch.int32,
+        adapter=None,
+        register_buffers=True,
+    )
+    module.optimize = lambda *args, **kwargs: None
+    module.post_init()
+
+    assert module.enable_wf_unsqueeze is True
+    assert module.wf_unsqueeze_zero is not None
+    assert module.wf_unsqueeze_neg_one is not None
+
+
 def test_cached_forward_matches_baseline():
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     module = _make_module(device)

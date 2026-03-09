@@ -16,9 +16,12 @@ from gptqmodel.quantization.config import (
     FailSafe,
     FailSafeStrategy,
     QuantizeConfig,
+    SmoothLog,
     SmoothMAD,
+    SmoothPercentile,
     SmoothPercentileAsymmetric,
 )
+from gptqmodel.quantization.failsafe_smooth import smooth_block
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.failsafe import should_use_failsafe
 from gptqmodel.utils.pause_resume import PauseResumeController
@@ -335,6 +338,42 @@ def _assert_failsafe_bounds(
 def _assert_finite_errors(label: str, group_size: int, errors: dict) -> None:
     for name, err in errors.items():
         assert math.isfinite(err), f"{label}, group={group_size}: {name} err is not finite ({err})"
+
+
+def _assert_percentile_smoother_matches_reference(device: str) -> None:
+    torch.manual_seed(0)
+    block = torch.randn(64, 128, device=device, dtype=torch.float32)
+
+    percentile = FailSafe(smooth=SmoothPercentile(percentile=99.0))
+    percentile_out, _ = smooth_block(block, percentile, group_size=128)
+    percentile_ref_threshold = torch.quantile(block.abs(), 0.99, dim=1, keepdim=True)
+    percentile_ref = torch.clamp(block, -percentile_ref_threshold, percentile_ref_threshold)
+    torch.testing.assert_close(percentile_out, percentile_ref, atol=1e-5, rtol=1e-5)
+
+    asym = FailSafe(smooth=SmoothPercentileAsymmetric(low=0.5, high=99.5))
+    asym_out, _ = smooth_block(block, asym, group_size=128)
+    asym_lo = torch.quantile(block, 0.005, dim=1, keepdim=True)
+    asym_hi = torch.quantile(block, 0.995, dim=1, keepdim=True)
+    asym_ref = torch.max(torch.min(block, asym_hi), asym_lo)
+    torch.testing.assert_close(asym_out, asym_ref, atol=1e-5, rtol=1e-5)
+
+    log = FailSafe(smooth=SmoothLog(percentile=99.0, mu=8.0))
+    log_out, _ = smooth_block(block, log, group_size=128)
+    log_mu = math.log1p(8.0)
+    log_vals = torch.log1p(block.abs() * 8.0) / log_mu
+    log_threshold = torch.quantile(log_vals, 0.99, dim=1, keepdim=True)
+    log_linear_threshold = (torch.exp(log_threshold * log_mu) - 1.0) / 8.0
+    log_ref = torch.clamp(block, -log_linear_threshold, log_linear_threshold)
+    torch.testing.assert_close(log_out, log_ref, atol=1e-5, rtol=1e-5)
+
+
+def test_percentile_smoothers_match_quantile_reference_cpu():
+    _assert_percentile_smoother_matches_reference("cpu")
+
+
+@unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+def test_percentile_smoothers_match_quantile_reference_cuda():
+    _assert_percentile_smoother_matches_reference("cuda")
 
 
 def test_midpoint_vs_rtn_across_distributions():
