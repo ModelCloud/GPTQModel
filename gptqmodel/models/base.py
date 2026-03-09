@@ -612,7 +612,7 @@ class BaseQModel(nn.Module):
 
     def quantize(
         self,
-        calibration: Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]],
+        calibration: Optional[Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]] = None,
         # Setting a fixed calibration_dataset_concat_size may improve the performance of the quantized model.
         calibration_concat_size: Optional[int] = None,
         calibration_sort: Optional[str] = "desc",  # valid values are asc, desc, shuffle
@@ -717,25 +717,6 @@ class BaseQModel(nn.Module):
         if adapter is not None:
             self.quantize_config.adapter = adapter
 
-        from ..adapter.adapter import Lora
-        from ..looper.eora_processor import EoraProcessor
-        from ..looper.module_looper import ModuleLooper
-
-        # has lora process
-        needs_lora = isinstance(self.quantize_config.adapter, Lora)
-
-        args = {
-            "tokenizer": self.tokenizer,
-            "qcfg": self.quantize_config,
-            "calibration": calibration,
-            "prepare_dataset_func": self.prepare_dataset,
-            "calibration_concat_size": calibration_concat_size,
-            "calibration_sort": calibration_sort,
-            "calibration_concat_separator": calibration_concat_separator,
-            "batch_size": batch_size,
-            "calculate_w_wq_diff": needs_lora,  # lora needs original w - wq delta
-        }
-
         self.qlinear_kernel = select_quant_linear(
                 bits=self.quantize_config.bits,
                 group_size=self.quantize_config.group_size,
@@ -778,8 +759,65 @@ class BaseQModel(nn.Module):
             self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
                                             device=rotation_device, **module_name_args)
 
-        # init processor with default GPTQ processor
+        if self.quantize_config.uses_calibrationless_lifecycle():
+            result = self._quantize_calibrationless(
+                calibration=calibration,
+                calibration_concat_size=calibration_concat_size,
+                calibration_sort=calibration_sort,
+                batch_size=batch_size,
+                backend=backend,
+                calibration_concat_separator=calibration_concat_separator,
+            )
+        else:
+            if calibration is None:
+                raise ValueError(
+                    "Calibration dataset is required unless `quantize_config.calibrationless` is configured."
+                )
+            result = self._quantize_with_calibration(
+                calibration=calibration,
+                calibration_concat_size=calibration_concat_size,
+                calibration_sort=calibration_sort,
+                batch_size=batch_size,
+                backend=backend,
+                adapter_calibration_dataset=adapter_calibration_dataset,
+                calibration_concat_separator=calibration_concat_separator,
+            )
+
+        timer = getattr(self, "quant_region_timer", None)
+        if timer is not None:
+            timer.flush()
+
+        return result
+
+    def _quantize_with_calibration(
+        self,
+        *,
+        calibration,
+        calibration_concat_size: Optional[int],
+        calibration_sort: Optional[str],
+        batch_size: int,
+        backend: Optional[BACKEND],
+        adapter_calibration_dataset,
+        calibration_concat_separator: Optional[str],
+    ):
+        from ..adapter.adapter import Lora
+        from ..looper.eora_processor import EoraProcessor
+        from ..looper.module_looper import ModuleLooper
         from ..looper.tensorparallel_weight_processor import TensorParallelWeightProcessor
+
+        needs_lora = isinstance(self.quantize_config.adapter, Lora)
+
+        args = {
+            "tokenizer": self.tokenizer,
+            "qcfg": self.quantize_config,
+            "calibration": calibration,
+            "prepare_dataset_func": self.prepare_dataset,
+            "calibration_concat_size": calibration_concat_size,
+            "calibration_sort": calibration_sort,
+            "calibration_concat_separator": calibration_concat_separator,
+            "batch_size": batch_size,
+            "calculate_w_wq_diff": needs_lora,
+        }
 
         if self.quantize_config.quant_method == METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
@@ -792,9 +830,6 @@ class BaseQModel(nn.Module):
             from ..looper.awq_processor import AWQProcessor
 
             os.environ["AWQ_BATCH_SIZE"] = str(batch_size)
-
-            # if self.model.config.model_type not in AWQ_CAUSAL_LM_MODEL_MAP.keys():
-            #     raise TypeError(f"{self.model.config.model_type} isn't supported yet.")
 
             awq_args = dict(args)
             awq_args["gptq_model"] = self
@@ -816,8 +851,6 @@ class BaseQModel(nn.Module):
         if self.quantize_config.gptaq is not None:
             from ..looper.native_processor import NativeProcessor
 
-            # During the deepcopy process, self.prepare_dataset will be deeply copied along with self. However,
-            # self has a threading.RLock() , which is not serializable.
             args_to_copy = {k: v for k, v in args.items() if k != "prepare_dataset_func"}
             args_clone = copy.deepcopy(args_to_copy)
             args_clone["prepare_dataset_func"] = args["prepare_dataset_func"]
@@ -826,7 +859,6 @@ class BaseQModel(nn.Module):
             quantize_processor.insert(0, NativeProcessor(**args_clone))
 
         processors = quantize_processor
-        # Append EoRA processor for lora adapter
         if needs_lora:
             processors.append(
                 EoraProcessor(
@@ -841,11 +873,8 @@ class BaseQModel(nn.Module):
                 )
             )
 
-        # prepare processor worker (looper)
         module_looper = ModuleLooper(self, processors=processors)
 
-        # When gc_mode=ON_STAGE_END, disable auto-gc for the whole quantization process
-        # to prevent interference with manual cleanups performed at stage ends
         gc_context = (
             DEVICE_THREAD_POOL.no_auto_gc()
             if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
@@ -853,16 +882,54 @@ class BaseQModel(nn.Module):
         )
 
         with gc_context:
-            result = module_looper.loop(
+            return module_looper.loop(
                 backend=backend,
                 failsafe=self.quantize_config.failsafe,
             )
 
-        timer = getattr(self, "quant_region_timer", None)
-        if timer is not None:
-            timer.flush()
+    def _quantize_calibrationless(
+        self,
+        *,
+        calibration,
+        calibration_concat_size: Optional[int],
+        calibration_sort: Optional[str],
+        batch_size: int,
+        backend: Optional[BACKEND],
+        calibration_concat_separator: Optional[str],
+    ):
+        del calibration_concat_size, calibration_sort, batch_size, calibration_concat_separator
 
-        return result
+        from ..adapter.adapter import Lora
+        from ..looper.calibrationless_gptq_processor import CalibrationlessGPTQProcessor
+        from ..looper.calibrationless_looper import CalibrationlessLooper
+
+        if calibration is not None:
+            log.info("Calibration-less quantization selected; ignoring provided calibration dataset.")
+
+        if isinstance(self.quantize_config.adapter, Lora):
+            raise NotImplementedError(
+                "Calibration-less quantization does not support adapter/EoRA generation."
+            )
+
+        if self.quantize_config.gptaq is not None:
+            raise NotImplementedError(
+                "Calibration-less quantization does not support GPTAQ/native activation capture."
+            )
+
+        processor = CalibrationlessGPTQProcessor(
+            tokenizer=self.tokenizer,
+            qcfg=self.quantize_config,
+        )
+        module_looper = CalibrationlessLooper(model=self, processor=processor)
+
+        gc_context = (
+            DEVICE_THREAD_POOL.no_auto_gc()
+            if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
+            else nullcontext()
+        )
+
+        with gc_context:
+            return module_looper.loop(backend=backend)
 
     def _eora_generate(
         self,

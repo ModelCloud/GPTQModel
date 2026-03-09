@@ -28,6 +28,59 @@ from ..utils.module_locks import parent_module_lock
 log = setup_logger()
 lock = threading.Lock()
 
+
+def clone_gptq_config_for_module(
+    qcfg: QuantizeConfig,
+    module_full_name: str,
+    *,
+    failsafe=None,
+) -> Optional[QuantizeConfig]:
+    # entire module is skipped
+    if qcfg.dynamic_get(layer_name=module_full_name) == False:
+        return None
+
+    qcfg_clone = copy.deepcopy(qcfg)
+
+    # dynamic overrides
+    if qcfg.dynamic is not None:
+        qcfg_clone.bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
+        qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
+        qcfg_clone.mse = qcfg.dynamic_get(module_full_name, "mse", qcfg_clone.mse)
+
+        qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
+        desc_act_override = qcfg.dynamic_get(module_full_name, "desc_act", None)
+        if desc_act_override is not None:
+            qcfg_clone.desc_act = desc_act_override
+        act_group_aware_override = qcfg.dynamic_get(module_full_name, "act_group_aware", None)
+        if act_group_aware_override is not None:
+            qcfg_clone.act_group_aware = act_group_aware_override
+        qcfg_clone.damp_percent = qcfg.dynamic_get(module_full_name, "damp_percent", qcfg_clone.damp_percent)
+        qcfg_clone.static_groups = qcfg.dynamic_get(module_full_name, "static_groups", qcfg_clone.static_groups)
+        failsafe_override = qcfg.dynamic_get(module_full_name, "failsafe", None)
+        if failsafe_override is not None:
+            qcfg_clone.failsafe = normalize_failsafe(failsafe_override, qcfg_clone.failsafe)
+        hessian_override = qcfg.dynamic_get(module_full_name, "hessian", None)
+        if hessian_override is not None:
+            if isinstance(hessian_override, dict):
+                qcfg_clone.hessian = HessianConfig(**hessian_override)
+            elif isinstance(hessian_override, HessianConfig):
+                qcfg_clone.hessian = hessian_override
+            else:
+                raise ValueError("QuantizeConfig: dynamic `hessian` must be a HessianConfig or dict.")
+        gptaq_override = qcfg.dynamic_get(module_full_name, "gptaq", None)
+        if gptaq_override is not None:
+            if isinstance(gptaq_override, dict):
+                qcfg_clone.gptaq = GPTAQConfig(**gptaq_override)
+            elif isinstance(gptaq_override, GPTAQConfig):
+                qcfg_clone.gptaq = gptaq_override
+            else:
+                raise ValueError("QuantizeConfig: dynamic `gptaq` must be a GPTAQConfig or dict.")
+
+        qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
+
+    qcfg_clone.failsafe = normalize_failsafe(failsafe, qcfg_clone.failsafe)
+    return qcfg_clone
+
 class GPTQProcessor(LoopProcessor):
     def __init__(
         self,
@@ -64,48 +117,13 @@ class GPTQProcessor(LoopProcessor):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, failsafe=None, **kwargs):
-        # entire module is skipped
-        if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
+        qcfg_clone = clone_gptq_config_for_module(
+            self.qcfg,
+            module.full_name,
+            failsafe=failsafe,
+        )
+        if qcfg_clone is None:
             return
-
-        qcfg_clone = copy.deepcopy(self.qcfg)
-
-        # dynamic overrides
-        if self.qcfg.dynamic is not None:
-            qcfg_clone.bits = self.qcfg.dynamic_get(module.full_name, "bits", qcfg_clone.bits)
-            qcfg_clone.sym = self.qcfg.dynamic_get(module.full_name, "sym", qcfg_clone.sym)
-            qcfg_clone.mse = self.qcfg.dynamic_get(module.full_name, "mse", qcfg_clone.mse)
-
-            qcfg_clone.group_size = self.qcfg.dynamic_get(module.full_name, "group_size", qcfg_clone.group_size)
-            desc_act_override = self.qcfg.dynamic_get(module.full_name, "desc_act", None)
-            if desc_act_override is not None:
-                qcfg_clone.desc_act = desc_act_override
-            act_group_aware_override = self.qcfg.dynamic_get(module.full_name, "act_group_aware", None)
-            if act_group_aware_override is not None:
-                qcfg_clone.act_group_aware = act_group_aware_override
-            qcfg_clone.damp_percent = self.qcfg.dynamic_get(module.full_name, "damp_percent", qcfg_clone.damp_percent)
-            qcfg_clone.static_groups = self.qcfg.dynamic_get(module.full_name, "static_groups", qcfg_clone.static_groups)
-            failsafe_override = self.qcfg.dynamic_get(module.full_name, "failsafe", None)
-            if failsafe_override is not None:
-                qcfg_clone.failsafe = normalize_failsafe(failsafe_override, qcfg_clone.failsafe)
-            hessian_override = self.qcfg.dynamic_get(module.full_name, "hessian", None)
-            if hessian_override is not None:
-                if isinstance(hessian_override, dict):
-                    qcfg_clone.hessian = HessianConfig(**hessian_override)
-                elif isinstance(hessian_override, HessianConfig):
-                    qcfg_clone.hessian = hessian_override
-                else:
-                    raise ValueError("QuantizeConfig: dynamic `hessian` must be a HessianConfig or dict.")
-            gptaq_override = self.qcfg.dynamic_get(module.full_name, "gptaq", None)
-            if gptaq_override is not None:
-                if isinstance(gptaq_override, dict):
-                    qcfg_clone.gptaq = GPTAQConfig(**gptaq_override)
-                elif isinstance(gptaq_override, GPTAQConfig):
-                    qcfg_clone.gptaq = gptaq_override
-                else:
-                    raise ValueError("QuantizeConfig: dynamic `gptaq` must be a GPTAQConfig or dict.")
-
-            qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
 
         # store last used qcfg_dynamic
         self.qcfg_dynamic = qcfg_clone
@@ -114,7 +132,7 @@ class GPTQProcessor(LoopProcessor):
             tmp = GPTAQ(module=module, qcfg=qcfg_clone)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
-            tmp.failsafe = normalize_failsafe(failsafe, qcfg_clone.failsafe)
+            tmp.failsafe = qcfg_clone.failsafe
             tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         tmp.quantizer.configure(

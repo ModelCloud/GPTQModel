@@ -1,0 +1,227 @@
+# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
+
+"""Calibration-less quantization loop for weight-only methods.
+
+This looper intentionally does not share the activation-capture lifecycle used
+by GPTQ/AWQ calibration flows. Weight-only methods such as RTN, FP8, NVFP4, or
+GGUF can usually process each linear layer directly, so the control flow here
+stays narrow: iterate quantizable modules, quantize weights, finalize, and
+optionally offload.
+"""
+
+from __future__ import annotations
+
+from typing import Dict, Optional
+
+import torch
+from defuser.modeling.fused_moe.replace_modules import materialize_model
+
+from ..looper.calibrationless_gptq_processor import CalibrationlessGPTQProcessor
+from ..looper.named_module import NamedModule
+from ..models import BaseQModel
+from ..models._const import CPU, SUPPORTS_MODULE_TYPES
+from ..nn_modules.converter import MODULE_CONVERTER_MAP
+from ..quantization.config import CalibrationlessMethod
+from ..utils.logger import setup_logger
+from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to
+from ..utils.offload import offload_to_disk
+
+
+log = setup_logger()
+
+
+class CalibrationlessLooper:
+    """Run the simplified per-layer lifecycle for calibration-less quantization."""
+
+    def __init__(self, model: BaseQModel, processor: CalibrationlessGPTQProcessor):
+        self.gptq_model = model
+        self.processor = processor
+
+    def _resolve_named_module(
+        self,
+        *,
+        layer_module: torch.nn.Module,
+        full: Dict[str, torch.nn.Module],
+        layer_index: int,
+        layers_prefix: Optional[str],
+        module_name: str,
+        is_lm_head_module: bool,
+    ) -> Optional[NamedModule]:
+        """Resolve a quantizable submodule and normalize it into a NamedModule."""
+        resolved = full.get(module_name)
+        if resolved is None:
+            resolved, _ = get_module_by_name_prefix(layer_module, module_name)
+            if resolved is None:
+                if self.gptq_model.layer_modules_strict:
+                    raise ValueError(f"layer module item `{module_name}` not found in model, please check your model config.")
+                return None
+
+        if isinstance(resolved, NamedModule):
+            return resolved
+
+        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{layer_index}.{module_name}"
+        named = NamedModule(
+            resolved,
+            name=module_name,
+            full_name=layer_name,
+            layer_index=layer_index,
+        )
+        full[module_name] = named
+        return named
+
+    def _offload_quantized_module(self, module: NamedModule) -> None:
+        """Persist an already-quantized module to disk when offload is enabled."""
+        quant_config = getattr(self.gptq_model, "quantize_config", None)
+        if not quant_config or not getattr(quant_config, "offload_to_disk", False):
+            return
+        offload_path = getattr(quant_config, "offload_to_disk_path", None)
+        if not offload_path:
+            return
+
+        module_full_name = getattr(module, "full_name", None)
+        target_module = (
+            self.gptq_model.model.get_submodule(module_full_name)
+            if module_full_name
+            else module
+        )
+        offload_to_disk(
+            model=self.gptq_model.model,
+            module=target_module,
+            disk_path=offload_path,
+        )
+
+    def loop(self, **kwargs):
+        """Quantize layers directly from weights without calibration forwards."""
+        quant_config = self.gptq_model.quantize_config
+        calibrationless = quant_config.calibrationless
+        if calibrationless is None:
+            raise ValueError("Calibration-less looper requires `quantize_config.calibrationless` to be configured.")
+        if calibrationless.method != CalibrationlessMethod.RTN:
+            raise NotImplementedError(
+                f"Calibration-less looper only supports `method={CalibrationlessMethod.RTN.value}` today."
+            )
+
+        if quant_config.lm_head:
+            if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
+                tied_keys = self.gptq_model.model._tied_weights_keys
+                for item in tied_keys:
+                    if self.gptq_model.lm_head in item:
+                        raise NotImplementedError(
+                            "quantization of `lm_head` layer with `tied_weights=True` model state is not supported. Please check model has `tied_weights=False`."
+                        )
+
+            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
+            if lm_head_module is None:
+                raise ValueError(f"could not find layer {self.gptq_model.lm_head} in the model, exit...")
+            if not isinstance(lm_head_module, tuple(SUPPORTS_MODULE_TYPES)):
+                raise NotImplementedError(
+                    f"This type({type(lm_head_module)}) of lm_head quantization is currently not supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}"
+                )
+
+        forward_pass_use_cache = (
+            self.gptq_model.model.config.use_cache
+            if hasattr(self.gptq_model.model.config, "use_cache")
+            else False
+        )
+        # No calibration forwards are executed here, but disabling cache keeps
+        # behavior aligned with the standard quantization path and avoids stale
+        # decoder-cache state while layers are being replaced.
+        self.gptq_model.model.config.use_cache = False
+
+        layers, layers_prefix = get_module_by_name_prefix(
+            self.gptq_model.model,
+            self.gptq_model.extract_layers_node(),
+        )
+
+        if quant_config.offload_to_disk:
+            log.info("Offloading base modules to disk...")
+            offload_to_disk(
+                model=self.gptq_model.model,
+                module=self.gptq_model.get_base_modules(model=self.gptq_model.model),
+                disk_path=quant_config.offload_to_disk_path,
+            )
+
+        layer_modules = self.gptq_model.simple_layer_modules(
+            model_config=self.gptq_model.model.config,
+            quantize_config=quant_config,
+            is_awq_quantize=False,
+            include_capture_only=False,
+        )
+        if not quant_config.true_sequential:
+            layer_modules = [sum(layer_modules, [])]
+
+        layer_count = len(layers)
+        total_layers = layer_count + (1 if quant_config.lm_head else 0)
+
+        try:
+            for layer_index in range(total_layers):
+                is_lm_head_module = layer_index >= layer_count
+
+                # Transformer blocks and lm_head follow the same weight-only
+                # lifecycle, but lm_head is resolved from the root model.
+                if is_lm_head_module:
+                    module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
+                    subsets = [[self.gptq_model.lm_head]]
+                else:
+                    module = layers[layer_index]
+                    subsets = layer_modules
+
+                module = self.gptq_model.pre_quantize(module)
+                if not is_lm_head_module:
+                    # Preserve existing module conversion behavior so the new
+                    # lifecycle stays compatible with model-specific wrappers.
+                    model_type = self.gptq_model.model.config.model_type
+                    if model_type in MODULE_CONVERTER_MAP:
+                        converter = MODULE_CONVERTER_MAP[model_type]
+                        module = converter(module, self.gptq_model.model.config)
+                    layers[layer_index] = module
+
+                # Resolve concrete submodules after any pre-quantization
+                # transforms so quantization targets the final layer layout.
+                materialize_model(module)
+                full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
+
+                self.processor.collect_memory_info(layer_index)
+                for subset_names in subsets:
+                    for module_name in subset_names:
+                        named = self._resolve_named_module(
+                            layer_module=module,
+                            full=full,
+                            layer_index=layer_index,
+                            layers_prefix=layers_prefix,
+                            module_name=module_name,
+                            is_lm_head_module=is_lm_head_module,
+                        )
+                        if named is None:
+                            continue
+
+                        # Weight-only quantization happens entirely within the
+                        # processor; no captured activations are needed.
+                        self.processor.quantize_module(named)
+
+                        # Finalization and optional disk offload expect the
+                        # packed module to be back on CPU memory.
+                        move_to(named.module, device=CPU)
+                        named.target_device = CPU
+                        named.module.target_device = CPU
+
+                        self.processor.submodule_finalize(named, self.gptq_model)
+                        self._offload_quantized_module(named)
+
+                if is_lm_head_module:
+                    self.gptq_model.post_quantize(module)
+                else:
+                    layers[layer_index] = self.gptq_model.post_quantize(module)
+        finally:
+            self.gptq_model.model.config.use_cache = forward_pass_use_cache
+
+        total_log = {self.processor.name(): self.processor.log}
+        self.gptq_model.quant_log = self.processor.log
+        self.processor.finalize(model=self.gptq_model)
+        return total_log
+
+
+__all__ = ["CalibrationlessLooper"]

@@ -104,6 +104,13 @@ class FailSafeStrategy(str, Enum):
     MEDIAN = "median"
     STDCLIP = "stdclip"
 
+
+class CalibrationlessMethod(str, Enum):
+    RTN = "rtn"
+    GGUF = "gguf"
+    FP8 = "fp8"
+    NVFP4 = "nvfp4"
+
 @dataclass
 class SmoothMethod:
     name: str
@@ -287,6 +294,27 @@ class FailSafe:
     # naive quantization methods used in failsafe has issue with very small/large outliers that can severely degrade the quantization quality
     # use smoothers to normalize these outliers so they do not dominate the scale/zero calculation
     smooth: Optional[SmoothMethod] = field(default_factory=SmoothMAD)
+
+
+@dataclass
+class CalibrationlessConfig:
+    method: CalibrationlessMethod = CalibrationlessMethod.RTN
+    smooth: Optional[SmoothMethod] = field(default_factory=SmoothMAD)
+
+    def __post_init__(self):
+        if isinstance(self.method, str):
+            try:
+                self.method = CalibrationlessMethod(self.method.lower())
+            except ValueError as exc:
+                raise ValueError(
+                    f"CalibrationlessConfig: `method` must be one of {[v.value for v in CalibrationlessMethod]}."
+                ) from exc
+        elif not isinstance(self.method, CalibrationlessMethod):
+            raise ValueError(
+                f"CalibrationlessConfig: `method` must be one of {[v.value for v in CalibrationlessMethod]}."
+            )
+
+        self.smooth = _parse_smooth_method(self.smooth)
 
 
 @dataclass
@@ -575,6 +603,33 @@ def _parse_smooth_method(setting: Any) -> Optional[SmoothMethod]:
     raise ValueError("QuantizeConfig: `failsafe.smooth` must be a SmoothMethod, string, or dict.")
 
 
+def _serialize_smooth_method(method: Optional[SmoothMethod]) -> Optional[Dict[str, Any]]:
+    if method is None:
+        return None
+
+    payload = {"type": method.name, "group_size_threshold": method.group_size_threshold}
+    if isinstance(method, SmoothPercentile):
+        payload["percentile"] = method.percentile
+    elif isinstance(method, SmoothPercentileAsymmetric):
+        payload["low"] = method.low
+        payload["high"] = method.high
+    elif isinstance(method, SmoothMAD):
+        payload["k"] = method.k
+    elif isinstance(method, SmoothMSE):
+        payload["steps"] = method.steps
+        payload["maxshrink"] = method.maxshrink
+    elif isinstance(method, SmoothOutlier):
+        payload["pct"] = method.pct
+    elif isinstance(method, SmoothSoftNorm):
+        payload["k"] = method.k
+    elif isinstance(method, SmoothLog):
+        payload["percentile"] = method.percentile
+        payload["mu"] = method.mu
+    elif isinstance(method, SmoothRowCol):
+        payload["axis"] = method.axis
+    return payload
+
+
 def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
                 default: Union[int, bool] = None, sub_key: str = None) -> Union[Dict, int, bool]:
 
@@ -688,6 +743,9 @@ class QuantizeConfig():
     # gptq only:
     # if calibration is insufficient, fallback to a simple quantization strategy; encapsulated in FailSafe config
     failsafe: Optional[FailSafe] = field(default_factory=FailSafe)
+
+    # calibration-less / weight-only quantization lifecycle
+    calibrationless: Optional[CalibrationlessConfig] = field(default=None)
 
     # GPTQ only
     # gptaq only:
@@ -848,6 +906,31 @@ class QuantizeConfig():
                 )
 
             self.failsafe.smooth = _parse_smooth_method(self.failsafe.smooth)
+
+        if self.calibrationless is None:
+            pass
+        elif isinstance(self.calibrationless, dict):
+            method = self.calibrationless.get("method", CalibrationlessMethod.RTN)
+            smooth = self.calibrationless.get("smooth")
+            if smooth is None:
+                smooth = self.calibrationless.get("smooth_method")
+            self.calibrationless = CalibrationlessConfig(method=method, smooth=smooth)
+        elif isinstance(self.calibrationless, str):
+            self.calibrationless = CalibrationlessConfig(method=self.calibrationless)
+        elif not isinstance(self.calibrationless, CalibrationlessConfig):
+            raise ValueError(
+                "QuantizeConfig: `calibrationless` must be a CalibrationlessConfig, dict, string, or None."
+            )
+
+        if self.calibrationless is not None:
+            if self.quant_method != METHOD.GPTQ:
+                raise ValueError(
+                    "QuantizeConfig: calibration-less quantization currently only supports `quant_method=METHOD.GPTQ`."
+                )
+            if self.format not in {FORMAT.GPTQ, FORMAT.GPTQ_V2}:
+                raise ValueError(
+                    "QuantizeConfig: calibration-less quantization currently only supports `format=FORMAT.GPTQ` or `FORMAT.GPTQ_V2`."
+                )
 
         if self.bits not in fields_info[0].metadata["choices"]:
             raise ValueError(f"QuantizeConfig: `bits` must be in the set of `{fields_info[0].metadata['choices']}`.")
@@ -1163,6 +1246,8 @@ class QuantizeConfig():
             normalized["hessian"] = meta_payload.get("hessian")
         if "gptaq" not in normalized and isinstance(meta_payload, dict) and "gptaq" in meta_payload:
             normalized["gptaq"] = meta_payload.get("gptaq")
+        if "calibrationless" not in normalized and isinstance(meta_payload, dict) and "calibrationless" in meta_payload:
+            normalized["calibrationless"] = meta_payload.get("calibrationless")
         if "gc_mode" not in normalized and isinstance(meta_payload, dict) and "gc_mode" in meta_payload:
             normalized["gc_mode"] = meta_payload.get("gc_mode")
         if (
@@ -1217,30 +1302,10 @@ class QuantizeConfig():
             return cls.from_quant_config(args_from_json, format)
 
     def to_dict(self):
-        smooth = None
-        if self.failsafe is not None and self.failsafe.smooth is not None:
-            payload = {"type": self.failsafe.smooth.name}
-            payload["group_size_threshold"] = self.failsafe.smooth.group_size_threshold
-            if isinstance(self.failsafe.smooth, SmoothPercentile):
-                payload["percentile"] = self.failsafe.smooth.percentile
-            elif isinstance(self.failsafe.smooth, SmoothPercentileAsymmetric):
-                payload["low"] = self.failsafe.smooth.low
-                payload["high"] = self.failsafe.smooth.high
-            elif isinstance(self.failsafe.smooth, SmoothMAD):
-                payload["k"] = self.failsafe.smooth.k
-            elif isinstance(self.failsafe.smooth, SmoothMSE):
-                payload["steps"] = self.failsafe.smooth.steps
-                payload["maxshrink"] = self.failsafe.smooth.maxshrink
-            elif isinstance(self.failsafe.smooth, SmoothOutlier):
-                payload["pct"] = self.failsafe.smooth.pct
-            elif isinstance(self.failsafe.smooth, SmoothSoftNorm):
-                payload["k"] = self.failsafe.smooth.k
-            elif isinstance(self.failsafe.smooth, SmoothLog):
-                payload["percentile"] = self.failsafe.smooth.percentile
-                payload["mu"] = self.failsafe.smooth.mu
-            elif isinstance(self.failsafe.smooth, SmoothRowCol):
-                payload["axis"] = self.failsafe.smooth.axis
-            smooth = payload
+        smooth = _serialize_smooth_method(self.failsafe.smooth if self.failsafe is not None else None)
+        calibrationless_smooth = _serialize_smooth_method(
+            self.calibrationless.smooth if self.calibrationless is not None else None
+        )
 
         meta_payload = dict(self.meta) if self.meta else {}
         if self.moe:
@@ -1263,6 +1328,17 @@ class QuantizeConfig():
             meta_payload["gptaq"] = {
                 "alpha": self.gptaq.alpha,
                 "device": device_value,
+            }
+        if self.calibrationless is None:
+            meta_payload["calibrationless"] = None
+        else:
+            meta_payload["calibrationless"] = {
+                "method": (
+                    self.calibrationless.method.value
+                    if isinstance(self.calibrationless.method, CalibrationlessMethod)
+                    else self.calibrationless.method
+                ),
+                "smooth": calibrationless_smooth,
             }
         meta_payload["offload_to_disk"] = self.offload_to_disk
         meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
@@ -1352,6 +1428,12 @@ class QuantizeConfig():
         if self.moe is None:
             return False
         return self.moe.routing_bypass()
+
+    def uses_calibrationless_lifecycle(self) -> bool:
+        return self.calibrationless is not None
+
+    def requires_calibration_dataset(self) -> bool:
+        return not self.uses_calibrationless_lifecycle()
 
 # deprecated: will be removed in future update
 @dataclass
