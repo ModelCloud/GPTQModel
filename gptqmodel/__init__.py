@@ -57,6 +57,7 @@ from .quantization import (
     GPTQQuantizeConfig,
     QuantizeConfig,
     RTNQuantizeConfig,
+    WeightOnlyConfig,
 )
 from .utils import BACKEND
 from .utils.exllama import exllama_set_max_input_length

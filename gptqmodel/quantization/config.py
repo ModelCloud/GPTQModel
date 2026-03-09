@@ -106,7 +106,7 @@ class FailSafeStrategy(str, Enum):
     STDCLIP = "stdclip"
 
 
-class CalibrationlessMethod(str, Enum):
+class WeightOnlyMethod(str, Enum):
     RTN = "rtn"
     GGUF = "gguf"
     FP8 = "fp8"
@@ -298,21 +298,21 @@ class FailSafe:
 
 
 @dataclass
-class CalibrationlessConfig:
-    method: CalibrationlessMethod = CalibrationlessMethod.RTN
+class WeightOnlyConfig:
+    method: WeightOnlyMethod = WeightOnlyMethod.RTN
     smooth: Optional[SmoothMethod] = field(default_factory=SmoothMAD)
 
     def __post_init__(self):
         if isinstance(self.method, str):
             try:
-                self.method = CalibrationlessMethod(self.method.lower())
+                self.method = WeightOnlyMethod(self.method.lower())
             except ValueError as exc:
                 raise ValueError(
-                    f"CalibrationlessConfig: `method` must be one of {[v.value for v in CalibrationlessMethod]}."
+                    f"WeightOnlyConfig: `method` must be one of {[v.value for v in WeightOnlyMethod]}."
                 ) from exc
-        elif not isinstance(self.method, CalibrationlessMethod):
+        elif not isinstance(self.method, WeightOnlyMethod):
             raise ValueError(
-                f"CalibrationlessConfig: `method` must be one of {[v.value for v in CalibrationlessMethod]}."
+                f"WeightOnlyConfig: `method` must be one of {[v.value for v in WeightOnlyMethod]}."
             )
 
         self.smooth = _parse_smooth_method(self.smooth)
@@ -800,24 +800,24 @@ def _normalize_failsafe(failsafe: Optional[Union[FailSafe, Dict[str, Any], str, 
     return failsafe
 
 
-def _normalize_calibrationless(
-    calibrationless: Optional[Union[CalibrationlessConfig, Dict[str, Any], str]]
-) -> Optional[CalibrationlessConfig]:
-    if calibrationless is None:
+def _normalize_weight_only(
+    weight_only: Optional[Union[WeightOnlyConfig, Dict[str, Any], str]]
+) -> Optional[WeightOnlyConfig]:
+    if weight_only is None:
         return None
-    if isinstance(calibrationless, dict):
-        method = calibrationless.get("method", CalibrationlessMethod.RTN)
-        smooth = calibrationless.get("smooth")
+    if isinstance(weight_only, dict):
+        method = weight_only.get("method", WeightOnlyMethod.RTN)
+        smooth = weight_only.get("smooth")
         if smooth is None:
-            smooth = calibrationless.get("smooth_method")
-        return CalibrationlessConfig(method=method, smooth=smooth)
-    if isinstance(calibrationless, str):
-        return CalibrationlessConfig(method=calibrationless)
-    if not isinstance(calibrationless, CalibrationlessConfig):
+            smooth = weight_only.get("smooth_method")
+        return WeightOnlyConfig(method=method, smooth=smooth)
+    if isinstance(weight_only, str):
+        return WeightOnlyConfig(method=weight_only)
+    if not isinstance(weight_only, WeightOnlyConfig):
         raise ValueError(
-            "QuantizeConfig: `calibrationless` must be a CalibrationlessConfig, dict, string, or None."
+            "QuantizeConfig: `weight_only` must be a WeightOnlyConfig, dict, string, or None."
         )
-    return calibrationless
+    return weight_only
 
 
 def _normalize_hessian(hessian: Optional[Union[HessianConfig, Dict[str, Any]]]) -> HessianConfig:
@@ -909,29 +909,29 @@ def _default_damp_auto_increment(method: METHOD) -> float:
     return 0.001 if method == METHOD.QQQ else 0.01
 
 
-def _peek_calibrationless_method(payload: Any) -> Optional[CalibrationlessMethod]:
+def _peek_weight_only_method(payload: Any) -> Optional[WeightOnlyMethod]:
     if payload is None:
         return None
-    if isinstance(payload, CalibrationlessConfig):
+    if isinstance(payload, WeightOnlyConfig):
         return payload.method
     if isinstance(payload, str):
         try:
-            return CalibrationlessMethod(payload.lower())
+            return WeightOnlyMethod(payload.lower())
         except ValueError:
             return None
     if isinstance(payload, dict):
-        method = payload.get("method", CalibrationlessMethod.RTN)
+        method = payload.get("method", WeightOnlyMethod.RTN)
         try:
-            return CalibrationlessMethod(str(method).lower())
+            return WeightOnlyMethod(str(method).lower())
         except ValueError:
             return None
     return None
 
 
-def _extract_calibrationless_smooth(payload: Any) -> Any:
+def _extract_weight_only_smooth(payload: Any) -> Any:
     if payload is None:
         return None
-    if isinstance(payload, CalibrationlessConfig):
+    if isinstance(payload, WeightOnlyConfig):
         return payload.smooth
     if isinstance(payload, dict):
         smooth = payload.get("smooth")
@@ -940,14 +940,14 @@ def _extract_calibrationless_smooth(payload: Any) -> Any:
         return smooth
     if isinstance(payload, str):
         return None
-    raise ValueError("QuantizeConfig: `calibrationless` must be a CalibrationlessConfig, dict, string, or None.")
+    raise ValueError("QuantizeConfig: `weight_only` must be a WeightOnlyConfig, dict, string, or None.")
 
 
 def _normalize_rtn_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(payload)
-    calibrationless = normalized.pop("calibrationless", None)
+    weight_only = normalized.pop("weight_only", None)
     if "smooth" not in normalized:
-        normalized["smooth"] = _extract_calibrationless_smooth(calibrationless)
+        normalized["smooth"] = _extract_weight_only_smooth(weight_only)
     return normalized
 
 
@@ -1302,7 +1302,7 @@ class BaseQuantizeConfig:
             "failsafe": "failsafe",
             "hessian": "hessian",
             "gptaq": "gptaq",
-            "calibrationless": "calibrationless",
+            "weight_only": "weight_only",
             "gc_mode": "gc_mode",
             "wait_for_submodule_finalizers": "wait_for_submodule_finalizers",
             "auto_forward_data_parallel": "auto_forward_data_parallel",
@@ -1450,11 +1450,11 @@ class BaseQuantizeConfig:
             return False
         return self.moe.routing_bypass()
 
-    def uses_calibrationless_lifecycle(self) -> bool:
+    def uses_weight_only_lifecycle(self) -> bool:
         return False
 
     def requires_calibration_dataset(self) -> bool:
-        return not self.uses_calibrationless_lifecycle()
+        return not self.uses_weight_only_lifecycle()
 
 
 @dataclass
@@ -1624,53 +1624,11 @@ class RTNQuantizeConfig(BaseQuantizeConfig):
         out[FORMAT_FIELD_CODE] = self.format
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
-        meta_payload["calibrationless"] = {
+        meta_payload["weight_only"] = {
             "smooth": _serialize_smooth_method(self.smooth),
         }
 
-    def to_gptq_work_config(self, *, failsafe: Optional[FailSafe] = None) -> GPTQQuantizeConfig:
-        """Build the internal GPTQ-compatible work config used by the RTN lifecycle.
-
-        RTN reuses GPTQ's quantizer implementation to emit GPTQ-compatible weight
-        tensors, but that worker config stays internal so RTN's public config
-        surface remains calibration-less and method-specific. Export format stays
-        on the outer RTN config; the worker config is always GPTQ-format.
-        """
-        return GPTQQuantizeConfig(
-            bits=self.bits,
-            dynamic=self.dynamic,
-            group_size=self.group_size,
-            desc_act=self.desc_act,
-            sym=self.sym,
-            true_sequential=self.true_sequential,
-            lm_head=self.lm_head,
-            quant_method=METHOD.GPTQ,
-            format=FORMAT.GPTQ,
-            meta=dict(self.meta) if self.meta else None,
-            device=self.device,
-            pack_dtype=self.pack_dtype,
-            pack_impl=self.pack_impl,
-            adapter=self.adapter,
-            offload_to_disk=self.offload_to_disk,
-            offload_to_disk_path=self.offload_to_disk_path,
-            rotation=self.rotation,
-            failsafe=failsafe if failsafe is not None else self.failsafe,
-            is_marlin_format=self.is_marlin_format,
-            compute_device_filter=self.compute_device_filter,
-            auto_forward_data_parallel=self.auto_forward_data_parallel,
-            vram_strategy=self.vram_strategy,
-            gc_mode=self.gc_mode,
-            wait_for_submodule_finalizers=self.wait_for_submodule_finalizers,
-            moe=self.moe,
-            act_group_aware=False,
-            static_groups=False,
-            mse=0.0,
-            gptaq=None,
-            mock_quantization=False,
-            hessian=HessianConfig(),
-        )
-
-    def uses_calibrationless_lifecycle(self) -> bool:
+    def uses_weight_only_lifecycle(self) -> bool:
         return True
 
 
@@ -1702,7 +1660,7 @@ def clone_rtn_config_for_module(
 def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantizeConfig]:
     method = payload.get(QUANT_METHOD_FIELD, METHOD.GPTQ)
     format_value = payload.get(FORMAT_FIELD_CODE, FORMAT.GPTQ)
-    calibrationless = payload.get("calibrationless")
+    weight_only = payload.get("weight_only")
 
     try:
         method = _normalize_quant_method(method)
@@ -1714,14 +1672,14 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
     except Exception:
         format_value = FORMAT.GPTQ
 
-    calibrationless_method = _peek_calibrationless_method(calibrationless)
-    if calibrationless is not None and calibrationless_method not in {None, CalibrationlessMethod.RTN}:
+    weight_only_method = _peek_weight_only_method(weight_only)
+    if weight_only is not None and weight_only_method not in {None, WeightOnlyMethod.RTN}:
         raise ValueError(
-            "QuantizeConfig: unsupported calibration-less config. Use RTNQuantizeConfig for RTN today."
+            "QuantizeConfig: unsupported weight-only config. Use RTNQuantizeConfig for RTN today."
         )
-    if calibrationless_method == CalibrationlessMethod.RTN:
+    if weight_only_method == WeightOnlyMethod.RTN:
         return RTNQuantizeConfig
-    if calibrationless is not None:
+    if weight_only is not None:
         return RTNQuantizeConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
         return QQQQuantizeConfig

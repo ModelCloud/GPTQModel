@@ -6,7 +6,7 @@ import pytest
 from gptqmodel.quantization.config import BaseQuantizeConfig, GPTQQuantizeConfig, QuantizeConfig, RTNQuantizeConfig, SmoothMAD
 
 
-def test_quantize_config_calibrationless_round_trip():
+def test_quantize_config_weight_only_round_trip():
     smooth = SmoothMAD(k=1.75)
     cfg = RTNQuantizeConfig(
         bits=4,
@@ -14,21 +14,21 @@ def test_quantize_config_calibrationless_round_trip():
         smooth=smooth,
     )
 
-    assert cfg.uses_calibrationless_lifecycle() is True
+    assert cfg.uses_weight_only_lifecycle() is True
     assert cfg.requires_calibration_dataset() is False
     assert isinstance(cfg.smooth, SmoothMAD)
     assert cfg.smooth.k == pytest.approx(1.75)
 
     payload = cfg.to_dict()
-    assert "method" not in payload["meta"]["calibrationless"]
-    assert payload["meta"]["calibrationless"]["smooth"]["type"] == "mad"
-    assert payload["meta"]["calibrationless"]["smooth"]["k"] == pytest.approx(1.75)
+    assert "method" not in payload["meta"]["weight_only"]
+    assert payload["meta"]["weight_only"]["smooth"]["type"] == "mad"
+    assert payload["meta"]["weight_only"]["smooth"]["k"] == pytest.approx(1.75)
 
     reloaded = QuantizeConfig.from_quant_config(payload)
     assert isinstance(reloaded, RTNQuantizeConfig)
     assert isinstance(reloaded.smooth, SmoothMAD)
     assert reloaded.smooth.k == pytest.approx(1.75)
-    assert reloaded.uses_calibrationless_lifecycle() is True
+    assert reloaded.uses_weight_only_lifecycle() is True
     assert reloaded.requires_calibration_dataset() is False
 
 
@@ -37,7 +37,7 @@ def test_rtn_quantize_config_defaults_to_direct_smoother():
 
     assert isinstance(cfg, BaseQuantizeConfig)
     assert not isinstance(cfg, GPTQQuantizeConfig)
-    assert cfg.uses_calibrationless_lifecycle() is True
+    assert cfg.uses_weight_only_lifecycle() is True
     assert isinstance(cfg.smooth, SmoothMAD)
     assert cfg.export_quant_method() is not None
 
@@ -64,11 +64,11 @@ def test_rtn_quantize_config_supports_awq_export_round_trip():
     assert reloaded.smooth.k == pytest.approx(1.5)
 
 
-def test_legacy_calibrationless_payload_still_dispatches_to_rtn():
+def test_weight_only_payload_dispatches_to_rtn():
     cfg = QuantizeConfig(
         bits=4,
         group_size=128,
-        calibrationless={
+        weight_only={
             "method": "rtn",
             "smooth": {"type": "mad", "k": 2.0},
         },

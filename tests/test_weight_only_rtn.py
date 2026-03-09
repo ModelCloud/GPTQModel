@@ -12,15 +12,12 @@ import torch.nn as nn
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.quantization.config import (
-    FailSafe,
-    FailSafeStrategy,
     FORMAT,
     METHOD,
-    QuantizeConfig,
     RTNQuantizeConfig,
     SmoothMAD,
 )
-from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.quantization.rtn import RTN
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.model import find_modules
 from gptqmodel.utils.model import convert_gptq_v1_to_v2_format_module
@@ -52,7 +49,7 @@ class _TinyModel(nn.Module):
         self.config = SimpleNamespace(
             use_cache=False,
             tie_word_embeddings=False,
-            model_type="tiny_calibrationless_test",
+            model_type="tiny_weight_only_test",
         )
 
 
@@ -72,29 +69,21 @@ def _reference_rtn_quantized_weight(weight: torch.Tensor, device: torch.device, 
     linear.weight.data.copy_(weight)
     linear.to(device)
 
-    qcfg = QuantizeConfig(
+    qcfg = RTNQuantizeConfig(
         bits=4,
         group_size=32,
         desc_act=False,
         sym=True,
-        format=FORMAT.GPTQ,
-        quant_method=METHOD.GPTQ,
-        failsafe=FailSafe(
-            strategy=FailSafeStrategy.RTN,
-            threshold=True,
-            smooth=smooth,
-        ),
+        smooth=smooth,
         offload_to_disk=False,
         device=str(device),
     )
-    gptq = GPTQ(linear, qcfg=qcfg)
-    gptq.quantizer.configure(perchannel=True)
-    qweight, _, _, g_idx, *_ = gptq.quantize()
-    gptq.free()
+    rtn = RTN(linear, qcfg=qcfg)
+    qweight, _, _, g_idx, *_ = rtn.quantize()
     return qweight.detach().cpu(), g_idx.detach().cpu()
 
 
-def test_baseqmodel_quantize_uses_calibrationless_gptq_pipeline():
+def test_baseqmodel_quantize_uses_weight_only_rtn_pipeline():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     device_type = device.type
 
@@ -121,7 +110,7 @@ def test_baseqmodel_quantize_uses_calibrationless_gptq_pipeline():
 
     result = model.quantize(calibration=None, backend=BACKEND.TORCH)
 
-    assert "calibrationless_gptq" in result
+    assert "weight_only_rtn" in result
     assert model.quantized is True
 
     qmodules = find_modules(model.model, [TorchQuantLinear])
@@ -183,7 +172,7 @@ def test_baseqmodel_quantize_allows_rtn_awq_export():
 
     result = model.quantize(calibration=None, backend=BACKEND.AUTO)
 
-    assert "calibrationless_gptq" in result
+    assert "weight_only_rtn" in result
     assert model.quantized is True
     assert model.quantize_config.format == FORMAT.GEMM
     assert model.quantize_config.export_quant_method() == METHOD.AWQ

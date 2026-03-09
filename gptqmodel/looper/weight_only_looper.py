@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Calibration-less quantization loop for weight-only methods.
+"""Weight-only quantization loop for methods that do not capture activations.
 
 This looper intentionally does not share the activation-capture lifecycle used
 by GPTQ/AWQ calibration flows. Weight-only methods such as RTN, FP8, NVFP4, or
@@ -19,7 +19,7 @@ from typing import Dict, Optional
 import torch
 from defuser.modeling.fused_moe.replace_modules import materialize_model
 
-from ..looper.calibrationless_gptq_processor import CalibrationlessGPTQProcessor
+from ..looper.weight_only_rtn_processor import WeightOnlyRTNProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
@@ -33,10 +33,10 @@ from ..utils.offload import offload_to_disk
 log = setup_logger()
 
 
-class CalibrationlessLooper:
-    """Run the simplified per-layer lifecycle for calibration-less quantization."""
+class WeightOnlyLooper:
+    """Run the simplified per-layer lifecycle for weight-only quantization."""
 
-    def __init__(self, model: BaseQModel, processor: CalibrationlessGPTQProcessor):
+    def __init__(self, model: BaseQModel, processor: WeightOnlyRTNProcessor):
         self.gptq_model = model
         self.processor = processor
 
@@ -98,7 +98,7 @@ class CalibrationlessLooper:
         quant_config = self.gptq_model.quantize_config
         if not isinstance(quant_config, RTNQuantizeConfig):
             raise NotImplementedError(
-                "Calibration-less looper only supports `RTNQuantizeConfig` today."
+                "Weight-only looper only supports `RTNQuantizeConfig` today."
             )
 
         if quant_config.lm_head:
@@ -221,4 +221,4 @@ class CalibrationlessLooper:
         return total_log
 
 
-__all__ = ["CalibrationlessLooper"]
+__all__ = ["WeightOnlyLooper"]

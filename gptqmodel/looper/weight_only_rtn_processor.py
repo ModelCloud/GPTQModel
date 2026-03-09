@@ -1,16 +1,12 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from __future__ import annotations
 
 import math
 import threading
 import time
-from typing import Dict, Optional
-
-import torch
+from typing import Optional
 
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
@@ -27,15 +23,8 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
-from ..quantization import GPTQ
-from ..quantization.config import (
-    BaseQuantizeConfig,
-    FailSafe,
-    FailSafeStrategy,
-    RTNQuantizeConfig,
-    clone_rtn_config_for_module,
-)
-from ..quantization.gptq import get_number_of_rows_and_cols
+from ..quantization.config import BaseQuantizeConfig, RTNQuantizeConfig, clone_rtn_config_for_module
+from ..quantization.rtn import RTN, get_number_of_rows_and_cols
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, pack_module
 from ..utils.module_locks import parent_module_lock
@@ -44,7 +33,9 @@ from ..utils.module_locks import parent_module_lock
 log = setup_logger()
 
 
-class CalibrationlessGPTQProcessor(LoopProcessor):
+class WeightOnlyRTNProcessor(LoopProcessor):
+    """Process RTN modules without entering activation-based quantization flows."""
+
     _TP_TARGETS = (2, 4, 8)
 
     def __init__(
@@ -66,13 +57,6 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
         )
         self.lock = threading.Lock()
         self.qcfg_dynamic: Optional[RTNQuantizeConfig] = None
-
-    def _zero_calibration_failsafe(self, qcfg: RTNQuantizeConfig) -> FailSafe:
-        return FailSafe(
-            strategy=FailSafeStrategy.RTN,
-            threshold=True,
-            smooth=qcfg.smooth,
-        )
 
     def _annotate_tp_padding(self, module: NamedModule, qcfg: BaseQuantizeConfig) -> None:
         target_multiple = math.lcm(*self._TP_TARGETS)
@@ -98,19 +82,8 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
 
         self.qcfg_dynamic = qcfg_clone
         self._annotate_tp_padding(module, qcfg_clone)
-        work_qcfg = qcfg_clone.to_gptq_work_config(
-            failsafe=self._zero_calibration_failsafe(qcfg_clone),
-        )
 
-        task = GPTQ(module=module, qcfg=work_qcfg)
-        task.quantizer.configure(perchannel=True)
-        task.failsafe = work_qcfg.failsafe
-        task.expected_nsamples = 0
-
-        if getattr(self, "_pause_controller", None) is not None and self.pb is not None:
-            base_title = f"Quantizing {module.name} in layer"
-            self._pause_controller.register_and_draw_progress_bar(self.pb, title=base_title, subtitle="")
-
+        task = RTN(module=module, qcfg=qcfg_clone)
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = task.quantize()
 
         module.stream_state_payload_to_cpu(
@@ -134,7 +107,7 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
             PROCESS_USED_MEMORY: self.device_memory_report(),
-            "lifecycle": "calibrationless",
+            "lifecycle": "weight_only",
         }
 
         with self.lock:
@@ -142,7 +115,6 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
         self.log_new_row(stat)
 
         module.weight.data = wq
-        task.free()
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         module.stream_sync()
@@ -155,6 +127,7 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
         assert q_scales.device == CPU
         assert q_g_idx.device == CPU
 
+        active_qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
         layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
@@ -166,16 +139,16 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
                 create_quant_module(
                     name=module.full_name,
                     linear_cls=model.qlinear_kernel,
-                    bits=self.qcfg.bits,
-                    desc_act=self.qcfg.desc_act,
-                    dynamic=self.qcfg.dynamic,
-                    group_size=self.qcfg.group_size,
+                    bits=active_qcfg.bits,
+                    desc_act=active_qcfg.desc_act,
+                    dynamic=active_qcfg.dynamic,
+                    group_size=active_qcfg.group_size,
                     module=model.model,
                     submodule=module,
-                    sym=self.qcfg.sym,
-                    device=self.qcfg.device,
+                    sym=active_qcfg.sym,
+                    device=active_qcfg.device,
                     lm_head_name=model.lm_head,
-                    pack_dtype=self.qcfg.pack_dtype,
+                    pack_dtype=active_qcfg.pack_dtype,
                     register_buffers=False,
                 )
         if timer is not None and create_start is not None:
@@ -198,7 +171,7 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
                     layers=layers,
                     quant_linear_cls=model.qlinear_kernel,
                     lock=self.lock,
-                    quantize_config=self.qcfg,
+                    quantize_config=active_qcfg,
                 )
         if timer is not None and pack_start is not None:
             timer.record(
@@ -215,7 +188,7 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
         super().finalize(model=model, **kwargs)
 
     def name(self) -> str:
-        return "calibrationless_gptq"
+        return "weight_only_rtn"
 
 
-__all__ = ["CalibrationlessGPTQProcessor"]
+__all__ = ["WeightOnlyRTNProcessor"]

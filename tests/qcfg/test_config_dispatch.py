@@ -4,13 +4,13 @@
 from gptqmodel.quantization.config import (
     AWQQuantizeConfig,
     BaseQuantizeConfig,
-    CalibrationlessConfig,
     FORMAT,
     GPTQQuantizeConfig,
     METHOD,
     QuantizeConfig,
     RTNQuantizeConfig,
     SmoothMAD,
+    WeightOnlyConfig,
 )
 
 
@@ -33,12 +33,12 @@ def test_quantize_config_dispatches_awq_constructor():
 
 
 def test_quantize_config_dispatches_rtn_constructor():
-    cfg = QuantizeConfig(calibrationless=CalibrationlessConfig(smooth=SmoothMAD(k=2.0)))
+    cfg = QuantizeConfig(weight_only=WeightOnlyConfig(smooth=SmoothMAD(k=2.0)))
 
     assert isinstance(cfg, BaseQuantizeConfig)
     assert isinstance(cfg, RTNQuantizeConfig)
     assert not isinstance(cfg, GPTQQuantizeConfig)
-    assert cfg.uses_calibrationless_lifecycle() is True
+    assert cfg.uses_weight_only_lifecycle() is True
     assert cfg.smooth is not None
     assert cfg.export_quant_method() == METHOD.GPTQ
 
@@ -46,7 +46,7 @@ def test_quantize_config_dispatches_rtn_constructor():
 def test_quantize_config_dispatches_rtn_awq_export_constructor():
     cfg = QuantizeConfig(
         format=FORMAT.GEMM,
-        calibrationless=CalibrationlessConfig(smooth=SmoothMAD(k=2.0)),
+        weight_only=WeightOnlyConfig(smooth=SmoothMAD(k=2.0)),
     )
 
     assert isinstance(cfg, RTNQuantizeConfig)

@@ -762,8 +762,8 @@ class BaseQModel(nn.Module):
             self.model, _ = rotate_model(model=self.model, rotate_mode=self.quantize_config.rotation,
                                             device=rotation_device, **module_name_args)
 
-        if self.quantize_config.uses_calibrationless_lifecycle():
-            result = self._quantize_calibrationless(
+        if self.quantize_config.uses_weight_only_lifecycle():
+            result = self._quantize_weight_only(
                 calibration=calibration,
                 calibration_concat_size=calibration_concat_size,
                 calibration_sort=calibration_sort,
@@ -774,7 +774,7 @@ class BaseQModel(nn.Module):
         else:
             if calibration is None:
                 raise ValueError(
-                    "Calibration dataset is required unless a calibration-less quantize config is configured."
+                    "Calibration dataset is required unless a weight-only quantize config is configured."
                 )
             result = self._quantize_with_calibration(
                 calibration=calibration,
@@ -890,7 +890,7 @@ class BaseQModel(nn.Module):
                 failsafe=self.quantize_config.failsafe,
             )
 
-    def _quantize_calibrationless(
+    def _quantize_weight_only(
         self,
         *,
         calibration,
@@ -903,27 +903,27 @@ class BaseQModel(nn.Module):
         del calibration_concat_size, calibration_sort, batch_size, calibration_concat_separator
 
         from ..adapter.adapter import Lora
-        from ..looper.calibrationless_gptq_processor import CalibrationlessGPTQProcessor
-        from ..looper.calibrationless_looper import CalibrationlessLooper
+        from ..looper.weight_only_looper import WeightOnlyLooper
+        from ..looper.weight_only_rtn_processor import WeightOnlyRTNProcessor
 
         if calibration is not None:
-            log.info("Calibration-less quantization selected; ignoring provided calibration dataset.")
+            log.info("Weight-only quantization selected; ignoring provided calibration dataset.")
 
         if isinstance(self.quantize_config.adapter, Lora):
             raise NotImplementedError(
-                "Calibration-less quantization does not support adapter/EoRA generation."
+                "Weight-only quantization does not support adapter/EoRA generation."
             )
 
         if getattr(self.quantize_config, "gptaq", None) is not None:
             raise NotImplementedError(
-                "Calibration-less quantization does not support GPTAQ/native activation capture."
+                "Weight-only quantization does not support GPTAQ/native activation capture."
             )
 
-        processor = CalibrationlessGPTQProcessor(
+        processor = WeightOnlyRTNProcessor(
             tokenizer=self.tokenizer,
             qcfg=self.quantize_config,
         )
-        module_looper = CalibrationlessLooper(model=self, processor=processor)
+        module_looper = WeightOnlyLooper(model=self, processor=processor)
 
         gc_context = (
             DEVICE_THREAD_POOL.no_auto_gc()
