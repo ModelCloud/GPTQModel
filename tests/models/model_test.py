@@ -178,7 +178,6 @@ class ModelTest(unittest.TestCase):
         model,
         tokenizer,
         processor,
-        need_create_processor: bool,
         cleanup_callback,
     ):
         if cleanup_callback is not None:
@@ -186,9 +185,7 @@ class ModelTest(unittest.TestCase):
                 cleanup_callback()
             except Exception:
                 pass
-        if need_create_processor:
-            return model, tokenizer, processor
-        return model, tokenizer
+        return model, tokenizer, processor
 
     def _normalize_task_identifier(self, task):
         if isinstance(task, Enum):
@@ -883,6 +880,7 @@ class ModelTest(unittest.TestCase):
         )
 
     def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):
+        """Return `(model, tokenizer, processor)`; `processor` is `None` for text-only models."""
         quantize_config = self._build_quantize_config()
 
         log.info(f"Quant config: {quantize_config}")
@@ -967,7 +965,6 @@ class ModelTest(unittest.TestCase):
                         model=model,
                         tokenizer=tokenizer,
                         processor=None,
-                        need_create_processor=need_create_processor,
                         cleanup_callback=cleanup_callback,
                     )
 
@@ -1025,15 +1022,9 @@ class ModelTest(unittest.TestCase):
         if not is_quantized:
             del model
             torch_empty_cache()
-            if need_create_processor:
-                return q_model, q_tokenizer, processor
-            else:
-                return q_model, q_tokenizer
+            return q_model, q_tokenizer, processor
         else:
-            if need_create_processor:
-                return model, tokenizer, processor
-            else:
-                return model, tokenizer
+            return model, tokenizer, processor
 
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, backend=None, **args):
 
@@ -1224,10 +1215,10 @@ class ModelTest(unittest.TestCase):
         self.model = None
         # TODO fix me: LOAD_QUANTIZED_MODEL doesn't make any sense when we have QUANT_SAVE_PATH
         #if self.QUANT_SAVE_PATH:
-        #    self.model, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
+        #    self.model, _, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
 
         if not self.model:
-            self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
+            self.model, _, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
