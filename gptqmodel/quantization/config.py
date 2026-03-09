@@ -65,6 +65,7 @@ class FORMAT(str, Enum):
     GPTQ = "gptq"
     # v2 format fixed sym = False quantization
     GPTQ_V2 = "gptq_v2"
+    GGUF = "gguf"
     MARLIN = "marlin"
     BITBLAS = "bitblas"
     QQQ = "qqq"
@@ -302,6 +303,7 @@ class WeightOnlyConfig:
     method: WeightOnlyMethod = WeightOnlyMethod.RTN
     # Whole-model RTN is noticeably more stable without a smoother by default.
     smooth: Optional[SmoothMethod] = None
+    gguf_qtype: Optional[str] = None
 
     def __post_init__(self):
         if isinstance(self.method, str):
@@ -519,6 +521,7 @@ QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 RTN_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.GPTQ,
     FORMAT.GPTQ_V2,
+    FORMAT.GGUF,
     FORMAT.GEMM,
     FORMAT.GEMV,
     FORMAT.GEMV_FAST,
@@ -944,11 +947,31 @@ def _extract_weight_only_smooth(payload: Any) -> Any:
     raise ValueError("QuantizeConfig: `weight_only` must be a WeightOnlyConfig, dict, string, or None.")
 
 
+def _extract_weight_only_gguf_qtype(payload: Any) -> Any:
+    if payload is None:
+        return None
+    if isinstance(payload, WeightOnlyConfig):
+        return payload.gguf_qtype
+    if isinstance(payload, dict):
+        return payload.get("gguf_qtype")
+    if isinstance(payload, str):
+        return None
+    raise ValueError("QuantizeConfig: `weight_only` must be a WeightOnlyConfig, dict, string, or None.")
+
+
 def _normalize_rtn_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(payload)
     weight_only = normalized.pop("weight_only", None)
+    weight_only_method = _peek_weight_only_method(weight_only)
+
+    # `weight_only.method="gguf"` is a shorthand for the RTN lifecycle with a GGUF export layout.
+    if weight_only_method == WeightOnlyMethod.GGUF and FORMAT_FIELD_CODE not in normalized:
+        normalized[FORMAT_FIELD_CODE] = FORMAT.GGUF
+
     if "smooth" not in normalized:
         normalized["smooth"] = _extract_weight_only_smooth(weight_only)
+    if "gguf_qtype" not in normalized:
+        normalized["gguf_qtype"] = _extract_weight_only_gguf_qtype(weight_only)
     return normalized
 
 
@@ -1029,7 +1052,7 @@ class QuantizeConfigMeta(type):
 
 @dataclass
 class BaseQuantizeConfig:
-    bits: int = field(default=4, metadata={"choices": [2, 3, 4, 8]})
+    bits: int = field(default=4, metadata={"choices": [2, 3, 4, 5, 6, 8]})
 
     # allow dynamic bitsize per layer, if None or some layer not set, use bits
     dynamic: Optional[Dict[str, Dict[str, Union[int, bool]]]] = field(default=None)
@@ -1631,6 +1654,7 @@ class RTNQuantizeConfig(BaseQuantizeConfig):
     format: FORMAT = field(default=FORMAT.GPTQ)
     # Whole-model RTN is noticeably more stable without a smoother by default.
     smooth: Optional[SmoothMethod] = None
+    gguf_qtype: Optional[str] = None
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.GPTQ,)
@@ -1652,6 +1676,7 @@ class RTNQuantizeConfig(BaseQuantizeConfig):
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         meta_payload["weight_only"] = {
             "smooth": _serialize_smooth_method(self.smooth),
+            "gguf_qtype": self.gguf_qtype,
         }
 
     def uses_weight_only_lifecycle(self) -> bool:
@@ -1699,11 +1724,11 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         format_value = FORMAT.GPTQ
 
     weight_only_method = _peek_weight_only_method(weight_only)
-    if weight_only is not None and weight_only_method not in {None, WeightOnlyMethod.RTN}:
+    if weight_only is not None and weight_only_method not in {None, WeightOnlyMethod.RTN, WeightOnlyMethod.GGUF}:
         raise ValueError(
-            "QuantizeConfig: unsupported weight-only config. Use RTNQuantizeConfig for RTN today."
+            "QuantizeConfig: unsupported weight-only config. RTN weight-only export currently supports `rtn` and `gguf`."
         )
-    if weight_only_method == WeightOnlyMethod.RTN:
+    if weight_only_method in {WeightOnlyMethod.RTN, WeightOnlyMethod.GGUF}:
         return RTNQuantizeConfig
     if weight_only is not None:
         return RTNQuantizeConfig

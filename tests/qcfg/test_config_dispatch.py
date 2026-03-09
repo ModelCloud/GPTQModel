@@ -80,6 +80,40 @@ def test_quantize_config_dispatches_rtn_awq_export_constructor():
     assert cfg.export_quant_method() == METHOD.AWQ
 
 
+def test_quantize_config_dispatches_rtn_gguf_export_constructor():
+    cfg = QuantizeConfig(
+        format=FORMAT.GGUF,
+        weight_only=WeightOnlyConfig(smooth=SmoothMAD(k=2.0)),
+    )
+
+    assert isinstance(cfg, RTNQuantizeConfig)
+    assert cfg.format == FORMAT.GGUF
+    assert cfg.export_quant_method() == METHOD.GPTQ
+
+
+def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method():
+    cfg = QuantizeConfig(
+        weight_only=WeightOnlyConfig(method="gguf", smooth=SmoothMAD(k=1.5)),
+    )
+
+    assert isinstance(cfg, RTNQuantizeConfig)
+    assert cfg.format == FORMAT.GGUF
+    assert cfg.export_quant_method() == METHOD.GPTQ
+
+
+def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method_preserving_qtype():
+    cfg = QuantizeConfig(
+        bits=5,
+        weight_only=WeightOnlyConfig(method="gguf", gguf_qtype="q5_k_m"),
+    )
+
+    assert isinstance(cfg, RTNQuantizeConfig)
+    assert cfg.bits == 5
+    assert cfg.format == FORMAT.GGUF
+    assert cfg.gguf_qtype == "q5_k_m"
+    assert cfg.export_quant_method() == METHOD.GPTQ
+
+
 def test_quantize_config_dispatches_gptq_marlin_constructor():
     cfg = QuantizeConfig(quant_method=METHOD.GPTQ, format=FORMAT.MARLIN)
 

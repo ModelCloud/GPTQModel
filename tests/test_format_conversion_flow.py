@@ -118,6 +118,12 @@ def test_pack_module_converts_for_rtn_gptq_export_requires_v2():
     assert calls == 1
 
 
+def test_pack_module_skips_for_rtn_gguf_export():
+    cfg = RTNQuantizeConfig(bits=4, format=FORMAT.GGUF, offload_to_disk=False)
+    calls = _run_pack(cfg, requires_v2=True)
+    assert calls == 0
+
+
 def test_pack_module_skips_when_kernel_uses_v1():
     cfg = QuantizeConfig(bits=4, quant_method=METHOD.GPTQ, format=FORMAT.GPTQ, offload_to_disk=False)
     calls = _run_pack(cfg, requires_v2=False)
