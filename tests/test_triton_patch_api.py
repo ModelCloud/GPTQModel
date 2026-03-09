@@ -53,6 +53,12 @@ def test_triton_patch_public_api_export():
     assert gptqmodel.TritonPatch is nogil_patcher.TritonPatch
 
 
+def test_triton_patch_external_usage_snippet():
+    # Run the exact user-facing API snippet.
+    from gptqmodel import TritonPatch
+    TritonPatch.apply()
+
+
 def test_package_init_uses_triton_patch_api():
     init_py = Path(__file__).resolve().parents[1] / "gptqmodel" / "__init__.py"
     tree = ast.parse(init_py.read_text(encoding="utf-8"))
