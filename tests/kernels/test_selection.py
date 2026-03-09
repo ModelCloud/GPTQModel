@@ -4,11 +4,16 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import pytest
+import torch
 
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
+from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
 from gptqmodel.quantization import METHOD
-from gptqmodel.utils.importer import select_quant_linear
+from gptqmodel.quantization import FORMAT
+from gptqmodel.utils.backend import BACKEND
+from gptqmodel.utils.importer import AUTO_BACKEND_KERNEL_MAPPING, select_quant_linear
 from gptqmodel.utils.rocm import IS_ROCM
 from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
@@ -61,6 +66,15 @@ def _pick_group_size(cls):
     return group_sizes[0] if group_sizes else 128
 
 
+def _force_auto_candidates_valid(monkeypatch, method, fmt):
+    for cls in set(AUTO_BACKEND_KERNEL_MAPPING[method][fmt].values()):
+        monkeypatch.setattr(
+            cls,
+            "validate",
+            classmethod(lambda qlinear_cls, **kwargs: (True, None)),
+        )
+
+
 CASES = []
 for kernel_cls in sorted(_iter_kernel_classes(), key=lambda cls: cls.__name__):
     for method in _infer_quant_methods(kernel_cls):
@@ -97,3 +111,42 @@ def test_select_quant_linear_smoke(kernel_cls, method, fmt):
     )
 
     assert qlinear_cls is kernel_cls
+
+
+@pytest.mark.parametrize("fmt", [FORMAT.GPTQ, FORMAT.GPTQ_V2])
+def test_cpu_auto_select_prioritizes_hf_kernel_for_gptq(monkeypatch, fmt):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GPTQ, fmt)
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=fmt,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert candidates[0] is HFKernelLinear
+
+
+def test_cpu_auto_select_prioritizes_hf_kernel_for_awq(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.AWQ, FORMAT.GEMM)
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert candidates[0] is HFKernelAwqLinear
