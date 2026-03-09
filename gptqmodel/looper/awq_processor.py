@@ -386,8 +386,15 @@ class AWQProcessor(LoopProcessor):
                 try:
                     pe = rotary(x_for_rotary, pos_for_rotary)
                     refreshed["position_embeddings"] = pe
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Cache refresh can proceed without precomputed rotary embeddings; log for debugging.
+                    log.debug(
+                        "AWQProcessor: failed to refresh rotary position_embeddings "
+                        "(seq_len=%s, device=%s): %s",
+                        seq_len,
+                        x_for_rotary.device,
+                        exc,
+                    )
         elif pos_ids_cache is not None:
             refreshed["position_ids"] = pos_ids_cache
 
