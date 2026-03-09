@@ -2,11 +2,17 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+
+import sys
+from pathlib import Path
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import FailSafe, VramStrategy
+from gptqmodel.quantization.config import FORMAT, METHOD, FailSafe, VramStrategy
 from gptqmodel.utils.eval import EVAL
-from gptqmodel.quantization.config import FORMAT, METHOD
 
 
 class TestQwen3_5Moe(ModelTest):
