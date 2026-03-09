@@ -162,7 +162,6 @@ class HFKernelAwqLinear(HFKernelLinear):
             scales=self.scales,
             bits=self.bits,
             group_size=self.group_size,
-            sym=self.sym,
         ).to(device=device, dtype=dtype)
 
     @torch.no_grad()
