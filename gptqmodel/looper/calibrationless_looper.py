@@ -24,7 +24,7 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
-from ..quantization.config import CalibrationlessMethod
+from ..quantization.config import RTNQuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to
 from ..utils.offload import offload_to_disk
@@ -96,12 +96,9 @@ class CalibrationlessLooper:
     def loop(self, **kwargs):
         """Quantize layers directly from weights without calibration forwards."""
         quant_config = self.gptq_model.quantize_config
-        calibrationless = quant_config.calibrationless
-        if calibrationless is None:
-            raise ValueError("Calibration-less looper requires `quantize_config.calibrationless` to be configured.")
-        if calibrationless.method != CalibrationlessMethod.RTN:
+        if not isinstance(quant_config, RTNQuantizeConfig):
             raise NotImplementedError(
-                f"Calibration-less looper only supports `method={CalibrationlessMethod.RTN.value}` today."
+                "Calibration-less looper only supports `RTNQuantizeConfig` today."
             )
 
         if quant_config.lm_head:

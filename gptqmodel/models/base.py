@@ -771,7 +771,7 @@ class BaseQModel(nn.Module):
         else:
             if calibration is None:
                 raise ValueError(
-                    "Calibration dataset is required unless `quantize_config.calibrationless` is configured."
+                    "Calibration dataset is required unless a calibration-less quantize config is configured."
                 )
             result = self._quantize_with_calibration(
                 calibration=calibration,
@@ -848,7 +848,7 @@ class BaseQModel(nn.Module):
                 GPTQProcessor(**args),
             ]
 
-        if self.quantize_config.gptaq is not None:
+        if getattr(self.quantize_config, "gptaq", None) is not None:
             from ..looper.native_processor import NativeProcessor
 
             args_to_copy = {k: v for k, v in args.items() if k != "prepare_dataset_func"}
@@ -911,7 +911,7 @@ class BaseQModel(nn.Module):
                 "Calibration-less quantization does not support adapter/EoRA generation."
             )
 
-        if self.quantize_config.gptaq is not None:
+        if getattr(self.quantize_config, "gptaq", None) is not None:
             raise NotImplementedError(
                 "Calibration-less quantization does not support GPTAQ/native activation capture."
             )

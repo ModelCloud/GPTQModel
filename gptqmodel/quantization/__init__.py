@@ -4,11 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from .config import (
+                     AWQQuantizeConfig,
                      CalibrationlessConfig,
                      CalibrationlessMethod,
                      FORMAT,
                      FORMAT_FIELD_CHECKPOINT,
                      FORMAT_FIELD_CODE,
+                     GPTQQuantizeConfig,
                      METHOD,
                      QUANT_CONFIG_FILENAME,
                      QUANT_METHOD_FIELD,
@@ -18,6 +20,7 @@ from .config import (
                      GPTAQConfig,
                      HessianConfig,
                      QuantizeConfig,
+                     RTNQuantizeConfig,
                      SmoothLog,
                      SmoothMAD,
                      SmoothMethod,

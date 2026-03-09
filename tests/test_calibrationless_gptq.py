@@ -11,7 +11,15 @@ import torch.nn as nn
 
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
-from gptqmodel.quantization.config import FailSafe, FailSafeStrategy, FORMAT, METHOD, QuantizeConfig, SmoothMAD
+from gptqmodel.quantization.config import (
+    FailSafe,
+    FailSafeStrategy,
+    FORMAT,
+    METHOD,
+    QuantizeConfig,
+    RTNQuantizeConfig,
+    SmoothMAD,
+)
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.model import find_modules
@@ -94,17 +102,12 @@ def test_baseqmodel_quantize_uses_calibrationless_gptq_pipeline():
     original_state = copy.deepcopy(native.state_dict())
 
     smooth = SmoothMAD(k=2.25)
-    qcfg = QuantizeConfig(
+    qcfg = RTNQuantizeConfig(
         bits=4,
         group_size=32,
         desc_act=False,
         sym=True,
-        format=FORMAT.GPTQ,
-        quant_method=METHOD.GPTQ,
-        calibrationless={
-            "method": "rtn",
-            "smooth": {"type": "mad", "k": smooth.k},
-        },
+        smooth={"type": "mad", "k": smooth.k},
         offload_to_disk=False,
         device=device_type,
     )

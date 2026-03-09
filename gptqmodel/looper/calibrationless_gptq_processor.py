@@ -29,7 +29,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..quantization import GPTQ
-from ..quantization.config import CalibrationlessMethod, FailSafe, FailSafeStrategy, METHOD, QuantizeConfig
+from ..quantization.config import FailSafe, FailSafeStrategy, METHOD, QuantizeConfig, RTNQuantizeConfig
 from ..quantization.gptq import get_number_of_rows_and_cols
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, pack_module
@@ -63,17 +63,14 @@ class CalibrationlessGPTQProcessor(LoopProcessor):
         self.qcfg_dynamic: Optional[QuantizeConfig] = None
 
     def _zero_calibration_failsafe(self) -> FailSafe:
-        calibrationless = self.qcfg.calibrationless
-        if calibrationless is None:
-            raise ValueError("Calibration-less GPTQ processor requires `qcfg.calibrationless` to be configured.")
-        if calibrationless.method != CalibrationlessMethod.RTN:
+        if not isinstance(self.qcfg, RTNQuantizeConfig):
             raise NotImplementedError(
-                f"Calibration-less GPTQ processor only supports `method={CalibrationlessMethod.RTN.value}` today."
+                "Calibration-less GPTQ processor only supports `RTNQuantizeConfig` today."
             )
         return FailSafe(
             strategy=FailSafeStrategy.RTN,
             threshold=True,
-            smooth=calibrationless.smooth,
+            smooth=self.qcfg.smooth,
         )
 
     def _annotate_tp_padding(self, module: NamedModule, qcfg: QuantizeConfig) -> None:

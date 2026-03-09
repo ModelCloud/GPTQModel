@@ -171,19 +171,21 @@ def ModelWriter(cls):
         )
 
         # meta: write config fields to meta if they doe not participate in inference
+        gptaq_cfg = getattr(self.quantize_config, "gptaq", None)
+
         self.quantize_config.meta_set(
             key=META_FIELD_DAMP_PERCENT,
-            value=self.quantize_config.damp_percent
+            value=getattr(self.quantize_config, "damp_percent", None)
         )
 
         self.quantize_config.meta_set(
             key=META_FIELD_DAMP_AUTO_INCREMENT,
-            value=self.quantize_config.damp_auto_increment
+            value=getattr(self.quantize_config, "damp_auto_increment", None)
         )
 
         self.quantize_config.meta_set(
             key=META_FIELD_STATIC_GROUPS,
-            value=self.quantize_config.static_groups
+            value=getattr(self.quantize_config, "static_groups", None)
         )
 
         self.quantize_config.meta_set(
@@ -193,24 +195,24 @@ def ModelWriter(cls):
 
         self.quantize_config.meta_set(
             key=META_FIELD_MSE,
-            value=self.quantize_config.mse
+            value=getattr(self.quantize_config, "mse", None)
         )
 
         self.quantize_config.meta_set(
             key=META_FIELD_GPTAQ_ENABLED,
-            value=None if self.quantize_config.gptaq is None else {
-                "alpha": self.quantize_config.gptaq.alpha,
+            value=None if gptaq_cfg is None else {
+                "alpha": gptaq_cfg.alpha,
                 "device": (
-                    self.quantize_config.gptaq.device
-                    if isinstance(self.quantize_config.gptaq.device, str)
-                    else str(self.quantize_config.gptaq.device)
+                    gptaq_cfg.device
+                    if isinstance(gptaq_cfg.device, str)
+                    else str(gptaq_cfg.device)
                 ),
             }
         )
 
         self.quantize_config.meta_set(
             key=META_FIELD_ACT_GROUP_AWARE,
-            value=self.quantize_config.act_group_aware
+            value=getattr(self.quantize_config, "act_group_aware", None)
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.

@@ -50,7 +50,14 @@ DEVICE_THREAD_POOL = DeviceThreadPool(
 
 from .models import GPTQModel, get_best_device
 from .models.auto import ASCII_LOGO
-from .quantization import BaseQuantizeConfig, GPTAQConfig, QuantizeConfig
+from .quantization import (
+    AWQQuantizeConfig,
+    BaseQuantizeConfig,
+    GPTAQConfig,
+    GPTQQuantizeConfig,
+    QuantizeConfig,
+    RTNQuantizeConfig,
+)
 from .utils import BACKEND
 from .utils.exllama import exllama_set_max_input_length
 from .version import __version__
