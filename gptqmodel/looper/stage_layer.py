@@ -13,7 +13,7 @@ import time
 from concurrent.futures import as_completed
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from defuser.modeling.fused_moe.replace_modules import materialize_model
+from defuser.modeling.replace_modules import materialize_model
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..quantization.config import GcMode
