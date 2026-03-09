@@ -29,7 +29,7 @@ class TestQwen3_5Moe(ModelTest):
     }
 
     VRAM_STRATEGY = VramStrategy.BALANCED
-    OFFLOAD_TO_DISK = False  # FIXME Currently, after defuser transforms the model, OFFLOAD_TO_DISK must be False for quantization to occur.
+    OFFLOAD_TO_DISK = False  # FIXME Currently, after defuser transforms the model, OFFLOAD_TO_DISK must be False for quantization.
 
     def test_qwen3_5_moe(self):
         self.quant_lm_eval()
