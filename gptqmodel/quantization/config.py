@@ -989,13 +989,20 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
     return normalized
 
 
+def _filter_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+    target_field_names = {field.name for field in fields(target_cls)}
+    return {key: value for key, value in payload.items() if key in target_field_names}
+
+
 class QuantizeConfigMeta(type):
     def __call__(cls, *args, **kwargs):
         if cls is QuantizeConfig:
             target_cls = _resolve_quantize_config_class(kwargs)
             target_kwargs = dict(kwargs)
+            target_kwargs = _normalize_quantize_config_payload_for_target_cls(target_cls, target_kwargs)
             if target_cls is RTNQuantizeConfig:
                 target_kwargs = _normalize_rtn_kwargs(target_kwargs)
+            target_kwargs = _filter_quantize_config_payload_for_target_cls(target_cls, target_kwargs)
             return type.__call__(target_cls, *args, **target_kwargs)
         return super().__call__(*args, **kwargs)
 

@@ -94,8 +94,8 @@ class AWQProcessor(LoopProcessor):
         self._scale_context = threading.local()
         self.gptq_model = gptq_model
 
-        # Select a default AWQ kernel for this processor (per-module overrides can still apply).
-        self.qlinear_kernel = self._select_qlinear_kernel_for_format(qcfg.format)
+        model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
+        self.qlinear_kernel = model_kernel or self._select_qlinear_kernel_for_format(qcfg.format)
 
         self.model = model
         # Whether to apply clipping to the model during quantization. Some models may perform better with this set to False.
@@ -193,6 +193,10 @@ class AWQProcessor(LoopProcessor):
         # Honor per-module dynamic format overrides when present.
         format_override = self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
         target_format = format_override or self.qcfg.format
+        if target_format == self.qcfg.format:
+            model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
+            if model_kernel is not None:
+                return model_kernel
         return self._select_qlinear_kernel_for_format(target_format)
 
     def _get_layer_state(self, layer_index: int) -> _AWQLayerState:
@@ -233,6 +237,11 @@ class AWQProcessor(LoopProcessor):
         self.nsamples = total_tokens
 
     def _record_input_feature(self, module_name: str, feature: torch.Tensor) -> None:
+        # Preserve a leading sample axis for flattened [seq, hidden] captures so later
+        # concatenation produces [samples, seq, hidden] instead of collapsing into one giant sequence.
+        if feature.dim() <= 2:
+            feature = feature.unsqueeze(0)
+
         if feature.device.type != "cpu":
             feature = feature.detach().cpu()
         else:
@@ -1123,15 +1132,6 @@ class AWQProcessor(LoopProcessor):
                 if changed:
                     module_kwargs[key] = type(value)(converted)
 
-        seq_len = None
-        batch_dim = None
-        if x.dim() >= 2:
-            batch_dim = x.shape[0]
-            seq_len = x.shape[1]
-        else:
-            batch_dim = 1
-            seq_len = x.shape[0]
-
         supports_position_ids = False
         supports_position_embeddings = False
         try:
@@ -1140,6 +1140,18 @@ class AWQProcessor(LoopProcessor):
             supports_position_embeddings = "position_embeddings" in signature
         except (ValueError, TypeError):
             pass
+
+        if x.dim() == 2 and (supports_position_ids or supports_position_embeddings):
+            x = x.unsqueeze(0)
+
+        seq_len = None
+        batch_dim = None
+        if x.dim() >= 2:
+            batch_dim = x.shape[0]
+            seq_len = x.shape[1] if x.dim() >= 3 else x.shape[0]
+        else:
+            batch_dim = 1
+            seq_len = x.shape[0]
 
         rotary = self._get_root_rotary()
         if seq_len is not None and rotary is not None and supports_position_embeddings:
@@ -1168,7 +1180,13 @@ class AWQProcessor(LoopProcessor):
                 pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
             module_kwargs["position_ids"] = pos_values
 
-        if self._quant_batch_size is None or self._quant_batch_size <= 1:
+        effective_quant_batch_size = self._quant_batch_size if self._quant_batch_size and self._quant_batch_size > 0 else None
+
+        if (
+            effective_quant_batch_size is None
+            or x.dim() == 0
+            or x.shape[0] <= effective_quant_batch_size
+        ):
             module_output = module(x, **module_kwargs)
             if isinstance(module_output, tuple):
                 module_output = module_output[0]
@@ -1187,7 +1205,7 @@ class AWQProcessor(LoopProcessor):
             return val
 
         outputs = []
-        for x_partial in torch.split(x, self._quant_batch_size, dim=0):
+        for x_partial in torch.split(x, effective_quant_batch_size, dim=0):
             partial_kwargs = {
                 key: _slice_value(value, x_partial.shape[0])
                 for key, value in module_kwargs.items()

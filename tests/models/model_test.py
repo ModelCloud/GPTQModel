@@ -68,7 +68,9 @@ from gptqmodel.quantization.config import (  # noqa: E402
     HessianConfig,
     MoEConfig,
     QuantizeConfig,
+    RTNQuantizeConfig,
     VramStrategy,
+    WeightOnlyConfig,
 )
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
@@ -124,6 +126,7 @@ class ModelTest(unittest.TestCase):
     MSE = 0.0
     DYNAMIC = None
     HESSIAN_CHUNK_SIZE = None
+    WEIGHT_ONLY = None
 
     SAVE_PATH = None  # default is temp folder
 
@@ -840,8 +843,26 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):
-        quantize_config = QuantizeConfig(
+    def _build_quantize_config(self):
+        if self.WEIGHT_ONLY is not None:
+            if not isinstance(self.WEIGHT_ONLY, WeightOnlyConfig):
+                raise TypeError(f"`WEIGHT_ONLY` must be a WeightOnlyConfig, got {type(self.WEIGHT_ONLY).__name__}")
+
+            return RTNQuantizeConfig(
+                bits=self.BITS,
+                group_size=self.GROUP_SIZE,
+                desc_act=self.DESC_ACT,
+                sym=self.SYM,
+                format=self.FORMAT,
+                adapter=self.EORA,
+                pack_impl="cpu",
+                vram_strategy=self.VRAM_STRATEGY,
+                dynamic=self.DYNAMIC,
+                moe=self.MOE_CONFIG,
+                smooth=self.WEIGHT_ONLY.smooth,
+            )
+
+        return QuantizeConfig(
             quant_method=self.METHOD,
             format=self.FORMAT,
             bits=self.BITS,
@@ -861,6 +882,9 @@ class ModelTest(unittest.TestCase):
             moe=self.MOE_CONFIG,
         )
 
+    def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):
+        quantize_config = self._build_quantize_config()
+
         log.info(f"Quant config: {quantize_config}")
         log.info(f"Quant batch_size: {batch_size}")
 
@@ -871,6 +895,8 @@ class ModelTest(unittest.TestCase):
                 args["attn_implementation"] = "flash_attention_2"
             else:
                 log.warn("flash-attn requested but not available; falling back to framework defaults")
+        else:
+            args["attn_implementation"] = "eager"
 
 
         log.info(f"args: {args}")
@@ -895,7 +921,10 @@ class ModelTest(unittest.TestCase):
         processor = None
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
-        calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
+        if quantize_config.requires_calibration_dataset():
+            calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
+        else:
+            calibration_dataset = None
 
         # mpt model need
         if hasattr(model.config, "pad_token_id") and not model.config.pad_token_id:
@@ -1018,6 +1047,8 @@ class ModelTest(unittest.TestCase):
                 load_kwargs["attn_implementation"] = "flash_attention_2"
             else:
                 log.warn("flash-attn requested but not available; falling back to framework defaults")
+        else:
+            load_kwargs["attn_implementation"] = "eager"
 
         active_backend = backend if backend is not None else self._current_load_backend()
         torch_fused_backend = self._torch_fused_backend()

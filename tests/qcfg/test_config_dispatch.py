@@ -32,6 +32,23 @@ def test_quantize_config_dispatches_awq_constructor():
     assert cfg.sym is False
 
 
+def test_quantize_config_dispatches_awq_ignoring_legacy_gptq_only_kwargs():
+    cfg = QuantizeConfig(
+        quant_method=METHOD.AWQ,
+        format=FORMAT.GEMM,
+        sym=False,
+        act_group_aware=True,
+        failsafe=None,
+        damp_percent=0.05,
+        mse=0.0,
+    )
+
+    assert isinstance(cfg, AWQQuantizeConfig)
+    assert cfg.quant_method == METHOD.AWQ
+    assert cfg.format == FORMAT.GEMM
+    assert cfg.sym is False
+
+
 def test_quantize_config_dispatches_rtn_constructor():
     cfg = QuantizeConfig(weight_only=WeightOnlyConfig(smooth=SmoothMAD(k=2.0)))
 

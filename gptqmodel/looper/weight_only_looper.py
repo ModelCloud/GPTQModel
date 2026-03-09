@@ -208,7 +208,12 @@ class WeightOnlyLooper:
                         self.processor.submodule_finalize(named, self.gptq_model)
                         self._offload_quantized_module(named)
 
-                if is_lm_head_module:
+                # Submodule-level offload may swap packed tensors to meta/disk placeholders.
+                # Skip the layer-wide CPU move in that case to avoid `.to()` on meta buffers.
+                if getattr(self.gptq_model.quantize_config, "offload_to_disk", False):
+                    if not is_lm_head_module:
+                        layers[layer_index] = module
+                elif is_lm_head_module:
                     self.gptq_model.post_quantize(module)
                 else:
                     layers[layer_index] = self.gptq_model.post_quantize(module)
