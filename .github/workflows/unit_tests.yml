@@ -302,12 +302,6 @@ jobs:
       - name: check wheel
         if: github.event.inputs.artifact_id == '' && !cancelled()
         run: |
-          grep -nE "ptxas fatal|nvcc fatal|error:|fatal error|ninja: build stopped" /tmp/build.log | head -n 50
-          
-          echo "::group::compile logs"
-          cat /tmp/build.log
-          echo "::endgroup::"
-          
           ls -ahl dist
           whl=$(ls -t dist/*.whl | head -n 1 | xargs basename)
           sha256=$(sha256sum dist/$whl)
@@ -329,6 +323,14 @@ jobs:
           DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
           [ -d $DIR ] || mkdir -p $DIR
           cp $WHEEL $DIR/
+
+      - name: Check log
+        if: github.event.inputs.artifact_id == '' && !cancelled()
+        continue-on-error: true
+        run: |
+          grep -nE "ptxas fatal|nvcc fatal|error:|fatal error|ninja: build stopped" /tmp/build.log | head -n 50
+
+          ls -ahl dist
 
       - name: Upload wheel to github artifact
         if: github.event.inputs.artifact_id == '' && !cancelled()
