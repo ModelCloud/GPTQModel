@@ -649,7 +649,7 @@ jobs:
               if [ "$(echo "$resp" | tr -d '[:space:]')" = "-1" ]; then
                 echo "Server returned -1, terminating job..."
                 pkill -9 -f "pytest.*${{ matrix.test_script }}" 2>/dev/null || true
-                exit 1
+                exit 3
               else
                 echo "gpu is kept alive..."
               fi
@@ -674,7 +674,7 @@ jobs:
           
           start_time=$(date +%s)
           pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee $log_file
-          test ${PIPESTATUS[0]} -eq 0 || { echo "ERROR=1" >> $GITHUB_ENV; exit 1; }
+          test ${PIPESTATUS[0]} -eq 0 || { echo "ERROR=2" >> $GITHUB_ENV; echo "pipe status wrong: ${PIPESTATUS[0]} $PIPESTATUS"; exit 2; }
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
           
