@@ -636,10 +636,10 @@ def test_gguf_forward_uses_fused_k_path_for_small_cuda_batches():
     module = _build_rtn_gguf_module(case).to(case["device"]).eval()
     calls = {"dense": 0, "fused": 0}
 
-    GGUFTorchQuantLinear.clear_shared_autotune_cache()
     module.gguf_fused_cuda_max_rows = case["inputs"].shape[0]
     module.gguf_fused_cuda_min_matrix_elements = 0
-    module.gguf_fused_autotune_enabled = False
+    module.autotune_enabled = False
+    module.clear_autotune()
     module.clear_weight_cache()
 
     def _dense(self, x_flat):
@@ -686,10 +686,10 @@ def test_gguf_forward_uses_fused_k_path_for_small_cpu_batches():
     inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
     calls = {"dense": 0, "fused": 0}
 
-    GGUFTorchQuantLinear.clear_shared_autotune_cache()
     module.gguf_fused_cpu_max_rows = inputs.shape[0]
     module.gguf_fused_cpu_min_matrix_elements = 0
-    module.gguf_fused_autotune_enabled = False
+    module.autotune_enabled = False
+    module.clear_autotune()
     module.clear_weight_cache()
 
     def _dense(self, x_flat):
@@ -712,15 +712,15 @@ def test_gguf_forward_uses_fused_k_path_for_small_cpu_batches():
     assert calls == {"dense": 1, "fused": 0}
 
 
-def test_gguf_forward_autotunes_and_caches_fused_plan_on_cpu(monkeypatch):
+def test_gguf_forward_autotunes_once_per_instance_with_fused_plan_on_cpu(monkeypatch):
     case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
     module = _build_rtn_gguf_module(case).cpu().eval()
     inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
 
-    GGUFTorchQuantLinear.clear_shared_autotune_cache()
     module.gguf_fused_cpu_max_rows = inputs.shape[0]
     module.gguf_fused_cpu_min_matrix_elements = 0
-    module.gguf_fused_autotune_enabled = True
+    module.autotune_enabled = True
+    module.clear_autotune()
     module.clear_weight_cache()
 
     calls = {"dense": 0, "fused": 0}
@@ -738,9 +738,8 @@ def test_gguf_forward_autotunes_and_caches_fused_plan_on_cpu(monkeypatch):
 
     module(inputs)
 
-    key = module._fused_k_forward_plan_key(inputs.reshape(-1, inputs.shape[-1]))
     assert calls == {"dense": 1, "fused": 1}
-    assert module._fused_k_forward_decisions[key] is True
+    assert module.get_autotune_result() is True
 
     def _fail(self, x_flat):
         raise AssertionError("autotune benchmark should not rerun for cached fused plan")
@@ -749,18 +748,18 @@ def test_gguf_forward_autotunes_and_caches_fused_plan_on_cpu(monkeypatch):
     monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fail)
 
     module(inputs)
-    assert module._fused_k_forward_decisions[key] is True
+    assert module.get_autotune_result() is True
 
 
-def test_gguf_forward_autotunes_and_caches_dense_plan_on_cpu(monkeypatch):
+def test_gguf_forward_autotunes_once_per_instance_with_dense_plan_on_cpu(monkeypatch):
     case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
     module = _build_rtn_gguf_module(case).cpu().eval()
     inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
 
-    GGUFTorchQuantLinear.clear_shared_autotune_cache()
     module.gguf_fused_cpu_max_rows = inputs.shape[0]
     module.gguf_fused_cpu_min_matrix_elements = 0
-    module.gguf_fused_autotune_enabled = True
+    module.autotune_enabled = True
+    module.clear_autotune()
     module.clear_weight_cache()
 
     calls = {"dense": 0, "fused": 0}
@@ -778,9 +777,8 @@ def test_gguf_forward_autotunes_and_caches_dense_plan_on_cpu(monkeypatch):
 
     module(inputs)
 
-    key = module._fused_k_forward_plan_key(inputs.reshape(-1, inputs.shape[-1]))
     assert calls == {"dense": 1, "fused": 1}
-    assert module._fused_k_forward_decisions[key] is False
+    assert module.get_autotune_result() is False
 
     def _fail(self, x_flat):
         raise AssertionError("autotune benchmark should not rerun for cached dense plan")
@@ -789,20 +787,20 @@ def test_gguf_forward_autotunes_and_caches_dense_plan_on_cpu(monkeypatch):
     monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fail)
 
     module(inputs)
-    assert module._fused_k_forward_decisions[key] is False
+    assert module.get_autotune_result() is False
 
 
-def test_gguf_forward_reuses_shared_autotune_plan_across_modules(monkeypatch):
+def test_gguf_forward_autotunes_once_per_module_instance(monkeypatch):
     case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
     inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
     module_a = _build_rtn_gguf_module(case).cpu().eval()
     module_b = _build_rtn_gguf_module(case).cpu().eval()
 
-    GGUFTorchQuantLinear.clear_shared_autotune_cache()
     for module in (module_a, module_b):
         module.gguf_fused_cpu_max_rows = inputs.shape[0]
         module.gguf_fused_cpu_min_matrix_elements = 0
-        module.gguf_fused_autotune_enabled = True
+        module.autotune_enabled = True
+        module.clear_autotune()
         module.clear_weight_cache()
 
     calls = {"dense": 0, "fused": 0}
@@ -820,19 +818,13 @@ def test_gguf_forward_reuses_shared_autotune_plan_across_modules(monkeypatch):
 
     module_a(inputs)
 
-    key = module_a._fused_k_forward_plan_key(inputs.reshape(-1, inputs.shape[-1]))
     assert calls == {"dense": 1, "fused": 1}
-    assert module_a._fused_k_forward_decisions[key] is True
-
-    def _fail(self, x_flat):
-        raise AssertionError("shared autotune cache should prevent benchmark reruns across modules")
-
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _fail)
-    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fail)
+    assert module_a.get_autotune_result() is True
 
     module_b(inputs)
 
-    assert module_b._fused_k_forward_decisions[key] is True
+    assert calls == {"dense": 2, "fused": 2}
+    assert module_b.get_autotune_result() is True
 
 
 @pytest.mark.parametrize(

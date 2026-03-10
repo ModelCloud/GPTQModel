@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import math
 import os
-import threading
 import time
-from typing import Dict, Tuple
 
 import numpy as np
 import torch
@@ -440,6 +438,7 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
     REQUIRES_FORMAT_V2 = False
+    AUTOTUNE = True
 
     QUANT_TYPE = "gguf"
     GGUF_FUSED_CUDA_MAX_ROWS = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CUDA_MAX_ROWS", "32")))
@@ -453,17 +452,9 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         int(os.environ.get("GPTQMODEL_GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS", "0")),
     )
     GGUF_FUSED_CHUNK_BLOCKS = max(1, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CHUNK_BLOCKS", "8")))
-    GGUF_FUSED_AUTOTUNE_ENABLED = os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE", "1").lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
     GGUF_FUSED_AUTOTUNE_WARMUP = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_WARMUP", "1")))
     GGUF_FUSED_AUTOTUNE_ITERS = max(1, int(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_ITERS", "2")))
     GGUF_FUSED_AUTOTUNE_MARGIN = max(0.0, float(os.environ.get("GPTQMODEL_GGUF_FUSED_AUTOTUNE_MARGIN", "0.05")))
-    _SHARED_FUSED_K_FORWARD_DECISIONS: Dict[Tuple[object, ...], bool] = {}
-    _SHARED_FUSED_K_FORWARD_DECISIONS_LOCK = threading.Lock()
 
     def __init__(
         self,
@@ -484,14 +475,11 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         self.gguf_block_size = qtype_info["block_size"]
         self.gguf_type_size = qtype_info["type_size"]
         self.padded_in_features = math.ceil(in_features / self.gguf_block_size) * self.gguf_block_size
-        # Keep an instance alias for compatibility, but decisions are shared process-wide by shape/device.
-        self._fused_k_forward_decisions = self._SHARED_FUSED_K_FORWARD_DECISIONS
         self.gguf_fused_cuda_max_rows = self.GGUF_FUSED_CUDA_MAX_ROWS
         self.gguf_fused_cuda_min_matrix_elements = self.GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS
         self.gguf_fused_cpu_max_rows = self.GGUF_FUSED_CPU_MAX_ROWS
         self.gguf_fused_cpu_min_matrix_elements = self.GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS
         self.gguf_fused_chunk_blocks = self.GGUF_FUSED_CHUNK_BLOCKS
-        self.gguf_fused_autotune_enabled = self.GGUF_FUSED_AUTOTUNE_ENABLED
         self.gguf_fused_autotune_warmup = self.GGUF_FUSED_AUTOTUNE_WARMUP
         self.gguf_fused_autotune_iters = self.GGUF_FUSED_AUTOTUNE_ITERS
         self.gguf_fused_autotune_margin = self.GGUF_FUSED_AUTOTUNE_MARGIN
@@ -535,11 +523,6 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
 
     def clear_weight_cache(self) -> None:
         return None
-
-    @classmethod
-    def clear_shared_autotune_cache(cls) -> None:
-        with cls._SHARED_FUSED_K_FORWARD_DECISIONS_LOCK:
-            cls._SHARED_FUSED_K_FORWARD_DECISIONS.clear()
 
     def post_init(self):
         self.clear_weight_cache()
@@ -636,6 +619,7 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         else:
             self.bias = None
 
+        self.clear_autotune()
         self.clear_weight_cache()
 
     def _resolve_dequant_target(
@@ -828,18 +812,6 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
 
         return weight[:, : self.in_features].transpose(0, 1).contiguous()
 
-    def _fused_k_forward_plan_key(self, x_flat: torch.Tensor) -> Tuple[object, ...]:
-        return (
-            x_flat.device.type,
-            x_flat.device.index,
-            x_flat.dtype,
-            self.gguf_tensor_qtype,
-            self.in_features,
-            self.out_features,
-            x_flat.shape[0],
-            self.gguf_fused_chunk_blocks,
-        )
-
     def _is_fused_k_forward_candidate(self, x_flat: torch.Tensor) -> bool:
         if x_flat.device.type == "cuda":
             max_rows = self.gguf_fused_cuda_max_rows
@@ -889,42 +861,22 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
             device=x_flat.device,
         )
 
-    def _autotune_fused_k_forward(self, x_flat: torch.Tensor) -> bool:
-        key = self._fused_k_forward_plan_key(x_flat)
-
-        with self._SHARED_FUSED_K_FORWARD_DECISIONS_LOCK:
-            decision = self._SHARED_FUSED_K_FORWARD_DECISIONS.get(key)
-        if decision is not None:
-            return decision
-
+    def _autotune(self, x_flat: torch.Tensor) -> bool:
         try:
             fused_time = self._benchmark_fused_forward(x_flat)
             dense_time = self._benchmark_dense_forward(x_flat)
-            use_fused = fused_time <= dense_time * (1.0 - self.gguf_fused_autotune_margin)
+            return fused_time <= dense_time * (1.0 - self.gguf_fused_autotune_margin)
         except Exception:
-            use_fused = False
-
-        with self._SHARED_FUSED_K_FORWARD_DECISIONS_LOCK:
-            existing = self._SHARED_FUSED_K_FORWARD_DECISIONS.get(key)
-            if existing is not None:
-                return existing
-            self._SHARED_FUSED_K_FORWARD_DECISIONS[key] = use_fused
-            return use_fused
+            return False
 
     def _should_use_fused_k_forward(self, x_flat: torch.Tensor) -> bool:
         if not self._is_fused_k_forward_candidate(x_flat):
             return False
 
-        if not self.gguf_fused_autotune_enabled:
+        if not self.autotune_enabled:
             return True
 
-        key = self._fused_k_forward_plan_key(x_flat)
-        with self._SHARED_FUSED_K_FORWARD_DECISIONS_LOCK:
-            decision = self._SHARED_FUSED_K_FORWARD_DECISIONS.get(key)
-        if decision is not None:
-            return decision
-
-        return self._autotune_fused_k_forward(x_flat)
+        return bool(self.maybe_autotune(x_flat))
 
     def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
