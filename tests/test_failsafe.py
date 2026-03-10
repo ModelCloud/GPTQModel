@@ -5,6 +5,7 @@ import unittest
 from glob import glob
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 from module_tree.test_subset import _StubAWQProcessor
@@ -736,7 +737,8 @@ def test_gptq_failsafe_threshold_triggers_rtn_when_samples_below_percent():
     inp = torch.randn(1, 1, 8)
     gptq.add_batch(inp, None)
 
-    _, _, _, _, _, avg_loss, _, nsamples = gptq.quantize(blocksize=4)
+    Q, _, _, _, _, avg_loss, _, nsamples = gptq.quantize(blocksize=4)
 
     assert nsamples == 1
-    assert avg_loss == "failsafe(rtn): 0.0062505"
+    assert avg_loss.startswith("failsafe(rtn): ")
+    assert (Q - layer.weight.data).abs().mean().item() == pytest.approx(0.0120230, abs=1e-7)
