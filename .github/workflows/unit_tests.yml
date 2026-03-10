@@ -277,10 +277,14 @@ jobs:
           which pip || true
           python --version
           echo "::endgroup::"
-          
+
+          log_dir=/opt/dist/${{ github.run_id }}/logs
+          [ -d $log_dir ] || mkdir -p $log_dir
+          log_file=$log_dir/build.log
+
           build_once() {
             echo "::group::compile logs"
-            python setup.py bdist_wheel 2>&1 | tee /tmp/build.log
+            python setup.py bdist_wheel 2>&1 | tee $log_file
             echo "::endgroup::"
           }
           
@@ -321,15 +325,17 @@ jobs:
           WHEEL="$(readlink -f dist/*.whl)"
           SHA256="$(sha256sum "$WHEEL" | awk '{print $1}')"
 
-          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
+          DIR=/opt/dist/${{ github.run_id }}
           [ -d $DIR ] || mkdir -p $DIR
           cp $WHEEL $DIR/
 
       - name: Check log
-        if: github.event.inputs.artifact_id == '' && !cancelled()
+        if: ${{ github.event.inputs.artifact_id == '' && !cancelled() && failure() }}
         continue-on-error: true
         run: |
-          grep -nE "ptxas fatal|nvcc fatal|error:|fatal error|ninja: build stopped" /tmp/build.log | head -n 50
+          log_dir=/opt/dist/${{ github.run_id }}/logs
+          log_file=$log_dir/build.log
+          grep -nE "ptxas fatal|nvcc fatal|error:|fatal error|ninja: build stopped" $log_file | head -n 50 || true
 
           ls -ahl dist
 
@@ -662,7 +668,7 @@ jobs:
           }
           trap cleanup EXIT
           
-          log_dir=/opt/dist/${{ needs.check-vm.outputs.run_id }}/logs
+          log_dir=/opt/dist/${{ github.run_id }}/logs
           [ -d $log_dir ] || mkdir -p $log_dir
           log_file=$log_dir/${{ matrix.test_script }}.log
           
@@ -677,14 +683,13 @@ jobs:
           curl "http://$XEON5/gpu/logVram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Check log
-        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() && !always() }}
+        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() && failure() }}
         continue-on-error: true
         run: |
-          log_dir=/opt/dist/${{ needs.check-vm.outputs.run_id }}/logs
+          log_dir=/opt/dist/${{ github.run_id }}/logs
           log_file=$log_dir/${{ matrix.test_script }}.log
       
           grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
-
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
