@@ -61,7 +61,7 @@ tests:
   test_eval.py:
     - peft
     - evalplus
-    - vllm
+    - http://10.0.13.31/files/vllm-0.1.dev1+gdc6b57846.d20260309.cu131-cp313-cp313-linux_x86_64.whl
 
   test_evalplus.py:
     - evalplus
