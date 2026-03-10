@@ -671,7 +671,7 @@ class BaseQModel(nn.Module):
         if preferred_backend in (None, BACKEND.AUTO):
             if self.quantize_config.quant_method == METHOD.AWQ:
                 if self.quantize_config.format == FORMAT.GEMM:
-                    preferred_backend = BACKEND.TORCH_AWQ
+                    preferred_backend = BACKEND.GEMM
                 elif self.quantize_config.format == FORMAT.GEMV:
                     preferred_backend = BACKEND.GEMV
                 elif self.quantize_config.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
