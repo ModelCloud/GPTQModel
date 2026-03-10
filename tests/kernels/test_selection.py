@@ -68,6 +68,14 @@ def _pick_group_size(cls):
     return group_sizes[0] if group_sizes else 128
 
 
+def _pick_bits(cls):
+    supported_bits = list(getattr(cls, "SUPPORTS_BITS", []))
+    for candidate in supported_bits:
+        if candidate in {2, 3, 4, 5, 6, 8}:
+            return candidate
+    return None
+
+
 def _force_auto_candidates_valid(monkeypatch, method, fmt):
     for cls in set(AUTO_BACKEND_KERNEL_MAPPING[method][fmt].values()):
         monkeypatch.setattr(
@@ -95,7 +103,9 @@ def test_select_quant_linear_smoke(kernel_cls, method, fmt):
         pytest.skip(f"{kernel_cls.__name__} unavailable: {err}")
 
     pack_dtype = kernel_cls.SUPPORTS_PACK_DTYPES[0]
-    bits = kernel_cls.SUPPORTS_BITS[0]
+    bits = _pick_bits(kernel_cls)
+    if bits is None:
+        pytest.skip(f"No selector-compatible bit-width available for {kernel_cls.__name__}.")
     group_size = _pick_group_size(kernel_cls)
     desc_act = kernel_cls.SUPPORTS_DESC_ACT[0]
     sym = kernel_cls.SUPPORTS_SYM[0]

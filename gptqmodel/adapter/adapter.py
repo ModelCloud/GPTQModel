@@ -115,8 +115,11 @@ class Lora(Adapter):
         # out = out + ((x @ self.lora_A) @ self.lora_B)
 
         # native quantized model/eora is float16 for gptq but for training, we may load the model as bfloat16 for accuracy
-        if x.dtype != self.lora_A.dtype:
-            log.info.once(f"Adapter: Lora A/B auto changed from `{self.lora_A.dtype}` to `{x.dtype}` to match forward input dtype.")
+        if x.dtype != self.lora_A.dtype or x.device != self.lora_A.device:
+            log.info.once(
+                f"Adapter: Lora A/B auto changed from `{self.lora_A.dtype}` on `{self.lora_A.device}` "
+                f"to `{x.dtype}` on `{x.device}` to match forward input."
+            )
             self.lora_A = self.lora_A.to(device=x.device, dtype=x.dtype)
             self.lora_B = self.lora_B.to(device=x.device, dtype=x.dtype)
 

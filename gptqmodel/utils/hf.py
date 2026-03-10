@@ -26,6 +26,66 @@ __all__ = ["no_init_weights"]
 
 log = setup_logger()
 
+_ORIGINAL_GET_EXPANDED_TIED_WEIGHTS_KEYS = PreTrainedModel.get_expanded_tied_weights_keys
+
+
+def _resolve_input_embedding_weight_name(model: PreTrainedModel) -> Optional[str]:
+    get_input_embeddings = getattr(model, "get_input_embeddings", None)
+    if not callable(get_input_embeddings):
+        return None
+
+    try:
+        input_embeddings = get_input_embeddings()
+    except Exception:
+        return None
+
+    if input_embeddings is None:
+        return None
+
+    weight = getattr(input_embeddings, "weight", None)
+    if weight is None:
+        return None
+
+    for name, param in model.named_parameters():
+        if param is weight:
+            return name
+
+    for name, module in model.named_modules():
+        if module is input_embeddings:
+            return f"{name}.weight" if name else "weight"
+
+    return None
+
+
+def _legacy_tied_weights_mapping(model: PreTrainedModel) -> Optional[dict[str, str]]:
+    tied_keys = getattr(model, "_tied_weights_keys", None)
+    if not isinstance(tied_keys, (list, tuple, set)):
+        return None
+
+    if not getattr(getattr(model, "config", None), "tie_word_embeddings", False):
+        return {}
+
+    input_weight_name = _resolve_input_embedding_weight_name(model)
+    if input_weight_name is None:
+        return {}
+
+    return {str(name): input_weight_name for name in tied_keys}
+
+
+def _compat_get_expanded_tied_weights_keys(self, all_submodels: bool = False) -> dict:
+    if not all_submodels:
+        legacy_mapping = _legacy_tied_weights_mapping(self)
+        if legacy_mapping is not None:
+            # Newer transformers expects a mapping in multiple code paths, including save_pretrained().
+            self._tied_weights_keys = legacy_mapping
+            return legacy_mapping
+
+    return _ORIGINAL_GET_EXPANDED_TIED_WEIGHTS_KEYS(self, all_submodels=all_submodels)
+
+
+if PreTrainedModel.get_expanded_tied_weights_keys is not _compat_get_expanded_tied_weights_keys:
+    PreTrainedModel.get_expanded_tied_weights_keys = _compat_get_expanded_tied_weights_keys
+
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False
     if cfg is None:

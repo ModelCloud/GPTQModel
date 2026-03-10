@@ -44,6 +44,7 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import BaseQuantizeConfig, FORMAT, METHOD, QUANTIZE_BLACK_LIST, GcMode, VramStrategy, dynamic_get
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
+from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
@@ -1021,11 +1022,41 @@ class BaseQModel(nn.Module):
             if pad_token_id is None and self.tokenizer:
                 kwargs["pad_token_id"] = self.tokenizer.pad_token_id
 
+            def _normalize_generate_attention_mask(input_ids, attention_mask):
+                if not torch.is_tensor(attention_mask) or attention_mask.ndim <= 2:
+                    return attention_mask
+
+                seq_len = None
+                if torch.is_tensor(input_ids) and input_ids.ndim >= 2:
+                    seq_len = input_ids.shape[-1]
+
+                return normalize_seq_mask(attention_mask, seq_len=seq_len)
+
             if isinstance(inputs, str) or (isinstance(inputs, list) and all(isinstance(x, str) for x in inputs)):
                 if self.tokenizer is None:
                     raise ValueError("You passed in an `input` to `generate()` of type `str` but model is missing `model.tokenizer`. Please set `model.tokenizer = my_tokenizer`.")
-                inputs = self.tokenizer(inputs, return_tensors="pt", padding=True, padding_side="left").to(self.model.device)
+                inputs = self.tokenizer(inputs, return_tensors="pt", padding=True, padding_side="left")
+                if "attention_mask" in inputs:
+                    inputs["attention_mask"] = _normalize_generate_attention_mask(
+                        inputs.get("input_ids"),
+                        inputs["attention_mask"],
+                    )
+                inputs = inputs.to(self.model.device)
                 return self.model.generate(**inputs, **kwargs)
+
+            if hasattr(inputs, "get") and not torch.is_tensor(inputs):
+                if "attention_mask" in inputs:
+                    inputs["attention_mask"] = _normalize_generate_attention_mask(
+                        inputs.get("input_ids"),
+                        inputs["attention_mask"],
+                    )
+                return self.model.generate(**inputs, **kwargs)
+
+            if "attention_mask" in kwargs:
+                kwargs["attention_mask"] = _normalize_generate_attention_mask(
+                    kwargs.get("input_ids", inputs),
+                    kwargs["attention_mask"],
+                )
 
             return self.model.generate(inputs=inputs, **kwargs)
 

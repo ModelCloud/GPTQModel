@@ -17,6 +17,7 @@ class _DummyKernel:
 
 class _DummyQuantizeConfig:
     format = FORMAT.GPTQ
+    checkpoint_format = FORMAT.GPTQ
     quant_method = METHOD.GPTQ
     damp_percent = 0.0
     damp_auto_increment = 0.0
