@@ -104,6 +104,48 @@ def test_gguf_cuda_kernel_forward_matches_torch_kernel(bits: str):
     assert torch.allclose(cuda_out, torch_out, rtol=8e-2, atol=8e-2)
 
 
+def test_gguf_cuda_kernel_reuses_cached_plan():
+    GGUFCudaKernel.cached_validate_once.cache_clear()
+    ok, err = GGUFCudaKernel.cached_validate_once()
+    if not ok:
+        pytest.skip(f"llama-cpp-python CUDA unavailable: {err}")
+
+    _, _, cuda_kernel = _build_quant_modules("q4_k_m")
+    cuda_kernel = cuda_kernel.to(device="cuda")
+    x = torch.randn(9, 64, dtype=torch.float16, device="cuda")
+
+    assert cuda_kernel._ggml_cuda_plans == {}
+    with torch.inference_mode():
+        first = cuda_kernel(x)
+        assert len(cuda_kernel._ggml_cuda_plans) == 1
+        first_plan = next(iter(cuda_kernel._ggml_cuda_plans.values()))
+        second = cuda_kernel(x)
+        second_plan = next(iter(cuda_kernel._ggml_cuda_plans.values()))
+
+    assert first_plan is second_plan
+    assert torch.allclose(first, second, rtol=0, atol=0)
+
+
+def test_gguf_cuda_kernel_fp32_preserves_output_dtype():
+    GGUFCudaKernel.cached_validate_once.cache_clear()
+    ok, err = GGUFCudaKernel.cached_validate_once()
+    if not ok:
+        pytest.skip(f"llama-cpp-python CUDA unavailable: {err}")
+
+    torch_kernel, _, cuda_kernel = _build_quant_modules("q4_k_m")
+    torch_kernel = torch_kernel.to(device="cuda")
+    cuda_kernel = cuda_kernel.to(device="cuda")
+    x = torch.randn(9, 64, dtype=torch.float32, device="cuda")
+
+    with torch.inference_mode():
+        torch_out = torch_kernel(x)
+        cuda_out = cuda_kernel(x)
+
+    assert cuda_out.dtype == torch.float32
+    assert cuda_out.device.type == "cuda"
+    assert torch.allclose(cuda_out, torch_out, rtol=8e-2, atol=8e-2)
+
+
 def test_gguf_cpp_kernel_explicit_backend_selection():
     GGUFCppKernel.cached_validate_once.cache_clear()
     ok, err = GGUFCppKernel.cached_validate_once()

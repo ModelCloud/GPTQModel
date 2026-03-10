@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel, triton_available as gguf_triton_triton_available
 
 
 @dataclass(frozen=True)
@@ -74,41 +75,96 @@ def _bench_once(fn, *, sync_cuda: bool) -> float:
     return (time.perf_counter() - t0) * 1000.0
 
 
-def _run_case(case: BenchCase, *, dtype: torch.dtype, device: str, trials: int, warmup: int) -> None:
+def _run_case(
+    case: BenchCase,
+    *,
+    dtype: torch.dtype,
+    device: str,
+    trials: int,
+    warmup: int,
+    include_triton: bool,
+) -> None:
     module = _build_module(case, dtype=dtype)
     module = module.to(device).eval()
+    triton_module = None
     x = torch.randn(case.rows, case.in_features, device=device, dtype=dtype)
     sync_cuda = device == "cuda"
+    can_bench_triton = (
+        include_triton
+        and device == "cuda"
+        and dtype == torch.float16
+        and module.gguf_tensor_qtype in {"Q4_K", "Q5_K", "Q6_K"}
+        and gguf_triton_triton_available()
+    )
+    if can_bench_triton:
+        triton_module = GGUFTritonKernel(
+            bits=case.bits,
+            group_size=case.group_size,
+            sym=True,
+            desc_act=False,
+            in_features=case.in_features,
+            out_features=case.out_features,
+            bias=False,
+            register_buffers=True,
+        ).to(device).eval()
+        triton_module.load_state_dict(module.state_dict(), strict=True)
 
     for _ in range(warmup):
         module._forward_dequant_matmul(x)
         module._forward_fused_k(x)
+        if can_bench_triton:
+            triton_module(x)
 
     baseline_trials: list[float] = []
     fused_trials: list[float] = []
+    triton_trials: list[float] = []
     for _ in range(trials):
         baseline_trials.append(_bench_once(lambda: module._forward_dequant_matmul(x), sync_cuda=sync_cuda))
         fused_trials.append(_bench_once(lambda: module._forward_fused_k(x), sync_cuda=sync_cuda))
+        if can_bench_triton:
+            triton_trials.append(_bench_once(lambda: triton_module(x), sync_cuda=sync_cuda))
 
     baseline_out = module._forward_dequant_matmul(x)
     fused_out = module._forward_fused_k(x)
+    if can_bench_triton:
+        triton_out = triton_module(x)
+        triton_diff = (baseline_out.to(torch.float32) - triton_out.to(torch.float32)).abs()
+        triton_mae = triton_diff.mean().item()
+        triton_max_abs = triton_diff.max().item()
+    else:
+        triton_mae = None
+        triton_max_abs = None
     diff = (baseline_out.to(torch.float32) - fused_out.to(torch.float32)).abs()
     mae = diff.mean().item()
     max_abs = diff.max().item()
 
-    trial_rows: list[list[str]] = []
-    for idx, (baseline_ms, fused_ms) in enumerate(zip(baseline_trials, fused_trials), start=1):
-        speedup = baseline_ms / fused_ms if fused_ms > 0 else float("inf")
-        delta_pct = ((baseline_ms - fused_ms) / baseline_ms * 100.0) if baseline_ms > 0 else 0.0
-        trial_rows.append(
-            [
-                str(idx),
-                f"{baseline_ms:.3f}",
-                f"{fused_ms:.3f}",
-                f"{speedup:.2f}x",
-                f"{delta_pct:.1f}%",
-            ]
-        )
+    if can_bench_triton:
+        trial_rows = []
+        for idx, (baseline_ms, fused_ms, triton_ms) in enumerate(zip(baseline_trials, fused_trials, triton_trials), start=1):
+            trial_rows.append(
+                [
+                    str(idx),
+                    f"{baseline_ms:.3f}",
+                    f"{fused_ms:.3f}",
+                    f"{triton_ms:.3f}",
+                    f"{baseline_ms / fused_ms:.2f}x" if fused_ms > 0 else "inf",
+                    f"{baseline_ms / triton_ms:.2f}x" if triton_ms > 0 else "inf",
+                ]
+            )
+    else:
+        trial_rows = []
+        for idx, (baseline_ms, fused_ms) in enumerate(zip(baseline_trials, fused_trials), start=1):
+            speedup = baseline_ms / fused_ms if fused_ms > 0 else float("inf")
+            delta_pct = ((baseline_ms - fused_ms) / baseline_ms * 100.0) if baseline_ms > 0 else 0.0
+            trial_rows.append(
+                [
+                    str(idx),
+                    f"{baseline_ms:.3f}",
+                    f"{fused_ms:.3f}",
+                    f"{speedup:.2f}x",
+                    f"{delta_pct:.1f}%",
+                ]
+            )
 
     summary_rows = [
         [
@@ -126,15 +182,30 @@ def _run_case(case: BenchCase, *, dtype: torch.dtype, device: str, trials: int, 
             f"{(sum(baseline_trials) / len(baseline_trials)) / (sum(fused_trials) / len(fused_trials)):.2f}x",
         ],
     ]
+    if can_bench_triton:
+        summary_rows.append(
+            [
+                "triton",
+                f"{sum(triton_trials) / len(triton_trials):.3f}",
+                f"{min(triton_trials):.3f}",
+                f"{max(triton_trials):.3f}",
+                f"{(sum(baseline_trials) / len(baseline_trials)) / (sum(triton_trials) / len(triton_trials)):.2f}x",
+            ]
+        )
 
     print()
     print(
         f"CASE {case.name} device={device} bits={case.bits} rows={case.rows} "
         f"shape={case.out_features}x{case.in_features} dtype={str(dtype).removeprefix('torch.')}"
     )
-    print(_ascii_table(["trial", "baseline_ms", "fused_ms", "speedup", "delta_pct"], trial_rows))
+    if can_bench_triton:
+        print(_ascii_table(["trial", "baseline_ms", "fused_ms", "triton_ms", "torch_speedup", "triton_speedup"], trial_rows))
+    else:
+        print(_ascii_table(["trial", "baseline_ms", "fused_ms", "speedup", "delta_pct"], trial_rows))
     print(_ascii_table(["path", "mean_ms", "min_ms", "max_ms", "speedup_vs_baseline"], summary_rows))
     print(f"correctness: mae={mae:.6f} max_abs={max_abs:.6f}")
+    if can_bench_triton and triton_mae is not None and triton_max_abs is not None:
+        print(f"triton_correctness: mae={triton_mae:.6f} max_abs={triton_max_abs:.6f}")
 
 
 def _parse_case(spec: str) -> BenchCase:
@@ -166,6 +237,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trials", type=int, default=5, help="Measured trials per case.")
     parser.add_argument("--warmup", type=int, default=2, help="Warmup iterations per path.")
     parser.add_argument("--dtype", choices=("fp16", "bf16", "fp32"), default="fp16", help="Benchmark dtype.")
+    parser.add_argument(
+        "--include-triton",
+        action="store_true",
+        help="Also benchmark the experimental CUDA Triton fused GGUF path when available.",
+    )
     parser.add_argument(
         "--device",
         choices=("auto", "cpu", "cuda", "both"),
@@ -215,7 +291,14 @@ def main() -> None:
     )
     for device in devices:
         for case in cases:
-            _run_case(case, dtype=dtype, device=device, trials=args.trials, warmup=args.warmup)
+            _run_case(
+                case,
+                dtype=dtype,
+                device=device,
+                trials=args.trials,
+                warmup=args.warmup,
+                include_triton=args.include_triton,
+            )
 
 
 if __name__ == "__main__":

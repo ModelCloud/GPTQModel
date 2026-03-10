@@ -12,6 +12,7 @@ from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
+from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import AUTO_BACKEND_KERNEL_MAPPING, select_quant_linear
@@ -191,6 +192,7 @@ def test_cuda_auto_select_prioritizes_cuda_kernel_for_gguf(monkeypatch):
 
     assert candidates[0] is GGUFCudaKernel
     assert GGUFTorchQuantLinear in candidates
+    assert GGUFTritonKernel not in candidates
 
 
 def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):
@@ -270,6 +272,27 @@ def test_explicit_gguf_torch_backend_selects_torch_kernel():
     )
 
     assert qlinear_cls is GGUFTorchQuantLinear
+
+
+def test_explicit_gguf_triton_backend_selects_triton_kernel(monkeypatch):
+    monkeypatch.setattr(
+        GGUFTritonKernel,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.GGUF_TRITON,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is GGUFTritonKernel
 
 
 def test_gguf_does_not_accept_generic_torch_backend():

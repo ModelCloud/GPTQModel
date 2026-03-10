@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
@@ -630,6 +631,55 @@ def test_gguf_k_fused_forward_matches_dense_baseline(bits: str):
     output_stats = _error_stats(baseline.to(torch.float32), fused.to(torch.float32))
     assert output_stats["mae"] < 2e-4
     assert output_stats["max"] < 3e-3
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton fused K tests")
+@pytest.mark.parametrize("bits", ["q4_k_m", "q5_k_m", "q6_k"])
+def test_gguf_triton_fused_forward_matches_dense_baseline(bits: str):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear.gguf_triton import triton_available
+
+    if not triton_available():
+        pytest.skip("Triton GGUF fused kernel unavailable")
+
+    case = _build_rtn_microbench_case(torch.float16, bits=bits)
+    module = _build_rtn_gguf_module(case).to(case["device"]).eval()
+    triton_module = GGUFTritonKernel(
+        bits=bits,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=case["in_features"],
+        out_features=case["out_features"],
+        bias=True,
+        register_buffers=True,
+    ).to(case["device"]).eval()
+    triton_module.load_state_dict(module.state_dict(), strict=True)
+    triton_module.clear_weight_cache()
+
+    baseline = module._forward_dequant_matmul(case["inputs"])
+    if module.bias is not None:
+        baseline = baseline + module.bias.to(device=baseline.device, dtype=baseline.dtype)
+    fused = triton_module(case["inputs"])
+
+    output_stats = _error_stats(baseline.to(torch.float32), fused.to(torch.float32))
+    assert output_stats["mae"] < 2e-4
+    assert output_stats["max"] < 3e-3
+
+
+def test_gguf_triton_kernel_rejects_non_k_formats():
+    with pytest.raises(ValueError, match="only supports GGUF K-block formats"):
+        GGUFTritonKernel(
+            bits="q4_0",
+            group_size=-1,
+            sym=True,
+            desc_act=False,
+            in_features=64,
+            out_features=48,
+            bias=False,
+            register_buffers=False,
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF fused K routing test")

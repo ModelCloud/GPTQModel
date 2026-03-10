@@ -39,6 +39,7 @@ class BACKEND(str, Enum):
 
     # external
     GGUF_TORCH = "gguf_torch" # GGUF module-level inference via native torch kernel
+    GGUF_TRITON = "gguf_triton" # GGUF module-level inference via Triton fused CUDA kernel
     GGUF_CPP_CPU = "gguf_cpp_cpu" # GGUF module-level inference via llama.cpp / ggml CPU backend
     GGUF_CPP_CUDA = "gguf_cpp_cuda" # GGUF module-level inference via llama.cpp / ggml CUDA backend
     VLLM = "vllm" # External inference engine: CUDA + ROCm + IPEX

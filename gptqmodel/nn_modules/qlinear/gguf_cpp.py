@@ -39,6 +39,51 @@ class _GGMLInitParams(ctypes.Structure):
     ]
 
 
+class _GGMLMatmulPlan:
+    def __init__(
+        self,
+        *,
+        ctx,
+        buffer,
+        weight_tensor,
+        input_tensor,
+        output_tensor,
+        graph,
+        rows: int,
+        out_features: int,
+        output_nbytes: int,
+        output_dtype: torch.dtype,
+        backend_buffer_free,
+        ctx_free,
+    ) -> None:
+        self.ctx = ctx
+        self.buffer = buffer
+        self.weight_tensor = weight_tensor
+        self.input_tensor = input_tensor
+        self.output_tensor = output_tensor
+        self.graph = graph
+        self.rows = rows
+        self.out_features = out_features
+        self.output_nbytes = output_nbytes
+        self.output_dtype = output_dtype
+        self._backend_buffer_free = backend_buffer_free
+        self._ctx_free = ctx_free
+
+    def close(self) -> None:
+        if self.buffer:
+            self._backend_buffer_free(self.buffer)
+            self.buffer = None
+        if self.ctx:
+            self._ctx_free(self.ctx)
+            self.ctx = None
+
+    def __del__(self) -> None:  # pragma: no cover - best effort cleanup
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
 class _GGMLBridge:
     GGML_METADATA_BYTES = 1 << 20
 
@@ -60,6 +105,7 @@ class _GGMLBridge:
         self._bind_functions()
 
         self.ggml_type_f32 = int(_llama_cpp_lib.GGML_TYPE_F32)
+        self.ggml_type_f16 = int(_llama_cpp_lib.GGML_TYPE_F16)
         self.ggml_qtypes = {
             "Q4_0": int(_llama_cpp_lib.GGML_TYPE_Q4_0),
             "Q8_0": int(_llama_cpp_lib.GGML_TYPE_Q8_0),
@@ -188,6 +234,50 @@ class _GGMLBridge:
             x_cpu = x_cpu.contiguous()
         return x_cpu
 
+    def _normalize_input_cuda(
+        self,
+        x: torch.Tensor,
+        padded_in_features: int,
+    ) -> tuple[torch.Tensor, int]:
+        x_cuda = x.detach()
+        if x_cuda.dtype == torch.float16:
+            ggml_input_type = self.ggml_type_f16
+        elif x_cuda.dtype == torch.float32:
+            ggml_input_type = self.ggml_type_f32
+        elif x_cuda.dtype == torch.bfloat16:
+            # ggml in llama-cpp-python does not expose BF16 here, so use native CUDA fp16.
+            x_cuda = x_cuda.to(dtype=torch.float16)
+            ggml_input_type = self.ggml_type_f16
+        else:
+            raise RuntimeError(
+                "GGUFCudaKernel only supports float16, bfloat16, or float32 inputs."
+            )
+
+        if x_cuda.shape[-1] != padded_in_features:
+            x_cuda = F.pad(x_cuda, (0, padded_in_features - x_cuda.shape[-1]))
+        if not x_cuda.is_contiguous():
+            x_cuda = x_cuda.contiguous()
+        return x_cuda, ggml_input_type
+
+    @staticmethod
+    def _normalize_qweight_cuda(qweight: torch.Tensor, device: torch.device) -> torch.Tensor:
+        qweight_cuda = qweight.detach()
+        if qweight_cuda.device != device:
+            qweight_cuda = qweight_cuda.to(device=device)
+        if not qweight_cuda.is_contiguous():
+            qweight_cuda = qweight_cuda.contiguous()
+        return qweight_cuda
+
+    @staticmethod
+    def _torch_dtype_from_ggml_element_size(output_element_size: int, *, kernel_name: str) -> torch.dtype:
+        if output_element_size == 4:
+            return torch.float32
+        if output_element_size == 2:
+            return torch.float16
+        raise RuntimeError(
+            f"{kernel_name} received unsupported GGML output element size `{output_element_size}`."
+        )
+
     def _run_quantized_matmul(
         self,
         *,
@@ -289,6 +379,123 @@ class _GGMLBridge:
                 self._ggml_base.ggml_backend_buffer_free(buffer)
             self._ggml_base.ggml_free(ctx)
 
+    def build_quantized_matmul_cuda_plan(
+        self,
+        *,
+        backend: int,
+        qweight: torch.Tensor,
+        gguf_tensor_qtype: str,
+        padded_in_features: int,
+        out_features: int,
+        rows: int,
+        input_ggml_type: int,
+        kernel_name: str,
+    ) -> _GGMLMatmulPlan:
+        ctx = self._ggml_base.ggml_init(
+            _GGMLInitParams(
+                mem_size=self.GGML_METADATA_BYTES,
+                mem_buffer=None,
+                no_alloc=True,
+            )
+        )
+        if not ctx:
+            raise RuntimeError(f"{kernel_name} failed to initialize GGML metadata context.")
+
+        buffer = None
+        try:
+            weight_tensor = self._ggml_base.ggml_new_tensor_2d(
+                ctx,
+                self.ggml_qtypes[gguf_tensor_qtype],
+                padded_in_features,
+                out_features,
+            )
+            input_tensor = self._ggml_base.ggml_new_tensor_2d(
+                ctx,
+                input_ggml_type,
+                padded_in_features,
+                rows,
+            )
+            if not weight_tensor or not input_tensor:
+                raise RuntimeError(f"{kernel_name} failed to create GGML tensors.")
+
+            self._ggml_base.ggml_set_input(input_tensor)
+            output_tensor = self._ggml_base.ggml_mul_mat(ctx, weight_tensor, input_tensor)
+            if not output_tensor:
+                raise RuntimeError(f"{kernel_name} failed to create GGML matmul node.")
+
+            graph = self._ggml_base.ggml_new_graph(ctx)
+            if not graph:
+                raise RuntimeError(f"{kernel_name} failed to allocate GGML graph.")
+            self._ggml_base.ggml_build_forward_expand(graph, output_tensor)
+
+            buffer = self._ggml_base.ggml_backend_alloc_ctx_tensors(ctx, backend)
+            if not buffer:
+                raise RuntimeError(f"{kernel_name} failed to allocate GGML backend tensors.")
+
+            self._ggml_base.ggml_backend_tensor_set(
+                weight_tensor,
+                ctypes.c_void_p(qweight.data_ptr()),
+                0,
+                qweight.numel() * qweight.element_size(),
+            )
+            output_nbytes = self._ggml_base.ggml_nbytes(output_tensor)
+            output_dtype = self._torch_dtype_from_ggml_element_size(
+                int(self._ggml_base.ggml_element_size(output_tensor)),
+                kernel_name=kernel_name,
+            )
+            return _GGMLMatmulPlan(
+                ctx=ctx,
+                buffer=buffer,
+                weight_tensor=weight_tensor,
+                input_tensor=input_tensor,
+                output_tensor=output_tensor,
+                graph=graph,
+                rows=rows,
+                out_features=out_features,
+                output_nbytes=output_nbytes,
+                output_dtype=output_dtype,
+                backend_buffer_free=self._ggml_base.ggml_backend_buffer_free,
+                ctx_free=self._ggml_base.ggml_free,
+            )
+        except Exception:
+            if buffer:
+                self._ggml_base.ggml_backend_buffer_free(buffer)
+            self._ggml_base.ggml_free(ctx)
+            raise
+
+    def run_quantized_matmul_cuda_plan(
+        self,
+        *,
+        backend: int,
+        plan: _GGMLMatmulPlan,
+        x: torch.Tensor,
+        kernel_name: str,
+    ) -> torch.Tensor:
+        self._ggml_base.ggml_backend_tensor_set(
+            plan.input_tensor,
+            ctypes.c_void_p(x.data_ptr()),
+            0,
+            x.numel() * x.element_size(),
+        )
+        status = self._ggml_base.ggml_backend_graph_compute(backend, plan.graph)
+        if status != 0:
+            raise RuntimeError(f"{kernel_name} GGML graph compute failed with status={status}.")
+        self._ggml_base.ggml_backend_synchronize(backend)
+
+        output = torch.empty((plan.rows, plan.out_features), dtype=plan.output_dtype, device=x.device)
+        expected_nbytes = output.numel() * output.element_size()
+        if expected_nbytes != plan.output_nbytes:
+            raise RuntimeError(
+                f"{kernel_name} GGML output size mismatch: expected {expected_nbytes}, got {plan.output_nbytes}."
+            )
+        self._ggml_base.ggml_backend_tensor_get(
+            plan.output_tensor,
+            ctypes.c_void_p(output.data_ptr()),
+            0,
+            plan.output_nbytes,
+        )
+        return output
+
     def quantized_matmul_cpu(
         self,
         *,
@@ -319,19 +526,33 @@ class _GGMLBridge:
         gguf_tensor_qtype: str,
         padded_in_features: int,
         out_features: int,
-    ) -> torch.Tensor:
+        plan: _GGMLMatmulPlan | None = None,
+    ) -> tuple[torch.Tensor, _GGMLMatmulPlan]:
         if x.device.type != "cuda":
             raise RuntimeError("GGUFCudaKernel only supports CUDA input tensors.")
 
-        return self._run_quantized_matmul(
-            backend=self._get_cuda_backend(0 if x.device.index is None else x.device.index),
-            qweight_cpu=self._normalize_qweight_cpu(qweight),
-            x_cpu=self._normalize_input_cpu(x, padded_in_features),
-            gguf_tensor_qtype=gguf_tensor_qtype,
-            padded_in_features=padded_in_features,
-            out_features=out_features,
+        device = x.device
+        backend = self._get_cuda_backend(0 if device.index is None else device.index)
+        x_cuda, input_ggml_type = self._normalize_input_cuda(x, padded_in_features)
+        if plan is None:
+            qweight_cuda = self._normalize_qweight_cuda(qweight, device=device)
+            plan = self.build_quantized_matmul_cuda_plan(
+                backend=backend,
+                qweight=qweight_cuda,
+                gguf_tensor_qtype=gguf_tensor_qtype,
+                padded_in_features=padded_in_features,
+                out_features=out_features,
+                rows=x_cuda.shape[0],
+                input_ggml_type=input_ggml_type,
+                kernel_name="GGUFCudaKernel",
+            )
+        output = self.run_quantized_matmul_cuda_plan(
+            backend=backend,
+            plan=plan,
+            x=x_cuda,
             kernel_name="GGUFCudaKernel",
         )
+        return output, plan
 
 
 _GGML_BRIDGE: Optional[_GGMLBridge] = None
@@ -493,10 +714,26 @@ class GGUFCudaKernel(GGUFTorchQuantLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
+        self._ggml_cuda_plans: Dict[tuple[int, int, torch.dtype, int], _GGMLMatmulPlan] = {}
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         return _get_ggml_bridge().cuda_available()
+
+    def clear_weight_cache(self) -> None:
+        for plan in self._ggml_cuda_plans.values():
+            plan.close()
+        self._ggml_cuda_plans.clear()
+        return super().clear_weight_cache()
+
+    def _cuda_plan_key(self, x_flat: torch.Tensor) -> tuple[int, int, torch.dtype, int]:
+        device_index = 0 if x_flat.device.index is None else x_flat.device.index
+        return (
+            device_index,
+            x_flat.shape[0],
+            x_flat.dtype,
+            self.qweight.data_ptr(),
+        )
 
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
@@ -507,13 +744,16 @@ class GGUFCudaKernel(GGUFTorchQuantLinear):
                 "Load GGUF models on CUDA or use BACKEND.GGUF_CPP_CPU or BACKEND.GGUF_TORCH for CPU inference."
             )
 
-        output = _get_ggml_bridge().quantized_matmul_cuda(
+        plan_key = self._cuda_plan_key(x_flat)
+        output, plan = _get_ggml_bridge().quantized_matmul_cuda(
             qweight=self.qweight,
             x=x_flat,
             gguf_tensor_qtype=self.gguf_tensor_qtype,
             padded_in_features=self.padded_in_features,
             out_features=self.out_features,
+            plan=self._ggml_cuda_plans.get(plan_key),
         )
+        self._ggml_cuda_plans.setdefault(plan_key, plan)
         if output.device != x_flat.device or output.dtype != x_flat.dtype:
             output = output.to(device=x_flat.device, dtype=x_flat.dtype)
 
