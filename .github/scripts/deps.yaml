@@ -67,7 +67,7 @@ tests:
     - evalplus
 
   test_nemotron_ultra.py:
-    - causal_conv1d
+    - http://10.0.13.31/files/causal_conv1d-1.6.0-cp313-cp313-linux_x86_64.whl
 
 tests/models:
   test_pangu_alpha.py:
@@ -80,7 +80,7 @@ tests/models:
     - jieba
 
   test_hymba.py:
-    - causal_conv1d
+    - http://10.0.13.31/files/causal_conv1d-1.6.0-cp313-cp313-linux_x86_64.whl
     - mamba_ssm
 
   test_internlm.py:
