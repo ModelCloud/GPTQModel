@@ -49,6 +49,9 @@ tests:
     - https://github.com/huggingface/transformers
     - https://github.com/huggingface/optimum
 
+  test_awq.py:
+    - peft
+
   test_asym_gptq_v1.py:
     - peft
 
@@ -100,3 +103,9 @@ tests/models:
 
   test_phi_3_moe.py:
     - transformers<=4.44.2
+
+  test_bloom.py:
+    - peft
+
+  test_gptbigcode.py:
+    - peft
