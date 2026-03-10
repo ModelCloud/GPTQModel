@@ -35,7 +35,7 @@ def triton_available() -> bool:
 
 
 if _TRITON_AVAILABLE:
-    _GGUF_TRITON_CONFIGS = [
+    _GGUF_TRITON_SMALL_CONFIGS = [
         triton.Config(
             {
                 "BLOCK_SIZE_M": 8,
@@ -62,9 +62,100 @@ if _TRITON_AVAILABLE:
         ),
     ]
 
-    @custom_autotune.autotune(configs=_GGUF_TRITON_CONFIGS, key=["M", "N"], nearest_power_of_two=True)
+    _GGUF_TRITON_LARGE_CONFIGS = [
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 8,
+                "BLOCK_SIZE_N": 16,
+            },
+            num_stages=2,
+            num_warps=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 8,
+                "BLOCK_SIZE_N": 32,
+            },
+            num_stages=2,
+            num_warps=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 16,
+            },
+            num_stages=2,
+            num_warps=2,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 16,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 8,
+                "BLOCK_SIZE_N": 32,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 32,
+            },
+            num_stages=2,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 32,
+            },
+            num_stages=4,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 64,
+            },
+            num_stages=2,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 16,
+            },
+            num_stages=2,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 32,
+            },
+            num_stages=2,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 64,
+            },
+            num_stages=2,
+            num_warps=8,
+        ),
+    ]
+    _GGUF_TRITON_LARGE_NUM_BLOCKS = 16
+
     @triton.jit
-    def _gguf_q4_k_fused_matmul_kernel(
+    def _gguf_q4_k_fused_matmul_kernel_impl(
         x_ptr,
         qs_ptr,
         scale_ptr,
@@ -139,9 +230,19 @@ if _TRITON_AVAILABLE:
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
-    @custom_autotune.autotune(configs=_GGUF_TRITON_CONFIGS, key=["M", "N"], nearest_power_of_two=True)
+    _gguf_q4_k_fused_matmul_kernel_small = custom_autotune.autotune(
+        configs=_GGUF_TRITON_SMALL_CONFIGS,
+        key=["M", "N"],
+        nearest_power_of_two=True,
+    )(_gguf_q4_k_fused_matmul_kernel_impl)
+    _gguf_q4_k_fused_matmul_kernel_large = custom_autotune.autotune(
+        configs=_GGUF_TRITON_LARGE_CONFIGS,
+        key=["M", "N", "NUM_BLOCKS"],
+        nearest_power_of_two=True,
+    )(_gguf_q4_k_fused_matmul_kernel_impl)
+
     @triton.jit
-    def _gguf_q5_k_fused_matmul_kernel(
+    def _gguf_q5_k_fused_matmul_kernel_impl(
         x_ptr,
         qs_ptr,
         qh_ptr,
@@ -228,9 +329,19 @@ if _TRITON_AVAILABLE:
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
-    @custom_autotune.autotune(configs=_GGUF_TRITON_CONFIGS, key=["M", "N"], nearest_power_of_two=True)
+    _gguf_q5_k_fused_matmul_kernel_small = custom_autotune.autotune(
+        configs=_GGUF_TRITON_SMALL_CONFIGS,
+        key=["M", "N"],
+        nearest_power_of_two=True,
+    )(_gguf_q5_k_fused_matmul_kernel_impl)
+    _gguf_q5_k_fused_matmul_kernel_large = custom_autotune.autotune(
+        configs=_GGUF_TRITON_LARGE_CONFIGS,
+        key=["M", "N", "NUM_BLOCKS"],
+        nearest_power_of_two=True,
+    )(_gguf_q5_k_fused_matmul_kernel_impl)
+
     @triton.jit
-    def _gguf_q6_k_fused_matmul_kernel(
+    def _gguf_q6_k_fused_matmul_kernel_impl(
         x_ptr,
         ql_ptr,
         qh_ptr,
@@ -314,6 +425,17 @@ if _TRITON_AVAILABLE:
             mask=m_mask[:, None] & n_mask[None, :],
         )
 
+    _gguf_q6_k_fused_matmul_kernel_small = custom_autotune.autotune(
+        configs=_GGUF_TRITON_SMALL_CONFIGS,
+        key=["M", "N"],
+        nearest_power_of_two=True,
+    )(_gguf_q6_k_fused_matmul_kernel_impl)
+    _gguf_q6_k_fused_matmul_kernel_large = custom_autotune.autotune(
+        configs=_GGUF_TRITON_LARGE_CONFIGS,
+        key=["M", "N", "NUM_BLOCKS"],
+        nearest_power_of_two=True,
+    )(_gguf_q6_k_fused_matmul_kernel_impl)
+
 
 def _launch(
     kernel: Callable,
@@ -331,6 +453,17 @@ def _launch(
     return output
 
 
+def _select_triton_kernel(
+    small_kernel: Callable,
+    large_kernel: Callable,
+    *,
+    num_blocks: int,
+) -> Callable:
+    if num_blocks >= _GGUF_TRITON_LARGE_NUM_BLOCKS:
+        return large_kernel
+    return small_kernel
+
+
 def fused_q4_k_matmul(
     x: torch.Tensor,
     qs: torch.Tensor,
@@ -341,8 +474,13 @@ def fused_q4_k_matmul(
         raise RuntimeError("Triton is not available for GGUF Q4_K fused matmul.")
 
     output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    kernel = _select_triton_kernel(
+        _gguf_q4_k_fused_matmul_kernel_small,
+        _gguf_q4_k_fused_matmul_kernel_large,
+        num_blocks=qs.shape[0],
+    )
     return _launch(
-        _gguf_q4_k_fused_matmul_kernel,
+        kernel,
         x,
         output,
         x,
@@ -380,8 +518,13 @@ def fused_q5_k_matmul(
         raise RuntimeError("Triton is not available for GGUF Q5_K fused matmul.")
 
     output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    kernel = _select_triton_kernel(
+        _gguf_q5_k_fused_matmul_kernel_small,
+        _gguf_q5_k_fused_matmul_kernel_large,
+        num_blocks=qs.shape[0],
+    )
     return _launch(
-        _gguf_q5_k_fused_matmul_kernel,
+        kernel,
         x,
         output,
         x,
@@ -422,8 +565,13 @@ def fused_q6_k_matmul(
         raise RuntimeError("Triton is not available for GGUF Q6_K fused matmul.")
 
     output = torch.empty((x.shape[0], scale.shape[2]), device=x.device, dtype=x.dtype)
+    kernel = _select_triton_kernel(
+        _gguf_q6_k_fused_matmul_kernel_small,
+        _gguf_q6_k_fused_matmul_kernel_large,
+        num_blocks=ql.shape[0],
+    )
     return _launch(
-        _gguf_q6_k_fused_matmul_kernel,
+        kernel,
         x,
         output,
         x,

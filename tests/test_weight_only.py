@@ -726,6 +726,39 @@ def test_gguf_triton_kernel_rejects_non_k_formats():
         )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF Triton routing test")
+def test_gguf_triton_selects_large_config_bank_for_large_k(monkeypatch):
+    pytest.importorskip("triton")
+
+    from gptqmodel.nn_modules.qlinear import gguf_triton
+
+    calls: list[object] = []
+    small_kernel = object()
+    large_kernel = object()
+
+    def _fake_launch(kernel, x, output, *args):
+        calls.append(kernel)
+        return output
+
+    monkeypatch.setattr(gguf_triton, "_gguf_q4_k_fused_matmul_kernel_small", small_kernel)
+    monkeypatch.setattr(gguf_triton, "_gguf_q4_k_fused_matmul_kernel_large", large_kernel)
+    monkeypatch.setattr(gguf_triton, "_launch", _fake_launch)
+
+    x_small = torch.randn(2, 2048, device="cuda", dtype=torch.float16)
+    qs_small = torch.empty((8, 144, 32), device="cuda", dtype=torch.uint8)
+    scale_small = torch.empty((8, 8, 32), device="cuda", dtype=torch.float16)
+    min_small = torch.empty((8, 8, 32), device="cuda", dtype=torch.float16)
+    gguf_triton.fused_q4_k_matmul(x_small, qs_small, scale_small, min_small)
+    assert calls[-1] is small_kernel
+
+    x_large = torch.randn(2, 4096, device="cuda", dtype=torch.float16)
+    qs_large = torch.empty((16, 144, 32), device="cuda", dtype=torch.uint8)
+    scale_large = torch.empty((16, 8, 32), device="cuda", dtype=torch.float16)
+    min_large = torch.empty((16, 8, 32), device="cuda", dtype=torch.float16)
+    gguf_triton.fused_q4_k_matmul(x_large, qs_large, scale_large, min_large)
+    assert calls[-1] is large_kernel
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF fused K routing test")
 def test_gguf_forward_uses_fused_k_path_for_small_cuda_batches():
     case = _build_rtn_microbench_case(torch.float16, bits="q4_k_m")
