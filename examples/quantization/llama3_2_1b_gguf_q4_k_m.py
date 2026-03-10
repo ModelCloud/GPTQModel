@@ -47,7 +47,7 @@ def main() -> None:
     quant_log = model.quantize(
         calibration=None,
         tokenizer=tokenizer,
-        backend=BACKEND.TORCH,
+        backend=BACKEND.GGUF_TORCH,
     )
     print("Quantize lifecycle keys:", list(quant_log.keys()))
 
@@ -63,7 +63,7 @@ def main() -> None:
 
     quantized = GPTQModel.from_quantized(
         model_id_or_path=str(out_dir),
-        backend=BACKEND.TORCH,
+        backend=BACKEND.GGUF_TORCH,
         device=device,
         trust_remote_code=False,
     )

@@ -38,6 +38,8 @@ class BACKEND(str, Enum):
     TORCH_AWQ = "torch_awq"
 
     # external
+    GGUF_TORCH = "gguf_torch" # GGUF module-level inference via native torch kernel
+    GGUF_CPP = "gguf_cpp" # GGUF module-level inference via llama.cpp / ggml
     VLLM = "vllm" # External inference engine: CUDA + ROCm + IPEX
     SGLANG = "sglang" # External inference engine: CUDA + ROCm
     MLX = "mlx" # External inference engine: Apple MLX on M1+ (Apple Silicon)

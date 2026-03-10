@@ -682,6 +682,8 @@ class BaseQModel(nn.Module):
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.checkpoint_format}` with `METHOD.AWQ`")
             elif self.quantize_config.quant_method == METHOD.QQQ:
                 preferred_backend = BACKEND.QQQ
+            elif self.quantize_config.quant_method == METHOD.GGUF:
+                preferred_backend = BACKEND.GGUF_TORCH
             else:
                 preferred_backend = BACKEND.TORCH
 

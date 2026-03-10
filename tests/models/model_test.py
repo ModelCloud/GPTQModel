@@ -438,7 +438,11 @@ class ModelTest(unittest.TestCase):
         return self.LOAD_BACKEND
 
     def _torch_backend(self) -> BACKEND:
-        return BACKEND.TORCH_AWQ if self.METHOD == METHOD.AWQ else BACKEND.TORCH
+        if self.METHOD == METHOD.AWQ:
+            return BACKEND.TORCH_AWQ
+        if self.METHOD == METHOD.GGUF:
+            return BACKEND.GGUF_TORCH
+        return BACKEND.TORCH
 
     def _torch_fused_backend(self) -> BACKEND:
         return BACKEND.TORCH_FUSED_AWQ if self.METHOD == METHOD.AWQ else BACKEND.TORCH_FUSED
@@ -451,7 +455,7 @@ class ModelTest(unittest.TestCase):
         torch_fused_backend = self._torch_fused_backend()
 
         if self.FORMAT is FORMAT.GGUF:
-            compare_backends = (BACKEND.TORCH,)
+            compare_backends = (torch_backend,)
         elif self.FORMAT is FORMAT.GPTQ:
             if self.LOAD_BACKEND == BACKEND.MARLIN:
                 compare_backends = (BACKEND.MARLIN,)

@@ -10,6 +10,8 @@ from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import AUTO_BACKEND_KERNEL_MAPPING, select_quant_linear
@@ -149,3 +151,75 @@ def test_cpu_auto_select_prioritizes_hf_kernel_for_awq(monkeypatch):
     )
 
     assert candidates[0] is HFKernelAwqLinear
+
+
+def test_cpu_auto_select_prioritizes_cpp_kernel_for_gguf(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert candidates[0] is GGUFCppKernel
+    assert GGUFTorchQuantLinear in candidates
+
+
+def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack=True,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert GGUFCppKernel not in candidates
+    assert candidates[0] is GGUFTorchQuantLinear
+
+
+def test_explicit_gguf_torch_backend_selects_torch_kernel():
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.GGUF_TORCH,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is GGUFTorchQuantLinear
+
+
+def test_gguf_does_not_accept_generic_torch_backend():
+    with pytest.raises(ValueError, match="Unsupported backend"):
+        select_quant_linear(
+            bits=4,
+            group_size=-1,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.CPU,
+            backend=BACKEND.TORCH,
+            format=FORMAT.GGUF,
+            quant_method=METHOD.GGUF,
+            pack_dtype=torch.int32,
+        )

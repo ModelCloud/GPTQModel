@@ -722,8 +722,10 @@ class GPTQModel:
 
         gptq_config = config.quantization_config
 
+        backend = BACKEND.GGUF_TORCH if str(gptq_config.get("quant_method", "")).lower() == METHOD.GGUF.value else BACKEND.TORCH
+
         # load gptq model
-        gptq_model = GPTQModel.load(model_id_or_path, backend=BACKEND.TORCH)
+        gptq_model = GPTQModel.load(model_id_or_path, backend=backend)
 
         if format == "mlx":
             try:

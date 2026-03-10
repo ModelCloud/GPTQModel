@@ -439,6 +439,9 @@ def select_quant_linear(
         format = FORMAT(format.lower())
     if isinstance(quant_method, str):
         quant_method = METHOD(quant_method.lower())
+    if isinstance(backend, str):
+        backend = BACKEND(backend.lower())
+
     bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
 
     supported_formats = BACKEND_TO_METHOD_FORMAT_MAPPING.get(quant_method)

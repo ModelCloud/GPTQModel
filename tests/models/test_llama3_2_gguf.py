@@ -50,7 +50,7 @@ class TestLlama3_2_GGUF(ModelTest):
     METHOD = METHOD.GGUF
     FORMAT = FORMAT.GGUF
     BITS = "q4_k_m"
-    LOAD_BACKEND = BACKEND.TORCH
+    LOAD_BACKEND = BACKEND.GGUF_TORCH
     KERNEL_INFERENCE = {GGUFTorchQuantLinear}
 
     def test_llama3_2_gguf_full_model(self):
