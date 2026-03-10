@@ -683,7 +683,7 @@ jobs:
           log_dir=/opt/dist/${{ needs.check-vm.outputs.run_id }}/logs
           log_file=$log_dir/${{ matrix.test_script }}.log
       
-          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|is the correct path|No such file or directory" "$log_file" | head -n 50 || true
+          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
 
 
       - name: Release GPU
