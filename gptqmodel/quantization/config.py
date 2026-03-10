@@ -81,6 +81,7 @@ class FORMAT(str, Enum):
 # quant methods
 class METHOD(str, Enum):
     GPTQ = "gptq"
+    GGUF = "gguf"
     QQQ = "qqq"
     AWQ = "awq"
 
@@ -891,6 +892,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
     },
+    METHOD.GGUF: {
+        FORMAT.GGUF,
+    },
     METHOD.QQQ: {
         FORMAT.QQQ,
     },
@@ -934,7 +938,7 @@ GGUF_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GPTQ: METHOD.GPTQ,
     FORMAT.GPTQ_V2: METHOD.GPTQ,
-    FORMAT.GGUF: METHOD.GPTQ,
+    FORMAT.GGUF: METHOD.GGUF,
     FORMAT.BITBLAS: METHOD.GPTQ,
     FORMAT.GEMM: METHOD.AWQ,
     FORMAT.GEMV: METHOD.AWQ,
@@ -1462,6 +1466,8 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
 
     if target_cls is AWQQuantizeConfig:
         expected_method = METHOD.AWQ
+    elif target_cls is GGUFConfig:
+        expected_method = METHOD.GGUF
     elif target_cls is QQQQuantizeConfig:
         expected_method = METHOD.QQQ
         format_value = normalized.get(FORMAT_FIELD_CODE)
@@ -1488,10 +1494,13 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
             normalized_method = None
 
     if normalized_method is not None and normalized_method != expected_method:
-        log.warn(
-            f"QuantizeConfig: `{QUANT_METHOD_FIELD}`=`{normalized_method}` is incompatible with `{target_cls.__name__}`. "
-            f"Auto-fix method to `{expected_method}`."
-        )
+        if target_cls is GGUFConfig and normalized_method == METHOD.GPTQ:
+            pass
+        else:
+            log.warn(
+                f"QuantizeConfig: `{QUANT_METHOD_FIELD}`=`{normalized_method}` is incompatible with `{target_cls.__name__}`. "
+                f"Auto-fix method to `{expected_method}`."
+            )
         normalized[QUANT_METHOD_FIELD] = expected_method
 
     return normalized
@@ -2243,7 +2252,7 @@ class RTNQuantizeConfig(PreFilterQuantizeConfig):
 @dataclass
 class GGUFConfig(PreFilterQuantizeConfig):
     format: Optional[str] = field(default=None)
-    quant_method: METHOD = field(default=METHOD.GPTQ, init=False)
+    quant_method: METHOD = field(default=METHOD.GGUF, init=False)
     group_size: int = field(default=-1, init=False, repr=False)
     desc_act: Optional[bool] = field(default=False, init=False, repr=False)
     sym: bool = field(default=True, init=False, repr=False)
@@ -2258,7 +2267,7 @@ class GGUFConfig(PreFilterQuantizeConfig):
         return self._gguf_bits
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
-        return (METHOD.GPTQ,)
+        return (METHOD.GGUF,)
 
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
         return (FORMAT.GGUF,)

@@ -257,7 +257,7 @@ def _build_rtn_gguf_module(
 ) -> GGUFTorchQuantLinear:
     module = GGUFTorchQuantLinear(
         bits=case["bits"],
-        group_size=case["group_size"],
+        group_size=-1,
         sym=True,
         desc_act=False,
         in_features=case["in_features"],
@@ -422,7 +422,8 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
     assert model.quantize_config.checkpoint_format == FORMAT.GGUF
     assert model.quantize_config.format == public_format
     assert model.quantize_config.bits == bit_width
-    assert model.quantize_config.export_quant_method() == METHOD.GPTQ
+    assert model.quantize_config.quant_method == METHOD.GGUF
+    assert model.quantize_config.export_quant_method() == METHOD.GGUF
     assert getattr(model.qlinear_kernel, "__name__", "") == "GGUFTorchQuantLinear"
 
     qmodules = find_modules(model.model, [model.qlinear_kernel])
@@ -907,7 +908,7 @@ def test_rtn_microbench_gguf_reload_from_state_dict_stays_close_to_rtn(
 
     reloaded = GGUFTorchQuantLinear(
         bits=bits,
-        group_size=case["group_size"],
+        group_size=-1,
         sym=True,
         desc_act=False,
         in_features=case["in_features"],

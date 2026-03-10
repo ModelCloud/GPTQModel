@@ -121,7 +121,7 @@ def _capture_layer0_module_io(model, tokenizer) -> dict[str, dict[str, torch.Ten
 def _build_direct_gguf_module(native_module: torch.nn.Linear) -> GGUFTorchQuantLinear:
     module = GGUFTorchQuantLinear(
         bits="q4_k_m",
-        group_size=128,
+        group_size=-1,
         sym=True,
         desc_act=False,
         in_features=native_module.in_features,

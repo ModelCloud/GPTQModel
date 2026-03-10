@@ -67,7 +67,7 @@ def _normalize_gguf_bits(bits) -> tuple[GGUFBits, str]:
     qtype_info = _GGUF_TYPE_INFO[tensor_qtype]
     if qtype_info["bits"] != bits_spec.width:
         raise ValueError(
-            f"GGUF bits `{bits_spec.name}` require {qtype_info['bits']}-bit RTN export, but got bits={bits_spec.width}."
+            f"GGUF bits `{bits_spec.name}` require {qtype_info['bits']}-bit GGUF packing, but got bits={bits_spec.width}."
         )
 
     return bits_spec, tensor_qtype
@@ -418,11 +418,11 @@ def _dequantize_q6_k_numpy(qweight: np.ndarray) -> np.ndarray:
 
 class GGUFTorchQuantLinear(BaseQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.TORCH]
-    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 15}
     SUPPORTS_BITS = [4, 5, 6, 8]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
-    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_GROUP_SIZE = [-1]
+    SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
@@ -499,6 +499,7 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
             **kwargs,
         )
 
+        self.group_size = -1
         self.bits = bits_spec
 
         if register_buffers:

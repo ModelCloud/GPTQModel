@@ -10,6 +10,7 @@ from gptqmodel.quantization.config import (
     GGUFQuantizeConfig,
     GGUFBits,
     GPTQQuantizeConfig,
+    METHOD,
     QuantizeConfig,
     RTNQuantizeConfig,
     SmoothMAD,
@@ -102,7 +103,8 @@ def test_gguf_quantize_config_round_trip():
     assert cfg.runtime_bits.quality is None
     assert cfg.group_size == -1
     assert cfg.desc_act is False
-    assert cfg.export_quant_method().value == "gptq"
+    assert cfg.quant_method == METHOD.GGUF
+    assert cfg.export_quant_method() == METHOD.GGUF
     assert isinstance(cfg.smoother, SmootherConfig)
     assert isinstance(cfg.smooth, SmoothMAD)
     assert cfg.smooth.k == pytest.approx(1.25)
@@ -124,6 +126,7 @@ def test_gguf_quantize_config_round_trip():
     assert reloaded.format == cfg.format
     assert reloaded.bits == 4
     assert reloaded.runtime_bits == "q4_0"
+    assert reloaded.quant_method == METHOD.GGUF
     assert reloaded.export_quant_method() == cfg.export_quant_method()
     assert isinstance(reloaded.smooth, SmoothMAD)
     assert reloaded.smooth.k == pytest.approx(1.25)

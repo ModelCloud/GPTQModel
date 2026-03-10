@@ -594,7 +594,7 @@ def test_emit_layer_complete_stops_cleanly_on_stop_main_loop(monkeypatch):
 
 def test_hide_unsupported_quantization_config_for_lm_eval_temporarily_clears_gguf_bits():
     quantization_config = {
-        "quant_method": "gptq",
+        "quant_method": "gguf",
         "format": "gguf",
         "bits": "q4_k_m",
     }

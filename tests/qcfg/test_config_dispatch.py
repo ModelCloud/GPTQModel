@@ -89,6 +89,7 @@ def test_quantize_config_dispatches_rtn_gguf_export_constructor():
     )
 
     assert isinstance(cfg, GGUFConfig)
+    assert cfg.quant_method == METHOD.GGUF
     assert cfg.checkpoint_format == FORMAT.GGUF
     assert cfg.format == "q_0"
     assert cfg.bits == 4
@@ -97,7 +98,7 @@ def test_quantize_config_dispatches_rtn_gguf_export_constructor():
     assert cfg.runtime_bits.bits == 4
     assert cfg.runtime_bits.version == "q"
     assert cfg.runtime_bits.variant == "0"
-    assert cfg.export_quant_method() == METHOD.GPTQ
+    assert cfg.export_quant_method() == METHOD.GGUF
 
 
 def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method():
@@ -106,6 +107,7 @@ def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method():
     )
 
     assert isinstance(cfg, GGUFConfig)
+    assert cfg.quant_method == METHOD.GGUF
     assert cfg.checkpoint_format == FORMAT.GGUF
     assert cfg.format == "q_0"
     assert cfg.bits == 4
@@ -113,7 +115,7 @@ def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method():
     assert cfg.runtime_bits == "q4_0"
     assert cfg.runtime_bits.bits == 4
     assert cfg.runtime_bits.variant == "0"
-    assert cfg.export_quant_method() == METHOD.GPTQ
+    assert cfg.export_quant_method() == METHOD.GGUF
 
 
 def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method_preserving_qtype():
@@ -123,6 +125,7 @@ def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method_preserving_
     )
 
     assert isinstance(cfg, GGUFConfig)
+    assert cfg.quant_method == METHOD.GGUF
     assert cfg.bits == 5
     assert isinstance(cfg.runtime_bits, GGUFBits)
     assert cfg.runtime_bits == "q5_k_m"
@@ -132,7 +135,7 @@ def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method_preserving_
     assert cfg.runtime_bits.quality == "m"
     assert cfg.format == "q_k_m"
     assert cfg.checkpoint_format == FORMAT.GGUF
-    assert cfg.export_quant_method() == METHOD.GPTQ
+    assert cfg.export_quant_method() == METHOD.GGUF
 
 
 def test_quantize_config_dispatches_gptq_marlin_constructor():

@@ -7,7 +7,7 @@ from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
-from gptqmodel.quantization import FORMAT
+from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.eval import EVAL
 
 
@@ -47,6 +47,7 @@ class TestLlama3_2_GGUF(ModelTest):
             },
         },
     }
+    METHOD = METHOD.GGUF
     FORMAT = FORMAT.GGUF
     BITS = "q4_k_m"
     LOAD_BACKEND = BACKEND.TORCH

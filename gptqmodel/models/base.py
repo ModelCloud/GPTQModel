@@ -1917,8 +1917,8 @@ class BaseQModel(nn.Module):
     def _auto_detect_module_tree(self, model: PreTrainedModel, quant_method: METHOD):
         log.warn("Model not yet support, attempting Module Tree AutoCompat...")
 
-        if quant_method != METHOD.GPTQ:
-            log.warn(f"Module Tree AutoCompat: Failed, quant_method={quant_method}, only support GPTQ")
+        if quant_method not in {METHOD.GPTQ, METHOD.GGUF}:
+            log.warn(f"Module Tree AutoCompat: Failed, quant_method={quant_method}, only support GPTQ/GGUF")
             return None
 
         def _get(path):
