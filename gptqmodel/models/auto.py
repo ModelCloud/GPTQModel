@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 
 from ..utils.logger import setup_logger
 
@@ -301,6 +302,35 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     return False
 
 
+@contextmanager
+def _hide_unsupported_quantization_config_for_lm_eval(model):
+    config = getattr(model, "config", None)
+    if config is None:
+        yield
+        return
+
+    quantization_config = getattr(config, "quantization_config", None)
+    if not isinstance(quantization_config, dict):
+        yield
+        return
+
+    try:
+        from transformers.quantizers import AutoQuantizationConfig
+
+        AutoQuantizationConfig.from_dict(dict(quantization_config))
+    except Exception:
+        pass
+    else:
+        yield
+        return
+
+    setattr(config, "quantization_config", None)
+    try:
+        yield
+    finally:
+        setattr(config, "quantization_config", quantization_config)
+
+
 def check_and_get_model_definition(model_dir, trust_remote_code=False):
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
     model_type = config.model_type.lower()
@@ -565,11 +595,12 @@ class GPTQModel:
                 raise ValueError(f"lm_eval import failed: {e}. Please install via `pip install gptqmodel[eval]`.") from e
 
             if llm_backend == "gptqmodel" and model is not None:
-                model_name = HFLM(
-                    pretrained=model,
-                    batch_size=batch_size,
-                    trust_remote_code=trust_remote_code,
-                )
+                with _hide_unsupported_quantization_config_for_lm_eval(model):
+                    model_name = HFLM(
+                        pretrained=model,
+                        batch_size=batch_size,
+                        trust_remote_code=trust_remote_code,
+                    )
 
             gen_kwargs = args.pop("gen_kwargs", None)
 

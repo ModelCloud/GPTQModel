@@ -9,26 +9,50 @@ from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization.config import WeightOnlyConfig
+from gptqmodel.utils.eval import EVAL
 
 
 class TestLlama3_2_GGUF(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"  # "meta-llama/Llama-3.2-1B-Instruct"
 
+    EVAL_BATCH_SIZE = 64
+    DATASET_CONCAT_SIZE = 2048
+    EVAL_TASKS = {
+        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+            "chat_template": True,
+            "exact_match,flexible-extract": {
+                "value": 0.1538,
+                "floor_pct": 0.04,
+                "ceil_pct": 0.04,
+            },
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
+            "chat_template": False,
+            "acc": {
+                "value": 0.3527,
+                "floor_pct": 0.04,
+                "ceil_pct": 0.04,
+            },
+        },
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
+            "acc": {
+                "value": 0.2790,
+                "floor_pct": 0.04,
+                "ceil_pct": 0.04,
+            },
+            "acc_norm": {
+                "value": 0.3166,
+                "floor_pct": 0.04,
+                "ceil_pct": 0.04,
+            },
+        },
+    }
     FORMAT = FORMAT.GGUF
     BITS = "q4_k_m"
     LOAD_BACKEND = BACKEND.TORCH
     WEIGHT_ONLY = WeightOnlyConfig(method="gguf")
+    KERNEL_INFERENCE = {GGUFTorchQuantLinear}
 
     def test_llama3_2_gguf_full_model(self):
-        model, tokenizer, _ = self.quantModel(
-            self.NATIVE_MODEL_ID,
-            trust_remote_code=self.TRUST_REMOTE_CODE,
-            dtype=self.TORCH_DTYPE,
-            call_perform_post_quant_validation=False,
-        )
-
-        try:
-            self.check_kernel(model, {GGUFTorchQuantLinear})
-            self.assertInference(model, tokenizer)
-        finally:
-            self._cleanup_quantized_model(model, enabled=self.DELETE_QUANTIZED_MODEL)
+        self.quant_lm_eval()
