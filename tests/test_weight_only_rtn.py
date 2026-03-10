@@ -589,6 +589,99 @@ def test_gguf_forward_requests_dequantized_weight_in_input_dtype(monkeypatch):
     assert observed["dtype"] == case["inputs"].dtype
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF K-path CUDA tests")
+@pytest.mark.parametrize(
+    ("bits", "tensor_qtype"),
+    [
+        ("q4_k_m", "Q4_K"),
+        ("q5_k_m", "Q5_K"),
+        ("q6_k", "Q6_K"),
+    ],
+)
+def test_gguf_k_dequantize_weight_matches_reference_on_cuda(bits: str, tensor_qtype: str):
+    gguf = pytest.importorskip("gguf")
+
+    case = _build_rtn_microbench_case(torch.float16, bits=bits)
+    module = _build_rtn_gguf_module(case).to(case["device"]).eval()
+
+    actual = module.dequantize_weight(device=case["device"], dtype=torch.float32).T.detach().cpu().numpy()
+    reference = gguf.dequantize(
+        module.qweight.detach().cpu().numpy(),
+        getattr(gguf.GGMLQuantizationType, tensor_qtype),
+    )[:, : case["in_features"]]
+
+    np.testing.assert_allclose(actual, reference, rtol=0.0, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF fused K forward tests")
+@pytest.mark.parametrize("bits", ["q4_k_m", "q5_k_m", "q6_k"])
+def test_gguf_k_fused_forward_matches_dense_baseline(bits: str):
+    case = _build_rtn_microbench_case(torch.float16, bits=bits)
+    module = _build_rtn_gguf_module(case).to(case["device"]).eval()
+    module.gguf_fused_cuda_max_rows = case["inputs"].shape[0]
+    module.gguf_fused_cuda_min_matrix_elements = 0
+    module.clear_weight_cache()
+
+    baseline = module._forward_dequant_matmul(case["inputs"], cache=False)
+    fused = module._forward_fused_k(case["inputs"])
+
+    output_stats = _error_stats(baseline.to(torch.float32), fused.to(torch.float32))
+    assert output_stats["mae"] < 2e-4
+    assert output_stats["max"] < 3e-3
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for GGUF fused K routing test")
+def test_gguf_forward_uses_fused_k_path_for_small_cuda_batches():
+    case = _build_rtn_microbench_case(torch.float16, bits="q4_k_m")
+    module = _build_rtn_gguf_module(case).to(case["device"]).eval()
+
+    module.gguf_fused_cuda_max_rows = case["inputs"].shape[0]
+    module.gguf_fused_cuda_min_matrix_elements = 0
+    module.clear_weight_cache()
+    module(case["inputs"])
+    assert module._cached_weights == {}
+
+    module.gguf_fused_cuda_max_rows = 1
+    module.clear_weight_cache()
+    module(case["inputs"])
+    assert len(module._cached_weights) == 1
+
+
+@pytest.mark.parametrize("bits", ["q4_k_m", "q5_k_m", "q6_k"])
+def test_gguf_cpu_fused_forward_matches_dense_baseline(bits: str):
+    case = _build_rtn_microbench_case(torch.bfloat16, bits=bits)
+    module = _build_rtn_gguf_module(case).cpu().eval()
+    inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
+
+    module.gguf_fused_cpu_max_rows = inputs.shape[0]
+    module.gguf_fused_cpu_min_matrix_elements = 0
+    module.clear_weight_cache()
+
+    baseline = module._forward_dequant_matmul(inputs, cache=False)
+    fused = module._forward_fused_k(inputs)
+
+    output_stats = _error_stats(baseline.to(torch.float32), fused.to(torch.float32))
+    assert output_stats["mae"] < 2e-4
+    assert output_stats["max"] < 3e-3
+
+
+def test_gguf_forward_uses_fused_k_path_for_small_cpu_batches():
+    case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
+    module = _build_rtn_gguf_module(case).cpu().eval()
+    inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
+
+    module.gguf_fused_cpu_max_rows = inputs.shape[0]
+    module.gguf_fused_cpu_min_matrix_elements = 0
+    module.clear_weight_cache()
+    module(inputs)
+    assert module._cached_weights == {}
+
+    module.gguf_fused_cpu_max_rows = 1
+    module.clear_weight_cache()
+    module(inputs)
+    assert len(module._cached_weights) == 1
+
+
 @pytest.mark.parametrize(
     ("bits", "tensor_qtype"),
     [

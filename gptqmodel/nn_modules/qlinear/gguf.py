@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Dict, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from torch.nn.modules.conv import _ConvNd
 
@@ -52,6 +54,7 @@ _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE = {
 }
 _GGUF_SCALE_QUANT_MAX = 63
 _GGUF_Q6_SCALE_QUANT_MAX = 127
+_GGUF_K_QTYPES = {"Q4_K", "Q5_K", "Q6_K"}
 
 
 def _normalize_gguf_bits(bits) -> tuple[GGUFBits, str]:
@@ -154,6 +157,17 @@ def _unpack_q4_k_scale_min(scales: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     sc = np.concatenate([d & 0x3F, (md & 0x0F) | ((d >> 2) & 0x30)], axis=-1)
     mins = np.concatenate([m & 0x3F, (md >> 4) | ((m >> 2) & 0x30)], axis=-1)
     return sc.reshape((-1, 8)), mins.reshape((-1, 8))
+
+
+def _unpack_q4_k_scale_min_torch(scales: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    packed = scales.reshape(*scales.shape[:-1], 3, 4)
+    d = packed[..., 0, :]
+    m = packed[..., 1, :]
+    md = packed[..., 2, :]
+
+    sc = torch.cat((d & 0x3F, (md & 0x0F) | ((d >> 2) & 0x30)), dim=-1)
+    mins = torch.cat((m & 0x3F, (md >> 4) | ((m >> 2) & 0x30)), dim=-1)
+    return sc, mins
 
 
 def _quantize_k_subblocks(
@@ -426,6 +440,17 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
     REQUIRES_FORMAT_V2 = False
 
     QUANT_TYPE = "gguf"
+    GGUF_FUSED_CUDA_MAX_ROWS = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CUDA_MAX_ROWS", "32")))
+    GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS = max(
+        0,
+        int(os.environ.get("GPTQMODEL_GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS", "8388608")),
+    )
+    GGUF_FUSED_CPU_MAX_ROWS = max(0, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CPU_MAX_ROWS", "64")))
+    GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS = max(
+        0,
+        int(os.environ.get("GPTQMODEL_GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS", "0")),
+    )
+    GGUF_FUSED_CHUNK_BLOCKS = max(1, int(os.environ.get("GPTQMODEL_GGUF_FUSED_CHUNK_BLOCKS", "8")))
 
     def __init__(
         self,
@@ -447,6 +472,11 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         self.gguf_type_size = qtype_info["type_size"]
         self.padded_in_features = math.ceil(in_features / self.gguf_block_size) * self.gguf_block_size
         self._cached_weights: Dict[Tuple[str, int | None, torch.dtype], torch.Tensor] = {}
+        self.gguf_fused_cuda_max_rows = self.GGUF_FUSED_CUDA_MAX_ROWS
+        self.gguf_fused_cuda_min_matrix_elements = self.GGUF_FUSED_CUDA_MIN_MATRIX_ELEMENTS
+        self.gguf_fused_cpu_max_rows = self.GGUF_FUSED_CPU_MAX_ROWS
+        self.gguf_fused_cpu_min_matrix_elements = self.GGUF_FUSED_CPU_MIN_MATRIX_ELEMENTS
+        self.gguf_fused_chunk_blocks = self.GGUF_FUSED_CHUNK_BLOCKS
 
         super().__init__(
             bits=int(bits_spec),
@@ -603,6 +633,22 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
             )
         return target_device, target_dtype
 
+    def _reshape_blocks(
+        self,
+        *,
+        device: torch.device | str | None = None,
+    ) -> tuple[torch.Tensor, int, int]:
+        target_device = self.qweight.device if device is None else torch.device(device)
+        qweight = self.qweight if self.qweight.device == target_device else self.qweight.to(device=target_device)
+        rows = qweight.shape[0]
+        num_blocks = qweight.shape[1] // self.gguf_type_size
+        blocks = qweight.contiguous().view(rows, num_blocks, self.gguf_type_size)
+        return blocks, rows, num_blocks
+
+    @staticmethod
+    def _u8_shift(values: tuple[int, ...], device: torch.device) -> torch.Tensor:
+        return torch.tensor(values, dtype=torch.uint8, device=device)
+
     def _dequantize_q4_0(
         self,
         *,
@@ -610,11 +656,7 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
-        qweight = self.qweight if self.qweight.device == target_device else self.qweight.to(device=target_device)
-
-        rows = qweight.shape[0]
-        num_blocks = qweight.shape[1] // self.gguf_type_size
-        blocks = qweight.contiguous().view(rows, num_blocks, self.gguf_type_size)
+        blocks, rows, _ = self._reshape_blocks(device=target_device)
 
         d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
         if d.dtype != target_dtype:
@@ -635,11 +677,7 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
-        qweight = self.qweight if self.qweight.device == target_device else self.qweight.to(device=target_device)
-
-        rows = qweight.shape[0]
-        num_blocks = qweight.shape[1] // self.gguf_type_size
-        blocks = qweight.contiguous().view(rows, num_blocks, self.gguf_type_size)
+        blocks, rows, _ = self._reshape_blocks(device=target_device)
 
         d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
         if d.dtype != target_dtype:
@@ -665,6 +703,84 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
             tensor = tensor.to(device=target_device, dtype=target_dtype)
         return tensor
 
+    def _dequantize_q4_k_blocks(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
+        rows, num_blocks = blocks.shape[0], blocks.shape[1]
+
+        d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).to(target_dtype)
+        dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1).to(target_dtype)
+        scales = blocks[..., 4:16]
+        qs = blocks[..., 16:]
+
+        sc, mins = _unpack_q4_k_scale_min_torch(scales)
+        d = d.unsqueeze(-1) * sc.to(target_dtype)
+        dm = dmin.unsqueeze(-1) * mins.to(target_dtype)
+
+        q = qs.reshape(rows, num_blocks, 4, 1, 32)
+        q = torch.bitwise_right_shift(
+            q,
+            self._u8_shift((0, 4), device=blocks.device).view(1, 1, 1, 2, 1),
+        )
+        q = torch.bitwise_and(q, 0x0F).reshape(rows, num_blocks, 8, 32)
+
+        return (d.unsqueeze(-1) * q.to(target_dtype) - dm.unsqueeze(-1)).reshape(rows, num_blocks * 256)
+
+    def _dequantize_q5_k_blocks(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
+        rows, num_blocks = blocks.shape[0], blocks.shape[1]
+
+        d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).to(target_dtype)
+        dmin = blocks[..., 2:4].contiguous().view(torch.float16).squeeze(-1).to(target_dtype)
+        scales = blocks[..., 4:16]
+        qh = blocks[..., 16:48]
+        qs = blocks[..., 48:]
+
+        sc, mins = _unpack_q4_k_scale_min_torch(scales)
+        d = d.unsqueeze(-1) * sc.to(target_dtype)
+        dm = dmin.unsqueeze(-1) * mins.to(target_dtype)
+
+        ql = qs.reshape(rows, num_blocks, 4, 1, 32)
+        ql = torch.bitwise_right_shift(
+            ql,
+            self._u8_shift((0, 4), device=blocks.device).view(1, 1, 1, 2, 1),
+        )
+        ql = torch.bitwise_and(ql, 0x0F).reshape(rows, num_blocks, 8, 32)
+
+        qh = torch.bitwise_right_shift(
+            qh.unsqueeze(-2),
+            self._u8_shift(tuple(range(8)), device=blocks.device).view(1, 1, 8, 1),
+        )
+        qh = torch.bitwise_and(qh, 0x01).reshape(rows, num_blocks, 8, 32)
+        q = torch.bitwise_or(ql, torch.bitwise_left_shift(qh, 4))
+
+        return (d.unsqueeze(-1) * q.to(target_dtype) - dm.unsqueeze(-1)).reshape(rows, num_blocks * 256)
+
+    def _dequantize_q6_k_blocks(self, blocks: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
+        rows, num_blocks = blocks.shape[0], blocks.shape[1]
+
+        ql = blocks[..., :128]
+        qh = blocks[..., 128:192]
+        scales = blocks[..., 192:208].contiguous().view(torch.int8).to(target_dtype)
+        d = blocks[..., 208:210].contiguous().view(torch.float16).squeeze(-1).to(target_dtype)
+        d = (d.unsqueeze(-1) * scales).reshape(rows, num_blocks, 16, 1)
+
+        ql = ql.reshape(rows, num_blocks, 2, 1, 64)
+        ql = torch.bitwise_right_shift(
+            ql,
+            self._u8_shift((0, 4), device=blocks.device).view(1, 1, 1, 2, 1),
+        )
+        ql = torch.bitwise_and(ql, 0x0F).reshape(rows, num_blocks, 8, 32)
+
+        qh = qh.reshape(rows, num_blocks, 2, 1, 32)
+        qh = torch.bitwise_right_shift(
+            qh,
+            self._u8_shift((0, 2, 4, 6), device=blocks.device).view(1, 1, 1, 4, 1),
+        )
+        qh = torch.bitwise_and(qh, 0x03).reshape(rows, num_blocks, 8, 32)
+
+        q = torch.bitwise_or(ql, torch.bitwise_left_shift(qh, 4)).to(torch.int16) - 32
+        q = q.reshape(rows, num_blocks, 16, 16).to(target_dtype)
+
+        return (d * q).reshape(rows, num_blocks * 256)
+
     def dequantize_weight(
         self,
         *,
@@ -676,15 +792,77 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         elif self.gguf_tensor_qtype == "Q8_0":
             weight = self._dequantize_q8_0(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q4_K":
-            weight = self._dequantize_numpy(_dequantize_q4_k_numpy, device=device, dtype=dtype)
+            target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
+            blocks, _, _ = self._reshape_blocks(device=target_device)
+            weight = self._dequantize_q4_k_blocks(blocks, target_dtype)
         elif self.gguf_tensor_qtype == "Q5_K":
-            weight = self._dequantize_numpy(_dequantize_q5_k_numpy, device=device, dtype=dtype)
+            target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
+            blocks, _, _ = self._reshape_blocks(device=target_device)
+            weight = self._dequantize_q5_k_blocks(blocks, target_dtype)
         elif self.gguf_tensor_qtype == "Q6_K":
-            weight = self._dequantize_numpy(_dequantize_q6_k_numpy, device=device, dtype=dtype)
+            target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
+            blocks, _, _ = self._reshape_blocks(device=target_device)
+            weight = self._dequantize_q6_k_blocks(blocks, target_dtype)
         else:  # pragma: no cover - guarded by class SUPPORTS_BITS
             raise NotImplementedError(f"Unsupported GGUF qtype: {self.gguf_tensor_qtype}")
 
         return weight[:, : self.in_features].transpose(0, 1).contiguous()
+
+    def _should_use_fused_k_forward(self, x_flat: torch.Tensor) -> bool:
+        if x_flat.device.type == "cuda":
+            max_rows = self.gguf_fused_cuda_max_rows
+            min_matrix_elements = self.gguf_fused_cuda_min_matrix_elements
+        elif x_flat.device.type == "cpu":
+            max_rows = self.gguf_fused_cpu_max_rows
+            min_matrix_elements = self.gguf_fused_cpu_min_matrix_elements
+        else:
+            return False
+
+        return (
+            self.gguf_tensor_qtype in _GGUF_K_QTYPES
+            and self.adapter is None
+            and not self.training
+            and max_rows > 0
+            and (self.in_features * self.out_features) >= min_matrix_elements
+            and x_flat.shape[0] <= max_rows
+        )
+
+    def _forward_dequant_matmul(self, x_flat: torch.Tensor, *, cache: bool = True) -> torch.Tensor:
+        weight = self._get_cached_weight(x_flat) if cache else None
+        if weight is None:
+            weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
+            if cache:
+                self._set_cached_weight(x_flat, weight)
+        return torch.matmul(x_flat, weight)
+
+    def _forward_fused_k(self, x_flat: torch.Tensor) -> torch.Tensor:
+        target_dtype = x_flat.dtype
+        blocks, _, num_blocks = self._reshape_blocks(device=x_flat.device)
+
+        if x_flat.shape[-1] != self.padded_in_features:
+            x_work = F.pad(x_flat, (0, self.padded_in_features - x_flat.shape[-1]))
+        else:
+            x_work = x_flat
+
+        output = torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=target_dtype)
+
+        for start in range(0, num_blocks, self.gguf_fused_chunk_blocks):
+            end = min(start + self.gguf_fused_chunk_blocks, num_blocks)
+            block_chunk = blocks[:, start:end, :]
+
+            if self.gguf_tensor_qtype == "Q4_K":
+                weight_chunk = self._dequantize_q4_k_blocks(block_chunk, target_dtype)
+            elif self.gguf_tensor_qtype == "Q5_K":
+                weight_chunk = self._dequantize_q5_k_blocks(block_chunk, target_dtype)
+            elif self.gguf_tensor_qtype == "Q6_K":
+                weight_chunk = self._dequantize_q6_k_blocks(block_chunk, target_dtype)
+            else:  # pragma: no cover - guarded by _should_use_fused_k_forward
+                raise NotImplementedError(f"Unsupported GGUF fused qtype: {self.gguf_tensor_qtype}")
+
+            x_chunk = x_work[:, start * self.gguf_block_size : end * self.gguf_block_size]
+            output = output + torch.matmul(x_chunk, weight_chunk.transpose(0, 1))
+
+        return output
 
     def _get_cached_weight(self, x: torch.Tensor) -> torch.Tensor | None:
         if self.training:
@@ -700,12 +878,10 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
 
-        weight = self._get_cached_weight(x_flat)
-        if weight is None:
-            weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
-            self._set_cached_weight(x_flat, weight)
-
-        output = torch.matmul(x_flat, weight)
+        if self._should_use_fused_k_forward(x_flat) and self._get_cached_weight(x_flat) is None:
+            output = self._forward_fused_k(x_flat)
+        else:
+            output = self._forward_dequant_matmul(x_flat, cache=True)
 
         if self.bias is not None:
             bias = self.bias
