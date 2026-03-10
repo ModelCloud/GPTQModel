@@ -20,4 +20,4 @@ pyarrow>=21.0
 dill>=0.3.8
 torchao>=0.14.1
 kernels>=0.12.2
-defuser>=0.0.4
+defuser>=0.0.6

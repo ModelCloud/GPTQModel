@@ -24,15 +24,14 @@ from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_
 from ..nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVQuantLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear, LLMAwqQuantLinear
-from ..nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig
-from ..utils.failsafe import normalize_failsafe
-from ..utils.logger import setup_logger, log_time_block
 from ..utils.ctx import ctx
 from ..utils.device import get_device
+from ..utils.failsafe import normalize_failsafe
+from ..utils.logger import setup_logger, log_time_block
 from ..utils.model import find_modules, get_module_by_name_prefix, move_to, create_quant_module, pack_module
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import CPU

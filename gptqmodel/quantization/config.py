@@ -674,9 +674,9 @@ class FailSafe:
     # string = if string is int/float followed by %, then if captured module fwd tokens is less than value in percentage relative to calibration, trigger strategy
     threshold: int | float | str = "0.5%" # if less than 0.5% of calibration reaches module (think moe) then we trigger per-module failsafe quantization
 
-    # naive quantization methods used in failsafe has issue with very small/large outliers that can severely degrade the quantization quality
-    # use smoothers to normalize these outliers so they do not dominate the scale/zero calculation
-    smooth: Optional[SmoothMethod] = field(default_factory=SmoothMAD)
+    # Smoothers can help some low-sample fallback cases, but a static default can
+    # hurt whole-model RTN quality. Leave smoothing opt-in.
+    smooth: Optional[SmoothMethod] = None
 
 
 @dataclass

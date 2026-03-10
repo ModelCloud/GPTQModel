@@ -28,13 +28,23 @@ from .config import (
 MAD_TO_STD_SCALE = 1.4826
 
 
-def _quantile(abs_block: torch.Tensor, percentile: float) -> torch.Tensor:
+def _quantile(block: torch.Tensor, percentile: float) -> torch.Tensor:
     if percentile <= 0.0:
-        return abs_block.min(dim=1, keepdim=True).values
+        return block.min(dim=1, keepdim=True).values
     if percentile >= 100.0:
-        return abs_block.max(dim=1, keepdim=True).values
+        return block.max(dim=1, keepdim=True).values
+
     q = max(0.0, min(percentile / 100.0, 1.0))
-    return torch.quantile(abs_block, q, dim=1, keepdim=True)
+    position = q * (block.shape[1] - 1)
+    lower_index = int(math.floor(position))
+    upper_index = int(math.ceil(position))
+    lower = block.kthvalue(lower_index + 1, dim=1, keepdim=True).values
+
+    if upper_index == lower_index:
+        return lower
+
+    upper = block.kthvalue(upper_index + 1, dim=1, keepdim=True).values
+    return lower + (upper - lower) * (position - lower_index)
 
 
 def _clamp_block(block: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor) -> torch.Tensor:
@@ -83,8 +93,8 @@ def smooth_block(
     if isinstance(method, SmoothPercentileAsymmetric):
         low = float(method.low)
         high = float(method.high)
-        lo = torch.quantile(block_f, max(0.0, min(low / 100.0, 1.0)), dim=1, keepdim=True)
-        hi = torch.quantile(block_f, max(0.0, min(high / 100.0, 1.0)), dim=1, keepdim=True)
+        lo = _quantile(block_f, low)
+        hi = _quantile(block_f, high)
         return _clamp_block(block_f, lo, hi).to(block.dtype), None
 
     if isinstance(method, SmoothMAD):
