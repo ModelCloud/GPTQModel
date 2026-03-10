@@ -51,7 +51,7 @@ def test_gguf_cpp_kernel_validate_once_uses_llama_cpp():
     assert _get_ggml_bridge() is not None
 
 
-@pytest.mark.parametrize("bits", ["q4_k_m", "q5_k_m", "q6_k"])
+@pytest.mark.parametrize("bits", ["q4_k_s", "q4_k_m", "q5_k_m", "q6_k"])
 def test_gguf_cpp_kernel_forward_matches_torch_kernel(bits: str):
     GGUFCppKernel.cached_validate_once.cache_clear()
     ok, err = GGUFCppKernel.cached_validate_once()
