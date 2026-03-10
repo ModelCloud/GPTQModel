@@ -21,7 +21,7 @@ class TestLlama3_2_GGUF(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.1538,
+                "value": 0.3871,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.04,
             },
@@ -29,7 +29,7 @@ class TestLlama3_2_GGUF(ModelTest):
         EVAL.LM_EVAL.MMLU_STEM: {
             "chat_template": False,
             "acc": {
-                "value": 0.3527,
+                "value": 0.3955,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.04,
             },
@@ -37,12 +37,12 @@ class TestLlama3_2_GGUF(ModelTest):
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
-                "value": 0.2790,
+                "value": 0.3106,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.04,
             },
             "acc_norm": {
-                "value": 0.3166,
+                "value": 0.3532,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.04,
             },

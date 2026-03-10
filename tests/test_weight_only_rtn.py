@@ -383,7 +383,7 @@ def test_baseqmodel_quantize_allows_rtn_awq_export():
         ("q6_k", "Q6_K", 6, "k", None),
     ],
 )
-def test_baseqmodel_quantize_allows_rtn_gguf_export(
+def test_baseqmodel_quantize_allows_direct_gguf_export(
     bits: str,
     tensor_qtype: str,
     bit_width: int,
@@ -394,15 +394,13 @@ def test_baseqmodel_quantize_allows_rtn_gguf_export(
     device_type = device.type
 
     native = _TinyModel().to(device=device, dtype=torch.float16).eval()
-    smooth = SmoothMAD(k=2.25)
-
     qcfg = RTNQuantizeConfig(
         bits=bits,
         group_size=32,
         desc_act=False,
         sym=True,
         format=FORMAT.GGUF,
-        smooth=smooth,
+        smooth=None,
         offload_to_disk=False,
         device=device_type,
     )
@@ -416,7 +414,7 @@ def test_baseqmodel_quantize_allows_rtn_gguf_export(
 
     result = model.quantize(calibration=None, backend=BACKEND.AUTO)
 
-    assert "weight_only_rtn" in result
+    assert "weight_only_gguf" in result
     assert model.quantized is True
     assert model.quantize_config.format == FORMAT.GGUF
     assert model.quantize_config.export_quant_method() == METHOD.GPTQ
@@ -435,6 +433,43 @@ def test_baseqmodel_quantize_allows_rtn_gguf_export(
         assert qmodule.bits.variant == variant
         assert qmodule.bits.quality == quality
         assert qmodule.gguf_tensor_qtype == tensor_qtype
+
+
+def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device_type = device.type
+
+    native = _TinyModel().to(device=device, dtype=torch.float16).eval()
+
+    qcfg = RTNQuantizeConfig(
+        bits="q4_k_m",
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        format=FORMAT.GGUF,
+        smooth=SmoothMAD(k=2.25),
+        offload_to_disk=False,
+        device=device_type,
+    )
+
+    model = _TinyQModel(
+        model=native,
+        quantized=False,
+        quantize_config=qcfg,
+        tokenizer=None,
+    )
+
+    def _fail_quantize(*args, **kwargs):
+        raise AssertionError("RTN.quantize should not be called for direct GGUF packing")
+
+    monkeypatch.setattr(RTN, "quantize", _fail_quantize)
+
+    result = model.quantize(calibration=None, backend=BACKEND.AUTO)
+
+    assert "weight_only_gguf" in result
+    assert model.quantized is True
+    qmodules = find_modules(model.model, [model.qlinear_kernel])
+    assert len(qmodules) == 4
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

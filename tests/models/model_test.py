@@ -1197,11 +1197,12 @@ class ModelTest(unittest.TestCase):
                 print(f"batch {old_batch} OOM, retrying with batch {self.EVAL_BATCH_SIZE}")
 
                 if int(self.EVAL_BATCH_SIZE) > 0:
-                    self.lm_eval(model=model,
-                                 trust_remote_code=trust_remote_code,
-                                 delete_quantized_model=delete_quantized_model,
-                                 extra_args=extra_args)
+                    results = self.lm_eval(model=model,
+                                           trust_remote_code=trust_remote_code,
+                                           delete_quantized_model=delete_quantized_model,
+                                           extra_args=extra_args)
                     print(f"set batch size to {self.EVAL_BATCH_SIZE}, passed")
+                    return results
                 else:
                     print(f"set batch size to {self.EVAL_BATCH_SIZE}, failed")
                     raise e

@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Optional
 
+import torch
+
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
@@ -23,7 +25,7 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
-from ..quantization.config import BaseQuantizeConfig, RTNQuantizeConfig, clone_rtn_config_for_module
+from ..quantization.config import BaseQuantizeConfig, FORMAT, RTNQuantizeConfig, clone_rtn_config_for_module
 from ..quantization.rtn import RTN, get_number_of_rows_and_cols
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, pack_module
@@ -57,6 +59,17 @@ class WeightOnlyRTNProcessor(LoopProcessor):
         )
         self.lock = threading.Lock()
 
+    @staticmethod
+    def _uses_direct_gguf(qcfg: RTNQuantizeConfig) -> bool:
+        return qcfg.format == FORMAT.GGUF
+
+    def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
+        with self.lock:
+            for entry in reversed(self.log):
+                if entry.get(PROCESS_LOG_LAYER) == module.layer_index and entry.get(PROCESS_LOG_MODULE) == module.name:
+                    entry[QUANT_LOG_LOSS] = avg_loss
+                    return
+
     def _annotate_tp_padding(self, module: NamedModule, qcfg: BaseQuantizeConfig) -> None:
         target_multiple = math.lcm(*self._TP_TARGETS)
         if qcfg.group_size > 0:
@@ -79,19 +92,26 @@ class WeightOnlyRTNProcessor(LoopProcessor):
         if qcfg_clone is None:
             return None
 
-        self._annotate_tp_padding(module, qcfg_clone)
+        if self._uses_direct_gguf(qcfg_clone):
+            start_time = time.time()
+            duration = time.time() - start_time
+            avg_loss = "gguf: pending"
+            damp_percent = 0.0
+            nsamples = 0
+        else:
+            self._annotate_tp_padding(module, qcfg_clone)
 
-        task = RTN(module=module, qcfg=qcfg_clone)
-        wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = task.quantize()
+            task = RTN(module=module, qcfg=qcfg_clone)
+            wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = task.quantize()
 
-        module.stream_state_payload_to_cpu(
-            {
-                "q_scales": q_scales,
-                "q_zeros": q_zeros,
-                "q_g_idx": q_g_idx,
-            },
-        )
-        del q_scales, q_zeros, q_g_idx
+            module.stream_state_payload_to_cpu(
+                {
+                    "q_scales": q_scales,
+                    "q_zeros": q_zeros,
+                    "q_g_idx": q_g_idx,
+                },
+            )
+            del q_scales, q_zeros, q_g_idx
 
         stat = {
             PROCESS_LOG_NAME: self.name(),
@@ -112,7 +132,8 @@ class WeightOnlyRTNProcessor(LoopProcessor):
             self.log.append(stat)
         self.log_new_row(stat)
 
-        module.weight.data = wq
+        if not self._uses_direct_gguf(qcfg_clone):
+            module.weight.data = wq
         return qcfg_clone
 
     def submodule_finalize(
@@ -123,20 +144,22 @@ class WeightOnlyRTNProcessor(LoopProcessor):
         qcfg: Optional[RTNQuantizeConfig] = None,
         **kwargs,
     ):
-        module.stream_sync()
-        with self.lock:
-            q_zeros = module.state.pop("q_zeros").clone()
-            q_scales = module.state.pop("q_scales").clone()
-            q_g_idx = module.state.pop("q_g_idx").clone()
-
-        assert q_zeros.device == CPU
-        assert q_scales.device == CPU
-        assert q_g_idx.device == CPU
-
         active_qcfg = qcfg or self.qcfg
+        if not self._uses_direct_gguf(active_qcfg):
+            module.stream_sync()
+            with self.lock:
+                q_zeros = module.state.pop("q_zeros").clone()
+                q_scales = module.state.pop("q_scales").clone()
+                q_g_idx = module.state.pop("q_g_idx").clone()
+
+            assert q_zeros.device == CPU
+            assert q_scales.device == CPU
+            assert q_g_idx.device == CPU
+
         layers = find_modules(model.model)
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
+        original_layer = layers.get(module.full_name)
         timer = getattr(model, "quant_region_timer", None)
 
         create_start = time.perf_counter() if timer is not None else None
@@ -166,6 +189,33 @@ class WeightOnlyRTNProcessor(LoopProcessor):
             for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items()
             if name == module.full_name
         }
+
+        if self._uses_direct_gguf(active_qcfg):
+            pack_start = time.perf_counter() if timer is not None else None
+            with log_time_block("module.pack_original", logger=log, module_name=module_label):
+                with parent_module_lock(parent_key):
+                    qmodule = qmodules[module.full_name]
+                    qmodule.pack_original(
+                        linear=original_layer,
+                        scales=None,
+                        zeros=None,
+                        g_idx=None,
+                        smooth=active_qcfg.smooth,
+                    )
+            if timer is not None and pack_start is not None:
+                timer.record(
+                    "submodule_finalize_pack",
+                    time.perf_counter() - pack_start,
+                    source=f"{module_label} [module.pack_original]",
+                )
+
+            reference_weight = qmodule._weight_to_matrix(original_layer).detach().cpu().to(torch.float32)
+            dequant_weight = qmodule.dequantize_weight().T.detach().cpu().to(torch.float32)
+            mean_abs_err = (dequant_weight - reference_weight).abs().mean().item()
+            self._update_logged_loss(module, f"gguf: {mean_abs_err:.7f}")
+            module.unregister_parameter("weight")
+            return
+
         pack_start = time.perf_counter() if timer is not None else None
         with log_time_block("pack", logger=log, module_name=module_label):
             with parent_module_lock(parent_key):
@@ -195,6 +245,8 @@ class WeightOnlyRTNProcessor(LoopProcessor):
         super().finalize(model=model, **kwargs)
 
     def name(self) -> str:
+        if self.qcfg.format == FORMAT.GGUF:
+            return "weight_only_gguf"
         return "weight_only_rtn"
 
 

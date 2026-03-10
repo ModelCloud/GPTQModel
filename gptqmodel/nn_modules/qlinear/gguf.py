@@ -14,7 +14,8 @@ from torch.nn.modules.conv import _ConvNd
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...quantization.config import FORMAT, GGUFBits, METHOD, _normalize_quant_bits
+from ...quantization.config import FailSafe, FailSafeStrategy, FORMAT, GGUFBits, METHOD, SmoothMethod, _normalize_quant_bits
+from ...quantization.failsafe_smooth import smooth_block
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import BaseQuantLinear
@@ -67,6 +68,42 @@ def _normalize_gguf_bits(bits) -> tuple[GGUFBits, str]:
         )
 
     return bits_spec, tensor_qtype
+
+
+def _apply_optional_smoother(
+    weight: torch.Tensor,
+    *,
+    smooth: SmoothMethod | None,
+    group_size: int,
+) -> torch.Tensor:
+    if smooth is None:
+        return weight
+
+    effective_group_size = weight.shape[1] if group_size == -1 else group_size
+    if effective_group_size <= 0:
+        effective_group_size = weight.shape[1]
+
+    failsafe = FailSafe(
+        strategy=FailSafeStrategy.RTN,
+        threshold=True,
+        smooth=smooth,
+    )
+    smoothed = weight.clone()
+
+    for start in range(0, weight.shape[1], effective_group_size):
+        end = min(start + effective_group_size, weight.shape[1])
+        block, scale_factor = smooth_block(
+            smoothed[:, start:end],
+            failsafe,
+            group_size=effective_group_size,
+        )
+        if scale_factor is not None:
+            raise ValueError(
+                "GGUF direct packing does not support smoothers that require post-quant rescaling."
+            )
+        smoothed[:, start:end] = block
+
+    return smoothed
 
 
 def _gguf_quantize_q4_0(blocks: np.ndarray) -> np.ndarray:
@@ -476,8 +513,18 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
             weight = weight.T
         return weight
 
-    def _pack_weight_tensor(self, linear: nn.Module) -> torch.Tensor:
+    def _pack_weight_tensor(
+        self,
+        linear: nn.Module,
+        *,
+        smooth: SmoothMethod | None = None,
+    ) -> torch.Tensor:
         weight = self._weight_to_matrix(linear).to(device="cpu", dtype=torch.float32)
+        weight = _apply_optional_smoother(
+            weight,
+            smooth=smooth,
+            group_size=self.group_size,
+        )
         if weight.shape[1] != self.padded_in_features:
             weight = torch.nn.functional.pad(weight, (0, self.padded_in_features - weight.shape[1]))
 
@@ -519,10 +566,12 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         scales: torch.Tensor,
         zeros: torch.Tensor,
         g_idx: torch.Tensor = None,
+        *,
+        smooth: SmoothMethod | None = None,
     ):
         del scales, zeros, g_idx
 
-        qweight = self._pack_weight_tensor(linear)
+        qweight = self._pack_weight_tensor(linear, smooth=smooth)
         if "qweight" in self._buffers:
             self.qweight = qweight
         else:
