@@ -673,8 +673,7 @@ class BaseQModel(nn.Module):
         if preferred_backend in (None, BACKEND.AUTO):
             if export_quant_method == METHOD.AWQ:
                 if self.quantize_config.checkpoint_format == FORMAT.GEMM:
-                    # Prefer the pure-torch GEMM packer so export does not depend on CUDA AWQ extension ABI.
-                    preferred_backend = BACKEND.TORCH_AWQ
+                    preferred_backend = BACKEND.GEMM
                 elif self.quantize_config.checkpoint_format == FORMAT.GEMV:
                     preferred_backend = BACKEND.GEMV
                 elif self.quantize_config.checkpoint_format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:

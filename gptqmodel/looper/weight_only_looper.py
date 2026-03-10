@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 import torch
-from defuser.modeling.fused_moe.replace_modules import materialize_model
+from defuser.modeling.replace_modules import materialize_model
 
 from ..looper.weight_only_rtn_processor import WeightOnlyRTNProcessor
 from ..looper.named_module import NamedModule
