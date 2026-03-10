@@ -622,7 +622,7 @@ def test_gguf_k_fused_forward_matches_dense_baseline(bits: str):
     module.gguf_fused_cuda_min_matrix_elements = 0
     module.clear_weight_cache()
 
-    baseline = module._forward_dequant_matmul(case["inputs"], cache=False)
+    baseline = module._forward_dequant_matmul(case["inputs"])
     fused = module._forward_fused_k(case["inputs"])
 
     output_stats = _error_stats(baseline.to(torch.float32), fused.to(torch.float32))
@@ -634,17 +634,32 @@ def test_gguf_k_fused_forward_matches_dense_baseline(bits: str):
 def test_gguf_forward_uses_fused_k_path_for_small_cuda_batches():
     case = _build_rtn_microbench_case(torch.float16, bits="q4_k_m")
     module = _build_rtn_gguf_module(case).to(case["device"]).eval()
+    calls = {"dense": 0, "fused": 0}
 
+    GGUFTorchQuantLinear.clear_shared_autotune_cache()
     module.gguf_fused_cuda_max_rows = case["inputs"].shape[0]
     module.gguf_fused_cuda_min_matrix_elements = 0
+    module.gguf_fused_autotune_enabled = False
     module.clear_weight_cache()
+
+    def _dense(self, x_flat):
+        calls["dense"] += 1
+        return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
+
+    def _fused(self, x_flat):
+        calls["fused"] += 1
+        return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
+
+    module._forward_dequant_matmul = _dense.__get__(module, GGUFTorchQuantLinear)
+    module._forward_fused_k = _fused.__get__(module, GGUFTorchQuantLinear)
+
     module(case["inputs"])
-    assert module._cached_weights == {}
+    assert calls == {"dense": 0, "fused": 1}
 
     module.gguf_fused_cuda_max_rows = 1
-    module.clear_weight_cache()
+    calls = {"dense": 0, "fused": 0}
     module(case["inputs"])
-    assert len(module._cached_weights) == 1
+    assert calls == {"dense": 1, "fused": 0}
 
 
 @pytest.mark.parametrize("bits", ["q4_k_m", "q5_k_m", "q6_k"])
@@ -657,7 +672,7 @@ def test_gguf_cpu_fused_forward_matches_dense_baseline(bits: str):
     module.gguf_fused_cpu_min_matrix_elements = 0
     module.clear_weight_cache()
 
-    baseline = module._forward_dequant_matmul(inputs, cache=False)
+    baseline = module._forward_dequant_matmul(inputs)
     fused = module._forward_fused_k(inputs)
 
     output_stats = _error_stats(baseline.to(torch.float32), fused.to(torch.float32))
@@ -669,17 +684,155 @@ def test_gguf_forward_uses_fused_k_path_for_small_cpu_batches():
     case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
     module = _build_rtn_gguf_module(case).cpu().eval()
     inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
+    calls = {"dense": 0, "fused": 0}
 
+    GGUFTorchQuantLinear.clear_shared_autotune_cache()
     module.gguf_fused_cpu_max_rows = inputs.shape[0]
     module.gguf_fused_cpu_min_matrix_elements = 0
+    module.gguf_fused_autotune_enabled = False
     module.clear_weight_cache()
+
+    def _dense(self, x_flat):
+        calls["dense"] += 1
+        return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
+
+    def _fused(self, x_flat):
+        calls["fused"] += 1
+        return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
+
+    module._forward_dequant_matmul = _dense.__get__(module, GGUFTorchQuantLinear)
+    module._forward_fused_k = _fused.__get__(module, GGUFTorchQuantLinear)
+
     module(inputs)
-    assert module._cached_weights == {}
+    assert calls == {"dense": 0, "fused": 1}
 
     module.gguf_fused_cpu_max_rows = 1
-    module.clear_weight_cache()
+    calls = {"dense": 0, "fused": 0}
     module(inputs)
-    assert len(module._cached_weights) == 1
+    assert calls == {"dense": 1, "fused": 0}
+
+
+def test_gguf_forward_autotunes_and_caches_fused_plan_on_cpu(monkeypatch):
+    case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
+    module = _build_rtn_gguf_module(case).cpu().eval()
+    inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
+
+    GGUFTorchQuantLinear.clear_shared_autotune_cache()
+    module.gguf_fused_cpu_max_rows = inputs.shape[0]
+    module.gguf_fused_cpu_min_matrix_elements = 0
+    module.gguf_fused_autotune_enabled = True
+    module.clear_weight_cache()
+
+    calls = {"dense": 0, "fused": 0}
+
+    def _dense(self, x_flat):
+        calls["dense"] += 1
+        return 2.0
+
+    def _fused(self, x_flat):
+        calls["fused"] += 1
+        return 1.0
+
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _dense)
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fused)
+
+    module(inputs)
+
+    key = module._fused_k_forward_plan_key(inputs.reshape(-1, inputs.shape[-1]))
+    assert calls == {"dense": 1, "fused": 1}
+    assert module._fused_k_forward_decisions[key] is True
+
+    def _fail(self, x_flat):
+        raise AssertionError("autotune benchmark should not rerun for cached fused plan")
+
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _fail)
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fail)
+
+    module(inputs)
+    assert module._fused_k_forward_decisions[key] is True
+
+
+def test_gguf_forward_autotunes_and_caches_dense_plan_on_cpu(monkeypatch):
+    case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
+    module = _build_rtn_gguf_module(case).cpu().eval()
+    inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
+
+    GGUFTorchQuantLinear.clear_shared_autotune_cache()
+    module.gguf_fused_cpu_max_rows = inputs.shape[0]
+    module.gguf_fused_cpu_min_matrix_elements = 0
+    module.gguf_fused_autotune_enabled = True
+    module.clear_weight_cache()
+
+    calls = {"dense": 0, "fused": 0}
+
+    def _dense(self, x_flat):
+        calls["dense"] += 1
+        return 1.0
+
+    def _fused(self, x_flat):
+        calls["fused"] += 1
+        return 2.0
+
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _dense)
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fused)
+
+    module(inputs)
+
+    key = module._fused_k_forward_plan_key(inputs.reshape(-1, inputs.shape[-1]))
+    assert calls == {"dense": 1, "fused": 1}
+    assert module._fused_k_forward_decisions[key] is False
+
+    def _fail(self, x_flat):
+        raise AssertionError("autotune benchmark should not rerun for cached dense plan")
+
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _fail)
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fail)
+
+    module(inputs)
+    assert module._fused_k_forward_decisions[key] is False
+
+
+def test_gguf_forward_reuses_shared_autotune_plan_across_modules(monkeypatch):
+    case = _build_rtn_microbench_case(torch.bfloat16, bits="q4_k_m")
+    inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
+    module_a = _build_rtn_gguf_module(case).cpu().eval()
+    module_b = _build_rtn_gguf_module(case).cpu().eval()
+
+    GGUFTorchQuantLinear.clear_shared_autotune_cache()
+    for module in (module_a, module_b):
+        module.gguf_fused_cpu_max_rows = inputs.shape[0]
+        module.gguf_fused_cpu_min_matrix_elements = 0
+        module.gguf_fused_autotune_enabled = True
+        module.clear_weight_cache()
+
+    calls = {"dense": 0, "fused": 0}
+
+    def _dense(self, x_flat):
+        calls["dense"] += 1
+        return 2.0
+
+    def _fused(self, x_flat):
+        calls["fused"] += 1
+        return 1.0
+
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _dense)
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fused)
+
+    module_a(inputs)
+
+    key = module_a._fused_k_forward_plan_key(inputs.reshape(-1, inputs.shape[-1]))
+    assert calls == {"dense": 1, "fused": 1}
+    assert module_a._fused_k_forward_decisions[key] is True
+
+    def _fail(self, x_flat):
+        raise AssertionError("shared autotune cache should prevent benchmark reruns across modules")
+
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_dense_forward", _fail)
+    monkeypatch.setattr(GGUFTorchQuantLinear, "_benchmark_fused_forward", _fail)
+
+    module_b(inputs)
+
+    assert module_b._fused_k_forward_decisions[key] is True
 
 
 @pytest.mark.parametrize(
