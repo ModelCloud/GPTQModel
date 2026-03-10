@@ -47,10 +47,10 @@ class Qwen3_5_MoeQModel(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe:?": {
                 "gate": ("gate:!",),  # <-- 0.5MB per layer. Not worth quantizing
-                "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 "experts": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
+                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
             },
         }
     ]
