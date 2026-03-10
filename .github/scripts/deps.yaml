@@ -66,6 +66,9 @@ tests:
   test_evalplus.py:
     - evalplus
 
+  test_lm_eval.py:
+    - peft
+
   test_nemotron_ultra.py:
     - causal_conv1d
 
