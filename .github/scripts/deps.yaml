@@ -49,6 +49,9 @@ tests:
     - https://github.com/huggingface/transformers
     - https://github.com/huggingface/optimum
 
+  test_asym_gptq_v1.py:
+    - peft
+
   test_bits.py:
     - peft
 
