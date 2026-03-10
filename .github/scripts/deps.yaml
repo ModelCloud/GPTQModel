@@ -6,16 +6,16 @@ common:
 
 tests:
   test_q4_bitblas.py:
-    - bitblas>=0.1.0.post1
+    - http://10.0.13.31/files/bitblas-0.1.0%2Bubuntu.22.4.cu131-py3-none-any.whl
 
   test_perplexity.py:
-    - bitblas>=0.1.0.post1
+    - http://10.0.13.31/files/bitblas-0.1.0%2Bubuntu.22.4.cu131-py3-none-any.whl
 
   test_inference_speed.py:
-    - bitblas>=0.1.0.post1
+    - http://10.0.13.31/files/bitblas-0.1.0%2Bubuntu.22.4.cu131-py3-none-any.whl
 
   test_save_loaded_quantized_model.py:
-    - bitblas>=0.1.0.post1
+    - http://10.0.13.31/files/bitblas-0.1.0%2Bubuntu.22.4.cu131-py3-none-any.whl
 
   test_olora_finetuning_xpu.py:
     - intel_extension_for_pytorch
