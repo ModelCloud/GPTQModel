@@ -10,6 +10,7 @@ from .config import (
                      FORMAT,
                      FORMAT_FIELD_CHECKPOINT,
                      FORMAT_FIELD_CODE,
+                     GGUFConfig,
                      GGUFQuantizeConfig,
                      GGUFBits,
                      GPTQQuantizeConfig,

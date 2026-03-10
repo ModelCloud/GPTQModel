@@ -337,9 +337,110 @@ class GGUFBits(BaseComplexBits):
     def __repr__(self) -> str:
         return f"GGUFBits({self.to_string()!r})"
 
+    def to_public_format(self) -> str:
+        public_format = f"{self.version}_{self.variant}"
+        if self.quality is not None:
+            public_format = f"{public_format}_{self.quality}"
+        return public_format
+
 
 # Backward-compatible alias for the earlier wrapper-based refactor.
 QuantBits = GGUFBits
+
+
+_GGUF_PUBLIC_FORMAT_RE = re.compile(r"^(q|iq)_(0|k)(?:_(xs|s|m|l))?$")
+
+
+def _gguf_public_format_from_bits(bits: GGUFBits) -> str:
+    return bits.to_public_format()
+
+
+def _normalize_gguf_public_format(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+
+    if isinstance(value, GGUFBits):
+        return _gguf_public_format_from_bits(value)
+
+    if isinstance(value, FORMAT):
+        value = value.value
+
+    normalized = str(value).strip().lower().replace("-", "_")
+    if normalized in {"", FORMAT.GGUF.value}:
+        return None
+    if normalized in _GGUF_BITS_ALIAS_INFO:
+        return _gguf_public_format_from_bits(GGUFBits.from_alias(normalized))
+    if _GGUF_PUBLIC_FORMAT_RE.fullmatch(normalized):
+        return normalized
+
+    raise ValueError(
+        "GGUFConfig: `format` must be a GGUF subtype like `q_0`, `q_k`, `q_k_s`, or `q_k_m`."
+    )
+
+
+def _default_gguf_public_format(bits: int) -> str:
+    alias = _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH.get(bits)
+    if alias is None:
+        raise ValueError(f"GGUFConfig: no default GGUF format exists for `{bits}`-bit quantization.")
+    return _gguf_public_format_from_bits(GGUFBits.from_alias(alias))
+
+
+def _gguf_bits_from_components(bits: int, public_format: str) -> GGUFBits:
+    match = _GGUF_PUBLIC_FORMAT_RE.fullmatch(public_format)
+    if match is None:
+        raise ValueError(
+            "GGUFConfig: `format` must be a GGUF subtype like `q_0`, `q_k`, `q_k_s`, or `q_k_m`."
+        )
+
+    version_name, variant, quality = match.groups()
+    bits_spec = GGUFBits(bits=bits, version=version_name, variant=variant, quality=quality)
+    if bits_spec.to_string() not in _GGUF_BITS_ALIAS_INFO:
+        raise ValueError(
+            f"Unsupported GGUF combination: bits={bits}, format={public_format}."
+        )
+    return bits_spec
+
+
+def _normalize_gguf_config_spec(
+    bits: Union[int, str, GGUFBits],
+    format_value: Optional[Union[str, FORMAT, GGUFBits]],
+) -> Tuple[int, str, GGUFBits]:
+    bits_spec_from_bits: Optional[GGUFBits] = None
+    normalized_bits = bits
+
+    if isinstance(bits, GGUFBits):
+        bits_spec_from_bits = bits
+        normalized_bits = bits.bits
+    elif isinstance(bits, str):
+        raw_bits = bits.strip().lower().replace("-", "_")
+        if raw_bits.isdigit():
+            normalized_bits = int(raw_bits)
+        else:
+            bits_spec_from_bits = GGUFBits.from_alias(raw_bits)
+            normalized_bits = bits_spec_from_bits.bits
+    elif not isinstance(bits, int):
+        raise ValueError(f"GGUFConfig: unsupported bits specification `{bits}`.")
+
+    normalized_bits = int(normalized_bits)
+    if normalized_bits not in [2, 3, 4, 5, 6, 8]:
+        raise ValueError("GGUFConfig: `bits` must resolve to one of `[2, 3, 4, 5, 6, 8]`.")
+
+    normalized_format = _normalize_gguf_public_format(format_value)
+    if normalized_format is None:
+        if bits_spec_from_bits is not None:
+            bits_spec = bits_spec_from_bits
+            normalized_format = _gguf_public_format_from_bits(bits_spec)
+        else:
+            normalized_format = _default_gguf_public_format(normalized_bits)
+            bits_spec = _gguf_bits_from_components(normalized_bits, normalized_format)
+    else:
+        bits_spec = _gguf_bits_from_components(normalized_bits, normalized_format)
+        if bits_spec_from_bits is not None and bits_spec_from_bits != bits_spec:
+            raise ValueError(
+                f"GGUFConfig: incompatible GGUF bits/format combination: bits={bits}, format={format_value}."
+            )
+
+    return normalized_bits, normalized_format, bits_spec
 
 
 def _normalize_quant_bits(bits: Union[int, str, GGUFBits], format_value: Optional[Union[str, FORMAT]] = None) -> Union[int, GGUFBits]:
@@ -1334,7 +1435,11 @@ def _normalize_gguf_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
         legacy_gguf_bits = _extract_weight_only_legacy_gguf_bits(weight_only)
     if legacy_gguf_bits is not None and BITS_FIELD_CODE not in normalized:
         normalized[BITS_FIELD_CODE] = legacy_gguf_bits
-    normalized[FORMAT_FIELD_CODE] = FORMAT.GGUF
+    normalized[BITS_FIELD_CODE], normalized[FORMAT_FIELD_CODE], _ = _normalize_gguf_config_spec(
+        normalized.get(BITS_FIELD_CODE, 4),
+        normalized.get(FORMAT_FIELD_CODE),
+    )
+    normalized[FORMAT_FIELD_CHECKPOINT] = FORMAT.GGUF
     return normalized
 
 
@@ -1401,7 +1506,7 @@ def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) 
     normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, payload)
     if target_cls is RTNQuantizeConfig:
         normalized = _normalize_rtn_kwargs(normalized)
-    elif target_cls is GGUFQuantizeConfig:
+    elif target_cls is GGUFConfig:
         normalized = _normalize_gguf_kwargs(normalized)
     return _filter_quantize_config_payload_for_target_cls(target_cls, normalized)
 
@@ -1511,6 +1616,40 @@ class BaseQuantizeConfig:
                   "moe={'routing': {'class': 'ExpertsRoutingOverride', 'num_experts_per_tok': 'all'}}"}
     )
 
+    @property
+    def checkpoint_format(self) -> FORMAT:
+        return self.format if isinstance(self.format, FORMAT) else _normalize_format(self.format)
+
+    @property
+    def runtime_bits(self):
+        return self.bits
+
+    def _resolve_checkpoint_format(self) -> FORMAT:
+        self.format = _normalize_format(self.format)
+        return self.format
+
+    def _normalize_bits_field(self, bits_value, checkpoint_format: FORMAT):
+        return _normalize_quant_bits(bits_value, format_value=checkpoint_format)
+
+    def _normalize_dynamic_layer_config(
+        self,
+        layer_name: str,
+        layer_dict: Dict[str, Any],
+        *,
+        valid_bit_widths: List[int],
+        checkpoint_format: FORMAT,
+    ) -> None:
+        for key, value in layer_dict.items():
+            if key == "bits":
+                normalized_bits = self._normalize_bits_field(value, checkpoint_format=checkpoint_format)
+                layer_dict[key] = normalized_bits
+                if quant_bits_width(normalized_bits) not in valid_bit_widths:
+                    raise ValueError(
+                        f"QuantizeConfig: Layer `{layer_name}` only support quantization of `{valid_bit_widths}` bits."
+                    )
+            if key == "group_size" and value != -1 and value <= 0:
+                raise ValueError(_resolve_dynamic_group_size_error())
+
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return tuple(METHOD)
 
@@ -1521,7 +1660,7 @@ class BaseQuantizeConfig:
         return tuple(valid_formats)
 
     def export_quant_method(self) -> METHOD:
-        return _resolve_export_quant_method(self.format, fallback_method=self.quant_method)
+        return _resolve_export_quant_method(self.checkpoint_format, fallback_method=self.quant_method)
 
     def default_desc_act(self) -> bool:
         return True
@@ -1530,9 +1669,9 @@ class BaseQuantizeConfig:
         fields_info = fields(self)
 
         self.quant_method = _normalize_quant_method(self.quant_method)
-        self.format = _normalize_format(self.format)
+        checkpoint_format = self._resolve_checkpoint_format()
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
-        self.bits = _normalize_quant_bits(self.bits, format_value=self.format)
+        self.bits = self._normalize_bits_field(self.bits, checkpoint_format=checkpoint_format)
 
         allowed_methods = self.allowed_quant_methods()
         if allowed_methods and self.quant_method not in allowed_methods:
@@ -1541,9 +1680,9 @@ class BaseQuantizeConfig:
             )
 
         valid_formats = self.supported_export_formats()
-        if self.format not in valid_formats:
+        if checkpoint_format not in valid_formats:
             raise ValueError(
-                f"{self.__class__.__name__}: unsupported export `format` `{self.format}`."
+                f"{self.__class__.__name__}: unsupported export `format` `{checkpoint_format}`."
             )
 
         self.failsafe = _normalize_failsafe(self.failsafe)
@@ -1559,16 +1698,12 @@ class BaseQuantizeConfig:
             }
 
             for layer, layer_dict in self.dynamic.items():
-                for key, value in layer_dict.items():
-                    if key == "bits":
-                        normalized_bits = _normalize_quant_bits(value, format_value=self.format)
-                        layer_dict[key] = normalized_bits
-                        if quant_bits_width(normalized_bits) not in valid_bit_widths:
-                            raise ValueError(
-                                f"QuantizeConfig: Layer `{layer}` only support quantization of  `{fields_info[0].metadata['choices']}` bits."
-                            )
-                    if key == "group_size" and value != -1 and value <= 0:
-                        raise ValueError(_resolve_dynamic_group_size_error())
+                self._normalize_dynamic_layer_config(
+                    layer,
+                    layer_dict,
+                    valid_bit_widths=valid_bit_widths,
+                    checkpoint_format=checkpoint_format,
+                )
 
         if self.group_size != -1 and self.group_size <= 0:
             raise ValueError(_resolve_dynamic_group_size_error())
@@ -1670,6 +1805,7 @@ class BaseQuantizeConfig:
     def from_quant_config(cls, quantize_cfg, format: str = None):
         valid_formats = set(FORMAT)
         format_auto_inferred = False
+        checkpoint_format_hint = quantize_cfg.get(FORMAT_FIELD_CHECKPOINT) if isinstance(quantize_cfg, dict) else None
         if format:
             format = _normalize_format(format)
             if format not in valid_formats:
@@ -1689,15 +1825,17 @@ class BaseQuantizeConfig:
         for key, val in quantize_cfg.items():
             key = key.lower()
 
+            if key == FORMAT_FIELD_CHECKPOINT:
+                normalized[key] = _normalize_format(val)
+                continue
+
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
                 key = QUANT_CONFIG_ARG_SYNONYMS[key]
             elif key in QUANT_CONFIG_ARG_SYNONYMS_NEGATED and QUANT_CONFIG_ARG_SYNONYMS_NEGATED[key] in field_names:
                 key = QUANT_CONFIG_ARG_SYNONYMS_NEGATED[key]
                 val = not bool(val)
 
-            if key == FORMAT_FIELD_CHECKPOINT:
-                normalized[key] = _normalize_format(val)
-            elif key == QUANT_METHOD_FIELD:
+            if key == QUANT_METHOD_FIELD:
                 if isinstance(val, str) and val.lower() == FORMAT.MARLIN:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif isinstance(val, str) and val.lower() == FORMAT.BITBLAS:
@@ -1705,7 +1843,16 @@ class BaseQuantizeConfig:
                 else:
                     normalized[QUANT_METHOD_FIELD] = _normalize_quant_method(val)
             elif key == FORMAT_FIELD_CODE:
-                normalized[key] = _normalize_format(val)
+                gguf_checkpoint_hint = format or checkpoint_format_hint
+                if gguf_checkpoint_hint is not None:
+                    try:
+                        gguf_checkpoint_hint = _normalize_format(gguf_checkpoint_hint)
+                    except ValueError:
+                        gguf_checkpoint_hint = None
+                if gguf_checkpoint_hint == FORMAT.GGUF:
+                    normalized[key] = val
+                else:
+                    normalized[key] = _normalize_format(val)
             elif key in field_names:
                 normalized[key] = val
             else:
@@ -1748,7 +1895,7 @@ class BaseQuantizeConfig:
         normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, normalized)
         if target_cls is RTNQuantizeConfig:
             normalized = _normalize_rtn_kwargs(normalized)
-        elif target_cls is GGUFQuantizeConfig:
+        elif target_cls is GGUFConfig:
             normalized = _normalize_gguf_kwargs(normalized)
 
         if format_auto_inferred:
@@ -1759,7 +1906,7 @@ class BaseQuantizeConfig:
         if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
             normalized["desc_act"] = False
 
-        if "sym" not in normalized and target_cls is not GGUFQuantizeConfig:
+        if "sym" not in normalized and target_cls is not GGUFConfig:
             log.warn(
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
@@ -1833,7 +1980,7 @@ class BaseQuantizeConfig:
             "desc_act": self.desc_act,
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD: self.quant_method,
-            FORMAT_FIELD_CHECKPOINT: self.format,
+            FORMAT_FIELD_CHECKPOINT: self.checkpoint_format,
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: meta_payload,
         }
@@ -1887,7 +2034,7 @@ class PreFilterQuantizeConfig(BaseQuantizeConfig):
     # Backward-compatible alias. New code should use `smoother`.
     smooth: Optional[Union[SmoothMethod, Dict[str, Any], str]] = field(default=None, repr=False)
 
-    def __post_init__(self):
+    def _normalize_prefilter_state(self) -> None:
         self.pre_filters = _normalize_pre_filters(self.pre_filters)
 
         smoother_payload = self.smoother if self.smoother is not None else self.smooth
@@ -1905,6 +2052,8 @@ class PreFilterQuantizeConfig(BaseQuantizeConfig):
         self.pre_filters = non_smoother_filters
         self.smooth = self.resolve_smooth_method()
 
+    def __post_init__(self):
+        self._normalize_prefilter_state()
         super().__post_init__()
 
     def resolve_smooth_method(self) -> Optional[SmoothMethod]:
@@ -2092,12 +2241,21 @@ class RTNQuantizeConfig(PreFilterQuantizeConfig):
 
 
 @dataclass
-class GGUFQuantizeConfig(PreFilterQuantizeConfig):
-    format: FORMAT = field(default=FORMAT.GGUF, init=False)
+class GGUFConfig(PreFilterQuantizeConfig):
+    format: Optional[str] = field(default=None)
     quant_method: METHOD = field(default=METHOD.GPTQ, init=False)
     group_size: int = field(default=-1, init=False, repr=False)
     desc_act: Optional[bool] = field(default=False, init=False, repr=False)
     sym: bool = field(default=True, init=False, repr=False)
+    _gguf_bits: GGUFBits = field(init=False, repr=False, compare=False)
+
+    @property
+    def checkpoint_format(self) -> FORMAT:
+        return FORMAT.GGUF
+
+    @property
+    def runtime_bits(self) -> GGUFBits:
+        return self._gguf_bits
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.GPTQ,)
@@ -2108,9 +2266,51 @@ class GGUFQuantizeConfig(PreFilterQuantizeConfig):
     def default_desc_act(self) -> bool:
         return False
 
+    def _resolve_checkpoint_format(self) -> FORMAT:
+        self.bits, self.format, self._gguf_bits = _normalize_gguf_config_spec(self.bits, self.format)
+        return FORMAT.GGUF
+
+    def _normalize_bits_field(self, bits_value, checkpoint_format: FORMAT):
+        normalized = _normalize_quant_bits(bits_value, format_value=None)
+        return normalized.bits if isinstance(normalized, GGUFBits) else normalized
+
+    def _normalize_dynamic_layer_config(
+        self,
+        layer_name: str,
+        layer_dict: Dict[str, Any],
+        *,
+        valid_bit_widths: List[int],
+        checkpoint_format: FORMAT,
+    ) -> None:
+        bits_override_present = "bits" in layer_dict
+        format_override_present = FORMAT_FIELD_CODE in layer_dict
+
+        if bits_override_present or format_override_present:
+            raw_bits = layer_dict.get("bits", self.bits)
+            raw_format = layer_dict.get(FORMAT_FIELD_CODE, self.format)
+            normalized_bits, normalized_format, normalized_runtime_bits = _normalize_gguf_config_spec(raw_bits, raw_format)
+
+            layer_dict["bits"] = normalized_bits
+
+            bits_implied_format = (
+                isinstance(raw_bits, GGUFBits)
+                or (isinstance(raw_bits, str) and not raw_bits.strip().isdigit())
+            )
+            if format_override_present or bits_implied_format:
+                layer_dict[FORMAT_FIELD_CODE] = normalized_format
+
+            if quant_bits_width(normalized_runtime_bits) not in valid_bit_widths:
+                raise ValueError(
+                    f"QuantizeConfig: Layer `{layer_name}` only support quantization of `{valid_bit_widths}` bits."
+                )
+
+        if "group_size" in layer_dict and layer_dict["group_size"] != -1 and layer_dict["group_size"] <= 0:
+            raise ValueError(_resolve_dynamic_group_size_error())
+
     def __post_init__(self):
-        super().__post_init__()
-        self.bits = _normalize_quant_bits(self.bits, format_value=FORMAT.GGUF)
+        self._normalize_prefilter_state()
+        super(PreFilterQuantizeConfig, self).__post_init__()
+        self._gguf_bits = _gguf_bits_from_components(self.bits, self.format)
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)
@@ -2145,36 +2345,48 @@ class GGUFQuantizeConfig(PreFilterQuantizeConfig):
         return out
 
     def calculate_bits_per_weight(self):
-        bits_name = str(self.bits)
-        bpw = _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS.get(bits_name, float(quant_bits_width(self.bits)))
+        bits_name = self.runtime_bits.to_string()
+        bpw = _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS.get(bits_name, float(quant_bits_width(self.runtime_bits)))
         log.info(
-            f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}]"
+            f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}, format: {self.format}]"
         )
 
     def uses_weight_only_lifecycle(self) -> bool:
         return True
 
 
+GGUFQuantizeConfig = GGUFConfig
+
+
 def clone_weight_only_config_for_module(
-    qcfg: Union[RTNQuantizeConfig, GGUFQuantizeConfig],
+    qcfg: Union[RTNQuantizeConfig, GGUFConfig],
     module_full_name: str,
-) -> Optional[Union[RTNQuantizeConfig, GGUFQuantizeConfig]]:
+) -> Optional[Union[RTNQuantizeConfig, GGUFConfig]]:
     if qcfg.dynamic_get(layer_name=module_full_name) is False:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
 
     if qcfg.dynamic is not None:
-        qcfg_clone.bits = _normalize_quant_bits(
-            qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits),
-            format_value=qcfg_clone.format,
-        )
         smooth_override = qcfg.dynamic_get(module_full_name, "smoother", None)
         if smooth_override is None:
             smooth_override = qcfg.dynamic_get(module_full_name, "smooth", None)
         if smooth_override is not None:
             qcfg_clone.smoother = _normalize_smoother_config(smooth_override)
             qcfg_clone.smooth = qcfg_clone.resolve_smooth_method()
+
+        if isinstance(qcfg_clone, GGUFConfig):
+            dynamic_bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
+            dynamic_format = qcfg.dynamic_get(module_full_name, FORMAT_FIELD_CODE, qcfg_clone.format)
+            qcfg_clone.bits, qcfg_clone.format, qcfg_clone._gguf_bits = _normalize_gguf_config_spec(
+                dynamic_bits,
+                dynamic_format,
+            )
+        else:
+            qcfg_clone.bits = _normalize_quant_bits(
+                qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits),
+                format_value=qcfg_clone.checkpoint_format,
+            )
 
         if isinstance(qcfg_clone, RTNQuantizeConfig):
             qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
@@ -2192,9 +2404,10 @@ clone_rtn_config_for_module = clone_weight_only_config_for_module
 
 def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantizeConfig]:
     method = payload.get(QUANT_METHOD_FIELD, METHOD.GPTQ)
-    format_value = payload.get(FORMAT_FIELD_CODE, FORMAT.GPTQ)
+    checkpoint_format_value = payload.get(FORMAT_FIELD_CHECKPOINT, payload.get(FORMAT_FIELD_CODE, FORMAT.GPTQ))
     weight_only = payload.get("weight_only")
     bits = payload.get(BITS_FIELD_CODE)
+    gguf_public_format = payload.get(FORMAT_FIELD_CODE)
 
     try:
         method = _normalize_quant_method(method)
@@ -2202,17 +2415,30 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         method = METHOD.GPTQ
 
     try:
-        format_value = _normalize_format(format_value)
+        checkpoint_format_value = _normalize_format(checkpoint_format_value)
     except Exception:
-        format_value = FORMAT.GPTQ
+        checkpoint_format_value = FORMAT.GPTQ
+    format_value = checkpoint_format_value
+
+    gguf_format_detected = False
+    if gguf_public_format is not None:
+        try:
+            gguf_format_detected = _normalize_gguf_public_format(gguf_public_format) is not None
+        except ValueError:
+            gguf_format_detected = False
 
     weight_only_method = _peek_weight_only_method(weight_only)
     if weight_only is not None and weight_only_method not in {None, WeightOnlyMethod.RTN, WeightOnlyMethod.GGUF}:
         raise ValueError(
             "QuantizeConfig: unsupported weight-only config. Weight-only export currently supports `rtn` and `gguf`."
         )
-    if format_value == FORMAT.GGUF or weight_only_method == WeightOnlyMethod.GGUF or _looks_like_gguf_bits(bits):
-        return GGUFQuantizeConfig
+    if (
+        checkpoint_format_value == FORMAT.GGUF
+        or weight_only_method == WeightOnlyMethod.GGUF
+        or _looks_like_gguf_bits(bits)
+        or gguf_format_detected
+    ):
+        return GGUFConfig
     if weight_only_method == WeightOnlyMethod.RTN:
         return RTNQuantizeConfig
     if weight_only is not None:
@@ -2238,7 +2464,7 @@ def _known_quantize_config_field_names() -> set[str]:
         AWQQuantizeConfig,
         QQQQuantizeConfig,
         RTNQuantizeConfig,
-        GGUFQuantizeConfig,
+        GGUFConfig,
     ):
         field_names.update(field.name for field in fields(cls))
     return field_names

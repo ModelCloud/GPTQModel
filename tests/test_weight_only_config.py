@@ -5,6 +5,8 @@ import pytest
 
 from gptqmodel.quantization.config import (
     BaseQuantizeConfig,
+    FORMAT,
+    GGUFConfig,
     GGUFQuantizeConfig,
     GGUFBits,
     GPTQQuantizeConfig,
@@ -82,20 +84,22 @@ def test_rtn_quantize_config_supports_awq_export_round_trip():
 
 def test_gguf_quantize_config_round_trip():
     smooth = SmoothMAD(k=1.25)
-    cfg = GGUFQuantizeConfig(
+    cfg = GGUFConfig(
         bits=4,
         smoother=smooth,
     )
 
-    assert cfg.format == "gguf"
+    assert cfg.format == "q_0"
+    assert cfg.checkpoint_format == FORMAT.GGUF
     assert cfg.uses_weight_only_lifecycle() is True
     assert cfg.requires_calibration_dataset() is False
-    assert isinstance(cfg.bits, GGUFBits)
-    assert cfg.bits == "q4_0"
-    assert cfg.bits.bits == 4
-    assert cfg.bits.version == "q"
-    assert cfg.bits.variant == "0"
-    assert cfg.bits.quality is None
+    assert cfg.bits == 4
+    assert isinstance(cfg.runtime_bits, GGUFBits)
+    assert cfg.runtime_bits == "q4_0"
+    assert cfg.runtime_bits.bits == 4
+    assert cfg.runtime_bits.version == "q"
+    assert cfg.runtime_bits.variant == "0"
+    assert cfg.runtime_bits.quality is None
     assert cfg.group_size == -1
     assert cfg.desc_act is False
     assert cfg.export_quant_method().value == "gptq"
@@ -104,7 +108,9 @@ def test_gguf_quantize_config_round_trip():
     assert cfg.smooth.k == pytest.approx(1.25)
 
     payload = cfg.to_dict()
-    assert payload["bits"] == "q4_0"
+    assert payload["bits"] == 4
+    assert payload["format"] == "q_0"
+    assert payload["checkpoint_format"] == "gguf"
     assert "group_size" not in payload
     assert "desc_act" not in payload
     assert "quant_method" not in payload
@@ -114,9 +120,10 @@ def test_gguf_quantize_config_round_trip():
     assert payload["meta"]["pre_filters"][0]["smooth"]["type"] == "mad"
     reloaded = QuantizeConfig.from_quant_config(payload)
 
-    assert isinstance(reloaded, GGUFQuantizeConfig)
+    assert isinstance(reloaded, GGUFConfig)
     assert reloaded.format == cfg.format
-    assert reloaded.bits == "q4_0"
+    assert reloaded.bits == 4
+    assert reloaded.runtime_bits == "q4_0"
     assert reloaded.export_quant_method() == cfg.export_quant_method()
     assert isinstance(reloaded.smooth, SmoothMAD)
     assert reloaded.smooth.k == pytest.approx(1.25)
@@ -124,15 +131,16 @@ def test_gguf_quantize_config_round_trip():
 
 def test_gguf_quantize_config_hides_non_gguf_constructor_args():
     with pytest.raises(TypeError):
-        GGUFQuantizeConfig(bits="q4_k_m", group_size=128)
+        GGUFConfig(bits=4, format="q_k_m", group_size=128)
 
     with pytest.raises(TypeError):
-        GGUFQuantizeConfig(bits="q4_k_m", desc_act=True)
+        GGUFConfig(bits=4, format="q_k_m", desc_act=True)
 
 
 def test_gguf_quantize_config_registers_smoother_prefilter():
-    cfg = GGUFQuantizeConfig(
-        bits="q4_k_m",
+    cfg = GGUFConfig(
+        bits=4,
+        format="q_k_m",
         pre_filters=[SmootherConfig(smooth=SmoothMAD(k=1.9))],
     )
 
@@ -144,62 +152,71 @@ def test_gguf_quantize_config_registers_smoother_prefilter():
 
 
 @pytest.mark.parametrize(
-    ("bits", "bit_width", "variant", "quality"),
+    ("bits", "format", "bit_width", "variant", "quality"),
     [
-        ("q4_k_m", 4, "k", "m"),
-        ("q5_k_s", 5, "k", "s"),
-        ("q5_k_m", 5, "k", "m"),
-        ("q6_k", 6, "k", None),
+        (4, "q_k_m", 4, "k", "m"),
+        (5, "q_k_s", 5, "k", "s"),
+        (5, "q_k_m", 5, "k", "m"),
+        (6, "q_k", 6, "k", None),
     ],
 )
 def test_rtn_quantize_config_supports_gguf_bits_round_trip(
-    bits: str,
+    bits: int,
+    format: str,
     bit_width: int,
     variant: str,
     quality: str | None,
 ):
-    cfg = GGUFQuantizeConfig(
+    cfg = GGUFConfig(
         bits=bits,
+        format=format,
         smoother=SmoothMAD(k=1.25),
     )
 
     payload = cfg.to_dict()
-    assert payload["bits"] == bits
-    assert cfg.bits.bits == bit_width
-    assert cfg.bits.version == "q"
-    assert cfg.bits.variant == variant
-    assert cfg.bits.quality == quality
+    assert payload["bits"] == bit_width
+    assert payload["format"] == format
+    assert cfg.bits == bit_width
+    assert cfg.runtime_bits.bits == bit_width
+    assert cfg.runtime_bits.version == "q"
+    assert cfg.runtime_bits.variant == variant
+    assert cfg.runtime_bits.quality == quality
 
     reloaded = QuantizeConfig.from_quant_config(payload)
 
-    assert isinstance(reloaded, GGUFQuantizeConfig)
-    assert reloaded.format == "gguf"
-    assert reloaded.bits == bits
-    assert reloaded.bits.bits == bit_width
-    assert reloaded.bits.version == "q"
-    assert reloaded.bits.variant == variant
-    assert reloaded.bits.quality == quality
+    assert isinstance(reloaded, GGUFConfig)
+    assert reloaded.checkpoint_format == FORMAT.GGUF
+    assert reloaded.format == format
+    assert reloaded.bits == bit_width
+    assert reloaded.runtime_bits.bits == bit_width
+    assert reloaded.runtime_bits.version == "q"
+    assert reloaded.runtime_bits.variant == variant
+    assert reloaded.runtime_bits.quality == quality
 
 
 def test_rtn_quantize_config_supports_structured_gguf_bits_round_trip():
-    cfg = GGUFQuantizeConfig(
+    cfg = GGUFConfig(
         bits=GGUFBits(bits=4, version="q", variant="k", quality="s"),
         smoother=SmoothMAD(k=1.25),
     )
 
-    assert isinstance(cfg.bits, GGUFBits)
-    assert cfg.bits == "q4_k_s"
-    assert cfg.bits.bits == 4
-    assert cfg.bits.version == "q"
-    assert cfg.bits.variant == "k"
-    assert cfg.bits.quality == "s"
+    assert cfg.bits == 4
+    assert cfg.format == "q_k_s"
+    assert isinstance(cfg.runtime_bits, GGUFBits)
+    assert cfg.runtime_bits == "q4_k_s"
+    assert cfg.runtime_bits.bits == 4
+    assert cfg.runtime_bits.version == "q"
+    assert cfg.runtime_bits.variant == "k"
+    assert cfg.runtime_bits.quality == "s"
 
     payload = cfg.to_dict()
-    assert payload["bits"] == "q4_k_s"
+    assert payload["bits"] == 4
+    assert payload["format"] == "q_k_s"
 
     reloaded = QuantizeConfig.from_quant_config(payload)
-    assert reloaded.bits == "q4_k_s"
-    assert isinstance(reloaded.bits, GGUFBits)
+    assert reloaded.bits == 4
+    assert reloaded.format == "q_k_s"
+    assert reloaded.runtime_bits == "q4_k_s"
 
 
 def test_gguf_bits_string_parser_round_trip():
@@ -239,12 +256,13 @@ def test_weight_only_payload_dispatches_to_rtn_gguf():
         },
     )
 
-    assert isinstance(cfg, GGUFQuantizeConfig)
-    assert cfg.format == "gguf"
-    assert cfg.bits == "q4_0"
-    assert cfg.bits.bits == 4
-    assert cfg.bits.version == "q"
-    assert cfg.bits.variant == "0"
+    assert isinstance(cfg, GGUFConfig)
+    assert cfg.format == "q_0"
+    assert cfg.bits == 4
+    assert cfg.runtime_bits == "q4_0"
+    assert cfg.runtime_bits.bits == 4
+    assert cfg.runtime_bits.version == "q"
+    assert cfg.runtime_bits.variant == "0"
     assert isinstance(cfg.smooth, SmoothMAD)
     assert cfg.smooth.k == pytest.approx(1.5)
 
@@ -257,13 +275,14 @@ def test_weight_only_payload_dispatches_to_rtn_gguf_with_qtype():
         },
     )
 
-    assert isinstance(cfg, GGUFQuantizeConfig)
-    assert cfg.format == "gguf"
-    assert cfg.bits == "q6_k"
-    assert cfg.bits.bits == 6
-    assert cfg.bits.version == "q"
-    assert cfg.bits.variant == "k"
-    assert cfg.bits.quality is None
+    assert isinstance(cfg, GGUFConfig)
+    assert cfg.format == "q_k"
+    assert cfg.bits == 6
+    assert cfg.runtime_bits == "q6_k"
+    assert cfg.runtime_bits.bits == 6
+    assert cfg.runtime_bits.version == "q"
+    assert cfg.runtime_bits.variant == "k"
+    assert cfg.runtime_bits.quality is None
 
 
 def test_weight_only_payload_dispatches_legacy_gguf_qtype_to_bits():
@@ -275,9 +294,10 @@ def test_weight_only_payload_dispatches_legacy_gguf_qtype_to_bits():
         },
     )
 
-    assert isinstance(cfg, GGUFQuantizeConfig)
-    assert cfg.format == "gguf"
-    assert cfg.bits == "q6_k"
-    assert cfg.bits.bits == 6
-    assert cfg.bits.version == "q"
-    assert cfg.bits.variant == "k"
+    assert isinstance(cfg, GGUFConfig)
+    assert cfg.format == "q_k"
+    assert cfg.bits == 6
+    assert cfg.runtime_bits == "q6_k"
+    assert cfg.runtime_bits.bits == 6
+    assert cfg.runtime_bits.version == "q"
+    assert cfg.runtime_bits.variant == "k"

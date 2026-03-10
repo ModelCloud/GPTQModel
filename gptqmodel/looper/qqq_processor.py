@@ -245,7 +245,7 @@ class QQQProcessor(LoopProcessor):
             create_quant_module(
                 name=module.full_name,
                 linear_cls=QQQQuantLinear,
-                bits=self.qcfg.bits,
+                bits=self.qcfg.runtime_bits,
                 desc_act=self.qcfg.desc_act,
                 dynamic=self.qcfg.dynamic,
                 group_size=self.qcfg.group_size,
@@ -255,7 +255,7 @@ class QQQProcessor(LoopProcessor):
                 device=self.qcfg.device,
                 lm_head_name=model.lm_head,
                 pack_dtype=self.qcfg.pack_dtype,
-                format=self.qcfg.format,
+                format=self.qcfg.checkpoint_format,
                 register_buffers=False,
             )
 

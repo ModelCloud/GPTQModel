@@ -254,10 +254,10 @@ def make_quant(
     from_quantized: bool = False,
 ) -> Type[BaseQuantLinear]:
 
-    bits = qcfg.bits
+    bits = qcfg.runtime_bits
     group_size =qcfg.group_size
     extension = qcfg.adapter
-    format = qcfg.format
+    format = qcfg.checkpoint_format
     desc_act = qcfg.desc_act
     sym = qcfg.sym
     dynamic = qcfg.dynamic
@@ -829,7 +829,7 @@ def pack_module(
         if (
             quantize_config is not None
             and quantize_config.export_quant_method() == METHOD.GPTQ
-            and quantize_config.format == FORMAT.GPTQ
+            and quantize_config.checkpoint_format == FORMAT.GPTQ
             and getattr(quant_linear_cls, "REQUIRES_FORMAT_V2", False)
         ):
             with log_time_block(

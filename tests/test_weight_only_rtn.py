@@ -20,6 +20,7 @@ from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.quantization.config import (
     FORMAT,
+    GGUFConfig,
     GGUFQuantizeConfig,
     GGUFBits,
     METHOD,
@@ -396,10 +397,12 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
 ):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     device_type = device.type
+    public_format = GGUFBits.from_string(bits).to_public_format()
 
     native = _TinyModel().to(device=device, dtype=torch.float16).eval()
-    qcfg = GGUFQuantizeConfig(
-        bits=bits,
+    qcfg = GGUFConfig(
+        bits=bit_width,
+        format=public_format,
         smoother=None,
         offload_to_disk=False,
         device=device_type,
@@ -416,7 +419,9 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
 
     assert "weight_only_gguf" in result
     assert model.quantized is True
-    assert model.quantize_config.format == FORMAT.GGUF
+    assert model.quantize_config.checkpoint_format == FORMAT.GGUF
+    assert model.quantize_config.format == public_format
+    assert model.quantize_config.bits == bit_width
     assert model.quantize_config.export_quant_method() == METHOD.GPTQ
     assert getattr(model.qlinear_kernel, "__name__", "") == "GGUFTorchQuantLinear"
 
@@ -441,8 +446,9 @@ def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):
 
     native = _TinyModel().to(device=device, dtype=torch.float16).eval()
 
-    qcfg = GGUFQuantizeConfig(
-        bits="q4_k_m",
+    qcfg = GGUFConfig(
+        bits=4,
+        format="q_k_m",
         smoother=SmoothMAD(k=2.25),
         offload_to_disk=False,
         device=device_type,

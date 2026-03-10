@@ -67,7 +67,7 @@ class WeightOnlyRTNProcessor(LoopProcessor):
 
     @staticmethod
     def _uses_direct_gguf(qcfg: RTNQuantizeConfig | GGUFQuantizeConfig) -> bool:
-        return qcfg.format == FORMAT.GGUF
+        return qcfg.checkpoint_format == FORMAT.GGUF
 
     def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
         with self.lock:
@@ -174,7 +174,7 @@ class WeightOnlyRTNProcessor(LoopProcessor):
                 create_quant_module(
                     name=module.full_name,
                     linear_cls=model.qlinear_kernel,
-                    bits=active_qcfg.bits,
+                    bits=active_qcfg.runtime_bits,
                     desc_act=active_qcfg.desc_act,
                     dynamic=active_qcfg.dynamic,
                     group_size=active_qcfg.group_size,
@@ -184,7 +184,7 @@ class WeightOnlyRTNProcessor(LoopProcessor):
                     device=active_qcfg.device,
                     lm_head_name=model.lm_head,
                     pack_dtype=active_qcfg.pack_dtype,
-                    format=active_qcfg.format,
+                    format=active_qcfg.checkpoint_format,
                     register_buffers=False,
                 )
         if timer is not None and create_start is not None:
@@ -251,7 +251,7 @@ class WeightOnlyRTNProcessor(LoopProcessor):
         super().finalize(model=model, **kwargs)
 
     def name(self) -> str:
-        if self.qcfg.format == FORMAT.GGUF:
+        if self.qcfg.checkpoint_format == FORMAT.GGUF:
             return "weight_only_gguf"
         return "weight_only_rtn"
 

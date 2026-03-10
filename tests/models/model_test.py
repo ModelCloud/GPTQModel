@@ -64,6 +64,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import (  # noqa: E402
     FailSafe,
+    GGUFConfig,
     GGUFQuantizeConfig,
     GPTAQConfig,
     HessianConfig,
@@ -849,7 +850,7 @@ class ModelTest(unittest.TestCase):
                 raise TypeError(f"`WEIGHT_ONLY` must be a WeightOnlyConfig, got {type(self.WEIGHT_ONLY).__name__}")
 
             if self.FORMAT is FORMAT.GGUF or self.WEIGHT_ONLY.method.value == "gguf":
-                return GGUFQuantizeConfig(
+                return GGUFConfig(
                     bits=self.BITS,
                     adapter=self.EORA,
                     pack_impl="cpu",

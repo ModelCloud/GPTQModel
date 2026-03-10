@@ -398,7 +398,7 @@ def ModelLoader(cls):
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
         export_quant_method = qcfg.export_quant_method()
 
-        if export_quant_method == METHOD.AWQ and qcfg.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
+        if export_quant_method == METHOD.AWQ and qcfg.checkpoint_format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
             # GEMV_FAST and LLM_AWQ only supports torch.float16
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
@@ -418,11 +418,11 @@ def ModelLoader(cls):
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if backend == BACKEND.VLLM:
-                if qcfg.format != FORMAT.GPTQ and qcfg.format != FORMAT.GEMM:
-                    raise ValueError(f"{backend} backend only supports FORMAT.GPTQ or FORMAT.GEMM: actual = {qcfg.format}")
+                if qcfg.checkpoint_format != FORMAT.GPTQ and qcfg.checkpoint_format != FORMAT.GEMM:
+                    raise ValueError(f"{backend} backend only supports FORMAT.GPTQ or FORMAT.GEMM: actual = {qcfg.checkpoint_format}")
             elif backend == BACKEND.SGLANG:
-                if qcfg.format != FORMAT.GPTQ:
-                    raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {qcfg.format}")
+                if qcfg.checkpoint_format != FORMAT.GPTQ:
+                    raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {qcfg.checkpoint_format}")
 
             if backend == BACKEND.VLLM:
                 from ..utils.vllm import load_model_by_vllm, vllm_generate
@@ -460,7 +460,7 @@ def ModelLoader(cls):
                 model_local_path=model_local_path,
             )
 
-        if qcfg.format == FORMAT.MARLIN:
+        if qcfg.checkpoint_format == FORMAT.MARLIN:
             # format marlin requires marlin kernel
             if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and backend != BACKEND.AUTO:
                 raise TypeError(f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.MARLIN: actual = `{backend}`.")
@@ -475,7 +475,7 @@ def ModelLoader(cls):
         #             "Hint: Model is compatible with the Marlin kernel. Marlin is optimized for batched inference on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
         #         )
 
-        if qcfg.format == FORMAT.BITBLAS:
+        if qcfg.checkpoint_format == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
             if backend != BACKEND.BITBLAS and backend != BACKEND.AUTO:
                 raise TypeError(f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.BITBLAS: actual = `{backend}`.")
@@ -509,7 +509,7 @@ def ModelLoader(cls):
                 "Loading of .bin files are not allowed due to safety. Please convert your model to safetensor or pytorch format."
             )
 
-        qcfg.runtime_format = qcfg.format
+        qcfg.runtime_format = qcfg.checkpoint_format
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
 
@@ -791,7 +791,7 @@ def ModelLoader(cls):
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if qcfg.format in [FORMAT.GPTQ, FORMAT.GEMM]:
+        if qcfg.checkpoint_format in [FORMAT.GPTQ, FORMAT.GEMM]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
@@ -804,7 +804,7 @@ def ModelLoader(cls):
 
             load_checkpoint_in_model = False
 
-            if qcfg.format == FORMAT.GPTQ:
+            if qcfg.checkpoint_format == FORMAT.GPTQ:
                 # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
                 if not qcfg.sym and not qcfg.is_quantized_by_gptaq():
                     raise ValueError(
@@ -831,7 +831,7 @@ def ModelLoader(cls):
                 )
 
         if backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and (
-                preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
+                preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.checkpoint_format == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Marlin is currently not supported."
@@ -880,13 +880,13 @@ def ModelLoader(cls):
         model = simple_dispatch_model(model, device_map)
 
         qlinear_kernel = select_quant_linear(
-            bits=qcfg.bits,
+            bits=qcfg.runtime_bits,
             dynamic=qcfg.dynamic,
             group_size=qcfg.group_size,
             desc_act=qcfg.desc_act,
             sym=qcfg.sym,
             backend=backend,
-            format=qcfg.format,
+            format=qcfg.checkpoint_format,
             quant_method=export_quant_method,
             device=device,
             pack_dtype=qcfg.pack_dtype,
