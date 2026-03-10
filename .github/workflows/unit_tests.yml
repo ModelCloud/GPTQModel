@@ -669,8 +669,9 @@ jobs:
           trap cleanup EXIT
           
           log_dir=/opt/dist/${{ github.run_id }}/logs
-          [ -d $log_dir ] || mkdir -p $log_dir
           log_file=$log_dir/${{ matrix.test_script }}.log
+          
+          mkdir -p "$(dirname "$log_file")"
           
           start_time=$(date +%s)
           pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee $log_file
