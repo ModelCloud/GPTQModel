@@ -418,7 +418,7 @@ def create_quant_module(
         pack_dtype=tmp_pack_dtype,
         in_features=in_features,
         out_features=out_features,
-        device=device,
+        device=DEVICE(device) if isinstance(device, str) else device,
         adapter=adapter, # TODO FIX ME..need to pass Eora if loaded
     )
     if err is not None:

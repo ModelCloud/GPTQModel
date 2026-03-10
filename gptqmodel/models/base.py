@@ -683,7 +683,7 @@ class BaseQModel(nn.Module):
             elif self.quantize_config.quant_method == METHOD.QQQ:
                 preferred_backend = BACKEND.QQQ
             elif self.quantize_config.quant_method == METHOD.GGUF:
-                preferred_backend = BACKEND.GGUF_TORCH
+                preferred_backend = BACKEND.AUTO
             else:
                 preferred_backend = BACKEND.TORCH
 
@@ -728,7 +728,7 @@ class BaseQModel(nn.Module):
                 sym=self.quantize_config.sym,
                 pack=True,
                 dynamic=self.quantize_config.dynamic,
-                device=self.quantize_config.device,
+                device=DEVICE(self.quantize_config.device),
                 pack_dtype=self.quantize_config.pack_dtype,
                 multi_select=False,
                 backend=preferred_backend,

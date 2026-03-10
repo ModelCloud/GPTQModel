@@ -426,7 +426,8 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
     assert model.quantize_config.bits == bit_width
     assert model.quantize_config.quant_method == METHOD.GGUF
     assert model.quantize_config.export_quant_method() == METHOD.GGUF
-    assert getattr(model.qlinear_kernel, "__name__", "") == "GGUFTorchQuantLinear"
+    expected_kernel = GGUFTritonKernel if device_type == "cuda" else GGUFTorchQuantLinear
+    assert model.qlinear_kernel is expected_kernel
 
     qmodules = find_modules(model.model, [model.qlinear_kernel])
     assert len(qmodules) == 4

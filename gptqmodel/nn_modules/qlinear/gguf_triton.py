@@ -601,8 +601,7 @@ def fused_q6_k_matmul(
 class GGUFTritonKernel(GGUFTorchQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TRITON]
     SUPPORTS_METHODS = [METHOD.GGUF]
-    # Priority 0 keeps explicit backend support without changing AUTO ordering.
-    SUPPORTS_FORMATS = {FORMAT.GGUF: 0}
+    SUPPORTS_FORMATS = {FORMAT.GGUF: 45}
     SUPPORTS_BITS = [4, 5, 6]
     SUPPORTS_GROUP_SIZE = [-1]
     SUPPORTS_DESC_ACT = [False]

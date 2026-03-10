@@ -174,7 +174,7 @@ def test_cpu_auto_select_prioritizes_cpp_kernel_for_gguf(monkeypatch):
     assert GGUFTorchQuantLinear in candidates
 
 
-def test_cuda_auto_select_prioritizes_cuda_kernel_for_gguf(monkeypatch):
+def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkeypatch):
     _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
 
     candidates = select_quant_linear(
@@ -190,9 +190,9 @@ def test_cuda_auto_select_prioritizes_cuda_kernel_for_gguf(monkeypatch):
         multi_select=True,
     )
 
-    assert candidates[0] is GGUFCudaKernel
-    assert GGUFTorchQuantLinear in candidates
-    assert GGUFTritonKernel not in candidates
+    assert candidates[0] is GGUFTritonKernel
+    assert candidates[1] is GGUFCudaKernel
+    assert candidates[2] is GGUFTorchQuantLinear
 
 
 def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):
@@ -214,6 +214,28 @@ def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):
 
     assert GGUFCppKernel not in candidates
     assert candidates[0] is GGUFTorchQuantLinear
+
+
+def test_cuda_pack_auto_select_prioritizes_triton_for_gguf(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack=True,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert candidates[0] is GGUFTritonKernel
+    assert GGUFCudaKernel not in candidates
+    assert GGUFTorchQuantLinear in candidates
 
 
 def test_explicit_gguf_cpu_backend_selects_cpp_kernel(monkeypatch):
