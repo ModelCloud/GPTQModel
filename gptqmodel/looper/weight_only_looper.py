@@ -19,7 +19,7 @@ from typing import Dict, Optional
 import torch
 from defuser.modeling.replace_modules import materialize_model
 
-from ..looper.weight_only_rtn_processor import WeightOnlyRTNProcessor
+from ..looper.weight_only_processor import WeightOnlyProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
@@ -36,7 +36,7 @@ log = setup_logger()
 class WeightOnlyLooper:
     """Run the simplified per-layer lifecycle for weight-only quantization."""
 
-    def __init__(self, model: BaseQModel, processor: WeightOnlyRTNProcessor):
+    def __init__(self, model: BaseQModel, processor: WeightOnlyProcessor):
         self.gptq_model = model
         self.processor = processor
 

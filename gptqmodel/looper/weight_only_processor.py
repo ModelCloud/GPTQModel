@@ -41,8 +41,8 @@ from ..utils.module_locks import parent_module_lock
 log = setup_logger()
 
 
-class WeightOnlyRTNProcessor(LoopProcessor):
-    """Process RTN modules without entering activation-based quantization flows."""
+class WeightOnlyProcessor(LoopProcessor):
+    """Process weight-only modules without entering activation-based quantization flows."""
 
     _TP_TARGETS = (2, 4, 8)
 
@@ -255,5 +255,4 @@ class WeightOnlyRTNProcessor(LoopProcessor):
             return "weight_only_gguf"
         return "weight_only_rtn"
 
-
-__all__ = ["WeightOnlyRTNProcessor"]
+__all__ = ["WeightOnlyProcessor"]

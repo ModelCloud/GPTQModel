@@ -905,7 +905,7 @@ class BaseQModel(nn.Module):
 
         from ..adapter.adapter import Lora
         from ..looper.weight_only_looper import WeightOnlyLooper
-        from ..looper.weight_only_rtn_processor import WeightOnlyRTNProcessor
+        from ..looper.weight_only_processor import WeightOnlyProcessor
 
         if calibration is not None:
             log.info("Weight-only quantization selected; ignoring provided calibration dataset.")
@@ -920,7 +920,7 @@ class BaseQModel(nn.Module):
                 "Weight-only quantization does not support GPTAQ/native activation capture."
             )
 
-        processor = WeightOnlyRTNProcessor(
+        processor = WeightOnlyProcessor(
             tokenizer=self.tokenizer,
             qcfg=self.quantize_config,
         )
