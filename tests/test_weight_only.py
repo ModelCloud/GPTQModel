@@ -441,6 +441,11 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
         assert qmodule.bits.variant == variant
         assert qmodule.bits.quality == quality
         assert qmodule.gguf_tensor_qtype == tensor_qtype
+        expected_padded_in_features = (
+            (qmodule.in_features + qmodule.gguf_block_size - 1) // qmodule.gguf_block_size
+        ) * qmodule.gguf_block_size
+        assert qmodule.padded_in_features == expected_padded_in_features
+        assert qmodule.qweight.shape == (qmodule.out_features, qmodule._bytes_per_row())
 
 
 def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):
@@ -475,6 +480,45 @@ def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):
     assert model.quantized is True
     qmodules = find_modules(model.model, [model.qlinear_kernel])
     assert len(qmodules) == 4
+
+
+@pytest.mark.parametrize("bits", ["q4_k_m", "q5_k_m", "q6_k"])
+def test_gguf_pack_original_auto_pads_non_aligned_k_in_features(bits: str):
+    torch.manual_seed(77)
+
+    in_features = 130
+    out_features = 48
+    linear = nn.Linear(in_features, out_features, bias=True, dtype=torch.float16).cpu().eval()
+
+    with torch.no_grad():
+        linear.weight.normal_(mean=0.0, std=0.02)
+        linear.bias.normal_(mean=0.0, std=0.01)
+
+    module = GGUFTorchQuantLinear(
+        bits=bits,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        register_buffers=True,
+    ).cpu().eval()
+    module.pack_original(linear, scales=None, zeros=None)
+
+    assert module.in_features == in_features
+    assert module.gguf_block_size == 256
+    assert module.padded_in_features == 256
+    assert module.qweight.shape == (out_features, module._bytes_per_row())
+
+    x = torch.randn(7, in_features, dtype=torch.float32)
+    with torch.inference_mode():
+        native_out = F.linear(x, linear.weight.detach().to(torch.float32), linear.bias.detach().to(torch.float32))
+        gguf_out = module(x)
+
+    stats = _error_stats(native_out, gguf_out.to(torch.float32))
+    assert stats["mae"] < 0.02
+    assert stats["max"] < 0.08
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

@@ -505,8 +505,11 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         if register_buffers:
             self._allocate_buffers(bias=bias)
 
+    def _bytes_per_row(self) -> int:
+        return (self.padded_in_features // self.gguf_block_size) * self.gguf_type_size
+
     def _allocate_buffers(self, *, bias: bool) -> None:
-        bytes_per_row = (self.padded_in_features // self.gguf_block_size) * self.gguf_type_size
+        bytes_per_row = self._bytes_per_row()
         qweight = torch.zeros((self.out_features, bytes_per_row), dtype=torch.uint8)
         if "qweight" in self._buffers:
             self.qweight = qweight
@@ -606,6 +609,12 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         del scales, zeros, g_idx
 
         qweight = self._pack_weight_tensor(linear, smooth=smooth)
+        expected_shape = (self.out_features, self._bytes_per_row())
+        if tuple(qweight.shape) != expected_shape:
+            raise RuntimeError(
+                f"{self.__class__.__name__} produced an invalid GGUF packed shape {tuple(qweight.shape)}; "
+                f"expected {expected_shape} for padded_in_features={self.padded_in_features}."
+            )
         if "qweight" in self._buffers:
             self.qweight = qweight
         else:

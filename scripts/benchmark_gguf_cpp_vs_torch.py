@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
+from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel, triton_available as gguf_triton_available
 
 
 @dataclass(frozen=True)
@@ -78,7 +79,15 @@ def _bench(fn: Callable[[], torch.Tensor], *, device: str, warmup: int, trials: 
     return samples, last
 
 
-def _build_modules(case: BenchCase, *, dtype: torch.dtype) -> tuple[GGUFTorchQuantLinear, GGUFCppKernel, GGUFCudaKernel]:
+def _supports_triton(case: BenchCase) -> bool:
+    return gguf_triton_available() and case.bits in {"q4_k_s", "q4_k_m", "q5_k_s", "q5_k_m", "q6_k"}
+
+
+def _build_modules(
+    case: BenchCase,
+    *,
+    dtype: torch.dtype,
+) -> tuple[GGUFTorchQuantLinear, GGUFCppKernel, GGUFCudaKernel, GGUFTritonKernel | None]:
     torch.manual_seed(0)
     linear = nn.Linear(case.in_features, case.out_features, bias=case.bias, dtype=torch.float16).cpu().eval()
     with torch.no_grad():
@@ -121,7 +130,22 @@ def _build_modules(case: BenchCase, *, dtype: torch.dtype) -> tuple[GGUFTorchQua
         register_buffers=True,
     ).eval()
     cuda_kernel.load_state_dict(torch_kernel.state_dict(), strict=True)
-    return torch_kernel, cpu_kernel, cuda_kernel
+
+    triton_kernel = None
+    if _supports_triton(case):
+        triton_kernel = GGUFTritonKernel(
+            bits=case.bits,
+            group_size=-1,
+            sym=True,
+            desc_act=False,
+            in_features=case.in_features,
+            out_features=case.out_features,
+            bias=case.bias,
+            register_buffers=True,
+        ).eval()
+        triton_kernel.load_state_dict(torch_kernel.state_dict(), strict=True)
+
+    return torch_kernel, cpu_kernel, cuda_kernel, triton_kernel
 
 
 def _mean(values: list[float]) -> float:
@@ -129,7 +153,7 @@ def _mean(values: list[float]) -> float:
 
 
 def _run_cpu(case: BenchCase, *, dtype: torch.dtype, warmup: int, trials: int) -> tuple[list[list[str]], list[str]]:
-    torch_kernel, cpu_kernel, _ = _build_modules(case, dtype=dtype)
+    torch_kernel, cpu_kernel, _, _ = _build_modules(case, dtype=dtype)
     x = torch.randn(case.rows, case.in_features, dtype=dtype, device="cpu")
 
     torch_trials, torch_out = _bench(lambda: torch_kernel(x), device="cpu", warmup=warmup, trials=trials)
@@ -148,27 +172,45 @@ def _run_cpu(case: BenchCase, *, dtype: torch.dtype, warmup: int, trials: int) -
         f"{case.out_features}x{case.in_features}",
         f"{_mean(torch_trials):.3f}",
         f"{_mean(cpu_trials):.3f}",
+        "n/a",
         f"{(_mean(torch_trials) / _mean(cpu_trials)):.2f}x",
+        "n/a",
         f"{diff.mean().item():.6f}",
         f"{diff.max().item():.6f}",
+        "n/a",
+        "n/a",
     ]
     return trial_rows, summary
 
 
 def _run_cuda(case: BenchCase, *, dtype: torch.dtype, warmup: int, trials: int) -> tuple[list[list[str]], list[str]]:
-    torch_kernel, _, cuda_kernel = _build_modules(case, dtype=dtype)
+    torch_kernel, _, cuda_kernel, triton_kernel = _build_modules(case, dtype=dtype)
     torch_kernel = torch_kernel.to("cuda")
     cuda_kernel = cuda_kernel.to("cuda")
+    if triton_kernel is not None:
+        triton_kernel = triton_kernel.to("cuda")
     x = torch.randn(case.rows, case.in_features, dtype=dtype, device="cuda")
 
     torch_trials, torch_out = _bench(lambda: torch_kernel(x), device="cuda", warmup=warmup, trials=trials)
     cuda_trials, cuda_out = _bench(lambda: cuda_kernel(x), device="cuda", warmup=warmup, trials=trials)
+    triton_trials = None
+    triton_out = None
+    if triton_kernel is not None:
+        triton_trials, triton_out = _bench(lambda: triton_kernel(x), device="cuda", warmup=warmup, trials=trials)
 
     diff = (torch_out.float() - cuda_out.float()).abs()
+    triton_diff = None if triton_out is None else (torch_out.float() - triton_out.float()).abs()
     trial_rows = []
     for idx, (torch_ms, cpp_ms) in enumerate(zip(torch_trials, cuda_trials), start=1):
-        speedup = torch_ms / cpp_ms if cpp_ms > 0 else float("inf")
-        trial_rows.append([str(idx), f"{torch_ms:.3f}", f"{cpp_ms:.3f}", f"{speedup:.2f}x"])
+        cpp_speedup = torch_ms / cpp_ms if cpp_ms > 0 else float("inf")
+        if triton_trials is None:
+            triton_ms = "n/a"
+            triton_speedup = "n/a"
+        else:
+            trial_triton_ms = triton_trials[idx - 1]
+            triton_ms = f"{trial_triton_ms:.3f}"
+            triton_speedup = f"{(torch_ms / trial_triton_ms):.2f}x" if trial_triton_ms > 0 else "inf"
+        trial_rows.append([str(idx), f"{torch_ms:.3f}", f"{cpp_ms:.3f}", triton_ms, f"{cpp_speedup:.2f}x", triton_speedup])
 
     summary = [
         case.name,
@@ -177,9 +219,13 @@ def _run_cuda(case: BenchCase, *, dtype: torch.dtype, warmup: int, trials: int) 
         f"{case.out_features}x{case.in_features}",
         f"{_mean(torch_trials):.3f}",
         f"{_mean(cuda_trials):.3f}",
+        "n/a" if triton_trials is None else f"{_mean(triton_trials):.3f}",
         f"{(_mean(torch_trials) / _mean(cuda_trials)):.2f}x",
+        "n/a" if triton_trials is None else f"{(_mean(torch_trials) / _mean(triton_trials)):.2f}x",
         f"{diff.mean().item():.6f}",
         f"{diff.max().item():.6f}",
+        "n/a" if triton_diff is None else f"{triton_diff.mean().item():.6f}",
+        "n/a" if triton_diff is None else f"{triton_diff.max().item():.6f}",
     ]
     return trial_rows, summary
 
@@ -240,9 +286,13 @@ def main() -> None:
                     "outxin",
                     "gguf_torch_ms",
                     "gguf_cpp_cpu_ms",
+                    "gguf_triton_ms",
                     "speedup",
+                    "triton_speedup",
                     "mae",
                     "max_abs",
+                    "triton_mae",
+                    "triton_max_abs",
                 ],
                 cpu_summary,
             )
@@ -256,7 +306,12 @@ def main() -> None:
         for case in cases:
             trial_rows, summary = _run_cuda(case, dtype=cuda_dtype, warmup=args.warmup, trials=args.trials)
             print(f"\nCASE {case.name} bits={case.bits} rows={case.rows}")
-            print(_ascii_table(["trial", "gguf_torch_ms", "gguf_cpp_cuda_ms", "speedup"], trial_rows))
+            print(
+                _ascii_table(
+                    ["trial", "gguf_torch_ms", "gguf_cpp_cuda_ms", "gguf_triton_ms", "cpp_speedup", "triton_speedup"],
+                    trial_rows,
+                )
+            )
             cuda_summary.append(summary)
         print("\nCUDA summary")
         print(
@@ -268,9 +323,13 @@ def main() -> None:
                     "outxin",
                     "gguf_torch_ms",
                     "gguf_cpp_cuda_ms",
-                    "speedup",
-                    "mae",
-                    "max_abs",
+                    "gguf_triton_ms",
+                    "cpp_speedup",
+                    "triton_speedup",
+                    "cpp_mae",
+                    "cpp_max_abs",
+                    "triton_mae",
+                    "triton_max_abs",
                 ],
                 cuda_summary,
             )
