@@ -438,10 +438,32 @@ class BaseQuantLinear(nn.Module):
         return super().train(mode)
 
 class PackableQuantLinear(BaseQuantLinear):
-    def post_init(self, **kwargs):
+    def __init__(self, *args, enable_wf_unsqueeze: bool = False, **kwargs):
+        self.enable_wf_unsqueeze = enable_wf_unsqueeze
+        super().__init__(*args, **kwargs)
+
+    def _wf_device(self):
+        if hasattr(self, "g_idx") and self.g_idx is not None:
+            return self.g_idx.device
+        if hasattr(self, "qweight") and self.qweight is not None:
+            return self.qweight.device
+        raise RuntimeError(f"{self.__class__.__name__} cannot initialize wf buffers without qweight or g_idx.")
+
+    def _init_wf_unsqueeze_buffers(self):
+        if not self.enable_wf_unsqueeze:
+            return
+
+        if (
+            getattr(self, "wf_unsqueeze_zero", None) is not None
+            and getattr(self, "wf_unsqueeze_neg_one", None) is not None
+        ):
+            return
+
+        device = self._wf_device()
+
         if self.bits in [2, 4, 8]:
             wf = t.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=t.int32).unsqueeze(0).to(
-                device=self.g_idx.device)
+                device=device)
         elif self.bits == 3:
             wf = t.tensor(
                 [
@@ -450,11 +472,25 @@ class PackableQuantLinear(BaseQuantLinear):
                     [0, 2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 0],
                 ],
                 dtype=t.int32,
-            ).reshape(1, 3, 12).to(device=self.g_idx.device)
+            ).reshape(1, 3, 12).to(device=device)
+        else:
+            raise NotImplementedError(f"{self.__class__.__name__} does not support wf unpack buffers for {self.bits}-bit weights.")
 
-        self.register_buffer("wf_unsqueeze_zero", wf.unsqueeze(0).to(device=self.g_idx.device), persistent=False)
-        self.register_buffer("wf_unsqueeze_neg_one", wf.unsqueeze(-1).to(device=self.g_idx.device), persistent=False)
+        wf_zero = wf.unsqueeze(0).to(device=device)
+        wf_neg_one = wf.unsqueeze(-1).to(device=device)
 
+        if "wf_unsqueeze_zero" not in self._buffers:
+            self.register_buffer("wf_unsqueeze_zero", wf_zero, persistent=False)
+        else:
+            self.wf_unsqueeze_zero = wf_zero
+
+        if "wf_unsqueeze_neg_one" not in self._buffers:
+            self.register_buffer("wf_unsqueeze_neg_one", wf_neg_one, persistent=False)
+        else:
+            self.wf_unsqueeze_neg_one = wf_neg_one
+
+    def post_init(self, **kwargs):
+        self._init_wf_unsqueeze_buffers()
         super().post_init(**kwargs)
 
     def list_buffers(self):
@@ -466,6 +502,15 @@ class PackableQuantLinear(BaseQuantLinear):
         return buf
 
     def dequantize_weight(self, num_itr: int = 1):
+        self._init_wf_unsqueeze_buffers()
+        wf_zero = getattr(self, "wf_unsqueeze_zero", None)
+        wf_neg_one = getattr(self, "wf_unsqueeze_neg_one", None)
+        if wf_zero is None or wf_neg_one is None:
+            raise RuntimeError(
+                f"{self.__class__.__name__} requires wf unpack buffers for dequantization. "
+                "Enable `enable_wf_unsqueeze` and call post_init()."
+            )
+
         if self.bits in [2, 4, 8]:
             zeros = t.bitwise_right_shift(
                 t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),

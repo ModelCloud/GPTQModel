@@ -13,9 +13,9 @@ from torch import Tensor
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
-from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8QuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_fused import TorchFusedQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8QuantLinear
 from gptqmodel.utils.model import find_modules
 
 

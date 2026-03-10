@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from logbar import LogBar
 
+
 # Keep this CPU test isolated from optional BitBLAS/TVM import side effects.
 os.environ.setdefault("GPTQMODEL_DISABLE_BITBLAS", "1")
 

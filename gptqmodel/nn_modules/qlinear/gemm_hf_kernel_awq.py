@@ -8,7 +8,6 @@ import math
 import torch
 
 from ...adapter.adapter import Adapter
-from ...nn_modules.qlinear import BaseQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import (
     dequantize_gemm,
@@ -77,6 +76,7 @@ class HFKernelAwqLinear(HFKernelLinear):
             adapter=adapter,
             # Skip base buffer init, we need to manually init buffers for awq
             register_buffers=False,
+            enable_wf_unsqueeze=kwargs.pop("enable_wf_unsqueeze", False),
             **kwargs,
         )
 
@@ -108,28 +108,7 @@ class HFKernelAwqLinear(HFKernelLinear):
                 self.bias = None
 
     def post_init(self):
-        # AWQ has no g_idx — create wf buffers using qweight.device instead
-        device = self.qweight.device
-        if self.bits in [2, 4, 8]:
-            wf = torch.tensor(list(range(0, self.pack_dtype_bits, self.bits)), dtype=torch.int32).unsqueeze(0).to(device=device)
-        elif self.bits == 3:
-            wf = torch.tensor(
-                [
-                    [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 0],
-                    [0, 1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31],
-                    [0, 2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 0],
-                ],
-                dtype=torch.int32,
-            ).reshape(1, 3, 12).to(device=device)
-
-        self.register_buffer("wf_unsqueeze_zero", wf.unsqueeze(0).to(device=device), persistent=False)
-        self.register_buffer("wf_unsqueeze_neg_one", wf.unsqueeze(-1).to(device=device), persistent=False)
-
-        # Lora: Keep adapter post-init behavior aligned with BaseQuantLinear.
-        BaseQuantLinear.post_init(self)
-        self.linear_mode = None
-        self.dequant_dtype = torch.int8
-        self.optimize()
+        super().post_init()
 
     def transform_cpu(self):
         # Unpack AWQ weights directly to integer form
