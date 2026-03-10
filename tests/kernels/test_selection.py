@@ -11,7 +11,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
-from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel
+from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import AUTO_BACKEND_KERNEL_MAPPING, select_quant_linear
@@ -71,8 +71,8 @@ def _force_auto_candidates_valid(monkeypatch, method, fmt):
     for cls in set(AUTO_BACKEND_KERNEL_MAPPING[method][fmt].values()):
         monkeypatch.setattr(
             cls,
-            "validate",
-            classmethod(lambda qlinear_cls, **kwargs: (True, None)),
+            "cached_validate_once",
+            classmethod(lambda qlinear_cls: (True, None)),
         )
 
 
@@ -173,6 +173,26 @@ def test_cpu_auto_select_prioritizes_cpp_kernel_for_gguf(monkeypatch):
     assert GGUFTorchQuantLinear in candidates
 
 
+def test_cuda_auto_select_prioritizes_cuda_kernel_for_gguf(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert candidates[0] is GGUFCudaKernel
+    assert GGUFTorchQuantLinear in candidates
+
+
 def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):
     _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
 
@@ -192,6 +212,48 @@ def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):
 
     assert GGUFCppKernel not in candidates
     assert candidates[0] is GGUFTorchQuantLinear
+
+
+def test_explicit_gguf_cpu_backend_selects_cpp_kernel(monkeypatch):
+    monkeypatch.setattr(
+        GGUFCppKernel,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.GGUF_CPP_CPU,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is GGUFCppKernel
+
+
+def test_explicit_gguf_cuda_backend_selects_cuda_kernel(monkeypatch):
+    monkeypatch.setattr(
+        GGUFCudaKernel,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.GGUF_CPP_CUDA,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is GGUFCudaKernel
 
 
 def test_explicit_gguf_torch_backend_selects_torch_kernel():
