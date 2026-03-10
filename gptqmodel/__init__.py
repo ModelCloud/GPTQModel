@@ -53,6 +53,7 @@ from .models.auto import ASCII_LOGO
 from .quantization import (
     AWQQuantizeConfig,
     BaseQuantizeConfig,
+    GGUFQuantizeConfig,
     GPTAQConfig,
     GPTQQuantizeConfig,
     QuantizeConfig,

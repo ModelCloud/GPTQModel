@@ -25,7 +25,13 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
-from ..quantization.config import BaseQuantizeConfig, FORMAT, RTNQuantizeConfig, clone_rtn_config_for_module
+from ..quantization.config import (
+    BaseQuantizeConfig,
+    FORMAT,
+    GGUFQuantizeConfig,
+    RTNQuantizeConfig,
+    clone_weight_only_config_for_module,
+)
 from ..quantization.rtn import RTN, get_number_of_rows_and_cols
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, pack_module
@@ -43,7 +49,7 @@ class WeightOnlyRTNProcessor(LoopProcessor):
     def __init__(
         self,
         tokenizer,
-        qcfg: RTNQuantizeConfig,
+        qcfg: RTNQuantizeConfig | GGUFQuantizeConfig,
     ):
         super().__init__(
             tokenizer=tokenizer,
@@ -60,7 +66,7 @@ class WeightOnlyRTNProcessor(LoopProcessor):
         self.lock = threading.Lock()
 
     @staticmethod
-    def _uses_direct_gguf(qcfg: RTNQuantizeConfig) -> bool:
+    def _uses_direct_gguf(qcfg: RTNQuantizeConfig | GGUFQuantizeConfig) -> bool:
         return qcfg.format == FORMAT.GGUF
 
     def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
@@ -87,8 +93,8 @@ class WeightOnlyRTNProcessor(LoopProcessor):
             "original_columns": columns,
         }
 
-    def quantize_module(self, module: NamedModule) -> Optional[RTNQuantizeConfig]:
-        qcfg_clone = clone_rtn_config_for_module(self.qcfg, module.full_name)
+    def quantize_module(self, module: NamedModule) -> Optional[RTNQuantizeConfig | GGUFQuantizeConfig]:
+        qcfg_clone = clone_weight_only_config_for_module(self.qcfg, module.full_name)
         if qcfg_clone is None:
             return None
 
@@ -141,7 +147,7 @@ class WeightOnlyRTNProcessor(LoopProcessor):
         module: NamedModule,
         model: BaseQModel,
         *,
-        qcfg: Optional[RTNQuantizeConfig] = None,
+        qcfg: Optional[RTNQuantizeConfig | GGUFQuantizeConfig] = None,
         **kwargs,
     ):
         active_qcfg = qcfg or self.qcfg

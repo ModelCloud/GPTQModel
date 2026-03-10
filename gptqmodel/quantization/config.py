@@ -116,6 +116,10 @@ class WeightOnlyMethod(str, Enum):
     NVFP4 = "nvfp4"
 
 
+class PreFilterCode(str, Enum):
+    SMOOTHER = "smoother"
+
+
 _GGUF_BITS_ALIAS_INFO = {
     "q4_0": {"bits": 4, "version": "q", "variant": "0", "quality": None},
     "q8_0": {"bits": 8, "version": "q", "variant": "0", "quality": None},
@@ -132,6 +136,17 @@ _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH = {
     5: "q5_k_m",
     6: "q6_k",
     8: "q8_0",
+}
+_GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS = {
+    "q4_0": 4.5,
+    "q8_0": 8.5,
+    "q4_k": 4.5,
+    "q4_k_s": 4.5,
+    "q4_k_m": 4.5,
+    "q5_k": 5.5,
+    "q5_k_s": 5.0,
+    "q5_k_m": 5.5,
+    "q6_k": 6.0,
 }
 
 
@@ -359,6 +374,15 @@ def _normalize_quant_bits(bits: Union[int, str, GGUFBits], format_value: Optiona
     return normalized
 
 
+def _looks_like_gguf_bits(bits: Any) -> bool:
+    if isinstance(bits, GGUFBits):
+        return True
+    if not isinstance(bits, str):
+        return False
+    normalized = bits.strip().lower().replace("-", "_")
+    return normalized in _GGUF_BITS_ALIAS_INFO
+
+
 def quant_bits_width(bits: Union[int, str, GGUFBits]) -> int:
     normalized = _normalize_quant_bits(bits)
     return normalized.bits if isinstance(normalized, GGUFBits) else normalized
@@ -576,6 +600,28 @@ class WeightOnlyConfig:
 
 
 @dataclass
+class BasePreFilterConfig:
+    code: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"code": self.code}
+
+
+@dataclass
+class SmootherConfig(BasePreFilterConfig):
+    smooth: Optional[SmoothMethod] = None
+    code: str = field(default=PreFilterCode.SMOOTHER.value, init=False)
+
+    def __post_init__(self):
+        self.smooth = _parse_smooth_method(self.smooth)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = super().to_dict()
+        payload["smooth"] = _serialize_smooth_method(self.smooth)
+        return payload
+
+
+@dataclass
 class HessianConfig:
     # Hessian accumulation controls (GPTQ only)
     chunk_size: Optional[int] = field(default=None, metadata={"help": "Maximum rows per Hessian chunk"})
@@ -775,16 +821,19 @@ QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 RTN_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.GPTQ,
     FORMAT.GPTQ_V2,
-    FORMAT.GGUF,
     FORMAT.GEMM,
     FORMAT.GEMV,
     FORMAT.GEMV_FAST,
     FORMAT.LLM_AWQ,
 )
+GGUF_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.GGUF,
+)
 
 _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GPTQ: METHOD.GPTQ,
     FORMAT.GPTQ_V2: METHOD.GPTQ,
+    FORMAT.GGUF: METHOD.GPTQ,
     FORMAT.BITBLAS: METHOD.GPTQ,
     FORMAT.GEMM: METHOD.AWQ,
     FORMAT.GEMV: METHOD.AWQ,
@@ -923,6 +972,48 @@ def _serialize_smooth_method(method: Optional[SmoothMethod]) -> Optional[Dict[st
     elif isinstance(method, SmoothRowCol):
         payload["axis"] = method.axis
     return payload
+
+
+def _normalize_smoother_config(
+    payload: Optional[Union[SmootherConfig, SmoothMethod, Dict[str, Any], str]]
+) -> Optional[SmootherConfig]:
+    if payload is None:
+        return None
+    if isinstance(payload, SmootherConfig):
+        return payload
+    if isinstance(payload, dict) and "smooth" in payload and "type" not in payload:
+        return SmootherConfig(smooth=payload.get("smooth"))
+    return SmootherConfig(smooth=payload)
+
+
+def _normalize_pre_filter_config(payload: Any) -> BasePreFilterConfig:
+    if isinstance(payload, BasePreFilterConfig):
+        return payload
+    if isinstance(payload, SmoothMethod):
+        return SmootherConfig(smooth=payload)
+    if isinstance(payload, str):
+        normalized = payload.strip().lower()
+        if normalized == PreFilterCode.SMOOTHER.value:
+            return SmootherConfig(smooth=None)
+        return SmootherConfig(smooth=payload)
+    if isinstance(payload, dict):
+        code = str(payload.get("code", "")).strip().lower()
+        if code and code != PreFilterCode.SMOOTHER.value:
+            raise ValueError(f"QuantizeConfig: unsupported pre-filter code `{code}`.")
+        if "smooth" in payload:
+            return SmootherConfig(smooth=payload.get("smooth"))
+        if "type" in payload:
+            return SmootherConfig(smooth=payload)
+        return SmootherConfig(smooth=None)
+    raise ValueError("QuantizeConfig: `pre_filters` entries must be pre-filter configs, smooth configs, dicts, or strings.")
+
+
+def _normalize_pre_filters(payload: Optional[List[Any]]) -> List[BasePreFilterConfig]:
+    if payload is None:
+        return []
+    if not isinstance(payload, list):
+        raise ValueError("QuantizeConfig: `pre_filters` must be a list or None.")
+    return [_normalize_pre_filter_config(item) for item in payload]
 
 
 def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: str, key: str = None,
@@ -1219,7 +1310,7 @@ def _normalize_rtn_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
     weight_only = normalized.pop("weight_only", None)
     weight_only_method = _peek_weight_only_method(weight_only)
 
-    # `weight_only.method="gguf"` is a shorthand for the RTN lifecycle with a GGUF export layout.
+    # `weight_only.method="gguf"` is a backward-compatible shorthand for the direct GGUF weight-only lifecycle.
     if weight_only_method == WeightOnlyMethod.GGUF and FORMAT_FIELD_CODE not in normalized:
         normalized[FORMAT_FIELD_CODE] = FORMAT.GGUF
 
@@ -1229,6 +1320,21 @@ def _normalize_rtn_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
         legacy_gguf_bits = _extract_weight_only_legacy_gguf_bits(weight_only)
     if legacy_gguf_bits is not None and BITS_FIELD_CODE not in normalized:
         normalized[BITS_FIELD_CODE] = legacy_gguf_bits
+    return normalized
+
+
+def _normalize_gguf_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(payload)
+    legacy_gguf_bits = normalized.pop("gguf_qtype", None)
+    weight_only = normalized.pop("weight_only", None)
+
+    if "smoother" not in normalized and "smooth" not in normalized:
+        normalized["smoother"] = _extract_weight_only_smooth(weight_only)
+    if legacy_gguf_bits is None:
+        legacy_gguf_bits = _extract_weight_only_legacy_gguf_bits(weight_only)
+    if legacy_gguf_bits is not None and BITS_FIELD_CODE not in normalized:
+        normalized[BITS_FIELD_CODE] = legacy_gguf_bits
+    normalized[FORMAT_FIELD_CODE] = FORMAT.GGUF
     return normalized
 
 
@@ -1287,7 +1393,7 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
 
 
 def _filter_quantize_config_payload_for_target_cls(target_cls, payload: Dict[str, Any]) -> Dict[str, Any]:
-    target_field_names = {field.name for field in fields(target_cls)}
+    target_field_names = {field.name for field in fields(target_cls) if field.init}
     return {key: value for key, value in payload.items() if key in target_field_names}
 
 
@@ -1295,6 +1401,8 @@ def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) 
     normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, payload)
     if target_cls is RTNQuantizeConfig:
         normalized = _normalize_rtn_kwargs(normalized)
+    elif target_cls is GGUFQuantizeConfig:
+        normalized = _normalize_gguf_kwargs(normalized)
     return _filter_quantize_config_payload_for_target_cls(target_cls, normalized)
 
 
@@ -1615,6 +1723,7 @@ class BaseQuantizeConfig:
             "hessian": "hessian",
             "gptaq": "gptaq",
             "weight_only": "weight_only",
+            "pre_filters": "pre_filters",
             "gc_mode": "gc_mode",
             "wait_for_submodule_finalizers": "wait_for_submodule_finalizers",
             "auto_forward_data_parallel": "auto_forward_data_parallel",
@@ -1637,6 +1746,10 @@ class BaseQuantizeConfig:
 
         target_cls = cls if cls not in {BaseQuantizeConfig, QuantizeConfig} else _resolve_quantize_config_class(normalized)
         normalized = _normalize_quantize_config_payload_for_target_cls(target_cls, normalized)
+        if target_cls is RTNQuantizeConfig:
+            normalized = _normalize_rtn_kwargs(normalized)
+        elif target_cls is GGUFQuantizeConfig:
+            normalized = _normalize_gguf_kwargs(normalized)
 
         if format_auto_inferred:
             log.info(
@@ -1646,13 +1759,10 @@ class BaseQuantizeConfig:
         if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
             normalized["desc_act"] = False
 
-        if "sym" not in normalized:
+        if "sym" not in normalized and target_cls is not GGUFQuantizeConfig:
             log.warn(
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
-
-        if target_cls is RTNQuantizeConfig:
-            normalized = _normalize_rtn_kwargs(normalized)
         return target_cls(**_filter_quantize_config_payload_for_target_cls(target_cls, normalized))
 
     @classmethod
@@ -1768,6 +1878,43 @@ class BaseQuantizeConfig:
 
     def requires_calibration_dataset(self) -> bool:
         return not self.uses_weight_only_lifecycle()
+
+
+@dataclass
+class PreFilterQuantizeConfig(BaseQuantizeConfig):
+    pre_filters: Optional[List[Union[BasePreFilterConfig, Dict[str, Any], str]]] = field(default=None)
+    smoother: Optional[Union[SmootherConfig, SmoothMethod, Dict[str, Any], str]] = field(default=None)
+    # Backward-compatible alias. New code should use `smoother`.
+    smooth: Optional[Union[SmoothMethod, Dict[str, Any], str]] = field(default=None, repr=False)
+
+    def __post_init__(self):
+        self.pre_filters = _normalize_pre_filters(self.pre_filters)
+
+        smoother_payload = self.smoother if self.smoother is not None else self.smooth
+        self.smoother = _normalize_smoother_config(smoother_payload)
+
+        if self.smoother is None:
+            for pre_filter in self.pre_filters:
+                if isinstance(pre_filter, SmootherConfig):
+                    self.smoother = pre_filter
+                    break
+
+        non_smoother_filters = [pre_filter for pre_filter in self.pre_filters if not isinstance(pre_filter, SmootherConfig)]
+        if self.smoother is not None:
+            non_smoother_filters.append(self.smoother)
+        self.pre_filters = non_smoother_filters
+        self.smooth = self.resolve_smooth_method()
+
+        super().__post_init__()
+
+    def resolve_smooth_method(self) -> Optional[SmoothMethod]:
+        if self.smoother is None:
+            return None
+        return self.smoother.smooth
+
+    def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
+        if self.pre_filters:
+            meta_payload["pre_filters"] = [pre_filter.to_dict() for pre_filter in self.pre_filters]
 
 
 @dataclass
@@ -1914,11 +2061,9 @@ class QQQQuantizeConfig(GPTQQuantizeConfig):
 
 
 @dataclass
-class RTNQuantizeConfig(BaseQuantizeConfig):
+class RTNQuantizeConfig(PreFilterQuantizeConfig):
     quant_method: METHOD = field(default=METHOD.GPTQ)
     format: FORMAT = field(default=FORMAT.GPTQ)
-    # Whole-model RTN is noticeably more stable without a smoother by default.
-    smooth: Optional[SmoothMethod] = None
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.GPTQ,)
@@ -1930,7 +2075,6 @@ class RTNQuantizeConfig(BaseQuantizeConfig):
         return False
 
     def __post_init__(self):
-        self.smooth = _parse_smooth_method(self.smooth)
         super().__post_init__()
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
@@ -1938,6 +2082,7 @@ class RTNQuantizeConfig(BaseQuantizeConfig):
         out[FORMAT_FIELD_CODE] = self.format
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
+        super()._update_meta_payload(meta_payload)
         meta_payload["weight_only"] = {
             "smooth": _serialize_smooth_method(self.smooth),
         }
@@ -1946,10 +2091,74 @@ class RTNQuantizeConfig(BaseQuantizeConfig):
         return True
 
 
-def clone_rtn_config_for_module(
-    qcfg: RTNQuantizeConfig,
+@dataclass
+class GGUFQuantizeConfig(PreFilterQuantizeConfig):
+    format: FORMAT = field(default=FORMAT.GGUF, init=False)
+    quant_method: METHOD = field(default=METHOD.GPTQ, init=False)
+    group_size: int = field(default=-1, init=False, repr=False)
+    desc_act: Optional[bool] = field(default=False, init=False, repr=False)
+    sym: bool = field(default=True, init=False, repr=False)
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.GPTQ,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return (FORMAT.GGUF,)
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.bits = _normalize_quant_bits(self.bits, format_value=FORMAT.GGUF)
+
+    def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
+        super()._update_meta_payload(meta_payload)
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out[FORMAT_FIELD_CODE] = self.format
+
+    def to_dict(self):
+        out = super().to_dict()
+        out.pop(GROUP_SIZE_FIELD_CODE, None)
+        out.pop("desc_act", None)
+        out.pop(QUANT_METHOD_FIELD, None)
+        out.pop(PACK_DTYPE_FIELD, None)
+
+        meta_payload = out.get(META_FIELD)
+        if isinstance(meta_payload, dict):
+            for key in (
+                "failsafe",
+                "offload_to_disk",
+                "offload_to_disk_path",
+                "pack_impl",
+                "gc_mode",
+                "wait_for_submodule_finalizers",
+                "auto_forward_data_parallel",
+                "vram_strategy",
+                "weight_only",
+            ):
+                meta_payload.pop(key, None)
+            if not meta_payload:
+                out.pop(META_FIELD, None)
+
+        return out
+
+    def calculate_bits_per_weight(self):
+        bits_name = str(self.bits)
+        bpw = _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS.get(bits_name, float(quant_bits_width(self.bits)))
+        log.info(
+            f"Estimated Quantization BPW (bits per weight): {bpw} bpw, based on [bits: {self.bits}]"
+        )
+
+    def uses_weight_only_lifecycle(self) -> bool:
+        return True
+
+
+def clone_weight_only_config_for_module(
+    qcfg: Union[RTNQuantizeConfig, GGUFQuantizeConfig],
     module_full_name: str,
-) -> Optional[RTNQuantizeConfig]:
+) -> Optional[Union[RTNQuantizeConfig, GGUFQuantizeConfig]]:
     if qcfg.dynamic_get(layer_name=module_full_name) is False:
         return None
 
@@ -1960,24 +2169,32 @@ def clone_rtn_config_for_module(
             qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits),
             format_value=qcfg_clone.format,
         )
-        qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
-        qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
-
-        desc_act_override = qcfg.dynamic_get(module_full_name, "desc_act", None)
-        if desc_act_override is not None:
-            qcfg_clone.desc_act = desc_act_override
-
-        smooth_override = qcfg.dynamic_get(module_full_name, "smooth", None)
+        smooth_override = qcfg.dynamic_get(module_full_name, "smoother", None)
+        if smooth_override is None:
+            smooth_override = qcfg.dynamic_get(module_full_name, "smooth", None)
         if smooth_override is not None:
-            qcfg_clone.smooth = _parse_smooth_method(smooth_override)
+            qcfg_clone.smoother = _normalize_smoother_config(smooth_override)
+            qcfg_clone.smooth = qcfg_clone.resolve_smooth_method()
+
+        if isinstance(qcfg_clone, RTNQuantizeConfig):
+            qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
+            qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
+
+            desc_act_override = qcfg.dynamic_get(module_full_name, "desc_act", None)
+            if desc_act_override is not None:
+                qcfg_clone.desc_act = desc_act_override
 
     return qcfg_clone
+
+
+clone_rtn_config_for_module = clone_weight_only_config_for_module
 
 
 def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantizeConfig]:
     method = payload.get(QUANT_METHOD_FIELD, METHOD.GPTQ)
     format_value = payload.get(FORMAT_FIELD_CODE, FORMAT.GPTQ)
     weight_only = payload.get("weight_only")
+    bits = payload.get(BITS_FIELD_CODE)
 
     try:
         method = _normalize_quant_method(method)
@@ -1992,9 +2209,11 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
     weight_only_method = _peek_weight_only_method(weight_only)
     if weight_only is not None and weight_only_method not in {None, WeightOnlyMethod.RTN, WeightOnlyMethod.GGUF}:
         raise ValueError(
-            "QuantizeConfig: unsupported weight-only config. RTN weight-only export currently supports `rtn` and `gguf`."
+            "QuantizeConfig: unsupported weight-only config. Weight-only export currently supports `rtn` and `gguf`."
         )
-    if weight_only_method in {WeightOnlyMethod.RTN, WeightOnlyMethod.GGUF}:
+    if format_value == FORMAT.GGUF or weight_only_method == WeightOnlyMethod.GGUF or _looks_like_gguf_bits(bits):
+        return GGUFQuantizeConfig
+    if weight_only_method == WeightOnlyMethod.RTN:
         return RTNQuantizeConfig
     if weight_only is not None:
         return RTNQuantizeConfig
@@ -2013,11 +2232,13 @@ def _known_quantize_config_field_names() -> set[str]:
     field_names: set[str] = set()
     for cls in (
         BaseQuantizeConfig,
+        PreFilterQuantizeConfig,
         QuantizeConfig,
         GPTQQuantizeConfig,
         AWQQuantizeConfig,
         QQQQuantizeConfig,
         RTNQuantizeConfig,
+        GGUFQuantizeConfig,
     ):
         field_names.update(field.name for field in fields(cls))
     return field_names

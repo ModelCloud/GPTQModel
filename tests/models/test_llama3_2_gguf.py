@@ -8,7 +8,6 @@ from model_test import ModelTest
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
 from gptqmodel.quantization import FORMAT
-from gptqmodel.quantization.config import WeightOnlyConfig
 from gptqmodel.utils.eval import EVAL
 
 
@@ -51,7 +50,6 @@ class TestLlama3_2_GGUF(ModelTest):
     FORMAT = FORMAT.GGUF
     BITS = "q4_k_m"
     LOAD_BACKEND = BACKEND.TORCH
-    WEIGHT_ONLY = WeightOnlyConfig(method="gguf")
     KERNEL_INFERENCE = {GGUFTorchQuantLinear}
 
     def test_llama3_2_gguf_full_model(self):

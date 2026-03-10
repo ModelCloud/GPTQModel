@@ -20,11 +20,13 @@ from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.quantization.config import (
     FORMAT,
+    GGUFQuantizeConfig,
     GGUFBits,
     METHOD,
     QuantizeConfig,
     RTNQuantizeConfig,
     SmoothMAD,
+    quant_bits_width,
 )
 from gptqmodel.quantization.rtn import RTN
 from gptqmodel.utils.backend import BACKEND
@@ -142,18 +144,20 @@ def _build_rtn_microbench_case(
     inputs = inputs_master.to(device=device, dtype=dtype)
     native_output = linear(inputs)
 
-    format = FORMAT.GPTQ
+    requested_bits: int | GGUFBits = bits
+    rtn_bits = bits
     if isinstance(bits, GGUFBits):
-        format = FORMAT.GGUF
+        requested_bits = bits
+        rtn_bits = int(bits)
     elif isinstance(bits, str) and not bits.strip().isdigit():
-        format = FORMAT.GGUF
+        requested_bits = GGUFBits.from_string(bits)
+        rtn_bits = quant_bits_width(bits)
 
     qcfg = RTNQuantizeConfig(
-        bits=bits,
+        bits=rtn_bits,
         group_size=group_size,
         desc_act=False,
         sym=True,
-        format=format,
         smooth=SmoothMAD(k=2.25),
         offload_to_disk=False,
         device=device.type,
@@ -172,8 +176,8 @@ def _build_rtn_microbench_case(
         "in_features": in_features,
         "out_features": out_features,
         "group_size": group_size,
-        "bits": qcfg.bits,
-        "bit_width": int(qcfg.bits),
+        "bits": requested_bits,
+        "bit_width": quant_bits_width(requested_bits),
         "inputs": inputs,
         "native_output": native_output,
         "rtn_output": rtn_output,
@@ -394,13 +398,9 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
     device_type = device.type
 
     native = _TinyModel().to(device=device, dtype=torch.float16).eval()
-    qcfg = RTNQuantizeConfig(
+    qcfg = GGUFQuantizeConfig(
         bits=bits,
-        group_size=32,
-        desc_act=False,
-        sym=True,
-        format=FORMAT.GGUF,
-        smooth=None,
+        smoother=None,
         offload_to_disk=False,
         device=device_type,
     )
@@ -441,13 +441,9 @@ def test_baseqmodel_quantize_gguf_weight_only_skips_rtn(monkeypatch):
 
     native = _TinyModel().to(device=device, dtype=torch.float16).eval()
 
-    qcfg = RTNQuantizeConfig(
+    qcfg = GGUFQuantizeConfig(
         bits="q4_k_m",
-        group_size=32,
-        desc_act=False,
-        sym=True,
-        format=FORMAT.GGUF,
-        smooth=SmoothMAD(k=2.25),
+        smoother=SmoothMAD(k=2.25),
         offload_to_disk=False,
         device=device_type,
     )

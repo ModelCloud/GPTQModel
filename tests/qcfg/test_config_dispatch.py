@@ -5,6 +5,7 @@ from gptqmodel.quantization.config import (
     AWQQuantizeConfig,
     BaseQuantizeConfig,
     FORMAT,
+    GGUFQuantizeConfig,
     GGUFBits,
     GPTQQuantizeConfig,
     METHOD,
@@ -84,10 +85,9 @@ def test_quantize_config_dispatches_rtn_awq_export_constructor():
 def test_quantize_config_dispatches_rtn_gguf_export_constructor():
     cfg = QuantizeConfig(
         format=FORMAT.GGUF,
-        weight_only=WeightOnlyConfig(smooth=SmoothMAD(k=2.0)),
     )
 
-    assert isinstance(cfg, RTNQuantizeConfig)
+    assert isinstance(cfg, GGUFQuantizeConfig)
     assert cfg.format == FORMAT.GGUF
     assert isinstance(cfg.bits, GGUFBits)
     assert cfg.bits == "q4_0"
@@ -102,7 +102,7 @@ def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method():
         weight_only=WeightOnlyConfig(method="gguf", smooth=SmoothMAD(k=1.5)),
     )
 
-    assert isinstance(cfg, RTNQuantizeConfig)
+    assert isinstance(cfg, GGUFQuantizeConfig)
     assert cfg.format == FORMAT.GGUF
     assert isinstance(cfg.bits, GGUFBits)
     assert cfg.bits == "q4_0"
@@ -117,7 +117,7 @@ def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method_preserving_
         weight_only=WeightOnlyConfig(method="gguf"),
     )
 
-    assert isinstance(cfg, RTNQuantizeConfig)
+    assert isinstance(cfg, GGUFQuantizeConfig)
     assert isinstance(cfg.bits, GGUFBits)
     assert cfg.bits == "q5_k_m"
     assert cfg.bits.bits == 5

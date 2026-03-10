@@ -5,11 +5,13 @@ import pytest
 
 from gptqmodel.quantization.config import (
     BaseQuantizeConfig,
+    GGUFQuantizeConfig,
     GGUFBits,
     GPTQQuantizeConfig,
     QuantizeConfig,
     RTNQuantizeConfig,
     SmoothMAD,
+    SmootherConfig,
 )
 
 
@@ -78,34 +80,67 @@ def test_rtn_quantize_config_supports_awq_export_round_trip():
     assert reloaded.smooth.k == pytest.approx(1.5)
 
 
-def test_rtn_quantize_config_supports_gguf_export_round_trip():
+def test_gguf_quantize_config_round_trip():
     smooth = SmoothMAD(k=1.25)
-    cfg = RTNQuantizeConfig(
+    cfg = GGUFQuantizeConfig(
         bits=4,
-        group_size=128,
-        format="gguf",
-        smooth=smooth,
+        smoother=smooth,
     )
 
     assert cfg.format == "gguf"
+    assert cfg.uses_weight_only_lifecycle() is True
+    assert cfg.requires_calibration_dataset() is False
     assert isinstance(cfg.bits, GGUFBits)
     assert cfg.bits == "q4_0"
     assert cfg.bits.bits == 4
     assert cfg.bits.version == "q"
     assert cfg.bits.variant == "0"
     assert cfg.bits.quality is None
+    assert cfg.group_size == -1
+    assert cfg.desc_act is False
     assert cfg.export_quant_method().value == "gptq"
+    assert isinstance(cfg.smoother, SmootherConfig)
+    assert isinstance(cfg.smooth, SmoothMAD)
+    assert cfg.smooth.k == pytest.approx(1.25)
 
     payload = cfg.to_dict()
     assert payload["bits"] == "q4_0"
+    assert "group_size" not in payload
+    assert "desc_act" not in payload
+    assert "quant_method" not in payload
+    assert "pack_dtype" not in payload
+    assert "weight_only" not in payload["meta"]
+    assert payload["meta"]["pre_filters"][0]["code"] == "smoother"
+    assert payload["meta"]["pre_filters"][0]["smooth"]["type"] == "mad"
     reloaded = QuantizeConfig.from_quant_config(payload)
 
-    assert isinstance(reloaded, RTNQuantizeConfig)
+    assert isinstance(reloaded, GGUFQuantizeConfig)
     assert reloaded.format == cfg.format
     assert reloaded.bits == "q4_0"
     assert reloaded.export_quant_method() == cfg.export_quant_method()
     assert isinstance(reloaded.smooth, SmoothMAD)
     assert reloaded.smooth.k == pytest.approx(1.25)
+
+
+def test_gguf_quantize_config_hides_non_gguf_constructor_args():
+    with pytest.raises(TypeError):
+        GGUFQuantizeConfig(bits="q4_k_m", group_size=128)
+
+    with pytest.raises(TypeError):
+        GGUFQuantizeConfig(bits="q4_k_m", desc_act=True)
+
+
+def test_gguf_quantize_config_registers_smoother_prefilter():
+    cfg = GGUFQuantizeConfig(
+        bits="q4_k_m",
+        pre_filters=[SmootherConfig(smooth=SmoothMAD(k=1.9))],
+    )
+
+    assert isinstance(cfg.smoother, SmootherConfig)
+    assert isinstance(cfg.smooth, SmoothMAD)
+    assert cfg.smooth.k == pytest.approx(1.9)
+    assert len(cfg.pre_filters) == 1
+    assert cfg.pre_filters[0].code == "smoother"
 
 
 @pytest.mark.parametrize(
@@ -123,11 +158,9 @@ def test_rtn_quantize_config_supports_gguf_bits_round_trip(
     variant: str,
     quality: str | None,
 ):
-    cfg = RTNQuantizeConfig(
+    cfg = GGUFQuantizeConfig(
         bits=bits,
-        group_size=128,
-        format="gguf",
-        smooth=SmoothMAD(k=1.25),
+        smoother=SmoothMAD(k=1.25),
     )
 
     payload = cfg.to_dict()
@@ -139,7 +172,7 @@ def test_rtn_quantize_config_supports_gguf_bits_round_trip(
 
     reloaded = QuantizeConfig.from_quant_config(payload)
 
-    assert isinstance(reloaded, RTNQuantizeConfig)
+    assert isinstance(reloaded, GGUFQuantizeConfig)
     assert reloaded.format == "gguf"
     assert reloaded.bits == bits
     assert reloaded.bits.bits == bit_width
@@ -149,11 +182,9 @@ def test_rtn_quantize_config_supports_gguf_bits_round_trip(
 
 
 def test_rtn_quantize_config_supports_structured_gguf_bits_round_trip():
-    cfg = RTNQuantizeConfig(
+    cfg = GGUFQuantizeConfig(
         bits=GGUFBits(bits=4, version="q", variant="k", quality="s"),
-        group_size=128,
-        format="gguf",
-        smooth=SmoothMAD(k=1.25),
+        smoother=SmoothMAD(k=1.25),
     )
 
     assert isinstance(cfg.bits, GGUFBits)
@@ -202,14 +233,13 @@ def test_weight_only_payload_dispatches_to_rtn():
 def test_weight_only_payload_dispatches_to_rtn_gguf():
     cfg = QuantizeConfig(
         bits=4,
-        group_size=128,
         weight_only={
             "method": "gguf",
             "smooth": {"type": "mad", "k": 1.5},
         },
     )
 
-    assert isinstance(cfg, RTNQuantizeConfig)
+    assert isinstance(cfg, GGUFQuantizeConfig)
     assert cfg.format == "gguf"
     assert cfg.bits == "q4_0"
     assert cfg.bits.bits == 4
@@ -222,13 +252,12 @@ def test_weight_only_payload_dispatches_to_rtn_gguf():
 def test_weight_only_payload_dispatches_to_rtn_gguf_with_qtype():
     cfg = QuantizeConfig(
         bits="q6_k",
-        group_size=128,
         weight_only={
             "method": "gguf",
         },
     )
 
-    assert isinstance(cfg, RTNQuantizeConfig)
+    assert isinstance(cfg, GGUFQuantizeConfig)
     assert cfg.format == "gguf"
     assert cfg.bits == "q6_k"
     assert cfg.bits.bits == 6
@@ -240,14 +269,13 @@ def test_weight_only_payload_dispatches_to_rtn_gguf_with_qtype():
 def test_weight_only_payload_dispatches_legacy_gguf_qtype_to_bits():
     cfg = QuantizeConfig(
         bits=6,
-        group_size=128,
         weight_only={
             "method": "gguf",
             "gguf_qtype": "q6_k",
         },
     )
 
-    assert isinstance(cfg, RTNQuantizeConfig)
+    assert isinstance(cfg, GGUFQuantizeConfig)
     assert cfg.format == "gguf"
     assert cfg.bits == "q6_k"
     assert cfg.bits.bits == 6

@@ -24,7 +24,7 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
-from ..quantization.config import RTNQuantizeConfig
+from ..quantization.config import GGUFQuantizeConfig, RTNQuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to
 from ..utils.offload import offload_to_disk
@@ -96,9 +96,9 @@ class WeightOnlyLooper:
     def loop(self, **kwargs):
         """Quantize layers directly from weights without calibration forwards."""
         quant_config = self.gptq_model.quantize_config
-        if not isinstance(quant_config, RTNQuantizeConfig):
+        if not isinstance(quant_config, (RTNQuantizeConfig, GGUFQuantizeConfig)):
             raise NotImplementedError(
-                "Weight-only looper only supports `RTNQuantizeConfig` today."
+                "Weight-only looper only supports `RTNQuantizeConfig` and `GGUFQuantizeConfig` today."
             )
 
         if quant_config.lm_head:
