@@ -554,6 +554,41 @@ def test_rtn_microbench_gguf_export_accepts_structured_bits():
     assert output_stats["max"] < 0.012
 
 
+@pytest.mark.parametrize("bits", ["q4_0", "q4_k_m"])
+def test_gguf_dequantize_weight_accepts_requested_dtype_and_device(bits: str):
+    dtype = torch.float16 if torch.cuda.is_available() else torch.bfloat16
+    case = _build_rtn_microbench_case(dtype, bits=bits)
+    module = _build_rtn_gguf_module(case)
+
+    direct = module.dequantize_weight(device=case["device"], dtype=case["dtype"])
+    baseline = module.dequantize_weight().to(device=case["device"], dtype=case["dtype"])
+
+    assert direct.device == case["device"]
+    assert direct.dtype == case["dtype"]
+    torch.testing.assert_close(direct, baseline, atol=2e-3, rtol=0.0)
+
+
+def test_gguf_forward_requests_dequantized_weight_in_input_dtype(monkeypatch):
+    dtype = torch.float16 if torch.cuda.is_available() else torch.bfloat16
+    case = _build_rtn_microbench_case(dtype, bits="q4_0")
+    module = _build_rtn_gguf_module(case)
+
+    observed: dict[str, torch.device | torch.dtype | None] = {"device": None, "dtype": None}
+    original = GGUFTorchQuantLinear.dequantize_weight
+
+    def _wrapped(self, *, device=None, dtype=None):
+        observed["device"] = None if device is None else torch.device(device)
+        observed["dtype"] = dtype
+        return original(self, device=device, dtype=dtype)
+
+    monkeypatch.setattr(GGUFTorchQuantLinear, "dequantize_weight", _wrapped)
+
+    module(case["inputs"])
+
+    assert observed["device"] == case["inputs"].device
+    assert observed["dtype"] == case["inputs"].dtype
+
+
 @pytest.mark.parametrize(
     ("bits", "tensor_qtype"),
     [

@@ -588,48 +588,99 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
 
         self.clear_weight_cache()
 
-    def _dequantize_q4_0(self) -> torch.Tensor:
-        rows = self.qweight.shape[0]
-        num_blocks = self.qweight.shape[1] // self.gguf_type_size
-        blocks = self.qweight.contiguous().view(rows, num_blocks, self.gguf_type_size)
+    def _resolve_dequant_target(
+        self,
+        *,
+        device: torch.device | str | None,
+        dtype: torch.dtype | None,
+    ) -> tuple[torch.device, torch.dtype]:
+        target_device = self.qweight.device if device is None else torch.device(device)
+        target_dtype = torch.float32 if dtype is None else dtype
+        if target_dtype not in self.SUPPORTS_DTYPES:
+            supported = ", ".join(str(dt).removeprefix("torch.") for dt in self.SUPPORTS_DTYPES)
+            raise ValueError(
+                f"{self.__class__.__name__} only supports GGUF dequantization dtypes {{{supported}}}, got `{target_dtype}`."
+            )
+        return target_device, target_dtype
 
-        d = blocks[..., :2].contiguous().view(torch.float16).to(torch.float32).squeeze(-1)
+    def _dequantize_q4_0(
+        self,
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
+        qweight = self.qweight if self.qweight.device == target_device else self.qweight.to(device=target_device)
+
+        rows = qweight.shape[0]
+        num_blocks = qweight.shape[1] // self.gguf_type_size
+        blocks = qweight.contiguous().view(rows, num_blocks, self.gguf_type_size)
+
+        d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
+        if d.dtype != target_dtype:
+            d = d.to(target_dtype)
+
         qs = blocks[..., 2:]
-
         low = torch.bitwise_and(qs, 0x0F)
         high = torch.bitwise_right_shift(qs, 4)
         values = torch.cat((low, high), dim=-1).to(torch.int16) - 8
 
-        weight = d.unsqueeze(-1) * values.to(torch.float32)
+        weight = d.unsqueeze(-1) * values.to(target_dtype)
         return weight.reshape(rows, self.padded_in_features)
 
-    def _dequantize_q8_0(self) -> torch.Tensor:
-        rows = self.qweight.shape[0]
-        num_blocks = self.qweight.shape[1] // self.gguf_type_size
-        blocks = self.qweight.contiguous().view(rows, num_blocks, self.gguf_type_size)
+    def _dequantize_q8_0(
+        self,
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
+        qweight = self.qweight if self.qweight.device == target_device else self.qweight.to(device=target_device)
 
-        d = blocks[..., :2].contiguous().view(torch.float16).to(torch.float32).squeeze(-1)
-        x = blocks[..., 2:].contiguous().view(torch.int8).to(torch.float32)
+        rows = qweight.shape[0]
+        num_blocks = qweight.shape[1] // self.gguf_type_size
+        blocks = qweight.contiguous().view(rows, num_blocks, self.gguf_type_size)
+
+        d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
+        if d.dtype != target_dtype:
+            d = d.to(target_dtype)
+
+        x = blocks[..., 2:].contiguous().view(torch.int8).to(target_dtype)
 
         weight = d.unsqueeze(-1) * x
         return weight.reshape(rows, self.padded_in_features)
 
-    def _dequantize_numpy(self, fn) -> torch.Tensor:
+    def _dequantize_numpy(
+        self,
+        fn,
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
         qweight = self.qweight.detach().cpu().numpy()
         weight = fn(qweight)
-        return torch.from_numpy(np.ascontiguousarray(weight)).to(torch.float32)
+        tensor = torch.from_numpy(np.ascontiguousarray(weight))
+        if tensor.device != target_device or tensor.dtype != target_dtype:
+            tensor = tensor.to(device=target_device, dtype=target_dtype)
+        return tensor
 
-    def dequantize_weight(self) -> torch.Tensor:
+    def dequantize_weight(
+        self,
+        *,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
         if self.gguf_tensor_qtype == "Q4_0":
-            weight = self._dequantize_q4_0()
+            weight = self._dequantize_q4_0(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q8_0":
-            weight = self._dequantize_q8_0()
+            weight = self._dequantize_q8_0(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q4_K":
-            weight = self._dequantize_numpy(_dequantize_q4_k_numpy)
+            weight = self._dequantize_numpy(_dequantize_q4_k_numpy, device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q5_K":
-            weight = self._dequantize_numpy(_dequantize_q5_k_numpy)
+            weight = self._dequantize_numpy(_dequantize_q5_k_numpy, device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q6_K":
-            weight = self._dequantize_numpy(_dequantize_q6_k_numpy)
+            weight = self._dequantize_numpy(_dequantize_q6_k_numpy, device=device, dtype=dtype)
         else:  # pragma: no cover - guarded by class SUPPORTS_BITS
             raise NotImplementedError(f"Unsupported GGUF qtype: {self.gguf_tensor_qtype}")
 
@@ -651,7 +702,7 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
 
         weight = self._get_cached_weight(x_flat)
         if weight is None:
-            weight = self.dequantize_weight().to(device=x_flat.device, dtype=x_flat.dtype)
+            weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
             self._set_cached_weight(x_flat, weight)
 
         output = torch.matmul(x_flat, weight)
