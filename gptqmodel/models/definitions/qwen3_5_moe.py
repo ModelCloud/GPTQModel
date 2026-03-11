@@ -20,7 +20,9 @@ class Qwen3_5_MoeQModel(BaseQModel):
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "num_experts"
 
-    pre_lm_head_norm_module = "model.norm"
+    pre_lm_head_norm_module = "model.language_model.norm"
+
+    rotary = "model.language_model.rotary_emb"
 
     # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module
     # the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)

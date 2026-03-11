@@ -142,6 +142,9 @@ class BaseQModel(nn.Module):
     # name of lm_head
     lm_head: str = "lm_head"
 
+    # Special rotary_emb path
+    rotary: str | None = None
+
     # a tree node of all the roots that contain quantizable modules
     module_tree: List[str] = None
     # Override module_tree according to different QUANT_METHOD
