@@ -127,10 +127,6 @@ def compile_plan_to_quantize_config(plan: ExecutionPlan):
         raise NotImplementedError("Initial protocol implementation supports exactly one rule for config compilation.")
 
     rule = stage.rules[0]
-    if not _is_global_match(rule.match):
-        raise NotImplementedError(
-            "Initial protocol implementation only supports a single positive global selector: `match=\"*\"`."
-        )
     if rule.aliases:
         raise NotImplementedError("Initial protocol implementation does not support aliases during config compilation.")
     if rule.actions:
@@ -142,7 +138,7 @@ def compile_plan_to_quantize_config(plan: ExecutionPlan):
     if rule.weight is None:
         raise ValueError("Initial protocol implementation requires a `weight` target.")
 
-    return _compile_gguf_weight_target(rule.weight)
+    return _compile_gguf_weight_target(rule.weight, matchers=rule.match)
 
 
 def compile_protocol_to_quantize_config(source: Any):
@@ -339,7 +335,11 @@ def _copy_optional_mapping(source: Any) -> dict[str, Any] | None:
     return dict(source)
 
 
-def _compile_gguf_weight_target(weight: TargetSpec) -> GGUFConfig:
+def _compile_gguf_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec, ...]) -> GGUFConfig:
+    if not _supports_gguf_match_compilation(matchers):
+        raise NotImplementedError(
+            "Initial GGUF protocol compiler supports only `match=\"*\"` or `match=[\"*\", \"-:...\"]`."
+        )
     if weight.mode not in {None, "merge"}:
         raise NotImplementedError("Initial GGUF compiler supports only the default target merge mode.")
 
@@ -361,7 +361,8 @@ def _compile_gguf_weight_target(weight: TargetSpec) -> GGUFConfig:
 
     smoother = _compile_supported_smoother(weight.prepare)
     gguf_format = _resolve_gguf_public_format(bits=bits, export=export)
-    return GGUFConfig(bits=bits, format=gguf_format, smoother=smoother)
+    dynamic = _compile_negative_match_dynamic(matchers)
+    return GGUFConfig(bits=bits, format=gguf_format, smoother=smoother, dynamic=dynamic)
 
 
 def _compile_supported_smoother(prepare: tuple[OperationSpec, ...]) -> Optional[SmoothMAD]:
@@ -404,6 +405,18 @@ def _resolve_gguf_public_format(bits: Any, export: Optional[ExportSpec]) -> Opti
 
 def _is_global_match(matchers: tuple[MatchSpec, ...]) -> bool:
     return len(matchers) == 1 and matchers[0].include and matchers[0].pattern == "*"
+
+
+def _supports_gguf_match_compilation(matchers: tuple[MatchSpec, ...]) -> bool:
+    includes = tuple(selector for selector in matchers if selector.include)
+    return bool(includes) and all(selector.pattern == "*" for selector in includes)
+
+
+def _compile_negative_match_dynamic(matchers: tuple[MatchSpec, ...]) -> Optional[dict[str, dict[str, Any]]]:
+    excludes = tuple(selector for selector in matchers if not selector.include)
+    if not excludes:
+        return None
+    return {f"-:{selector.pattern}": {} for selector in excludes}
 
 
 def _pattern_matches(pattern: str, module_name: str) -> bool:

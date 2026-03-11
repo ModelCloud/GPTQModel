@@ -7,6 +7,7 @@ from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.quantization import GGUFConfig, METHOD
 from gptqmodel.quantization.protocol import (
     Rule,
     Stage,
@@ -17,6 +18,9 @@ from gptqmodel.quantization.protocol import (
 from gptqmodel.utils.eval import EVAL
 
 
+LAYER0_ONLY_NEGATIVE_MATCH = r".*layers\.(?:[1-9]|[12][0-9]|3[0-2])\..*"
+
+
 def _python_protocol():
     return {
         "version": 2,
@@ -25,7 +29,7 @@ def _python_protocol():
                 name="weight_only",
                 rules=[
                     Rule(
-                        match="*",
+                        match=["*", f"-:{LAYER0_ONLY_NEGATIVE_MATCH}"],
                         weight={
                             "quantize": {
                                 "method": "gguf",
@@ -45,12 +49,14 @@ def _python_protocol():
 
 
 def _yaml_protocol() -> str:
-    return """
+    return r"""
 version: 2
 stages:
   - name: weight_only
     rules:
-      - match: "*"
+      - match:
+          - "*"
+          - '-:.*layers\.(?:[1-9]|[12][0-9]|3[0-2])\..*'
         weight:
           quantize:
             method: gguf
@@ -75,30 +81,30 @@ class _BaseLlama3_2GGUFProtocol(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.3871,
-                "floor_pct": 0.04,
-                "ceil_pct": 0.04,
+                "value": 0.4690,
+                "floor_pct": 0.05,
+                "ceil_pct": 0.05,
             },
         },
         EVAL.LM_EVAL.MMLU_STEM: {
             "chat_template": False,
             "acc": {
-                "value": 0.3955,
-                "floor_pct": 0.04,
-                "ceil_pct": 0.04,
+                "value": 0.3999,
+                "floor_pct": 0.03,
+                "ceil_pct": 0.03,
             },
         },
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
-                "value": 0.3106,
-                "floor_pct": 0.04,
-                "ceil_pct": 0.04,
+                "value": 0.3221,
+                "floor_pct": 0.05,
+                "ceil_pct": 0.05,
             },
             "acc_norm": {
-                "value": 0.3532,
-                "floor_pct": 0.04,
-                "ceil_pct": 0.04,
+                "value": 0.3528,
+                "floor_pct": 0.03,
+                "ceil_pct": 0.03,
             },
         },
     }
@@ -111,6 +117,55 @@ class _BaseLlama3_2GGUFProtocol(ModelTest):
     def _build_quantize_config(self):
         return compile_plan_to_quantize_config(self._compiled_protocol_plan())
 
+    def _assert_layer0_only_dynamic(self, cfg):
+        assert isinstance(cfg, GGUFConfig)
+        assert cfg.quant_method == METHOD.GGUF
+        assert cfg.dynamic == {f"-:{LAYER0_ONLY_NEGATIVE_MATCH}": {}}
+
+    def _assert_only_first_layer_quantized(self, model):
+        layer0_quantized = []
+        later_layer_quantized = []
+
+        for name, module in model.named_modules():
+            if not isinstance(module, GGUFTorchQuantLinear):
+                continue
+            if ".layers.0." in name:
+                layer0_quantized.append(name)
+            elif ".layers." in name:
+                later_layer_quantized.append(name)
+
+        assert layer0_quantized, "Expected at least one GGUF quantized module in layer 0."
+        assert not later_layer_quantized, (
+            "Expected GGUF quantization only in layer 0, "
+            f"but found later-layer modules: {later_layer_quantized[:8]}"
+        )
+
+    def _run_layer0_only_protocol_eval(self):
+        cfg = self._build_quantize_config()
+        self._assert_layer0_only_dynamic(cfg)
+
+        self.model, _, _ = self.quantModel(
+            self.NATIVE_MODEL_ID,
+            batch_size=self.QUANT_BATCH_SIZE,
+            trust_remote_code=self.TRUST_REMOTE_CODE,
+            dtype=self.TORCH_DTYPE,
+        )
+        self.check_kernel(self.model, self.KERNEL_INFERENCE)
+        self._assert_only_first_layer_quantized(self.model)
+
+        eval_records = getattr(self, "_post_quant_eval_records", {})
+        target_backend = self._current_load_backend()
+        if eval_records and len(eval_records) == 1 and target_backend in eval_records:
+            task_results = eval_records[target_backend]
+        else:
+            task_results = self.lm_eval(
+                model=self.SAVE_PATH if self.SAVE_PATH else self.model,
+                trust_remote_code=self.TRUST_REMOTE_CODE,
+                delete_quantized_model=self.DELETE_QUANTIZED_MODEL,
+            )
+        self.check_results(task_results)
+        self._cleanup_quantized_model(self.model, enabled=self.DELETE_QUANTIZED_MODEL)
+
 
 class TestLlama3_2_GGUFProtocolPython(_BaseLlama3_2GGUFProtocol):
     PIN_CUDA_DEVICE = 2
@@ -119,7 +174,7 @@ class TestLlama3_2_GGUFProtocolPython(_BaseLlama3_2GGUFProtocol):
         return compile_protocol(_python_protocol())
 
     def test_llama3_2_gguf_protocol_python(self):
-        self.quant_lm_eval()
+        self._run_layer0_only_protocol_eval()
 
 
 class TestLlama3_2_GGUFProtocolYAML(_BaseLlama3_2GGUFProtocol):
@@ -129,4 +184,4 @@ class TestLlama3_2_GGUFProtocolYAML(_BaseLlama3_2GGUFProtocol):
         return compile_protocol_yaml_text(_yaml_protocol())
 
     def test_llama3_2_gguf_protocol_yaml(self):
-        self.quant_lm_eval()
+        self._run_layer0_only_protocol_eval()

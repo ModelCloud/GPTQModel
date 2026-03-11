@@ -70,13 +70,13 @@ def _python_protocol_with_negative_match():
                         "match": ["*", r"-:.*layers\.2.*"],
                         "weight": {
                             "quantize": {
-                                "method": "gptq",
-                                "bits": 4,
-                                "sym": True,
-                                "group_size": 128,
+                                "method": "gguf",
+                                "bits": "q4_k_m",
                             },
                             "export": {
-                                "format": "gptq",
+                                "format": "gguf",
+                                "variant": "q_k_m",
+                                "impl": "gguf_torch",
                             },
                         },
                     },
@@ -97,12 +97,12 @@ stages:
           - '-:.*layers\.2.*'
         weight:
           quantize:
-            method: gptq
-            bits: 4
-            sym: true
-            group_size: 128
+            method: gguf
+            bits: q4_k_m
           export:
-            format: gptq
+            format: gguf
+            variant: q_k_m
+            impl: gguf_torch
 """
 
 
@@ -154,3 +154,16 @@ def test_rule_match_supports_include_and_exclude_selectors():
 
     assert rule.matches("model.layers.0.self_attn.q_proj")
     assert not rule.matches("model.layers.2.self_attn.q_proj")
+
+
+def test_negative_match_gguf_protocol_compiles_to_dynamic_skip_config():
+    python_cfg = compile_protocol_to_quantize_config(_python_protocol_with_negative_match())
+    yaml_cfg = compile_protocol_yaml_to_quantize_config(_yaml_protocol_with_negative_match())
+
+    assert isinstance(python_cfg, GGUFConfig)
+    assert isinstance(yaml_cfg, GGUFConfig)
+    assert python_cfg.to_dict() == yaml_cfg.to_dict()
+    assert python_cfg.quant_method == METHOD.GGUF
+    assert python_cfg.runtime_bits == "q4_k_m"
+    assert python_cfg.format == "q_k_m"
+    assert python_cfg.dynamic == {r"-:.*layers\.2.*": {}}
