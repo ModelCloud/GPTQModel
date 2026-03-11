@@ -12,10 +12,15 @@ The protocol is designed to be:
 - flexible about quantization method vs exported representation
 - future-proof for weight, activation, output, and KV-cache quantization
 
-The canonical model is a typed internal representation. It may be authored through:
+The user-facing protocol root is intentionally shallow. It consists of:
+
+- `version`
+- `stages`
+
+It may be authored through:
 
 - a Python DSL
-- YAML / JSON serialization of the same internal representation
+- YAML / JSON serialization of the same protocol
 
 The Python and YAML forms below describe the same protocol.
 Python is the ergonomic builder API.
@@ -49,52 +54,65 @@ YAML is the portable serialized form.
    Terms such as `*input_quantizer`, `*weight_quantizer`, or packer-specific tensor names should not be the primary user-facing API.
 
 
-## Canonical Model
+## Protocol Root
 
 Python:
 
 ```python
-Plan(
-    stages=[
-        Stage(
-            name="ptq",
-            rules=[
-                Rule(
-                    match="*",
-                    aliases=None,
-                    actions=[],
-                    stop=False,
-                    weight=None,
-                    input=None,
-                    output=None,
-                    kv_cache=None,
-                ),
-            ],
-        ),
-    ],
-)
+version = 2
+
+stages = [
+    Stage(
+        name="ptq",
+        rules=[
+            Rule(
+                match="*",
+                aliases=None,
+                actions=[],
+                stop=False,
+                weight=None,
+                input=None,
+                output=None,
+                kv_cache=None,
+            ),
+        ],
+    ),
+]
 ```
 
 YAML:
 
 ```yaml
-plan:
-  stages:
-    - name: ptq
-      rules:
-        - match: "*"
-          aliases: null
-          actions: []
-          stop: false
-          weight: null
-          input: null
-          output: null
-          kv_cache: null
+version: 2
+stages:
+  - name: ptq
+    rules:
+      - match: "*"
+        aliases: null
+        actions: []
+        stop: false
+        weight: null
+        input: null
+        output: null
+        kv_cache: null
 ```
 
 A stage is an ordered execution boundary.
 A rule is the only normal matcher.
 Each rule may configure one or more tensor targets.
+
+
+## Internal Implementation
+
+An implementation may compile the user-facing protocol into an internal typed object such as:
+
+```python
+Plan(version=2, stages=[...])
+```
+
+That internal root object is for parser/runtime organization.
+It should not be required in user-facing examples or config files.
+Normal user configs have one protocol root for one quantization run or artifact, not multiple user-facing plans.
 
 
 ## Authoring Surfaces
@@ -148,55 +166,52 @@ Example:
 Python:
 
 ```python
-Plan(
-    stages=[
-        Stage(
-            name="balance",
-            rules=[
-                Rule(
-                    match="re:.*self_attn$",
-                    actions=[smoothquant(alpha=0.5)],
-                ),
-            ],
-        ),
-        Stage(
-            name="ptq",
-            rules=[
-                Rule(
-                    match="*",
-                    weight={
-                        "quantize": gptq(bits=4, sym=True, group_size=128),
-                        "export": {"format": "gptq"},
-                    },
-                ),
-            ],
-        ),
-    ],
-)
+stages = [
+    Stage(
+        name="balance",
+        rules=[
+            Rule(
+                match="re:.*self_attn$",
+                actions=[smoothquant(alpha=0.5)],
+            ),
+        ],
+    ),
+    Stage(
+        name="ptq",
+        rules=[
+            Rule(
+                match="*",
+                weight={
+                    "quantize": gptq(bits=4, sym=True, group_size=128),
+                    "export": {"format": "gptq"},
+                },
+            ),
+        ],
+    ),
+]
 ```
 
 YAML:
 
 ```yaml
-plan:
-  stages:
-    - name: balance
-      rules:
-        - match: "re:.*self_attn$"
-          actions:
-            - method: smoothquant
-              alpha: 0.5
-    - name: ptq
-      rules:
-        - match: "*"
-          weight:
-            quantize:
-              method: gptq
-              bits: 4
-              sym: true
-              group_size: 128
-            export:
-              format: gptq
+stages:
+  - name: balance
+    rules:
+      - match: "re:.*self_attn$"
+        actions:
+          - method: smoothquant
+            alpha: 0.5
+  - name: ptq
+    rules:
+      - match: "*"
+        weight:
+          quantize:
+            method: gptq
+            bits: 4
+            sym: true
+            group_size: 128
+          export:
+            format: gptq
 ```
 
 
@@ -1287,6 +1302,241 @@ YAML:
 ```
 
 
+## Real Test-Derived Examples
+
+The examples below are translations of real repo tests into the proposed protocol.
+They preserve the tested quantization intent, but they do not try to mirror every harness detail such as evaluation tasks, prompt text, or temporary save paths.
+
+
+### 1. GPTQ with per-module overrides
+
+Source tests:
+
+- `tests/test_dynamic.py`
+
+Current tested behavior:
+
+- base quantization is 4-bit GPTQ
+- base group size is 128
+- `up_proj` and `gate_proj` are overridden to 8-bit
+- `down_proj` keeps 4-bit but overrides group size to 32
+
+Python:
+
+```python
+Stage(
+    name="ptq",
+    rules=[
+        Rule(
+            match="*",
+            weight={
+                "quantize": {
+                    "method": "gptq",
+                    "bits": 4,
+                    "group_size": 128,
+                },
+                "export": {
+                    "format": "gptq",
+                    "impl": "default",
+                },
+            },
+        ),
+        Rule(
+            match="re:.*\\.up_proj.*",
+            weight={
+                "quantize": {"bits": 8},
+            },
+        ),
+        Rule(
+            match="re:.*\\.gate_proj.*",
+            weight={
+                "quantize": {"bits": 8},
+            },
+        ),
+        Rule(
+            match="re:.*\\.down_proj.*",
+            weight={
+                "quantize": {"bits": 4, "group_size": 32},
+            },
+        ),
+    ],
+)
+```
+
+YAML:
+
+```yaml
+stages:
+  - name: ptq
+    rules:
+      - match: "*"
+        weight:
+          quantize:
+            method: gptq
+            bits: 4
+            group_size: 128
+          export:
+            format: gptq
+            impl: default
+      - match: "re:.*\\.up_proj.*"
+        weight:
+          quantize:
+            bits: 8
+      - match: "re:.*\\.gate_proj.*"
+        weight:
+          quantize:
+            bits: 8
+      - match: "re:.*\\.down_proj.*"
+        weight:
+          quantize:
+            bits: 4
+            group_size: 32
+```
+
+This is the clearest example of why the protocol uses patch-first override semantics.
+The narrower rules change only the leaf fields they care about.
+
+
+### 2. AWQ GEMM full-model quantization
+
+Source tests:
+
+- `tests/test_awq.py`
+- `tests/models/awq/test_llama3_2.py`
+- `tests/models/model_test.py`
+
+Current tested behavior:
+
+- method is AWQ
+- bits are 4
+- group size is 128
+- one tested export target is AWQ GEMM
+- one tested runtime backend is `BACKEND.TORCH_AWQ`
+
+Python:
+
+```python
+Stage(
+    name="ptq",
+    rules=[
+        Rule(
+            match="*",
+            weight={
+                "quantize": {
+                    "method": "awq",
+                    "bits": 4,
+                    "group_size": 128,
+                    "sym": True,
+                },
+                "export": {
+                    "format": "awq",
+                    "variant": "gemm",
+                },
+            },
+        ),
+    ],
+)
+```
+
+YAML:
+
+```yaml
+stages:
+  - name: ptq
+    rules:
+      - match: "*"
+        weight:
+          quantize:
+            method: awq
+            bits: 4
+            group_size: 128
+            sym: true
+          export:
+            format: awq
+            variant: gemm
+```
+
+In `tests/test_awq.py`, the same pattern is also exercised with other export variants such as:
+
+- `gemv`
+- `gemv_fast`
+- `llm_awq`
+
+That is exactly why `export` needs to be an object and not just a single string token.
+
+
+### 3. RTN with weight smoothing and AWQ GEMM export
+
+Source tests:
+
+- `tests/test_weight_only_config.py`
+
+Note:
+
+- the repo currently exercises RTN primarily through weight-only/config and format-conversion tests rather than a `tests/models/*` full-model test case
+
+Current tested behavior:
+
+- method is RTN
+- bits are 4
+- group size is 128
+- smoothing uses `SmoothMAD(k=1.5)`
+- export target is AWQ GEMM
+
+Python:
+
+```python
+Stage(
+    name="weight_only",
+    rules=[
+        Rule(
+            match="*",
+            weight={
+                "prepare": [
+                    {"method": "smooth.mad", "k": 1.5},
+                ],
+                "quantize": {
+                    "method": "rtn",
+                    "bits": 4,
+                    "group_size": 128,
+                },
+                "export": {
+                    "format": "awq",
+                    "variant": "gemm",
+                },
+            },
+        ),
+    ],
+)
+```
+
+YAML:
+
+```yaml
+stages:
+  - name: weight_only
+    rules:
+      - match: "*"
+        weight:
+          prepare:
+            - method: smooth.mad
+              k: 1.5
+          quantize:
+            method: rtn
+            bits: 4
+            group_size: 128
+          export:
+            format: awq
+            variant: gemm
+```
+
+Related repo test:
+
+- `tests/test_format_conversion_flow.py` also verifies that RTN can export to GPTQ format with `RTNQuantizeConfig(bits=4, format=FORMAT.GPTQ, offload_to_disk=False)`
+
+That is a concrete existing example of the protocol's `quantize != export` split.
+
+
 ## Migration From Current `gptqmodel`
 
 Current `gptqmodel` configuration is primarily weight-centric.
@@ -1320,91 +1570,91 @@ The recommended protocol shape is:
 Python:
 
 ```python
-Plan(
-    stages=[
-        Stage(
-            name="ptq",
-            rules=[
-                Rule(
-                    match="re:.*self_attn$",
-                    actions=[smoothquant(alpha=0.5)],
-                ),
-                Rule(
-                    match="*",
-                    weight={
-                        "prepare": [clip.mad(k=2.75)],
-                        "quantize": gptq(
-                            bits=4,
-                            sym=True,
-                            group_size=128,
-                            activation_mode="fake",
-                        ),
-                        "export": {"format": "gptq", "impl": "default"},
+version = 2
+
+stages = [
+    Stage(
+        name="ptq",
+        rules=[
+            Rule(
+                match="re:.*self_attn$",
+                actions=[smoothquant(alpha=0.5)],
+            ),
+            Rule(
+                match="*",
+                weight={
+                    "prepare": [clip.mad(k=2.75)],
+                    "quantize": gptq(
+                        bits=4,
+                        sym=True,
+                        group_size=128,
+                        activation_mode="fake",
+                    ),
+                    "export": {"format": "gptq", "impl": "default"},
+                },
+                input={
+                    "quantize": mxfp4(
+                        mode="dynamic",
+                        block_size=32,
+                        scale_bits=8,
+                    ),
+                    "export": {
+                        "format": "fp4",
+                        "variant": "mxfp4",
+                        "impl": "modelopt",
                     },
-                    input={
-                        "quantize": mxfp4(
-                            mode="dynamic",
-                            block_size=32,
-                            scale_bits=8,
-                        ),
-                        "export": {
-                            "format": "fp4",
-                            "variant": "mxfp4",
-                            "impl": "modelopt",
-                        },
-                    },
-                ),
-                Rule(
-                    match="layer0.qkv",
-                    weight={
-                        "quantize": skip(),
-                    },
-                ),
-            ],
-        ),
-    ],
-)
+                },
+            ),
+            Rule(
+                match="layer0.qkv",
+                weight={
+                    "quantize": skip(),
+                },
+            ),
+        ],
+    ),
+]
 ```
 
 YAML:
 
 ```yaml
-plan:
-  stages:
-    - name: ptq
-      rules:
-        - match: "re:.*self_attn$"
-          actions:
-            - method: smoothquant
-              alpha: 0.5
-        - match: "*"
-          weight:
-            prepare:
-              - method: clip.mad
-                k: 2.75
-            quantize:
-              method: gptq
-              bits: 4
-              sym: true
-              group_size: 128
-              activation_mode: fake
-            export:
-              format: gptq
-              impl: default
-          input:
-            quantize:
-              method: mxfp4
-              mode: dynamic
-              block_size: 32
-              scale_bits: 8
-            export:
-              format: fp4
-              variant: mxfp4
-              impl: modelopt
-        - match: "layer0.qkv"
-          weight:
-            quantize:
-              method: skip
+version: 2
+stages:
+  - name: ptq
+    rules:
+      - match: "re:.*self_attn$"
+        actions:
+          - method: smoothquant
+            alpha: 0.5
+      - match: "*"
+        weight:
+          prepare:
+            - method: clip.mad
+              k: 2.75
+          quantize:
+            method: gptq
+            bits: 4
+            sym: true
+            group_size: 128
+            activation_mode: fake
+          export:
+            format: gptq
+            impl: default
+        input:
+          quantize:
+            method: mxfp4
+            mode: dynamic
+            block_size: 32
+            scale_bits: 8
+          export:
+            format: fp4
+            variant: mxfp4
+            impl: modelopt
+      - match: "layer0.qkv"
+        weight:
+          quantize:
+            method: skip
 ```
 
 This keeps the model concise:
