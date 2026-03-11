@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from .config import GGUFConfig, GGUFBits, SmoothMAD
+from .config import FORMAT, METHOD, GGUFConfig, GGUFBits, QuantizeConfig, SmoothMAD
 
 
 @dataclass(frozen=True)
@@ -138,7 +138,7 @@ def compile_plan_to_quantize_config(plan: ExecutionPlan):
     if rule.weight is None:
         raise ValueError("Initial protocol implementation requires a `weight` target.")
 
-    return _compile_gguf_weight_target(rule.weight, matchers=rule.match)
+    return _compile_weight_target(rule.weight, matchers=rule.match)
 
 
 def compile_protocol_to_quantize_config(source: Any):
@@ -335,13 +335,29 @@ def _copy_optional_mapping(source: Any) -> dict[str, Any] | None:
     return dict(source)
 
 
+def _compile_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec, ...]):
+    if weight.mode not in {None, "merge"}:
+        raise NotImplementedError("Initial protocol compiler supports only the default target merge mode.")
+
+    quantize = weight.quantize
+    if quantize is None or not quantize.method:
+        raise ValueError("Weight target requires `weight.quantize.method`.")
+
+    method = str(quantize.method).strip().lower()
+    if method == METHOD.GGUF.value:
+        return _compile_gguf_weight_target(weight, matchers=matchers)
+    if method in {METHOD.GPTQ.value, METHOD.AWQ.value}:
+        return _compile_quantize_config_weight_target(weight, matchers=matchers, method=METHOD(method))
+    raise NotImplementedError(
+        "Initial protocol compiler supports only `weight.quantize.method` in {\"gguf\", \"gptq\", \"awq\"}."
+    )
+
+
 def _compile_gguf_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec, ...]) -> GGUFConfig:
-    if not _supports_gguf_match_compilation(matchers):
+    if not _supports_initial_weight_match_compilation(matchers):
         raise NotImplementedError(
             "Initial GGUF protocol compiler supports only `match=\"*\"` or `match=[\"*\", \"-:...\"]`."
         )
-    if weight.mode not in {None, "merge"}:
-        raise NotImplementedError("Initial GGUF compiler supports only the default target merge mode.")
 
     quantize = weight.quantize
     if quantize is None:
@@ -363,6 +379,52 @@ def _compile_gguf_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec
     gguf_format = _resolve_gguf_public_format(bits=bits, export=export)
     dynamic = _compile_negative_match_dynamic(matchers)
     return GGUFConfig(bits=bits, format=gguf_format, smoother=smoother, dynamic=dynamic)
+
+
+def _compile_quantize_config_weight_target(weight: TargetSpec, *, matchers: tuple[MatchSpec, ...], method: METHOD):
+    if not _supports_initial_weight_match_compilation(matchers):
+        raise NotImplementedError(
+            f"Initial {method.value.upper()} protocol compiler supports only `match=\"*\"` or `match=[\"*\", \"-:...\"]`."
+        )
+    if weight.prepare:
+        raise NotImplementedError(
+            f"Initial {method.value.upper()} protocol compiler does not yet support `weight.prepare`."
+        )
+
+    quantize = weight.quantize
+    if quantize is None:
+        raise ValueError(f"{method.value.upper()} weight target requires `weight.quantize`.")
+    if quantize.method != method.value:
+        raise NotImplementedError(
+            f"Initial {method.value.upper()} compiler supports only `weight.quantize.method = \"{method.value}\"`."
+        )
+
+    bits = quantize.args.get("bits")
+    if bits is None:
+        raise ValueError(f"{method.value.upper()} weight target requires `weight.quantize.bits`.")
+
+    export_format = _resolve_export_format(method=method, export=weight.export)
+    dynamic = _compile_negative_match_dynamic(matchers)
+    group_size = quantize.args.get("group_size", 128)
+    sym = bool(quantize.args.get("sym", True))
+
+    kwargs = {
+        "quant_method": method,
+        "format": export_format,
+        "bits": bits,
+        "group_size": group_size,
+        "sym": sym,
+        "dynamic": dynamic,
+    }
+
+    if "desc_act" in quantize.args or method == METHOD.GPTQ:
+        kwargs["desc_act"] = bool(quantize.args.get("desc_act", False))
+
+    if method == METHOD.GPTQ:
+        if "act_group_aware" in quantize.args:
+            kwargs["act_group_aware"] = bool(quantize.args["act_group_aware"])
+
+    return QuantizeConfig(**kwargs)
 
 
 def _compile_supported_smoother(prepare: tuple[OperationSpec, ...]) -> Optional[SmoothMAD]:
@@ -407,7 +469,7 @@ def _is_global_match(matchers: tuple[MatchSpec, ...]) -> bool:
     return len(matchers) == 1 and matchers[0].include and matchers[0].pattern == "*"
 
 
-def _supports_gguf_match_compilation(matchers: tuple[MatchSpec, ...]) -> bool:
+def _supports_initial_weight_match_compilation(matchers: tuple[MatchSpec, ...]) -> bool:
     includes = tuple(selector for selector in matchers if selector.include)
     return bool(includes) and all(selector.pattern == "*" for selector in includes)
 
@@ -417,6 +479,45 @@ def _compile_negative_match_dynamic(matchers: tuple[MatchSpec, ...]) -> Optional
     if not excludes:
         return None
     return {f"-:{selector.pattern}": {} for selector in excludes}
+
+
+def _resolve_export_format(method: METHOD, export: Optional[ExportSpec]) -> FORMAT:
+    if method == METHOD.GPTQ:
+        if export is None:
+            return FORMAT.GPTQ
+        if export.format not in {None, METHOD.GPTQ.value}:
+            raise NotImplementedError("Initial GPTQ compiler supports only `weight.export.format = \"gptq\"`.")
+        variant = str(export.variant or FORMAT.GPTQ.value).strip().lower().replace("-", "_")
+        mapping = {
+            FORMAT.GPTQ.value: FORMAT.GPTQ,
+            FORMAT.GPTQ_V2.value: FORMAT.GPTQ_V2,
+            FORMAT.MARLIN.value: FORMAT.MARLIN,
+            FORMAT.BITBLAS.value: FORMAT.BITBLAS,
+        }
+        if variant not in mapping:
+            raise NotImplementedError(f"Unsupported GPTQ export variant: `{variant}`.")
+        return mapping[variant]
+
+    if method == METHOD.AWQ:
+        if export is None:
+            return FORMAT.GEMM
+        if export.format not in {None, METHOD.AWQ.value}:
+            raise NotImplementedError("Initial AWQ compiler supports only `weight.export.format = \"awq\"`.")
+        variant = str(export.variant or FORMAT.GEMM.value).strip().lower().replace("-", "_")
+        mapping = {
+            FORMAT.GEMM.value: FORMAT.GEMM,
+            FORMAT.GEMV.value: FORMAT.GEMV,
+            FORMAT.GEMV_FAST.value: FORMAT.GEMV_FAST,
+            "gemvfast": FORMAT.GEMV_FAST,
+            FORMAT.LLM_AWQ.value.replace("-", "_"): FORMAT.LLM_AWQ,
+            FORMAT.LLM_AWQ.value: FORMAT.LLM_AWQ,
+            FORMAT.MARLIN.value: FORMAT.MARLIN,
+        }
+        if variant not in mapping:
+            raise NotImplementedError(f"Unsupported AWQ export variant: `{variant}`.")
+        return mapping[variant]
+
+    raise NotImplementedError(f"Unsupported export method resolution for `{method}`.")
 
 
 def _pattern_matches(pattern: str, module_name: str) -> bool:
