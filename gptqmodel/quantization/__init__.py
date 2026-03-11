@@ -42,5 +42,21 @@ from .config import (
 )
 from .gptaq import GPTAQ
 from .gptq import GPTQ
+from .protocol import (
+                       ExecutionPlan,
+                       ExportSpec,
+                       OperationSpec,
+                       QuantizeSpec,
+                       Rule,
+                       Stage,
+                       TargetSpec,
+                       compile_plan_to_quantize_config,
+                       compile_protocol,
+                       compile_protocol_to_quantize_config,
+                       compile_protocol_yaml_file,
+                       compile_protocol_yaml_text,
+                       compile_protocol_yaml_to_quantize_config,
+                       skip,
+)
 from .quantizer import Quantizer, quantize
 from .rtn import RTN

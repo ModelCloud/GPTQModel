@@ -781,14 +781,19 @@ def ModelLoader(cls):
             return device_map
 
         log.info(f"Loader: device = {device}")
-        layers, _ = get_module_by_name_prefix(model, extract_layers_node)
-        num_gpus = 1
-        if device is DEVICE.CUDA:
-            num_gpus = torch.cuda.device_count()
-        elif device is DEVICE.XPU:
-            num_gpus = torch.xpu.device_count()
-        device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
-        log.info(f"Loader: device_map = {device_map}")
+        explicit_device_map = device_map if isinstance(device_map, dict) else None
+        if explicit_device_map is not None:
+            device_map = {str(key): str(value) for key, value in explicit_device_map.items()}
+            log.info(f"Loader: honoring explicit device_map = {device_map}")
+        else:
+            layers, _ = get_module_by_name_prefix(model, extract_layers_node)
+            num_gpus = 1
+            if device is DEVICE.CUDA:
+                num_gpus = torch.cuda.device_count()
+            elif device is DEVICE.XPU:
+                num_gpus = torch.xpu.device_count()
+            device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
+            log.info(f"Loader: device_map = {device_map}")
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
