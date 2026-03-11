@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "GPTQModel"
-dynamic = ["version"]
+dynamic = ["version", "dependencies"]
 description = "Production ready LLM model compression/quantization toolkit with hw accelerated inference support for both cpu/gpu via HF, vLLM, and SGLang."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,39 +31,16 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-dependencies = [
-    "accelerate>=1.10.1",
-    "numpy==2.2.6; python_version < '3.14'",
-    "numpy>=2.3.0; python_version >= '3.14'",
-    "torch>=2.8.0",
-    "safetensors>=0.6.2",
-    "transformers>=4.57.1",
-    "threadpoolctl>=3.6.0",
-    "packaging>=24.2",
-    "device-smi>=0.5.3",
-    "protobuf>=6.32.0",
-    "pillow>=11.3.0",
-    "hf_transfer>=0.1.9; python_version < '3.14'",
-    "huggingface_hub>=0.34.4",
-    "tokenicer>=0.0.8",
-    "logbar>=0.2.1",
-    "maturin>=1.9.4", # required by safetensors and hf_transfer
-    "datasets>=3.6.0",
-    "pyarrow>=21.0",
-    "dill>=0.3.8", # datasets requirements
-    "pypcre>=0.2.13",
-    "torchao>=0.14.1", # fix bad transformers 4.57.1 breaking torchao compat
-    "kernels>=0.12.2", # For CPU kernels
-    "defuser>=0.0.6",
-    # "cython>=3.1.4", # required by hf-xet/hf-transfer
-# "flash-attn>=2.8.3", <-- install for lower vram usage
-]
 
 [project.scripts]
 gptqmodel = "gptqmodel.cli.gptqmodel:main"
 
 [project.urls]
 Homepage = "https://github.com/ModelCloud/GPTQModel"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
 
 [project.optional-dependencies]
 test = [
@@ -104,3 +81,6 @@ openai = [
 mlx = [
     "mlx_lm>=0.24.0",
 ]
+
+[tool.uv]
+torch-backend = "auto"
