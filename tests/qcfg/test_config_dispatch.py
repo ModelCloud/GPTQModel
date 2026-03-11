@@ -90,7 +90,6 @@ def test_quantize_config_dispatches_rtn_gguf_export_constructor():
 
     assert isinstance(cfg, GGUFConfig)
     assert cfg.quant_method == METHOD.GGUF
-    assert cfg.checkpoint_format == FORMAT.GGUF
     assert cfg.format == "q_0"
     assert cfg.bits == 4
     assert isinstance(cfg.runtime_bits, GGUFBits)
@@ -108,7 +107,6 @@ def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method():
 
     assert isinstance(cfg, GGUFConfig)
     assert cfg.quant_method == METHOD.GGUF
-    assert cfg.checkpoint_format == FORMAT.GGUF
     assert cfg.format == "q_0"
     assert cfg.bits == 4
     assert isinstance(cfg.runtime_bits, GGUFBits)
@@ -134,7 +132,6 @@ def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method_preserving_
     assert cfg.runtime_bits.variant == "k"
     assert cfg.runtime_bits.quality == "m"
     assert cfg.format == "q_k_m"
-    assert cfg.checkpoint_format == FORMAT.GGUF
     assert cfg.export_quant_method() == METHOD.GGUF
 
 

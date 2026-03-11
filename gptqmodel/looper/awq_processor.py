@@ -27,7 +27,7 @@ from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear, LLMAwqQua
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
-from ..quantization.config import FORMAT, METHOD, QuantizeConfig
+from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.failsafe import normalize_failsafe
@@ -94,7 +94,8 @@ class AWQProcessor(LoopProcessor):
         self.gptq_model = gptq_model
 
         model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
-        self.qlinear_kernel = model_kernel or self._select_qlinear_kernel_for_format(qcfg.checkpoint_format)
+        self.format = resolve_quant_format(qcfg.format, qcfg.quant_method)
+        self.qlinear_kernel = model_kernel or self._select_qlinear_kernel_for_format(self.format)
 
         self.model = model
         # Whether to apply clipping to the model during quantization. Some models may perform better with this set to False.
@@ -103,8 +104,6 @@ class AWQProcessor(LoopProcessor):
         # " Adjust this parameter to increase or decrease memory usage for these computations."
         # " Default is 1GB (1024 * 1024 * 1024)."
         self.max_chunk_memory = 1024 * 1024 * 1024
-
-        self.format = qcfg.checkpoint_format
 
         # Whether to scale using both w/x or just x.
         self.duo_scaling = True
@@ -191,8 +190,8 @@ class AWQProcessor(LoopProcessor):
     def _resolve_qlinear_kernel(self, module_name: Optional[str] = None):
         # Honor per-module dynamic format overrides when present.
         format_override = self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
-        target_format = format_override or self.qcfg.checkpoint_format
-        if target_format == self.qcfg.checkpoint_format:
+        target_format = resolve_quant_format(format_override or self.qcfg.format, self.qcfg.quant_method)
+        if target_format == self.format:
             model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
             if model_kernel is not None:
                 return model_kernel
@@ -1490,7 +1489,7 @@ class AWQProcessor(LoopProcessor):
                     device=self.qcfg.device,
                     lm_head_name=self.gptq_model.lm_head,
                     pack_dtype=self.qcfg.pack_dtype,
-                    format=self.qcfg.checkpoint_format,
+                    format=self.format,
                     register_buffers=False,
                 )
         if timer is not None and create_start is not None:

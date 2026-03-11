@@ -38,6 +38,7 @@ from ..quantization.config import (
     META_QUANTIZER_GPTQMODEL,
     META_VALUE_URI,
     MIN_VERSION_WITH_V2,
+    resolve_quant_format,
 )
 from ..utils.backend import BACKEND
 from ..utils.hf import no_init_weights, sanitize_generation_config_file
@@ -222,7 +223,7 @@ def ModelWriter(cls):
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
-        if quantize_config.checkpoint_format == FORMAT.GPTQ_V2:
+        if resolve_quant_format(quantize_config.format, quantize_config.quant_method) == FORMAT.GPTQ_V2:
             log.warn(
                 f"Using 'format = {FORMAT.GPTQ_V2}': the serialized model is only supported by GPTQModel version >= {MIN_VERSION_WITH_V2}."
             )

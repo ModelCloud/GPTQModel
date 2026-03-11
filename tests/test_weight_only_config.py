@@ -91,7 +91,6 @@ def test_gguf_quantize_config_round_trip():
     )
 
     assert cfg.format == "q_0"
-    assert cfg.checkpoint_format == FORMAT.GGUF
     assert cfg.uses_weight_only_lifecycle() is True
     assert cfg.requires_calibration_dataset() is False
     assert cfg.bits == 4
@@ -188,7 +187,7 @@ def test_rtn_quantize_config_supports_gguf_bits_round_trip(
     reloaded = QuantizeConfig.from_quant_config(payload)
 
     assert isinstance(reloaded, GGUFConfig)
-    assert reloaded.checkpoint_format == FORMAT.GGUF
+    assert reloaded.quant_method == METHOD.GGUF
     assert reloaded.format == format
     assert reloaded.bits == bit_width
     assert reloaded.runtime_bits.bits == bit_width

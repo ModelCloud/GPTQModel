@@ -15,7 +15,7 @@ from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
-from ..quantization.config import METHOD, QuantizeConfig
+from ..quantization.config import METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.failsafe import normalize_failsafe
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger, log_time_block
@@ -255,7 +255,7 @@ class QQQProcessor(LoopProcessor):
                 device=self.qcfg.device,
                 lm_head_name=model.lm_head,
                 pack_dtype=self.qcfg.pack_dtype,
-                format=self.qcfg.checkpoint_format,
+                format=resolve_quant_format(self.qcfg.format, self.qcfg.quant_method),
                 register_buffers=False,
             )
 

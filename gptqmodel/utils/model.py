@@ -50,7 +50,7 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, _normalize_quant_bits, dynamic_get, quant_bits_width
+from ..quantization.config import FORMAT_FIELD_CODE, METHOD, _normalize_quant_bits, dynamic_get, quant_bits_width, resolve_quant_format
 from . import has_gil_disabled
 from .backend import BACKEND
 from .ctx import ctx
@@ -257,7 +257,7 @@ def make_quant(
     bits = qcfg.runtime_bits
     group_size =qcfg.group_size
     extension = qcfg.adapter
-    format = qcfg.checkpoint_format
+    format = resolve_quant_format(qcfg.format, qcfg.quant_method)
     desc_act = qcfg.desc_act
     sym = qcfg.sym
     dynamic = qcfg.dynamic
@@ -606,7 +606,7 @@ def convert_gptq_v1_to_v2_format(
     # with tctl.threadpool_limits(limits=1):
     time.time()
     log.info(
-        f"Format: Converting `{FORMAT_FIELD_CHECKPOINT}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
+        f"Format: Converting `{FORMAT_FIELD_CODE}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
 
     for _, submodule in model.named_modules():
         # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
@@ -829,7 +829,7 @@ def pack_module(
         if (
             quantize_config is not None
             and quantize_config.export_quant_method() == METHOD.GPTQ
-            and quantize_config.checkpoint_format == FORMAT.GPTQ
+            and resolve_quant_format(quantize_config.format, quantize_config.quant_method) == FORMAT.GPTQ
             and getattr(quant_linear_cls, "REQUIRES_FORMAT_V2", False)
         ):
             with log_time_block(

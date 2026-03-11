@@ -476,6 +476,28 @@ def _normalize_quant_bits(bits: Union[int, str, GGUFBits], format_value: Optiona
     return normalized
 
 
+def resolve_quant_format(format_value: Optional[Union[str, FORMAT]], quant_method: Optional[Union[str, METHOD]] = None) -> FORMAT:
+    if isinstance(quant_method, str):
+        quant_method = _normalize_quant_method(quant_method)
+
+    if quant_method == METHOD.GGUF:
+        return FORMAT.GGUF
+
+    if isinstance(format_value, FORMAT):
+        return format_value
+
+    try:
+        if _normalize_gguf_public_format(format_value) is not None:
+            return FORMAT.GGUF
+    except ValueError:
+        pass
+
+    if format_value is None:
+        return FORMAT.GPTQ
+
+    return _normalize_format(format_value)
+
+
 def _looks_like_gguf_bits(bits: Any) -> bool:
     if isinstance(bits, GGUFBits):
         return True
@@ -1443,7 +1465,6 @@ def _normalize_gguf_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
         normalized.get(BITS_FIELD_CODE, 4),
         normalized.get(FORMAT_FIELD_CODE),
     )
-    normalized[FORMAT_FIELD_CHECKPOINT] = FORMAT.GGUF
     return normalized
 
 
@@ -1627,7 +1648,7 @@ class BaseQuantizeConfig:
 
     @property
     def checkpoint_format(self) -> FORMAT:
-        return self.format if isinstance(self.format, FORMAT) else _normalize_format(self.format)
+        return resolve_quant_format(self.format, self.quant_method)
 
     @property
     def runtime_bits(self):
@@ -1669,7 +1690,7 @@ class BaseQuantizeConfig:
         return tuple(valid_formats)
 
     def export_quant_method(self) -> METHOD:
-        return _resolve_export_quant_method(self.checkpoint_format, fallback_method=self.quant_method)
+        return _resolve_export_quant_method(resolve_quant_format(self.format, self.quant_method), fallback_method=self.quant_method)
 
     def default_desc_act(self) -> bool:
         return True
@@ -1815,13 +1836,14 @@ class BaseQuantizeConfig:
         valid_formats = set(FORMAT)
         format_auto_inferred = False
         checkpoint_format_hint = quantize_cfg.get(FORMAT_FIELD_CHECKPOINT) if isinstance(quantize_cfg, dict) else None
+        serialized_format = quantize_cfg.get(FORMAT_FIELD_CODE) if isinstance(quantize_cfg, dict) else None
         if format:
             format = _normalize_format(format)
             if format not in valid_formats:
                 raise ValueError(f"QuantizeConfig: Unknown quantization checkpoint format: {format}.")
-            if quantize_cfg.get(FORMAT_FIELD_CHECKPOINT):
+            if checkpoint_format_hint is not None or serialized_format is not None:
                 raise ValueError("QuantizeConfig: Conflicting quantization format passed in manually and also exists in model config.")
-        elif quantize_cfg.get(FORMAT_FIELD_CHECKPOINT) is None:
+        elif checkpoint_format_hint is None and serialized_format is None:
             format_auto_inferred = True
 
         field_names = _known_quantize_config_field_names()
@@ -1830,12 +1852,14 @@ class BaseQuantizeConfig:
             QUANT_METHOD_FIELD: METHOD.GPTQ,
             FORMAT_FIELD_CODE: format if format else FORMAT.GPTQ,
         }
+        format_field_present = format is not None
+        legacy_checkpoint_format = None
 
         for key, val in quantize_cfg.items():
             key = key.lower()
 
             if key == FORMAT_FIELD_CHECKPOINT:
-                normalized[key] = _normalize_format(val)
+                legacy_checkpoint_format = _normalize_format(val)
                 continue
 
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
@@ -1852,13 +1876,26 @@ class BaseQuantizeConfig:
                 else:
                     normalized[QUANT_METHOD_FIELD] = _normalize_quant_method(val)
             elif key == FORMAT_FIELD_CODE:
-                gguf_checkpoint_hint = format or checkpoint_format_hint
+                format_field_present = True
+                serialized_format_hint = None
+                try:
+                    serialized_format_hint = resolve_quant_format(
+                        val,
+                        normalized.get(QUANT_METHOD_FIELD),
+                    )
+                except ValueError:
+                    serialized_format_hint = None
+
+                gguf_checkpoint_hint = format or legacy_checkpoint_format or checkpoint_format_hint
                 if gguf_checkpoint_hint is not None:
                     try:
-                        gguf_checkpoint_hint = _normalize_format(gguf_checkpoint_hint)
+                        gguf_checkpoint_hint = resolve_quant_format(
+                            gguf_checkpoint_hint,
+                            normalized.get(QUANT_METHOD_FIELD),
+                        )
                     except ValueError:
                         gguf_checkpoint_hint = None
-                if gguf_checkpoint_hint == FORMAT.GGUF:
+                if serialized_format_hint == FORMAT.GGUF or gguf_checkpoint_hint == FORMAT.GGUF:
                     normalized[key] = val
                 else:
                     normalized[key] = _normalize_format(val)
@@ -1866,6 +1903,9 @@ class BaseQuantizeConfig:
                 normalized[key] = val
             else:
                 log.info(f"QuantizeConfig: Ignoring unknown parameter in the quantization configuration: {key}.")
+
+        if not format_field_present and legacy_checkpoint_format is not None:
+            normalized[FORMAT_FIELD_CODE] = legacy_checkpoint_format
 
         if quantize_cfg.get(AWQ_PACKING_BACKEND_FIELD) == "llm-awq":
             normalized[QUANT_METHOD_FIELD] = METHOD.AWQ
@@ -1909,7 +1949,7 @@ class BaseQuantizeConfig:
 
         if format_auto_inferred:
             log.info(
-                f"QuantizeConfig: `{FORMAT_FIELD_CHECKPOINT}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}"
+                f"QuantizeConfig: `{FORMAT_FIELD_CODE}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}"
             )
 
         if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
@@ -1989,7 +2029,11 @@ class BaseQuantizeConfig:
             "desc_act": self.desc_act,
             "lm_head": self.lm_head,
             QUANT_METHOD_FIELD: self.quant_method,
-            FORMAT_FIELD_CHECKPOINT: self.checkpoint_format,
+            FORMAT_FIELD_CODE: self.format,
+            # TODO: Stop emitting the legacy field once upstream GPTQ loaders stop hard-coding it.
+            # As of 2026-03-11, vLLM and SGLang still read only `checkpoint_format`,
+            # while Transformers v5.3.0 accepts `format` and normalizes the legacy field.
+            FORMAT_FIELD_CHECKPOINT: resolve_quant_format(self.format, self.quant_method),
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: meta_payload,
         }
@@ -2394,7 +2438,7 @@ def clone_weight_only_config_for_module(
         else:
             qcfg_clone.bits = _normalize_quant_bits(
                 qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits),
-                format_value=qcfg_clone.checkpoint_format,
+                format_value=resolve_quant_format(qcfg_clone.format, qcfg_clone.quant_method),
             )
 
         if isinstance(qcfg_clone, RTNQuantizeConfig):

@@ -421,7 +421,6 @@ def test_baseqmodel_quantize_allows_direct_gguf_export(
 
     assert "weight_only_gguf" in result
     assert model.quantized is True
-    assert model.quantize_config.checkpoint_format == FORMAT.GGUF
     assert model.quantize_config.format == public_format
     assert model.quantize_config.bits == bit_width
     assert model.quantize_config.quant_method == METHOD.GGUF

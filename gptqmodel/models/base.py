@@ -42,7 +42,16 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchQuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import BaseQuantizeConfig, FORMAT, METHOD, QUANTIZE_BLACK_LIST, GcMode, VramStrategy, dynamic_get
+from ..quantization.config import (
+    BaseQuantizeConfig,
+    FORMAT,
+    METHOD,
+    QUANTIZE_BLACK_LIST,
+    GcMode,
+    VramStrategy,
+    dynamic_get,
+    resolve_quant_format,
+)
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND
@@ -649,7 +658,9 @@ class BaseQModel(nn.Module):
             log.warn("Quantize: batch_size overridden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
 
-        if self.quantize_config.checkpoint_format == FORMAT.MARLIN:
+        format_code = resolve_quant_format(self.quantize_config.format, self.quantize_config.quant_method)
+
+        if format_code == FORMAT.MARLIN:
             raise ValueError(
                 "FORMAT.MARLIN is deprecated for quantization. Please switch to FORMAT.GPTQ. GPTQMOdel will auto-use Marlin kernel for accelerated inference for FORMAT.GPTQ."
             )
@@ -657,7 +668,7 @@ class BaseQModel(nn.Module):
         export_quant_method = self.quantize_config.export_quant_method()
 
         if export_quant_method == METHOD.AWQ:
-            if self.quantize_config.checkpoint_format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
+            if format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
                 # AWQ GEMV_FAST / LLM_AWQ only supports pack_dtype is torch.int16
                 log.info("Quantize Model: Auto fix `pack_dtype` to `torch.int16`")
                 self.quantize_config.pack_dtype = torch.int16
@@ -673,14 +684,14 @@ class BaseQModel(nn.Module):
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):
             if export_quant_method == METHOD.AWQ:
-                if self.quantize_config.checkpoint_format == FORMAT.GEMM:
+                if format_code == FORMAT.GEMM:
                     preferred_backend = BACKEND.GEMM
-                elif self.quantize_config.checkpoint_format == FORMAT.GEMV:
+                elif format_code == FORMAT.GEMV:
                     preferred_backend = BACKEND.GEMV
-                elif self.quantize_config.checkpoint_format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
+                elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
                     preferred_backend = BACKEND.GEMV_FAST
                 else:
-                    raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.checkpoint_format}` with `METHOD.AWQ`")
+                    raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
             elif self.quantize_config.quant_method == METHOD.QQQ:
                 preferred_backend = BACKEND.QQQ
             elif self.quantize_config.quant_method == METHOD.GGUF:
@@ -696,7 +707,7 @@ class BaseQModel(nn.Module):
             desc_act=self.quantize_config.desc_act,
             sym=self.quantize_config.sym,
             backend=preferred_backend,
-            format=self.quantize_config.checkpoint_format,
+            format=format_code,
             quant_method=export_quant_method,
             device=DEVICE(self.quantize_config.device),
             pack=True,
@@ -713,7 +724,7 @@ class BaseQModel(nn.Module):
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
 
-        if self.quantize_config.checkpoint_format == FORMAT.BITBLAS:
+        if format_code == FORMAT.BITBLAS:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
@@ -733,7 +744,7 @@ class BaseQModel(nn.Module):
                 pack_dtype=self.quantize_config.pack_dtype,
                 multi_select=False,
                 backend=preferred_backend,
-                format=self.quantize_config.checkpoint_format,
+                format=format_code,
                 quant_method=export_quant_method,
             )
 
