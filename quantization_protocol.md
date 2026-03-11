@@ -102,6 +102,57 @@ A rule is the only normal matcher.
 Each rule may configure one or more tensor targets.
 
 
+## Match Selectors
+
+`Rule.match` may be either:
+
+- a single selector string
+- a list of selector strings
+
+Selector prefixes:
+
+- no prefix or `+:` means positive/include
+- `-:` means negative/exclude
+
+This lets one rule express "match everything except ..." without adding a second skip rule.
+
+Python:
+
+```python
+Rule(
+    match=["*", "-:.*layer2.*"],
+    weight={
+        "quantize": gptq(bits=4, sym=True, group_size=128),
+        "export": {"format": "gptq"},
+    },
+)
+```
+
+YAML:
+
+```yaml
+- match:
+    - "*"
+    - "-:.*layer2.*"
+  weight:
+    quantize:
+      method: gptq
+      bits: 4
+      sym: true
+      group_size: 128
+    export:
+      format: gptq
+```
+
+Recommended semantics:
+
+- a rule matches if at least one positive selector matches
+- any matching negative selector removes that module from the rule
+- `*` is a special match-all shorthand
+- every other selector string is interpreted as regex by default
+- for exact module-name matches, use an anchored escaped regex such as `^model\.layers\.0\.self_attn\.q_proj$`
+
+
 ## Internal Implementation
 
 An implementation may compile the user-facing protocol into an internal typed object such as:
@@ -171,7 +222,7 @@ stages = [
         name="balance",
         rules=[
             Rule(
-                match="re:.*self_attn$",
+                match=".*self_attn$",
                 actions=[smoothquant(alpha=0.5)],
             ),
         ],
@@ -197,7 +248,7 @@ YAML:
 stages:
   - name: balance
     rules:
-      - match: "re:.*self_attn$"
+      - match: ".*self_attn$"
         actions:
           - method: smoothquant
             alpha: 0.5
@@ -268,7 +319,7 @@ Recommended match forms:
 
 - exact module path: `"model.layers.0.self_attn.q_proj"`
 - wildcard / glob: `"*"` or `"*.q_proj"`
-- regex: `"re:.*self_attn$"`
+- regex: `".*self_attn$"`
 
 Rules are evaluated top-to-bottom inside a stage.
 
@@ -288,7 +339,7 @@ Python:
 
 ```python
 Rule(
-    match="re:.*self_attn$",
+    match=".*self_attn$",
     aliases={"proj": ["q_proj", "k_proj", "v_proj", "o_proj"]},
     actions=[
         record_stats(targets="@proj"),
@@ -300,7 +351,7 @@ Rule(
 YAML:
 
 ```yaml
-match: "re:.*self_attn$"
+match: ".*self_attn$"
 aliases:
   proj:
     - q_proj
@@ -387,7 +438,7 @@ YAML:
 
 ```yaml
 weight:
-  prepare: []
+  prepa []
   quantize: null
   export: null
 ```
@@ -526,7 +577,7 @@ Example:
       impl: llm_awq
       version: 2
 
-- match: "re:.*small_proj$"
+- match: ".*small_proj$"
   weight:
     export:
       variant: gemv
@@ -564,7 +615,7 @@ Rule(
 )
 
 Rule(
-    match="re:.*down_proj$",
+    match=".*down_proj$",
     weight={
         "quantize": {"bits": 3},
     },
@@ -584,7 +635,7 @@ YAML:
     export:
       format: gptq
 
-- match: "re:.*down_proj$"
+- match: ".*down_proj$"
   weight:
     quantize:
       bits: 3
@@ -629,7 +680,7 @@ YAML:
 match: "layer0.qkv"
 weight:
   mode: replace
-  prepare:
+  prepa
     - method: pad.columns
       multiple: 4
       semantic: true
@@ -854,7 +905,7 @@ YAML:
 ```yaml
 - match: "*"
   weight:
-    prepare:
+    prepa
       - method: pad.columns
         multiple: 4
         semantic: true
@@ -903,7 +954,7 @@ Rule(
 )
 
 Rule(
-    match="re:.*(q_proj|k_proj)$",
+    match=".*(q_proj|k_proj)$",
     weight={
         "quantize": {"bits": 8},
     },
@@ -924,7 +975,7 @@ YAML:
       format: gptq
       impl: default
 
-- match: "re:.*(q_proj|k_proj)$"
+- match: ".*(q_proj|k_proj)$"
   weight:
     quantize:
       bits: 8
@@ -960,7 +1011,7 @@ match: "layer0.qkv"
 stop: true
 weight:
   mode: replace
-  prepare:
+  prepa
     - method: pad.columns
       multiple: 4
       semantic: true
@@ -999,7 +1050,7 @@ Python:
 
 ```python
 Rule(
-    match="re:.*self_attn$",
+    match=".*self_attn$",
     actions=[smoothquant(alpha=0.5)],
 )
 
@@ -1024,14 +1075,14 @@ Rule(
 YAML:
 
 ```yaml
-- match: "re:.*self_attn$"
+- match: ".*self_attn$"
   actions:
     - method: smoothquant
       alpha: 0.5
 
 - match: "*"
   weight:
-    prepare:
+    prepa
       - method: clip.mad
         k: 2.75
     quantize:
@@ -1148,7 +1199,7 @@ Python:
 
 ```python
 Rule(
-    match="re:.*self_attn$",
+    match=".*self_attn$",
     actions=[smoothquant(alpha=0.5)],
 )
 ```
@@ -1156,7 +1207,7 @@ Rule(
 YAML:
 
 ```yaml
-match: "re:.*self_attn$"
+match: ".*self_attn$"
 actions:
   - method: smoothquant
     alpha: 0.5
@@ -1190,7 +1241,7 @@ Python:
 
 ```python
 Rule(
-    match="re:.*down_proj$",
+    match=".*down_proj$",
     weight={
         "quantize": rtn(bits=4, sym=True),
         "export": {"format": "gptq", "impl": "default"},
@@ -1201,7 +1252,7 @@ Rule(
 YAML:
 
 ```yaml
-match: "re:.*down_proj$"
+match: ".*down_proj$"
 weight:
   quantize:
     method: rtn
@@ -1272,7 +1323,7 @@ Rule(
 )
 
 Rule(
-    match="re:.*small_proj$",
+    match=".*small_proj$",
     weight={
         "export": {"variant": "gemv"},
     },
@@ -1295,7 +1346,7 @@ YAML:
       impl: llm_awq
       version: 2
 
-- match: "re:.*small_proj$"
+- match: ".*small_proj$"
   weight:
     export:
       variant: gemv
@@ -1342,19 +1393,19 @@ Stage(
             },
         ),
         Rule(
-            match="re:.*\\.up_proj.*",
+            match=".*\\.up_proj.*",
             weight={
                 "quantize": {"bits": 8},
             },
         ),
         Rule(
-            match="re:.*\\.gate_proj.*",
+            match=".*\\.gate_proj.*",
             weight={
                 "quantize": {"bits": 8},
             },
         ),
         Rule(
-            match="re:.*\\.down_proj.*",
+            match=".*\\.down_proj.*",
             weight={
                 "quantize": {"bits": 4, "group_size": 32},
             },
@@ -1378,15 +1429,15 @@ stages:
           export:
             format: gptq
             impl: default
-      - match: "re:.*\\.up_proj.*"
+      - match: ".*\\.up_proj.*"
         weight:
           quantize:
             bits: 8
-      - match: "re:.*\\.gate_proj.*"
+      - match: ".*\\.gate_proj.*"
         weight:
           quantize:
             bits: 8
-      - match: "re:.*\\.down_proj.*"
+      - match: ".*\\.down_proj.*"
         weight:
           quantize:
             bits: 4
@@ -1518,7 +1569,7 @@ stages:
     rules:
       - match: "*"
         weight:
-          prepare:
+          prepa
             - method: smooth.mad
               k: 1.5
           quantize:
@@ -1577,7 +1628,7 @@ stages = [
         name="ptq",
         rules=[
             Rule(
-                match="re:.*self_attn$",
+                match=".*self_attn$",
                 actions=[smoothquant(alpha=0.5)],
             ),
             Rule(
@@ -1623,13 +1674,13 @@ version: 2
 stages:
   - name: ptq
     rules:
-      - match: "re:.*self_attn$"
+      - match: ".*self_attn$"
         actions:
           - method: smoothquant
             alpha: 0.5
       - match: "*"
         weight:
-          prepare:
+          prepa
             - method: clip.mad
               k: 2.75
           quantize:

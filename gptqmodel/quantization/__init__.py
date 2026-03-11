@@ -45,6 +45,7 @@ from .gptq import GPTQ
 from .protocol import (
                        ExecutionPlan,
                        ExportSpec,
+                       MatchSpec,
                        OperationSpec,
                        QuantizeSpec,
                        Rule,

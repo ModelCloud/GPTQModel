@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -40,8 +41,21 @@ class TargetSpec:
 
 
 @dataclass(frozen=True)
+class MatchSpec:
+    pattern: str
+    include: bool = True
+
+    @property
+    def modifier(self) -> str:
+        return "+" if self.include else "-"
+
+    def matches(self, module_name: str) -> bool:
+        return _pattern_matches(self.pattern, module_name)
+
+
+@dataclass(frozen=True)
 class Rule:
-    match: str
+    match: tuple[MatchSpec, ...]
     aliases: dict[str, Any] | None = None
     actions: tuple[OperationSpec, ...] = ()
     stop: bool = False
@@ -49,6 +63,15 @@ class Rule:
     input: Optional[TargetSpec] = None
     output: Optional[TargetSpec] = None
     kv_cache: Optional[TargetSpec] = None
+
+    def matches(self, module_name: str) -> bool:
+        includes = tuple(selector for selector in self.match if selector.include)
+        excludes = tuple(selector for selector in self.match if not selector.include)
+        if not includes:
+            return False
+        if not any(selector.matches(module_name) for selector in includes):
+            return False
+        return not any(selector.matches(module_name) for selector in excludes)
 
 
 @dataclass(frozen=True)
@@ -104,8 +127,10 @@ def compile_plan_to_quantize_config(plan: ExecutionPlan):
         raise NotImplementedError("Initial protocol implementation supports exactly one rule for config compilation.")
 
     rule = stage.rules[0]
-    if rule.match != "*":
-        raise NotImplementedError("Initial protocol implementation only supports a single `match=\"*\"` rule.")
+    if not _is_global_match(rule.match):
+        raise NotImplementedError(
+            "Initial protocol implementation only supports a single positive global selector: `match=\"*\"`."
+        )
     if rule.aliases:
         raise NotImplementedError("Initial protocol implementation does not support aliases during config compilation.")
     if rule.actions:
@@ -165,7 +190,7 @@ def _normalize_stage(source: Any) -> Stage:
 def _normalize_rule(source: Any) -> Rule:
     if isinstance(source, Rule):
         return Rule(
-            match=source.match,
+            match=_normalize_match(source.match),
             aliases=_copy_optional_mapping(source.aliases),
             actions=tuple(_normalize_operation(action) for action in source.actions),
             stop=bool(source.stop),
@@ -181,7 +206,7 @@ def _normalize_rule(source: Any) -> Rule:
         raise ValueError("Rule requires a non-empty `match`.")
 
     return Rule(
-        match=str(match),
+        match=_normalize_match(match),
         aliases=_copy_optional_mapping(data.get("aliases")),
         actions=tuple(_normalize_operation(action) for action in data.get("actions", ())),
         stop=bool(data.get("stop", False)),
@@ -210,6 +235,42 @@ def _normalize_target(source: Any) -> Optional[TargetSpec]:
         quantize=_normalize_quantize(data.get("quantize")),
         export=_normalize_export(data.get("export")),
     )
+
+
+def _normalize_match(source: Any) -> tuple[MatchSpec, ...]:
+    if isinstance(source, MatchSpec):
+        return (MatchSpec(pattern=source.pattern, include=bool(source.include)),)
+    if isinstance(source, str):
+        return (_normalize_match_selector(source),)
+    if isinstance(source, (tuple, list)):
+        selectors = tuple(_normalize_match_selector(item) for item in source)
+        if not selectors:
+            raise ValueError("Rule `match` list must not be empty.")
+        return selectors
+    raise TypeError("Rule `match` must be a string, MatchSpec, or a list/tuple of selector strings.")
+
+
+def _normalize_match_selector(source: Any) -> MatchSpec:
+    if isinstance(source, MatchSpec):
+        return MatchSpec(pattern=source.pattern, include=bool(source.include))
+    if not isinstance(source, str):
+        raise TypeError("Match selector must be a string or MatchSpec.")
+
+    selector = source.strip()
+    if not selector:
+        raise ValueError("Match selector must not be empty.")
+
+    include = True
+    if selector.startswith("+:"):
+        selector = selector[2:].strip()
+    elif selector.startswith("-:"):
+        include = False
+        selector = selector[2:].strip()
+
+    if not selector:
+        raise ValueError("Match selector pattern must not be empty.")
+
+    return MatchSpec(pattern=selector, include=include)
 
 
 def _normalize_operation(source: Any) -> OperationSpec:
@@ -339,3 +400,13 @@ def _resolve_gguf_public_format(bits: Any, export: Optional[ExportSpec]) -> Opti
             return variant or public_format
 
     return variant
+
+
+def _is_global_match(matchers: tuple[MatchSpec, ...]) -> bool:
+    return len(matchers) == 1 and matchers[0].include and matchers[0].pattern == "*"
+
+
+def _pattern_matches(pattern: str, module_name: str) -> bool:
+    if pattern == "*":
+        return True
+    return re.search(pattern, module_name) is not None

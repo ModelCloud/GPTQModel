@@ -3,6 +3,7 @@
 
 from gptqmodel.quantization import GGUFConfig, METHOD
 from gptqmodel.quantization.protocol import (
+    MatchSpec,
     Rule,
     Stage,
     compile_plan_to_quantize_config,
@@ -58,6 +59,53 @@ stages:
 """
 
 
+def _python_protocol_with_negative_match():
+    return {
+        "version": 2,
+        "stages": [
+            {
+                "name": "weight_only",
+                "rules": [
+                    {
+                        "match": ["*", r"-:.*layers\.2.*"],
+                        "weight": {
+                            "quantize": {
+                                "method": "gptq",
+                                "bits": 4,
+                                "sym": True,
+                                "group_size": 128,
+                            },
+                            "export": {
+                                "format": "gptq",
+                            },
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def _yaml_protocol_with_negative_match() -> str:
+    return r"""
+version: 2
+stages:
+  - name: weight_only
+    rules:
+      - match:
+          - "*"
+          - '-:.*layers\.2.*'
+        weight:
+          quantize:
+            method: gptq
+            bits: 4
+            sym: true
+            group_size: 128
+          export:
+            format: gptq
+"""
+
+
 def test_protocol_python_and_yaml_compile_to_same_execution_plan():
     python_plan = compile_protocol(_python_protocol())
     yaml_plan = compile_protocol_yaml_text(_yaml_protocol())
@@ -86,3 +134,23 @@ def test_protocol_plan_compiles_to_expected_gguf_config():
     assert cfg.bits == 4
     assert cfg.runtime_bits == "q4_k_m"
     assert cfg.format == "q_k_m"
+
+
+def test_protocol_python_and_yaml_compile_to_same_negative_match_plan():
+    python_plan = compile_protocol(_python_protocol_with_negative_match())
+    yaml_plan = compile_protocol_yaml_text(_yaml_protocol_with_negative_match())
+
+    assert python_plan == yaml_plan
+    rule = python_plan.stages[0].rules[0]
+    assert rule.match == (
+        MatchSpec(pattern="*", include=True),
+        MatchSpec(pattern=r".*layers\.2.*", include=False),
+    )
+
+
+def test_rule_match_supports_include_and_exclude_selectors():
+    plan = compile_protocol(_python_protocol_with_negative_match())
+    rule = plan.stages[0].rules[0]
+
+    assert rule.matches("model.layers.0.self_attn.q_proj")
+    assert not rule.matches("model.layers.2.self_attn.q_proj")
