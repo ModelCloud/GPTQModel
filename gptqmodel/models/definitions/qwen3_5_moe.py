@@ -22,7 +22,7 @@ class Qwen3_5_MoeQModel(BaseQModel):
 
     pre_lm_head_norm_module = "model.language_model.norm"
 
-    rotary = "model.language_model.rotary_emb"
+    rotary_embedding = "model.language_model.rotary_emb"
 
     # awq scaling optimizations requires some modules within same subset to strictly match the shape of previous module
     # the o_proj must match v_proj or else scaling optimizations are skipped (GQA vs MHA)

@@ -119,8 +119,8 @@ class AWQProcessor(LoopProcessor):
         self.failsafe = qcfg.failsafe
 
     def _get_root_rotary(self) -> Optional[nn.Module]:
-        if self.gptq_model.rotary:
-            rotary, _ = get_module_by_name_prefix(self.model, [self.gptq_model.rotary])
+        if self.gptq_model.rotary_embedding:
+            rotary, _ = get_module_by_name_prefix(self.model, [self.gptq_model.rotary_embedding])
             return rotary
         return getattr(getattr(self.model, "model", self.model), "rotary_emb", None)
 
