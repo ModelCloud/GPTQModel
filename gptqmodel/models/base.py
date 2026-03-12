@@ -547,11 +547,17 @@ class BaseQModel(nn.Module):
 
     @classmethod
     def filter_not_quantize_module(cls, layer_modules, quantize_config):
-        layer_modules = [
-            [name for name in block if NOT_QUANTIZE_FLAG not in name]
-            for block in layer_modules
-        ]
-        layer_modules = [block for block in layer_modules if block]  # 去掉空 block
+        def should_quantize(name: str) -> bool:
+            # Check if the module name contains any NON_QUANTIZE_FLAGS that indicates it should NOT be quantized
+            return not any(flag in name for flag in NON_QUANTIZE_FLAGS)
+
+        filtered_layer_modules = []
+        for block in layer_modules:
+            filtered_block = [name for name in block if should_quantize(name)]
+            filtered_layer_modules.append(filtered_block)
+        layer_modules = filtered_layer_modules
+
+        layer_modules = [block for block in layer_modules if block]  # Remove empty blocks
 
         if getattr(quantize_config, "dynamic", None):
             new_layer_modules = []
