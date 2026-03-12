@@ -1,6 +1,6 @@
 [build-system]
 requires = [
-    "setuptools>=80.9",
+    "setuptools>=78.1.1",
     "ninja>=1.13.0", # required for faster compilataion
 ]
 build-backend = "setuptools.build_meta"
