@@ -5,11 +5,15 @@
 
 import os
 
+import pytest
+
 
 os.environ["GPTQMODEL_USE_MODELSCOPE"] = "True"
 from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestLoadModelscope(ModelTest):

@@ -47,6 +47,8 @@ from safetensors.torch import save_file
 from gptqmodel.quantization.dtype import dequantize_f8_e4m3
 from gptqmodel.utils.model_dequant import dequantize_model
 
+pytestmark = [pytest.mark.model, pytest.mark.slow, pytest.mark.gpu]
+
 
 def pack_cols(values: torch.Tensor, bits: int = 4) -> torch.Tensor:
     """Pack per-column low-bit values into int32 words."""

@@ -23,6 +23,9 @@ except Exception:  # pragma: no cover
     nvfp4_quantize = None
 
 
+pytestmark = [pytest.mark.cpu, pytest.mark.gpu]
+
+
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
 def test_dequantize_f8_e4m3_basic_conversion():
     values = torch.linspace(-1, 1, steps=8, dtype=torch.float32)

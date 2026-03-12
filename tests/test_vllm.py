@@ -13,12 +13,15 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import importlib.util  # noqa: E402
 import tempfile  # noqa: E402
 
+import pytest  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestLoadVLLM(ModelTest):

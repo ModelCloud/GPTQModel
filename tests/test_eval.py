@@ -14,12 +14,15 @@ from typing import (
     Union,  # noqa: E402
 )
 
+import pytest  # noqa: E402
 from lm_eval.tasks import TaskManager  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestEval(ModelTest):

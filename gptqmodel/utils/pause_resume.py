@@ -212,16 +212,42 @@ class PauseResumeController:
         global _original_termios_settings
         old_settings = None
         try:
-            old_settings = termios.tcgetattr(sys.stdin)
-            if _original_termios_settings is None:
-                _original_termios_settings = old_settings
-            tty.setcbreak(sys.stdin.fileno())
+            try:
+                old_settings = termios.tcgetattr(sys.stdin)
+            except Exception as e:
+                # Some stdin providers used by tests and wrappers expose a stream that
+                # reports as a TTY but does not support termios inspection.
+                log.debug(f"Unable to read terminal settings from stdin: {e}")
+
+            if old_settings is not None:
+                if _original_termios_settings is None:
+                    _original_termios_settings = old_settings
+                try:
+                    tty.setcbreak(sys.stdin.fileno())
+                except Exception as e:
+                    # Test harnesses and redirected stdin can expose a file descriptor that
+                    # passes isatty() checks but still rejects termios mode changes.
+                    log.debug(f"Unable to switch stdin to cbreak mode: {e}")
 
             while not self._stop_event.is_set():
-                if select.select([sys.stdin], [], [], 0.1)[0]:
-                    char = sys.stdin.read(1)
+                try:
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+                except Exception as e:
+                    log.debug(f"stdin polling unavailable for pause/resume listener: {e}")
+                    time.sleep(0.1)
+                    continue
+
+                if ready:
+                    try:
+                        char = sys.stdin.read(1)
+                    except Exception as e:
+                        log.debug(f"stdin read unavailable for pause/resume listener: {e}")
+                        time.sleep(0.1)
+                        continue
+
                     if char.lower() == 'p':
                         self.toggle_pause_resume()
+                        time.sleep(0.1)
         except Exception as e:
             log.warning(f"Error in stdin listener: {e}")
         finally:

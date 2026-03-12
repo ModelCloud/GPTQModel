@@ -23,6 +23,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
+import pytest  # noqa: E402
 from datasets import load_dataset
 from models.model_test import ModelTest  # noqa: E402
 
@@ -30,6 +31,8 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):

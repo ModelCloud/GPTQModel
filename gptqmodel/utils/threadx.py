@@ -29,6 +29,7 @@ except Exception:  # pragma: no cover - defensive: optional dependency may be un
 from .. import DEBUG_ON
 from ..utils.ctx import ctx
 from ..utils.logger import setup_logger
+from ..utils import torch as torch_utils
 from ..utils.torch import torch_empty_cache_any
 
 
@@ -536,7 +537,7 @@ class DeviceThreadPool:
         empty_cache_every_n: int = 50,     # <=0 disables janitor
         workers: Optional[Dict[str, int]] = None,  # e.g. {'cpu':4, 'cuda:per':1, 'cuda:0':3}
         gc_debounce_seconds: float = 0.02,  # absorb bursty triggers before GC
-        gc_min_interval_seconds: float = 1.0,  # throttle janitor passes
+        gc_min_interval_seconds: float = 0.0,  # throttle janitor passes
         pin_cpu_workers: bool = False,
         pin_accelerator_workers: bool = False,
     ):
@@ -1393,6 +1394,8 @@ class DeviceThreadPool:
         """
         start = time.time()
         try:
+            # Tests and runtime hooks may monkeypatch empty_cache between janitor passes.
+            torch_utils.resolve_empty_cache_callable.cache_clear()
             success = torch_empty_cache_any(device=dev, gc=False)
         except Exception as exc:
             if DEBUG_ON:
@@ -1537,10 +1540,14 @@ class DeviceThreadPool:
                 physical_key = self._physical_key(key)
                 current = self._gc_done_physical.get(physical_key, 0) + 1
                 self._gc_done_physical[physical_key] = current
-                if current % self._empty_cache_every_n == 0:
-                    pending_map = self._gc_pending_physical
-                    pending_map[physical_key] = pending_map.get(physical_key, 0) + 1
-                    self._gc_generation += 1
+                last_done = self._last_gc_done_physical.get(physical_key, 0)
+                completed_chunks = max(0, (current - last_done) // self._empty_cache_every_n)
+                pending_map = self._gc_pending_physical
+                already_pending = pending_map.get(physical_key, 0)
+                new_triggers = completed_chunks - already_pending
+                if new_triggers > 0:
+                    pending_map[physical_key] = already_pending + new_triggers
+                    self._gc_generation += new_triggers
                     trigger_gc = True
                     if DEBUG_ON:
                         log.debug(
@@ -1753,21 +1760,14 @@ class DeviceThreadPool:
             done_phys = per_done_physical.get(phys_key)
             if done_phys is None:
                 continue
-            if threshold <= 0:
-                self._last_gc_done_physical[phys_key] = done_phys
-            else:
-                self._last_gc_done_physical[phys_key] = done_phys - (done_phys % threshold)
+            self._last_gc_done_physical[phys_key] = done_phys
 
             members = self._physical_children.get(phys_key, {phys_key})
             for member in members:
                 done_member = per_done.get(member)
                 if done_member is None:
                     continue
-                dev_type = meta.get(member, {}).get("type")
-                if threshold <= 0 or dev_type not in ("cuda", "xpu", "mps"):
-                    self._last_gc_done_per_device[member] = done_member
-                else:
-                    self._last_gc_done_per_device[member] = done_member - (done_member % threshold)
+                self._last_gc_done_per_device[member] = done_member
 
     def _janitor_loop(self):
         """
@@ -1912,11 +1912,30 @@ class DeviceThreadPool:
                     self._last_consumed_gc_generation = max(self._last_consumed_gc_generation, current_generation)
                 continue
 
+            # A single trigger runs a full accelerator sweep so memory pressure is
+            # normalized across all active devices under the janitor's exclusive pass.
+            sweep_targets: List[str] = []
+            seen_targets: Set[str] = set()
+            for candidate in self._ordered_keys:
+                physical = self._physical_key(candidate)
+                if physical in seen_targets:
+                    continue
+                dev = self._devices_by_key.get(physical)
+                if dev is None or dev.type not in ("cuda", "xpu", "mps"):
+                    continue
+                if physical not in self._locks:
+                    continue
+                seen_targets.add(physical)
+                sweep_targets.append(physical)
+
+            if not sweep_targets:
+                sweep_targets = pending_targets
+
             processed_devices: List[str] = []
             skipped_devices: List[str] = []
             per_device_durations: Dict[str, float] = {}
 
-            for key in pending_targets:
+            for key in sweep_targets:
                 dev = self._devices_by_key.get(key)
                 if dev is None or dev.type not in ("cuda", "xpu", "mps"):
                     skipped_devices.append(key)
@@ -1950,12 +1969,34 @@ class DeviceThreadPool:
                 delta_s = t1 - prev_gc_ts
                 since_last_gc = f"since last GC: {delta_s:.3f}s ({delta_s * 1000:.1f}ms)"
 
+            post = None
             if processed_devices:
-                vram_summary = self._format_vram_summary(processed_devices)
                 try:
                     post = self._collect_state_snapshot()
                     post["_gc_processed_devices"] = processed_devices
                     self._update_gc_watermarks(post)
+                except Exception as e:
+                    try:
+                        log.warn(f"Failed to update GC watermarks: {e!r}")
+                    except Exception:
+                        pass
+
+            with self._stats_lock:
+                pending_map = self._gc_pending_physical
+                if not isinstance(pending_map, dict):
+                    pending_map = dict.fromkeys(pending_map, 1)
+                    self._gc_pending_physical = pending_map
+                for key in processed_devices:
+                    pending_map.pop(key, None)
+                for key in skipped_devices:
+                    pending_map.pop(key, None)
+                self._last_consumed_gc_generation = max(self._last_consumed_gc_generation, current_generation)
+                if any(count > 0 for count in pending_map.values()):
+                    self._gc_event.set()
+
+            if processed_devices:
+                vram_summary = self._format_vram_summary(processed_devices)
+                try:
                     devices_clause = ", ".join(processed_devices)
                     log.info(
                         f"GC completed in {t1 - t0:.3f}s (pass #{self._gc_passes}) at {gc_timestamp}; devices={devices_clause}; VRAM {vram_summary}; {since_last_gc}."
@@ -1973,20 +2014,6 @@ class DeviceThreadPool:
                         log.warn(f"Failed to render GC post-snapshot: {e!r}")
                     except Exception:
                         pass
-
-            with self._stats_lock:
-                pending_map = self._gc_pending_physical
-                if not isinstance(pending_map, dict):
-                    pending_map = dict.fromkeys(pending_map, 1)
-                    self._gc_pending_physical = pending_map
-                for key in processed_devices:
-                    pending_map.pop(key, None)
-                    self._last_gc_done_physical[key] = self._gc_done_physical.get(key, 0)
-                for key in skipped_devices:
-                    pending_map.pop(key, None)
-                self._last_consumed_gc_generation = max(self._last_consumed_gc_generation, current_generation)
-                if any(count > 0 for count in pending_map.values()):
-                    self._gc_event.set()
 
     def _empty_all_caches(self):
         torch_empty_cache_any(gc=False)

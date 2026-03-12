@@ -11,9 +11,12 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import importlib.util  # noqa: E402
 
+import pytest  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestLoadSglang(ModelTest):
@@ -42,4 +45,3 @@ class TestLoadSglang(ModelTest):
         self.assertTrue(len(output)>5)
         model.shutdown()
         del model
-

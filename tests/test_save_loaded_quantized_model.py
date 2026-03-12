@@ -13,9 +13,12 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from parameterized import parameterized  # noqa: E402
+import pytest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, get_best_device  # noqa: E402
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
