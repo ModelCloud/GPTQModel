@@ -27,6 +27,7 @@ from ..models.writer import (
 )
 from ..quantization.config import (
     BaseQuantizeConfig,
+    FP8Config,
     GGUFQuantizeConfig,
     METHOD,
     RTNQuantizeConfig,
@@ -50,7 +51,7 @@ class WeightOnlyProcessor(LoopProcessor):
     def __init__(
         self,
         tokenizer,
-        qcfg: RTNQuantizeConfig | GGUFQuantizeConfig,
+        qcfg: RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config,
     ):
         super().__init__(
             tokenizer=tokenizer,
@@ -67,8 +68,8 @@ class WeightOnlyProcessor(LoopProcessor):
         self.lock = threading.Lock()
 
     @staticmethod
-    def _uses_direct_gguf(qcfg: RTNQuantizeConfig | GGUFQuantizeConfig) -> bool:
-        return qcfg.quant_method == METHOD.GGUF
+    def _uses_direct_pack(qcfg: RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config) -> bool:
+        return qcfg.quant_method in {METHOD.GGUF, METHOD.FP8}
 
     def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
         with self.lock:
@@ -94,15 +95,15 @@ class WeightOnlyProcessor(LoopProcessor):
             "original_columns": columns,
         }
 
-    def quantize_module(self, module: NamedModule) -> Optional[RTNQuantizeConfig | GGUFQuantizeConfig]:
+    def quantize_module(self, module: NamedModule) -> Optional[RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config]:
         qcfg_clone = clone_weight_only_config_for_module(self.qcfg, module.full_name)
         if qcfg_clone is None:
             return None
 
-        if self._uses_direct_gguf(qcfg_clone):
+        if self._uses_direct_pack(qcfg_clone):
             start_time = time.time()
             duration = time.time() - start_time
-            avg_loss = "gguf: pending"
+            avg_loss = f"{qcfg_clone.quant_method.value}: pending"
             damp_percent = 0.0
             nsamples = 0
         else:
@@ -139,7 +140,7 @@ class WeightOnlyProcessor(LoopProcessor):
             self.log.append(stat)
         self.log_new_row(stat)
 
-        if not self._uses_direct_gguf(qcfg_clone):
+        if not self._uses_direct_pack(qcfg_clone):
             module.weight.data = wq
         return qcfg_clone
 
@@ -148,11 +149,11 @@ class WeightOnlyProcessor(LoopProcessor):
         module: NamedModule,
         model: BaseQModel,
         *,
-        qcfg: Optional[RTNQuantizeConfig | GGUFQuantizeConfig] = None,
+        qcfg: Optional[RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config] = None,
         **kwargs,
     ):
         active_qcfg = qcfg or self.qcfg
-        if not self._uses_direct_gguf(active_qcfg):
+        if not self._uses_direct_pack(active_qcfg):
             module.stream_sync()
             with self.lock:
                 q_zeros = module.state.pop("q_zeros").clone()
@@ -187,6 +188,7 @@ class WeightOnlyProcessor(LoopProcessor):
                     pack_dtype=active_qcfg.pack_dtype,
                     format=resolve_quant_format(active_qcfg.format, active_qcfg.quant_method),
                     register_buffers=False,
+                    init_kwargs=active_qcfg.quant_linear_init_kwargs(),
                 )
         if timer is not None and create_start is not None:
             timer.record("submodule_finalize_create", time.perf_counter() - create_start, source=module_label)
@@ -197,7 +199,7 @@ class WeightOnlyProcessor(LoopProcessor):
             if name == module.full_name
         }
 
-        if self._uses_direct_gguf(active_qcfg):
+        if self._uses_direct_pack(active_qcfg):
             pack_start = time.perf_counter() if timer is not None else None
             with log_time_block("module.pack_original", logger=log, module_name=module_label):
                 with parent_module_lock(parent_key):
@@ -219,7 +221,7 @@ class WeightOnlyProcessor(LoopProcessor):
             reference_weight = qmodule._weight_to_matrix(original_layer).detach().cpu().to(torch.float32)
             dequant_weight = qmodule.dequantize_weight().T.detach().cpu().to(torch.float32)
             mean_abs_err = (dequant_weight - reference_weight).abs().mean().item()
-            self._update_logged_loss(module, f"gguf: {mean_abs_err:.7f}")
+            self._update_logged_loss(module, f"{active_qcfg.quant_method.value}: {mean_abs_err:.7f}")
             module.unregister_parameter("weight")
             return
 
@@ -254,6 +256,8 @@ class WeightOnlyProcessor(LoopProcessor):
     def name(self) -> str:
         if self.qcfg.quant_method == METHOD.GGUF:
             return "weight_only_gguf"
+        if self.qcfg.quant_method == METHOD.FP8:
+            return "weight_only_fp8"
         return "weight_only_rtn"
 
 __all__ = ["WeightOnlyProcessor"]

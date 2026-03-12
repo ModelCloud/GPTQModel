@@ -11,6 +11,8 @@ from .config import (
                      FORMAT_FIELD_CHECKPOINT,
                      FORMAT_FIELD_CODE,
                      EXL3QuantizeConfig,
+                     FP8Config,
+                     FP8QuantizeConfig,
                      GGUFConfig,
                      GGUFQuantizeConfig,
                      GGUFBits,

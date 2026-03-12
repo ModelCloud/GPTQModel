@@ -50,7 +50,18 @@ from ..nn_modules.qlinear.exllama import ExllamaQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import FORMAT_FIELD_CODE, METHOD, _normalize_quant_bits, dynamic_get, quant_bits_width, resolve_quant_format
+from ..quantization.config import (
+    FORMAT_FIELD_CODE,
+    METHOD,
+    _normalize_fp8_fmt,
+    _normalize_fp8_scale_semantics,
+    _normalize_fp8_weight_block_size,
+    _normalize_fp8_weight_scale_method,
+    _normalize_quant_bits,
+    dynamic_get,
+    quant_bits_width,
+    resolve_quant_format,
+)
 from . import has_gil_disabled
 from .backend import BACKEND
 from .ctx import ctx
@@ -76,6 +87,11 @@ _DTYPE_SAFE_MAP = {
     torch.bool: ("BOOL", 1),
 }
 
+if hasattr(torch, "float8_e4m3fn"):
+    _DTYPE_SAFE_MAP[torch.float8_e4m3fn] = ("F8_E4M3", 1)
+if hasattr(torch, "float8_e5m2"):
+    _DTYPE_SAFE_MAP[torch.float8_e5m2] = ("F8_E5M2", 1)
+
 
 _DTYPE_STR_MAP = {
     "float32": torch.float32,
@@ -95,6 +111,13 @@ _DTYPE_STR_MAP = {
     "uint8": torch.uint8,
     "bool": torch.bool,
 }
+
+if hasattr(torch, "float8_e4m3fn"):
+    _DTYPE_STR_MAP["float8_e4m3fn"] = torch.float8_e4m3fn
+    _DTYPE_STR_MAP["f8_e4m3"] = torch.float8_e4m3fn
+if hasattr(torch, "float8_e5m2"):
+    _DTYPE_STR_MAP["float8_e5m2"] = torch.float8_e5m2
+    _DTYPE_STR_MAP["f8_e5m2"] = torch.float8_e5m2
 
 MoETopKState = List[Tuple[nn.Module, str, int]]
 
@@ -262,6 +285,7 @@ def make_quant(
     sym = qcfg.sym
     dynamic = qcfg.dynamic
     pack_dtype = qcfg.pack_dtype
+    init_kwargs = qcfg.quant_linear_init_kwargs()
 
     # Bitblas needs to be loaded as gptq's quant linear first, and then converted to bitblas format.
     if not pack and format in (FORMAT.GPTQ, FORMAT.GPTQ_V2) and backend == BACKEND.BITBLAS:
@@ -311,6 +335,7 @@ def make_quant(
                 backend=backend,
                 adapter=qcfg.adapter,
                 format=format,
+                init_kwargs=init_kwargs,
             )
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
@@ -340,6 +365,7 @@ def create_quant_module(
     backend: BACKEND = BACKEND.AUTO,
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
+    init_kwargs: Optional[Dict[str, Any]] = None,
 
 ):
     # unwrap named module
@@ -388,6 +414,7 @@ def create_quant_module(
     tmp_desc_act = desc_act
     tmp_sym = sym
     tmp_pack_dtype = pack_dtype
+    tmp_init_kwargs = dict(init_kwargs or {})
 
     # dynamic bits, group_size, sym, pack_dtype for each layer/module
     if dynamic is not None:
@@ -404,6 +431,30 @@ def create_quant_module(
             tmp_desc_act = overrides.get("desc_act", desc_act)
             tmp_sym = overrides.get("sym", sym)
             tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
+
+            if format == FORMAT.FP8:
+                fp8_format_override = overrides.get(FORMAT_FIELD_CODE, overrides.get("fmt"))
+                if fp8_format_override is not None:
+                    tmp_init_kwargs["format"] = _normalize_fp8_fmt(fp8_format_override)
+                block_size_override = overrides.get(
+                    "weight_block_size",
+                    tmp_init_kwargs.get("weight_block_size"),
+                )
+                normalized_block_size = _normalize_fp8_weight_block_size(block_size_override)
+                if "weight_scale_method" in overrides or block_size_override is not None:
+                    tmp_init_kwargs["weight_scale_method"] = _normalize_fp8_weight_scale_method(
+                        overrides.get(
+                            "weight_scale_method",
+                            tmp_init_kwargs.get("weight_scale_method"),
+                        ),
+                        weight_block_size=normalized_block_size,
+                    )
+                if "weight_scale_semantics" in overrides:
+                    tmp_init_kwargs["weight_scale_semantics"] = _normalize_fp8_scale_semantics(
+                        overrides["weight_scale_semantics"]
+                    )
+                if "weight_block_size" in overrides:
+                    tmp_init_kwargs["weight_block_size"] = normalized_block_size
 
     validate_bits = quant_bits_width(tmp_bits)
     constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits
@@ -439,6 +490,7 @@ def create_quant_module(
         backend=backend,
         register_buffers=register_buffers,
         adapter=adapter,
+        **tmp_init_kwargs,
     )
     new_layer.device = ori_layer_device
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
@@ -458,6 +510,7 @@ def create_quant_layer(
         backend: BACKEND,
         adapter: Optional[Adapter] = None,
         format: FORMAT = FORMAT.GPTQ,
+        init_kwargs: Optional[Dict[str, Any]] = None,
 
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
@@ -483,6 +536,7 @@ def create_quant_layer(
             format=format,
             backend=backend,
             adapter=adapter,
+            init_kwargs=init_kwargs,
         )
 
     return linear_cls

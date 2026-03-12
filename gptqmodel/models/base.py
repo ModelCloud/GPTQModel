@@ -708,6 +708,8 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.EXLLAMA_V3
             elif self.quantize_config.quant_method == METHOD.GGUF:
                 preferred_backend = BACKEND.AUTO
+            elif self.quantize_config.quant_method == METHOD.FP8:
+                preferred_backend = BACKEND.TORCH
             else:
                 preferred_backend = BACKEND.TORCH
 
@@ -2015,8 +2017,8 @@ class BaseQModel(nn.Module):
     def _auto_detect_module_tree(self, model: PreTrainedModel, quant_method: METHOD):
         log.warn("Model not yet support, attempting Module Tree AutoCompat...")
 
-        if quant_method not in {METHOD.GPTQ, METHOD.GGUF, METHOD.EXL3}:
-            log.warn(f"Module Tree AutoCompat: Failed, quant_method={quant_method}, only support GPTQ/GGUF/EXL3")
+        if quant_method not in {METHOD.GPTQ, METHOD.GGUF, METHOD.FP8, METHOD.EXL3}:
+            log.warn(f"Module Tree AutoCompat: Failed, quant_method={quant_method}, only support GPTQ/GGUF/FP8/EXL3")
             return None
 
         def _get(path):

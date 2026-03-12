@@ -20,9 +20,17 @@ except Exception:
 
 __all__ = [
     "device_supports_native_fp8",
+    "dequantize_fp8",
     "dequantize_f8_e4m3",
     "dequantize_f4_e2m1",
 ]
+
+
+_FLOAT8_DTYPES = tuple(
+    getattr(torch, name)
+    for name in ("float8_e4m3fn", "float8_e5m2")
+    if hasattr(torch, name)
+)
 
 
 def device_supports_native_fp8(device: Optional[torch.device] = None) -> bool:
@@ -92,13 +100,13 @@ def dequantize_f8_e4m3(
     omitted the helper falls back to a plain dtype conversion.
     """
 
-    if not hasattr(torch, "float8_e4m3fn"):
-        raise RuntimeError("Current PyTorch build does not provide float8_e4m3fn tensors")
+    if not _FLOAT8_DTYPES:
+        raise RuntimeError("Current PyTorch build does not provide FP8 tensors")
 
     if scale is not None and scale_inv is not None:
         raise ValueError("Provide either scale or scale_inv, not both")
 
-    if tensor.dtype is not torch.float8_e4m3fn:
+    if tensor.dtype not in _FLOAT8_DTYPES:
         result = tensor.to(target_dtype)
     else:
         result = tensor.to(target_dtype)
@@ -170,6 +178,23 @@ def dequantize_f8_e4m3(
             result = result / scale_tensor
 
     return result
+
+
+def dequantize_fp8(
+    tensor: torch.Tensor,
+    *,
+    scale: Optional[torch.Tensor] = None,
+    scale_inv: Optional[torch.Tensor] = None,
+    axis: Optional[int] = 0,
+    target_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    return dequantize_f8_e4m3(
+        tensor,
+        scale=scale,
+        scale_inv=scale_inv,
+        axis=axis,
+        target_dtype=target_dtype,
+    )
 
 
 def dequantize_f4_e2m1(

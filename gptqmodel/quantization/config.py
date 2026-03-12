@@ -69,6 +69,7 @@ class FORMAT(str, Enum):
     # v2 format fixed sym = False quantization
     GPTQ_V2 = "gptq_v2"
     GGUF = "gguf"
+    FP8 = "fp8"
     MARLIN = "marlin"
     BITBLAS = "bitblas"
     QQQ = "qqq"
@@ -84,6 +85,7 @@ class FORMAT(str, Enum):
 class METHOD(str, Enum):
     GPTQ = "gptq"
     GGUF = "gguf"
+    FP8 = "fp8"
     QQQ = "qqq"
     AWQ = "awq"
     EXL3 = "exl3"
@@ -492,6 +494,8 @@ def resolve_quant_format(format_value: Optional[Union[str, FORMAT]], quant_metho
 
     if quant_method == METHOD.GGUF:
         return FORMAT.GGUF
+    if quant_method == METHOD.FP8:
+        return FORMAT.FP8
     if quant_method == METHOD.EXL3:
         return FORMAT.EXL3
 
@@ -503,6 +507,9 @@ def resolve_quant_format(format_value: Optional[Union[str, FORMAT]], quant_metho
             return FORMAT.GGUF
     except ValueError:
         pass
+
+    if _looks_like_fp8_fmt(format_value):
+        return FORMAT.FP8
 
     if format_value is None:
         return FORMAT.GPTQ
@@ -548,6 +555,84 @@ def _normalize_exl3_bits(bits: Union[int, float, str]) -> float:
     if bits < 1.0 or bits > 8.0:
         raise ValueError("EXL3QuantizeConfig: `bits` must be between 1.0 and 8.0.")
     return float(bits)
+
+
+_FP8_FMT_ALIASES = {
+    "e4m3": "float8_e4m3fn",
+    "float8_e4m3": "float8_e4m3fn",
+    "float8_e4m3fn": "float8_e4m3fn",
+    "e5m2": "float8_e5m2",
+    "float8_e5m2": "float8_e5m2",
+}
+_FP8_WEIGHT_SCALE_METHODS = {"tensor", "row", "block"}
+_FP8_SCALE_SEMANTICS = {"inverse"}
+
+
+def _looks_like_fp8_fmt(value: Any) -> bool:
+    if value is None:
+        return False
+    normalized = str(value).strip().lower()
+    return normalized in _FP8_FMT_ALIASES
+
+
+def _normalize_fp8_fmt(value: Optional[str]) -> str:
+    if isinstance(value, FORMAT):
+        if value != FORMAT.FP8:
+            raise ValueError(f"FP8Config: unsupported `format` `{value}`.")
+        value = None
+
+    normalized = "float8_e4m3fn" if value is None else str(value).strip().lower()
+    if normalized in {"", FORMAT.FP8.value}:
+        normalized = "float8_e4m3fn"
+    resolved = _FP8_FMT_ALIASES.get(normalized)
+    if resolved is None:
+        supported = ", ".join(sorted(_FP8_FMT_ALIASES))
+        raise ValueError(f"FP8Config: unsupported `format` `{value}`. Supported values: {supported}.")
+    if not hasattr(torch, resolved):
+        raise ValueError(f"FP8Config: current PyTorch build does not provide `{resolved}`.")
+    return resolved
+
+
+def _normalize_fp8_weight_block_size(value: Optional[Union[List[int], Tuple[int, int]]]) -> Optional[Tuple[int, int]]:
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("FP8Config: `weight_block_size` must be a 2-item list/tuple or None.")
+    rows, cols = int(value[0]), int(value[1])
+    if rows <= 0 or cols <= 0:
+        raise ValueError("FP8Config: `weight_block_size` entries must be positive integers.")
+    return rows, cols
+
+
+def _normalize_fp8_weight_scale_method(
+    value: Optional[str],
+    *,
+    weight_block_size: Optional[Tuple[int, int]],
+) -> str:
+    normalized = "block" if weight_block_size is not None and value is None else (value or "row")
+    normalized = str(normalized).strip().lower()
+    if normalized not in _FP8_WEIGHT_SCALE_METHODS:
+        supported = ", ".join(sorted(_FP8_WEIGHT_SCALE_METHODS))
+        raise ValueError(
+            f"FP8Config: `weight_scale_method` must be one of {{{supported}}}, got `{value}`."
+        )
+    if normalized == "block" and weight_block_size is None:
+        raise ValueError("FP8Config: `weight_scale_method='block'` requires `weight_block_size`.")
+    if normalized != "block" and weight_block_size is not None:
+        raise ValueError(
+            "FP8Config: `weight_block_size` is only valid when `weight_scale_method='block'`."
+        )
+    return normalized
+
+
+def _normalize_fp8_scale_semantics(value: Optional[str]) -> str:
+    normalized = "inverse" if value is None else str(value).strip().lower()
+    if normalized not in _FP8_SCALE_SEMANTICS:
+        supported = ", ".join(sorted(_FP8_SCALE_SEMANTICS))
+        raise ValueError(
+            f"FP8Config: `weight_scale_semantics` must be one of {{{supported}}}, got `{value}`."
+        )
+    return normalized
 
 @dataclass
 class SmoothMethod:
@@ -947,6 +1032,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
     },
+    METHOD.FP8: {
+        FORMAT.FP8,
+    },
     METHOD.EXL3: {
         FORMAT.EXL3,
     },
@@ -981,6 +1069,9 @@ AWQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.QQQ,
 )
+FP8_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.FP8,
+)
 EXL3_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.EXL3,
 )
@@ -999,6 +1090,7 @@ GGUF_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GPTQ: METHOD.GPTQ,
     FORMAT.GPTQ_V2: METHOD.GPTQ,
+    FORMAT.FP8: METHOD.FP8,
     FORMAT.EXL3: METHOD.EXL3,
     FORMAT.GGUF: METHOD.GGUF,
     FORMAT.BITBLAS: METHOD.GPTQ,
@@ -1226,6 +1318,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.GPTQ
         if value == FORMAT.BITBLAS:
             return METHOD.GPTQ
+        if value == FORMAT.FP8:
+            return METHOD.FP8
         if value == FORMAT.EXL3:
             return METHOD.EXL3
         try:
@@ -1510,6 +1604,28 @@ def _normalize_gguf_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _normalize_fp8_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(payload)
+    weight_only = normalized.pop("weight_only", None)
+    legacy_fmt = normalized.pop("fmt", None)
+
+    if "smoother" not in normalized and "smooth" not in normalized:
+        normalized["smoother"] = _extract_weight_only_smooth(weight_only)
+
+    normalized[FORMAT_FIELD_CODE] = _normalize_fp8_fmt(
+        normalized.get(FORMAT_FIELD_CODE, legacy_fmt)
+    )
+
+    weight_block_size = _normalize_fp8_weight_block_size(normalized.get("weight_block_size"))
+    normalized["weight_block_size"] = list(weight_block_size) if weight_block_size is not None else None
+
+    normalized["weight_scale_method"] = _normalize_fp8_weight_scale_method(
+        normalized.get("weight_scale_method"),
+        weight_block_size=weight_block_size,
+    )
+    return normalized
+
+
 def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional[METHOD] = None) -> METHOD:
     if format_value == FORMAT.MARLIN:
         if fallback_method is None:
@@ -1529,6 +1645,8 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
 
     if target_cls is AWQQuantizeConfig:
         expected_method = METHOD.AWQ
+    elif target_cls is FP8Config:
+        expected_method = METHOD.FP8
     elif target_cls is EXL3QuantizeConfig:
         expected_method = METHOD.EXL3
         format_value = normalized.get(FORMAT_FIELD_CODE)
@@ -1593,6 +1711,8 @@ def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) 
         normalized = _normalize_rtn_kwargs(normalized)
     elif target_cls is GGUFConfig:
         normalized = _normalize_gguf_kwargs(normalized)
+    elif target_cls is FP8Config:
+        normalized = _normalize_fp8_kwargs(normalized)
     return _filter_quantize_config_payload_for_target_cls(target_cls, normalized)
 
 
@@ -1893,9 +2013,12 @@ class BaseQuantizeConfig:
         checkpoint_format_hint = quantize_cfg.get(FORMAT_FIELD_CHECKPOINT) if isinstance(quantize_cfg, dict) else None
         serialized_format = quantize_cfg.get(FORMAT_FIELD_CODE) if isinstance(quantize_cfg, dict) else None
         if format:
-            format = _normalize_format(format)
-            if format not in valid_formats:
-                raise ValueError(f"QuantizeConfig: Unknown quantization checkpoint format: {format}.")
+            if _looks_like_fp8_fmt(format):
+                format = _normalize_fp8_fmt(format)
+            else:
+                format = _normalize_format(format)
+                if format not in valid_formats:
+                    raise ValueError(f"QuantizeConfig: Unknown quantization checkpoint format: {format}.")
             if checkpoint_format_hint is not None or serialized_format is not None:
                 raise ValueError("QuantizeConfig: Conflicting quantization format passed in manually and also exists in model config.")
         elif checkpoint_format_hint is None and serialized_format is None:
@@ -1914,7 +2037,10 @@ class BaseQuantizeConfig:
             key = key.lower()
 
             if key == FORMAT_FIELD_CHECKPOINT:
-                legacy_checkpoint_format = _normalize_format(val)
+                if _looks_like_fp8_fmt(val):
+                    legacy_checkpoint_format = FORMAT.FP8
+                else:
+                    legacy_checkpoint_format = _normalize_format(val)
                 continue
 
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
@@ -1950,7 +2076,7 @@ class BaseQuantizeConfig:
                         )
                     except ValueError:
                         gguf_checkpoint_hint = None
-                if serialized_format_hint == FORMAT.GGUF or gguf_checkpoint_hint == FORMAT.GGUF:
+                if serialized_format_hint in {FORMAT.GGUF, FORMAT.FP8} or gguf_checkpoint_hint in {FORMAT.GGUF, FORMAT.FP8}:
                     normalized[key] = val
                 else:
                     normalized[key] = _normalize_format(val)
@@ -2001,6 +2127,8 @@ class BaseQuantizeConfig:
             normalized = _normalize_rtn_kwargs(normalized)
         elif target_cls is GGUFConfig:
             normalized = _normalize_gguf_kwargs(normalized)
+        elif target_cls is FP8Config:
+            normalized = _normalize_fp8_kwargs(normalized)
 
         if format_auto_inferred:
             log.info(
@@ -2010,7 +2138,7 @@ class BaseQuantizeConfig:
         if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
             normalized["desc_act"] = False
 
-        if "sym" not in normalized and target_cls is not GGUFConfig:
+        if "sym" not in normalized and target_cls not in {GGUFConfig, FP8Config, EXL3QuantizeConfig}:
             log.warn(
                 "QuantizeConfig: config does not contain `sym` (symmetric quantization). This may result in silent errors. Defaulting to `sym=True`."
             )
@@ -2133,6 +2261,9 @@ class BaseQuantizeConfig:
 
     def requires_calibration_dataset(self) -> bool:
         return not self.uses_weight_only_lifecycle()
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {}
 
 
 @dataclass
@@ -2315,6 +2446,123 @@ class QQQQuantizeConfig(GPTQQuantizeConfig):
 
     def default_desc_act(self) -> bool:
         return True
+
+
+@dataclass
+class FP8Config(PreFilterQuantizeConfig):
+    bits: int = field(default=8, metadata={"choices": [8]})
+    quant_method: METHOD = field(default=METHOD.FP8)
+    format: Optional[str] = field(default="float8_e4m3fn")
+    group_size: int = field(default=-1)
+    desc_act: Optional[bool] = field(default=False)
+    sym: bool = field(default=True)
+    weight_scale_method: str = field(default="row")
+    weight_block_size: Optional[Union[List[int], Tuple[int, int]]] = field(default=None)
+    weight_scale_semantics: str = field(default="inverse")
+
+    @property
+    def checkpoint_format(self) -> FORMAT:
+        return FORMAT.FP8
+
+    def _resolve_checkpoint_format(self) -> FORMAT:
+        self.format = _normalize_fp8_fmt(self.format)
+        return FORMAT.FP8
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.FP8,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return FP8_EXPORT_FORMATS
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def __post_init__(self):
+        self._normalize_prefilter_state()
+        super(PreFilterQuantizeConfig, self).__post_init__()
+
+        if self.bits != 8:
+            raise ValueError("FP8Config: `bits` must be `8`.")
+
+        if self.quant_method != METHOD.FP8:
+            raise ValueError("FP8Config: `quant_method` must be `fp8`.")
+
+        self.group_size = -1
+        self.desc_act = False
+        self.sym = True
+
+        self.format = _normalize_fp8_fmt(self.format)
+        block_size = _normalize_fp8_weight_block_size(self.weight_block_size)
+        self.weight_scale_method = _normalize_fp8_weight_scale_method(
+            self.weight_scale_method,
+            weight_block_size=block_size,
+        )
+        self.weight_block_size = list(block_size) if block_size is not None else None
+        self.weight_scale_semantics = _normalize_fp8_scale_semantics(self.weight_scale_semantics)
+
+        if self.dynamic is not None:
+            self.dynamic = {
+                **{k: v for k, v in self.dynamic.items() if k.startswith('-')},
+                **{k: v for k, v in self.dynamic.items() if not k.startswith('-')},
+            }
+            for layer, layer_dict in self.dynamic.items():
+                self._normalize_dynamic_layer_config(
+                    layer,
+                    layer_dict,
+                    valid_bit_widths=[8],
+                    checkpoint_format=FORMAT.FP8,
+                )
+
+    def _normalize_dynamic_layer_config(
+        self,
+        layer_name: str,
+        layer_dict: Dict[str, Any],
+        *,
+        valid_bit_widths: List[int],
+        checkpoint_format: FORMAT,
+    ) -> None:
+        del valid_bit_widths, checkpoint_format
+        if "bits" in layer_dict and int(layer_dict["bits"]) != 8:
+            raise ValueError(f"FP8Config: layer `{layer_name}` only supports 8-bit FP8 weights.")
+        if "group_size" in layer_dict and layer_dict["group_size"] not in (-1, None):
+            raise ValueError("FP8Config: `group_size` is not used; keep it at `-1`.")
+
+        block_size = _normalize_fp8_weight_block_size(layer_dict.get("weight_block_size"))
+        raw_format = layer_dict.get(FORMAT_FIELD_CODE, layer_dict.get("fmt"))
+        if raw_format is not None:
+            layer_dict[FORMAT_FIELD_CODE] = _normalize_fp8_fmt(raw_format)
+        layer_dict.pop("fmt", None)
+        if "weight_scale_method" in layer_dict or block_size is not None:
+            layer_dict["weight_scale_method"] = _normalize_fp8_weight_scale_method(
+                layer_dict.get("weight_scale_method"),
+                weight_block_size=block_size,
+            )
+        if "weight_scale_semantics" in layer_dict:
+            layer_dict["weight_scale_semantics"] = _normalize_fp8_scale_semantics(
+                layer_dict["weight_scale_semantics"]
+            )
+        if "weight_block_size" in layer_dict:
+            layer_dict["weight_block_size"] = list(block_size) if block_size is not None else None
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {
+            "format": self.format,
+            "weight_scale_method": self.weight_scale_method,
+            "weight_block_size": self.weight_block_size,
+            "weight_scale_semantics": self.weight_scale_semantics,
+        }
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out[FORMAT_FIELD_CODE] = self.format
+        out["weight_scale_method"] = self.weight_scale_method
+        out["weight_block_size"] = self.weight_block_size
+        out["weight_scale_semantics"] = self.weight_scale_semantics
+
+    def uses_weight_only_lifecycle(self) -> bool:
+        return True
+
+
+FP8QuantizeConfig = FP8Config
 
 
 @dataclass
@@ -2610,9 +2858,9 @@ GGUFQuantizeConfig = GGUFConfig
 
 
 def clone_weight_only_config_for_module(
-    qcfg: Union[RTNQuantizeConfig, GGUFConfig],
+    qcfg: Union[RTNQuantizeConfig, GGUFConfig, FP8Config],
     module_full_name: str,
-) -> Optional[Union[RTNQuantizeConfig, GGUFConfig]]:
+) -> Optional[Union[RTNQuantizeConfig, GGUFConfig, FP8Config]]:
     if qcfg.dynamic_get(layer_name=module_full_name) is False:
         return None
 
@@ -2632,6 +2880,33 @@ def clone_weight_only_config_for_module(
             qcfg_clone.bits, qcfg_clone.format, qcfg_clone._gguf_bits = _normalize_gguf_config_spec(
                 dynamic_bits,
                 dynamic_format,
+            )
+        elif isinstance(qcfg_clone, FP8Config):
+            dynamic_format = qcfg.dynamic_get(module_full_name, FORMAT_FIELD_CODE, None)
+            if dynamic_format is None:
+                dynamic_format = qcfg.dynamic_get(module_full_name, "fmt", qcfg_clone.format)
+            dynamic_block_size = qcfg.dynamic_get(
+                module_full_name,
+                "weight_block_size",
+                qcfg_clone.weight_block_size,
+            )
+            block_size = _normalize_fp8_weight_block_size(dynamic_block_size)
+            qcfg_clone.format = _normalize_fp8_fmt(dynamic_format)
+            qcfg_clone.weight_scale_method = _normalize_fp8_weight_scale_method(
+                qcfg.dynamic_get(
+                    module_full_name,
+                    "weight_scale_method",
+                    qcfg_clone.weight_scale_method,
+                ),
+                weight_block_size=block_size,
+            )
+            qcfg_clone.weight_block_size = list(block_size) if block_size is not None else None
+            qcfg_clone.weight_scale_semantics = _normalize_fp8_scale_semantics(
+                qcfg.dynamic_get(
+                    module_full_name,
+                    "weight_scale_semantics",
+                    qcfg_clone.weight_scale_semantics,
+                )
             )
         else:
             qcfg_clone.bits = _normalize_quant_bits(
@@ -2655,7 +2930,7 @@ clone_rtn_config_for_module = clone_weight_only_config_for_module
 
 def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantizeConfig]:
     method = payload.get(QUANT_METHOD_FIELD, METHOD.GPTQ)
-    checkpoint_format_value = payload.get(FORMAT_FIELD_CHECKPOINT, payload.get(FORMAT_FIELD_CODE, FORMAT.GPTQ))
+    raw_checkpoint_format_value = payload.get(FORMAT_FIELD_CHECKPOINT, payload.get(FORMAT_FIELD_CODE, FORMAT.GPTQ))
     weight_only = payload.get("weight_only")
     bits = payload.get(BITS_FIELD_CODE)
     gguf_public_format = payload.get(FORMAT_FIELD_CODE)
@@ -2665,10 +2940,13 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
     except Exception:
         method = METHOD.GPTQ
 
-    try:
-        checkpoint_format_value = _normalize_format(checkpoint_format_value)
-    except Exception:
-        checkpoint_format_value = FORMAT.GPTQ
+    if _looks_like_fp8_fmt(raw_checkpoint_format_value):
+        checkpoint_format_value = FORMAT.FP8
+    else:
+        try:
+            checkpoint_format_value = _normalize_format(raw_checkpoint_format_value)
+        except Exception:
+            checkpoint_format_value = FORMAT.GPTQ
     format_value = checkpoint_format_value
 
     gguf_format_detected = False
@@ -2679,9 +2957,10 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
             gguf_format_detected = False
 
     weight_only_method = _peek_weight_only_method(weight_only)
-    if weight_only is not None and weight_only_method not in {None, WeightOnlyMethod.RTN, WeightOnlyMethod.GGUF}:
+    fp8_storage_fmt = payload.get(FORMAT_FIELD_CODE, payload.get("fmt"))
+    if weight_only is not None and weight_only_method not in {None, WeightOnlyMethod.RTN, WeightOnlyMethod.GGUF, WeightOnlyMethod.FP8}:
         raise ValueError(
-            "QuantizeConfig: unsupported weight-only config. Weight-only export currently supports `rtn` and `gguf`."
+            "QuantizeConfig: unsupported weight-only config. Weight-only export currently supports `rtn`, `gguf`, and `fp8`."
         )
     if (
         checkpoint_format_value == FORMAT.GGUF
@@ -2690,10 +2969,14 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         or gguf_format_detected
     ):
         return GGUFConfig
+    if weight_only_method == WeightOnlyMethod.FP8:
+        return FP8Config
     if weight_only_method == WeightOnlyMethod.RTN:
         return RTNQuantizeConfig
     if weight_only is not None:
         return RTNQuantizeConfig
+    if method == METHOD.FP8 or format_value == FORMAT.FP8 or _looks_like_fp8_fmt(fp8_storage_fmt):
+        return FP8Config
     if method == METHOD.EXL3 or format_value == FORMAT.EXL3:
         return EXL3QuantizeConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
@@ -2716,6 +2999,7 @@ def _known_quantize_config_field_names() -> set[str]:
         GPTQQuantizeConfig,
         AWQQuantizeConfig,
         QQQQuantizeConfig,
+        FP8Config,
         EXL3QuantizeConfig,
         RTNQuantizeConfig,
         GGUFConfig,

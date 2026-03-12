@@ -289,6 +289,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     if isinstance(quant_format, str) and quant_format.lower() in (
         METHOD.GPTQ,
         METHOD.GGUF,
+        METHOD.FP8,
         METHOD.AWQ,
         METHOD.QQQ,
         METHOD.EXL3,
@@ -299,6 +300,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     if isinstance(quant_method, str) and quant_method.lower() in (
         METHOD.GPTQ,
         METHOD.GGUF,
+        METHOD.FP8,
         METHOD.AWQ,
         METHOD.QQQ,
         METHOD.EXL3,

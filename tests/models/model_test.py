@@ -64,6 +64,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import (  # noqa: E402
     Fallback,
+    FP8Config,
     GGUFConfig,
     GGUFQuantizeConfig,
     GPTAQConfig,
@@ -73,6 +74,7 @@ from gptqmodel.quantization.config import (  # noqa: E402
     RTNQuantizeConfig,
     VramStrategy,
     WeightOnlyConfig,
+    resolve_quant_format,
 )
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
@@ -454,12 +456,15 @@ class ModelTest(unittest.TestCase):
         reuse_candidates = {}
         torch_backend = self._torch_backend()
         torch_fused_backend = self._torch_fused_backend()
+        format_family = resolve_quant_format(self.FORMAT, self.METHOD)
 
-        if self.FORMAT is FORMAT.GGUF:
+        if format_family == FORMAT.GGUF:
             compare_backends = (torch_backend,)
-        elif self.FORMAT is FORMAT.EXL3:
+        elif format_family == FORMAT.FP8:
+            compare_backends = (torch_backend,)
+        elif format_family == FORMAT.EXL3:
             compare_backends = (self.LOAD_BACKEND,)
-        elif self.FORMAT is FORMAT.GPTQ:
+        elif format_family == FORMAT.GPTQ:
             if self.LOAD_BACKEND == BACKEND.MARLIN:
                 compare_backends = (BACKEND.MARLIN,)
             else:
@@ -853,13 +858,26 @@ class ModelTest(unittest.TestCase):
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
     def _build_quantize_config(self):
+        format_family = resolve_quant_format(self.FORMAT, self.METHOD)
         if self.WEIGHT_ONLY is not None:
             if not isinstance(self.WEIGHT_ONLY, WeightOnlyConfig):
                 raise TypeError(f"`WEIGHT_ONLY` must be a WeightOnlyConfig, got {type(self.WEIGHT_ONLY).__name__}")
 
-            if self.FORMAT is FORMAT.GGUF or self.WEIGHT_ONLY.method.value == "gguf":
+            if format_family == FORMAT.GGUF or self.WEIGHT_ONLY.method.value == "gguf":
                 return GGUFConfig(
                     bits=self.BITS,
+                    adapter=self.EORA,
+                    pack_impl="cpu",
+                    vram_strategy=self.VRAM_STRATEGY,
+                    dynamic=self.DYNAMIC,
+                    moe=self.MOE_CONFIG,
+                    smoother=self.WEIGHT_ONLY.smooth,
+                )
+
+            if format_family == FORMAT.FP8 or self.WEIGHT_ONLY.method.value == "fp8":
+                return FP8Config(
+                    bits=self.BITS,
+                    format=self.FORMAT,
                     adapter=self.EORA,
                     pack_impl="cpu",
                     vram_strategy=self.VRAM_STRATEGY,

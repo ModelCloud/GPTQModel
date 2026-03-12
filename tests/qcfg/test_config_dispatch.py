@@ -4,6 +4,7 @@
 from gptqmodel.quantization.config import (
     AWQQuantizeConfig,
     BaseQuantizeConfig,
+    FP8Config,
     FORMAT,
     GGUFConfig,
     GGUFQuantizeConfig,
@@ -133,6 +134,35 @@ def test_quantize_config_dispatches_rtn_from_gguf_weight_only_method_preserving_
     assert cfg.runtime_bits.quality == "m"
     assert cfg.format == "q_k_m"
     assert cfg.export_quant_method() == METHOD.GGUF
+
+
+def test_quantize_config_dispatches_fp8_constructor():
+    cfg = QuantizeConfig(
+        quant_method=METHOD.FP8,
+        format="float8_e5m2",
+        weight_scale_method="row",
+    )
+
+    assert isinstance(cfg, FP8Config)
+    assert cfg.quant_method == METHOD.FP8
+    assert cfg.format == "float8_e5m2"
+    assert cfg.weight_scale_method == "row"
+    assert cfg.uses_weight_only_lifecycle() is True
+
+
+def test_quantize_config_dispatches_fp8_from_weight_only_method():
+    cfg = QuantizeConfig(
+        weight_only=WeightOnlyConfig(method="fp8", smooth=SmoothMAD(k=1.5)),
+        weight_scale_method="block",
+        weight_block_size=[128, 128],
+    )
+
+    assert isinstance(cfg, FP8Config)
+    assert cfg.quant_method == METHOD.FP8
+    assert cfg.format == "float8_e4m3fn"
+    assert cfg.weight_scale_method == "block"
+    assert cfg.weight_block_size == [128, 128]
+    assert cfg.smooth is not None
 
 
 def test_quantize_config_dispatches_gptq_marlin_constructor():

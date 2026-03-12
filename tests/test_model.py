@@ -85,7 +85,7 @@ def test_dequantize_model_fp8_infers_block_size(tmp_path):
     config = {
         "architectures": ["TestModel"],
         "quantization_config": {
-            "fmt": "float8_e4m3fn",
+            "format": "float8_e4m3fn",
             "quant_method": "fp8",
         },
     }
@@ -122,7 +122,7 @@ def test_dequantize_model_fp8(tmp_path):
     config = {
         "architectures": ["TestModel"],
         "quantization_config": {
-            "fmt": "float8_e4m3fn",
+            "format": "float8_e4m3fn",
             "quant_method": "fp8",
             "weight_block_size": [2, 4],
         },
