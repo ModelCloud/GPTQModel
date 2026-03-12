@@ -52,7 +52,9 @@ def _make_processor(rotary: nn.Module) -> AWQProcessor:
         calibration_concat_size=None,
         calibration_sort=None,
         batch_size=1,
-        gptq_model=None,
+        gptq_model=types.SimpleNamespace(
+            rotary_embedding=None,
+        ),
         model=model,
         require_fwd=True,
         calculate_w_wq_diff=False,
