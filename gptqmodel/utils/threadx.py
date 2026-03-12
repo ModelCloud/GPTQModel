@@ -35,6 +35,13 @@ from ..utils.torch import torch_empty_cache_any
 
 log = setup_logger()
 
+
+def _best_effort_stderr_write(message: str) -> None:
+    with contextlib.suppress(Exception):
+        sys.stderr.write(f"{message}\n")
+        sys.stderr.flush()
+
+
 # Debug logging is very chatty and can alter timings subtly in tests.
 # We gate all extra diagnostics behind the DEBUG env (1/true/yes/on).
 
@@ -1978,8 +1985,10 @@ class DeviceThreadPool:
                 except Exception as e:
                     try:
                         log.warn(f"Failed to update GC watermarks: {e!r}")
-                    except Exception:
-                        pass
+                    except Exception as log_exc:
+                        _best_effort_stderr_write(
+                            f"Failed to update GC watermarks: {e!r}; secondary logging failed: {log_exc!r}"
+                        )
 
             with self._stats_lock:
                 pending_map = self._gc_pending_physical
@@ -2012,8 +2021,10 @@ class DeviceThreadPool:
                 except Exception as e:
                     try:
                         log.warn(f"Failed to render GC post-snapshot: {e!r}")
-                    except Exception:
-                        pass
+                    except Exception as log_exc:
+                        _best_effort_stderr_write(
+                            f"Failed to render GC post-snapshot: {e!r}; secondary logging failed: {log_exc!r}"
+                        )
 
     def _empty_all_caches(self):
         torch_empty_cache_any(gc=False)
