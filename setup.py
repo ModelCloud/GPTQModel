@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import os
 import re
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
