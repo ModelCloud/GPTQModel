@@ -21,7 +21,7 @@ class TestLoadModelscope(ModelTest):
     def test_load_modelscope(self):
         model = GPTQModel.load(self.MODEL_ID)
 
-        result = model.generate("The capital of France is")[0]
+        result = model.generate("The capital city of France is named")[0]
         str_output = model.tokenizer.decode(result)
         assert "paris" in str_output.lower() or "city" in str_output.lower()
 
