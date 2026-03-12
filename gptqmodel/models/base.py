@@ -250,7 +250,7 @@ class BaseQModel(nn.Module):
         super().__init__()
 
         if quantize_config:
-            quant_method = quantize_config.quant_method
+            quant_method = quantize_config.method
             # override module_tree if need
             if self.module_tree_overrides is not None and self.module_tree_overrides.get(quant_method) is not None:
                 log.info(f'Module Tree: overridden by METHOD.{quant_method.upper()}')
@@ -659,16 +659,16 @@ class BaseQModel(nn.Module):
         self._turtle_reload_accum_bytes = 0
         self._turtle_materialized_ids = set()
 
-        if self.quantize_config.quant_method in QUANTIZE_BLACK_LIST:
+        if self.quantize_config.method in QUANTIZE_BLACK_LIST:
             raise ValueError(
-                f"Unsupported quantization operation for quant method: {self.quantize_config.quant_method}"
+                f"Unsupported quantization operation for quant method: {self.quantize_config.method}"
             )
 
         if not self.support_batch_quantize:
             log.warn("Quantize: batch_size overridden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
 
-        format_code = resolve_quant_format(self.quantize_config.format, self.quantize_config.quant_method)
+        format_code = resolve_quant_format(self.quantize_config.format, self.quantize_config.method)
 
         if format_code == FORMAT.MARLIN:
             raise ValueError(
@@ -702,18 +702,18 @@ class BaseQModel(nn.Module):
                     preferred_backend = BACKEND.GEMV_FAST
                 else:
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
-            elif self.quantize_config.quant_method == METHOD.QQQ:
+            elif self.quantize_config.method == METHOD.QQQ:
                 preferred_backend = BACKEND.QQQ
-            elif self.quantize_config.quant_method == METHOD.EXL3:
+            elif self.quantize_config.method == METHOD.EXL3:
                 preferred_backend = BACKEND.EXLLAMA_V3
-            elif self.quantize_config.quant_method == METHOD.GGUF:
+            elif self.quantize_config.method == METHOD.GGUF:
                 preferred_backend = BACKEND.AUTO
-            elif self.quantize_config.quant_method == METHOD.FP8:
+            elif self.quantize_config.method == METHOD.FP8:
                 preferred_backend = BACKEND.TORCH
             else:
                 preferred_backend = BACKEND.TORCH
 
-        if self.quantize_config.quant_method == METHOD.EXL3:
+        if self.quantize_config.method == METHOD.EXL3:
             if preferred_backend not in (BACKEND.AUTO, BACKEND.EXLLAMA_V3):
                 raise ValueError("EXL3 quantization only supports BACKEND.AUTO or BACKEND.EXLLAMA_V3.")
 
@@ -764,7 +764,7 @@ class BaseQModel(nn.Module):
         if adapter is not None:
             self.quantize_config.adapter = adapter
 
-        if self.quantize_config.quant_method == METHOD.EXL3:
+        if self.quantize_config.method == METHOD.EXL3:
             self.qlinear_kernel = ExllamaV3Linear
         else:
             self.qlinear_kernel = select_quant_linear(
@@ -869,7 +869,7 @@ class BaseQModel(nn.Module):
             "calculate_w_wq_diff": needs_lora,
         }
 
-        if self.quantize_config.quant_method == METHOD.EXL3:
+        if self.quantize_config.method == METHOD.EXL3:
             from ..looper.exllamav3_processor import EXL3Processor
 
             if needs_lora:
@@ -892,14 +892,14 @@ class BaseQModel(nn.Module):
             quantize_processor = [
                 EXL3Processor(**exl3_args),
             ]
-        elif self.quantize_config.quant_method == METHOD.QQQ:
+        elif self.quantize_config.method == METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
 
             quantize_processor = [
                 TensorParallelWeightProcessor(**args),
                 QQQProcessor(**args),
             ]
-        elif self.quantize_config.quant_method == METHOD.AWQ:
+        elif self.quantize_config.method == METHOD.AWQ:
             from ..looper.awq_processor import AWQProcessor
 
             os.environ["AWQ_BATCH_SIZE"] = str(batch_size)

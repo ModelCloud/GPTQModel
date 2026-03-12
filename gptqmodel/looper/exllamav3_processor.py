@@ -337,7 +337,7 @@ class EXL3Processor(LoopProcessor):
 
     def finalize(self, model: BaseQModel, **kwargs):
         model.quantized = True
-        model.quantize_config.quant_method = METHOD.EXL3
+        model.quantize_config.method = METHOD.EXL3
         model.quantize_config.format = FORMAT.EXL3
         model.qlinear_kernel = ExllamaV3Linear
         super().finalize(model=model, **kwargs)

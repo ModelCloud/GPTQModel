@@ -321,7 +321,7 @@ def infer_block_shape(weight_shape: Tuple[int, int], scale_tensor: torch.Tensor)
 
 def detect_format(model_path: Path, config: dict) -> str:
     quant_cfg = config.get("quantization_config", {}) or {}
-    method = (quant_cfg.get("quant_method") or "").lower()
+    method = (quant_cfg.get("method") or quant_cfg.get("quant_method") or "").lower()
     format_name = (quant_cfg.get("format") or "").lower()
 
     files, _ = list_safetensor_files(model_path)
@@ -369,22 +369,22 @@ def detect_format(model_path: Path, config: dict) -> str:
         LOG.debug("Detected FP8 format via config format=%s", format_name)
         return "fp8"
     if method == "fp8":
-        LOG.debug("Detected FP8 format via quant_method=%s", method)
+        LOG.debug("Detected FP8 format via method=%s", method)
         return "fp8"
     if method in ("gptq", "gptqmodel"):
-        LOG.debug("Detected GPTQ format via quant_method=%s", method)
+        LOG.debug("Detected GPTQ format via method=%s", method)
         return "gptq"
     if method == "awq":
-        LOG.debug("Detected AWQ format via quant_method=%s", method)
+        LOG.debug("Detected AWQ format via method=%s", method)
         return "awq"
     if method == "exl3":
-        LOG.debug("Detected EXL3 format via quant_method=%s", method)
+        LOG.debug("Detected EXL3 format via method=%s", method)
         return "exl3"
     if method == "compressed-tensors":
         fmt_name = (quant_cfg.get("format") or "").lower()
         if fmt_name == "pack-quantized":
             LOG.debug(
-                "Detected compressed-tensors format via quant_method=%s and format=%s",
+                "Detected compressed-tensors format via method=%s and format=%s",
                 method,
                 fmt_name,
             )

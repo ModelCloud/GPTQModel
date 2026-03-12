@@ -18,6 +18,7 @@ from .config import (
                      GGUFBits,
                      GPTQQuantizeConfig,
                      METHOD,
+                     METHOD_FIELD_CODE,
                      PreFilterCode,
                      PreFilterQuantizeConfig,
                      QUANT_CONFIG_FILENAME,

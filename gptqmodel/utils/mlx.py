@@ -36,7 +36,7 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
     if gptq_config["bits"] not in [2, 3, 4, 8]:
         raise ValueError("Model bits is not in [2,3,4,8]")
 
-    if resolve_quant_format(gptq_config.get("format"), gptq_config.get("quant_method")) not in [FORMAT.GPTQ, FORMAT.GPTQ_V2]:
+    if resolve_quant_format(gptq_config.get("format"), gptq_config.get("method", gptq_config.get("quant_method"))) not in [FORMAT.GPTQ, FORMAT.GPTQ_V2]:
         raise ValueError("Model format is not gptq or gptq_v2")
 
     if gptq_config.get("dynamic") is not None:

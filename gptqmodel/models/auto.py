@@ -296,8 +296,8 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     ):
         return True
 
-    quant_method = quantization_config.get("quant_method")
-    if isinstance(quant_method, str) and quant_method.lower() in (
+    method = quantization_config.get("method", quantization_config.get("quant_method"))
+    if isinstance(method, str) and method.lower() in (
         METHOD.GPTQ,
         METHOD.GGUF,
         METHOD.FP8,
@@ -725,7 +725,8 @@ class GPTQModel:
 
         gptq_config = config.quantization_config
 
-        backend = BACKEND.GGUF_TORCH if str(gptq_config.get("quant_method", "")).lower() == METHOD.GGUF.value else BACKEND.TORCH
+        method = gptq_config.get("method", gptq_config.get("quant_method", ""))
+        backend = BACKEND.GGUF_TORCH if str(method).lower() == METHOD.GGUF.value else BACKEND.TORCH
 
         # load gptq model
         gptq_model = GPTQModel.load(model_id_or_path, backend=backend)

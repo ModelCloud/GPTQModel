@@ -29,8 +29,11 @@ BITS_FIELD_CODE = "bits"
 GROUP_SIZE_FIELD_CODE = "group_size"
 FORMAT_FIELD_CODE = "format"
 SYMMETRIC_FIELD_CODE = "sym"
+# Deprecated JSON alias retained for backward compatibility.
 FORMAT_FIELD_CHECKPOINT = "checkpoint_format"
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
+# Canonical method field; `quant_method` is a deprecated JSON alias.
+METHOD_FIELD_CODE = "method"
 QUANT_METHOD_FIELD = "quant_method"
 PACK_DTYPE_FIELD = "pack_dtype"
 QUANT_CONFIG_FILENAME = "quantize_config.json"
@@ -488,15 +491,22 @@ def _normalize_quant_bits(bits: Union[int, float, str, GGUFBits], format_value: 
     return normalized
 
 
-def resolve_quant_format(format_value: Optional[Union[str, FORMAT]], quant_method: Optional[Union[str, METHOD]] = None) -> FORMAT:
-    if isinstance(quant_method, str):
-        quant_method = _normalize_quant_method(quant_method)
+def resolve_quant_format(
+    format_value: Optional[Union[str, FORMAT]],
+    method: Optional[Union[str, METHOD]] = None,
+    quant_method: Optional[Union[str, METHOD]] = None,
+) -> FORMAT:
+    if method is None:
+        method = quant_method
 
-    if quant_method == METHOD.GGUF:
+    if isinstance(method, str):
+        method = _normalize_quant_method(method)
+
+    if method == METHOD.GGUF:
         return FORMAT.GGUF
-    if quant_method == METHOD.FP8:
+    if method == METHOD.FP8:
         return FORMAT.FP8
-    if quant_method == METHOD.EXL3:
+    if method == METHOD.EXL3:
         return FORMAT.EXL3
 
     if isinstance(format_value, FORMAT):
@@ -1115,8 +1125,9 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     # AWQ compat
     "version" : FORMAT_FIELD_CODE,
 
-    # map format field (checkpoint_format) to class/code (format)
+    # map deprecated aliases to canonical fields
     FORMAT_FIELD_CHECKPOINT: FORMAT_FIELD_CODE,
+    QUANT_METHOD_FIELD: METHOD_FIELD_CODE,
 }
 
 # compat (values are negated)
@@ -1327,7 +1338,7 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
         except ValueError as exc:
             raise ValueError(f"QuantizeConfig: Unknown quantization method: `{value}`.") from exc
     if not isinstance(value, METHOD):
-        raise ValueError(f"QuantizeConfig: Unsupported `quant_method`: {value}")
+        raise ValueError(f"QuantizeConfig: Unsupported `method`: {value}")
     return value
 
 
@@ -1678,12 +1689,12 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
     else:
         expected_method = METHOD.GPTQ
 
-    method = normalized.get(QUANT_METHOD_FIELD)
+    method = normalized.get(METHOD_FIELD_CODE)
     normalized_method = None
     if method is not None:
         try:
             normalized_method = _normalize_quant_method(method)
-            normalized[QUANT_METHOD_FIELD] = normalized_method
+            normalized[METHOD_FIELD_CODE] = normalized_method
         except ValueError:
             normalized_method = None
 
@@ -1692,10 +1703,10 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
             pass
         else:
             log.warn(
-                f"QuantizeConfig: `{QUANT_METHOD_FIELD}`=`{normalized_method}` is incompatible with `{target_cls.__name__}`. "
+                f"QuantizeConfig: `{METHOD_FIELD_CODE}`=`{normalized_method}` is incompatible with `{target_cls.__name__}`. "
                 f"Auto-fix method to `{expected_method}`."
             )
-        normalized[QUANT_METHOD_FIELD] = expected_method
+        normalized[METHOD_FIELD_CODE] = expected_method
 
     return normalized
 
@@ -1718,6 +1729,7 @@ def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) 
 
 class QuantizeConfigMeta(type):
     def __call__(cls, *args, **kwargs):
+        kwargs = _normalize_quantize_config_constructor_kwargs(kwargs)
         if cls is QuantizeConfig:
             target_cls = _resolve_quantize_config_class(kwargs)
             target_kwargs = _prepare_target_quantize_config_kwargs(target_cls, kwargs)
@@ -1725,8 +1737,23 @@ class QuantizeConfigMeta(type):
         return super().__call__(*args, **kwargs)
 
 
+def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    if not kwargs:
+        return kwargs
+
+    normalized = dict(kwargs)
+    if METHOD_FIELD_CODE not in normalized and QUANT_METHOD_FIELD in normalized:
+        normalized[METHOD_FIELD_CODE] = normalized[QUANT_METHOD_FIELD]
+    normalized.pop(QUANT_METHOD_FIELD, None)
+
+    if FORMAT_FIELD_CODE not in normalized and FORMAT_FIELD_CHECKPOINT in normalized:
+        normalized[FORMAT_FIELD_CODE] = normalized[FORMAT_FIELD_CHECKPOINT]
+    normalized.pop(FORMAT_FIELD_CHECKPOINT, None)
+    return normalized
+
+
 @dataclass
-class BaseQuantizeConfig:
+class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     bits: Union[int, str, GGUFBits] = field(default=4, metadata={"choices": [2, 3, 4, 5, 6, 8]})
 
     # allow dynamic bitsize per layer, if None or some layer not set, use bits
@@ -1744,7 +1771,7 @@ class BaseQuantizeConfig:
 
     lm_head: bool = field(default=False)
 
-    quant_method: METHOD = field(default=METHOD.GPTQ)
+    method: METHOD = field(default=METHOD.GPTQ)
 
     # Serialized/exported checkpoint layout. This is the authoritative post-quantization format.
     format: FORMAT = field(default=FORMAT.GPTQ)
@@ -1822,8 +1849,20 @@ class BaseQuantizeConfig:
     )
 
     @property
-    def checkpoint_format(self) -> FORMAT:
-        return resolve_quant_format(self.format, self.quant_method)
+    def quant_method(self) -> METHOD:
+        return self.method
+
+    @quant_method.setter
+    def quant_method(self, value: Union[str, METHOD]) -> None:
+        self.method = value
+
+    @property
+    def checkpoint_format(self):
+        return self.format
+
+    @checkpoint_format.setter
+    def checkpoint_format(self, value) -> None:
+        self.format = value
 
     @property
     def runtime_bits(self):
@@ -1859,13 +1898,13 @@ class BaseQuantizeConfig:
         return tuple(METHOD)
 
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
-        valid_formats = QUANT_METHOD_FORMAT_MAPPING.get(self.quant_method, None)
+        valid_formats = QUANT_METHOD_FORMAT_MAPPING.get(self.method, None)
         if valid_formats is None:
-            raise ValueError(f"QuantizeConfig: Unsupported `quant_method`: {self.quant_method}")
+            raise ValueError(f"QuantizeConfig: Unsupported `method`: {self.method}")
         return tuple(valid_formats)
 
     def export_quant_method(self) -> METHOD:
-        return _resolve_export_quant_method(resolve_quant_format(self.format, self.quant_method), fallback_method=self.quant_method)
+        return _resolve_export_quant_method(resolve_quant_format(self.format, self.method), fallback_method=self.method)
 
     def default_desc_act(self) -> bool:
         return True
@@ -1873,21 +1912,21 @@ class BaseQuantizeConfig:
     def __post_init__(self):
         fields_info = fields(self)
 
-        self.quant_method = _normalize_quant_method(self.quant_method)
-        checkpoint_format = self._resolve_checkpoint_format()
+        self.method = _normalize_quant_method(self.method)
+        format_family = self._resolve_checkpoint_format()
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
-        self.bits = self._normalize_bits_field(self.bits, checkpoint_format=checkpoint_format)
+        self.bits = self._normalize_bits_field(self.bits, checkpoint_format=format_family)
 
         allowed_methods = self.allowed_quant_methods()
-        if allowed_methods and self.quant_method not in allowed_methods:
+        if allowed_methods and self.method not in allowed_methods:
             raise ValueError(
-                f"{self.__class__.__name__}: `quant_method` must be one of {[v.value for v in allowed_methods]}."
+                f"{self.__class__.__name__}: `method` must be one of {[v.value for v in allowed_methods]}."
             )
 
         valid_formats = self.supported_export_formats()
-        if checkpoint_format not in valid_formats:
+        if format_family not in valid_formats:
             raise ValueError(
-                f"{self.__class__.__name__}: unsupported export `format` `{checkpoint_format}`."
+                f"{self.__class__.__name__}: unsupported export `format` `{format_family}`."
             )
 
         self.fallback = _normalize_fallback(self.fallback)
@@ -1907,7 +1946,7 @@ class BaseQuantizeConfig:
                     layer,
                     layer_dict,
                     valid_bit_widths=valid_bit_widths,
-                    checkpoint_format=checkpoint_format,
+                    checkpoint_format=format_family,
                 )
 
         if self.group_size != -1 and self.group_size <= 0:
@@ -2027,7 +2066,7 @@ class BaseQuantizeConfig:
         field_names = _known_quantize_config_field_names()
 
         normalized = {
-            QUANT_METHOD_FIELD: METHOD.GPTQ,
+            METHOD_FIELD_CODE: METHOD.GPTQ,
             FORMAT_FIELD_CODE: format if format else FORMAT.GPTQ,
         }
         format_field_present = format is not None
@@ -2038,9 +2077,16 @@ class BaseQuantizeConfig:
 
             if key == FORMAT_FIELD_CHECKPOINT:
                 if _looks_like_fp8_fmt(val):
-                    legacy_checkpoint_format = FORMAT.FP8
+                    legacy_checkpoint_format = _normalize_fp8_fmt(val)
                 else:
-                    legacy_checkpoint_format = _normalize_format(val)
+                    try:
+                        legacy_checkpoint_format = _normalize_gguf_public_format(val)
+                    except ValueError:
+                        legacy_checkpoint_format = None
+                    if legacy_checkpoint_format is None:
+                        legacy_checkpoint_format = _normalize_format(val)
+                if legacy_checkpoint_format is not None:
+                    checkpoint_format_hint = legacy_checkpoint_format
                 continue
 
             if key in QUANT_CONFIG_ARG_SYNONYMS and QUANT_CONFIG_ARG_SYNONYMS[key] in field_names:
@@ -2049,34 +2095,34 @@ class BaseQuantizeConfig:
                 key = QUANT_CONFIG_ARG_SYNONYMS_NEGATED[key]
                 val = not bool(val)
 
-            if key == QUANT_METHOD_FIELD:
+            if key == METHOD_FIELD_CODE:
                 if isinstance(val, str) and val.lower() == FORMAT.MARLIN:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.MARLIN
                 elif isinstance(val, str) and val.lower() == FORMAT.BITBLAS:
                     normalized[FORMAT_FIELD_CODE] = FORMAT.BITBLAS
                 else:
-                    normalized[QUANT_METHOD_FIELD] = _normalize_quant_method(val)
+                    normalized[METHOD_FIELD_CODE] = _normalize_quant_method(val)
             elif key == FORMAT_FIELD_CODE:
                 format_field_present = True
                 serialized_format_hint = None
                 try:
                     serialized_format_hint = resolve_quant_format(
                         val,
-                        normalized.get(QUANT_METHOD_FIELD),
+                        normalized.get(METHOD_FIELD_CODE),
                     )
                 except ValueError:
                     serialized_format_hint = None
 
-                gguf_checkpoint_hint = format or legacy_checkpoint_format or checkpoint_format_hint
-                if gguf_checkpoint_hint is not None:
+                format_hint = format or legacy_checkpoint_format or checkpoint_format_hint
+                if format_hint is not None:
                     try:
-                        gguf_checkpoint_hint = resolve_quant_format(
-                            gguf_checkpoint_hint,
-                            normalized.get(QUANT_METHOD_FIELD),
+                        format_hint = resolve_quant_format(
+                            format_hint,
+                            normalized.get(METHOD_FIELD_CODE),
                         )
                     except ValueError:
-                        gguf_checkpoint_hint = None
-                if serialized_format_hint in {FORMAT.GGUF, FORMAT.FP8} or gguf_checkpoint_hint in {FORMAT.GGUF, FORMAT.FP8}:
+                        format_hint = None
+                if serialized_format_hint in {FORMAT.GGUF, FORMAT.FP8} or format_hint in {FORMAT.GGUF, FORMAT.FP8}:
                     normalized[key] = val
                 else:
                     normalized[key] = _normalize_format(val)
@@ -2089,7 +2135,7 @@ class BaseQuantizeConfig:
             normalized[FORMAT_FIELD_CODE] = legacy_checkpoint_format
 
         if quantize_cfg.get(AWQ_PACKING_BACKEND_FIELD) == "llm-awq":
-            normalized[QUANT_METHOD_FIELD] = METHOD.AWQ
+            normalized[METHOD_FIELD_CODE] = METHOD.AWQ
             normalized[FORMAT_FIELD_CODE] = FORMAT.LLM_AWQ
             normalized[PACK_DTYPE_FIELD] = torch.int16
             log.info("Detected llm-awq quantization format; FORMAT automatically set to FORMAT.LLM_AWQ.")
@@ -2211,12 +2257,10 @@ class BaseQuantizeConfig:
             "group_size": self.group_size,
             "desc_act": self.desc_act,
             "lm_head": self.lm_head,
-            QUANT_METHOD_FIELD: self.quant_method,
+            METHOD_FIELD_CODE: self.method,
+            QUANT_METHOD_FIELD: self.method,
             FORMAT_FIELD_CODE: self.format,
-            # TODO: Stop emitting the legacy field once upstream GPTQ loaders stop hard-coding it.
-            # As of 2026-03-11, vLLM and SGLang still read only `checkpoint_format`,
-            # while Transformers v5.3.0 accepts `format` and normalizes the legacy field.
-            FORMAT_FIELD_CHECKPOINT: resolve_quant_format(self.format, self.quant_method),
+            FORMAT_FIELD_CHECKPOINT: self.format,
             PACK_DTYPE_FIELD: str(self.pack_dtype).split(".")[-1],
             META_FIELD: meta_payload,
         }
@@ -2342,9 +2386,9 @@ class GPTQQuantizeConfig(QuantizeConfig):
         super().__post_init__()
 
         if self.damp_percent is None:
-            self.damp_percent = _default_damp_percent(self.quant_method)
+            self.damp_percent = _default_damp_percent(self.method)
         if self.damp_auto_increment is None:
-            self.damp_auto_increment = _default_damp_auto_increment(self.quant_method)
+            self.damp_auto_increment = _default_damp_auto_increment(self.method)
         if not (0 < self.damp_percent < 1):
             raise ValueError("QuantizeConfig: `damp_percent` must between 0 and 1.")
         if self.damp_auto_increment < 0:
@@ -2354,7 +2398,7 @@ class GPTQQuantizeConfig(QuantizeConfig):
         self.gptaq = _normalize_gptaq(self.gptaq)
 
         if act_group_aware_user_value is None:
-            self.act_group_aware = self.quant_method == METHOD.GPTQ
+            self.act_group_aware = self.method == METHOD.GPTQ
         elif not isinstance(act_group_aware_user_value, bool):
             self.act_group_aware = bool(act_group_aware_user_value)
 
@@ -2410,7 +2454,7 @@ class GPTQQuantizeConfig(QuantizeConfig):
 
 @dataclass
 class AWQQuantizeConfig(QuantizeConfig):
-    quant_method: METHOD = field(default=METHOD.AWQ)
+    method: METHOD = field(default=METHOD.AWQ)
     format: FORMAT = field(default=FORMAT.GEMM)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
@@ -2420,7 +2464,7 @@ class AWQQuantizeConfig(QuantizeConfig):
         return AWQ_EXPORT_FORMATS
 
     def __post_init__(self):
-        self.quant_method = _normalize_quant_method(self.quant_method)
+        self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
         if self.format not in self.supported_export_formats():
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
@@ -2435,7 +2479,7 @@ class AWQQuantizeConfig(QuantizeConfig):
 
 @dataclass
 class QQQQuantizeConfig(GPTQQuantizeConfig):
-    quant_method: METHOD = field(default=METHOD.QQQ)
+    method: METHOD = field(default=METHOD.QQQ)
     format: FORMAT = field(default=FORMAT.QQQ)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
@@ -2451,7 +2495,7 @@ class QQQQuantizeConfig(GPTQQuantizeConfig):
 @dataclass
 class FP8Config(PreFilterQuantizeConfig):
     bits: int = field(default=8, metadata={"choices": [8]})
-    quant_method: METHOD = field(default=METHOD.FP8)
+    method: METHOD = field(default=METHOD.FP8)
     format: Optional[str] = field(default="float8_e4m3fn")
     group_size: int = field(default=-1)
     desc_act: Optional[bool] = field(default=False)
@@ -2459,10 +2503,6 @@ class FP8Config(PreFilterQuantizeConfig):
     weight_scale_method: str = field(default="row")
     weight_block_size: Optional[Union[List[int], Tuple[int, int]]] = field(default=None)
     weight_scale_semantics: str = field(default="inverse")
-
-    @property
-    def checkpoint_format(self) -> FORMAT:
-        return FORMAT.FP8
 
     def _resolve_checkpoint_format(self) -> FORMAT:
         self.format = _normalize_fp8_fmt(self.format)
@@ -2484,8 +2524,8 @@ class FP8Config(PreFilterQuantizeConfig):
         if self.bits != 8:
             raise ValueError("FP8Config: `bits` must be `8`.")
 
-        if self.quant_method != METHOD.FP8:
-            raise ValueError("FP8Config: `quant_method` must be `fp8`.")
+        if self.method != METHOD.FP8:
+            raise ValueError("FP8Config: `method` must be `fp8`.")
 
         self.group_size = -1
         self.desc_act = False
@@ -2568,7 +2608,7 @@ FP8QuantizeConfig = FP8Config
 @dataclass
 class EXL3QuantizeConfig(BaseQuantizeConfig):
     bits: float = field(default=3.0)
-    quant_method: METHOD = field(default=METHOD.EXL3)
+    method: METHOD = field(default=METHOD.EXL3)
     format: FORMAT = field(default=FORMAT.EXL3)
     group_size: int = field(default=-1)
     desc_act: Optional[bool] = field(default=False)
@@ -2613,14 +2653,14 @@ class EXL3QuantizeConfig(BaseQuantizeConfig):
                 raise ValueError("EXL3QuantizeConfig: `group_size` is not used; keep it at `-1`.")
 
     def __post_init__(self):
-        self.quant_method = _normalize_quant_method(self.quant_method)
+        self.method = _normalize_quant_method(self.method)
         self.format = _normalize_format(self.format)
         self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
         self.bits = _normalize_exl3_bits(self.bits)
         self.head_bits = None if self.head_bits is None else _normalize_exl3_bits(self.head_bits)
 
-        if self.quant_method != METHOD.EXL3:
-            raise ValueError("EXL3QuantizeConfig: `quant_method` must be `exl3`.")
+        if self.method != METHOD.EXL3:
+            raise ValueError("EXL3QuantizeConfig: `method` must be `exl3`.")
         if self.format != FORMAT.EXL3:
             raise ValueError("EXL3QuantizeConfig: `format` must be `exl3`.")
 
@@ -2710,7 +2750,7 @@ class EXL3QuantizeConfig(BaseQuantizeConfig):
 
 @dataclass
 class RTNQuantizeConfig(PreFilterQuantizeConfig):
-    quant_method: METHOD = field(default=METHOD.GPTQ)
+    method: METHOD = field(default=METHOD.GPTQ)
     format: FORMAT = field(default=FORMAT.GPTQ)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
@@ -2742,15 +2782,11 @@ class RTNQuantizeConfig(PreFilterQuantizeConfig):
 @dataclass
 class GGUFConfig(PreFilterQuantizeConfig):
     format: Optional[str] = field(default=None)
-    quant_method: METHOD = field(default=METHOD.GGUF, init=False)
+    method: METHOD = field(default=METHOD.GGUF, init=False)
     group_size: int = field(default=-1, init=False, repr=False)
     desc_act: Optional[bool] = field(default=False, init=False, repr=False)
     sym: bool = field(default=True, init=False, repr=False)
     _gguf_bits: GGUFBits = field(init=False, repr=False, compare=False)
-
-    @property
-    def checkpoint_format(self) -> FORMAT:
-        return FORMAT.GGUF
 
     @property
     def runtime_bits(self) -> GGUFBits:
@@ -2821,7 +2857,6 @@ class GGUFConfig(PreFilterQuantizeConfig):
         out = super().to_dict()
         out.pop(GROUP_SIZE_FIELD_CODE, None)
         out.pop("desc_act", None)
-        out.pop(QUANT_METHOD_FIELD, None)
         out.pop(PACK_DTYPE_FIELD, None)
 
         meta_payload = out.get(META_FIELD)
@@ -2911,7 +2946,7 @@ def clone_weight_only_config_for_module(
         else:
             qcfg_clone.bits = _normalize_quant_bits(
                 qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits),
-                format_value=resolve_quant_format(qcfg_clone.format, qcfg_clone.quant_method),
+                format_value=resolve_quant_format(qcfg_clone.format, qcfg_clone.method),
             )
 
         if isinstance(qcfg_clone, RTNQuantizeConfig):
@@ -2929,8 +2964,8 @@ clone_rtn_config_for_module = clone_weight_only_config_for_module
 
 
 def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantizeConfig]:
-    method = payload.get(QUANT_METHOD_FIELD, METHOD.GPTQ)
-    raw_checkpoint_format_value = payload.get(FORMAT_FIELD_CHECKPOINT, payload.get(FORMAT_FIELD_CODE, FORMAT.GPTQ))
+    method = payload.get(METHOD_FIELD_CODE, payload.get(QUANT_METHOD_FIELD, METHOD.GPTQ))
+    raw_format_value = payload.get(FORMAT_FIELD_CODE, payload.get(FORMAT_FIELD_CHECKPOINT, FORMAT.GPTQ))
     weight_only = payload.get("weight_only")
     bits = payload.get(BITS_FIELD_CODE)
     gguf_public_format = payload.get(FORMAT_FIELD_CODE)
@@ -2940,14 +2975,17 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
     except Exception:
         method = METHOD.GPTQ
 
-    if _looks_like_fp8_fmt(raw_checkpoint_format_value):
-        checkpoint_format_value = FORMAT.FP8
+    if _looks_like_fp8_fmt(raw_format_value):
+        format_value = FORMAT.FP8
     else:
         try:
-            checkpoint_format_value = _normalize_format(raw_checkpoint_format_value)
+            format_value = _normalize_format(raw_format_value)
         except Exception:
-            checkpoint_format_value = FORMAT.GPTQ
-    format_value = checkpoint_format_value
+            try:
+                gguf_public_format = _normalize_gguf_public_format(raw_format_value)
+            except ValueError:
+                gguf_public_format = payload.get(FORMAT_FIELD_CODE)
+            format_value = FORMAT.GPTQ
 
     gguf_format_detected = False
     if gguf_public_format is not None:
@@ -2963,7 +3001,7 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
             "QuantizeConfig: unsupported weight-only config. Weight-only export currently supports `rtn`, `gguf`, and `fp8`."
         )
     if (
-        checkpoint_format_value == FORMAT.GGUF
+        format_value == FORMAT.GGUF
         or weight_only_method == WeightOnlyMethod.GGUF
         or _looks_like_gguf_bits(bits)
         or gguf_format_detected

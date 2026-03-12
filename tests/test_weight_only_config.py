@@ -110,11 +110,12 @@ def test_gguf_quantize_config_round_trip():
 
     payload = cfg.to_dict()
     assert payload["bits"] == 4
+    assert payload["method"] == "gguf"
+    assert payload["quant_method"] == "gguf"
     assert payload["format"] == "q_0"
-    assert payload["checkpoint_format"] == "gguf"
+    assert payload["checkpoint_format"] == "q_0"
     assert "group_size" not in payload
     assert "desc_act" not in payload
-    assert "quant_method" not in payload
     assert "pack_dtype" not in payload
     assert "weight_only" not in payload["meta"]
     assert payload["meta"]["pre_filters"][0]["code"] == "smoother"

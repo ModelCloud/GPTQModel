@@ -69,7 +69,7 @@ class WeightOnlyProcessor(LoopProcessor):
 
     @staticmethod
     def _uses_direct_pack(qcfg: RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config) -> bool:
-        return qcfg.quant_method in {METHOD.GGUF, METHOD.FP8}
+        return qcfg.method in {METHOD.GGUF, METHOD.FP8}
 
     def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
         with self.lock:
@@ -103,7 +103,7 @@ class WeightOnlyProcessor(LoopProcessor):
         if self._uses_direct_pack(qcfg_clone):
             start_time = time.time()
             duration = time.time() - start_time
-            avg_loss = f"{qcfg_clone.quant_method.value}: pending"
+            avg_loss = f"{qcfg_clone.method.value}: pending"
             damp_percent = 0.0
             nsamples = 0
         else:
@@ -186,7 +186,7 @@ class WeightOnlyProcessor(LoopProcessor):
                     device=active_qcfg.device,
                     lm_head_name=model.lm_head,
                     pack_dtype=active_qcfg.pack_dtype,
-                    format=resolve_quant_format(active_qcfg.format, active_qcfg.quant_method),
+                    format=resolve_quant_format(active_qcfg.format, active_qcfg.method),
                     register_buffers=False,
                     init_kwargs=active_qcfg.quant_linear_init_kwargs(),
                 )
@@ -221,7 +221,7 @@ class WeightOnlyProcessor(LoopProcessor):
             reference_weight = qmodule._weight_to_matrix(original_layer).detach().cpu().to(torch.float32)
             dequant_weight = qmodule.dequantize_weight().T.detach().cpu().to(torch.float32)
             mean_abs_err = (dequant_weight - reference_weight).abs().mean().item()
-            self._update_logged_loss(module, f"{active_qcfg.quant_method.value}: {mean_abs_err:.7f}")
+            self._update_logged_loss(module, f"{active_qcfg.method.value}: {mean_abs_err:.7f}")
             module.unregister_parameter("weight")
             return
 
@@ -254,9 +254,9 @@ class WeightOnlyProcessor(LoopProcessor):
         super().finalize(model=model, **kwargs)
 
     def name(self) -> str:
-        if self.qcfg.quant_method == METHOD.GGUF:
+        if self.qcfg.method == METHOD.GGUF:
             return "weight_only_gguf"
-        if self.qcfg.quant_method == METHOD.FP8:
+        if self.qcfg.method == METHOD.FP8:
             return "weight_only_fp8"
         return "weight_only_rtn"
 

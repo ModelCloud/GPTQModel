@@ -31,7 +31,7 @@ def prepare_model_for_bitblas_load(
         load_checkpoint_in_model: bool,
 ):
     # The model (e.g. model.safetensors) is already serialized in the BitBLAS format, load it directly.
-    if resolve_quant_format(qcfg.format, qcfg.quant_method) == FORMAT.BITBLAS:
+    if resolve_quant_format(qcfg.format, qcfg.method) == FORMAT.BITBLAS:
         # if the checkpoint is already in bitblas format, we can load it directly.
         log.info(f"Loading a GPTQ model, detected BitBLAS serialized format at {model_save_name}.")
         model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=False)

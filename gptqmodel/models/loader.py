@@ -400,7 +400,7 @@ def ModelLoader(cls):
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
         export_quant_method = qcfg.export_quant_method()
-        format_code = resolve_quant_format(qcfg.format, qcfg.quant_method)
+        format_code = resolve_quant_format(qcfg.format, qcfg.method)
 
         if format_code == FORMAT.EXL3:
             if backend not in (BACKEND.AUTO, BACKEND.EXLLAMA_V3, BACKEND.TORCH):

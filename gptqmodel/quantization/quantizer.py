@@ -53,7 +53,7 @@ class Quantizer(nn.Module):
     ):
         if self.name == HF_OPTIMUM:
             if bits is not None:
-                self.qcfg.bits = _normalize_quant_bits(bits, format_value=resolve_quant_format(self.qcfg.format, self.qcfg.quant_method))
+                self.qcfg.bits = _normalize_quant_bits(bits, format_value=resolve_quant_format(self.qcfg.format, self.qcfg.method))
             if sym is not None:
                 self.qcfg.sym = sym
 

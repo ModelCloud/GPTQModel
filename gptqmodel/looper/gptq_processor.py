@@ -384,7 +384,7 @@ class GPTQProcessor(LoopProcessor):
                     device=self.qcfg.device,
                     lm_head_name=model.lm_head,
                     pack_dtype=self.qcfg.pack_dtype,
-                    format=resolve_quant_format(self.qcfg.format, self.qcfg.quant_method),
+                    format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                     register_buffers=False,
                 )
         if timer is not None and create_start is not None:
@@ -438,7 +438,7 @@ class GPTQProcessor(LoopProcessor):
 
         # set quantized state
         model.quantized = True
-        model.quantize_config.quant_method = METHOD.GPTQ
+        model.quantize_config.method = METHOD.GPTQ
 
         super().finalize(model=model, **kwargs)
 

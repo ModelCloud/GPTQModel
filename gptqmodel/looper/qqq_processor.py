@@ -255,7 +255,7 @@ class QQQProcessor(LoopProcessor):
                 device=self.qcfg.device,
                 lm_head_name=model.lm_head,
                 pack_dtype=self.qcfg.pack_dtype,
-                format=resolve_quant_format(self.qcfg.format, self.qcfg.quant_method),
+                format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                 register_buffers=False,
             )
 
@@ -293,7 +293,7 @@ class QQQProcessor(LoopProcessor):
         # set quantized state
         model.quantized = True
 
-        model.quantize_config.quant_method = METHOD.QQQ
+        model.quantize_config.method = METHOD.QQQ
 
         super().finalize(model=model, **kwargs)
 

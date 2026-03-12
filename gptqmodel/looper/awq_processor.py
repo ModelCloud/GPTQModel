@@ -94,7 +94,7 @@ class AWQProcessor(LoopProcessor):
         self.gptq_model = gptq_model
 
         model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
-        self.format = resolve_quant_format(qcfg.format, qcfg.quant_method)
+        self.format = resolve_quant_format(qcfg.format, qcfg.method)
         self.qlinear_kernel = model_kernel or self._select_qlinear_kernel_for_format(self.format)
 
         self.model = model
@@ -193,7 +193,7 @@ class AWQProcessor(LoopProcessor):
     def _resolve_qlinear_kernel(self, module_name: Optional[str] = None):
         # Honor per-module dynamic format overrides when present.
         format_override = self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
-        target_format = resolve_quant_format(format_override or self.qcfg.format, self.qcfg.quant_method)
+        target_format = resolve_quant_format(format_override or self.qcfg.format, self.qcfg.method)
         if target_format == self.format:
             model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
             if model_kernel is not None:
@@ -1536,7 +1536,7 @@ class AWQProcessor(LoopProcessor):
         # set quantized state
         model.quantized = True
 
-        model.quantize_config.quant_method = METHOD.AWQ
+        model.quantize_config.method = METHOD.AWQ
 
         super().finalize(model=model, **kwargs)
 

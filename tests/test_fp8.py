@@ -24,8 +24,10 @@ def test_fp8_quantize_config_round_trip():
     assert cfg.uses_weight_only_lifecycle() is True
 
     payload = cfg.to_dict()
+    assert payload["method"] == METHOD.FP8
+    assert payload["quant_method"] == METHOD.FP8
     assert payload["format"] == "float8_e5m2"
-    assert payload["checkpoint_format"] == FORMAT.FP8
+    assert payload["checkpoint_format"] == "float8_e5m2"
     assert payload["weight_scale_method"] == "block"
     assert payload["weight_block_size"] == [128, 128]
     assert payload["weight_scale_semantics"] == "inverse"
@@ -53,7 +55,7 @@ def test_detect_format_identifies_fp8_from_e5m2_checkpoint(tmp_path):
         json.dumps(
             {
                 "quantization_config": {
-                    "quant_method": "fp8",
+                    "method": "fp8",
                     "format": "float8_e5m2",
                     "weight_scale_method": "row",
                     "weight_scale_semantics": "inverse",

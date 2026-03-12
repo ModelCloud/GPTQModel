@@ -409,7 +409,7 @@ def _compile_quantize_config_weight_target(weight: TargetSpec, *, matchers: tupl
     sym = bool(quantize.args.get("sym", True))
 
     kwargs = {
-        "quant_method": method,
+        "method": method,
         "format": export_format,
         "bits": bits,
         "group_size": group_size,

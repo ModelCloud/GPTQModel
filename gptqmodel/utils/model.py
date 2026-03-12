@@ -280,7 +280,7 @@ def make_quant(
     bits = qcfg.runtime_bits
     group_size =qcfg.group_size
     extension = qcfg.adapter
-    format = resolve_quant_format(qcfg.format, qcfg.quant_method)
+    format = resolve_quant_format(qcfg.format, qcfg.method)
     desc_act = qcfg.desc_act
     sym = qcfg.sym
     dynamic = qcfg.dynamic
@@ -883,7 +883,7 @@ def pack_module(
         if (
             quantize_config is not None
             and quantize_config.export_quant_method() == METHOD.GPTQ
-            and resolve_quant_format(quantize_config.format, quantize_config.quant_method) == FORMAT.GPTQ
+            and resolve_quant_format(quantize_config.format, quantize_config.method) == FORMAT.GPTQ
             and getattr(quant_linear_cls, "REQUIRES_FORMAT_V2", False)
         ):
             with log_time_block(
