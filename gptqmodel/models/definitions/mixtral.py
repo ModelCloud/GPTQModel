@@ -10,6 +10,8 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 class MixtralQModel(BaseQModel):
     pre_lm_head_norm_module = "model.norm"
 
+    dynamic_expert_index = "num_local_experts"
+
     # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
@@ -23,7 +25,7 @@ class MixtralQModel(BaseQModel):
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_porj:1"),
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 }
             }
         }
