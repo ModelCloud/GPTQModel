@@ -509,6 +509,180 @@ The override changes only `bits`.
 It does not require restating `method`, `sym`, or `group_size`.
 
 
+### `quantize.failsafe`
+
+`failsafe` belongs inside `quantize`.
+
+It is not:
+
+- an `action`
+- a `prepare` step
+- an `export` setting
+
+It is a quantizer-local fallback policy for methods that depend on calibration or activation evidence and may not have enough usable samples for every matched unit.
+
+This is the right place because failsafe changes how the quantizer solves a target when evidence is insufficient.
+It does not change which modules are matched, and it does not change the exported format family.
+
+Primary use cases:
+
+- GPTQ with too few Hessian / activation samples for a module
+- AWQ with missing or too-sparse captured activations for a layer group
+- future activation-aware weight quantizers
+- MoE routing cases where some experts receive little or no calibration traffic
+
+Recommended protocol shape:
+
+Python:
+
+```python
+Rule(
+    match="*",
+    weight={
+        "quantize": {
+            "method": "gptq",
+            "bits": 4,
+            "group_size": 128,
+            "sym": True,
+            "failsafe": {
+                "strategy": "rtn",
+                "threshold": "0.5%",
+            },
+        },
+        "export": {
+            "format": "gptq",
+        },
+    },
+)
+```
+
+YAML:
+
+```yaml
+- match: "*"
+  weight:
+    quantize:
+      method: gptq
+      bits: 4
+      group_size: 128
+      sym: true
+      failsafe:
+        strategy: rtn
+        threshold: 0.5%
+    export:
+      format: gptq
+```
+
+Recommended fields:
+
+- `strategy`: fallback quantization strategy
+- `threshold`: minimum evidence threshold before fallback triggers
+- `smooth`: optional smoothing used only inside the fallback path
+
+Example:
+
+```yaml
+weight:
+  quantize:
+    method: awq
+    bits: 4
+    group_size: 128
+    failsafe:
+      strategy: rtn
+      threshold: 1.0%
+      smooth:
+        type: mad
+        k: 2.75
+```
+
+Recommended threshold semantics:
+
+- integer / float: absolute minimum observed samples or tokens
+- percent string such as `"0.5%"`: minimum observed coverage relative to expected calibration traffic
+- `true`: enable quantizer default threshold
+- `false` or `null`: disable failsafe
+
+Initial runtime contract:
+
+- GPTQ: evaluate failsafe per matched module
+- AWQ: evaluate failsafe at the quantizer's natural scaling group or layer subgroup
+- future methods: evaluate failsafe at the quantizer's natural solve unit
+
+The protocol should not force one global failsafe scope.
+Failsafe should use the quantizer's native solve scope.
+
+Important separation:
+
+- `quantize.method = gptq` with `failsafe.strategy = rtn` means:
+  GPTQ is still the primary method
+- if the module or group is under-sampled, fallback quantization uses RTN-like weight-only solving
+- the rule's `export` still controls the final encoded representation
+
+Example:
+
+```yaml
+weight:
+  quantize:
+    method: gptq
+    bits: 4
+    failsafe:
+      strategy: rtn
+      threshold: 0.5%
+  export:
+    format: gptq
+```
+
+This does not mean "export as RTN".
+It means:
+
+- primary solve path: GPTQ
+- low-evidence fallback solve path: RTN
+- final export family: GPTQ
+
+That matches current `gptqmodel` behavior more closely than treating failsafe as a separate stage or a weight-only top-level config.
+
+Patch-first override behavior should apply here too.
+
+Example base rule:
+
+```yaml
+- match: "*"
+  weight:
+    quantize:
+      method: gptq
+      bits: 4
+      group_size: 128
+      failsafe:
+        strategy: rtn
+        threshold: 0.5%
+```
+
+Example narrower MoE override:
+
+```yaml
+- match: ".*experts\\.[0-9]+\\..*"
+  weight:
+    quantize:
+      failsafe:
+        threshold: 2.0%
+```
+
+Effective result for expert modules:
+
+- `method = gptq`
+- `bits = 4`
+- `group_size = 128`
+- `failsafe.strategy = rtn`
+- `failsafe.threshold = 2.0%`
+
+This is how failsafe should fit into the new protocol:
+
+- nested under `target.quantize`
+- inherited and patchable like other quantizer fields
+- supported only for quantizers that actually depend on calibration / activations
+- independent from `export`
+
+
 ### `export`
 
 `export` defines the final encoded representation for the target.
