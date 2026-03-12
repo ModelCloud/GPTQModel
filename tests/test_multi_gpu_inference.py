@@ -6,6 +6,7 @@
 # -- do not touch
 import os
 
+import pytest
 import torch
 from transformers import AutoTokenizer
 
@@ -16,6 +17,8 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestMultiGPUInference(unittest.TestCase):

@@ -10,6 +10,10 @@ import time
 import torch
 from models.model_test import ModelTest
 
+import pytest
+
+pytestmark = pytest.mark.gpu
+
 
 # cpu_gpu_bandwidth_test.py
 # Measure HtoD and DtoH bandwidth with pageable vs pinned CPU memory.

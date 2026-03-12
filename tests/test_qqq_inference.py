@@ -3,8 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import pytest
+
 from gptqmodel import GPTQModel
 from gptqmodel.utils.eval import EVAL
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 eval_results = GPTQModel.eval("HandH1998/QQQ-Llama-3-8b-g128",

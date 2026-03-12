@@ -18,6 +18,8 @@ from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 
 QWEN3_HIDDEN_SIZE = 3584
 
+pytestmark = [pytest.mark.cpu, pytest.mark.gpu]
+
 
 def _compute_legacy_w_mean(layers, group_size):
     weights = [layer.weight.detach().to(torch.float32).cpu() for layer in layers]

@@ -25,7 +25,11 @@ import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 # isort: on
 
+import pytest  # noqa: E402
+
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
+
+pytestmark = [pytest.mark.cpu, pytest.mark.gpu]
 
 
 def gen_quant4(k: int, n: int, groupsize: int):

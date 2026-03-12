@@ -10,6 +10,7 @@ import os
 import tempfile
 import unittest
 
+import pytest
 import torch
 from datasets import load_dataset
 from parameterized import parameterized
@@ -33,6 +34,7 @@ from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 
 
 log = LogBar.shared()
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestAwq(unittest.TestCase):

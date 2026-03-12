@@ -11,6 +11,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 from inference_speed import InferenceSpeed  # noqa: E402
 from parameterized import parameterized  # noqa: E402
+import pytest  # noqa: E402
 
 from gptqmodel.utils import BACKEND  # noqa: E402
 
@@ -29,6 +30,8 @@ GPU: 4090
 (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1474),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.IPEX, 48),
 '''
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 class TestInferenceSpeed(InferenceSpeed):
 

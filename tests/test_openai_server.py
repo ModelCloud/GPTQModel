@@ -7,11 +7,14 @@ import os
 import unittest
 
 import openai
+import pytest
 
 from gptqmodel import GPTQModel
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 class TestOpeniServer(unittest.TestCase):
     @classmethod
