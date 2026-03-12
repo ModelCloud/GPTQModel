@@ -1,0 +1,3 @@
+tests/models:
+  test_baichuan.py:
+    - flash_attn
