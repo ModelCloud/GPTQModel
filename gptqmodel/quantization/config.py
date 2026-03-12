@@ -31,6 +31,7 @@ FORMAT_FIELD_CODE = "format"
 SYMMETRIC_FIELD_CODE = "sym"
 # Deprecated JSON alias retained for backward compatibility.
 FORMAT_FIELD_CHECKPOINT = "checkpoint_format"
+# Hard-deprecated legacy alias. Presence should fail fast.
 FORMAT_FIELD_COMPAT_MARLIN = "is_marlin_format"
 # Canonical method field; `quant_method` is a deprecated JSON alias.
 METHOD_FIELD_CODE = "method"
@@ -1742,6 +1743,11 @@ def _normalize_quantize_config_constructor_kwargs(kwargs: Dict[str, Any]) -> Dic
         return kwargs
 
     normalized = dict(kwargs)
+    if FORMAT_FIELD_COMPAT_MARLIN in normalized:
+        raise ValueError(
+            "QuantizeConfig: `is_marlin_format` has been removed. Use `format=\"marlin\"` only for legacy checkpoint inspection, "
+            "or `format=\"gptq\"` for new GPTQ quantization."
+        )
     if METHOD_FIELD_CODE not in normalized and QUANT_METHOD_FIELD in normalized:
         normalized[METHOD_FIELD_CODE] = normalized[QUANT_METHOD_FIELD]
     normalized.pop(QUANT_METHOD_FIELD, None)
@@ -1806,9 +1812,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
     # if calibration is insufficient, fallback to a simple quantization strategy
     fallback: Optional[Fallback] = field(default_factory=Fallback)
-
-    # deprecated: only used for compat when reading legacy configs
-    is_marlin_format: bool = False
 
     # Callback function to filter devices for compute-intensive stages (quantization and forwarding)
     compute_device_filter: Optional[callable] = field(
@@ -2074,6 +2077,11 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         for key, val in quantize_cfg.items():
             key = key.lower()
+
+            if key == FORMAT_FIELD_COMPAT_MARLIN:
+                raise ValueError(
+                    "QuantizeConfig: `is_marlin_format` is no longer supported. Replace it with an explicit `format` field."
+                )
 
             if key == FORMAT_FIELD_CHECKPOINT:
                 if _looks_like_fp8_fmt(val):

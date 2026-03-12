@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
+
 from gptqmodel.quantization.config import (
     AWQQuantizeConfig,
     BaseQuantizeConfig,
@@ -70,6 +72,21 @@ def test_quantize_config_dispatches_awq_ignoring_legacy_gptq_only_kwargs():
     assert cfg.quant_method == METHOD.AWQ
     assert cfg.format == FORMAT.GEMM
     assert cfg.sym is False
+
+
+def test_quantize_config_rejects_is_marlin_format_constructor_arg():
+    with pytest.raises(ValueError, match="is_marlin_format"):
+        QuantizeConfig(is_marlin_format=True)
+
+
+def test_quantize_config_rejects_is_marlin_format_in_serialized_payload():
+    with pytest.raises(ValueError, match="is_marlin_format"):
+        QuantizeConfig.from_quant_config(
+            {
+                "bits": 4,
+                "is_marlin_format": True,
+            }
+        )
 
 
 def test_quantize_config_dispatches_rtn_constructor():
