@@ -5,6 +5,7 @@
 
 import copy
 import json
+import math
 import os.path
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field, fields
@@ -71,6 +72,7 @@ class FORMAT(str, Enum):
     MARLIN = "marlin"
     BITBLAS = "bitblas"
     QQQ = "qqq"
+    EXL3 = "exl3"
 
     GEMM = "gemm"
     GEMV = "gemv"
@@ -84,6 +86,7 @@ class METHOD(str, Enum):
     GGUF = "gguf"
     QQQ = "qqq"
     AWQ = "awq"
+    EXL3 = "exl3"
 
 
 class VramStrategy(str, Enum):
@@ -444,12 +447,19 @@ def _normalize_gguf_config_spec(
     return normalized_bits, normalized_format, bits_spec
 
 
-def _normalize_quant_bits(bits: Union[int, str, GGUFBits], format_value: Optional[Union[str, FORMAT]] = None) -> Union[int, GGUFBits]:
+def _normalize_quant_bits(bits: Union[int, float, str, GGUFBits], format_value: Optional[Union[str, FORMAT]] = None) -> Union[int, GGUFBits]:
     if isinstance(format_value, str):
         format_value = _normalize_format(format_value)
 
     if isinstance(bits, GGUFBits):
         normalized = bits
+    elif isinstance(bits, float):
+        if format_value == FORMAT.EXL3:
+            normalized = bits
+        elif bits.is_integer():
+            normalized = int(bits)
+        else:
+            raise ValueError(f"QuantizeConfig: unsupported bits specification `{bits}`.")
     elif isinstance(bits, int):
         normalized = bits
     elif isinstance(bits, str):
@@ -482,6 +492,8 @@ def resolve_quant_format(format_value: Optional[Union[str, FORMAT]], quant_metho
 
     if quant_method == METHOD.GGUF:
         return FORMAT.GGUF
+    if quant_method == METHOD.EXL3:
+        return FORMAT.EXL3
 
     if isinstance(format_value, FORMAT):
         return format_value
@@ -508,13 +520,34 @@ def _looks_like_gguf_bits(bits: Any) -> bool:
 
 
 def quant_bits_width(bits: Union[int, str, GGUFBits]) -> int:
+    if isinstance(bits, float):
+        if bits <= 0:
+            raise ValueError("QuantizeConfig: EXL3 bits per weight must be greater than 0.")
+        return max(1, int(math.floor(bits)))
     normalized = _normalize_quant_bits(bits)
     return normalized.bits if isinstance(normalized, GGUFBits) else normalized
 
 
 def serialize_quant_bits(bits: Union[int, str, GGUFBits]) -> Union[int, str]:
+    if isinstance(bits, float):
+        return float(bits)
     normalized = _normalize_quant_bits(bits)
     return normalized.serialize() if isinstance(normalized, GGUFBits) else normalized
+
+
+def _normalize_exl3_bits(bits: Union[int, float, str]) -> float:
+    if isinstance(bits, str):
+        bits = float(bits.strip())
+    elif isinstance(bits, int):
+        bits = float(bits)
+    elif not isinstance(bits, float):
+        raise ValueError(f"EXL3QuantizeConfig: unsupported bits specification `{bits}`.")
+
+    if not math.isfinite(bits):
+        raise ValueError("EXL3QuantizeConfig: `bits` must be finite.")
+    if bits < 1.0 or bits > 8.0:
+        raise ValueError("EXL3QuantizeConfig: `bits` must be between 1.0 and 8.0.")
+    return float(bits)
 
 @dataclass
 class SmoothMethod:
@@ -914,6 +947,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.MARLIN,
         FORMAT.BITBLAS,
     },
+    METHOD.EXL3: {
+        FORMAT.EXL3,
+    },
     METHOD.GGUF: {
         FORMAT.GGUF,
     },
@@ -945,6 +981,9 @@ AWQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.QQQ,
 )
+EXL3_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.EXL3,
+)
 RTN_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.GPTQ,
     FORMAT.GPTQ_V2,
@@ -960,6 +999,7 @@ GGUF_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GPTQ: METHOD.GPTQ,
     FORMAT.GPTQ_V2: METHOD.GPTQ,
+    FORMAT.EXL3: METHOD.EXL3,
     FORMAT.GGUF: METHOD.GGUF,
     FORMAT.BITBLAS: METHOD.GPTQ,
     FORMAT.GEMM: METHOD.AWQ,
@@ -1186,6 +1226,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.GPTQ
         if value == FORMAT.BITBLAS:
             return METHOD.GPTQ
+        if value == FORMAT.EXL3:
+            return METHOD.EXL3
         try:
             return METHOD(value)
         except ValueError as exc:
@@ -1487,6 +1529,19 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
 
     if target_cls is AWQQuantizeConfig:
         expected_method = METHOD.AWQ
+    elif target_cls is EXL3QuantizeConfig:
+        expected_method = METHOD.EXL3
+        format_value = normalized.get(FORMAT_FIELD_CODE)
+        normalized_format = None
+        if format_value is not None:
+            try:
+                normalized_format = _normalize_format(format_value)
+                normalized[FORMAT_FIELD_CODE] = normalized_format
+            except ValueError:
+                normalized_format = None
+        if normalized_format is not None and normalized_format != FORMAT.EXL3:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.EXL3}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.EXL3
     elif target_cls is GGUFConfig:
         expected_method = METHOD.GGUF
     elif target_cls is QQQQuantizeConfig:
@@ -2263,6 +2318,149 @@ class QQQQuantizeConfig(GPTQQuantizeConfig):
 
 
 @dataclass
+class EXL3QuantizeConfig(BaseQuantizeConfig):
+    bits: float = field(default=3.0)
+    quant_method: METHOD = field(default=METHOD.EXL3)
+    format: FORMAT = field(default=FORMAT.EXL3)
+    group_size: int = field(default=-1)
+    desc_act: Optional[bool] = field(default=False)
+    sym: bool = field(default=True)
+    head_bits: Optional[float] = field(default=None)
+    out_scales: Optional[str] = field(default="auto")
+    codebook: str = field(default="mcg")
+    tensor_storage: Optional[Dict[str, Any]] = field(default=None)
+    calibration: Optional[Dict[str, int]] = field(default=None)
+
+    @property
+    def runtime_bits(self) -> int:
+        return quant_bits_width(self.bits)
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.EXL3,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return EXL3_EXPORT_FORMATS
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def _normalize_bits_field(self, bits_value, checkpoint_format: FORMAT):
+        return _normalize_exl3_bits(bits_value)
+
+    def _normalize_dynamic_layer_config(
+        self,
+        layer_name: str,
+        layer_dict: Dict[str, Any],
+        *,
+        valid_bit_widths: List[int],
+        checkpoint_format: FORMAT,
+    ) -> None:
+        del valid_bit_widths, checkpoint_format
+        for key, value in layer_dict.items():
+            if key == "bits":
+                layer_dict[key] = _normalize_exl3_bits(value)
+            elif key == "head_bits":
+                layer_dict[key] = None if value is None else _normalize_exl3_bits(value)
+            elif key == "group_size" and value not in (-1, None):
+                raise ValueError("EXL3QuantizeConfig: `group_size` is not used; keep it at `-1`.")
+
+    def __post_init__(self):
+        self.quant_method = _normalize_quant_method(self.quant_method)
+        self.format = _normalize_format(self.format)
+        self.pack_dtype = _normalize_pack_dtype(self.pack_dtype)
+        self.bits = _normalize_exl3_bits(self.bits)
+        self.head_bits = None if self.head_bits is None else _normalize_exl3_bits(self.head_bits)
+
+        if self.quant_method != METHOD.EXL3:
+            raise ValueError("EXL3QuantizeConfig: `quant_method` must be `exl3`.")
+        if self.format != FORMAT.EXL3:
+            raise ValueError("EXL3QuantizeConfig: `format` must be `exl3`.")
+
+        self.group_size = -1
+        self.desc_act = False
+        self.sym = True
+
+        self.fallback = _normalize_fallback(self.fallback)
+
+        if self.dynamic is not None:
+            self.dynamic = {
+                **{k: v for k, v in self.dynamic.items() if k.startswith('-')},
+                **{k: v for k, v in self.dynamic.items() if not k.startswith('-')},
+            }
+            for layer, layer_dict in self.dynamic.items():
+                self._normalize_dynamic_layer_config(
+                    layer,
+                    layer_dict,
+                    valid_bit_widths=[],
+                    checkpoint_format=FORMAT.EXL3,
+                )
+
+        if self.out_scales is not None:
+            normalized_out_scales = str(self.out_scales).strip().lower()
+            out_scale_aliases = {
+                "always": "always",
+                "true": "always",
+                "never": "never",
+                "false": "never",
+                "auto": "auto",
+                "none": "auto",
+            }
+            if normalized_out_scales not in out_scale_aliases:
+                raise ValueError("EXL3QuantizeConfig: `out_scales` must be one of `always`, `never`, or `auto`.")
+            self.out_scales = out_scale_aliases[normalized_out_scales]
+
+        self.codebook = str(self.codebook).strip().lower()
+        if self.codebook not in {"mcg", "mul1", "3inst"}:
+            raise ValueError("EXL3QuantizeConfig: `codebook` must be one of `mcg`, `mul1`, or `3inst`.")
+
+        if self.tensor_storage is not None and not isinstance(self.tensor_storage, dict):
+            raise ValueError("EXL3QuantizeConfig: `tensor_storage` must be a dictionary when provided.")
+        if self.calibration is not None:
+            if not isinstance(self.calibration, dict):
+                raise ValueError("EXL3QuantizeConfig: `calibration` must be a dictionary when provided.")
+            self.calibration = {
+                str(key): int(value)
+                for key, value in self.calibration.items()
+            }
+
+        if self.meta is not None:
+            if not isinstance(self.meta, dict):
+                raise ValueError("QuantizeConfig: `meta` must be a dictionary")
+            for key in self.meta:
+                if not isinstance(key, str):
+                    raise ValueError("QuantizeConfig: `meta` keys must be strings")
+        else:
+            self.meta = {}
+
+        self.adapter = normalize_adapter(self.adapter)
+
+        if self.offload_to_disk and not self.offload_to_disk_path:
+            path_key = f"{get_random_string()}-{get_random_string()}"
+            self.offload_to_disk_path = f"./gptqmodel_offload/{path_key}/"
+            log.info(f"QuantizeConfig: offload_to_disk_path auto set to `{self.offload_to_disk_path}`")
+
+        self.vram_strategy = _normalize_vram_strategy(self.vram_strategy)
+        self.gc_mode = _normalize_gc_mode(self.gc_mode)
+        self.moe = _normalize_moe_config(self.moe)
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["bits"] = float(self.bits)
+        out["head_bits"] = None if self.head_bits is None else float(self.head_bits)
+        out["out_scales"] = self.out_scales
+        out["codebook"] = self.codebook
+        out["tensor_storage"] = self.tensor_storage
+        out["calibration"] = self.calibration
+
+    def calculate_bits_per_weight(self):
+        head_bits = self.head_bits if self.head_bits is not None else self.bits
+        log.info(
+            "Estimated Quantization BPW (bits per weight): %s bpw, based on [bits: %s, head_bits: %s]",
+            self.bits,
+            self.bits,
+            head_bits,
+        )
+
+@dataclass
 class RTNQuantizeConfig(PreFilterQuantizeConfig):
     quant_method: METHOD = field(default=METHOD.GPTQ)
     format: FORMAT = field(default=FORMAT.GPTQ)
@@ -2496,6 +2694,8 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return RTNQuantizeConfig
     if weight_only is not None:
         return RTNQuantizeConfig
+    if method == METHOD.EXL3 or format_value == FORMAT.EXL3:
+        return EXL3QuantizeConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
         return QQQQuantizeConfig
     if method == METHOD.AWQ:
@@ -2516,6 +2716,7 @@ def _known_quantize_config_field_names() -> set[str]:
         GPTQQuantizeConfig,
         AWQQuantizeConfig,
         QQQQuantizeConfig,
+        EXL3QuantizeConfig,
         RTNQuantizeConfig,
         GGUFConfig,
     ):

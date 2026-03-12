@@ -291,6 +291,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.GGUF,
         METHOD.AWQ,
         METHOD.QQQ,
+        METHOD.EXL3,
     ):
         return True
 
@@ -300,6 +301,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.GGUF,
         METHOD.AWQ,
         METHOD.QQQ,
+        METHOD.EXL3,
     ):
         return True
 

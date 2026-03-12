@@ -347,6 +347,9 @@ def detect_format(model_path: Path, config: dict) -> str:
         if any(k.endswith(".weight_scale_inv") for k in keys):
             LOG.debug("Detected FP8 format via '.weight_scale_inv' metadata in shard '%s'", files[0])
             return "fp8"
+        if any(k.endswith(".trellis") for k in keys):
+            LOG.debug("Detected EXL3 format via '.trellis' metadata in shard '%s'", files[0])
+            return "exl3"
         if any(k.endswith(".qweight") for k in keys):
             has_g = any(k.endswith(".g_idx") for k in keys)
             LOG.debug(
@@ -365,6 +368,9 @@ def detect_format(model_path: Path, config: dict) -> str:
     if method == "awq":
         LOG.debug("Detected AWQ format via quant_method=%s", method)
         return "awq"
+    if method == "exl3":
+        LOG.debug("Detected EXL3 format via quant_method=%s", method)
+        return "exl3"
     if method == "compressed-tensors":
         fmt_name = (quant_cfg.get("format") or "").lower()
         if fmt_name == "pack-quantized":

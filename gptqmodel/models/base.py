@@ -38,6 +38,7 @@ except Exception:  # pragma: no cover - datasets may not be installed
 
 from .. import DEVICE_THREAD_POOL
 from ..adapter.adapter import Adapter
+from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -697,26 +698,45 @@ class BaseQModel(nn.Module):
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
             elif self.quantize_config.quant_method == METHOD.QQQ:
                 preferred_backend = BACKEND.QQQ
+            elif self.quantize_config.quant_method == METHOD.EXL3:
+                preferred_backend = BACKEND.EXLLAMA_V3
             elif self.quantize_config.quant_method == METHOD.GGUF:
                 preferred_backend = BACKEND.AUTO
             else:
                 preferred_backend = BACKEND.TORCH
 
-        # Validate quant linear before quantization starts
-        _ = select_quant_linear(
-            bits=self.quantize_config.runtime_bits,
-            dynamic=self.quantize_config.dynamic,
-            group_size=self.quantize_config.group_size,
-            desc_act=self.quantize_config.desc_act,
-            sym=self.quantize_config.sym,
-            backend=preferred_backend,
-            format=format_code,
-            quant_method=export_quant_method,
-            device=DEVICE(self.quantize_config.device),
-            pack=True,
-            pack_dtype=self.quantize_config.pack_dtype,
+        if self.quantize_config.quant_method == METHOD.EXL3:
+            if preferred_backend not in (BACKEND.AUTO, BACKEND.EXLLAMA_V3):
+                raise ValueError("EXL3 quantization only supports BACKEND.AUTO or BACKEND.EXLLAMA_V3.")
 
-        )
+            if not torch.cuda.is_available():
+                raise ValueError("EXL3 quantization requires CUDA/HIP.")
+
+            quant_device = self.quantize_config.device
+            if isinstance(quant_device, DEVICE):
+                quant_device_type = quant_device.type
+            elif isinstance(quant_device, torch.device):
+                quant_device_type = quant_device.type
+            else:
+                quant_device_type = str(quant_device).split(":")[0].lower()
+
+            if quant_device_type != "cuda":
+                raise ValueError("EXL3 quantization requires a CUDA/HIP quantization device.")
+        else:
+            # Validate quant linear before quantization starts
+            _ = select_quant_linear(
+                bits=self.quantize_config.runtime_bits,
+                dynamic=self.quantize_config.dynamic,
+                group_size=self.quantize_config.group_size,
+                desc_act=self.quantize_config.desc_act,
+                sym=self.quantize_config.sym,
+                backend=preferred_backend,
+                format=format_code,
+                quant_method=export_quant_method,
+                device=DEVICE(self.quantize_config.device),
+                pack=True,
+                pack_dtype=self.quantize_config.pack_dtype,
+            )
 
         # Use the provided tokenizer if one is passed to quantize()
         if tokenizer is not None:
@@ -736,20 +756,23 @@ class BaseQModel(nn.Module):
         if adapter is not None:
             self.quantize_config.adapter = adapter
 
-        self.qlinear_kernel = select_quant_linear(
-                bits=self.quantize_config.runtime_bits,
-                group_size=self.quantize_config.group_size,
-                desc_act=self.quantize_config.desc_act,
-                sym=self.quantize_config.sym,
-                pack=True,
-                dynamic=self.quantize_config.dynamic,
-                device=DEVICE(self.quantize_config.device),
-                pack_dtype=self.quantize_config.pack_dtype,
-                multi_select=False,
-                backend=preferred_backend,
-                format=format_code,
-                quant_method=export_quant_method,
-            )
+        if self.quantize_config.quant_method == METHOD.EXL3:
+            self.qlinear_kernel = ExllamaV3Linear
+        else:
+            self.qlinear_kernel = select_quant_linear(
+                    bits=self.quantize_config.runtime_bits,
+                    group_size=self.quantize_config.group_size,
+                    desc_act=self.quantize_config.desc_act,
+                    sym=self.quantize_config.sym,
+                    pack=True,
+                    dynamic=self.quantize_config.dynamic,
+                    device=DEVICE(self.quantize_config.device),
+                    pack_dtype=self.quantize_config.pack_dtype,
+                    multi_select=False,
+                    backend=preferred_backend,
+                    format=format_code,
+                    quant_method=export_quant_method,
+                )
 
         # rotate model
         if self.quantize_config.rotation:
@@ -838,7 +861,30 @@ class BaseQModel(nn.Module):
             "calculate_w_wq_diff": needs_lora,
         }
 
-        if self.quantize_config.quant_method == METHOD.QQQ:
+        if self.quantize_config.quant_method == METHOD.EXL3:
+            from ..looper.exllamav3_processor import EXL3Processor
+
+            if needs_lora:
+                raise NotImplementedError("EXL3 quantization does not support adapter/EoRA generation.")
+
+            if getattr(self.quantize_config, "gptaq", None) is not None:
+                raise NotImplementedError("EXL3 quantization does not support GPTAQ/native activation capture.")
+
+            exl3_args = {
+                "tokenizer": self.tokenizer,
+                "qcfg": self.quantize_config,
+                "calibration": calibration,
+                "prepare_dataset_func": self.prepare_dataset,
+                "calibration_concat_size": calibration_concat_size,
+                "calibration_sort": calibration_sort,
+                "calibration_concat_separator": calibration_concat_separator,
+                "batch_size": batch_size,
+                "lm_head_name": self.lm_head,
+            }
+            quantize_processor = [
+                EXL3Processor(**exl3_args),
+            ]
+        elif self.quantize_config.quant_method == METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
 
             quantize_processor = [
@@ -1963,8 +2009,8 @@ class BaseQModel(nn.Module):
     def _auto_detect_module_tree(self, model: PreTrainedModel, quant_method: METHOD):
         log.warn("Model not yet support, attempting Module Tree AutoCompat...")
 
-        if quant_method not in {METHOD.GPTQ, METHOD.GGUF}:
-            log.warn(f"Module Tree AutoCompat: Failed, quant_method={quant_method}, only support GPTQ/GGUF")
+        if quant_method not in {METHOD.GPTQ, METHOD.GGUF, METHOD.EXL3}:
+            log.warn(f"Module Tree AutoCompat: Failed, quant_method={quant_method}, only support GPTQ/GGUF/EXL3")
             return None
 
         def _get(path):

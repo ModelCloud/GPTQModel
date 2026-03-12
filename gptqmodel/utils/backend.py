@@ -17,6 +17,7 @@ class BACKEND(str, Enum):
     TRITON = "triton" # VERY GOOD: all-around kernel
     EXLLAMA_V1 = "exllama_v1" # FAST: optimized for batching == 1
     EXLLAMA_V2 = "exllama_v2" # FASTER: optimized for batching > 1
+    EXLLAMA_V3 = "exllama_v3"
     EXLLAMA_EORA = "exllama_eora"
     MACHETE = "machete" # CUTLASS-based kernel optimized for Hopper (SM90+)
     MARLIN = "marlin" # FASTEST: marlin reduce ops in fp32 (higher precision -> more accurate, slightly slower)
