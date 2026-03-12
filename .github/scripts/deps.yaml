@@ -109,3 +109,6 @@ tests/models:
 
   test_gptbigcode.py:
     - peft
+
+  test_brumby.py:
+    - retention
