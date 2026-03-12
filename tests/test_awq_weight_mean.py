@@ -1,5 +1,5 @@
 import os
-
+import types
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:256,garbage_collection_threshold:0.7" #"expandable_segments:True"
@@ -95,7 +95,9 @@ class _TestAWQProcessor(AWQProcessor):
             calibration_concat_size=None,
             calibration_sort=None,
             batch_size=1,
-            gptq_model=None,
+            gptq_model=types.SimpleNamespace(
+                rotary_embedding=None,
+            ),
             model=None,
             require_fwd=True,
             calculate_w_wq_diff=False,
