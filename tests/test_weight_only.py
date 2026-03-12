@@ -22,7 +22,6 @@ from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.quantization.config import (
     FORMAT,
     GGUFConfig,
-    GGUFQuantizeConfig,
     GGUFBits,
     METHOD,
     QuantizeConfig,

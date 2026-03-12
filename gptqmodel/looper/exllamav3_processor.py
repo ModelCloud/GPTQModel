@@ -40,7 +40,7 @@ from ..utils.logger import setup_logger
 from ..utils.module_locks import parent_module_lock
 
 
-log = setup_logger()
+setup_logger()
 
 _EXL3_SIGMA_REG = 0.025
 _OUT_SCALES_TO_ARG = {

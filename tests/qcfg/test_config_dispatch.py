@@ -9,7 +9,6 @@ from gptqmodel.quantization.config import (
     FP8Config,
     FORMAT,
     GGUFConfig,
-    GGUFQuantizeConfig,
     GGUFBits,
     GPTQQuantizeConfig,
     METHOD,

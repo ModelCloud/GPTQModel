@@ -32,7 +32,7 @@ except Exception:  # pragma: no cover - optional dependency
     _GGUF_AVAILABLE = False
 
 
-log = setup_logger()
+setup_logger()
 
 _GGUF_TYPE_INFO = {
     "Q4_0": {"bits": 4, "block_size": 32, "type_size": 18},

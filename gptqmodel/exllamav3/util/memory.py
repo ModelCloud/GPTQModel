@@ -13,7 +13,7 @@ from pydantic import PydanticUserError
 def touch_device(device: int):
     d = torch.empty((32, 32), device = device, dtype = torch.float)
     d = d @ d
-    d = d + d
+    d.add_(d)
 
 
 # Touch device and measure VRAM (child process)
@@ -181,7 +181,7 @@ def list_gpu_tensors(min_size: int = 1, cuda_only: bool = True):
                     if id(value) not in visited:
                         visited.add(id(value))
                         queue.append((new_path, value))
-            except:
+            except Exception:
                 pass
 
         # Same for list, tuple, set
@@ -220,9 +220,9 @@ def list_gpu_tensors(min_size: int = 1, cuda_only: bool = True):
     # Print tables to console
     for k in sorted(devices.keys()):
         print()
-        print(f"--------------")
+        print("--------------")
         print(f"| {k:10} |")
-        print(f"--------------")
+        print("--------------")
         print()
         headers = ["size // MB", "path", "shape", "dtype"]
         print(tabulate(devices[k], headers = headers, tablefmt = "github", intfmt=","))

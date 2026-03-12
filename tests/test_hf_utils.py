@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import torch
 from torch import nn
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_utils import _get_tied_weight_keys

@@ -220,7 +220,6 @@ class LinearEXL3:
     @staticmethod
     def tp_import_split(local_context, exported, plan, split):
         consumer = local_context["consumer"]
-        device = local_context["device"]
         id_suh = exported["suh"]
         id_svh = exported["svh"]
         id_trellis = exported["trellis"]

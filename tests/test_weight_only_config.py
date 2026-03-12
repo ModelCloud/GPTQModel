@@ -5,9 +5,7 @@ import pytest
 
 from gptqmodel.quantization.config import (
     BaseQuantizeConfig,
-    FORMAT,
     GGUFConfig,
-    GGUFQuantizeConfig,
     GGUFBits,
     GPTQQuantizeConfig,
     METHOD,

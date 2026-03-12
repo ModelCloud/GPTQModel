@@ -131,9 +131,6 @@ def _run_case(
         triton_diff = (baseline_out.to(torch.float32) - triton_out.to(torch.float32)).abs()
         triton_mae = triton_diff.mean().item()
         triton_max_abs = triton_diff.max().item()
-    else:
-        triton_mae = None
-        triton_max_abs = None
     diff = (baseline_out.to(torch.float32) - fused_out.to(torch.float32)).abs()
     mae = diff.mean().item()
     max_abs = diff.max().item()
@@ -204,7 +201,7 @@ def _run_case(
         print(_ascii_table(["trial", "baseline_ms", "fused_ms", "speedup", "delta_pct"], trial_rows))
     print(_ascii_table(["path", "mean_ms", "min_ms", "max_ms", "speedup_vs_baseline"], summary_rows))
     print(f"correctness: mae={mae:.6f} max_abs={max_abs:.6f}")
-    if can_bench_triton and triton_mae is not None and triton_max_abs is not None:
+    if can_bench_triton:
         print(f"triton_correctness: mae={triton_mae:.6f} max_abs={triton_max_abs:.6f}")
 
 

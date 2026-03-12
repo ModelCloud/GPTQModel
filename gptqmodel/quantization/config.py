@@ -2852,7 +2852,9 @@ class GGUFConfig(PreFilterQuantizeConfig):
 
     def __post_init__(self):
         self._normalize_prefilter_state()
-        super(PreFilterQuantizeConfig, self).__post_init__()
+        # GGUFConfig already normalized pre-filters above; skip the parent hook to
+        # avoid running that normalization twice.
+        BaseQuantizeConfig.__post_init__(self)
         self._gguf_bits = _gguf_bits_from_components(self.bits, self.format)
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:

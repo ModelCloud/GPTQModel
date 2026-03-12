@@ -81,6 +81,7 @@ class _GGMLMatmulPlan:
         try:
             self.close()
         except Exception:
+            # Destructors must not raise during GC or interpreter shutdown.
             pass
 
 
