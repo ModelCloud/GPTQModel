@@ -433,6 +433,7 @@ class TestModelSave(unittest.TestCase):
     def test_moe(self):
         quantize_config = QuantizeConfig(
             failsafe=None,
+            offload_to_disk=False
         )
 
         model = GPTQModel.load(
