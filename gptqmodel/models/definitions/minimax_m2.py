@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from ..base import BaseQModel
-from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ..moe_lifecycle import W1W3W2MoELifecycleHooks
 
 
 class MiniMaxM2GPTQ(BaseQModel):
@@ -21,8 +21,8 @@ class MiniMaxM2GPTQ(BaseQModel):
 
     dynamic_expert_index = "num_local_experts"
 
-    # MoE lifecycle hooks for gate_proj/up_proj/down_proj pattern
-    moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
+    # MoE lifecycle hooks for w1/w3/w2 pattern
+    moe_lifecycle_hooks = W1W3W2MoELifecycleHooks()
 
     module_tree = [
         "model",
@@ -39,11 +39,11 @@ class MiniMaxM2GPTQ(BaseQModel):
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp:moe": {  # MoE module
+            "block_sparse_moe:moe": {  # MoE module
                 "gate": ("gate:!",),
                 "e_score_correction_bias": ("e_score_correction_bias:!",),
                 "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                    "#": ("w1:0", "w3:0", "w2:1"),
                 },
             },
         },
