@@ -4,25 +4,25 @@
 
 from typing import Any, Optional, Tuple
 
-from gptqmodel.quantization.config import FailSafe, FailSafeStrategy
+from gptqmodel.quantization.config import Fallback, FallbackStrategy
 
 
-def normalize_failsafe(
+def normalize_fallback(
     value: Any,
-    default: Optional[FailSafe] = None,
-) -> Optional[FailSafe]:
+    default: Optional[Fallback] = None,
+) -> Optional[Fallback]:
     if value is None:
         return default
-    if isinstance(value, FailSafe):
+    if isinstance(value, Fallback):
         return value
     if isinstance(value, dict):
-        fallback = default if isinstance(default, FailSafe) else FailSafe()
-        return FailSafe(
+        fallback = default if isinstance(default, Fallback) else Fallback()
+        return Fallback(
             strategy=value.get("strategy", fallback.strategy),
             threshold=value.get("threshold", fallback.threshold),
         )
     raise ValueError(
-        "normalize_failsafe: expected FailSafe, dict, or None. "
+        "normalize_fallback: expected Fallback, dict, or None. "
     )
 
 
@@ -50,36 +50,36 @@ def _parse_threshold(setting: Any) -> Tuple[Optional[float], bool]:
     return None, False
 
 
-def resolve_failsafe_strategy(strategy: Any) -> FailSafeStrategy:
+def resolve_fallback_strategy(strategy: Any) -> FallbackStrategy:
     """
-    Normalize a failsafe strategy.
+    Normalize a fallback strategy.
     """
-    if isinstance(strategy, FailSafe):
+    if isinstance(strategy, Fallback):
         strategy = strategy.strategy
     if isinstance(strategy, dict):
-        strategy = strategy.get("strategy", FailSafeStrategy.RTN)
+        strategy = strategy.get("strategy", FallbackStrategy.RTN)
     if strategy is None:
-        resolved = FailSafeStrategy.RTN
-    elif isinstance(strategy, FailSafeStrategy):
+        resolved = FallbackStrategy.RTN
+    elif isinstance(strategy, FallbackStrategy):
         resolved = strategy
     elif isinstance(strategy, str):
         normalized = strategy.strip().lower()
         try:
-            resolved = FailSafeStrategy(normalized)
+            resolved = FallbackStrategy(normalized)
         except ValueError:
-            resolved = FailSafeStrategy.RTN
+            resolved = FallbackStrategy.RTN
     else:
-        resolved = FailSafeStrategy.RTN
+        resolved = FallbackStrategy.RTN
 
     return resolved
 
 
-def should_use_failsafe(
+def should_use_fallback(
     setting: Any,
     observed_samples: float,
     expected_total_samples: Optional[float] = None,
 ) -> bool:
-    if isinstance(setting, FailSafe):
+    if isinstance(setting, Fallback):
         setting = setting.threshold
     if isinstance(setting, dict):
         setting = setting.get("threshold", None)
@@ -96,7 +96,7 @@ def resolve_threshold(
     """
     Resolve a threshold into a raw numeric value and whether it was percent-based.
     """
-    if isinstance(setting, FailSafe):
+    if isinstance(setting, Fallback):
         setting = setting.threshold
     if isinstance(setting, dict):
         setting = setting.get("threshold", None)

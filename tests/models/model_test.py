@@ -63,7 +63,7 @@ from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import (  # noqa: E402
-    FailSafe,
+    Fallback,
     GGUFConfig,
     GGUFQuantizeConfig,
     GPTAQConfig,
@@ -123,7 +123,7 @@ class ModelTest(unittest.TestCase):
     SYM = True
     GPTQA = False
     ACT_GROUP_AWARE = True
-    FAILSAFE = FailSafe()
+    FALLBACK = Fallback()
     EORA = None
     DAMP_PERCENT = 0.05
     MSE = 0.0
@@ -887,7 +887,7 @@ class ModelTest(unittest.TestCase):
             group_size=self.GROUP_SIZE,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
-            failsafe=self.FAILSAFE,
+            fallback=self.FALLBACK,
             sym=self.SYM,
             gptaq=GPTAQConfig() if self.GPTQA else None,
             adapter=self.EORA,

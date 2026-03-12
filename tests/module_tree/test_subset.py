@@ -220,7 +220,7 @@ class _StubAWQProcessor(LoopProcessor):
     def name(cls) -> str:
         return "stub-awq"
 
-    def preprocess(self, module: NamedModule, failsafe=None, **_kwargs):
+    def preprocess(self, module: NamedModule, fallback=None, **_kwargs):
         self.tasks[module.name] = {"inputs": []}
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[torch.nn.Module, tuple, torch.Tensor], None]:
@@ -323,7 +323,7 @@ def test_stage_subset_early_stop_and_callbacks():
         layers_prefix="layers",
         names=subset_names,
         processor=processor,
-        failsafe=False,
+        fallback=False,
         layer_module=mini_layer,
     )
 
@@ -345,7 +345,7 @@ def test_stage_subset_early_stop_and_callbacks():
         subset_index=0,
         subset_total=2,
         full=full_modules,
-        failsafe=False,
+        fallback=False,
         shared_kv_cache_dict=shared_kv_cache_dict,
         pb=_DummyProgress(),
         log=None,

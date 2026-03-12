@@ -50,7 +50,7 @@ def test_quantize_config_dispatches_awq_ignoring_legacy_gptq_only_kwargs():
         format=FORMAT.GEMM,
         sym=False,
         act_group_aware=True,
-        failsafe=None,
+        fallback=None,
         damp_percent=0.05,
         mse=0.0,
     )

@@ -903,7 +903,7 @@ class BaseQModel(nn.Module):
         with gc_context:
             return module_looper.loop(
                 backend=backend,
-                failsafe=self.quantize_config.failsafe,
+                fallback=self.quantize_config.fallback,
             )
 
     def _quantize_weight_only(

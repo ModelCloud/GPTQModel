@@ -298,7 +298,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             pass
 
         def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor,
-                                 failsafe, layer_module=None) -> Dict[str, NamedModule]:
+                                 fallback, layer_module=None) -> Dict[str, NamedModule]:
             subset = {}
             name = "self_attn.q_proj"
             subset[name] = NamedModule(module, name=name, full_name=full, layer_index=layer_index)
@@ -319,7 +319,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         layers=layers,
         layer_modules=layer_modules,
         layers_prefix="model.layers",
-        failsafe=True,
+        fallback=True,
         shared_kv_cache_dict={},
         pb=pb,
         layer_count=1,

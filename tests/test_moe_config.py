@@ -82,7 +82,7 @@ class TestMoEConfig(ModelTest):
     - structural integrity of MoE experts after quantization
     """
 
-    FAILSAFE = None
+    FALLBACK = None
 
     # Intentionally minimal to force observable MoE routing behavior
     DATASET_SIZE = 1
@@ -101,7 +101,7 @@ class TestMoEConfig(ModelTest):
 
     def quantize_and_assert(self):
         # Apply GPTQ quantization with optional MoE routing configuration
-        quant_config = QuantizeConfig(bits=4, group_size=128, moe=self.MOE_CONFIG, failsafe=self.FAILSAFE)
+        quant_config = QuantizeConfig(bits=4, group_size=128, moe=self.MOE_CONFIG, fallback=self.FALLBACK)
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quant_config)
 
         # Compute total calibration token size

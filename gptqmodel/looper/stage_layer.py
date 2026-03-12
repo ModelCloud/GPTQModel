@@ -41,7 +41,7 @@ def run_layer_stage(
     layers: List[torch.nn.Module],
     layer_modules: List[List[str]],
     layers_prefix: Optional[str],
-    failsafe,
+    fallback,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
     pb,
     layer_count: int,
@@ -129,7 +129,7 @@ def run_layer_stage(
                     layers_prefix=layers_prefix,
                     names=names,
                     processor=processor,
-                    failsafe=failsafe,
+                    fallback=fallback,
                     layer_module=module,
                 )
                 # Skip empty subsets caused by per-layer structure differences or dynamic config exclusions;
@@ -179,7 +179,7 @@ def run_layer_stage(
                     subset_index=index,
                     subset_total=subset_total,
                     full=full,
-                    failsafe=failsafe,
+                    fallback=fallback,
                     shared_kv_cache_dict=shared_kv_cache_dict,
                     pb=pb,
                     log=log,

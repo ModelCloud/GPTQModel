@@ -19,7 +19,7 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTAQ, GPTQ
 from ..quantization.config import GPTAQConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
-from ..utils.failsafe import normalize_failsafe
+from ..utils.fallback import normalize_fallback
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.device import get_device
 from ..utils.model import create_quant_module, find_modules, pack_module
@@ -33,7 +33,7 @@ def clone_gptq_config_for_module(
     qcfg: QuantizeConfig,
     module_full_name: str,
     *,
-    failsafe=None,
+    fallback=None,
 ) -> Optional[QuantizeConfig]:
     # entire module is skipped
     if qcfg.dynamic_get(layer_name=module_full_name) == False:
@@ -56,9 +56,9 @@ def clone_gptq_config_for_module(
             qcfg_clone.act_group_aware = act_group_aware_override
         qcfg_clone.damp_percent = qcfg.dynamic_get(module_full_name, "damp_percent", qcfg_clone.damp_percent)
         qcfg_clone.static_groups = qcfg.dynamic_get(module_full_name, "static_groups", qcfg_clone.static_groups)
-        failsafe_override = qcfg.dynamic_get(module_full_name, "failsafe", None)
-        if failsafe_override is not None:
-            qcfg_clone.failsafe = normalize_failsafe(failsafe_override, qcfg_clone.failsafe)
+        fallback_override = qcfg.dynamic_get(module_full_name, "fallback", None)
+        if fallback_override is not None:
+            qcfg_clone.fallback = normalize_fallback(fallback_override, qcfg_clone.fallback)
         hessian_override = qcfg.dynamic_get(module_full_name, "hessian", None)
         if hessian_override is not None:
             if isinstance(hessian_override, dict):
@@ -78,7 +78,7 @@ def clone_gptq_config_for_module(
 
         qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
 
-    qcfg_clone.failsafe = normalize_failsafe(failsafe, qcfg_clone.failsafe)
+    qcfg_clone.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
     return qcfg_clone
 
 class GPTQProcessor(LoopProcessor):
@@ -116,11 +116,11 @@ class GPTQProcessor(LoopProcessor):
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
-    def preprocess(self, module: NamedModule, failsafe=None, **kwargs):
+    def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         qcfg_clone = clone_gptq_config_for_module(
             self.qcfg,
             module.full_name,
-            failsafe=failsafe,
+            fallback=fallback,
         )
         if qcfg_clone is None:
             return
@@ -132,7 +132,7 @@ class GPTQProcessor(LoopProcessor):
             tmp = GPTAQ(module=module, qcfg=qcfg_clone)
         else:
             tmp = GPTQ(module=module, qcfg=qcfg_clone)
-            tmp.failsafe = qcfg_clone.failsafe
+            tmp.fallback = qcfg_clone.fallback
             tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         tmp.quantizer.configure(

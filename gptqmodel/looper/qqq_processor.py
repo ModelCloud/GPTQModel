@@ -16,7 +16,7 @@ from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LO
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
 from ..quantization.config import METHOD, QuantizeConfig, resolve_quant_format
-from ..utils.failsafe import normalize_failsafe
+from ..utils.fallback import normalize_fallback
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.model import create_quant_module, find_modules, move_to, pack_module
@@ -57,7 +57,7 @@ class QQQProcessor(LoopProcessor):
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("QQQProcessor's calibration_dataset cannot be modified")
 
-    def preprocess(self, module: NamedModule, failsafe=None, **kwargs):
+    def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
             return
@@ -84,7 +84,7 @@ class QQQProcessor(LoopProcessor):
 
         tmp = QQQ(module=module, qcfg=qcfg_clone)
 
-        tmp.failsafe = normalize_failsafe(failsafe, qcfg_clone.failsafe)
+        tmp.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
         tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         if self.qcfg.mse > 0.0:

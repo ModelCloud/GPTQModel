@@ -174,7 +174,7 @@ def test_dynamic_overrides_apply_per_module(monkeypatch):
         dynamic={
             "model.linear": {
                 "gptaq": {"alpha": 0.5, "device": "cpu"},
-                "failsafe": {"strategy": "median", "threshold": "2%"},
+                "fallback": {"strategy": "median", "threshold": "2%"},
                 "hessian": {"chunk_size": 32, "chunk_bytes": 1024, "staging_dtype": "bfloat16"},
             },
         }
@@ -196,9 +196,9 @@ def test_dynamic_overrides_apply_per_module(monkeypatch):
     assert dynamic_cfg.gptaq is not None
     assert dynamic_cfg.gptaq.alpha == 0.5
     assert dynamic_cfg.gptaq.device == "cpu"
-    assert dynamic_cfg.failsafe is not None
-    assert dynamic_cfg.failsafe.strategy == "median"
-    assert dynamic_cfg.failsafe.threshold == "2%"
+    assert dynamic_cfg.fallback is not None
+    assert dynamic_cfg.fallback.strategy == "median"
+    assert dynamic_cfg.fallback.threshold == "2%"
     assert dynamic_cfg.hessian.chunk_size == 32
     assert dynamic_cfg.hessian.chunk_bytes == 1024
     assert dynamic_cfg.hessian.staging_dtype == torch.bfloat16
@@ -214,8 +214,8 @@ def test_dynamic_overrides_apply_per_module(monkeypatch):
     other_cfg = processor.qcfg_dynamic
     assert other_cfg is not None
     assert other_cfg.gptaq is None
-    assert other_cfg.failsafe.strategy == qcfg.failsafe.strategy
-    assert other_cfg.failsafe.threshold == qcfg.failsafe.threshold
+    assert other_cfg.fallback.strategy == qcfg.fallback.strategy
+    assert other_cfg.fallback.threshold == qcfg.fallback.threshold
     assert other_cfg.hessian.chunk_size == qcfg.hessian.chunk_size
     assert other_cfg.hessian.chunk_bytes == qcfg.hessian.chunk_bytes
     assert other_cfg.hessian.staging_dtype == qcfg.hessian.staging_dtype

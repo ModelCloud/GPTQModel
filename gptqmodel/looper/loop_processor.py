@@ -288,7 +288,7 @@ class LoopProcessor:
             try:
                 color_code = self.loss_color(float(text))
             except (TypeError, ValueError):
-                if cleaned.endswith("failsafe") or cleaned.startswith("failsafe("):
+                if cleaned.endswith("fallback") or cleaned.startswith("fallback("):
                     return color_text(text, ANSIColor.ORANGE)
                 return text
             return color_text(text, color_code)

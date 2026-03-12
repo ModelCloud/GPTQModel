@@ -13,8 +13,8 @@ import transformers
 from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
-from .config import FailSafe, FailSafeStrategy, RTNQuantizeConfig, SmoothMSE
-from .failsafe_smooth import mse_optimal_quant, smooth_block
+from .config import Fallback, FallbackStrategy, RTNQuantizeConfig, SmoothMSE
+from .fallback_smooth import mse_optimal_quant, smooth_block
 from .quantizer import HF_OPTIMUM, Quantizer
 
 
@@ -52,8 +52,8 @@ class RTN:
         self.quantizer = Quantizer(qcfg=qcfg, name=self.name)
         self.quantizer.configure(perchannel=True)
         self.nsamples = 0
-        self._primary = FailSafe(
-            strategy=FailSafeStrategy.RTN,
+        self._primary = Fallback(
+            strategy=FallbackStrategy.RTN,
             threshold=True,
             smooth=qcfg.smooth,
         )

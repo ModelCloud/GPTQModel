@@ -91,7 +91,7 @@ class VramStrategy(str, Enum):
     BALANCED = "balanced"
 
 
-class FailSafeStrategy(str, Enum):
+class FallbackStrategy(str, Enum):
     """
     +-----------+----------------------+---------------------------+------------------------------+
     | strategy  | center               | scale                     | strengths / weaknesses       |
@@ -689,12 +689,12 @@ class GcMode(str, Enum):
 
 
 @dataclass
-class FailSafe:
-    strategy: FailSafeStrategy = FailSafeStrategy.RTN # enable failsafe by default due to moe routing behavior breaking calibration based quantization
+class Fallback:
+    strategy: FallbackStrategy = FallbackStrategy.RTN # enable fallback by default due to moe routing behavior breaking calibration based quantization
 
     # int/float = if captured module fwd tokens is less than value, trigger strategy
     # string = if string is int/float followed by %, then if captured module fwd tokens is less than value in percentage relative to calibration, trigger strategy
-    threshold: int | float | str = "0.5%" # if less than 0.5% of calibration reaches module (think moe) then we trigger per-module failsafe quantization
+    threshold: int | float | str = "0.5%" # if less than 0.5% of calibration reaches module (think moe) then we trigger per-module fallback quantization
 
     # Smoothers can help some low-sample fallback cases, but a static default can
     # hurt whole-model RTN quality. Leave smoothing opt-in.
@@ -1071,7 +1071,7 @@ def _parse_smooth_method(setting: Any) -> Optional[SmoothMethod]:
         return _build_smooth_method_from_dict({"type": setting})
     if isinstance(setting, dict):
         return _build_smooth_method_from_dict(setting)
-    raise ValueError("QuantizeConfig: `failsafe.smooth` must be a SmoothMethod, string, or dict.")
+    raise ValueError("QuantizeConfig: `fallback.smooth` must be a SmoothMethod, string, or dict.")
 
 
 def _serialize_smooth_method(method: Optional[SmoothMethod]) -> Optional[Dict[str, Any]]:
@@ -1221,59 +1221,59 @@ def _normalize_pack_dtype(pack_dtype: Optional[Union[str, torch.dtype]]) -> torc
     raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {pack_dtype}")
 
 
-def _normalize_failsafe(failsafe: Optional[Union[FailSafe, Dict[str, Any], str, int, float]]) -> Optional[FailSafe]:
-    if failsafe is None:
+def _normalize_fallback(fallback: Optional[Union[Fallback, Dict[str, Any], str, int, float]]) -> Optional[Fallback]:
+    if fallback is None:
         return None
-    if isinstance(failsafe, dict):
-        strategy = failsafe.get("strategy", FailSafeStrategy.RTN)
-        threshold = failsafe.get("threshold", "1.0%")
-        smooth = failsafe.get("smooth")
+    if isinstance(fallback, dict):
+        strategy = fallback.get("strategy", FallbackStrategy.RTN)
+        threshold = fallback.get("threshold", "1.0%")
+        smooth = fallback.get("smooth")
         if smooth is None:
-            smooth = failsafe.get("smooth_method")
-        if smooth is None and "clip_method" in failsafe:
-            smooth = failsafe.get("clip_method")
+            smooth = fallback.get("smooth_method")
+        if smooth is None and "clip_method" in fallback:
+            smooth = fallback.get("clip_method")
         smooth = _parse_smooth_method(smooth)
         if smooth is None:
-            if "smooth_percentile" in failsafe:
-                smooth = SmoothPercentile(percentile=float(failsafe.get("smooth_percentile", 99.0)))
-            elif "smooth_mad_k" in failsafe:
-                smooth = SmoothMAD(k=float(failsafe.get("smooth_mad_k", 3.0)))
-            elif "smooth_mse_steps" in failsafe or "smooth_mse_maxshrink" in failsafe:
+            if "smooth_percentile" in fallback:
+                smooth = SmoothPercentile(percentile=float(fallback.get("smooth_percentile", 99.0)))
+            elif "smooth_mad_k" in fallback:
+                smooth = SmoothMAD(k=float(fallback.get("smooth_mad_k", 3.0)))
+            elif "smooth_mse_steps" in fallback or "smooth_mse_maxshrink" in fallback:
                 smooth = SmoothMSE(
-                    steps=int(failsafe.get("smooth_mse_steps", 32)),
-                    maxshrink=float(failsafe.get("smooth_mse_maxshrink", 0.8)),
+                    steps=int(fallback.get("smooth_mse_steps", 32)),
+                    maxshrink=float(fallback.get("smooth_mse_maxshrink", 0.8)),
                 )
-            elif "smooth_outlier_pct" in failsafe:
-                smooth = SmoothOutlier(pct=float(failsafe.get("smooth_outlier_pct", 1.0)))
-            elif "smooth_rms_k" in failsafe:
-                smooth = SmoothSoftNorm(k=float(failsafe.get("smooth_rms_k", 3.0)))
-            elif "smooth_log_mu" in failsafe:
+            elif "smooth_outlier_pct" in fallback:
+                smooth = SmoothOutlier(pct=float(fallback.get("smooth_outlier_pct", 1.0)))
+            elif "smooth_rms_k" in fallback:
+                smooth = SmoothSoftNorm(k=float(fallback.get("smooth_rms_k", 3.0)))
+            elif "smooth_log_mu" in fallback:
                 smooth = SmoothLog(
-                    percentile=float(failsafe.get("smooth_percentile", 99.0)),
-                    mu=float(failsafe.get("smooth_log_mu", 8.0)),
+                    percentile=float(fallback.get("smooth_percentile", 99.0)),
+                    mu=float(fallback.get("smooth_log_mu", 8.0)),
                 )
-            elif "smooth_axis" in failsafe:
-                smooth = SmoothRowCol(axis=str(failsafe.get("smooth_axis", "row")))
-        failsafe = FailSafe(strategy=strategy, threshold=threshold, smooth=smooth)
-    elif isinstance(failsafe, (str, int, float)):
-        failsafe = FailSafe(strategy=FailSafeStrategy.RTN, threshold=failsafe)
-    elif not isinstance(failsafe, FailSafe):
-        raise ValueError("QuantizeConfig: `failsafe` must be a FailSafe config, dict, string, int, float, or None.")
+            elif "smooth_axis" in fallback:
+                smooth = SmoothRowCol(axis=str(fallback.get("smooth_axis", "row")))
+        fallback = Fallback(strategy=strategy, threshold=threshold, smooth=smooth)
+    elif isinstance(fallback, (str, int, float)):
+        fallback = Fallback(strategy=FallbackStrategy.RTN, threshold=fallback)
+    elif not isinstance(fallback, Fallback):
+        raise ValueError("QuantizeConfig: `fallback` must be a Fallback config, dict, string, int, float, or None.")
 
-    if isinstance(failsafe.strategy, str):
+    if isinstance(fallback.strategy, str):
         try:
-            failsafe.strategy = FailSafeStrategy(failsafe.strategy.lower())
+            fallback.strategy = FallbackStrategy(fallback.strategy.lower())
         except ValueError as exc:
             raise ValueError(
-                f"QuantizeConfig: `failsafe.strategy` must be one of {[v.value for v in FailSafeStrategy]}."
+                f"QuantizeConfig: `fallback.strategy` must be one of {[v.value for v in FallbackStrategy]}."
             ) from exc
-    elif not isinstance(failsafe.strategy, FailSafeStrategy):
+    elif not isinstance(fallback.strategy, FallbackStrategy):
         raise ValueError(
-            f"QuantizeConfig: `failsafe.strategy` must be one of {[v.value for v in FailSafeStrategy]}."
+            f"QuantizeConfig: `fallback.strategy` must be one of {[v.value for v in FallbackStrategy]}."
         )
 
-    failsafe.smooth = _parse_smooth_method(failsafe.smooth)
-    return failsafe
+    fallback.smooth = _parse_smooth_method(fallback.smooth)
+    return fallback
 
 
 def _normalize_weight_only(
@@ -1603,7 +1603,7 @@ class BaseQuantizeConfig:
     rotation: Optional[str] = field(default=None, metadata={"choices": ["hadamard", "random"]})
 
     # if calibration is insufficient, fallback to a simple quantization strategy
-    failsafe: Optional[FailSafe] = field(default_factory=FailSafe)
+    fallback: Optional[Fallback] = field(default_factory=Fallback)
 
     # deprecated: only used for compat when reading legacy configs
     is_marlin_format: bool = False
@@ -1715,7 +1715,7 @@ class BaseQuantizeConfig:
                 f"{self.__class__.__name__}: unsupported export `format` `{checkpoint_format}`."
             )
 
-        self.failsafe = _normalize_failsafe(self.failsafe)
+        self.fallback = _normalize_fallback(self.fallback)
 
         valid_bit_widths = fields_info[0].metadata["choices"]
         if quant_bits_width(self.bits) not in valid_bit_widths:
@@ -1915,7 +1915,7 @@ class BaseQuantizeConfig:
 
         meta_payload = normalized.get(META_FIELD)
         meta_field_map = {
-            "failsafe": "failsafe",
+            "fallback": "fallback",
             "hessian": "hessian",
             "gptaq": "gptaq",
             "weight_only": "weight_only",
@@ -1992,22 +1992,22 @@ class BaseQuantizeConfig:
         return None
 
     def to_dict(self):
-        smooth = _serialize_smooth_method(self.failsafe.smooth if self.failsafe is not None else None)
+        smooth = _serialize_smooth_method(self.fallback.smooth if self.fallback is not None else None)
 
         meta_payload = dict(self.meta) if self.meta else {}
         if self.moe:
             meta_payload["moe"] = self.moe.to_dict()
 
-        if self.failsafe is None:
-            meta_payload["failsafe"] = None
+        if self.fallback is None:
+            meta_payload["fallback"] = None
         else:
-            meta_payload["failsafe"] = {
+            meta_payload["fallback"] = {
                 "strategy": (
-                    self.failsafe.strategy.value
-                    if isinstance(self.failsafe.strategy, FailSafeStrategy)
-                    else self.failsafe.strategy
+                    self.fallback.strategy.value
+                    if isinstance(self.fallback.strategy, FallbackStrategy)
+                    else self.fallback.strategy
                 ),
-                "threshold": self.failsafe.threshold,
+                "threshold": self.fallback.threshold,
                 "smooth": smooth,
             }
 
@@ -2381,7 +2381,7 @@ class GGUFConfig(PreFilterQuantizeConfig):
         meta_payload = out.get(META_FIELD)
         if isinstance(meta_payload, dict):
             for key in (
-                "failsafe",
+                "fallback",
                 "offload_to_disk",
                 "offload_to_disk_path",
                 "pack_impl",

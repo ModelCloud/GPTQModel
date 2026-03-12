@@ -75,7 +75,7 @@ class TestMoEExpertBatching(unittest.TestCase):
             subset_index=0,
             subset_total=1,
             full=self.full,
-            failsafe=False,
+            fallback=False,
             shared_kv_cache_dict=self.shared_kv_cache_dict,
             pb=self.pb,
         )

@@ -16,8 +16,8 @@ from torch.nn.modules.conv import _ConvNd
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...quantization.config import FailSafe, FailSafeStrategy, FORMAT, GGUFBits, METHOD, SmoothMethod, _normalize_quant_bits
-from ...quantization.failsafe_smooth import smooth_block
+from ...quantization.config import Fallback, FallbackStrategy, FORMAT, GGUFBits, METHOD, SmoothMethod, _normalize_quant_bits
+from ...quantization.fallback_smooth import smooth_block
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import BaseQuantLinear
@@ -86,8 +86,8 @@ def _apply_optional_smoother(
     if effective_group_size <= 0:
         effective_group_size = weight.shape[1]
 
-    failsafe = FailSafe(
-        strategy=FailSafeStrategy.RTN,
+    fallback = Fallback(
+        strategy=FallbackStrategy.RTN,
         threshold=True,
         smooth=smooth,
     )
@@ -97,7 +97,7 @@ def _apply_optional_smoother(
         end = min(start + effective_group_size, weight.shape[1])
         block, scale_factor = smooth_block(
             smoothed[:, start:end],
-            failsafe,
+            fallback,
             group_size=effective_group_size,
         )
         if scale_factor is not None:

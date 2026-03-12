@@ -86,7 +86,7 @@ class TestSerialization(unittest.TestCase):
         self.assertIsInstance(meta, dict)
 
         meta_only_fields = [
-            "failsafe",
+            "fallback",
             "gptaq",
             "offload_to_disk",
             "offload_to_disk_path",
