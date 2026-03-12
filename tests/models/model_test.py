@@ -457,6 +457,8 @@ class ModelTest(unittest.TestCase):
 
         if self.FORMAT is FORMAT.GGUF:
             compare_backends = (torch_backend,)
+        elif self.FORMAT is FORMAT.EXL3:
+            compare_backends = (self.LOAD_BACKEND,)
         elif self.FORMAT is FORMAT.GPTQ:
             if self.LOAD_BACKEND == BACKEND.MARLIN:
                 compare_backends = (BACKEND.MARLIN,)
