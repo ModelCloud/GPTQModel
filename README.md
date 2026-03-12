@@ -145,7 +145,7 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 ## What is GPT-QModel?
 GPT-QModel is a production-ready LLM model compression/quantization toolkit with hw-accelerated inference support for both CPU/GPU via HF Transformers, vLLM, and SGLang.
 
-GPT-QModel currently supports GPTQ, AWQ, QQQ, GPTAQ, EoRa, GAR, with more quantization methods and enhancements planned. 
+GPT-QModel currently supports GPTQ, AWQ, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRa, and GAR, with more quantization methods and enhancements planned. 
 
 ## Quantization Support
 
@@ -155,16 +155,21 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 |---------------------------|------------|---|---|---|---------------|
 | GPTQ                      | ✅          | ✅ | ✅ | ✅ | ✅             | 
 | AWQ                       | ✅          | ✅ | ✅ | ✅ | ✅             |
+| GGUF                      | ✅          | x | x | x | x             |
+| FP8                       | ✅          | x | x | x | x             |
+| Exllama V3 / EXL3         | ✅          | x | x | x | x             |
 | EoRA                      | ✅          | ✅ | ✅ | ✅ | x             | 
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
 | QQQ                       | ✅          | x | x | x | x             | 
 | Rotation                  | ✅          | x | x | x | x             |  
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 
+`GGUF`, `FP8`, and `EXL3` are currently native GPT-QModel quantization/runtime paths. `vLLM` and `SGLang` integration currently targets `GPTQ` and `AWQ`.
+
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
-* ✨ GPTQ, AWQ, and QQQ quantization format with hardware-accelerated inference kernels. 
+* ✨ GPTQ, AWQ, QQQ, GGUF, FP8, and EXL3 quantization support.
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
@@ -176,6 +181,15 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 * ✨ `lm_head` module quant inference support for further VRAM reduction.
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) optimized tile based inference.
 * 💯 CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
+
+## Who's Using GPT-QModel?
+
+Selected public references where teams or companies explicitly mention `GPTQModel` in documentation, integration notes, or quantized model usage. This is not an exhaustive customer list.
+
+* <img src="https://cdn.simpleicons.org/huggingface/FFD21E" alt="Hugging Face logo" height="14"> Hugging Face
+* <img src="https://cdn.simpleicons.org/intel/0071C5" alt="Intel logo" height="14"> Intel
+* <img src="https://cdn.simpleicons.org/nvidia/76B900" alt="NVIDIA logo" height="14"> NVIDIA
+* <img src="https://cdn.simpleicons.org/alibabacloud/FF6A00" alt="Alibaba Cloud logo" height="14"> Alibaba Cloud
 
 
 ## Quality: GPTQ 4bit can match native BF16:
@@ -286,6 +300,76 @@ model = GPTQModel.load(model_id, quant_config)
 # increase `batch_size` to match GPU/VRAM specs to speed up quantization
 model.quantize(calibration_dataset, batch_size=1)
 
+model.save(quant_path)
+```
+
+#### Other Quantization Formats
+
+`GPTQ`, `AWQ`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
+
+##### GGUF Example: Llama 3.2 1B Instruct
+
+```py
+from gptqmodel import BACKEND, GGUFConfig, GPTQModel
+
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
+quant_path = "Llama-3.2-1B-Instruct-GGUF-Q4_K_M"
+
+qcfg = GGUFConfig(
+    bits=4,
+    format="q_k_m",
+)
+
+model = GPTQModel.load(model_id, qcfg)
+model.quantize(calibration=None, backend=BACKEND.GGUF_TORCH)
+model.save(quant_path)
+```
+
+##### FP8 Example: Llama 3.2 1B Instruct
+
+```py
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
+quant_path = "Llama-3.2-1B-Instruct-FP8-E4M3"
+
+qcfg = QuantizeConfig(
+    method="fp8",
+    format="float8_e4m3fn",  # or "float8_e5m2"
+    bits=8,
+    weight_scale_method="row",
+)
+
+model = GPTQModel.load(model_id, qcfg)
+model.quantize(calibration=None, backend=BACKEND.TORCH)
+model.save(quant_path)
+```
+
+##### Exllama V3 / EXL3 Example: Llama 3.2 1B Instruct
+
+```py
+from datasets import load_dataset
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
+quant_path = "Llama-3.2-1B-Instruct-EXL3"
+
+calibration_dataset = load_dataset(
+    "allenai/c4",
+    data_files="en/c4-train.00001-of-01024.json.gz",
+    split="train",
+).select(range(1024))["text"]
+
+qcfg = QuantizeConfig(
+    method="exl3",
+    format="exl3",
+    bits=4.0,        # target average bits-per-weight
+    head_bits=6.0,   # optional higher bitrate for attention heads / sensitive tensors
+    codebook="mcg",  # one of: mcg, mul1, 3inst
+)
+
+model = GPTQModel.load(model_id, qcfg)
+model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.EXLLAMA_V3)
 model.save(quant_path)
 ```
 
@@ -489,6 +573,17 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   year={2023}
 }
 
+# GGUF / llama.cpp
+@misc{ggerganov2023gguf,
+  author = {Georgi Gerganov and ggml-org contributors},
+  title = {llama.cpp and the GGUF model format},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/ggml-org/llama.cpp}},
+  note = {Canonical GGUF implementation and format reference; see also \url{https://github.com/ggml-org/llama.cpp/wiki/dev-notes}},
+  year = {2023}
+}
+
 # EoRA
 @article{liu2024eora,
   title={EoRA: Training-free Compensation for Compressed LLM with Eigenspace Low-Rank Approximation},
@@ -527,6 +622,17 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
       author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
       journal={arXiv preprint arXiv:2406.09904},
       year={2024}
+}
+
+# ExLlama V3 / EXL3
+@misc{turboderp2026exllamav3,
+  author = {turboderp and exllamav3 contributors},
+  title = {ExLlamaV3 and the EXL3 quantization format},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/turboderp-org/exllamav3}},
+  note = {Project repository and EXL3 format documentation: \url{https://github.com/turboderp-org/exllamav3/blob/master/doc/exl3.md}},
+  year = {2026}
 }
 ```
 
