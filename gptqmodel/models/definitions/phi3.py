@@ -19,7 +19,7 @@ class Phi3QModel(BaseQModel):
     ]
 
 class PhiMoEGPTQForCausalLM(BaseQModel):
-    dynamic_expert_index = "num_local_experts"
+    require_pkgs = ["transformers<=4.44.2"]
 
     module_tree = [
         "model",
