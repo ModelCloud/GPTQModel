@@ -79,36 +79,162 @@ tests:
     - http://10.0.13.31/files/causal_conv1d-1.6.0-cp313-cp313-linux_x86_64.whl
 
 tests/models:
-  test_pangu_alpha.py:
-    - jieba
-
   test_cohere2:
     - jieba
 
   test_gemma:
     - jieba
 
-  test_hymba.py:
-    - http://10.0.13.31/files/causal_conv1d-1.6.0-cp313-cp313-linux_x86_64.whl
-    - mamba_ssm
-
-  test_internlm.py:
-    - transformers<=4.44.2
-
-  test_ovis_1_6_llama.py:
-    - transformers<=4.44.2
-
-  test_phi_4.py:
-    - peft
-
-  test_phi_3_moe.py:
-    - transformers<=4.44.2
-
   test_bloom.py:
-    - peft
-
-  test_gptbigcode.py:
     - peft
 
   test_brumby.py:
     - retention
+    - transformers<=5.0.0
+
+  test_deepseekv2_lite.py:
+    - transformers<=5.0.0
+
+  test_baichuan.py:
+    - transformers<=5.0.0
+
+  test_chatglm.py:
+    - transformers<=5.0.0
+
+  test_codegen.py:
+    - transformers<=5.0.0
+
+  test_deci.py:
+    - transformers<=5.0.0
+
+  test_dots_one.py:
+    - transformers<=5.0.0
+
+  test_dream.py:
+    - transformers<=5.0.0
+
+  test_ernie4_5.py:
+    - transformers<=5.0.0
+
+  test_exaone.py:
+    - transformers<=5.0.0
+
+  test_falcon.py:
+    - transformers<=5.0.0
+
+  test_glm4v.py:
+    - transformers<=5.0.0
+
+  test_gpt2.py:
+    - transformers<=5.0.0
+
+  test_gpt_oss.py:
+    - transformers<=5.0.0
+
+  test_gptbigcode.py:
+    - peft
+    - transformers<=5.0.0
+
+  test_granite.py:
+    - transformers<=5.0.0
+
+  test_hymba.py:
+    - transformers<=5.0.0
+    - http://10.0.13.31/files/causal_conv1d-1.6.0-cp313-cp313-linux_x86_64.whl
+    - mamba_ssm
+
+  test_instella.py:
+    - transformers<=5.0.0
+
+  test_internlm.py:
+    - transformers<=4.44.2
+
+  test_internlm2_5.py:
+    - transformers<=5.0.0
+
+  test_ling.py:
+    - transformers<=5.0.0
+
+  test_llama4.py:
+    - transformers<=5.0.0
+
+  test_longllama.py:
+    - transformers<=5.0.0
+
+  test_mimo.py:
+    - transformers<=5.0.0
+
+  test_minicpm.py:
+    - transformers<=5.0.0
+
+  test_minimax_m2.py:
+    - transformers<=5.0.0
+
+  test_mistral.py:
+    - transformers<=5.0.0
+
+  test_mistral3.py:
+    - transformers<=5.0.0
+
+  test_mpt.py:
+    - transformers<=5.0.0
+
+  test_ovis2.py:
+    - transformers<=5.0.0
+
+  test_ovis_1_6_llama.py:
+    - transformers<=4.44.2
+
+  test_pangu_alpha.py:
+    - jieba
+    - transformers<=5.0.0
+
+  test_phi_3.py:
+    - transformers<=5.0.0
+
+  test_phi_3_moe.py:
+    - transformers<=4.44.2
+
+  test_phi_4.py:
+    - peft
+    - transformers<=5.0.0
+
+  test_qwen2_5_omni.py:
+    - transformers<=5.0.0
+
+  test_qwen2_vl.py:
+    - transformers<=5.0.0
+
+  test_qwen3_moe.py:
+    - transformers<=5.0.0
+
+  test_qwen3_next.py:
+    - transformers<=5.0.0
+
+  test_qwen3_omni.py:
+    - transformers<=5.0.0
+
+  test_qwen3_vl.py:
+    - transformers<=5.0.0
+
+  test_seed_oss.py:
+    - transformers<=5.0.0
+
+  test_stablelm.py:
+    - transformers<=5.0.0
+
+  test_telechat2.py:
+    - transformers<=5.0.0
+
+  test_tinyllama.py:
+    - transformers<=5.0.0
+
+  test_voxtral.py:
+    - transformers<=5.0.0
+
+  test_xverse.py:
+    - transformers<=5.0.0
+
+  test_yi.py:
+    - transformers<=5.0.0
+
