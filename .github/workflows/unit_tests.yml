@@ -597,7 +597,7 @@ jobs:
             resp="${resp//$'\n'/}"
           
             # If response is empty or not an integer, treat as temporary error
-            if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+$ ]]; then
+            if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+(,-?[0-9]+)*$ ]]; then
               echo "Allocator returned invalid response: '$resp' (temporary error)"
               curl -fsSL "$BASE_URL/gpu/status" || true
               sleep "$SLEEP_SEC"
