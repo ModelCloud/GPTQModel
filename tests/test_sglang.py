@@ -20,6 +20,8 @@ from gptqmodel.utils.sglang import SGLANG_AVAILABLE, SGLANG_INSTALL_HINT  # noqa
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
+pytestmark = [pytest.mark.model, pytest.mark.slow]
+
 
 class TestLoadSglang(ModelTest):
 
