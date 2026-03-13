@@ -6,16 +6,16 @@ common:
 
 tests:
   test_q4_bitblas.py:
-    - http://10.0.13.31/files/bitblas-0.1.0%2Bubuntu.22.4.cu131-py3-none-any.whl
+    - http://10.0.13.31/files/bitblas-0.1.0.post1+ubuntu.22.4.cu131-py3-none-any.whl
 
   test_perplexity.py:
-    - http://10.0.13.31/files/bitblas-0.1.0%2Bubuntu.22.4.cu131-py3-none-any.whl
+    - http://10.0.13.31/files/bitblas-0.1.0.post1+ubuntu.22.4.cu131-py3-none-any.whl
 
   test_inference_speed.py:
-    - http://10.0.13.31/files/bitblas-0.1.0%2Bubuntu.22.4.cu131-py3-none-any.whl
+    - http://10.0.13.31/files/bitblas-0.1.0.post1+ubuntu.22.4.cu131-py3-none-any.whl
 
   test_save_loaded_quantized_model.py:
-    - http://10.0.13.31/files/bitblas-0.1.0%2Bubuntu.22.4.cu131-py3-none-any.whl
+    - http://10.0.13.31/files/bitblas-0.1.0.post1+ubuntu.22.4.cu131-py3-none-any.whl
 
   test_olora_finetuning_xpu.py:
     - intel_extension_for_pytorch
@@ -77,6 +77,12 @@ tests:
 
   test_nemotron_ultra.py:
     - http://10.0.13.31/files/causal_conv1d-1.6.0-cp313-cp313-linux_x86_64.whl
+
+  test_quant_trust_remote.py:
+    - transformers<=5.0.0
+
+  test_openai_server.py:
+    - openai
 
 tests/models:
   test_cohere2:
