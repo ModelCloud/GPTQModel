@@ -362,7 +362,9 @@ class ModelTest(unittest.TestCase):
         print(f"Result is: \n{output}")
         return output
 
-    def generate_with_limit(self, model, tokenizer, prompt, max_new_tokens=512):
+    # Use this helper for CI output assertions instead of raw model.generate().
+    # It forces deterministic decoding so expected-text checks are less flaky across runs.
+    def generate_stable_with_limit(self, model, tokenizer, prompt, max_new_tokens=512):
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
         pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
         generated = model.generate(
@@ -383,7 +385,7 @@ class ModelTest(unittest.TestCase):
             prompt = item["prompt"]
             keywords = item["keywords"]
             try:
-                response = self.generate_with_limit(model, tokenizer, prompt)
+                response = self.generate_stable_with_limit(model, tokenizer, prompt)
                 normalized = response.lower()
                 matched = any(keyword.lower() in normalized for keyword in keywords)
                 results.append(

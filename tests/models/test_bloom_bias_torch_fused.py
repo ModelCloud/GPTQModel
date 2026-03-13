@@ -35,7 +35,7 @@ class TestBloom_With_Bias_TorchFused(ModelTest):
                 backend=BACKEND.TORCH_FUSED,
                 device=DEVICE.CPU,
             )
-            generate_str = self.generate_with_limit(
+            generate_str = self.generate_stable_with_limit(
                 model,
                 tokenizer,
                 "The capital city of France is named",
