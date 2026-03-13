@@ -40,19 +40,20 @@ class TestMultiGPUInference(unittest.TestCase):
         messages = [
             {"role": "user", "content": "How many p's are in the word \"apple\"? Please only respond with a number."},
         ]
-        input_tensor = self.tokenizer.apply_chat_template(
+        model_inputs = self.tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
             return_tensors="pt"
         )
 
         outputs = model.generate(
-            inputs=input_tensor.to(model.device),
+            **model_inputs.to(model.device),
             max_length=512
         )
 
+        input_ids = model_inputs["input_ids"]
         result = self.tokenizer.decode(
-            outputs[0][input_tensor.shape[1]:],
+            outputs[0][input_ids.shape[1]:],
             skip_special_tokens=False
         )
 
