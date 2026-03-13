@@ -518,7 +518,7 @@ jobs:
           uv pip uninstall gptqmodel
           # make sure torch & torchvision are corresponded
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-          uv pip install -r requirements.txt
+          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
@@ -533,7 +533,7 @@ jobs:
             echo "===== install with local files for xpu env ====="
             export CUDA_VISIBLE_DEVICES=""
             unset TORCH_CUDA_ARCH_LIST
-            uv pip install . --no-build-isolation
+            uv pip install . --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           fi
 
           # deps may reinstalled torch
