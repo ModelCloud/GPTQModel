@@ -124,7 +124,7 @@ def test_dequantize_f4_e2m1_matches_nvfp4tensor():
 
     dequant = dequantize_f4_e2m1(packed, scale=scales, axis=None, target_dtype=torch.bfloat16)
     nv_tensor = NVFP4Tensor(packed, scales, block_size=16, orig_dtype=torch.bfloat16)
-    expected = nv_tensor.to_dtype(torch.bfloat16)
+    expected = nv_tensor.dequantize(torch.bfloat16)
 
     diff = torch.max(torch.abs(dequant - expected)).item()
     _print_accuracy(
