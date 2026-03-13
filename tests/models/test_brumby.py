@@ -3,6 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import unittest
+from importlib.metadata import PackageNotFoundError, version
+
+from packaging.version import Version
+
 from model_test import ModelTest
 
 from gptqmodel.utils.eval import EVAL
@@ -39,6 +44,19 @@ class TestBrumby(ModelTest):
             "acc": {"value": 0.71, "floor_pct": 0.05, "ceil_pct": 0.10},
         },
     }
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        try:
+            installed = Version(version("retention"))
+        except PackageNotFoundError:
+            raise unittest.SkipTest("retention>=1.0.7 is required for Brumby")
+
+        if installed < Version("1.0.7"):
+            raise unittest.SkipTest(
+                f"retention>=1.0.7 is required for Brumby, found {installed}"
+            )
 
     def test_brumby(self):
         self.quant_lm_eval()
