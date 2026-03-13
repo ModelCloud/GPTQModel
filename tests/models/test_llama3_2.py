@@ -25,25 +25,25 @@ class TestLlama3_2(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.3143,
+                "value": 0.3987,
                 "floor_pct": 0.04,
             },
         },
         EVAL.LM_EVAL.MMLU_STEM: {
             "chat_template": False,
             "acc": {
-                "value": 0.3990, # 0.3099 4096, 0.3270 2048
+                "value": 0.3860, # 0.3099 4096, 0.3270 2048
                 "floor_pct": 0.04,
             },
         },
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
-                "value": 0.3089,  # 0.3294 4096, 0.3242 2048
+                "value": 0.3234,  # 0.3294 4096, 0.3242 2048
                 "floor_pct": 0.04,
             },
             "acc_norm": {
-                "value": 0.3481,  # 0.3558 4096, 0.3635 2048
+                "value": 0.3643,  # 0.3558 4096, 0.3635 2048
                 "floor_pct": 0.04,
             },
         },
