@@ -27,7 +27,7 @@ python basic_usage_bitblas.py
 
 To Execute `basic_usage_exllama.py`, using command like this:
 ```shell
-python basic_usage_exllama.py --backend EXLLAMA/EXLLAMA_V2
+python basic_usage_exllama.py --backend EXLLAMA_V2
 ```
 
 To Execute `basic_usage_marlin.py`, using command like this:
@@ -104,4 +104,3 @@ CUDA_VISIBLE_DEVICES=0 python generation_speed.py --model_id_or_path PATH/TO/MOD
 ```
 
 Use `--help` flag to see detailed descriptions for more command arguments.
-

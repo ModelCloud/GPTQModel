@@ -19,7 +19,6 @@ from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
@@ -34,7 +33,6 @@ TASK_NAME = EVAL.LM_EVAL.ARC_CHALLENGE
 
 class TestGroupSize(unittest.TestCase):
     QLINEAR_DICT = {
-        BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
@@ -45,7 +43,7 @@ class TestGroupSize(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.pack_backends = [BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.TORCH, BACKEND.BITBLAS]
+        cls.pack_backends = [BACKEND.TRITON, BACKEND.TORCH, BACKEND.BITBLAS]
         cls.backends = list(cls.pack_backends)
         cls.backends.extend([BACKEND.EXLLAMA_V2, BACKEND.MARLIN, ])
 

@@ -568,7 +568,6 @@ BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
 
 # Optional kernels and not build by default. Enable compile with env flags
 BUILD_EORA = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EORA", "0"))
-BUILD_EXLLAMA_V1 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V1", "0"))
 
 if BUILD_CUDA_EXT == "1":
     # Import torch's cpp_extension only if we're truly building GPU extensions
@@ -815,23 +814,6 @@ if BUILD_CUDA_EXT == "1":
                             extra_compile_args=extra_compile_args,
                         )
                     ]
-
-            # both CUDA and ROCm compatible
-            if BUILD_EXLLAMA_V1:
-                extensions += [
-                    cpp_ext.CUDAExtension(
-                        "gptqmodel_exllama_kernels",
-                        [
-                            "gptqmodel_ext/exllama/exllama_ext.cpp",
-                            "gptqmodel_ext/exllama/cuda_buffers.cu",
-                            "gptqmodel_ext/exllama/cuda_func/column_remap.cu",
-                            "gptqmodel_ext/exllama/cuda_func/q4_matmul.cu",
-                            "gptqmodel_ext/exllama/cuda_func/q4_matrix.cu",
-                        ],
-                        extra_link_args=extra_link_args,
-                        extra_compile_args=extra_compile_args,
-                    )
-                ]
 
             if BUILD_AWQ:
                 if ROCM_VERSION:

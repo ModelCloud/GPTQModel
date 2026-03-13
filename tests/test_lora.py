@@ -48,7 +48,6 @@ class Test(ModelTest):
         #BACKEND.TORCH,
         # BACKEND.CUDA,
         # BACKEND.TRITON,
-        # BACKEND.EXLLAMA_V1,
         # BACKEND.EXLLAMA_V2,
         BACKEND.MARLIN,
         # # (BACKEND.IPEX), <-- not tested yet

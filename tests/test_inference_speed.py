@@ -23,7 +23,6 @@ GPU: 4090
 
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 748),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 493),
-(InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 717),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 775),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 296),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 295),
@@ -41,7 +40,6 @@ class TestInferenceSpeed(InferenceSpeed):
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 286.74, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 176.00, False, False),
             # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 53, False, False),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 282.64, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 290.60, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 239.58, False, False),
             (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 2167.38, False, False), # Second time running bitblas, there is cache
