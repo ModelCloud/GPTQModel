@@ -12,6 +12,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import importlib.util  # noqa: E402
 import tempfile  # noqa: E402
+import unittest  # noqa: E402
 
 import pytest  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
@@ -30,9 +31,15 @@ class TestLoadVLLM(ModelTest):
     def setUpClass(self):
         if ((importlib.util.find_spec("flashinfer") is None and importlib.util.find_spec("flashinfer-python") is None) or
                 importlib.util.find_spec("vllm") is None):
-            raise RuntimeError("flashinfer and vllm are required by this test. you can install them by `pip install gptqmodel['vllm']`")
+            raise unittest.SkipTest(
+                "flashinfer and vllm are required by this test. install via `pip install gptqmodel['vllm']`"
+            )
 
-        from vllm import SamplingParams  # noqa: E402
+        try:
+            import vllm._C  # noqa: F401,E402
+            from vllm import SamplingParams  # noqa: E402
+        except Exception as exc:
+            raise unittest.SkipTest(f"vllm runtime unavailable: {exc}")
         self.MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         self.SHARDED_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-sharded"
         self.prompts = [
