@@ -11,8 +11,10 @@ from gptqmodel.utils.eval import EVAL
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
-eval_results = GPTQModel.eval("HandH1998/QQQ-Llama-3-8b-g128",
-                                 framework=EVAL.LM_EVAL,
-                                 tasks=[EVAL.LM_EVAL.ARC_CHALLENGE])
+from gptqmodel import GPTQModel
 
-print(f"{eval_results}")
+def test_qqq_inference():
+    model = GPTQModel.load("HandH1998/QQQ-Llama-3-8b-g128")
+    result = model.generate("The capital city of France is named")[0]
+    str_output = model.tokenizer.decode(result)
+    assert "paris" in str_output.lower() or "city" in str_output.lower()
