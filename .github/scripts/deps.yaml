@@ -96,7 +96,7 @@ tests/models:
 
   test_brumby.py:
     - retention
-    - transformers<=5.0.0
+    - transformers<5.0.0
 
   test_deepseekv2_lite.py:
     - transformers<=5.0.0
