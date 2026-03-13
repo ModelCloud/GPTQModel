@@ -9,7 +9,6 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
-import unittest  # noqa: E402
 from typing import (
     Type,  # noqa: E402
     Union,  # noqa: E402
@@ -28,9 +27,9 @@ pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 class TestEval(ModelTest):
     @classmethod
-    def setUpClass(self):
-        self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
-        self.model = GPTQModel.load(self.MODEL_ID)
+    def setUpClass(cls):
+        cls.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
+        cls.model = GPTQModel.load(cls.MODEL_ID)
 
     @parameterized.expand(
         [
