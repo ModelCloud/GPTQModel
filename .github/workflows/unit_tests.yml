@@ -690,8 +690,9 @@ jobs:
         run: |
           log_dir=/opt/dist/${{ github.run_id }}/logs
           log_file=$log_dir/${{ matrix.test_script }}.log
-      
-          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
+          
+          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
+          exit 1
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')
