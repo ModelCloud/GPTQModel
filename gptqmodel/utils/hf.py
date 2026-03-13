@@ -27,8 +27,9 @@ __all__ = ["no_init_weights"]
 log = setup_logger()
 
 
-# Older remote model files sometimes store tied-weight metadata as a plain list
-# like `["lm_head.weight"]`, but transformers 5.x now expects `{target: source}`.
+# Older remote model files sometimes store `_tied_weights_keys` as a plain list
+# like `["lm_head.weight"]`. transformers 5.x now expects `{target: source}`,
+# and otherwise later save/load helpers fail with `'list' object has no attribute 'keys'`.
 def _resolve_legacy_tied_weights_mapping(model: PreTrainedModel, tied_mapping) -> dict[str, str]:
     if not isinstance(tied_mapping, (list, tuple, set)):
         return {}
@@ -59,8 +60,9 @@ def _resolve_legacy_tied_weights_mapping(model: PreTrainedModel, tied_mapping) -
     }
 
 
-# Rewrite legacy list-based `_tied_weights_keys` in-place so newer HF save/load
-# helpers stop tripping over remote code that still uses the old format.
+# Rewrite legacy list-based `_tied_weights_keys` in-place so transformers 5.x
+# save/load code stops crashing on older trust_remote_code models that still use
+# the pre-5.x list format.
 def _normalize_legacy_tied_weights_keys(model: PreTrainedModel) -> None:
     for _name, submodule in model.named_modules(remove_duplicate=False):
         tied_mapping = getattr(submodule, "_tied_weights_keys", None)
@@ -73,8 +75,8 @@ def _normalize_legacy_tied_weights_keys(model: PreTrainedModel) -> None:
             submodule._tied_weights_keys = {}
 
 
-# Bridge a few transformers 5.x API/config changes so older trust_remote_code
-# model files still import and initialize without patching their cached source.
+# Bridge a few transformers 5.x API changes so older trust_remote_code model
+# files still import and initialize without editing the cached remote source.
 def _patch_transformers_remote_code_compat() -> None:
     try:
         from transformers.utils import import_utils
@@ -82,8 +84,8 @@ def _patch_transformers_remote_code_compat() -> None:
         return
 
     if not hasattr(import_utils, "is_torch_fx_available"):
-        # transformers 5.x dropped this helper, but a number of remote model
-        # implementations still import it from transformers.utils.import_utils.
+        # transformers 5.x removed `import_utils.is_torch_fx_available`, but
+        # older remote model files still import it during module import.
         def is_torch_fx_available() -> bool:
             return hasattr(torch, "fx")
 
@@ -94,7 +96,8 @@ def _patch_transformers_remote_code_compat() -> None:
 
         def get_expanded_tied_weights_keys(self, all_submodels: bool = False) -> dict:
             # transformers 5.x expects `_tied_weights_keys` to be a dict, while
-            # older trust_remote_code models still declare it as `["lm_head.weight"]`.
+            # older trust_remote_code models still declare `["lm_head.weight"]`.
+            # Handle the legacy form here so HF tied-weight expansion still works.
             tied_mapping = getattr(self, "_tied_weights_keys", None)
             if not isinstance(tied_mapping, (list, tuple, set)):
                 return original_get_expanded_tied_weights_keys(self, all_submodels=all_submodels)
@@ -120,11 +123,11 @@ def _patch_transformers_remote_code_compat() -> None:
         PreTrainedModel._gptqmodel_legacy_tied_weights_patch = True
 
 
-# Restore the pre-transformers-5 RoPE config shape expected by older remote
-# MiniCPM code before HF instantiates the architecture from config.
+# Restore the pre-transformers-5 RoPE config shape expected by older MiniCPM
+# remote code before HF instantiates the architecture from config.
 def _normalize_remote_code_config_compat(config: Any) -> None:
     # transformers 5.x normalizes RoPE config to `rope_type`, but older
-    # remote MiniCPM code still expects `rope_scaling["type"]` or `None`.
+    # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.
     rope_scaling = getattr(config, "rope_scaling", None)
     if not isinstance(rope_scaling, dict) or "type" in rope_scaling:
         return
