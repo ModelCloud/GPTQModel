@@ -20,7 +20,6 @@ from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.exllama import ExllamaQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
@@ -35,7 +34,6 @@ TASK_NAME = EVAL.LM_EVAL.ARC_CHALLENGE
 
 class TestBits(unittest.TestCase):
     QLINEAR_DICT = {
-        BACKEND.EXLLAMA_V1: ExllamaQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
@@ -69,11 +67,6 @@ class TestBits(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # cls.pack_backends = [BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA, BACKEND.TORCH, BACKEND.BITBLAS,
-        #                      BACKEND.IPEX]
-        # cls.backends = list(cls.pack_backends)
-        # cls.backends.extend([BACKEND.EXLLAMA_V2, BACKEND.MARLIN, ])
-
         # TODO Only CUDA Quant Linear is tested for now
         cls.pack_backends = [BACKEND.TRITON]
         cls.backends = [BACKEND.MARLIN]

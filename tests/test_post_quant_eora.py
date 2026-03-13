@@ -107,7 +107,6 @@ class TestEoraPostQuant(ModelTest):
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
             )
 
-            # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
             # for backend in [BACKEND.MARLIN]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
             #     base_bench = bench(path=self.QUANTIZED_MODEL_PATH, backend=backend, adapter=None)  # inference using qweights only
             #     eora_bench = bench(path=self.QUANTIZED_MODEL_PATH, backend=backend, adapter=eora)  # inference using eora (lora)

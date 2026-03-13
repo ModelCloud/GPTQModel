@@ -167,7 +167,6 @@ class Test(ModelTest):
                 del model
                 torch_empty_cache()
 
-            # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
             for backend in [ BACKEND.TORCH ]: # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
                 base_bench = bench(path=save_path, backend=backend, adapter=None) # inference using qweights only
                 # eora_bench = bench(path=tmpdir, backend=backend, adapter=eora) # inference using eora (lora)

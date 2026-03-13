@@ -159,7 +159,6 @@ class TestPackingSpeed(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # [ExllamaQuantLinear, BACKEND.EXLLAMA, 9.63],
             # [TritonV2QuantLinear, BACKEND.TRITON, 9.67],
             [TorchQuantLinear, BACKEND.TORCH, 21.05],  # A100 Z3 33.56 # 4090? 27.0297
         ]
@@ -178,7 +177,6 @@ class TestPackingSpeed(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # [ExllamaQuantLinear, BACKEND.EXLLAMA, 9.63],
             # [TritonV2QuantLinear, BACKEND.TRITON, 9.67],
             [TorchQuantLinear, BACKEND.TORCH, 14.71],  # A100 Z3 33.56 # 4090? 27.0297
         ]
