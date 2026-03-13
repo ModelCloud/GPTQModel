@@ -249,10 +249,6 @@ class TestQwen3_8B_Base_awq(ModelTest):
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
     QUANT_BATCH_SIZE = 1
-    EVAL_BATCH_SIZE = 64
-    SAVE_PATH = "QWEN3-8B-AWQ"
-    # DATASET_SIZE = 1
 
     def test_qwen3_8b_base_awq(self):
-        # self.quant_lm_eval()
-        self.lm_eval(self.SAVE_PATH)
+        self.quant_lm_eval()
