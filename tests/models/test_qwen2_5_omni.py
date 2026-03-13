@@ -93,7 +93,14 @@ class TestQwen2_5_Omni(ModelTest):
 
         # Inference: Generation of the output (text and audio)
         audio_file_name = 'output_gptq.wav'
-        generated_ids, audio = model.generate(**inputs, max_new_tokens=128, return_audio = True)
+        generated_ids, audio = self.generate_stable_with_limit(
+            model,
+            processor,
+            inputs=inputs,
+            max_new_tokens=128,
+            return_generate_output=True,
+            return_audio=True,
+        )
         sf.write(
             audio_file_name,
             audio.reshape(-1).detach().cpu().numpy(),

@@ -63,8 +63,11 @@ class Test(ModelTest):
         )
 
         # print(model)
-        tokens = model.generate("The capital city of France is named")[0]
-        result = model.tokenizer.decode(tokens)
+        result = self.generate_stable_with_limit(
+            model,
+            model.tokenizer,
+            "The capital city of France is named",
+        )
         print(f"Result: {result}")
         self.assertIn("paris", result.lower())
 
@@ -81,8 +84,13 @@ class Test(ModelTest):
             device_map="auto",
         )
 
-        tokens = model.generate("The capital city of France is named", min_new_tokens=128, max_new_tokens=128)[0]
-        result = model.tokenizer.decode(tokens)
+        result = self.generate_stable_with_limit(
+            model,
+            model.tokenizer,
+            "The capital city of France is named",
+            min_new_tokens=128,
+            max_new_tokens=128,
+        )
         print(f"Result: {result}")
         self.assertIn("paris", result.lower())
         if "paris" not in result.lower() and "built" not in result.lower():

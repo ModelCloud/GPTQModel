@@ -24,7 +24,7 @@ class TestLlama_TorchFused(ModelTest):
             device=DEVICE.CPU,
         )
         tokenizer = model.tokenizer
-        generate_str = self.generate_with_limit(
+        generate_str = self.generate_stable_with_limit(
             model,
             tokenizer,
             "The capital of France is is",

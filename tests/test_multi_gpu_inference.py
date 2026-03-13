@@ -16,6 +16,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import unittest  # noqa: E402
 
+from models.model_test import ModelTest  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
@@ -46,15 +47,14 @@ class TestMultiGPUInference(unittest.TestCase):
             return_tensors="pt"
         )
 
-        outputs = model.generate(
-            **model_inputs.to(model.device),
-            max_length=512
-        )
-
         input_ids = model_inputs["input_ids"]
-        result = self.tokenizer.decode(
-            outputs[0][input_ids.shape[1]:],
-            skip_special_tokens=False
+        result = ModelTest.generate_stable_with_limit(
+            model,
+            self.tokenizer,
+            inputs=model_inputs,
+            max_new_tokens=512,
+            decode_start_idx=input_ids.shape[1],
+            skip_special_tokens=False,
         )
 
         self.assertIn("2<|im_end|>", result.lower(), "The generated result should contain '2<|im_end|>'")

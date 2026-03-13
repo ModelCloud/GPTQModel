@@ -12,6 +12,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
+from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
@@ -30,12 +31,17 @@ class TestSave(unittest.TestCase):
         prompt = "I am in Paris and"
         device = get_best_device(backend)
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-        inp = tokenizer(prompt, return_tensors="pt").to(device)
 
         # origin model produce correct output
         origin_model = GPTQModel.load(MODEL_ID, backend=backend)
-        origin_model_res = origin_model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
-        origin_model_predicted_text = tokenizer.decode(origin_model_res[0])
+        origin_model_predicted_text = ModelTest.generate_stable_with_limit(
+            origin_model,
+            tokenizer,
+            prompt,
+            min_new_tokens=60,
+            max_new_tokens=60,
+            skip_special_tokens=False,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             origin_model.save(tmpdir)
@@ -43,8 +49,14 @@ class TestSave(unittest.TestCase):
             # saved model produce wrong output
             new_model = GPTQModel.load(tmpdir, backend=backend)
 
-            new_model_res = new_model.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
-            new_model_predicted_text = tokenizer.decode(new_model_res[0])
+            new_model_predicted_text = ModelTest.generate_stable_with_limit(
+                new_model,
+                tokenizer,
+                prompt,
+                min_new_tokens=60,
+                max_new_tokens=60,
+                skip_special_tokens=False,
+            )
 
             print("origin_model_predicted_text",origin_model_predicted_text)
             print("new_model_predicted_text",new_model_predicted_text)
