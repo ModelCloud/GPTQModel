@@ -132,7 +132,21 @@ class HFKernelLinear(PackableQuantLinear):
         self.dequant_dtype = torch.int8
 
     @classmethod
+    def _is_torch_release(cls) -> bool:
+        """Return True only for official release builds of torch (no dev/nightly/rc tags)."""
+        return not any(tag in torch.__version__ for tag in (".dev", "a0+", "+git", "rc"))
+
+    @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        if not cls._is_torch_release():
+            msg = (
+                f"HFKernelLinear requires a release version of torch, "
+                f"but found `{torch.__version__}`. "
+                f"Please install a stable release (e.g. `pip install torch`)."
+            )
+            log.warning(msg)
+            return False, RuntimeError(msg)
+
         try:
             from kernels import get_kernel
 
@@ -288,7 +302,7 @@ class HFKernelLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if not self.training and not x.requires_grad and self.linear_mode is None and self.gemm_int4_forward_kernel is not None:
+        if not self.training and not x.requires_grad and self.linear_mode is None and self.gemm_int4_forward_kernel is not None and x.device.type == "cpu":
             self.transform(x.device.type)
             self.linear_mode = "inference"
         elif self.linear_mode is None:
