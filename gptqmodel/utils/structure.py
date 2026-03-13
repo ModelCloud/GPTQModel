@@ -617,6 +617,21 @@ def _module_all_meta(mod: nn.Module) -> bool:
 def _is_leaf(mod: nn.Module) -> bool:
     return next(mod.named_children(), None) is None
 
+def _prune_stale_meta_buffers(shell_sub: nn.Module, turtle_sub: nn.Module) -> int:
+    removed = 0
+    turtle_buffers = {
+        name for name, _ in turtle_sub.named_buffers(recurse=False)
+    }
+    for name, buf in list(shell_sub.named_buffers(recurse=False)):
+        if name in turtle_buffers:
+            continue
+        if not _is_meta_tensor(buf):
+            continue
+        if name in getattr(shell_sub, "_buffers", {}):
+            del shell_sub._buffers[name]
+            removed += 1
+    return removed
+
 def alias_all_from_turtle_if_meta(
     shell_model: nn.Module,
     turtle_model: nn.Module,
@@ -640,14 +655,18 @@ def alias_all_from_turtle_if_meta(
     for qname, shell_sub in list(shell_model.named_modules()):
         if not qname:  # skip root
             continue
-        if not _is_leaf(shell_sub):
-            continue
-        if not _module_all_meta(shell_sub):
-            continue
 
         turtle_sub = turtle_map.get(qname, None)
         if turtle_sub is None:
-            # log.info(f"Module: Skipped {qname}: not found in turtle model")
+            continue
+
+        removed = _prune_stale_meta_buffers(shell_sub, turtle_sub)
+        if removed:
+            log.info(f"Module: Pruned {removed} stale meta buffer(s) from {qname}")
+
+        if not _is_leaf(shell_sub):
+            continue
+        if not _module_all_meta(shell_sub):
             continue
 
         if require_class_match and (shell_sub.__class__ is not turtle_sub.__class__):

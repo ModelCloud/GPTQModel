@@ -54,30 +54,53 @@ class BaseQwen3VLGPTQ(BaseQModel):
 
     require_load_processor = True
 
+    def _language_model_root(self):
+        if hasattr(self.model, "language_model"):
+            return self.model
+        if hasattr(self.model, "model") and hasattr(self.model.model, "language_model"):
+            return self.model.model
+        raise AttributeError(
+            f"{type(self.model).__name__} does not expose a language_model root"
+        )
+
     def pre_quantize_generate_hook_start(self):
-        self.model.language_model.embed_tokens = move_to(self.model.language_model.embed_tokens, device=self.quantize_config.device)
-        self.model.language_model.rotary_emb = move_to(self.model.language_model.rotary_emb, device=self.quantize_config.device)
-        self.model.visual = move_to(self.model.visual, device=self.quantize_config.device)
+        model_root = self._language_model_root()
+        model_root.language_model.embed_tokens = move_to(
+            model_root.language_model.embed_tokens,
+            device=self.quantize_config.device,
+        )
+        model_root.language_model.rotary_emb = move_to(
+            model_root.language_model.rotary_emb,
+            device=self.quantize_config.device,
+        )
+        model_root.visual = move_to(model_root.visual, device=self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
+        model_root = self._language_model_root()
         if self.quantize_config.offload_to_disk:
-            offload_to_disk(model=self.model.language_model,
-                            module=self.model.language_model.embed_tokens,
+            offload_to_disk(model=model_root.language_model,
+                            module=model_root.language_model.embed_tokens,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
-            offload_to_disk(model=self.model.language_model,
-                            module=self.model.language_model.rotary_emb,
+            offload_to_disk(model=model_root.language_model,
+                            module=model_root.language_model.rotary_emb,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
             offload_to_disk(model=self.model,
-                            module=self.model.visual,
+                            module=model_root.visual,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
             return
 
-        self.model.language_model.embed_tokens = move_to(self.model.language_model.embed_tokens, device=CPU)
-        self.model.language_model.rotary_emb = move_to(self.model.language_model.rotary_emb, device=CPU)
-        self.model.visual = move_to(self.model.visual, device=CPU)
+        model_root.language_model.embed_tokens = move_to(
+            model_root.language_model.embed_tokens,
+            device=CPU,
+        )
+        model_root.language_model.rotary_emb = move_to(
+            model_root.language_model.rotary_emb,
+            device=CPU,
+        )
+        model_root.visual = move_to(model_root.visual, device=CPU)
 
     @staticmethod
     def process_vision_info(
