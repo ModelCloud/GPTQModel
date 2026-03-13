@@ -35,9 +35,11 @@ class TestBloom_With_Bias_TorchFused(ModelTest):
                 backend=BACKEND.TORCH_FUSED,
                 device=DEVICE.CPU,
             )
-            generate_str = tokenizer.decode(
-                model.generate(**tokenizer("The capital of France is is", return_tensors="pt").to(model.device),
-                               max_new_tokens=512)[0])
+            generate_str = self.generate_with_limit(
+                model,
+                tokenizer,
+                "The capital of France is is",
+            )
 
             print(f"generate_str: {generate_str}")
 
