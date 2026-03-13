@@ -155,7 +155,7 @@ class HFKernelAwqLinear(HFKernelLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
-        if not self.training and not x.requires_grad and self.linear_mode is None and self.gemm_int4_forward_kernel is not None:
+        if not self.training and not x.requires_grad and self.linear_mode is None and self.gemm_int4_forward_kernel is not None and x.device.type == "cpu":
             self.transform(x.device.type)
             self.linear_mode = "inference"
         elif self.linear_mode is None:
