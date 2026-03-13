@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import importlib.util
+import unittest
+
 from model_test import ModelTest
 
 
@@ -14,6 +17,13 @@ class TestCodeGen(ModelTest):
     USE_VLLM = False
     USE_FLASH_ATTN = False
 
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if importlib.util.find_spec("transformers.onnx") is None:
+            raise unittest.SkipTest(
+                "CodeGen remote config requires transformers.onnx, which is unavailable in this environment"
+            )
+
     def test_codegen(self):
         self.quant_lm_eval()
-
