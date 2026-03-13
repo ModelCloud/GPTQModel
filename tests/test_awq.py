@@ -205,7 +205,7 @@ class TestInferenceOnly(unittest.TestCase):
             device="cuda"
         )
 
-        tokens = model.generate("Capital of France is",
+        tokens = model.generate("The capital city of France is named",
                                 max_new_tokens=512)[0]
         result = model.tokenizer.decode(tokens)
         print("result", result)
@@ -254,4 +254,5 @@ class TestQwen3_8B_Base_awq(ModelTest):
     # DATASET_SIZE = 1
 
     def test_qwen3_8b_base_awq(self):
-        self.quant_lm_eval()
+        # self.quant_lm_eval()
+        self.lm_eval(self.SAVE_PATH)
