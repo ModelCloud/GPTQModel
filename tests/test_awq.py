@@ -152,8 +152,12 @@ class TestAwq(unittest.TestCase):
 
         self.assert_awq_linear(model, backend)
 
-        tokens = model.generate("Capital of France is", max_new_tokens=100)[0]
-        result = model.tokenizer.decode(tokens)
+        result = ModelTest.generate_stable_with_limit(
+            model,
+            self.tokenizer,
+            "The capital city of France is named",
+            max_new_tokens=100,
+        )
         print(f"BACKEND: {backend}, Result: {result}")
         if "paris" not in result.lower() and "city" not in result.lower():
             raise AssertionError(" `paris` not found in `result`")
@@ -191,8 +195,12 @@ class TestInferenceOnly(unittest.TestCase):
             device="cuda"
         )
 
-        tokens = model.generate("Capital of France is", max_new_tokens=64)[0]
-        result = model.tokenizer.decode(tokens)
+        result = ModelTest.generate_stable_with_limit(
+            model,
+            model.tokenizer,
+            "The capital city of France is named",
+            max_new_tokens=64,
+        )
         if "paris" not in result.lower() and "city" not in result.lower():
             raise AssertionError(" `paris` not found in `result`")
 
@@ -205,9 +213,12 @@ class TestInferenceOnly(unittest.TestCase):
             device="cuda"
         )
 
-        tokens = model.generate("The capital city of France is named",
-                                max_new_tokens=512)[0]
-        result = model.tokenizer.decode(tokens)
+        result = ModelTest.generate_stable_with_limit(
+            model,
+            model.tokenizer,
+            "The capital city of France is named",
+            max_new_tokens=512,
+        )
         print("result", result)
         if "paris" not in result.lower() and "city" not in result.lower() and "food" not in result.lower() and "market" not in result.lower() and "country" not in result.lower():
             raise AssertionError(" `paris` not found in `result`")

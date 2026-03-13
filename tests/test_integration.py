@@ -10,6 +10,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 import torch
+from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPTQConfig  # noqa: E402
 
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -60,8 +61,13 @@ class TestIntegration(unittest.TestCase):
 
             model = AutoModelForCausalLM.from_pretrained(tmp_dir, device_map=device_map)
 
-            generate_str = tokenizer.decode(
-                model.generate(**tokenizer("gptqmodel is", return_tensors="pt").to(model.device))[0])
+            generate_str = ModelTest.generate_stable_with_limit(
+                model,
+                tokenizer,
+                "gptqmodel is",
+                max_new_tokens=30,
+                skip_special_tokens=False,
+            )
 
             self.assertIn("is a good", generate_str.lower())
 
@@ -103,9 +109,14 @@ class TestIntegration(unittest.TestCase):
     def generate(self, model, tokenizer, prompt=None):
         if prompt is None:
             prompt = self.INFERENCE_PROMPT
-        inp = tokenizer(prompt, return_tensors="pt").to(model.device)
-        res = model.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=10, max_new_tokens=30)
-        output = tokenizer.decode(res[0])
+        output = ModelTest.generate_stable_with_limit(
+            model,
+            tokenizer,
+            prompt,
+            min_new_tokens=10,
+            max_new_tokens=30,
+            skip_special_tokens=False,
+        )
         print(f"Result is: >>\n{output}\n<<")
         return output
 
@@ -117,18 +128,13 @@ class TestIntegration(unittest.TestCase):
         )
         tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-        inputs = tokenizer("Capital of France is", return_tensors="pt").to(model.device)
-
         with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
+            result = ModelTest.generate_stable_with_limit(
+                model,
+                tokenizer,
+                "The capital city of France is named",
                 max_new_tokens=128,
-                temperature=0.7,
-                top_p=0.9,
-                do_sample=True
             )
-
-            result = tokenizer.decode(outputs[0], skip_special_tokens=True)
             print("result:", result)
 
             if "paris" not in result.lower() and "city" not in result.lower() and "food" not in result.lower() and "market" not in result.lower():

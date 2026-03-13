@@ -47,8 +47,12 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
     if backend == BACKEND.TORCH:
         model.optimize()
 
-    tokens = model.generate("Capital of France is")[0]
-    result = model.tokenizer.decode(tokens)
+    result = ModelTest.generate_stable_with_limit(
+        model,
+        model.tokenizer,
+        "The capital city of France is named",
+        max_new_tokens=128,
+    )
     print(f"BACKEND: {backend}, Result: {result}")
     if "paris" not in result.lower():
         raise AssertionError(" `paris` not found in `result`")

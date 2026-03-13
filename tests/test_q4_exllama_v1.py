@@ -1176,11 +1176,14 @@ class TestsQ4ExllamaV1(ModelTest):
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
-        inp = tokenizer(prompt, return_tensors="pt").to(device)
-
-        res = model_q.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
-
-        predicted_text = tokenizer.decode(res[0])
+        predicted_text = ModelTest.generate_stable_with_limit(
+            model_q,
+            tokenizer,
+            prompt,
+            min_new_tokens=60,
+            max_new_tokens=60,
+            skip_special_tokens=False,
+        )
 
         print("predicted_text", predicted_text)
         assert "paris" in predicted_text.lower() or "city" in predicted_text.lower() or "country" in predicted_text.lower()

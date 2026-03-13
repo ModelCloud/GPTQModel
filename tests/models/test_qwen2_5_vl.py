@@ -54,13 +54,14 @@ class TestQwen2_5_VL(ModelTest):
         inputs = inputs.to("cuda")
 
         # Inference: Generation of the output
-        generated_ids = model.generate(**inputs, max_new_tokens=128)
-        generated_ids_trimmed = [
-            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
-        output_text = processor.batch_decode(
-            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )[0]
+        output_text = self.generate_stable_with_limit(
+            model,
+            processor,
+            inputs=inputs,
+            max_new_tokens=128,
+            batch_decode=True,
+            clean_up_tokenization_spaces=False,
+        )
         print("output_text:", output_text)
 
         self.assertIn("dog", output_text)

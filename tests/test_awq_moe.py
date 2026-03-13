@@ -13,6 +13,7 @@ import unittest
 from datasets import load_dataset
 from parameterized import parameterized
 from transformers import AutoTokenizer
+from models.model_test import ModelTest
 
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
@@ -83,8 +84,12 @@ class TestGroupSize(unittest.TestCase):
 
             # self.assert_awq_linear(model)
 
-            tokens = model.generate("Capital of France is", max_new_tokens=100)[0]
-            result = model.tokenizer.decode(tokens)
+            result = ModelTest.generate_stable_with_limit(
+                model,
+                model.tokenizer,
+                "The capital city of France is named",
+                max_new_tokens=100,
+            )
             print(f"BACKEND: {BACKEND.GEMM}, Result: {result}")
             if "paris" not in result.lower() and "city" not in result.lower():
                 raise AssertionError(" `paris` not found in `result`")
