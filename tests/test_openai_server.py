@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
+import socket
 import unittest
 
 import openai
@@ -17,12 +18,25 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 class TestOpeniServer(unittest.TestCase):
+    @staticmethod
+    def _pick_free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+
     @classmethod
     def setUpClass(self):
         self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
         self.HOST = "127.0.0.1"
-        self.PORT = 23900
+        self.PORT = self._pick_free_port()
         self.model = GPTQModel.load(self.MODEL_ID)
+
+    @classmethod
+    def tearDownClass(self):
+        try:
+            self.model.serve_shutdown()
+        except Exception:
+            pass
 
 
     def test_openai_server(self):

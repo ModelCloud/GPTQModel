@@ -53,26 +53,37 @@ class OpenAiServer:
         @self.app.post("/v1/chat/completions", response_model=OpenAiResponse)
         async def create_completion(request: OpenAiRequest):
             try:
-                inputs_tensor = self.tokenizer.apply_chat_template(
+                model_inputs = self.tokenizer.apply_chat_template(
                     request.messages,
                     add_generation_prompt=True,
-                    return_tensors='pt').to(self.model.device)
+                    return_tensors='pt',
+                )
+
+                if isinstance(model_inputs, torch.Tensor):
+                    model_inputs = model_inputs.to(self.model.device)
+                    generate_inputs = {"inputs": model_inputs}
+                    prompt_length = model_inputs.size(-1)
+                else:
+                    model_inputs = model_inputs.to(self.model.device)
+                    input_ids = model_inputs["input_ids"]
+                    generate_inputs = dict(model_inputs)
+                    prompt_length = input_ids.size(-1)
 
                 do_sample = True if request.temperature != 0.0 else False
                 with torch.inference_mode():
                     outputs = self.model.generate(
-                        inputs_tensor,
-                        max_length=inputs_tensor.shape[0] + request.max_tokens,
+                        max_length=prompt_length + request.max_tokens,
                         temperature=request.temperature,
                         top_p=request.top_p,
                         num_return_sequences=request.n,
                         eos_token_id=self.tokenizer.eos_token_id,
                         stop_strings=request.stop,
-                        do_sample=do_sample
+                        do_sample=do_sample,
+                        **generate_inputs,
                     )
 
                 generated_texts = self.tokenizer.batch_decode(
-                    outputs[:, inputs_tensor.size(-1):],
+                    outputs[:, prompt_length:],
                     skip_special_tokens=True,
                 )
 

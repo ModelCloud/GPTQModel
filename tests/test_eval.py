@@ -9,6 +9,7 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import tempfile  # noqa: E402
+import unittest  # noqa: E402
 from typing import (
     Type,  # noqa: E402
     Union,  # noqa: E402
@@ -41,6 +42,12 @@ class TestEval(ModelTest):
         ]
     )
     def test_eval_gptqmodel(self, framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS]], task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], llm_backend: str):
+        if llm_backend == "vllm":
+            try:
+                import vllm._C  # noqa: F401,E402
+            except Exception as exc:
+                self.skipTest(f"vllm runtime unavailable: {exc}")
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_path = f"{tmp_dir}/result.json"
             model_args = {}
