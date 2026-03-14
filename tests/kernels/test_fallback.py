@@ -11,8 +11,8 @@ from transformers import AutoModelForCausalLM
 
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.quantization.config import (
-    FailSafe,
-    FailSafeStrategy,
+    Fallback,
+    FallbackStrategy,
     QuantizeConfig,
     SmoothLog,
     SmoothMAD,
@@ -53,7 +53,7 @@ def _load_down_proj(dtype: torch.dtype, device: torch.device) -> torch.nn.Module
 
 def _quantize_to_torch_linear(
     layer: torch.nn.Module,
-    failsafe: FailSafe,
+    fallback: Fallback,
     device: torch.device,
 ) -> TorchQuantLinear:
     qcfg = QuantizeConfig(
@@ -61,12 +61,12 @@ def _quantize_to_torch_linear(
         group_size=128,
         sym=False,
         desc_act=False,
-        failsafe=failsafe,
+        fallback=fallback,
     )
 
     gptq = GPTQ(layer, qcfg)
     gptq.quantizer.configure(perchannel=True)
-    gptq.failsafe = qcfg.failsafe
+    gptq.fallback = qcfg.fallback
 
     wq, scales, zeros, g_idx, *_ = gptq.quantize(blocksize=128)
 
@@ -193,7 +193,7 @@ def _select_shapes():
     return small_shapes
 
 
-def test_kernel_output_failsafe():
+def test_kernel_output_fallback():
     if not os.path.isdir(MODEL_DIR):
         import pytest
 
@@ -202,7 +202,7 @@ def test_kernel_output_failsafe():
     if not torch.cuda.is_available():
         import pytest
 
-        pytest.skip("CUDA required for failsafe kernel output test")
+        pytest.skip("CUDA required for fallback kernel output test")
 
     torch.manual_seed(0)
 
@@ -213,95 +213,95 @@ def test_kernel_output_failsafe():
 
     shapes = _select_shapes()
     variants = [
-        ("rtn", FailSafe(strategy=FailSafeStrategy.RTN, threshold=True)),
-        ("midpoint", FailSafe(strategy=FailSafeStrategy.MIDPOINT, threshold=True)),
-        ("mean", FailSafe(strategy=FailSafeStrategy.MEAN, threshold=True)),
-        ("median", FailSafe(strategy=FailSafeStrategy.MEDIAN, threshold=True)),
-        ("stdclip", FailSafe(strategy=FailSafeStrategy.STDCLIP, threshold=True)),
-        ("rtn_p99", FailSafe(
-            strategy=FailSafeStrategy.RTN,
+        ("rtn", Fallback(strategy=FallbackStrategy.RTN, threshold=True)),
+        ("midpoint", Fallback(strategy=FallbackStrategy.MIDPOINT, threshold=True)),
+        ("mean", Fallback(strategy=FallbackStrategy.MEAN, threshold=True)),
+        ("median", Fallback(strategy=FallbackStrategy.MEDIAN, threshold=True)),
+        ("stdclip", Fallback(strategy=FallbackStrategy.STDCLIP, threshold=True)),
+        ("rtn_p99", Fallback(
+            strategy=FallbackStrategy.RTN,
             threshold=True,
             smooth=SmoothPercentile(percentile=99.0),
         )),
-        ("rtn_asym_p", FailSafe(
-            strategy=FailSafeStrategy.RTN,
+        ("rtn_asym_p", Fallback(
+            strategy=FallbackStrategy.RTN,
             threshold=True,
             smooth=SmoothPercentileAsymmetric(low=0.5, high=99.5),
         )),
-        ("rtn_mad", FailSafe(
-            strategy=FailSafeStrategy.RTN,
+        ("rtn_mad", Fallback(
+            strategy=FallbackStrategy.RTN,
             threshold=True,
             smooth=SmoothMAD(k=3.0),
         )),
-        ("rtn_mse", FailSafe(
-            strategy=FailSafeStrategy.RTN,
+        ("rtn_mse", Fallback(
+            strategy=FallbackStrategy.RTN,
             threshold=True,
             smooth=SmoothMSE(steps=32, maxshrink=0.8),
         )),
-        ("rtn_outlier", FailSafe(
-            strategy=FailSafeStrategy.RTN,
+        ("rtn_outlier", Fallback(
+            strategy=FallbackStrategy.RTN,
             threshold=True,
             smooth=SmoothOutlier(pct=1.0),
         )),
-        ("rtn_softnorm", FailSafe(
-            strategy=FailSafeStrategy.RTN,
+        ("rtn_softnorm", Fallback(
+            strategy=FallbackStrategy.RTN,
             threshold=True,
             smooth=SmoothSoftNorm(k=3.0),
         )),
-        ("rtn_log", FailSafe(
-            strategy=FailSafeStrategy.RTN,
+        ("rtn_log", Fallback(
+            strategy=FallbackStrategy.RTN,
             threshold=True,
             smooth=SmoothLog(percentile=99.0, mu=8.0),
         )),
-        ("rtn_rowcol", FailSafe(
-            strategy=FailSafeStrategy.RTN,
+        ("rtn_rowcol", Fallback(
+            strategy=FallbackStrategy.RTN,
             threshold=True,
             smooth=SmoothRowCol(axis="row"),
         )),
-        ("median_p99", FailSafe(
-            strategy=FailSafeStrategy.MEDIAN,
+        ("median_p99", Fallback(
+            strategy=FallbackStrategy.MEDIAN,
             threshold=True,
             smooth=SmoothPercentile(percentile=99.0),
         )),
-        ("median_asym_p", FailSafe(
-            strategy=FailSafeStrategy.MEDIAN,
+        ("median_asym_p", Fallback(
+            strategy=FallbackStrategy.MEDIAN,
             threshold=True,
             smooth=SmoothPercentileAsymmetric(low=0.5, high=99.5),
         )),
-        ("median_mad", FailSafe(
-            strategy=FailSafeStrategy.MEDIAN,
+        ("median_mad", Fallback(
+            strategy=FallbackStrategy.MEDIAN,
             threshold=True,
             smooth=SmoothMAD(k=3.0),
         )),
-        ("median_mse", FailSafe(
-            strategy=FailSafeStrategy.MEDIAN,
+        ("median_mse", Fallback(
+            strategy=FallbackStrategy.MEDIAN,
             threshold=True,
             smooth=SmoothMSE(steps=32, maxshrink=0.8),
         )),
-        ("median_outlier", FailSafe(
-            strategy=FailSafeStrategy.MEDIAN,
+        ("median_outlier", Fallback(
+            strategy=FallbackStrategy.MEDIAN,
             threshold=True,
             smooth=SmoothOutlier(pct=1.0),
         )),
-        ("median_softnorm", FailSafe(
-            strategy=FailSafeStrategy.MEDIAN,
+        ("median_softnorm", Fallback(
+            strategy=FallbackStrategy.MEDIAN,
             threshold=True,
             smooth=SmoothSoftNorm(k=3.0),
         )),
-        ("median_log", FailSafe(
-            strategy=FailSafeStrategy.MEDIAN,
+        ("median_log", Fallback(
+            strategy=FallbackStrategy.MEDIAN,
             threshold=True,
             smooth=SmoothLog(percentile=99.0, mu=8.0),
         )),
-        ("median_rowcol", FailSafe(
-            strategy=FailSafeStrategy.MEDIAN,
+        ("median_rowcol", Fallback(
+            strategy=FallbackStrategy.MEDIAN,
             threshold=True,
             smooth=SmoothRowCol(axis="row"),
         )),
     ]
     qlinears = {
-        label: _quantize_to_torch_linear(_clone_linear(down_proj, device=device), failsafe, device=device)
-        for label, failsafe in variants
+        label: _quantize_to_torch_linear(_clone_linear(down_proj, device=device), fallback, device=device)
+        for label, fallback in variants
     }
     for label, qlinear in qlinears.items():
         assert qlinear.list_buffers()[0].device.type == "cuda", f"{label} buffers not on CUDA"
@@ -366,7 +366,7 @@ def test_kernel_output_failsafe():
         assert torch.isfinite(torch.tensor([metrics["mean"], metrics["max"], metrics["min"]])).all()
 
 
-def test_kernel_output_failsafe_mad_sweep():
+def test_kernel_output_fallback_mad_sweep():
     if not os.path.isdir(MODEL_DIR):
         import pytest
 
@@ -375,7 +375,7 @@ def test_kernel_output_failsafe_mad_sweep():
     if not torch.cuda.is_available():
         import pytest
 
-        pytest.skip("CUDA required for failsafe kernel output test")
+        pytest.skip("CUDA required for fallback kernel output test")
 
     torch.manual_seed(0)
 
@@ -386,8 +386,8 @@ def test_kernel_output_failsafe_mad_sweep():
 
     k_values = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0]
     variants = [
-        (f"rtn_mad_k{k:g}", FailSafe(
-            strategy=FailSafeStrategy.RTN,
+        (f"rtn_mad_k{k:g}", Fallback(
+            strategy=FallbackStrategy.RTN,
             threshold=True,
             smooth=SmoothMAD(k=k),
         ))
@@ -396,8 +396,8 @@ def test_kernel_output_failsafe_mad_sweep():
 
     shapes = _select_shapes()
     qlinears = {
-        label: _quantize_to_torch_linear(_clone_linear(down_proj, device=device), failsafe, device=device)
-        for label, failsafe in variants
+        label: _quantize_to_torch_linear(_clone_linear(down_proj, device=device), fallback, device=device)
+        for label, fallback in variants
     }
     for label, qlinear in qlinears.items():
         assert qlinear.list_buffers()[0].device.type == "cuda", f"{label} buffers not on CUDA"

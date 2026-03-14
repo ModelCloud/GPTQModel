@@ -195,9 +195,9 @@ def stream_tensor_dict_to_cpu(
     #     store_callback(host_map)
     # return host_map
 
-    first = next(iter(filtered.values()))
+    first_cuda = next((tensor for tensor in filtered.values() if tensor.device.type == "cuda"), None)
 
-    if first.device.type != "cuda" or not torch.cuda.is_available():
+    if first_cuda is None or not torch.cuda.is_available():
         host_map = {name: tensor.detach().to("cpu") for name, tensor in filtered.items()}
         with state_lock:
             store_callback(host_map)
@@ -205,18 +205,25 @@ def stream_tensor_dict_to_cpu(
 
     host_map: Dict[str, torch.Tensor] = {}
 
-    copy_device = first.device
+    copy_device = first_cuda.device
     compute_stream = torch.cuda.current_stream(device=copy_device)
     copy_stream = _get_cached_copy_stream(copy_device)
-    done_event = torch.cuda.Event(enable_timing=False, blocking=False)
 
     pending_sources: List[torch.Tensor] = []
+    pending_keys: List[str] = []
     with torch.cuda.stream(copy_stream):
         copy_stream.wait_stream(compute_stream)
         for name, tensor in filtered.items():
             src = tensor.detach()
+            if src.device.type != "cuda":
+                host_map[name] = src.to("cpu")
+                continue
+            if src.device != copy_device:
+                host_map[name] = src.to("cpu")
+                continue
             src.record_stream(copy_stream)
             pending_sources.append(src)
+            pending_keys.append(name)
             host = torch.empty(
                 src.shape,
                 dtype=src.dtype,
@@ -226,12 +233,19 @@ def stream_tensor_dict_to_cpu(
             )
             host.copy_(src, non_blocking=True)
             host_map[name] = host
+
+    if not pending_sources:
+        with state_lock:
+            store_callback(host_map)
+        return host_map
+
+    done_event = torch.cuda.Event(enable_timing=False, blocking=False)
     done_event.record(copy_stream)
 
     ticket = StreamCopyTicket(
         event=done_event,
         device=copy_device,
-        keys=tuple(host_map.keys()),
+        keys=tuple(pending_keys),
         sources=pending_sources,
         stream=copy_stream,
     )

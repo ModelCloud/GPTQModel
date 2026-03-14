@@ -177,9 +177,10 @@ class TestPauseResumeController:
             controller = PauseResumeController()
             controller.set_status_callback(state_change_callback)
 
-            with controller.lifecycle(), \
-                    patch('msvcrt.kbhit', kbhit_mock), \
-                    patch('msvcrt.getch', getch_mock):
+            # Install keypress mocks before lifecycle() starts the listener thread.
+            with patch('msvcrt.kbhit', kbhit_mock), \
+                    patch('msvcrt.getch', getch_mock), \
+                    controller.lifecycle():
 
                 # Wait for the listener thread to detect the first key press
                 assert state_changed.wait(timeout=1), "Timeout waiting for first state change"
@@ -216,12 +217,13 @@ class TestPauseResumeController:
             controller = PauseResumeController()
             controller.set_status_callback(state_change_callback)
 
-            with controller.lifecycle(), \
-                    patch('select.select', select_mock), \
+            # Install stdin and termios mocks before lifecycle() starts the listener thread.
+            with patch('select.select', select_mock), \
                     patch('sys.stdin.read', read_mock), \
                     patch('termios.tcgetattr', tcgetattr_mock), \
                     patch('termios.tcsetattr'), \
-                    patch('tty.setcbreak'):
+                    patch('tty.setcbreak'), \
+                    controller.lifecycle():
                 # Wait for the listener thread to detect the first key press
                 assert state_changed.wait(timeout=2), "Timeout waiting for first state change"
                 assert controller.get_state() == PauseResumeState.PAUSE_REQUESTED

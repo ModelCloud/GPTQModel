@@ -68,7 +68,7 @@ def _run_quant_on_device(device_index: int) -> torch.device:
     )
     processor.pb = _DummyProgressBar()
 
-    processor.preprocess(named, failsafe=False)
+    processor.preprocess(named, fallback=False)
     named.module.target_device = target
 
     processor.process(named)

@@ -64,7 +64,7 @@ def _run_single_subset_pass(
     subset_index: int,
     subset_total: int,
     full,
-    failsafe,
+    fallback,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
     pb,
     logger,
@@ -261,21 +261,21 @@ def _run_single_subset_pass(
         torch_sync()
         torch_empty_cache()
     moe_skip_modules = []
-    failsafe_enabled = failsafe is not None
+    fallback_enabled = fallback is not None
     if isinstance(processor, GPTQProcessor) or isinstance(processor, QQQProcessor) or isinstance(processor, AWQProcessor):
         for name in subset:
             # Skip MoE experts that never fired; they likely lacked calibration
             # traffic and would produce invalid statistics.
             if not processor.has_captured_input_ids(name):
-                # only log for moe if `failsafe` is not enabled
-                if not failsafe_enabled:
+                # only log for moe if `fallback` is not enabled
+                if not fallback_enabled:
                     logger.error(
                         f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it. "
-                        f"Please enable and use `failsafe` config option."
+                        f"Please enable and use `fallback` config option."
                     )
                 moe_skip_modules.append(name)
 
-        if not failsafe_enabled:
+        if not fallback_enabled:
             for name in moe_skip_modules:
                 skipped_module = subset.pop(name)
                 task_map = getattr(processor, "tasks", None)
@@ -433,7 +433,7 @@ def run_subset_stage(
     subset_index: int,
     subset_total: int,
     full,
-    failsafe: bool,
+    fallback: bool,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
     pb,
     log=None,
@@ -608,7 +608,7 @@ def run_subset_stage(
         subset_index=subset_index,
         subset_total=subset_total,
         full=full,
-        failsafe=failsafe,
+        fallback=fallback,
         shared_kv_cache_dict=shared_kv_cache_dict,
         pb=pb,
         logger=logger,

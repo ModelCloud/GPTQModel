@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 
 from ..utils.logger import setup_logger
 
@@ -287,20 +288,55 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     quant_format = quantization_config.get("quant_format")
     if isinstance(quant_format, str) and quant_format.lower() in (
         METHOD.GPTQ,
+        METHOD.GGUF,
+        METHOD.FP8,
         METHOD.AWQ,
         METHOD.QQQ,
+        METHOD.EXL3,
     ):
         return True
 
-    quant_method = quantization_config.get("quant_method")
-    if isinstance(quant_method, str) and quant_method.lower() in (
+    method = quantization_config.get("method", quantization_config.get("quant_method"))
+    if isinstance(method, str) and method.lower() in (
         METHOD.GPTQ,
+        METHOD.GGUF,
+        METHOD.FP8,
         METHOD.AWQ,
         METHOD.QQQ,
+        METHOD.EXL3,
     ):
         return True
 
     return False
+
+
+@contextmanager
+def _hide_unsupported_quantization_config_for_lm_eval(model):
+    config = getattr(model, "config", None)
+    if config is None:
+        yield
+        return
+
+    quantization_config = getattr(config, "quantization_config", None)
+    if not isinstance(quantization_config, dict):
+        yield
+        return
+
+    try:
+        from transformers.quantizers import AutoQuantizationConfig
+
+        AutoQuantizationConfig.from_dict(dict(quantization_config))
+    except Exception:
+        pass
+    else:
+        yield
+        return
+
+    setattr(config, "quantization_config", None)
+    try:
+        yield
+    finally:
+        setattr(config, "quantization_config", quantization_config)
 
 
 def check_and_get_model_definition(model_dir, trust_remote_code=False):
@@ -499,11 +535,10 @@ class GPTQModel:
 
         if isinstance(model_or_id_or_path, str):
             load_backend = backend
-            if llm_backend == "vllm":
-                disallowed_keys = {"pretrained", "tokenizer", "gptqmodel", "trust_remote_code", "backend", "model_id_or_path"}
-                load_kwargs = {k: v for k, v in model_args.items() if k not in disallowed_keys}
-            else:
-                load_kwargs = model_args
+            # These keys are consumed by eval wrappers and should never leak
+            # into GPTQModel.load when callers reuse a shared model_args dict.
+            disallowed_keys = {"pretrained", "tokenizer", "gptqmodel", "trust_remote_code", "backend", "model_id_or_path"}
+            load_kwargs = {k: v for k, v in model_args.items() if k not in disallowed_keys}
 
             backend_name = load_backend.value if isinstance(load_backend, BACKEND) else str(load_backend)
             log.info(f"Eval: loading using backend = `{backend_name}`")
@@ -567,11 +602,12 @@ class GPTQModel:
                 raise ValueError(f"lm_eval import failed: {e}. Please install via `pip install gptqmodel[eval]`.") from e
 
             if llm_backend == "gptqmodel" and model is not None:
-                model_name = HFLM(
-                    pretrained=model,
-                    batch_size=batch_size,
-                    trust_remote_code=trust_remote_code,
-                )
+                with _hide_unsupported_quantization_config_for_lm_eval(model):
+                    model_name = HFLM(
+                        pretrained=model,
+                        batch_size=batch_size,
+                        trust_remote_code=trust_remote_code,
+                    )
 
             gen_kwargs = args.pop("gen_kwargs", None)
 
@@ -689,8 +725,11 @@ class GPTQModel:
 
         gptq_config = config.quantization_config
 
+        method = gptq_config.get("method", gptq_config.get("quant_method", ""))
+        backend = BACKEND.GGUF_TORCH if str(method).lower() == METHOD.GGUF.value else BACKEND.TORCH
+
         # load gptq model
-        gptq_model = GPTQModel.load(model_id_or_path, backend=BACKEND.TORCH)
+        gptq_model = GPTQModel.load(model_id_or_path, backend=backend)
 
         if format == "mlx":
             try:

@@ -48,7 +48,18 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from ..quantization import FORMAT, QuantizeConfig
-from ..quantization.config import FORMAT_FIELD_CHECKPOINT, METHOD, dynamic_get
+from ..quantization.config import (
+    FORMAT_FIELD_CODE,
+    METHOD,
+    _normalize_fp8_fmt,
+    _normalize_fp8_scale_semantics,
+    _normalize_fp8_weight_block_size,
+    _normalize_fp8_weight_scale_method,
+    _normalize_quant_bits,
+    dynamic_get,
+    quant_bits_width,
+    resolve_quant_format,
+)
 from . import has_gil_disabled
 from .backend import BACKEND
 from .ctx import ctx
@@ -74,6 +85,11 @@ _DTYPE_SAFE_MAP = {
     torch.bool: ("BOOL", 1),
 }
 
+if hasattr(torch, "float8_e4m3fn"):
+    _DTYPE_SAFE_MAP[torch.float8_e4m3fn] = ("F8_E4M3", 1)
+if hasattr(torch, "float8_e5m2"):
+    _DTYPE_SAFE_MAP[torch.float8_e5m2] = ("F8_E5M2", 1)
+
 
 _DTYPE_STR_MAP = {
     "float32": torch.float32,
@@ -93,6 +109,13 @@ _DTYPE_STR_MAP = {
     "uint8": torch.uint8,
     "bool": torch.bool,
 }
+
+if hasattr(torch, "float8_e4m3fn"):
+    _DTYPE_STR_MAP["float8_e4m3fn"] = torch.float8_e4m3fn
+    _DTYPE_STR_MAP["f8_e4m3"] = torch.float8_e4m3fn
+if hasattr(torch, "float8_e5m2"):
+    _DTYPE_STR_MAP["float8_e5m2"] = torch.float8_e5m2
+    _DTYPE_STR_MAP["f8_e5m2"] = torch.float8_e5m2
 
 MoETopKState = List[Tuple[nn.Module, str, int]]
 
@@ -252,18 +275,21 @@ def make_quant(
     from_quantized: bool = False,
 ) -> Type[BaseQuantLinear]:
 
-    bits = qcfg.bits
+    bits = qcfg.runtime_bits
     group_size =qcfg.group_size
     extension = qcfg.adapter
-    format = qcfg.format
+    format = resolve_quant_format(qcfg.format, qcfg.method)
     desc_act = qcfg.desc_act
     sym = qcfg.sym
     dynamic = qcfg.dynamic
     pack_dtype = qcfg.pack_dtype
+    init_kwargs = qcfg.quant_linear_init_kwargs()
 
     # Bitblas needs to be loaded as gptq's quant linear first, and then converted to bitblas format.
     if not pack and format in (FORMAT.GPTQ, FORMAT.GPTQ_V2) and backend == BACKEND.BITBLAS:
         backend = BACKEND.TORCH
+
+    export_quant_method = qcfg.export_quant_method()
 
     # returns multiple validated kernels
     quant_linear_candidates = select_quant_linear(
@@ -273,7 +299,7 @@ def make_quant(
         sym=sym,
         backend=backend,
         format=format,
-        quant_method=qcfg.quant_method,
+        quant_method=export_quant_method,
         pack=pack,
         dynamic=dynamic,
         device=device,
@@ -306,6 +332,8 @@ def make_quant(
                 pack_dtype=pack_dtype,
                 backend=backend,
                 adapter=qcfg.adapter,
+                format=format,
+                init_kwargs=init_kwargs,
             )
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
@@ -321,7 +349,7 @@ def make_quant(
 def create_quant_module(
     name: str,
     linear_cls: Type[BaseQuantLinear],
-    bits: int,
+    bits,
     desc_act: bool,
     dynamic,
     group_size: int,
@@ -331,9 +359,11 @@ def create_quant_module(
     device: DEVICE,
     lm_head_name: str,
     pack_dtype: torch.dtype,
+    format: FORMAT,
     backend: BACKEND = BACKEND.AUTO,
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
+    init_kwargs: Optional[Dict[str, Any]] = None,
 
 ):
     # unwrap named module
@@ -377,11 +407,12 @@ def create_quant_module(
     bias = submodule.bias is not None
 
     # need copies as dynamic config may override these in for loop
-    tmp_bits = bits
+    tmp_bits = _normalize_quant_bits(bits, format_value=format)
     tmp_group_size = group_size
     tmp_desc_act = desc_act
     tmp_sym = sym
     tmp_pack_dtype = pack_dtype
+    tmp_init_kwargs = dict(init_kwargs or {})
 
     # dynamic bits, group_size, sym, pack_dtype for each layer/module
     if dynamic is not None:
@@ -393,30 +424,57 @@ def create_quant_module(
         # positive module match
         if overrides:
             # override base QuantizeConfig for every quant config key/value
-            tmp_bits = overrides.get("bits", bits)
+            tmp_bits = _normalize_quant_bits(overrides.get("bits", bits), format_value=format)
             tmp_group_size = overrides.get("group_size", group_size)
             tmp_desc_act = overrides.get("desc_act", desc_act)
             tmp_sym = overrides.get("sym", sym)
             tmp_pack_dtype = overrides.get("pack_dtype", pack_dtype)
 
+            if format == FORMAT.FP8:
+                fp8_format_override = overrides.get(FORMAT_FIELD_CODE, overrides.get("fmt"))
+                if fp8_format_override is not None:
+                    tmp_init_kwargs["format"] = _normalize_fp8_fmt(fp8_format_override)
+                block_size_override = overrides.get(
+                    "weight_block_size",
+                    tmp_init_kwargs.get("weight_block_size"),
+                )
+                normalized_block_size = _normalize_fp8_weight_block_size(block_size_override)
+                if "weight_scale_method" in overrides or block_size_override is not None:
+                    tmp_init_kwargs["weight_scale_method"] = _normalize_fp8_weight_scale_method(
+                        overrides.get(
+                            "weight_scale_method",
+                            tmp_init_kwargs.get("weight_scale_method"),
+                        ),
+                        weight_block_size=normalized_block_size,
+                    )
+                if "weight_scale_semantics" in overrides:
+                    tmp_init_kwargs["weight_scale_semantics"] = _normalize_fp8_scale_semantics(
+                        overrides["weight_scale_semantics"]
+                    )
+                if "weight_block_size" in overrides:
+                    tmp_init_kwargs["weight_block_size"] = normalized_block_size
+
+    validate_bits = quant_bits_width(tmp_bits)
+    constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits
+
     # when loading a quantized model, device is target device passed in GPTQModel.load()
     # check in_features and out_features validate
     _, err = linear_cls.validate(
-        bits=tmp_bits,
+        bits=validate_bits,
         group_size=tmp_group_size,
         desc_act=tmp_desc_act,
         sym=tmp_sym,
         pack_dtype=tmp_pack_dtype,
         in_features=in_features,
         out_features=out_features,
-        device=device,
+        device=DEVICE(device) if isinstance(device, str) else device,
         adapter=adapter, # TODO FIX ME..need to pass Eora if loaded
     )
     if err is not None:
         raise err
 
     new_layer = linear_cls(
-        bits=tmp_bits,
+        bits=constructor_bits,
         group_size=tmp_group_size,
         desc_act=tmp_desc_act,
         sym=tmp_sym,
@@ -430,13 +488,14 @@ def create_quant_module(
         backend=backend,
         register_buffers=register_buffers,
         adapter=adapter,
+        **tmp_init_kwargs,
     )
     new_layer.device = ori_layer_device
     recurse_setattr(module, name, new_layer.to(ori_layer_device))
 
 def create_quant_layer(
         linear_cls: Type[BaseQuantLinear],
-        bits: int,
+        bits,
         desc_act: bool,
         dynamic,
         group_size: int,
@@ -448,6 +507,8 @@ def create_quant_layer(
         pack_dtype: torch.dtype,
         backend: BACKEND,
         adapter: Optional[Adapter] = None,
+        format: FORMAT = FORMAT.GPTQ,
+        init_kwargs: Optional[Dict[str, Any]] = None,
 
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
@@ -470,8 +531,10 @@ def create_quant_layer(
             device=device,
             lm_head_name=lm_head_name,
             pack_dtype=pack_dtype,
+            format=format,
             backend=backend,
             adapter=adapter,
+            init_kwargs=init_kwargs,
         )
 
     return linear_cls
@@ -586,7 +649,7 @@ def convert_gptq_v1_to_v2_format(
     qlinear_kernel: Type[BaseQuantLinear],
 ):
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if cfg.quant_method in [METHOD.GPTQ] and not qlinear_kernel.REQUIRES_FORMAT_V2:
+    if cfg.export_quant_method() == METHOD.GPTQ and not qlinear_kernel.REQUIRES_FORMAT_V2:
         log.info(
             f"Format: Skipped v1 to v2 conversion due to Kernel  `{qlinear_kernel}`.")
         return model
@@ -595,7 +658,7 @@ def convert_gptq_v1_to_v2_format(
     # with tctl.threadpool_limits(limits=1):
     time.time()
     log.info(
-        f"Format: Converting `{FORMAT_FIELD_CHECKPOINT}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
+        f"Format: Converting `{FORMAT_FIELD_CODE}` from `{FORMAT.GPTQ}` to internal `{FORMAT.GPTQ_V2}`.")
 
     for _, submodule in model.named_modules():
         # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
@@ -663,7 +726,7 @@ def convert_gptq_v2_to_v1_format(
 ):
 
     # skip v2 to v1 conversion for gptq_v1 kernels
-    if quantize_config.quant_method in [METHOD.GPTQ] and not qlinear_kernel.REQUIRES_FORMAT_V2:
+    if quantize_config.export_quant_method() == METHOD.GPTQ and not qlinear_kernel.REQUIRES_FORMAT_V2:
         return model
 
     # Limit thread usage to avoid auto-parallizataion regression
@@ -817,8 +880,8 @@ def pack_module(
 
         if (
             quantize_config is not None
-            and quantize_config.quant_method == METHOD.GPTQ
-            and quantize_config.format == FORMAT.GPTQ
+            and quantize_config.export_quant_method() == METHOD.GPTQ
+            and resolve_quant_format(quantize_config.format, quantize_config.method) == FORMAT.GPTQ
             and getattr(quant_linear_cls, "REQUIRES_FORMAT_V2", False)
         ):
             with log_time_block(

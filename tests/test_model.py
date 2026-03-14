@@ -30,6 +30,7 @@ from torch import nn
 
 from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.looper.module_looper import ModuleLooper, StopMainLoop
+from gptqmodel.models.auto import _hide_unsupported_quantization_config_for_lm_eval
 from gptqmodel.models import loader
 
 
@@ -86,7 +87,7 @@ def test_dequantize_model_fp8_infers_block_size(tmp_path):
     config = {
         "architectures": ["TestModel"],
         "quantization_config": {
-            "fmt": "float8_e4m3fn",
+            "format": "float8_e4m3fn",
             "quant_method": "fp8",
         },
     }
@@ -123,7 +124,7 @@ def test_dequantize_model_fp8(tmp_path):
     config = {
         "architectures": ["TestModel"],
         "quantization_config": {
-            "fmt": "float8_e4m3fn",
+            "format": "float8_e4m3fn",
             "quant_method": "fp8",
             "weight_block_size": [2, 4],
         },
@@ -434,8 +435,7 @@ class TestModelSave(unittest.TestCase):
 
     def test_moe(self):
         quantize_config = QuantizeConfig(
-            failsafe=None,
-            offload_to_disk=False
+            fallback=None,
         )
 
         model = GPTQModel.load(
@@ -592,3 +592,35 @@ def test_emit_layer_complete_stops_cleanly_on_stop_main_loop(monkeypatch):
     )
 
     assert looper._check_loop_stop() is True
+
+
+def test_hide_unsupported_quantization_config_for_lm_eval_temporarily_clears_gguf_bits():
+    quantization_config = {
+        "quant_method": "gguf",
+        "format": "gguf",
+        "bits": "q4_k_m",
+    }
+    model = types.SimpleNamespace(
+        config=types.SimpleNamespace(quantization_config=dict(quantization_config))
+    )
+
+    with _hide_unsupported_quantization_config_for_lm_eval(model):
+        assert model.config.quantization_config is None
+
+    assert model.config.quantization_config == quantization_config
+
+
+def test_hide_unsupported_quantization_config_for_lm_eval_leaves_supported_gptq_alone():
+    quantization_config = {
+        "quant_method": "gptq",
+        "bits": 4,
+        "group_size": 128,
+    }
+    model = types.SimpleNamespace(
+        config=types.SimpleNamespace(quantization_config=dict(quantization_config))
+    )
+
+    with _hide_unsupported_quantization_config_for_lm_eval(model):
+        assert model.config.quantization_config == quantization_config
+
+    assert model.config.quantization_config == quantization_config

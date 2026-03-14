@@ -11,12 +11,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import FORMAT, METHOD, FailSafe, VramStrategy
+from gptqmodel.quantization.config import FORMAT, METHOD, Fallback, VramStrategy
 from gptqmodel.utils.eval import EVAL
 
 
 class TestQwen3_5Moe(ModelTest):
-    FAILSAFE = FailSafe()
+    FALLBACK = Fallback()
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
 

@@ -16,6 +16,7 @@ class BACKEND(str, Enum):
     TORCH = "torch" # GOOD: about 80% of triton
     TRITON = "triton" # VERY GOOD: all-around kernel
     EXLLAMA_V2 = "exllama_v2" # FASTER: optimized for batching > 1
+    EXLLAMA_V3 = "exllama_v3"
     EXLLAMA_EORA = "exllama_eora"
     MACHETE = "machete" # CUTLASS-based kernel optimized for Hopper (SM90+)
     MARLIN = "marlin" # FASTEST: marlin reduce ops in fp32 (higher precision -> more accurate, slightly slower)
@@ -37,6 +38,10 @@ class BACKEND(str, Enum):
     TORCH_AWQ = "torch_awq"
 
     # external
+    GGUF_TORCH = "gguf_torch" # GGUF module-level inference via native torch kernel
+    GGUF_TRITON = "gguf_triton" # GGUF module-level inference via Triton fused CUDA kernel
+    GGUF_CPP_CPU = "gguf_cpp_cpu" # GGUF module-level inference via llama.cpp / ggml CPU backend
+    GGUF_CPP_CUDA = "gguf_cpp_cuda" # GGUF module-level inference via llama.cpp / ggml CUDA backend
     VLLM = "vllm" # External inference engine: CUDA + ROCm + IPEX
     SGLANG = "sglang" # External inference engine: CUDA + ROCm
     MLX = "mlx" # External inference engine: Apple MLX on M1+ (Apple Silicon)

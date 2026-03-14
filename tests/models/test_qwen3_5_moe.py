@@ -4,12 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import FailSafe, VramStrategy
+from gptqmodel.quantization.config import Fallback, VramStrategy
 from gptqmodel.utils.eval import EVAL
 
 
 class TestQwen3_5Moe(ModelTest):
-    FAILSAFE = FailSafe()
+    FALLBACK = Fallback()
     # FORMAT = FORMAT.GEMM
     # METHOD = METHOD.AWQ
 

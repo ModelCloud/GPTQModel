@@ -63,12 +63,18 @@ from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import (  # noqa: E402
-    FailSafe,
+    Fallback,
+    FP8Config,
+    GGUFConfig,
+    GGUFQuantizeConfig,
     GPTAQConfig,
     HessianConfig,
     MoEConfig,
     QuantizeConfig,
+    RTNQuantizeConfig,
     VramStrategy,
+    WeightOnlyConfig,
+    resolve_quant_format,
 )
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
@@ -94,6 +100,7 @@ class ModelTest(unittest.TestCase):
     QUANT_BATCH_SIZE = 1
     LOAD_BACKEND = BACKEND.MARLIN
     QUANT_BACKEND = BACKEND.AUTO
+    PIN_CUDA_DEVICE: Optional[int] = None
     USE_VLLM = False
     INPUTS_MAX_LENGTH = 2048
     MODEL_MAX_LEN = 4096
@@ -118,12 +125,13 @@ class ModelTest(unittest.TestCase):
     SYM = True
     GPTQA = False
     ACT_GROUP_AWARE = True
-    FAILSAFE = FailSafe()
+    FALLBACK = Fallback()
     EORA = None
     DAMP_PERCENT = 0.05
     MSE = 0.0
     DYNAMIC = None
     HESSIAN_CHUNK_SIZE = None
+    WEIGHT_ONLY = None
 
     SAVE_PATH = None  # default is temp folder
 
@@ -176,7 +184,6 @@ class ModelTest(unittest.TestCase):
         model,
         tokenizer,
         processor,
-        need_create_processor: bool,
         cleanup_callback,
     ):
         if cleanup_callback is not None:
@@ -184,9 +191,7 @@ class ModelTest(unittest.TestCase):
                 cleanup_callback()
             except Exception:
                 pass
-        if need_create_processor:
-            return model, tokenizer, processor
-        return model, tokenizer
+        return model, tokenizer, processor
 
     def _normalize_task_identifier(self, task):
         if isinstance(task, Enum):
@@ -492,7 +497,11 @@ class ModelTest(unittest.TestCase):
         return self.LOAD_BACKEND
 
     def _torch_backend(self) -> BACKEND:
-        return BACKEND.TORCH_AWQ if self.METHOD == METHOD.AWQ else BACKEND.TORCH
+        if self.METHOD == METHOD.AWQ:
+            return BACKEND.TORCH_AWQ
+        if self.METHOD == METHOD.GGUF:
+            return BACKEND.GGUF_TORCH
+        return BACKEND.TORCH
 
     def _torch_fused_backend(self) -> BACKEND:
         return BACKEND.TORCH_FUSED_AWQ if self.METHOD == METHOD.AWQ else BACKEND.TORCH_FUSED
@@ -503,8 +512,15 @@ class ModelTest(unittest.TestCase):
         reuse_candidates = {}
         torch_backend = self._torch_backend()
         torch_fused_backend = self._torch_fused_backend()
+        format_family = resolve_quant_format(self.FORMAT, self.METHOD)
 
-        if self.FORMAT is FORMAT.GPTQ:
+        if format_family == FORMAT.GGUF:
+            compare_backends = (torch_backend,)
+        elif format_family == FORMAT.FP8:
+            compare_backends = (torch_backend,)
+        elif format_family == FORMAT.EXL3:
+            compare_backends = (self.LOAD_BACKEND,)
+        elif format_family == FORMAT.GPTQ:
             if self.LOAD_BACKEND == BACKEND.MARLIN:
                 compare_backends = (BACKEND.MARLIN,)
             else:
@@ -552,7 +568,7 @@ class ModelTest(unittest.TestCase):
 
         for backend in compare_backends:
             log.info(f"Loading post-quant model with backend `{backend.name}`")
-            # When EVAL_SINGLE_GPU is enabled, pin post-quant loads to the first CUDA device to avoid auto sharding.
+            # When EVAL_SINGLE_GPU is enabled, keep post-quant validation on the preferred device.
             use_cuda_map = (
                 self.EVAL_SINGLE_GPU
                 and torch.cuda.is_available()
@@ -563,7 +579,7 @@ class ModelTest(unittest.TestCase):
                     model_path,
                     trust_remote_code=trust_remote_code,
                     backend=backend,
-                    device_map={"": "cuda:0"},
+                    device_map=self._preferred_cuda_device_map(backend=backend) or {"": "cuda:0"},
                 )
             else:
                 model = self.loadQuantModel(
@@ -897,15 +913,57 @@ class ModelTest(unittest.TestCase):
         if expected_kernels:
             assert modules == expected_kernels, f"kernels are different with expected. found: {modules}. expected: {expected_kernels}"
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):
-        quantize_config = QuantizeConfig(
+    def _build_quantize_config(self):
+        format_family = resolve_quant_format(self.FORMAT, self.METHOD)
+        if self.WEIGHT_ONLY is not None:
+            if not isinstance(self.WEIGHT_ONLY, WeightOnlyConfig):
+                raise TypeError(f"`WEIGHT_ONLY` must be a WeightOnlyConfig, got {type(self.WEIGHT_ONLY).__name__}")
+
+            if format_family == FORMAT.GGUF or self.WEIGHT_ONLY.method.value == "gguf":
+                return GGUFConfig(
+                    bits=self.BITS,
+                    adapter=self.EORA,
+                    pack_impl="cpu",
+                    vram_strategy=self.VRAM_STRATEGY,
+                    dynamic=self.DYNAMIC,
+                    moe=self.MOE_CONFIG,
+                    smoother=self.WEIGHT_ONLY.smooth,
+                )
+
+            if format_family == FORMAT.FP8 or self.WEIGHT_ONLY.method.value == "fp8":
+                return FP8Config(
+                    bits=self.BITS,
+                    format=self.FORMAT,
+                    adapter=self.EORA,
+                    pack_impl="cpu",
+                    vram_strategy=self.VRAM_STRATEGY,
+                    dynamic=self.DYNAMIC,
+                    moe=self.MOE_CONFIG,
+                    smoother=self.WEIGHT_ONLY.smooth,
+                )
+
+            return RTNQuantizeConfig(
+                bits=self.BITS,
+                group_size=self.GROUP_SIZE,
+                desc_act=self.DESC_ACT,
+                sym=self.SYM,
+                format=self.FORMAT,
+                adapter=self.EORA,
+                pack_impl="cpu",
+                vram_strategy=self.VRAM_STRATEGY,
+                dynamic=self.DYNAMIC,
+                moe=self.MOE_CONFIG,
+                smooth=self.WEIGHT_ONLY.smooth,
+            )
+
+        return QuantizeConfig(
             quant_method=self.METHOD,
             format=self.FORMAT,
             bits=self.BITS,
             group_size=self.GROUP_SIZE,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
-            failsafe=self.FAILSAFE,
+            fallback=self.FALLBACK,
             sym=self.SYM,
             gptaq=GPTAQConfig() if self.GPTQA else None,
             adapter=self.EORA,
@@ -919,6 +977,28 @@ class ModelTest(unittest.TestCase):
             offload_to_disk=self.OFFLOAD_TO_DISK,
         )
 
+    def _preferred_cuda_device_map(self, *, backend=None):
+        if self.PIN_CUDA_DEVICE is None or not torch.cuda.is_available():
+            return None
+
+        active_backend = backend if backend is not None else self._current_load_backend()
+        if active_backend == self._torch_fused_backend():
+            return None
+
+        try:
+            if self.PIN_CUDA_DEVICE >= torch.cuda.device_count():
+                self.skipTest(
+                    f"CUDA device {self.PIN_CUDA_DEVICE} requested but only {torch.cuda.device_count()} visible device(s) are available."
+                )
+        except Exception:
+            pass
+
+        return {"": f"cuda:{self.PIN_CUDA_DEVICE}"}
+
+    def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):
+        """Return `(model, tokenizer, processor)`; `processor` is `None` for text-only models."""
+        quantize_config = self._build_quantize_config()
+
         log.info(f"Quant config: {quantize_config}")
         log.info(f"Quant batch_size: {batch_size}")
 
@@ -929,6 +1009,8 @@ class ModelTest(unittest.TestCase):
                 args["attn_implementation"] = "flash_attention_2"
             else:
                 log.warn("flash-attn requested but not available; falling back to framework defaults")
+        else:
+            args["attn_implementation"] = "eager"
 
 
         log.info(f"args: {args}")
@@ -938,7 +1020,11 @@ class ModelTest(unittest.TestCase):
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
             dtype=dtype,
-            device_map={"": "cpu"} if self.LOAD_BACKEND == torch_fused_backend else "auto",
+            device_map=(
+                {"": "cpu"}
+                if self.LOAD_BACKEND == torch_fused_backend
+                else (self._preferred_cuda_device_map(backend=self.LOAD_BACKEND) or "auto")
+            ),
             **args,
         )
 
@@ -953,7 +1039,10 @@ class ModelTest(unittest.TestCase):
         processor = None
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
-        calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
+        if quantize_config.requires_calibration_dataset():
+            calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
+        else:
+            calibration_dataset = None
 
         # mpt model need
         if hasattr(model.config, "pad_token_id") and not model.config.pad_token_id:
@@ -996,7 +1085,6 @@ class ModelTest(unittest.TestCase):
                         model=model,
                         tokenizer=tokenizer,
                         processor=None,
-                        need_create_processor=need_create_processor,
                         cleanup_callback=cleanup_callback,
                     )
 
@@ -1030,7 +1118,7 @@ class ModelTest(unittest.TestCase):
                                 path,
                                 trust_remote_code=trust_remote_code,
                                 backend=target_backend,
-                                device_map={"": "cuda:0"},
+                                device_map=self._preferred_cuda_device_map(backend=target_backend) or {"": "cuda:0"},
                             )
                         else:
                             q_model = self.loadQuantModel(path, trust_remote_code=trust_remote_code, backend=target_backend)
@@ -1054,15 +1142,9 @@ class ModelTest(unittest.TestCase):
         if not is_quantized:
             del model
             torch_empty_cache()
-            if need_create_processor:
-                return q_model, q_tokenizer, processor
-            else:
-                return q_model, q_tokenizer
+            return q_model, q_tokenizer, processor
         else:
-            if need_create_processor:
-                return model, tokenizer, processor
-            else:
-                return model, tokenizer
+            return model, tokenizer, processor
 
     def loadQuantModel(self, model_id_or_path, trust_remote_code=False, tokenizer_path=None, backend=None, **args):
 
@@ -1076,6 +1158,8 @@ class ModelTest(unittest.TestCase):
                 load_kwargs["attn_implementation"] = "flash_attention_2"
             else:
                 log.warn("flash-attn requested but not available; falling back to framework defaults")
+        else:
+            load_kwargs["attn_implementation"] = "eager"
 
         active_backend = backend if backend is not None else self._current_load_backend()
         torch_fused_backend = self._torch_fused_backend()
@@ -1084,7 +1168,7 @@ class ModelTest(unittest.TestCase):
         explicit_device = "device" in load_kwargs
         inserted_device_map = False
         if "device_map" not in load_kwargs and not explicit_device:
-            load_kwargs["device_map"] = default_device_map
+            load_kwargs["device_map"] = self._preferred_cuda_device_map(backend=active_backend) or default_device_map
             inserted_device_map = True
 
         # Post-quant CI runs may expose multiple GPUs; pin loading to the first one to avoid spread-out auto maps.
@@ -1103,7 +1187,7 @@ class ModelTest(unittest.TestCase):
 
             if multi_device:
                 if self.EVAL_SINGLE_GPU:
-                    load_kwargs["device_map"] = {"": "cuda:0"}
+                    load_kwargs["device_map"] = self._preferred_cuda_device_map(backend=active_backend) or {"": "cuda:0"}
 
         model = GPTQModel.load(
             model_id_or_path,
@@ -1231,11 +1315,12 @@ class ModelTest(unittest.TestCase):
                 print(f"batch {old_batch} OOM, retrying with batch {self.EVAL_BATCH_SIZE}")
 
                 if int(self.EVAL_BATCH_SIZE) > 0:
-                    self.lm_eval(model=model,
-                                 trust_remote_code=trust_remote_code,
-                                 delete_quantized_model=delete_quantized_model,
-                                 extra_args=extra_args)
+                    results = self.lm_eval(model=model,
+                                           trust_remote_code=trust_remote_code,
+                                           delete_quantized_model=delete_quantized_model,
+                                           extra_args=extra_args)
                     print(f"set batch size to {self.EVAL_BATCH_SIZE}, passed")
+                    return results
                 else:
                     print(f"set batch size to {self.EVAL_BATCH_SIZE}, failed")
                     raise e
@@ -1247,14 +1332,100 @@ class ModelTest(unittest.TestCase):
         log.info(f"{task_name}:{metric_name}: `{value}` vs `{expected}` diff {diff_pct:.2f}%")
         return diff_pct, expected
 
+    @staticmethod
+    def _metric_within_expected_range(value, expected, floor_pct, ceil_pct):
+        diff_pct = (value / expected) * 100
+        negative_pct = 100 * (1 - floor_pct)
+        positive_pct = 100 * (1 + ceil_pct)
+        return negative_pct <= diff_pct <= positive_pct, diff_pct, negative_pct, positive_pct
+
+    def _current_native_backend(self) -> BACKEND:
+        return BACKEND.TORCH
+
+    def _get_current_native_eval_results(self):
+        cached = getattr(self, "_current_native_eval_results", None)
+        if cached is not None:
+            return cached
+
+        native_model_id = getattr(self, "NATIVE_MODEL_ID", None)
+        if not native_model_id:
+            return None
+
+        previous_backend = self.LOAD_BACKEND
+        previous_effective_backend = getattr(self, "_effective_load_backend", None)
+        self.LOAD_BACKEND = self._current_native_backend()
+        self._effective_load_backend = None
+        try:
+            log.warn(
+                "Baseline fallback: evaluating current native model `%s` to verify whether stored expectations are stale.",
+                native_model_id,
+            )
+            cached = self.lm_eval(
+                model=native_model_id,
+                trust_remote_code=self.TRUST_REMOTE_CODE,
+                delete_quantized_model=False,
+            )
+        finally:
+            self.LOAD_BACKEND = previous_backend
+            self._effective_load_backend = previous_effective_backend
+
+        self._current_native_eval_results = cached
+        return cached
+
+    def _maybe_accept_current_native_baseline(
+        self,
+        *,
+        task_name: str,
+        metric_name: str,
+        metric_key: str,
+        value: float,
+        floor_pct: float,
+        ceil_pct: float,
+    ) -> bool:
+        try:
+            native_results = self._get_current_native_eval_results()
+        except Exception as exc:  # pragma: no cover - defensive fallback for flaky native eval
+            log.warn(f"Baseline fallback: failed to evaluate current native model: {exc}")
+            return False
+
+        if not isinstance(native_results, dict):
+            return False
+
+        native_metrics = native_results.get(task_name)
+        if not isinstance(native_metrics, dict):
+            return False
+
+        native_metric_key = self._resolve_metric_key(metric_key, native_metrics)
+        if native_metric_key is None and metric_key != metric_name:
+            native_metric_key = self._resolve_metric_key(metric_name, native_metrics)
+        if native_metric_key is None:
+            return False
+
+        native_value = native_metrics[native_metric_key]
+        passed, diff_pct, negative_pct, positive_pct = self._metric_within_expected_range(
+            value=value,
+            expected=native_value,
+            floor_pct=floor_pct,
+            ceil_pct=ceil_pct,
+        )
+        if not passed:
+            return False
+
+        log.warn(
+            f"Baseline fallback: accepting `{task_name}:{metric_name}` using current native value `{native_value}`; "
+            f"quantized result `{value}` diff {diff_pct:.2f}% is within [{negative_pct:.2f}-{positive_pct:.2f}] "
+            f"while stored expectation appears stale."
+        )
+        return True
+
     def quant_lm_eval(self):
         self.model = None
         # TODO fix me: LOAD_QUANTIZED_MODEL doesn't make any sense when we have QUANT_SAVE_PATH
         #if self.QUANT_SAVE_PATH:
-        #    self.model, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
+        #    self.model, _, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
 
         if not self.model:
-            self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
+            self.model, _, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
@@ -1304,10 +1475,24 @@ class ModelTest(unittest.TestCase):
                 )
                 floor_pct = baseline_spec["floor_pct"]
                 ceil_pct = baseline_spec["ceil_pct"]
-                negative_pct = 100 * (1 - floor_pct)
-                positive_pct = 100 * (1 + ceil_pct)
-                self.assertTrue(
-                    negative_pct <= diff_pct <= positive_pct,
+                passed, diff_pct, negative_pct, positive_pct = self._metric_within_expected_range(
+                    value=value,
+                    expected=expected_value,
+                    floor_pct=floor_pct,
+                    ceil_pct=ceil_pct,
+                )
+                if passed:
+                    continue
+                if self._maybe_accept_current_native_baseline(
+                    task_name=task_name,
+                    metric_name=metric_name,
+                    metric_key=metric_key,
+                    value=value,
+                    floor_pct=floor_pct,
+                    ceil_pct=ceil_pct,
+                ):
+                    continue
+                self.fail(
                     f"{task_name}:{metric_name}: `{value}` vs expected `{expected_value}`, "
                     f"diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]",
                 )

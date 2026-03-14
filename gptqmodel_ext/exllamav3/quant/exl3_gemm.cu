@@ -1,0 +1,141 @@
+#include <cuda_fp16.h>
+#include "exl3_gemm.cuh"
+
+#include <c10/cuda/CUDAGuard.h>
+#include <ATen/cuda/CUDAContext.h>
+#include "../util.h"
+#include "../util.cuh"
+#include "exl3_kernel_map.cuh"
+#include "exl3_devctx.cuh"
+#include <set>
+
+constexpr int EXL3_GEMM_SMEM_MAX = 90 * 1024;
+
+/*
+EXL3 matmul, A @ B -> C
+
+- A: row-major A tensor, shape (m, k), dtype float16, contiguous
+- B: EXL3-quantized B tensor, shape (k//16, n//16, 16*K), dtype uint16
+- C: empty row-major C tensor, shape (m, n), dtype float16 or float32, contiguous. Does not need to be zero-initialized
+- suh: optional, packed input scales/flips, shape (k//16), dtype float16
+- A_had: required if suh given, may be reference to A, temporary storage for input transform, size and dtype as A
+- svh: optional, packed output scales/flips, shape (n//16), dtype float16
+
+limitations:
+- k % 16 == 0
+- n % 128 == 0
+*/
+
+std::set<void*> kernel_attr_set[MAX_DEVICES] = {};
+
+int exl3_gemm
+(
+    const at::Tensor& A,
+    const at::Tensor& B,
+    at::Tensor& C,
+    const c10::optional<at::Tensor>& suh,
+    const c10::optional<at::Tensor>& A_had,
+    const c10::optional<at::Tensor>& svh,
+    int force_shape_idx,
+    bool mcg,
+    bool mul1,
+    int force_num_sms
+)
+{
+    const at::cuda::OptionalCUDAGuard device_guard(A.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+    TORCH_CHECK_DIM(B, 3);
+    TORCH_CHECK_SHAPES(A, -1, B, 0, 16);
+    TORCH_CHECK_SHAPES(C, -1, B, 1, 16);
+    // TORCH_CHECK_SHAPES(A, 0, C, 0, 1);
+    TORCH_CHECK_DTYPE(A, kHalf);
+    TORCH_CHECK_DTYPE(B, kShort);
+    bool c_fp32 = C.dtype() == at::kFloat;
+    if (!c_fp32) TORCH_CHECK_DTYPE(C, kHalf);
+
+    // Get SU, optionally
+    const half* suh_ptr = (const half*) OPTPTR(suh);
+    half* A_had_ptr = nullptr;
+    if (suh_ptr)
+    {
+        // TORCH_CHECK_SHAPES(suh.value(), 0, A, 1, 1);
+        A_had_ptr = (half*) OPTPTR(A_had);
+        // TORCH_CHECK(A_had_ptr, "Must supply A_had with suh");
+        // TORCH_CHECK_SHAPES_FULL(A_had.value(), A);
+    }
+
+    // Get SV, optionally
+    const half* svh_ptr = (const half*) OPTPTR(svh);
+    // if (svh_ptr)
+        // TORCH_CHECK_SHAPES(svh.value(), 0, B, 1, 16);
+
+    // Device properties
+    int device;
+    cudaGetDevice(&device);
+    int num_sms = force_num_sms ? force_num_sms : DevCtx::instance().get_num_sms(device);
+    int cc = DevCtx::instance().get_cc(device);
+    int* locks = DevCtx::instance().get_locks(device);
+
+    // Dispatch
+    int K = B.size(2) / 16;
+    const half* A_ptr = (const half*) A.data_ptr();
+    const uint16_t* B_ptr = (const uint16_t*) B.data_ptr();
+    void* C_ptr = (void*) C.data_ptr();
+
+    int size_m = 1;
+    int dim = A.dim();
+    for (int d = 0; d < dim - 1; ++d) size_m *= A.size(d);
+    int size_k = A.size(-1);
+    int size_n = B.size(1) * 16;
+
+    // Select kernel
+    TORCH_CHECK(!(mcg && mul1), "Specified both mcg and mul1")
+    int cb = 0;
+    if (mcg) cb = 1;
+    if (mul1) cb = 2;
+
+    int block_dim;
+    int shape_idx;
+    fp_exl3_gemm_kernel kernel;
+
+    TResult* tr = select_exl3_gemm_kernel_tuned(cc, size_k, size_n, K, c_fp32, force_shape_idx, force_num_sms, cb);
+    if (!tr) return 0;
+    num_sms = MIN(num_sms, tr->num_sms);
+    kernel = tr->kernel;
+    block_dim = tr->block_dim;
+    shape_idx = tr->shape_idx;
+
+    // Launch
+    if (kernel_attr_set[device].find((void*) kernel) == kernel_attr_set[device].end())
+    {
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, EXL3_GEMM_SMEM_MAX);
+        kernel_attr_set[device].insert((void*) kernel);
+        cuda_check(cudaPeekAtLastError());
+    }
+    void* kernelArgs[] =
+    {
+        (void*)& A_ptr,
+        (void*)& B_ptr,
+        (void*)& C_ptr,
+        (void*)& size_m,
+        (void*)& size_k,
+        (void*)& size_n,
+        (void*)& locks,
+        (void*)& suh_ptr,
+        (void*)& A_had_ptr,
+        (void*)& svh_ptr
+    };
+    cudaLaunchCooperativeKernel
+    (
+        (void*) kernel,
+        num_sms,
+        block_dim,
+        kernelArgs,
+        EXL3_GEMM_SMEM_MAX,
+        stream
+    );
+
+    cuda_check(cudaPeekAtLastError());
+    return shape_idx;
+}

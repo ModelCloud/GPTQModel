@@ -15,8 +15,8 @@ from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
-from ..quantization.config import METHOD, QuantizeConfig
-from ..utils.failsafe import normalize_failsafe
+from ..quantization.config import METHOD, QuantizeConfig, resolve_quant_format
+from ..utils.fallback import normalize_fallback
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.model import create_quant_module, find_modules, move_to, pack_module
@@ -57,7 +57,7 @@ class QQQProcessor(LoopProcessor):
     def set_calibration_dataset(self, calibration_dataset):
         raise NotImplementedError("QQQProcessor's calibration_dataset cannot be modified")
 
-    def preprocess(self, module: NamedModule, failsafe=None, **kwargs):
+    def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
             return
@@ -84,7 +84,7 @@ class QQQProcessor(LoopProcessor):
 
         tmp = QQQ(module=module, qcfg=qcfg_clone)
 
-        tmp.failsafe = normalize_failsafe(failsafe, qcfg_clone.failsafe)
+        tmp.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
         tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         if self.qcfg.mse > 0.0:
@@ -245,7 +245,7 @@ class QQQProcessor(LoopProcessor):
             create_quant_module(
                 name=module.full_name,
                 linear_cls=QQQQuantLinear,
-                bits=self.qcfg.bits,
+                bits=self.qcfg.runtime_bits,
                 desc_act=self.qcfg.desc_act,
                 dynamic=self.qcfg.dynamic,
                 group_size=self.qcfg.group_size,
@@ -255,6 +255,7 @@ class QQQProcessor(LoopProcessor):
                 device=self.qcfg.device,
                 lm_head_name=model.lm_head,
                 pack_dtype=self.qcfg.pack_dtype,
+                format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                 register_buffers=False,
             )
 
@@ -292,7 +293,7 @@ class QQQProcessor(LoopProcessor):
         # set quantized state
         model.quantized = True
 
-        model.quantize_config.quant_method = METHOD.QQQ
+        model.quantize_config.method = METHOD.QQQ
 
         super().finalize(model=model, **kwargs)
 

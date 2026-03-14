@@ -169,6 +169,24 @@ def test_gptq_post_init_creates_wf_unpack_buffers():
     assert module.wf_unsqueeze_neg_one is not None
 
 
+def test_torch_quant_linear_weight_property_uses_packed_buffer_device():
+    module = TorchQuantLinear(
+        bits=4,
+        group_size=32,
+        sym=True,
+        desc_act=False,
+        in_features=64,
+        out_features=64,
+        bias=False,
+        pack_dtype=torch.int32,
+        adapter=None,
+        register_buffers=True,
+    )
+
+    assert module.weight is module.qweight
+    assert module.weight.device == module.qweight.device
+
+
 def test_cached_forward_matches_baseline():
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     module = _make_module(device)
@@ -185,6 +203,20 @@ def test_cached_forward_matches_baseline():
     torch.testing.assert_close(ref, cached)
     assert x.dtype in module._cached_weights
     assert module._cached_weights[x.dtype].device.type == device.type
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 CUDA devices")
+def test_cross_device_forward_moves_weights_to_input_device():
+    module = _make_module(torch.device("cuda:1"))
+    module.enable_weight_cache(True)
+    module.clear_weight_cache()
+
+    x = torch.randn(8, module.in_features, device=torch.device("cuda:0"), dtype=torch.float16)
+    out = module(x)
+
+    assert out.device == x.device
+    assert x.dtype in module._cached_weights
+    assert module._cached_weights[x.dtype].device == x.device
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda required for lookahead prefetch test")

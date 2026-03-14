@@ -1389,15 +1389,15 @@ class ModuleLooper():
             use_cache=use_cache,
         )
 
-    def loop(self, failsafe=None, **kwargs):
+    def loop(self, fallback=None, **kwargs):
         with tf32_high_precision_guard():
             with self.pause_controller.lifecycle():
-                return self._loop_impl(failsafe=failsafe, **kwargs)
+                return self._loop_impl(fallback=fallback, **kwargs)
 
     @torch.inference_mode()
-    def _loop_impl(self, failsafe=None, **kwargs):
-        if failsafe is None:
-            failsafe = getattr(self.gptq_model.quantize_config, "failsafe", None)
+    def _loop_impl(self, fallback=None, **kwargs):
+        if fallback is None:
+            fallback = getattr(self.gptq_model.quantize_config, "fallback", None)
 
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
@@ -1428,7 +1428,7 @@ class ModuleLooper():
         for p_index, processor in enumerate(self.processors):
             if not processor.verify_calibration_dataset(p_index):
                 if isinstance(processor, EoraProcessor) or\
-                        (isinstance(processor, GPTQProcessor) and self.gptq_model.quantize_config.gptaq is not None):
+                        (isinstance(processor, GPTQProcessor) and getattr(self.gptq_model.quantize_config, "gptaq", None) is not None):
                     prev_processor = self.processors[p_index - 1]
                     processor.set_calibration_dataset(prev_processor.calibration_dataset)
                     # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
@@ -1502,7 +1502,7 @@ class ModuleLooper():
             layers=layers,
             layer_modules=layer_modules,
             layers_prefix=layers_prefix,
-            failsafe=failsafe,
+            fallback=fallback,
             shared_kv_cache_dict=shared_kv_cache_dict,
             pb=pb,
             layer_count=layer_count,
@@ -1586,7 +1586,7 @@ class ModuleLooper():
 
         return total_log
 
-    def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, failsafe, layer_module=None) -> Dict[str, NamedModule]:
+    def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fallback, layer_module=None) -> Dict[str, NamedModule]:
         subset = {}
         capture_only_flags: Dict[str, bool] = {}
         for n in names:
@@ -1628,7 +1628,7 @@ class ModuleLooper():
                 subset[name].state["capture_only"] = True
 
             if isinstance(processor, GPTQProcessor):
-                processor.preprocess(subset[name], failsafe=failsafe)
+                processor.preprocess(subset[name], fallback=fallback)
             else:
                 processor.preprocess(subset[name])
             # some modules are skipped

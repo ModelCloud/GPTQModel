@@ -30,10 +30,13 @@ from transformers.utils import is_flash_attn_2_available
 from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import Adapter
+from ..nn_modules.exllamav3 import ExllamaV3Linear
+from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
+from ..quantization.config import BaseQuantizeConfig, FORMAT, METHOD, MIN_VERSION_WITH_V2, resolve_quant_format
 from ..utils.backend import BACKEND
+from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import no_init_weights
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.inspect import safe_kwargs_call
@@ -125,7 +128,7 @@ def ModelLoader(cls):
     def from_pretrained(
             cls,
             pretrained_model_id_or_path: str,
-            quantize_config: QuantizeConfig,
+            quantize_config: BaseQuantizeConfig,
             trust_remote_code: bool = False,
             dtype: [str | torch.dtype] = "auto",
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
@@ -189,8 +192,8 @@ def ModelLoader(cls):
         # non-quantized models are always loaded into cpu
         cpu_device_map = {"": "cpu"}
 
-        if quantize_config is None or not isinstance(quantize_config, QuantizeConfig):
-            raise AttributeError("`quantize_config` must be passed and be an instance of QuantizeConfig.")
+        if quantize_config is None or not isinstance(quantize_config, BaseQuantizeConfig):
+            raise AttributeError("`quantize_config` must be passed and be an instance of BaseQuantizeConfig.")
 
         quantize_config.calculate_bits_per_weight()
 
@@ -396,8 +399,24 @@ def ModelLoader(cls):
             config.torch_dtype = dtype
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
+        export_quant_method = qcfg.export_quant_method()
+        format_code = resolve_quant_format(qcfg.format, qcfg.method)
 
-        if qcfg.quant_method == METHOD.AWQ and qcfg.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
+        if format_code == FORMAT.EXL3:
+            if backend not in (BACKEND.AUTO, BACKEND.EXLLAMA_V3, BACKEND.TORCH):
+                raise TypeError("FORMAT.EXL3 requires BACKEND.AUTO, BACKEND.EXLLAMA_V3, or BACKEND.TORCH.")
+            if backend == BACKEND.AUTO:
+                if torch.cuda.is_available() and device in (DEVICE.CUDA, DEVICE.ROCM):
+                    backend = BACKEND.EXLLAMA_V3
+                else:
+                    backend = BACKEND.TORCH
+            if backend == BACKEND.EXLLAMA_V3:
+                if not torch.cuda.is_available():
+                    raise ValueError("EXL3 CUDA loading requires CUDA/HIP.")
+                if device not in (DEVICE.CUDA, DEVICE.ROCM):
+                    raise ValueError("EXL3 CUDA loading requires a CUDA/HIP device.")
+
+        if export_quant_method == METHOD.AWQ and format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
             # GEMV_FAST and LLM_AWQ only supports torch.float16
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
@@ -417,10 +436,10 @@ def ModelLoader(cls):
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if backend == BACKEND.VLLM:
-                if qcfg.format != FORMAT.GPTQ and qcfg.format != FORMAT.GEMM:
+                if format_code not in [FORMAT.GPTQ, FORMAT.GEMM]:
                     raise ValueError(f"{backend} backend only supports FORMAT.GPTQ or FORMAT.GEMM: actual = {qcfg.format}")
             elif backend == BACKEND.SGLANG:
-                if qcfg.format != FORMAT.GPTQ:
+                if format_code != FORMAT.GPTQ:
                     raise ValueError(f"{backend} backend only supports FORMAT.GPTQ: actual = {qcfg.format}")
 
             if backend == BACKEND.VLLM:
@@ -459,7 +478,7 @@ def ModelLoader(cls):
                 model_local_path=model_local_path,
             )
 
-        if qcfg.format == FORMAT.MARLIN:
+        if format_code == FORMAT.MARLIN:
             # format marlin requires marlin kernel
             if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and backend != BACKEND.AUTO:
                 raise TypeError(f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.MARLIN: actual = `{backend}`.")
@@ -474,7 +493,7 @@ def ModelLoader(cls):
         #             "Hint: Model is compatible with the Marlin kernel. Marlin is optimized for batched inference on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
         #         )
 
-        if qcfg.format == FORMAT.BITBLAS:
+        if format_code == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
             if backend != BACKEND.BITBLAS and backend != BACKEND.AUTO:
                 raise TypeError(f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.BITBLAS: actual = `{backend}`.")
@@ -485,10 +504,13 @@ def ModelLoader(cls):
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
-        possible_model_basenames = [
-            f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g",
-            "model",
-        ]
+        if format_code == FORMAT.EXL3:
+            possible_model_basenames = ["model"]
+        else:
+            possible_model_basenames = [
+                f"gptq_model-{qcfg.bits}bit-{qcfg.group_size}g",
+                "model",
+            ]
 
         extensions = [".safetensors"]
 
@@ -508,7 +530,7 @@ def ModelLoader(cls):
                 "Loading of .bin files are not allowed due to safety. Please convert your model to safetensor or pytorch format."
             )
 
-        qcfg.runtime_format = qcfg.format
+        qcfg.runtime_format = format_code
 
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
 
@@ -576,14 +598,27 @@ def ModelLoader(cls):
                         log.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
-            preload_qlinear_kernel = make_quant(
-                model,
-                qcfg=qcfg,
-                quant_result=modules,
-                backend=backend,
-                lm_head_name=cls.lm_head,
-                device=device,
-            )
+            if format_code == FORMAT.EXL3:
+                if not isinstance(qcfg.tensor_storage, dict) or not qcfg.tensor_storage:
+                    raise ValueError("EXL3 checkpoints require `quantization_config.tensor_storage` metadata.")
+
+                exl3_module_cls = ExllamaV3TorchLinear if backend == BACKEND.TORCH else ExllamaV3Linear
+                replace_exllamav3_placeholders(
+                    model=model,
+                    module_names=list(qcfg.tensor_storage.keys()),
+                    tensor_storage=qcfg.tensor_storage,
+                    module_cls=exl3_module_cls,
+                )
+                preload_qlinear_kernel = exl3_module_cls
+            else:
+                preload_qlinear_kernel = make_quant(
+                    model,
+                    qcfg=qcfg,
+                    quant_result=modules,
+                    backend=backend,
+                    lm_head_name=cls.lm_head,
+                    device=device,
+                )
 
         if isinstance(device_map, str) and device_map not in [
                 "auto",
@@ -779,18 +814,23 @@ def ModelLoader(cls):
             return device_map
 
         log.info(f"Loader: device = {device}")
-        layers, _ = get_module_by_name_prefix(model, extract_layers_node)
-        num_gpus = 1
-        if device is DEVICE.CUDA:
-            num_gpus = torch.cuda.device_count()
-        elif device is DEVICE.XPU:
-            num_gpus = torch.xpu.device_count()
-        device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
-        log.info(f"Loader: device_map = {device_map}")
+        explicit_device_map = device_map if isinstance(device_map, dict) else None
+        if explicit_device_map is not None:
+            device_map = {str(key): str(value) for key, value in explicit_device_map.items()}
+            log.info(f"Loader: honoring explicit device_map = {device_map}")
+        else:
+            layers, _ = get_module_by_name_prefix(model, extract_layers_node)
+            num_gpus = 1
+            if device is DEVICE.CUDA:
+                num_gpus = torch.cuda.device_count()
+            elif device is DEVICE.XPU:
+                num_gpus = torch.xpu.device_count()
+            device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
+            log.info(f"Loader: device_map = {device_map}")
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if qcfg.format in [FORMAT.GPTQ, FORMAT.GEMM]:
+        if format_code in [FORMAT.GPTQ, FORMAT.GEMM]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
@@ -803,7 +843,7 @@ def ModelLoader(cls):
 
             load_checkpoint_in_model = False
 
-            if qcfg.format == FORMAT.GPTQ:
+            if format_code == FORMAT.GPTQ:
                 # validate sym=False v1 loading needs to be protected for models produced with new v2 format codebase
                 if not qcfg.sym and not qcfg.is_quantized_by_gptaq():
                     raise ValueError(
@@ -830,7 +870,7 @@ def ModelLoader(cls):
                 )
 
         if backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and (
-                preload_qlinear_kernel == ExllamaV2QuantLinear or qcfg.format == FORMAT.MARLIN):
+                preload_qlinear_kernel == ExllamaV2QuantLinear or format_code == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Marlin is currently not supported."
@@ -878,18 +918,21 @@ def ModelLoader(cls):
         # TODO: Why are we using this custom function and not dispatch_model?
         model = simple_dispatch_model(model, device_map)
 
-        qlinear_kernel = select_quant_linear(
-            bits=qcfg.bits,
-            dynamic=qcfg.dynamic,
-            group_size=qcfg.group_size,
-            desc_act=qcfg.desc_act,
-            sym=qcfg.sym,
-            backend=backend,
-            format=qcfg.format,
-            quant_method=qcfg.quant_method,
-            device=device,
-            pack_dtype=qcfg.pack_dtype,
-        )
+        if format_code == FORMAT.EXL3:
+            qlinear_kernel = ExllamaV3TorchLinear if backend == BACKEND.TORCH else ExllamaV3Linear
+        else:
+            qlinear_kernel = select_quant_linear(
+                bits=qcfg.runtime_bits,
+                dynamic=qcfg.dynamic,
+                group_size=qcfg.group_size,
+                desc_act=qcfg.desc_act,
+                sym=qcfg.sym,
+                backend=backend,
+                format=format_code,
+                quant_method=export_quant_method,
+                device=device,
+                pack_dtype=qcfg.pack_dtype,
+            )
 
         # == step4: set seqlen == #
         model_config = model.config.to_dict()
@@ -901,8 +944,9 @@ def ModelLoader(cls):
             log.warn("can't get model's sequence length from model config, will set to 4096.")
             model.seqlen = 4096
 
-        # Any post-initialization that require device information, for example buffers initialization on device.
-        model = gptqmodel_post_init(model, use_act_order=qcfg.desc_act, quantize_config=qcfg)
+        if format_code != FORMAT.EXL3:
+            # Any post-initialization that require device information, for example buffers initialization on device.
+            model = gptqmodel_post_init(model, use_act_order=qcfg.desc_act, quantize_config=qcfg)
 
         model.eval()
 

@@ -5,6 +5,7 @@ import unittest
 from glob import glob
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 from module_tree.test_subset import _StubAWQProcessor
@@ -13,29 +14,30 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization.config import (
     FORMAT,
     METHOD,
-    FailSafe,
-    FailSafeStrategy,
+    Fallback,
+    FallbackStrategy,
     QuantizeConfig,
     SmoothLog,
     SmoothMAD,
     SmoothPercentile,
     SmoothPercentileAsymmetric,
 )
-from gptqmodel.quantization.failsafe_smooth import smooth_block
+from gptqmodel.quantization.fallback_smooth import smooth_block
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.utils.failsafe import should_use_failsafe
+from gptqmodel.utils.fallback import should_use_fallback
 from gptqmodel.utils.pause_resume import PauseResumeController
 
 
 def test_smooth_mad_uses_sigma_normalized_window():
     torch.manual_seed(0)
 
-    # With sigma-normalized MAD, SmoothMAD(k=2.75) should clip only far-tail
-    # outliers instead of behaving like an approximately 1.85 sigma window.
+    # For Gaussian-like rows, SmoothMAD(k=2.75) should clip only far-tail
+    # outliers. Without sigma normalization, the same `k` clips near 1.85 sigma
+    # and removes several times more weights than intended.
     block = torch.randn(2048, 128)
     clipped, _ = smooth_block(
         block,
-        FailSafe(strategy=FailSafeStrategy.RTN, threshold=True, smooth=SmoothMAD(k=2.75)),
+        Fallback(strategy=FallbackStrategy.RTN, threshold=True, smooth=SmoothMAD(k=2.75)),
         group_size=128,
     )
 
@@ -69,7 +71,7 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         qcfg = QuantizeConfig(
             bits=4,
             group_size=128,
-            failsafe={"strategy": "rtn", "threshold": False},
+            fallback={"strategy": "rtn", "threshold": False},
         )
 
         # ============================================================
@@ -77,7 +79,7 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         # ============================================================
         gptq_h = GPTQ(linear, qcfg)
         gptq_h.quantizer.configure(perchannel=True)
-        gptq_h.failsafe = False
+        gptq_h.fallback = False
 
         # Accumulate Hessian via the public API
         gptq_h.add_batch(inp, None)
@@ -87,10 +89,10 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
         # ============================================================
         # RTN fallback (use_hessian = False)
         # ============================================================
-        qcfg.failsafe={"strategy": "rtn", "threshold": True}
+        qcfg.fallback={"strategy": "rtn", "threshold": True}
         gptq_r = GPTQ(linear, qcfg)
         gptq_r.quantizer.configure(perchannel=True)
-        gptq_r.failsafe = qcfg.failsafe
+        gptq_r.fallback = qcfg.fallback
 
         # IMPORTANT:
         # We intentionally do NOT call add_batch here,
@@ -191,17 +193,17 @@ class TestGPTQHessianSimilarity(unittest.TestCase):
 
 
 class TestFailsafeConfig(unittest.TestCase):
-    def test_failsafe_none_round_trip(self):
-        qcfg = QuantizeConfig(failsafe=None)
+    def test_fallback_none_round_trip(self):
+        qcfg = QuantizeConfig(fallback=None)
         payload = qcfg.to_dict()
 
-        self.assertIn("failsafe", payload.get("meta", {}))
-        self.assertIsNone(payload["meta"]["failsafe"])
+        self.assertIn("fallback", payload.get("meta", {}))
+        self.assertIsNone(payload["meta"]["fallback"])
 
         loaded = QuantizeConfig.from_quant_config(payload)
-        self.assertIsNone(loaded.failsafe)
+        self.assertIsNone(loaded.fallback)
 
-######## test_failsafe_awq.py ########
+######## test_fallback_awq.py ########
 
 def _dummy_prepare_dataset(
         *,
@@ -225,7 +227,7 @@ class _DummyProgressBar:
         return None
 
 
-def test_awq_failsafe_falls_back_to_rtn_when_no_activations(monkeypatch):
+def test_awq_fallback_falls_back_to_rtn_when_no_activations(monkeypatch):
     model = nn.Module()
     model.linear = nn.Linear(8, 8, bias=False)
 
@@ -234,7 +236,7 @@ def test_awq_failsafe_falls_back_to_rtn_when_no_activations(monkeypatch):
     qcfg = QuantizeConfig(
         bits=4,
         group_size=-1,
-        failsafe={"strategy": "rtn", "threshold": "1.0%"},
+        fallback={"strategy": "rtn", "threshold": "1.0%"},
         format=FORMAT.GEMM,
         quant_method=METHOD.AWQ,
     )
@@ -245,7 +247,7 @@ def test_awq_failsafe_falls_back_to_rtn_when_no_activations(monkeypatch):
     processor.pb = _DummyProgressBar()
 
     named = NamedModule(model.linear, name="linear", full_name="linear", layer_index=0)
-    processor.preprocess(named, failsafe=qcfg.failsafe)
+    processor.preprocess(named, fallback=qcfg.fallback)
 
     calls = {}
 
@@ -267,13 +269,13 @@ def test_awq_failsafe_falls_back_to_rtn_when_no_activations(monkeypatch):
     assert layer_state.quantized is True
     assert "wq" in named.state
 
-######### test_failsafe_strategies.py #############
+######### test_fallback_strategies.py #############
 
 
-def _failsafe_quantize(
+def _fallback_quantize(
         weights: torch.Tensor,
         group_size: int,
-        strategy: FailSafeStrategy,
+        strategy: FallbackStrategy,
         *,
         bits: int = 4,
         sym: bool = False,
@@ -288,12 +290,12 @@ def _failsafe_quantize(
         bits=bits,
         group_size=group_size,
         sym=sym,
-        failsafe=FailSafe(strategy=strategy, smooth=smooth),
+        fallback=Fallback(strategy=strategy, smooth=smooth),
         offload_to_disk=False,
     )
     gptq = GPTQ(module=module, qcfg=qcfg)
     gptq.quantizer.configure(perchannel=True)
-    dequant, *_ = gptq._failsafe_quantize(strategy, blocksize=group_size)
+    dequant, *_ = gptq._fallback_quantize(strategy, blocksize=group_size)
     return dequant
 
 
@@ -310,7 +312,7 @@ def _scenarios():
     }
 
 
-def _assert_failsafe_bounds(
+def _assert_fallback_bounds(
         label: str,
         weights: torch.Tensor,
         group_size: int,
@@ -360,20 +362,20 @@ def _assert_percentile_smoother_matches_reference(device: str) -> None:
     torch.manual_seed(0)
     block = torch.randn(64, 128, device=device, dtype=torch.float32)
 
-    percentile = FailSafe(smooth=SmoothPercentile(percentile=99.0))
+    percentile = Fallback(smooth=SmoothPercentile(percentile=99.0))
     percentile_out, _ = smooth_block(block, percentile, group_size=128)
     percentile_ref_threshold = torch.quantile(block.abs(), 0.99, dim=1, keepdim=True)
     percentile_ref = torch.clamp(block, -percentile_ref_threshold, percentile_ref_threshold)
     torch.testing.assert_close(percentile_out, percentile_ref, atol=1e-5, rtol=1e-5)
 
-    asym = FailSafe(smooth=SmoothPercentileAsymmetric(low=0.5, high=99.5))
+    asym = Fallback(smooth=SmoothPercentileAsymmetric(low=0.5, high=99.5))
     asym_out, _ = smooth_block(block, asym, group_size=128)
     asym_lo = torch.quantile(block, 0.005, dim=1, keepdim=True)
     asym_hi = torch.quantile(block, 0.995, dim=1, keepdim=True)
     asym_ref = torch.max(torch.min(block, asym_hi), asym_lo)
     torch.testing.assert_close(asym_out, asym_ref, atol=1e-5, rtol=1e-5)
 
-    log = FailSafe(smooth=SmoothLog(percentile=99.0, mu=8.0))
+    log = Fallback(smooth=SmoothLog(percentile=99.0, mu=8.0))
     log_out, _ = smooth_block(block, log, group_size=128)
     log_mu = math.log1p(8.0)
     log_vals = torch.log1p(block.abs() * 8.0) / log_mu
@@ -397,7 +399,7 @@ def test_midpoint_vs_rtn_across_distributions():
     rows = _collect_synthetic_rows(scenarios)
     for scenario_name, group_size, rtn_err, midpoint_err, mean_err, median_err, std_err, asym_err in rows:
         weights = scenarios[scenario_name]
-        _assert_failsafe_bounds(
+        _assert_fallback_bounds(
             scenario_name,
             weights,
             group_size,
@@ -448,15 +450,15 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
             pytest.skip(f"Tensor `{name}` not found in model shards at {model_dir}")
 
         for group_size in group_sizes:
-            rtn = _failsafe_quantize(w, group_size, FailSafeStrategy.RTN)
-            mid = _failsafe_quantize(w, group_size, FailSafeStrategy.MIDPOINT)
-            mean_c = _failsafe_quantize(w, group_size, FailSafeStrategy.MEAN)
-            median_c = _failsafe_quantize(w, group_size, FailSafeStrategy.MEDIAN)
-            std_c = _failsafe_quantize(w, group_size, FailSafeStrategy.STDCLIP)
-            asym_c = _failsafe_quantize(
+            rtn = _fallback_quantize(w, group_size, FallbackStrategy.RTN)
+            mid = _fallback_quantize(w, group_size, FallbackStrategy.MIDPOINT)
+            mean_c = _fallback_quantize(w, group_size, FallbackStrategy.MEAN)
+            median_c = _fallback_quantize(w, group_size, FallbackStrategy.MEDIAN)
+            std_c = _fallback_quantize(w, group_size, FallbackStrategy.STDCLIP)
+            asym_c = _fallback_quantize(
                 w,
                 group_size,
-                FailSafeStrategy.MIDPOINT,
+                FallbackStrategy.MIDPOINT,
                 smooth=SmoothPercentileAsymmetric(low=0.5, high=99.5),
             )
 
@@ -466,7 +468,7 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
             median_err = torch.mean((w - median_c).abs()).item()
             std_err = torch.mean((w - std_c).abs()).item()
             asym_err = torch.mean((w - asym_c).abs()).item()
-            _assert_failsafe_bounds(
+            _assert_fallback_bounds(
                 name,
                 w,
                 group_size,
@@ -479,11 +481,11 @@ def test_midpoint_vs_rtn_on_qwen3_real_weights():
             )
             rows.append((name, group_size, rtn_err, mid_err, mean_err, median_err, std_err, asym_err))
 
-            rtn_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.RTN, smooth=SmoothMAD())
-            mid_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.MIDPOINT, smooth=SmoothMAD())
-            mean_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.MEAN, smooth=SmoothMAD())
-            median_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.MEDIAN, smooth=SmoothMAD())
-            std_mad = _failsafe_quantize(w, group_size, FailSafeStrategy.STDCLIP, smooth=SmoothMAD())
+            rtn_mad = _fallback_quantize(w, group_size, FallbackStrategy.RTN, smooth=SmoothMAD())
+            mid_mad = _fallback_quantize(w, group_size, FallbackStrategy.MIDPOINT, smooth=SmoothMAD())
+            mean_mad = _fallback_quantize(w, group_size, FallbackStrategy.MEAN, smooth=SmoothMAD())
+            median_mad = _fallback_quantize(w, group_size, FallbackStrategy.MEDIAN, smooth=SmoothMAD())
+            std_mad = _fallback_quantize(w, group_size, FallbackStrategy.STDCLIP, smooth=SmoothMAD())
 
             rtn_mad_err = torch.mean((w - rtn_mad).abs()).item()
             mid_mad_err = torch.mean((w - mid_mad).abs()).item()
@@ -684,15 +686,15 @@ def _collect_synthetic_rows(scenarios=None):
     rows = []
     for scenario_name, weights in scenarios.items():
         for group_size in (16, 32, 64, 128):
-            rtn = _failsafe_quantize(weights, group_size, FailSafeStrategy.RTN)
-            midpoint = _failsafe_quantize(weights, group_size, FailSafeStrategy.MIDPOINT)
-            mean_centered = _failsafe_quantize(weights, group_size, FailSafeStrategy.MEAN)
-            median_centered = _failsafe_quantize(weights, group_size, FailSafeStrategy.MEDIAN)
-            std_clip = _failsafe_quantize(weights, group_size, FailSafeStrategy.STDCLIP)
-            asym_clip = _failsafe_quantize(
+            rtn = _fallback_quantize(weights, group_size, FallbackStrategy.RTN)
+            midpoint = _fallback_quantize(weights, group_size, FallbackStrategy.MIDPOINT)
+            mean_centered = _fallback_quantize(weights, group_size, FallbackStrategy.MEAN)
+            median_centered = _fallback_quantize(weights, group_size, FallbackStrategy.MEDIAN)
+            std_clip = _fallback_quantize(weights, group_size, FallbackStrategy.STDCLIP)
+            asym_clip = _fallback_quantize(
                 weights,
                 group_size,
-                FailSafeStrategy.MIDPOINT,
+                FallbackStrategy.MIDPOINT,
                 smooth=SmoothPercentileAsymmetric(low=0.5, high=99.5),
             )
 
@@ -707,27 +709,27 @@ def _collect_synthetic_rows(scenarios=None):
 
 
 
-######### test_failsafe_thresholds.py #############
+######### test_fallback_thresholds.py #############
 
 
-def test_should_use_failsafe_parses_numeric_and_percent():
-    assert should_use_failsafe(True, observed_samples=0, expected_total_samples=100)
-    assert not should_use_failsafe(True, observed_samples=1, expected_total_samples=100)
+def test_should_use_fallback_parses_numeric_and_percent():
+    assert should_use_fallback(True, observed_samples=0, expected_total_samples=100)
+    assert not should_use_fallback(True, observed_samples=1, expected_total_samples=100)
 
-    assert should_use_failsafe("10", observed_samples=5, expected_total_samples=100)
-    assert not should_use_failsafe("10", observed_samples=11, expected_total_samples=100)
+    assert should_use_fallback("10", observed_samples=5, expected_total_samples=100)
+    assert not should_use_fallback("10", observed_samples=11, expected_total_samples=100)
 
-    assert should_use_failsafe("10%", observed_samples=8, expected_total_samples=90)
-    assert should_use_failsafe("10%", observed_samples=10, expected_total_samples=200)
+    assert should_use_fallback("10%", observed_samples=8, expected_total_samples=90)
+    assert should_use_fallback("10%", observed_samples=10, expected_total_samples=200)
 
 
-def test_gptq_failsafe_threshold_triggers_rtn_when_samples_below_percent():
+def test_gptq_fallback_threshold_triggers_rtn_when_samples_below_percent():
     torch.manual_seed(0)
     layer = nn.Linear(8, 8, bias=False)
 
-    qcfg = QuantizeConfig(bits=4, group_size=4, failsafe="75%")
+    qcfg = QuantizeConfig(bits=4, group_size=4, fallback="75%")
     gptq = GPTQ(layer, qcfg)
-    gptq.failsafe = qcfg.failsafe
+    gptq.fallback = qcfg.fallback
     gptq.expected_nsamples = 4  # pretend we expected 4 token rows
     gptq.quantizer.configure(perchannel=True)
 
@@ -735,7 +737,8 @@ def test_gptq_failsafe_threshold_triggers_rtn_when_samples_below_percent():
     inp = torch.randn(1, 1, 8)
     gptq.add_batch(inp, None)
 
-    _, _, _, _, _, avg_loss, _, nsamples = gptq.quantize(blocksize=4)
+    Q, _, _, _, _, avg_loss, _, nsamples = gptq.quantize(blocksize=4)
 
     assert nsamples == 1
-    assert avg_loss == "failsafe(rtn): 0.0062505"
+    assert avg_loss.startswith("fallback(rtn): ")
+    assert (Q - layer.weight.data).abs().mean().item() == pytest.approx(0.0120230, abs=1e-7)

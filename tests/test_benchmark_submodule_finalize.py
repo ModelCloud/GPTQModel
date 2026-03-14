@@ -307,7 +307,7 @@ def _prepare_modules(processor, qcfg, device, module_count):
         named_module.target_device = device
         named_module.module.target_device = device
 
-        processor.preprocess(named_module, failsafe=None)
+        processor.preprocess(named_module, fallback=None)
         processor.process(named_module)
 
         base_model.to("cpu")

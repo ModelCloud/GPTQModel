@@ -563,6 +563,30 @@ def _env_enabled_any(names, default="1") -> bool:
 BUILD_MARLIN = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
 BUILD_MACHETE = _env_enabled(os.environ.get("GPTQMODEL_BUILD_MACHETE", "0"))
 BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
+BUILD_EXLLAMA_V3 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V3", "1"))
+
+EXLLAMAV3_SOURCES = [
+    "gptqmodel_ext/exllamav3/bindings.cpp",
+    "gptqmodel_ext/exllamav3/hadamard.cpp",
+    "gptqmodel_ext/exllamav3/hgemm.cu",
+    "gptqmodel_ext/exllamav3/libtorch/linear.cpp",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_1.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_2.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_3.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_4.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_5.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_6.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_7.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_8.cu",
+    "gptqmodel_ext/exllamav3/quant/exl3_devctx.cu",
+    "gptqmodel_ext/exllamav3/quant/exl3_gemm.cu",
+    "gptqmodel_ext/exllamav3/quant/exl3_kernel_map.cu",
+    "gptqmodel_ext/exllamav3/quant/hadamard.cu",
+    "gptqmodel_ext/exllamav3/quant/pack.cu",
+    "gptqmodel_ext/exllamav3/quant/quantize.cu",
+    "gptqmodel_ext/exllamav3/quant/reconstruct.cu",
+    "gptqmodel_ext/exllamav3/quant/util.cu",
+]
 BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
 BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
 
@@ -815,6 +839,16 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
+                if BUILD_EXLLAMA_V3:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_exllamav3_kernels",
+                            EXLLAMAV3_SOURCES,
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                            include_dirs=[str(Path("gptqmodel_ext/exllamav3").resolve())],
+                        )
+                    ]
             if BUILD_AWQ:
                 if ROCM_VERSION:
                     print("Skipping AWQ kernels on ROCm: inline PTX is CUDA-only.")

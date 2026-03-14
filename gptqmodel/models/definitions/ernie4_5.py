@@ -75,6 +75,34 @@ class Ernie4_5QModel(LlamaQModel):
                 output_hidden_states=None,
                 return_dict=False,
         ):
+            def _coerce_legacy_past_key_values(cache_like):
+                if cache_like is None:
+                    return tuple([None] * len(self.layers))
+
+                if isinstance(cache_like, tuple):
+                    return cache_like
+
+                if hasattr(cache_like, "__iter__"):
+                    legacy = []
+                    for layer_cache in cache_like:
+                        if layer_cache is None:
+                            legacy.append(None)
+                            continue
+                        if isinstance(layer_cache, (tuple, list)) and len(layer_cache) >= 2:
+                            if layer_cache[0] is None or layer_cache[1] is None:
+                                legacy.append(None)
+                            else:
+                                legacy.append((layer_cache[0], layer_cache[1]))
+                            continue
+                        legacy.append(None)
+
+                    if len(legacy) < len(self.layers):
+                        legacy.extend([None] * (len(self.layers) - len(legacy)))
+
+                    return tuple(legacy)
+
+                return cache_like
+
             use_cache = use_cache if use_cache is not None else self.config.use_cache
 
             # retrieve input_ids and inputs_embeds
@@ -91,8 +119,7 @@ class Ernie4_5QModel(LlamaQModel):
                     "You have to specify either decoder_input_ids or decoder_inputs_embeds"
                 )
 
-            if past_key_values is None:
-                past_key_values = tuple([None] * len(self.layers))
+            past_key_values = _coerce_legacy_past_key_values(past_key_values)
 
             if inputs_embeds is None:
                 inputs_embeds = self.embed_tokens(input_ids)
@@ -167,9 +194,8 @@ class Ernie4_5QModel(LlamaQModel):
                 attentions=all_self_attns,
             )
 
-        if not self.load_quantized_model:
-            ernie4_5_model = type(self.model.model)
-            ernie4_5_model.forward = ernie4_5_model_forward
+        ernie4_5_model = type(self.model.model)
+        ernie4_5_model.forward = ernie4_5_model_forward
 
-            ernie4_5_layer = type(self.model.model.layers[0])
-            ernie4_5_layer.forward = ernie4_5_decode_layer_forward
+        ernie4_5_layer = type(self.model.model.layers[0])
+        ernie4_5_layer.forward = ernie4_5_decode_layer_forward

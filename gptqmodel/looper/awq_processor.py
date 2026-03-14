@@ -27,10 +27,10 @@ from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear, LLMAwqQua
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.awq.utils.utils import get_best_device
-from ..quantization.config import FORMAT, METHOD, QuantizeConfig
+from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.ctx import ctx
 from ..utils.device import get_device
-from ..utils.failsafe import normalize_failsafe
+from ..utils.fallback import normalize_fallback
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.model import find_modules, get_module_by_name_prefix, move_to, create_quant_module, pack_module
 from ..utils.module_locks import parent_module_lock
@@ -94,7 +94,8 @@ class AWQProcessor(LoopProcessor):
         self.gptq_model = gptq_model
 
         model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
-        self.qlinear_kernel = model_kernel or self._select_qlinear_kernel_for_format(qcfg.format)
+        self.format = resolve_quant_format(qcfg.format, qcfg.method)
+        self.qlinear_kernel = model_kernel or self._select_qlinear_kernel_for_format(self.format)
 
         self.model = model
         # Whether to apply clipping to the model during quantization. Some models may perform better with this set to False.
@@ -103,8 +104,6 @@ class AWQProcessor(LoopProcessor):
         # " Adjust this parameter to increase or decrease memory usage for these computations."
         # " Default is 1GB (1024 * 1024 * 1024)."
         self.max_chunk_memory = 1024 * 1024 * 1024
-
-        self.format = qcfg.format
 
         # Whether to scale using both w/x or just x.
         self.duo_scaling = True
@@ -115,8 +114,8 @@ class AWQProcessor(LoopProcessor):
         self._rotary_source_id: Optional[int] = None
         self._initialize_sample_counts()
         self._module_forward_kwargs.setdefault("attention_mask", None)
-        # Preserve failsafe preference so AWQ can optionally fall back when no calibration data or activations are available.
-        self.failsafe = qcfg.failsafe
+        # Preserve fallback preference so AWQ can optionally fall back when no calibration data or activations are available.
+        self.fallback = qcfg.fallback
 
     def _get_root_rotary(self) -> Optional[nn.Module]:
         if self.gptq_model.rotary_embedding:
@@ -194,8 +193,8 @@ class AWQProcessor(LoopProcessor):
     def _resolve_qlinear_kernel(self, module_name: Optional[str] = None):
         # Honor per-module dynamic format overrides when present.
         format_override = self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
-        target_format = format_override or self.qcfg.format
-        if target_format == self.qcfg.format:
+        target_format = resolve_quant_format(format_override or self.qcfg.format, self.qcfg.method)
+        if target_format == self.format:
             model_kernel = getattr(self.gptq_model, "qlinear_kernel", None)
             if model_kernel is not None:
                 return model_kernel
@@ -308,7 +307,7 @@ class AWQProcessor(LoopProcessor):
         #         features[root] = tensors[0]
         return features
 
-    def _quantize_layer_failsafe(
+    def _quantize_layer_fallback(
         self,
         layer_index: int,
         state: _AWQLayerState,
@@ -416,12 +415,12 @@ class AWQProcessor(LoopProcessor):
 
         self._module_forward_kwargs = refreshed
 
-    def _should_failsafe_group(
+    def _should_fallback_group(
         self,
         layer_names: List[str],
         input_feat: Dict[str, torch.Tensor],
     ) -> bool:
-        from ..utils.failsafe import should_use_failsafe
+        from ..utils.fallback import should_use_fallback
 
         captured_tokens = 0
         for name in layer_names:
@@ -433,8 +432,8 @@ class AWQProcessor(LoopProcessor):
             captured_tokens += feat.numel() // max(hidden, 1)
 
         expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
-        return should_use_failsafe(
-            self.failsafe,
+        return should_use_fallback(
+            self.fallback,
             float(captured_tokens),
             float(expected_tokens) if expected_tokens else None,
         )
@@ -466,10 +465,10 @@ class AWQProcessor(LoopProcessor):
 
         input_feat = self._layer_input_features(state)
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
-        if missing and not self.failsafe:
+        if missing and not self.fallback:
             raise RuntimeError(
                 f"AWQProcessor error: missing activation features for modules {missing} "
-                f"with failsafe disabled."
+                f"with fallback disabled."
             )
 
         # Filtering MLP modules like Qwen3MoeSparseMoeBlock
@@ -521,7 +520,7 @@ class AWQProcessor(LoopProcessor):
 
         filtered_module_config: List[Dict] = []
         skipped_groups: List[Tuple[List[str], List[str]]] = []
-        failsafe_names = set()
+        fallback_names = set()
         for cfg in sanitized_module_config:
             layers_sample = cfg.get("layers") or []
             prev_module = cfg.get("prev_op")
@@ -530,8 +529,8 @@ class AWQProcessor(LoopProcessor):
                 get_op_name(layer_module_ref, layer) if isinstance(layer, torch.nn.Module) else str(layer)
                 for layer in layers_sample
             ]
-            if self.failsafe and self._should_failsafe_group(layer_names, input_feat):
-                failsafe_names.update(layer_names)
+            if self.fallback and self._should_fallback_group(layer_names, input_feat):
+                fallback_names.update(layer_names)
                 continue
 
             first_layer_module = layers_sample[0] if layers_sample else None
@@ -576,7 +575,7 @@ class AWQProcessor(LoopProcessor):
             )
 
         sanitized_module_config = filtered_module_config
-        if not sanitized_module_config and not failsafe_names:
+        if not sanitized_module_config and not fallback_names:
             log.warning(
                 "AWQProcessor: no valid scaling groups for layer %s after filtering; marking layer as quantized.",
                 layer_index,
@@ -662,7 +661,7 @@ class AWQProcessor(LoopProcessor):
         if self.apply_clip:
             clip_list = self._search_best_clip(
                 layer_module_ref,
-                {name: named.module for name, named in named_childs.items() if name not in failsafe_names},
+                {name: named.module for name, named in named_childs.items() if name not in fallback_names},
                 input_feat,
             )
             apply_clip(layer_module_ref, clip_list)
@@ -671,24 +670,24 @@ class AWQProcessor(LoopProcessor):
                 get_op_name(self.model, layer_module_ref) + ".",
             )
 
-        failsafe_named_childs = {
+        fallback_named_childs = {
             n: named_childs[n]
-            for n in failsafe_names
+            for n in fallback_names
             if n in named_childs
         }
 
-        named_childs = {name: named for name, named in named_childs.items() if name in input_feat and name not in failsafe_names}
+        named_childs = {name: named for name, named in named_childs.items() if name in input_feat and name not in fallback_names}
 
         self.apply_quant(named_childs, scales_list)
 
-        if failsafe_named_childs:
+        if fallback_named_childs:
             log.warning(
                 "AWQProcessor: layer %s fallback quant %d modules: %s",
                 layer_index,
-                len(failsafe_named_childs),
-                list(failsafe_named_childs)[:6],
+                len(fallback_named_childs),
+                list(fallback_named_childs)[:6],
             )
-            self.apply_quant(failsafe_named_childs, scales_list=[])
+            self.apply_quant(fallback_named_childs, scales_list=[])
 
         state.quantized = True
         state.modules.clear()
@@ -1185,9 +1184,9 @@ class AWQProcessor(LoopProcessor):
         effective_quant_batch_size = self._quant_batch_size if self._quant_batch_size and self._quant_batch_size > 0 else None
 
         if (
-                effective_quant_batch_size is None
-                or x.dim() == 0
-                or x.shape[0] <= effective_quant_batch_size
+            effective_quant_batch_size is None
+            or x.dim() == 0
+            or x.shape[0] <= effective_quant_batch_size
         ):
             module_output = module(x, **module_kwargs)
             if isinstance(module_output, tuple):
@@ -1353,10 +1352,10 @@ class AWQProcessor(LoopProcessor):
                 sanitized_kwargs[k] = v
         return sanitized_kwargs
 
-    def preprocess(self, module: NamedModule, failsafe=None, **kwargs):
+    def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         # Track the most recent preference so the processor can decide whether
         # to fall back to simple quantization when activations are missing.
-        self.failsafe = normalize_failsafe(failsafe, self.qcfg.failsafe)
+        self.fallback = normalize_fallback(fallback, self.qcfg.fallback)
         layer_state = self._get_layer_state(module.layer_index)
         with layer_state.lock:
             layer_state.modules[module.name] = module
@@ -1483,7 +1482,7 @@ class AWQProcessor(LoopProcessor):
                 create_quant_module(
                     name=module.full_name,
                     linear_cls=quant_linear_cls,
-                    bits=self.qcfg.bits,
+                    bits=self.qcfg.runtime_bits,
                     desc_act=self.qcfg.desc_act,
                     dynamic=self.qcfg.dynamic,
                     group_size=self.qcfg.group_size,
@@ -1493,6 +1492,7 @@ class AWQProcessor(LoopProcessor):
                     device=self.qcfg.device,
                     lm_head_name=self.gptq_model.lm_head,
                     pack_dtype=self.qcfg.pack_dtype,
+                    format=self.format,
                     register_buffers=False,
                 )
         if timer is not None and create_start is not None:
@@ -1536,7 +1536,7 @@ class AWQProcessor(LoopProcessor):
         # set quantized state
         model.quantized = True
 
-        model.quantize_config.quant_method = METHOD.AWQ
+        model.quantize_config.method = METHOD.AWQ
 
         super().finalize(model=model, **kwargs)
 

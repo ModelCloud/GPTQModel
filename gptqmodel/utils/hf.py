@@ -26,6 +26,33 @@ __all__ = ["no_init_weights"]
 
 log = setup_logger()
 
+def _resolve_input_embedding_weight_name(model: PreTrainedModel) -> Optional[str]:
+    get_input_embeddings = getattr(model, "get_input_embeddings", None)
+    if not callable(get_input_embeddings):
+        return None
+
+    try:
+        input_embeddings = get_input_embeddings()
+    except Exception:
+        return None
+
+    if input_embeddings is None:
+        return None
+
+    weight = getattr(input_embeddings, "weight", None)
+    if weight is None:
+        return None
+
+    for name, param in model.named_parameters(remove_duplicate=False):
+        if param is weight:
+            return name
+
+    for name, module in model.named_modules(remove_duplicate=False):
+        if module is input_embeddings:
+            return f"{name}.weight" if name else "weight"
+
+    return None
+
 
 # Older remote model files sometimes store `_tied_weights_keys` as a plain list
 # like `["lm_head.weight"]`. transformers 5.x now expects `{target: source}`,
@@ -34,20 +61,10 @@ def _resolve_legacy_tied_weights_mapping(model: PreTrainedModel, tied_mapping) -
     if not isinstance(tied_mapping, (list, tuple, set)):
         return {}
 
-    if not getattr(model.config, "tie_word_embeddings", False):
+    if not getattr(getattr(model, "config", None), "tie_word_embeddings", False):
         return {}
 
-    input_embeddings = model.get_input_embeddings()
-    input_weight = getattr(input_embeddings, "weight", None)
-    if input_weight is None:
-        return {}
-
-    source_name = None
-    for name, param in model.named_parameters(remove_duplicate=False):
-        if param is input_weight:
-            source_name = name
-            break
-
+    source_name = _resolve_input_embedding_weight_name(model)
     if source_name is None:
         return {}
 
@@ -114,10 +131,12 @@ def _patch_transformers_remote_code_compat() -> None:
                         expanded_tied_weights.update(submodel_tied_weights)
                 return expanded_tied_weights
 
-            if not getattr(self.config, "tie_word_embeddings", False):
+            if not getattr(getattr(self, "config", None), "tie_word_embeddings", False):
                 return {}
 
-            return _resolve_legacy_tied_weights_mapping(self, tied_mapping)
+            resolved_mapping = _resolve_legacy_tied_weights_mapping(self, tied_mapping)
+            self._tied_weights_keys = resolved_mapping
+            return resolved_mapping
 
         PreTrainedModel.get_expanded_tied_weights_keys = get_expanded_tied_weights_keys
         PreTrainedModel._gptqmodel_legacy_tied_weights_patch = True
@@ -141,6 +160,9 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
 
     config.rope_scaling = dict(rope_scaling)
     config.rope_scaling["type"] = rope_type
+
+
+_patch_transformers_remote_code_compat()
 
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False

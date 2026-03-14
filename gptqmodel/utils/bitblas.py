@@ -10,6 +10,7 @@ import torch
 
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
+from ..quantization.config import resolve_quant_format
 from ..utils.logger import setup_logger
 from .model import load_checkpoint_in_model_then_tie_weights
 from .safe import THREADPOOLCTL
@@ -30,7 +31,7 @@ def prepare_model_for_bitblas_load(
         load_checkpoint_in_model: bool,
 ):
     # The model (e.g. model.safetensors) is already serialized in the BitBLAS format, load it directly.
-    if qcfg.format == FORMAT.BITBLAS:
+    if resolve_quant_format(qcfg.format, qcfg.method) == FORMAT.BITBLAS:
         # if the checkpoint is already in bitblas format, we can load it directly.
         log.info(f"Loading a GPTQ model, detected BitBLAS serialized format at {model_save_name}.")
         model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=False)
@@ -99,7 +100,7 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
             # from checkpoints holding zero bias.
             with torch.device("meta"):
                 bitblas_module = BitBLASQuantLinear(
-                    bits=qcfg.bits,
+                    bits=qcfg.runtime_bits,
                     group_size=qcfg.group_size,
                     sym=sym,
                     desc_act=desc_act,

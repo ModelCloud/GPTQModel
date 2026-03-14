@@ -146,9 +146,17 @@ class TestKernelOutput(unittest.TestCase):
         for name, module in modules.items():
             if name == self.target:
                 data = self.data[dtype]
+                module_device = self._module_device(module)
                 for i in log.pb(self.random_input_sample_size).title("Forward Pass on Random Input"):
-                    assert data.x[i].dtype == dtype
-                    result.append(module(data.x[i]))
+                    sample = data.x[i]
+                    assert sample.dtype == dtype
+
+                    # Direct layer calls bypass accelerate's cross-device routing,
+                    # so align the synthetic input with the module's local device.
+                    if module_device is not None and sample.device != module_device:
+                        sample = sample.to(module_device)
+
+                    result.append(module(sample).detach().to(device="cpu", dtype=torch.float32))
                 break
 
         assert result is not None
@@ -158,6 +166,16 @@ class TestKernelOutput(unittest.TestCase):
         torch.cuda.empty_cache()
 
         return result
+
+    @staticmethod
+    def _module_device(module):
+        for tensor in module.parameters(recurse=False):
+            if tensor is not None and not tensor.is_meta:
+                return tensor.device
+        for tensor in module.buffers(recurse=False):
+            if tensor is not None and not tensor.is_meta:
+                return tensor.device
+        return None
 
     def _summarize_results(
         self,

@@ -5,6 +5,7 @@
 
 import math
 
+import pytest
 import torch
 
 from gptqmodel.looper.named_module import NamedModule
@@ -15,6 +16,13 @@ from gptqmodel.quantization.gptq import GPTQ
 
 def _noop_prepare_dataset(*, calibration_dataset, **_):
     return calibration_dataset
+
+
+@pytest.fixture(autouse=True)
+def _disable_device_smi(monkeypatch):
+    # These tests only exercise padding math and metadata propagation.
+    monkeypatch.setattr(TensorParallelWeightProcessor, "_init_device_smi_handles", lambda self: {})
+    monkeypatch.setattr(TensorParallelWeightProcessor, "_init_cpu_device_handle", lambda self: None)
 
 
 def test_tensorparallel_pre_padding_applies_zero_pad_metadata():

@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 import torch
 
 from .config import (
-    FailSafe,
+    Fallback,
     QuantizeConfig,
     SmoothLog,
     SmoothMAD,
@@ -23,7 +23,7 @@ from .config import (
 
 
 # For Gaussian-like rows, raw MAD ~= 0.67449 * sigma. Normalize MAD so the
-# configured `k` behaves like a sigma-width window instead of clipping more
+# configured `k` behaves like a sigma-width window instead of clipping far more
 # aggressively than intended.
 MAD_TO_STD_SCALE = 1.4826
 
@@ -53,12 +53,12 @@ def _clamp_block(block: torch.Tensor, lo: torch.Tensor, hi: torch.Tensor) -> tor
 
 def smooth_block(
     block: torch.Tensor,
-    failsafe: FailSafe,
+    fallback: Fallback,
     *,
     eps: float = 1e-8,
     group_size: Optional[int] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    method = getattr(failsafe, "smooth", None)
+    method = getattr(fallback, "smooth", None)
     if method is None:
         return block, None
     if group_size is not None and group_size < 0:

@@ -8,7 +8,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch as t  # conflict with torch.py
@@ -53,6 +53,7 @@ class BaseQuantLinear(nn.Module):
     SUPPORTS_DTYPES: List[t.dtype] = None
 
     REQUIRES_FORMAT_V2: bool = False
+    AUTOTUNE: bool = False
 
     def __init__(self,
                  bits: int,
@@ -89,6 +90,9 @@ class BaseQuantLinear(nn.Module):
         self.adapter =  copy.deepcopy(adapter)
 
         self.optimized = False
+        self.autotune_enabled = self.AUTOTUNE
+        self._autotune_complete = False
+        self._autotune_result: Any = None
 
         if self.pack_dtype == t.int8:
             self.pack_dtype_bits = 8
@@ -215,12 +219,34 @@ class BaseQuantLinear(nn.Module):
 
     # override me, to perform post-weight load to device init
     def post_init(self):
+        self.clear_autotune()
         if self.adapter is not None:
             self.adapter.post_init(
                 weight_key=self.name,
                 device=self.list_buffers()[0].device,
                 lora_A=getattr(self, "lora_A", None),
                 lora_B=getattr(self, "lora_B", None))
+
+    def clear_autotune(self):
+        self._autotune_complete = False
+        self._autotune_result = None
+
+    def get_autotune_result(self):
+        return self._autotune_result
+
+    def _autotune(self, *args, **kwargs):
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement `_autotune()`.")
+
+    def maybe_autotune(self, *args, **kwargs):
+        if not self.autotune_enabled or self.training:
+            return self._autotune_result
+
+        if self._autotune_complete:
+            return self._autotune_result
+
+        self._autotune_result = self._autotune(*args, **kwargs)
+        self._autotune_complete = True
+        return self._autotune_result
 
     @classmethod
     @lru_cache(maxsize=1024)
@@ -435,6 +461,7 @@ class BaseQuantLinear(nn.Module):
             pass
             # log.info(f"{self.__class__.__name__}: `{self.name}` switching to eval mode.")
 
+        self.clear_autotune()
         return super().train(mode)
 
 class PackableQuantLinear(BaseQuantLinear):

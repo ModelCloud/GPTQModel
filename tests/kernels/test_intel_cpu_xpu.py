@@ -42,6 +42,11 @@ def _xpu_available() -> bool:
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
+def _ensure_model_path_available(path: str):
+    if os.path.isabs(path) and not os.path.isdir(path):
+        raise unittest.SkipTest(f"Local model path missing: {path}")
+
+
 def _summarize_failures(failures):
     if not failures:
         return "-"
@@ -73,6 +78,7 @@ class TestKernelOutput(unittest.TestCase):
 
     @classmethod
     def setUp(self):
+        _ensure_model_path_available(self.model_path)
         self.torch_model = GPTQModel.load(self.model_path, backend=BACKEND.TORCH, device=self.device, dtype=self.dtype)
         self.x = []
         self.torch_kernel_outs = []
@@ -156,6 +162,7 @@ class TestTorchFusedAndHFKernelDevices(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        _ensure_model_path_available(cls.model_path)
         torch.manual_seed(0)
         cls.inputs = []
         for dim_0 in cls.m:

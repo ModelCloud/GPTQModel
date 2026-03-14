@@ -50,7 +50,17 @@ DEVICE_THREAD_POOL = DeviceThreadPool(
 
 from .models import GPTQModel, get_best_device
 from .models.auto import ASCII_LOGO
-from .quantization import BaseQuantizeConfig, GPTAQConfig, QuantizeConfig
+from .quantization import (
+    AWQQuantizeConfig,
+    BaseQuantizeConfig,
+    GGUFConfig,
+    GGUFQuantizeConfig,
+    GPTAQConfig,
+    GPTQQuantizeConfig,
+    QuantizeConfig,
+    RTNQuantizeConfig,
+    WeightOnlyConfig,
+)
 from .utils import BACKEND
 from .version import __version__
 

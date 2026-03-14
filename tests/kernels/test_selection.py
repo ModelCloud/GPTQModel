@@ -10,6 +10,9 @@ from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
+from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
+from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
+from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import AUTO_BACKEND_KERNEL_MAPPING, select_quant_linear
@@ -65,12 +68,20 @@ def _pick_group_size(cls):
     return group_sizes[0] if group_sizes else 128
 
 
+def _pick_bits(cls):
+    supported_bits = list(getattr(cls, "SUPPORTS_BITS", []))
+    for candidate in supported_bits:
+        if candidate in {2, 3, 4, 5, 6, 8}:
+            return candidate
+    return None
+
+
 def _force_auto_candidates_valid(monkeypatch, method, fmt):
     for cls in set(AUTO_BACKEND_KERNEL_MAPPING[method][fmt].values()):
         monkeypatch.setattr(
             cls,
-            "validate",
-            classmethod(lambda qlinear_cls, **kwargs: (True, None)),
+            "cached_validate_once",
+            classmethod(lambda qlinear_cls: (True, None)),
         )
 
 
@@ -92,7 +103,9 @@ def test_select_quant_linear_smoke(kernel_cls, method, fmt):
         pytest.skip(f"{kernel_cls.__name__} unavailable: {err}")
 
     pack_dtype = kernel_cls.SUPPORTS_PACK_DTYPES[0]
-    bits = kernel_cls.SUPPORTS_BITS[0]
+    bits = _pick_bits(kernel_cls)
+    if bits is None:
+        pytest.skip(f"No selector-compatible bit-width available for {kernel_cls.__name__}.")
     group_size = _pick_group_size(kernel_cls)
     desc_act = kernel_cls.SUPPORTS_DESC_ACT[0]
     sym = kernel_cls.SUPPORTS_SYM[0]
@@ -149,3 +162,181 @@ def test_cpu_auto_select_prioritizes_hf_kernel_for_awq(monkeypatch):
     )
 
     assert candidates[0] is HFKernelAwqLinear
+
+
+def test_cpu_auto_select_prioritizes_cpp_kernel_for_gguf(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert candidates[0] is GGUFCppKernel
+    assert GGUFTorchQuantLinear in candidates
+
+
+def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert candidates[0] is GGUFTritonKernel
+    assert candidates[1] is GGUFCudaKernel
+    assert candidates[2] is GGUFTorchQuantLinear
+
+
+def test_cpu_pack_auto_select_skips_cpp_kernel_for_gguf(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack=True,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert GGUFCppKernel not in candidates
+    assert candidates[0] is GGUFTorchQuantLinear
+
+
+def test_cuda_pack_auto_select_prioritizes_triton_for_gguf(monkeypatch):
+    _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack=True,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert candidates[0] is GGUFTritonKernel
+    assert GGUFCudaKernel not in candidates
+    assert GGUFTorchQuantLinear in candidates
+
+
+def test_explicit_gguf_cpu_backend_selects_cpp_kernel(monkeypatch):
+    monkeypatch.setattr(
+        GGUFCppKernel,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.GGUF_CPP_CPU,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is GGUFCppKernel
+
+
+def test_explicit_gguf_cuda_backend_selects_cuda_kernel(monkeypatch):
+    monkeypatch.setattr(
+        GGUFCudaKernel,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.GGUF_CPP_CUDA,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is GGUFCudaKernel
+
+
+def test_explicit_gguf_torch_backend_selects_torch_kernel():
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.GGUF_TORCH,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is GGUFTorchQuantLinear
+
+
+def test_explicit_gguf_triton_backend_selects_triton_kernel(monkeypatch):
+    monkeypatch.setattr(
+        GGUFTritonKernel,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.GGUF_TRITON,
+        format=FORMAT.GGUF,
+        quant_method=METHOD.GGUF,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is GGUFTritonKernel
+
+
+def test_gguf_does_not_accept_generic_torch_backend():
+    with pytest.raises(ValueError, match="Unsupported backend"):
+        select_quant_linear(
+            bits=4,
+            group_size=-1,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.CPU,
+            backend=BACKEND.TORCH,
+            format=FORMAT.GGUF,
+            quant_method=METHOD.GGUF,
+            pack_dtype=torch.int32,
+        )

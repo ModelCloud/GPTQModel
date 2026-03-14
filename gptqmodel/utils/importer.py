@@ -16,6 +16,7 @@ from gptqmodel.adapter.adapter import Adapter
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..quantization import FORMAT, METHOD
+from ..quantization.config import _normalize_quant_bits, quant_bits_width
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from . import BACKEND
@@ -30,6 +31,15 @@ ACCELERATE_OFFLOAD_TARGETS = {"disk", "meta"}
 
 message_logged = False
 log = setup_logger()
+
+
+def _supports_pack_api(cls: Type[BaseQuantLinear]) -> bool:
+    return (
+        issubclass(cls, PackableQuantLinear)
+        or (hasattr(cls, "pack") and callable(getattr(cls, "pack")))
+        or (hasattr(cls, "pack_block") and callable(getattr(cls, "pack_block")))
+    )
+
 
 def iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
     kernels = []
@@ -409,7 +419,7 @@ def hf_select_quant_linear_v2(
 
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
-        bits: int,
+        bits,
         group_size: int,
         desc_act: bool,
         sym: bool,
@@ -429,6 +439,10 @@ def select_quant_linear(
         format = FORMAT(format.lower())
     if isinstance(quant_method, str):
         quant_method = METHOD(quant_method.lower())
+    if isinstance(backend, str):
+        backend = BACKEND(backend.lower())
+
+    bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
 
     supported_formats = BACKEND_TO_METHOD_FORMAT_MAPPING.get(quant_method)
     if supported_formats is None:
@@ -467,10 +481,7 @@ def select_quant_linear(
                 log.info(f"skip {k} for {str(err)}")
             if validate:
                 if pack:
-                    check_pack_func = issubclass(cls, PackableQuantLinear) or (
-                        hasattr(cls, "pack_block") and callable(getattr(cls, "pack_block"))
-                    )
-                    if check_pack_func:
+                    if _supports_pack_api(cls):
                         #if not message_logged:
                         #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
                         #    message_logged = True
@@ -517,8 +528,13 @@ def select_quant_linear(
     log.info(f"{'Packing ' if pack else ''}Kernel: selected: `{qlinear.__name__}`")
     if not validate:
         raise ValueError(err)
-    else:
-        if multi_select:
-            return [qlinear]
-        else:
-            return qlinear
+
+    if pack:
+        if not _supports_pack_api(qlinear):
+            raise ValueError(
+                f"Selected backend `{backend}` with kernel `{qlinear.__name__}` cannot pack quantized weights for format `{format}`."
+            )
+
+    if multi_select:
+        return [qlinear]
+    return qlinear
