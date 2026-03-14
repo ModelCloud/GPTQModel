@@ -10,28 +10,22 @@ from parameterized import parameterized
 from tabulate import tabulate
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.bitblas import (
-    BITBLAS_AVAILABLE,
-    BitblasQuantLinear,
-    _bitblas_fallback_target,
-    _normalize_bitblas_target,
-    import_bitblas,
-)
+import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear, marlin_import_exception
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
-@pytest.mark.skipif(not BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_bitblas_forward_pass1():
-    import_bitblas()
+    bitblas_module.import_bitblas()
 
     device_index = int(os.environ.get("BITBLAS_TEST_DEVICE", 0))
     device = torch.device("cuda", device_index)
     torch.cuda.set_device(device_index)
 
-    layer = BitblasQuantLinear(
+    layer = bitblas_module.BitblasQuantLinear(
         bits=4,
         group_size=32,
         desc_act=False,
@@ -54,28 +48,27 @@ def test_bitblas_forward_pass1():
     assert torch.allclose(y, torch.zeros_like(y), atol=1e-4, rtol=1e-4)
 
 
-@pytest.mark.skipif(not BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_bitblas_target_normalization_preserves_supported_arch():
-    assert _normalize_bitblas_target("cuda -arch=sm_89") == "cuda -arch=sm_89"
+    assert bitblas_module._normalize_bitblas_target("cuda -arch=sm_89") == "cuda -arch=sm_89"
 
 
-@pytest.mark.skipif(not BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_bitblas_target_normalization_strips_supported_arch_suffix():
-    assert _normalize_bitblas_target("cuda -arch=sm_90a") == "cuda -arch=sm_90"
+    assert bitblas_module._normalize_bitblas_target("cuda -arch=sm_90a") == "cuda -arch=sm_90"
 
 
-@pytest.mark.skipif(not BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_bitblas_target_normalization_falls_back_for_future_arch():
-    assert _normalize_bitblas_target("cuda -arch=sm_120") == _bitblas_fallback_target()
+    assert bitblas_module._normalize_bitblas_target("cuda -arch=sm_120") == bitblas_module._bitblas_fallback_target()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
-@pytest.mark.skipif(not BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_bitblas_forward_pass_future_target_fallback():
-    import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
     from bitblas.cache import global_operator_cache
 
-    import_bitblas()
+    bitblas_module.import_bitblas()
 
     device_index = int(os.environ.get("BITBLAS_TEST_DEVICE", 0))
     device = torch.device("cuda", device_index)
@@ -90,7 +83,7 @@ def test_bitblas_forward_pass_future_target_fallback():
             bitblas_module.BITBLAS_TARGET = "cuda -arch=sm_120"
             bitblas_module.BITBLAS_DATABASE_PATH = tmpdir
 
-            layer = BitblasQuantLinear(
+            layer = bitblas_module.BitblasQuantLinear(
                 bits=4,
                 group_size=32,
                 desc_act=False,
@@ -111,7 +104,7 @@ def test_bitblas_forward_pass_future_target_fallback():
 
             assert y.shape == (2, 48)
             assert torch.allclose(y, torch.zeros_like(y), atol=1e-4, rtol=1e-4)
-            assert layer.bitblas_matmul.target.arch == _bitblas_fallback_target().removeprefix("cuda -arch=")
+            assert layer.bitblas_matmul.target.arch == bitblas_module._bitblas_fallback_target().removeprefix("cuda -arch=")
         finally:
             bitblas_module.BITBLAS_TARGET = original_target
             bitblas_module.BITBLAS_DATABASE_PATH = original_database_path
@@ -119,9 +112,9 @@ def test_bitblas_forward_pass_future_target_fallback():
 
 ######### test_bitblas_gptq_v2.py #########
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
-@pytest.mark.skipif(not BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_bitblas_forward_pass2():
-    import_bitblas()
+    bitblas_module.import_bitblas()
 
     device_index = int(os.environ.get("BITBLAS_TEST_DEVICE", 0))
     torch.cuda.set_device(device_index)
@@ -244,7 +237,7 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
     torch_linear.pack_block(linear, scales.T, zeros.T, g_idx=g_idx.to(torch.int32))
     torch_linear.post_init()
 
-    bitblas_linear = BitblasQuantLinear(
+    bitblas_linear = bitblas_module.BitblasQuantLinear(
         bits=bits,
         group_size=group_size,
         desc_act=False,
