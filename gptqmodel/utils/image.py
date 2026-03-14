@@ -28,7 +28,13 @@ def extract_vision_info(conversations: list[dict] | list[list[dict]]) -> list[di
     return vision_infos
 
 
-def fetch_image(ele: dict[str, str | Image.Image]) -> Image.Image:
+def fetch_image(
+    ele: dict[str, str | Image.Image],
+    image_patch_size: int | None = None,
+) -> Image.Image:
+    # Some multimodal model adapters forward image-related kwargs here even
+    # though local image loading does not need them.
+    del image_patch_size
     if "image" in ele:
         image = ele["image"]
     else:

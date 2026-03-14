@@ -3,8 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import os
+import unittest
+from importlib.metadata import PackageNotFoundError, version
 
 import soundfile as sf
+from packaging.version import Version
 from model_test import ModelTest
 
 from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
@@ -22,6 +25,28 @@ class TestQwen2_5_Omni(ModelTest):
     }
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+
+        required = {
+            "audioread": Version("3.1.0"),
+            "librosa": Version("0.11.1"),
+            "av": Version("16.0.1"),
+        }
+        for pkg, minimum in required.items():
+            try:
+                installed = Version(version(pkg))
+            except PackageNotFoundError:
+                raise unittest.SkipTest(
+                    f"Qwen2.5 Omni requires {pkg}>={minimum}"
+                )
+
+            if installed < minimum:
+                raise unittest.SkipTest(
+                    f"Qwen2.5 Omni requires {pkg}>={minimum}, found {installed}"
+                )
 
     def test_qwen2_5_omni(self):
         model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
@@ -68,7 +93,14 @@ class TestQwen2_5_Omni(ModelTest):
 
         # Inference: Generation of the output (text and audio)
         audio_file_name = 'output_gptq.wav'
-        generated_ids, audio = model.generate(**inputs, max_new_tokens=128, return_audio = True)
+        generated_ids, audio = self.generate_stable_with_limit(
+            model,
+            processor,
+            inputs=inputs,
+            max_new_tokens=128,
+            return_generate_output=True,
+            return_audio=True,
+        )
         sf.write(
             audio_file_name,
             audio.reshape(-1).detach().cpu().numpy(),

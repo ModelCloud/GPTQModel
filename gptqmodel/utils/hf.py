@@ -26,9 +26,6 @@ __all__ = ["no_init_weights"]
 
 log = setup_logger()
 
-_ORIGINAL_GET_EXPANDED_TIED_WEIGHTS_KEYS = PreTrainedModel.get_expanded_tied_weights_keys
-
-
 def _resolve_input_embedding_weight_name(model: PreTrainedModel) -> Optional[str]:
     get_input_embeddings = getattr(model, "get_input_embeddings", None)
     if not callable(get_input_embeddings):
@@ -46,45 +43,126 @@ def _resolve_input_embedding_weight_name(model: PreTrainedModel) -> Optional[str
     if weight is None:
         return None
 
-    for name, param in model.named_parameters():
+    for name, param in model.named_parameters(remove_duplicate=False):
         if param is weight:
             return name
 
-    for name, module in model.named_modules():
+    for name, module in model.named_modules(remove_duplicate=False):
         if module is input_embeddings:
             return f"{name}.weight" if name else "weight"
 
     return None
 
 
-def _legacy_tied_weights_mapping(model: PreTrainedModel) -> Optional[dict[str, str]]:
-    tied_keys = getattr(model, "_tied_weights_keys", None)
-    if not isinstance(tied_keys, (list, tuple, set)):
-        return None
+# Older remote model files sometimes store `_tied_weights_keys` as a plain list
+# like `["lm_head.weight"]`. transformers 5.x now expects `{target: source}`,
+# and otherwise later save/load helpers fail with `'list' object has no attribute 'keys'`.
+def _resolve_legacy_tied_weights_mapping(model: PreTrainedModel, tied_mapping) -> dict[str, str]:
+    if not isinstance(tied_mapping, (list, tuple, set)):
+        return {}
 
     if not getattr(getattr(model, "config", None), "tie_word_embeddings", False):
         return {}
 
-    input_weight_name = _resolve_input_embedding_weight_name(model)
-    if input_weight_name is None:
+    source_name = _resolve_input_embedding_weight_name(model)
+    if source_name is None:
         return {}
 
-    return {str(name): input_weight_name for name in tied_keys}
+    return {
+        # Legacy list entries only name the tied target, so resolve them back
+        # to the input embedding weight name expected by transformers 5.x.
+        target_name: source_name
+        for target_name in tied_mapping
+        if isinstance(target_name, str) and target_name != source_name
+    }
 
 
-def _compat_get_expanded_tied_weights_keys(self, all_submodels: bool = False) -> dict:
-    if not all_submodels:
-        legacy_mapping = _legacy_tied_weights_mapping(self)
-        if legacy_mapping is not None:
-            # Newer transformers expects a mapping in multiple code paths, including save_pretrained().
-            self._tied_weights_keys = legacy_mapping
-            return legacy_mapping
+# Rewrite legacy list-based `_tied_weights_keys` in-place so transformers 5.x
+# save/load code stops crashing on older trust_remote_code models that still use
+# the pre-5.x list format.
+def _normalize_legacy_tied_weights_keys(model: PreTrainedModel) -> None:
+    for _name, submodule in model.named_modules(remove_duplicate=False):
+        tied_mapping = getattr(submodule, "_tied_weights_keys", None)
+        if not isinstance(tied_mapping, (list, tuple, set)):
+            continue
 
-    return _ORIGINAL_GET_EXPANDED_TIED_WEIGHTS_KEYS(self, all_submodels=all_submodels)
+        if isinstance(submodule, PreTrainedModel):
+            submodule._tied_weights_keys = _resolve_legacy_tied_weights_mapping(submodule, tied_mapping)
+        else:
+            submodule._tied_weights_keys = {}
 
 
-if PreTrainedModel.get_expanded_tied_weights_keys is not _compat_get_expanded_tied_weights_keys:
-    PreTrainedModel.get_expanded_tied_weights_keys = _compat_get_expanded_tied_weights_keys
+# Bridge a few transformers 5.x API changes so older trust_remote_code model
+# files still import and initialize without editing the cached remote source.
+def _patch_transformers_remote_code_compat() -> None:
+    try:
+        from transformers.utils import import_utils
+    except Exception:
+        return
+
+    if not hasattr(import_utils, "is_torch_fx_available"):
+        # transformers 5.x removed `import_utils.is_torch_fx_available`, but
+        # older remote model files still import it during module import.
+        def is_torch_fx_available() -> bool:
+            return hasattr(torch, "fx")
+
+        import_utils.is_torch_fx_available = is_torch_fx_available
+
+    if not getattr(PreTrainedModel, "_gptqmodel_legacy_tied_weights_patch", False):
+        original_get_expanded_tied_weights_keys = PreTrainedModel.get_expanded_tied_weights_keys
+
+        def get_expanded_tied_weights_keys(self, all_submodels: bool = False) -> dict:
+            # transformers 5.x expects `_tied_weights_keys` to be a dict, while
+            # older trust_remote_code models still declare `["lm_head.weight"]`.
+            # Handle the legacy form here so HF tied-weight expansion still works.
+            tied_mapping = getattr(self, "_tied_weights_keys", None)
+            if not isinstance(tied_mapping, (list, tuple, set)):
+                return original_get_expanded_tied_weights_keys(self, all_submodels=all_submodels)
+
+            if all_submodels:
+                expanded_tied_weights = {}
+                for prefix, submodule in self.named_modules(remove_duplicate=False):
+                    if isinstance(submodule, PreTrainedModel):
+                        submodel_tied_weights = submodule.get_expanded_tied_weights_keys(all_submodels=False)
+                        if prefix != "":
+                            submodel_tied_weights = {
+                                f"{prefix}.{k}": f"{prefix}.{v}" for k, v in submodel_tied_weights.items()
+                            }
+                        expanded_tied_weights.update(submodel_tied_weights)
+                return expanded_tied_weights
+
+            if not getattr(getattr(self, "config", None), "tie_word_embeddings", False):
+                return {}
+
+            resolved_mapping = _resolve_legacy_tied_weights_mapping(self, tied_mapping)
+            self._tied_weights_keys = resolved_mapping
+            return resolved_mapping
+
+        PreTrainedModel.get_expanded_tied_weights_keys = get_expanded_tied_weights_keys
+        PreTrainedModel._gptqmodel_legacy_tied_weights_patch = True
+
+
+# Restore the pre-transformers-5 RoPE config shape expected by older MiniCPM
+# remote code before HF instantiates the architecture from config.
+def _normalize_remote_code_config_compat(config: Any) -> None:
+    # transformers 5.x normalizes RoPE config to `rope_type`, but older
+    # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if not isinstance(rope_scaling, dict) or "type" in rope_scaling:
+        return
+
+    rope_type = rope_scaling.get("rope_type")
+    factor = rope_scaling.get("factor")
+
+    if rope_type in (None, "default") and factor is None:
+        config.rope_scaling = None
+        return
+
+    config.rope_scaling = dict(rope_scaling)
+    config.rope_scaling["type"] = rope_type
+
+
+_patch_transformers_remote_code_compat()
 
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False
@@ -214,6 +292,10 @@ def build_shell_model(
     del init_kwargs["_fast_init"]
     # All nn.Parameters and buffers are created
 
+    if trust_remote_code:
+        _patch_transformers_remote_code_compat()
+        _normalize_remote_code_config_compat(config)
+
     # All nn.Parameters and buffers are created on 'meta' and initializers are skipped.
     pb = log.spinner(title="Model loading...", interval=0.1)
     try:
@@ -226,5 +308,8 @@ def build_shell_model(
             )
     finally:
         pb.close()
+
+    if trust_remote_code and isinstance(shell, PreTrainedModel):
+        _normalize_legacy_tied_weights_keys(shell)
 
     return shell

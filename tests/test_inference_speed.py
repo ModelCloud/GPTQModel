@@ -11,6 +11,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 from inference_speed import InferenceSpeed  # noqa: E402
 from parameterized import parameterized  # noqa: E402
+import pytest  # noqa: E402
 
 from gptqmodel.utils import BACKEND  # noqa: E402
 
@@ -22,13 +23,14 @@ GPU: 4090
 
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 748),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.CUDA, 493),
-(InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 717),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 775),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 296),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 295),
 (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1474),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.IPEX, 48),
 '''
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 class TestInferenceSpeed(InferenceSpeed):
 
@@ -38,7 +40,6 @@ class TestInferenceSpeed(InferenceSpeed):
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 286.74, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 176.00, False, False),
             # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 53, False, False),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V1, 282.64, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 290.60, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 239.58, False, False),
             (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 2167.38, False, False), # Second time running bitblas, there is cache

@@ -10,6 +10,7 @@ import os
 import tempfile
 import unittest
 
+import pytest
 import torch
 from datasets import load_dataset
 from parameterized import parameterized
@@ -33,6 +34,7 @@ from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 
 
 log = LogBar.shared()
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestAwq(unittest.TestCase):
@@ -150,8 +152,12 @@ class TestAwq(unittest.TestCase):
 
         self.assert_awq_linear(model, backend)
 
-        tokens = model.generate("Capital of France is", max_new_tokens=100)[0]
-        result = model.tokenizer.decode(tokens)
+        result = ModelTest.generate_stable_with_limit(
+            model,
+            self.tokenizer,
+            "The capital city of France is named",
+            max_new_tokens=100,
+        )
         print(f"BACKEND: {backend}, Result: {result}")
         if "paris" not in result.lower() and "city" not in result.lower():
             raise AssertionError(" `paris` not found in `result`")
@@ -189,8 +195,12 @@ class TestInferenceOnly(unittest.TestCase):
             device="cuda"
         )
 
-        tokens = model.generate("Capital of France is", max_new_tokens=64)[0]
-        result = model.tokenizer.decode(tokens)
+        result = ModelTest.generate_stable_with_limit(
+            model,
+            model.tokenizer,
+            "The capital city of France is named",
+            max_new_tokens=64,
+        )
         if "paris" not in result.lower() and "city" not in result.lower():
             raise AssertionError(" `paris` not found in `result`")
 
@@ -203,9 +213,12 @@ class TestInferenceOnly(unittest.TestCase):
             device="cuda"
         )
 
-        tokens = model.generate("Capital of France is",
-                                max_new_tokens=512)[0]
-        result = model.tokenizer.decode(tokens)
+        result = ModelTest.generate_stable_with_limit(
+            model,
+            model.tokenizer,
+            "The capital city of France is named",
+            max_new_tokens=512,
+        )
         print("result", result)
         if "paris" not in result.lower() and "city" not in result.lower() and "food" not in result.lower() and "market" not in result.lower() and "country" not in result.lower():
             raise AssertionError(" `paris` not found in `result`")
@@ -247,9 +260,6 @@ class TestQwen3_8B_Base_awq(ModelTest):
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
     QUANT_BATCH_SIZE = 1
-    EVAL_BATCH_SIZE = 64
-    SAVE_PATH = "QWEN3-8B-AWQ"
-    # DATASET_SIZE = 1
 
     def test_qwen3_8b_base_awq(self):
         self.quant_lm_eval()

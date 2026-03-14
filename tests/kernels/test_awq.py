@@ -34,7 +34,6 @@ except Exception as exc:  # pragma: no cover - triton import may fail in CI
     AwqGEMMTritonQuantLinear = None  # type: ignore[assignment]
     awq_triton_import_exception = exc
 
-from gptqmodel.nn_modules.qlinear.exllama_awq import AwqExllamaQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2QuantLinear
 from gptqmodel.utils.exllamav2 import ScratchSpace
 
@@ -72,7 +71,6 @@ class TestAwqKernelOutput(unittest.TestCase):
         (BACKEND.MARLIN, torch.float16, 0.006),
         (BACKEND.TORCH_FUSED_AWQ, torch.float16, 0.004),
         # (BACKEND.MARLIN, torch.bfloat16, 0.05),
-        (BACKEND.EXLLAMA_V1, torch.float16, 0.006),
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
     ]
 
@@ -87,7 +85,6 @@ class TestAwqKernelOutput(unittest.TestCase):
             cls.backend_skip_reason[BACKEND.GEMM] = "CUDA is required for GEMM backend."
             cls.backend_skip_reason[BACKEND.TRITON] = "CUDA is required for AWQ Triton backend."
             cls.backend_skip_reason[BACKEND.MARLIN] = "CUDA is required for AWQ Marlin kernel."
-            cls.backend_skip_reason[BACKEND.EXLLAMA_V1] = "CUDA is required for ExLlama v1 AWQ kernel."
             cls.backend_skip_reason[BACKEND.EXLLAMA_V2] = "CUDA is required for ExLlama v2 AWQ kernel."
         if awq_triton_import_exception is not None:
             cls.backend_skip_reason[BACKEND.TRITON] = (
@@ -137,12 +134,6 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         cls.modules[BACKEND.MARLIN] = (
             cls._build_marlin_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
-            if cls.cuda_available
-            else None
-        )
-
-        cls.modules[BACKEND.EXLLAMA_V1] = (
-            cls._build_exllama_v1_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
             if cls.cuda_available
             else None
         )
@@ -349,41 +340,6 @@ class TestAwqKernelOutput(unittest.TestCase):
         module.eval()
         module.post_init()
         return module
-
-    @classmethod
-    def _build_exllama_v1_module(
-        cls,
-        qweight_cpu: torch.Tensor,
-        qzeros_cpu: torch.Tensor,
-        scales_cpu: torch.Tensor,
-        bias_cpu: torch.Tensor,
-    ) -> Optional[AwqExllamaQuantLinear]:
-        try:
-            module = AwqExllamaQuantLinear(
-                bits=cls.BITS,
-                group_size=cls.GROUP_SIZE,
-                sym=True,
-                desc_act=False,
-                in_features=cls.in_features,
-                out_features=cls.out_features,
-                bias=True,
-                adapter=None,
-                register_buffers=True,
-            ).to(cls.device)
-
-            module.qweight.copy_(qweight_cpu.to(cls.device))
-            module.qzeros.copy_(qzeros_cpu.to(cls.device))
-            module.scales.copy_(scales_cpu.to(torch.float16).to(cls.device))
-            module.bias.copy_(bias_cpu.to(torch.float16).to(cls.device))
-
-            module.eval()
-            module.post_init()
-            return module
-        except Exception as exc:
-            cls.backend_skip_reason[BACKEND.EXLLAMA_V1] = (
-                f"ExLlama v1 AWQ kernel unavailable: {exc}"
-            )
-            return None
 
     @classmethod
     def _build_exllama_v2_module(

@@ -15,7 +15,8 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import unittest  # noqa: E402
 
 import torch  # noqa: E402
-from test_q4_exllama_v1 import REFERENCE, get_diff  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
+from test_q4_reference import REFERENCE, get_diff  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
@@ -97,11 +98,14 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         model_q = GPTQModel.load(model_id, device="cuda:0")
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        inp = tokenizer(prompt, return_tensors="pt").to(device)
-
-        res = model_q.generate(**inp, num_beams=1, do_sample=False, min_new_tokens=60, max_new_tokens=60)
-
-        predicted_text = tokenizer.decode(res[0])
+        predicted_text = ModelTest.generate_stable_with_limit(
+            model_q,
+            tokenizer,
+            prompt,
+            min_new_tokens=60,
+            max_new_tokens=60,
+            skip_special_tokens=False,
+        )
 
         self.assertEqual(predicted_text[:GENERATE_EVAL_SIZE], reference_output[:GENERATE_EVAL_SIZE])
 
@@ -120,11 +124,14 @@ class TestsQ4ExllamaV2(unittest.TestCase):
         )
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        inp = tokenizer(prompt, return_tensors="pt").to(device)
-
-        res = model_q.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
-
-        predicted_text = tokenizer.decode(res[0])
+        predicted_text = ModelTest.generate_stable_with_limit(
+            model_q,
+            tokenizer,
+            prompt,
+            min_new_tokens=60,
+            max_new_tokens=60,
+            skip_special_tokens=False,
+        )
 
         print("predicted_text", predicted_text)
         assert "paris" in predicted_text.lower() or "city" in predicted_text.lower()

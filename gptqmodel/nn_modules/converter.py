@@ -9,18 +9,26 @@ def convert_gpt_oss_expert_converter(module, config):
     import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_modeling
     from transformers.integrations.hub_kernels import use_kernel_forward_from_hub
 
-    from ..models.definitions.gpt_oss import GptOssExpertsNew
+    from ..models.definitions.gpt_oss import GptOssExpertsNew, GptOssTopKRouterNew
 
     @use_kernel_forward_from_hub("MegaBlocksMoeMLP")
     class GptOssMLPNew(nn.Module):
         def __init__(self, config, ori_mlp=None):
             super().__init__()
-            self.router = ori_mlp.router
+            self.router = GptOssTopKRouterNew(config, ori_mlp.router)
             experts_new = GptOssExpertsNew(config, ori_mlp.experts)
             self.experts = experts_new
 
         def forward(self, hidden_states):
-            router_scores, router_indices = self.router(hidden_states)  # (num_experts, seq_len)
+            router_output = self.router(hidden_states)
+            if isinstance(router_output, tuple) and len(router_output) == 3:
+                _, router_scores, router_indices = router_output
+            elif isinstance(router_output, tuple) and len(router_output) == 2:
+                router_scores, router_indices = router_output
+            else:
+                raise ValueError(
+                    f"Unexpected GPT-OSS router output during conversion: {type(router_output).__name__}"
+                )
             routed_out = self.experts(hidden_states, router_indices=router_indices, routing_weights=router_scores)
             return routed_out, router_scores
 

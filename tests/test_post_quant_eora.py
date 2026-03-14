@@ -23,6 +23,7 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
+import pytest  # noqa: E402
 from datasets import load_dataset
 from models.model_test import ModelTest  # noqa: E402
 
@@ -30,6 +31,8 @@ from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
@@ -44,8 +47,12 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
     if backend == BACKEND.TORCH:
         model.optimize()
 
-    tokens = model.generate("Capital of France is")[0]
-    result = model.tokenizer.decode(tokens)
+    result = ModelTest.generate_stable_with_limit(
+        model,
+        model.tokenizer,
+        "The capital city of France is named",
+        max_new_tokens=128,
+    )
     print(f"BACKEND: {backend}, Result: {result}")
     if "paris" not in result.lower():
         raise AssertionError(" `paris` not found in `result`")
@@ -100,7 +107,6 @@ class TestEoraPostQuant(ModelTest):
                 calibration_dataset_concat_size=calibration_dataset_concat_size,
             )
 
-            # BACKEND.EXLLAMA_V2, BACKEND.EXLLAMA_V1, BACKEND.TRITON, BACKEND.CUDA,
             # for backend in [BACKEND.MARLIN]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
             #     base_bench = bench(path=self.QUANTIZED_MODEL_PATH, backend=backend, adapter=None)  # inference using qweights only
             #     eora_bench = bench(path=self.QUANTIZED_MODEL_PATH, backend=backend, adapter=eora)  # inference using eora (lora)

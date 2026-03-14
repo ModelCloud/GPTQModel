@@ -518,7 +518,7 @@ jobs:
           uv pip uninstall gptqmodel
           # make sure torch & torchvision are corresponded
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
-          uv pip install -r requirements.txt
+          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
 
           if [[ "${{ matrix.test_script }}" == *xpu* ]]; then
             echo "===== switching to xpu env ====="
@@ -533,7 +533,7 @@ jobs:
             echo "===== install with local files for xpu env ====="
             export CUDA_VISIBLE_DEVICES=""
             unset TORCH_CUDA_ARCH_LIST
-            uv pip install . --no-build-isolation
+            uv pip install . --no-build-isolation -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           fi
 
           # deps may reinstalled torch
@@ -562,6 +562,11 @@ jobs:
           runner_q=$(urlencode "$RUNNER")
           exclusive_q=$(urlencode "$EXCLUSIVE")
           
+          count=1
+          if [[ "${{ matrix.test_script }}" == *test_multi_gpu_inference* ]]; then
+            count=5
+          fi
+          
           start_s=$(date +%s)
           gpu_id=""
           
@@ -571,7 +576,7 @@ jobs:
           while true; do
             # Refresh timestamp every request to avoid cache or duplicated requests
             ts_ms=$(date +%s%3N)
-            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&exclusive=$exclusive_q"
+            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&exclusive=$exclusive_q&count=$count"
             echo "requesting GPU with: $url"
           
             # Call allocator
@@ -592,7 +597,7 @@ jobs:
             resp="${resp//$'\n'/}"
           
             # If response is empty or not an integer, treat as temporary error
-            if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+$ ]]; then
+            if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+(,-?[0-9]+)*$ ]]; then
               echo "Allocator returned invalid response: '$resp' (temporary error)"
               curl -fsSL "$BASE_URL/gpu/status" || true
               sleep "$SLEEP_SEC"
@@ -690,8 +695,9 @@ jobs:
         run: |
           log_dir=/opt/dist/${{ github.run_id }}/logs
           log_file=$log_dir/${{ matrix.test_script }}.log
-      
-          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
+          
+          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
+          exit 1
 
       - name: Release GPU
         if: always() && !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu')

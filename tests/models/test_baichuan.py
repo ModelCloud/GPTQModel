@@ -12,6 +12,7 @@ class TestBaiChuan(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.4317
     MODEL_MAX_LEN = 4096
     TRUST_REMOTE_CODE = True
+    USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 6
 
     def test_baichuan(self):

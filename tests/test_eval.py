@@ -14,6 +14,7 @@ from typing import (
     Union,  # noqa: E402
 )
 
+import pytest  # noqa: E402
 from lm_eval.tasks import TaskManager  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
@@ -21,12 +22,14 @@ from parameterized import parameterized  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 
+pytestmark = [pytest.mark.model, pytest.mark.slow]
+
 
 class TestEval(ModelTest):
     @classmethod
-    def setUpClass(self):
-        self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
-        self.model = GPTQModel.load(self.MODEL_ID)
+    def setUpClass(cls):
+        cls.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
+        cls.model = GPTQModel.load(cls.MODEL_ID)
 
     @parameterized.expand(
         [
@@ -38,6 +41,12 @@ class TestEval(ModelTest):
         ]
     )
     def test_eval_gptqmodel(self, framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS]], task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], llm_backend: str):
+        if llm_backend == "vllm":
+            try:
+                import vllm._C  # noqa: F401,E402
+            except Exception as exc:
+                self.skipTest(f"vllm runtime unavailable: {exc}")
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_path = f"{tmp_dir}/result.json"
             model_args = {}

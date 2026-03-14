@@ -25,7 +25,11 @@ import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 # isort: on
 
+import pytest  # noqa: E402
+
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
+
+pytestmark = [pytest.mark.cpu, pytest.mark.gpu]
 
 
 def gen_quant4(k: int, n: int, groupsize: int):
@@ -145,17 +149,26 @@ class TestPackingSpeed(unittest.TestCase):
         return qlinear
 
     def _time_pack_impl(self, qlinearCls, backend, impl: str, repeats: int, threads: int = 1) -> float:
-        start = time.time()
+        impl_lower = impl.lower()
+        warmup_repeats = 2 if impl_lower == "gpu" and torch.cuda.is_available() else 1
+
         with threadpoolctl.threadpool_limits(limits=threads):
+            for _ in range(warmup_repeats):
+                self.pack(qlinearCls, backend, impl=impl)
+
+            if impl_lower == "gpu" and torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+            start = time.perf_counter()
             for _ in range(repeats):
                 self.pack(qlinearCls, backend, impl=impl)
-        if impl.lower() == "gpu" and torch.cuda.is_available():
-            torch.cuda.synchronize()
-        return time.time() - start
+            if impl_lower == "gpu" and torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+        return time.perf_counter() - start
 
     @parameterized.expand(
         [
-            # [ExllamaQuantLinear, BACKEND.EXLLAMA, 9.63],
             # [TritonV2QuantLinear, BACKEND.TRITON, 9.67],
             [TorchQuantLinear, BACKEND.TORCH, 21.05],  # A100 Z3 33.56 # 4090? 27.0297
         ]
@@ -174,7 +187,6 @@ class TestPackingSpeed(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # [ExllamaQuantLinear, BACKEND.EXLLAMA, 9.63],
             # [TritonV2QuantLinear, BACKEND.TRITON, 9.67],
             [TorchQuantLinear, BACKEND.TORCH, 14.71],  # A100 Z3 33.56 # 4090? 27.0297
         ]

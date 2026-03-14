@@ -12,11 +12,15 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import unittest  # noqa: E402
 
+import pytest  # noqa: E402
 import torch  # noqa: E402
+from models.model_test import ModelTest  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
+
+pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 
 class TestQ4BitBLAS(unittest.TestCase):
@@ -40,11 +44,14 @@ class TestQ4BitBLAS(unittest.TestCase):
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-        inp = tokenizer(prompt, return_tensors="pt").to(device)
-
-        res = model_q.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
-
-        predicted_text = tokenizer.decode(res[0])
+        predicted_text = ModelTest.generate_stable_with_limit(
+            model_q,
+            tokenizer,
+            prompt,
+            min_new_tokens=60,
+            max_new_tokens=60,
+            skip_special_tokens=False,
+        )
 
         self.assertIn("paris", predicted_text.lower())
 
@@ -67,9 +74,12 @@ class TestQ4BitBLAS(unittest.TestCase):
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         prompt = "The capital city of France is named"
-        inp = tokenizer(prompt, return_tensors="pt").to("cuda:0")
-
-        res = model_q.generate(**inp, num_beams=1, min_new_tokens=60, max_new_tokens=60)
-
-        predicted_text = tokenizer.decode(res[0])
+        predicted_text = ModelTest.generate_stable_with_limit(
+            model_q,
+            tokenizer,
+            prompt,
+            min_new_tokens=60,
+            max_new_tokens=60,
+            skip_special_tokens=False,
+        )
         self.assertIn("paris", predicted_text.lower())

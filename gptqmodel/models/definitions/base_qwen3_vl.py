@@ -54,30 +54,35 @@ class BaseQwen3VLGPTQ(BaseQModel):
 
     require_load_processor = True
 
+    def _core_multimodal_model(self):
+        return getattr(self.model, "model", self.model)
+
     def pre_quantize_generate_hook_start(self):
-        self.model.language_model.embed_tokens = move_to(self.model.language_model.embed_tokens, device=self.quantize_config.device)
-        self.model.language_model.rotary_emb = move_to(self.model.language_model.rotary_emb, device=self.quantize_config.device)
-        self.model.visual = move_to(self.model.visual, device=self.quantize_config.device)
+        core_model = self._core_multimodal_model()
+        core_model.language_model.embed_tokens = move_to(core_model.language_model.embed_tokens, device=self.quantize_config.device)
+        core_model.language_model.rotary_emb = move_to(core_model.language_model.rotary_emb, device=self.quantize_config.device)
+        core_model.visual = move_to(core_model.visual, device=self.quantize_config.device)
 
     def pre_quantize_generate_hook_end(self):
+        core_model = self._core_multimodal_model()
         if self.quantize_config.offload_to_disk:
-            offload_to_disk(model=self.model.language_model,
-                            module=self.model.language_model.embed_tokens,
+            offload_to_disk(model=core_model.language_model,
+                            module=core_model.language_model.embed_tokens,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
-            offload_to_disk(model=self.model.language_model,
-                            module=self.model.language_model.rotary_emb,
+            offload_to_disk(model=core_model.language_model,
+                            module=core_model.language_model.rotary_emb,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
-            offload_to_disk(model=self.model,
-                            module=self.model.visual,
+            offload_to_disk(model=core_model,
+                            module=core_model.visual,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
             return
 
-        self.model.language_model.embed_tokens = move_to(self.model.language_model.embed_tokens, device=CPU)
-        self.model.language_model.rotary_emb = move_to(self.model.language_model.rotary_emb, device=CPU)
-        self.model.visual = move_to(self.model.visual, device=CPU)
+        core_model.language_model.embed_tokens = move_to(core_model.language_model.embed_tokens, device=CPU)
+        core_model.language_model.rotary_emb = move_to(core_model.language_model.rotary_emb, device=CPU)
+        core_model.visual = move_to(core_model.visual, device=CPU)
 
     @staticmethod
     def process_vision_info(
@@ -126,6 +131,10 @@ class BaseQwen3VLGPTQ(BaseQModel):
 
         if return_video_kwargs:
             return image_inputs, video_inputs, video_kwargs
+        if video_inputs is None and not return_video_metadata:
+            # Keep the image-only call contract aligned with the earlier VL
+            # adapters so processor(images=...) can use the return value directly.
+            return image_inputs
         return image_inputs, video_inputs
 
     def preprocess_dataset(self, sample: Dict) -> Dict:
@@ -141,7 +150,11 @@ class BaseQwen3VLGPTQ(BaseQModel):
             text = processor.apply_chat_template(
                 batch, tokenize=False, add_generation_prompt=True
             )
-            image_inputs, video_inputs = self.process_vision_info(batch)
+            vision_inputs = self.process_vision_info(batch)
+            if isinstance(vision_inputs, tuple):
+                image_inputs, video_inputs = vision_inputs
+            else:
+                image_inputs, video_inputs = vision_inputs, None
             inputs = processor(
                 text=text,
                 images=image_inputs,

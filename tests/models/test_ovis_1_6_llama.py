@@ -38,23 +38,22 @@ class TestOvis1_6_Llama(ModelTest):
         input_ids = input_ids.unsqueeze(0).to(device=model.device)
         attention_mask = attention_mask.unsqueeze(0).to(device=model.device)
         pixel_values = [pixel_values.to(dtype=visual_tokenizer.dtype, device=visual_tokenizer.device)]
+        inputs = {
+            "input_ids": input_ids,
+            "pixel_values": pixel_values,
+            "attention_mask": attention_mask,
+        }
 
         # generate output
         with torch.inference_mode():
-            gen_kwargs = {
-                "max_new_tokens": 1024,
-                "do_sample": False,
-                "top_p": None,
-                "top_k": None,
-                "temperature": None,
-                "repetition_penalty": None,
-                "eos_token_id": model.generation_config.eos_token_id,
-                "pad_token_id": text_tokenizer.pad_token_id,
-                "use_cache": True
-            }
-            output_ids = \
-                model.generate(input_ids, pixel_values=pixel_values, attention_mask=attention_mask, **gen_kwargs)[0]
-            output = text_tokenizer.decode(output_ids, skip_special_tokens=True)
+            output = self.generate_stable_with_limit(
+                model,
+                text_tokenizer,
+                inputs=inputs,
+                max_new_tokens=1024,
+                skip_special_tokens=True,
+                use_cache=True,
+            )
 
             print(f'Output:\n{output}')
 

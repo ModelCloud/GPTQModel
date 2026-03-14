@@ -37,7 +37,7 @@ import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import textwrap  # noqa: E402
 import unittest  # noqa: E402
-from collections.abc import Iterable  # noqa: E402
+from collections.abc import Iterable, Mapping  # noqa: E402
 
 import torch.cuda  # noqa: E402
 from datasets import load_dataset  # noqa: E402
@@ -367,18 +367,74 @@ class ModelTest(unittest.TestCase):
         print(f"Result is: \n{output}")
         return output
 
-    def generate_with_limit(self, model, tokenizer, prompt, max_new_tokens=512):
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    # Use this helper for CI output assertions instead of raw model.generate(),
+    # including in standalone unittest cases, so expected-text checks stay deterministic.
+    @staticmethod
+    def generate_stable_with_limit(
+        model,
+        tokenizer,
+        prompt=None,
+        max_new_tokens=512,
+        min_new_tokens=None,
+        skip_special_tokens=True,
+        inputs=None,
+        decode_start_idx=None,
+        batch_decode=False,
+        clean_up_tokenization_spaces=None,
+        return_generate_output=False,
+        **generate_kwargs,
+    ):
+        if inputs is None:
+            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        elif hasattr(inputs, "to"):
+            inputs = inputs.to(model.device)
+
+        generation_inputs = dict(inputs) if isinstance(inputs, Mapping) else {"input_ids": inputs}
+
+        decoder = getattr(tokenizer, "tokenizer", tokenizer)
+        pad_token_id = decoder.pad_token_id if decoder.pad_token_id is not None else decoder.eos_token_id
         generated = model.generate(
-            **inputs,
+            **generation_inputs,
             max_new_tokens=max_new_tokens,
+            min_new_tokens=min_new_tokens,
             do_sample=False,
             num_beams=1,
             pad_token_id=pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+            eos_token_id=decoder.eos_token_id,
+            **generate_kwargs,
         )
-        return tokenizer.decode(generated[0], skip_special_tokens=True)
+        if return_generate_output:
+            return generated
+
+        generated_ids = generated[0] if isinstance(generated, tuple) else generated
+
+        if batch_decode:
+            if decode_start_idx is None:
+                if hasattr(inputs, "input_ids"):
+                    decode_start_idx = [len(input_ids) for input_ids in inputs.input_ids]
+                else:
+                    raise ValueError("decode_start_idx is required for batch_decode when inputs lack input_ids")
+
+            if isinstance(decode_start_idx, int):
+                generated_ids = [output_ids[decode_start_idx:] for output_ids in generated_ids]
+            else:
+                generated_ids = [
+                    output_ids[start_idx:]
+                    for start_idx, output_ids in zip(decode_start_idx, generated_ids)
+                ]
+
+            decode_kwargs = {"skip_special_tokens": skip_special_tokens}
+            if clean_up_tokenization_spaces is not None:
+                decode_kwargs["clean_up_tokenization_spaces"] = clean_up_tokenization_spaces
+            return tokenizer.batch_decode(generated_ids, **decode_kwargs)[0]
+
+        if decode_start_idx is None:
+            decode_start_idx = 0
+
+        return tokenizer.decode(
+            generated_ids[0][decode_start_idx:],
+            skip_special_tokens=skip_special_tokens,
+        )
 
     def run_generic_inference_checks(self, model, tokenizer, backend):
         model.eval()
@@ -388,7 +444,7 @@ class ModelTest(unittest.TestCase):
             prompt = item["prompt"]
             keywords = item["keywords"]
             try:
-                response = self.generate_with_limit(model, tokenizer, prompt)
+                response = self.generate_stable_with_limit(model, tokenizer, prompt)
                 normalized = response.lower()
                 matched = any(keyword.lower() in normalized for keyword in keywords)
                 results.append(

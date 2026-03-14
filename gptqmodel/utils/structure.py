@@ -552,6 +552,19 @@ def alias_from_turtle_for_submodule(
 
     t_bufs = dict(target_submodule.named_buffers(recurse=True))
     s_bufs = dict(src_sub.named_buffers(recurse=True))
+
+    # Drop stale shell-only meta buffers when the source module no longer exposes them.
+    # This can happen when the shell module preallocates generic buffers like `g_idx`
+    # but the concrete packed kernel does not persist that buffer after quantization.
+    for name, t_b in list(t_bufs.items()):
+        if name in s_bufs:
+            continue
+        if not (getattr(t_b, "is_meta", False) or t_b.device.type == "meta"):
+            continue
+        t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)
+        if leaf in getattr(t_parent, "_buffers", {}):
+            del t_parent._buffers[leaf]
+
     for name, s_b in s_bufs.items():
         tb = t_bufs.get(name)
         t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, name)

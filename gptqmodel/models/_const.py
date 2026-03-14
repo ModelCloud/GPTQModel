@@ -128,6 +128,4 @@ def get_best_device(backend: BACKEND = BACKEND.AUTO) -> torch.device:
     else:
         return CPU
 
-EXLLAMA_DEFAULT_MAX_INPUT_LENGTH = 2048
-
 EXPERT_INDEX_PLACEHOLDER = "{expert_index}"

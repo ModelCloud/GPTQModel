@@ -24,8 +24,8 @@ from gptqmodel.utils.eval import EVAL
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.3166 |
 # | arc_challenge :: acc_norm,none |   0.3464 |
-# | mmlu_stem :: acc,none          |   0.3692 |
-# | gsm8k_plat :: exact,flexible   |   0.2994 |
+# | mmlu_stem :: acc,none          |   0.3784 |
+# | gsm8k_plat :: exact,flexible   |   0.3457 |
 class TestLlama3_2_awq(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
@@ -35,7 +35,7 @@ class TestLlama3_2_awq(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.2440,
+                "value": 0.3457402812241522,
                 "floor_pct": 0.04,
             },
         },
@@ -53,7 +53,7 @@ class TestLlama3_2_awq(ModelTest):
         EVAL.LM_EVAL.MMLU_STEM: {
             "chat_template": False,
             "acc": {
-                "value": 0.3692,
+                "value": 0.3783698065334602,
                 "floor_pct": 0.04,
             },
         },

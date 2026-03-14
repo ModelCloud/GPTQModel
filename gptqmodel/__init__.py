@@ -62,7 +62,6 @@ from .quantization import (
     WeightOnlyConfig,
 )
 from .utils import BACKEND
-from .utils.exllama import exllama_set_max_input_length
 from .version import __version__
 
 
