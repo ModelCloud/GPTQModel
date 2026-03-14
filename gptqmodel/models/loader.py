@@ -34,7 +34,7 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
-from ..utils.hf import no_init_weights
+from ..utils.hf import no_init_weights, prepare_remote_code_compat
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
@@ -141,6 +141,9 @@ def ModelLoader(cls):
         model_init_kwargs["trust_remote_code"] = trust_remote_code
 
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
+
+        if trust_remote_code:
+            prepare_remote_code_compat(config)
 
         atten_impl = model_init_kwargs.get("attn_implementation", None)
 
@@ -383,6 +386,9 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
         )
+
+        if trust_remote_code:
+            prepare_remote_code_compat(config)
 
         if cls.require_dtype:
             dtype = cls.require_dtype

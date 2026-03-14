@@ -12,7 +12,12 @@ from parameterized import parameterized
 from pytest import MonkeyPatch
 from torch import nn
 
-from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
+from gptqmodel.looper.awq_processor import (
+    AWQProcessor,
+    _AWQLayerState,
+    _accumulate_awq_weight_mean,
+    _compute_awq_weight_mean,
+)
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 
 
@@ -31,46 +36,14 @@ def _compute_legacy_w_mean(layers, group_size):
     return w_scale.mean(0)
 
 def _compute_fast_w_mean(layers, group_size):
-    first_weight = layers[0].weight
-    num_channels = first_weight.shape[1]
-    device = first_weight.device
-    dtype = first_weight.dtype
-    w_sum = torch.zeros(num_channels, dtype=torch.float32, device=device)
-    row_count = 0
-
-    for layer in layers:
-        weight = layer.weight
-        org_shape = weight.shape
-        weight_abs = weight.abs()
-        weight_group = weight_abs.view(-1, group_size)
-        group_scale = weight_group.amax(dim=1, keepdim=True) + 1e-6
-        normalized = (weight_group / group_scale).view(org_shape)
-        w_sum += normalized.sum(dim=0, dtype=torch.float32)
-        row_count += org_shape[0]
-
-    if row_count == 0:
-        return torch.zeros(num_channels, dtype=dtype, device=device)
-    return (w_sum / row_count).to(dtype)
+    return _compute_awq_weight_mean(layers, group_size)
 
 
 def _compute_fast_w_mean_multi(layer_groups, group_size):
     total_sum = None
     total_rows = 0
     for layers in layer_groups:
-        first_weight = layers[0].weight
-        device = first_weight.device
-        num_channels = first_weight.shape[1]
-        w_sum = torch.zeros(num_channels, dtype=torch.float32, device=device)
-        rows = 0
-        for layer in layers:
-            weight = layer.weight
-            org_shape = weight.shape
-            weight_abs = weight.abs()
-            weight_group = weight_abs.view(-1, group_size)
-            group_scale = weight_group.amax(dim=1, keepdim=True) + 1e-6
-            normalized = (weight_group / group_scale).view(org_shape)
-            w_sum += normalized.sum(dim=0, dtype=torch.float32)
-            rows += org_shape[0]
+        w_sum, rows = _accumulate_awq_weight_mean(layers, group_size)
         if total_sum is None:
             total_sum = w_sum.cpu()
         else:
