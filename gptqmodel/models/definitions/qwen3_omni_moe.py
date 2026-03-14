@@ -38,7 +38,7 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_norm:!", "k_norm:!", "q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "gate": ("gate",),

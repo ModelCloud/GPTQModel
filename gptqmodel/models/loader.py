@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import time
 from importlib.metadata import PackageNotFoundError, version
@@ -250,7 +251,8 @@ def ModelLoader(cls):
             log.warn(f"{cls} doesn't support offload_to_disk, set quantize_config.offload_to_disk to False.")
 
         if quantize_config.offload_to_disk:
-            model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
+            shell_config = copy.deepcopy(config)
+            model = build_shell_model(cls.loader, config=shell_config, **model_init_kwargs)
             defuser.convert_model(model, cleanup_original=False)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)

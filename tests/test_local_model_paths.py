@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
+import torch
+
 from gptqmodel.models import GPTQModel, auto, loader
+from gptqmodel.quantization import QuantizeConfig
 
 
 def test_load_treats_missing_absolute_path_as_local(monkeypatch):
@@ -38,3 +41,86 @@ def test_get_model_local_path_skips_snapshot_download_for_absolute_path(monkeypa
     )
 
     assert loader.get_model_local_path(model_path) == model_path
+
+
+def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
+    class FakeConfig:
+        def __init__(self):
+            self._experts_implementation = None
+            self.sub_configs = {}
+            self.torch_dtype = None
+
+        def to_dict(self):
+            return {"max_position_embeddings": 128}
+
+    class FakeModel:
+        def __init__(self, config):
+            self.config = config
+            self.seqlen = None
+
+        def eval(self):
+            return self
+
+    base_config = FakeConfig()
+    shell_configs = []
+    turtle_configs = []
+
+    def fake_build_shell_model(_loader, config, **_kwargs):
+        shell_configs.append(config)
+        return FakeModel(config)
+
+    def fake_convert_model(model, cleanup_original=False):
+        assert cleanup_original is False
+        model.config._experts_implementation = "linear_loop"
+        return model
+
+    class FakeInnerLoader:
+        @staticmethod
+        def from_pretrained(_path, config=None, **_kwargs):
+            turtle_configs.append(config)
+            assert getattr(config, "_experts_implementation", None) is None
+            return FakeModel(config)
+
+    @loader.ModelLoader
+    class DummyQModel:
+        loader = FakeInnerLoader
+        require_dtype = None
+        require_fast_init = False
+        require_trust_remote_code = False
+        require_pkgs = []
+        supports_desc_act = [True, False]
+        support_offload_to_disk = True
+        config_class = None
+
+        @staticmethod
+        def before_model_load(*_args, **_kwargs):
+            return None
+
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.turtle_model = kwargs.get("turtle_model")
+            self.config = model.config
+
+    monkeypatch.setattr(loader, "check_versions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader, "get_model_local_path", lambda *_args, **_kwargs: "/tmp/fake-model")
+    monkeypatch.setattr(loader, "auto_select_device", lambda *_args, **_kwargs: torch.device("cpu"))
+    monkeypatch.setattr(loader, "auto_dtype", lambda *_args, **_kwargs: torch.float16)
+    monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: base_config)
+    monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("gptqmodel.utils.hf.build_shell_model", fake_build_shell_model)
+    monkeypatch.setattr(loader.defuser, "convert_model", fake_convert_model)
+
+    instance = DummyQModel.from_pretrained(
+        "/tmp/fake-model",
+        quantize_config=QuantizeConfig(offload_to_disk=True),
+        trust_remote_code=False,
+    )
+
+    assert shell_configs
+    assert turtle_configs
+    assert shell_configs[0] is not base_config
+    assert turtle_configs[0] is base_config
+    assert shell_configs[0]._experts_implementation == "linear_loop"
+    assert turtle_configs[0]._experts_implementation is None
+    assert instance.turtle_model is not None
