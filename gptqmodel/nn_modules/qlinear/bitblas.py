@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,8 @@ BITBLAS_SUPPORTED_BITS: List[int] = [1, 2, 4, 8]
 BITBLAS_SUPPORTED_SYM: List[bool] = [False, True]
 BITBLAS_DEFAULT_ZEROS_MODE = "quantized"
 BITBLAS_PROPAGATE_WEIGHTS = False
+BITBLAS_MAX_SUPPORTED_SM = 90
+BITBLAS_FALLBACK_TARGET = f"cuda -arch=sm_{BITBLAS_MAX_SUPPORTED_SM}"
 
 BITBLAS_TARGET = None
 BITBLAS_DATABASE_PATH = None
@@ -155,7 +158,7 @@ def import_bitblas():
 
         bitblas.auto_detect_nvidia_target = patched_auto_detect_nvidia_target
         visible = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
-        BITBLAS_TARGET = patched_auto_detect_nvidia_target(visible)
+        BITBLAS_TARGET = _normalize_bitblas_target(patched_auto_detect_nvidia_target(visible))
         os.environ["TVM_TARGET"] = f"{BITBLAS_TARGET}"
         log.debug("BITBLAS_TARGET %s", BITBLAS_TARGET)
 
@@ -164,6 +167,84 @@ def import_bitblas():
 
         BITBLAS_DATABASE_PATH = f"{get_database_path()}_{bitblas.__version__}"
         log.debug("BITBLAS_DATABASE_PATH %s", BITBLAS_DATABASE_PATH)
+
+
+def _bitblas_target_arch(target) -> Optional[str]:
+    if target is None:
+        return None
+
+    target_text = str(target)
+
+    try:
+        from bitblas import tvm
+
+        return str(tvm.target.Target(target_text).arch)
+    except Exception:
+        match = re.search(r"\bsm_(\d+)[a-z]*\b", target_text)
+        if match:
+            return f"sm_{match.group(1)}"
+        return None
+
+
+def _bitblas_target_sm(target) -> Optional[int]:
+    arch = _bitblas_target_arch(target)
+    if arch is None:
+        return None
+
+    match = re.search(r"sm_(\d+)", arch)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _current_cuda_sm() -> Optional[int]:
+    if not torch.cuda.is_available():
+        return None
+
+    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    return props.major * 10 + props.minor
+
+
+def _bitblas_fallback_target() -> str:
+    current_sm = _current_cuda_sm()
+    if current_sm is None:
+        return BITBLAS_FALLBACK_TARGET
+
+    fallback_sm = min(current_sm, BITBLAS_MAX_SUPPORTED_SM)
+    return f"cuda -arch=sm_{fallback_sm}"
+
+
+def _normalize_bitblas_target(target):
+    if target is None:
+        return None
+
+    arch = _bitblas_target_arch(target)
+    sm_version = _bitblas_target_sm(target)
+    if sm_version is None:
+        return target
+
+    canonical_target = f"cuda -arch=sm_{sm_version}"
+
+    if sm_version > BITBLAS_MAX_SUPPORTED_SM:
+        fallback_target = _bitblas_fallback_target()
+        log.warning(
+            "BitBLAS target %s resolves to unsupported CUDA arch %s; falling back to %s.",
+            target,
+            arch,
+            fallback_target,
+        )
+        return fallback_target
+
+    if arch != f"sm_{sm_version}":
+        log.info(
+            "Canonicalizing BitBLAS target %s (%s) to %s.",
+            target,
+            arch,
+            canonical_target,
+        )
+        return canonical_target
+
+    return target
 
 
 def unpack_gptq_qzeros(qzeros: torch.Tensor, bits: int, is_gptq_v2: bool = False) -> torch.Tensor:
@@ -433,20 +514,21 @@ class BitblasQuantLinear(BaseQuantLinear):
     def _get_or_create_bitblas_operator(self, config, enable_tuning):
         from bitblas import Matmul
         from bitblas.cache import global_operator_cache
+        target = _normalize_bitblas_target(BITBLAS_TARGET)
 
         if global_operator_cache.size() == 0:
             global_operator_cache.load_from_database(
-                BITBLAS_DATABASE_PATH, BITBLAS_TARGET
+                BITBLAS_DATABASE_PATH, target
             )
 
         bitblas_matmul = global_operator_cache.get(config)
         if bitblas_matmul is None:
-            bitblas_matmul = Matmul(config, target=BITBLAS_TARGET, enable_tuning=enable_tuning)
+            bitblas_matmul = Matmul(config, target=target, enable_tuning=enable_tuning)
             if enable_tuning:
                 bitblas_matmul.hardware_aware_finetune(topk=20)
                 global_operator_cache.add(config, bitblas_matmul)
                 global_operator_cache.save_into_database(
-                    BITBLAS_DATABASE_PATH, BITBLAS_TARGET
+                    BITBLAS_DATABASE_PATH, target
                 )
                 log.info(
                     "BitBLAS operator tuned and added to cache for %s", config
