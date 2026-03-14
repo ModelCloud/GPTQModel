@@ -341,6 +341,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         module.post_init()
         return module
 
+    @classmethod
     def _build_exllama_v2_module(
         cls,
         qweight_cpu: torch.Tensor,
