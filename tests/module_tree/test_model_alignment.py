@@ -7,9 +7,14 @@ import sys
 from pathlib import Path
 
 from accelerate import init_empty_weights
-from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTextToWaveform
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText, AutoModelForTextToWaveform
 
 from gptqmodel.models.definitions.dots1 import Dots1QModel
+from gptqmodel.models.definitions.qwen2 import Qwen2QModel
+from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
+from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
+from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
+from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.models.definitions.qwen3_next import Qwen3NextGPTQ
@@ -86,6 +91,92 @@ class TestMarinAwqModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.self_attn, "o_proj"))
         self.assertIn("q_norm:!", Qwen3QModel.module_tree[3]["self_attn"])
         self.assertIn("k_norm:!", Qwen3QModel.module_tree[3]["self_attn"])
+
+
+class TestQwen2ModuleTree(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
+
+    def test_qwen2_module_tree(self):
+        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
+        with init_empty_weights(include_buffers=True):
+            shell = AutoModelForCausalLM.from_config(config, trust_remote_code=False)
+
+        decoder_layer = shell.model.layers[0]
+        self.assertTrue(hasattr(decoder_layer.self_attn, "q_proj"))
+        self.assertTrue(hasattr(decoder_layer.self_attn, "k_proj"))
+        self.assertTrue(hasattr(decoder_layer.self_attn, "v_proj"))
+        self.assertTrue(hasattr(decoder_layer.self_attn, "o_proj"))
+        self.assertFalse(hasattr(decoder_layer.self_attn, "q_norm"))
+        self.assertFalse(hasattr(decoder_layer.self_attn, "k_norm"))
+        self.assertIn("q_proj:0", Qwen2QModel.module_tree[3]["self_attn"])
+        self.assertIn("o_proj:1", Qwen2QModel.module_tree[3]["self_attn"])
+
+
+class TestQwen2MoeModuleTree(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen1.5-MoE-A2.7B"
+
+    def test_qwen2_moe_module_tree(self):
+        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
+        with init_empty_weights(include_buffers=True):
+            shell = AutoModelForCausalLM.from_config(config, trust_remote_code=False)
+
+        decoder_layer = shell.model.layers[0]
+        self.assertTrue(hasattr(decoder_layer.self_attn, "q_proj"))
+        self.assertFalse(hasattr(decoder_layer.self_attn, "q_norm"))
+        self.assertTrue(hasattr(decoder_layer.mlp, "gate"))
+        self.assertTrue(hasattr(decoder_layer.mlp, "shared_expert"))
+        self.assertTrue(hasattr(decoder_layer.mlp, "experts"))
+        self.assertIn("shared_expert:0", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
+        self.assertIn("experts:0", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
+
+
+class TestQwen2VLModuleTree(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2-VL-2B-Instruct"
+
+    def test_qwen2_vl_module_tree(self):
+        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
+        with init_empty_weights(include_buffers=True):
+            shell = AutoModelForImageTextToText.from_config(config, trust_remote_code=False)
+
+        decoder_layer = shell.model.language_model.layers[0]
+        self.assertTrue(hasattr(shell.model, "language_model"))
+        self.assertTrue(hasattr(shell.model, "visual"))
+        self.assertTrue(hasattr(decoder_layer.self_attn, "q_proj"))
+        self.assertIn("q_proj:0", Qwen2VLQModel.module_tree[-1]["self_attn"])
+        self.assertEqual(Qwen2VLQModel.module_tree[:4], ["model", "language_model", "layers", "#"])
+
+
+class TestQwen2_5_VLModuleTree(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-VL-3B-Instruct"
+
+    def test_qwen2_5_vl_module_tree(self):
+        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
+        with init_empty_weights(include_buffers=True):
+            shell = AutoModelForImageTextToText.from_config(config, trust_remote_code=False)
+
+        decoder_layer = shell.model.language_model.layers[0]
+        self.assertTrue(hasattr(shell.model, "language_model"))
+        self.assertTrue(hasattr(shell.model, "visual"))
+        self.assertTrue(hasattr(decoder_layer.self_attn, "q_proj"))
+        self.assertIn("q_proj:0", Qwen2_5_VLQModel.module_tree[-1]["self_attn"])
+        self.assertEqual(Qwen2_5_VLQModel.module_tree[:4], ["model", "language_model", "layers", "#"])
+
+
+class TestQwen2_5_OmniModuleTree(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-Omni-3B"
+
+    def test_qwen2_5_omni_module_tree(self):
+        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
+        with init_empty_weights(include_buffers=True):
+            shell = AutoModelForTextToWaveform.from_config(config, trust_remote_code=False)
+
+        decoder_layer = shell.thinker.model.layers[0]
+        self.assertTrue(hasattr(shell, "thinker"))
+        self.assertTrue(hasattr(shell.thinker, "visual"))
+        self.assertTrue(hasattr(shell.thinker, "audio_tower"))
+        self.assertTrue(hasattr(decoder_layer.self_attn, "q_proj"))
+        self.assertIn("q_proj:0", Qwen2_5_OmniGPTQ.module_tree[-1]["self_attn"])
+        self.assertEqual(Qwen2_5_OmniGPTQ.module_tree[:4], ["thinker", "model", "layers", "#"])
 
 
 class TestQwen3MoeModuleTree(ModelTest):
