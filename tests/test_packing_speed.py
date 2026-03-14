@@ -149,13 +149,23 @@ class TestPackingSpeed(unittest.TestCase):
         return qlinear
 
     def _time_pack_impl(self, qlinearCls, backend, impl: str, repeats: int, threads: int = 1) -> float:
-        start = time.time()
+        impl_lower = impl.lower()
+        warmup_repeats = 2 if impl_lower == "gpu" and torch.cuda.is_available() else 1
+
         with threadpoolctl.threadpool_limits(limits=threads):
+            for _ in range(warmup_repeats):
+                self.pack(qlinearCls, backend, impl=impl)
+
+            if impl_lower == "gpu" and torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+            start = time.perf_counter()
             for _ in range(repeats):
                 self.pack(qlinearCls, backend, impl=impl)
-        if impl.lower() == "gpu" and torch.cuda.is_available():
-            torch.cuda.synchronize()
-        return time.time() - start
+            if impl_lower == "gpu" and torch.cuda.is_available():
+                torch.cuda.synchronize()
+
+        return time.perf_counter() - start
 
     @parameterized.expand(
         [
