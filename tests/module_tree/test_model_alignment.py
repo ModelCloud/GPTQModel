@@ -7,10 +7,13 @@ import sys
 from pathlib import Path
 
 from accelerate import init_empty_weights
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForTextToWaveform
 
 from gptqmodel.models.definitions.dots1 import Dots1QModel
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
+from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
+from gptqmodel.models.definitions.qwen3_next import Qwen3NextGPTQ
+from gptqmodel.models.definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "models"))
@@ -83,3 +86,50 @@ class TestMarinAwqModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.self_attn, "o_proj"))
         self.assertIn("q_norm:!", Qwen3QModel.module_tree[3]["self_attn"])
         self.assertIn("k_norm:!", Qwen3QModel.module_tree[3]["self_attn"])
+
+
+class TestQwen3MoeModuleTree(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
+
+    def test_qwen3_moe_module_tree(self):
+        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
+        with init_empty_weights(include_buffers=True):
+            shell = AutoModelForCausalLM.from_config(config, trust_remote_code=False)
+
+        decoder_layer = shell.model.layers[0]
+        self.assertTrue(hasattr(decoder_layer.self_attn, "q_norm"))
+        self.assertTrue(hasattr(decoder_layer.self_attn, "k_norm"))
+        self.assertIn("q_norm:!", Qwen3MoeQModel.module_tree[-1]["self_attn"])
+        self.assertIn("k_norm:!", Qwen3MoeQModel.module_tree[-1]["self_attn"])
+
+
+class TestQwen3OmniModuleTree(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen3-Omni-30B-A3B-Instruct"
+
+    def test_qwen3_omni_module_tree(self):
+        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
+        with init_empty_weights(include_buffers=True):
+            shell = AutoModelForTextToWaveform.from_config(config, trust_remote_code=False)
+
+        decoder_layer = shell.thinker.model.layers[0]
+        self.assertTrue(hasattr(decoder_layer.self_attn, "q_norm"))
+        self.assertTrue(hasattr(decoder_layer.self_attn, "k_norm"))
+        self.assertIn("q_norm:!", Qwen3OmniMoeGPTQ.module_tree[-1]["self_attn"])
+        self.assertIn("k_norm:!", Qwen3OmniMoeGPTQ.module_tree[-1]["self_attn"])
+
+
+class TestQwen3NextModuleTree(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen3-Next-80B-A3B-Instruct"
+
+    def test_qwen3_next_full_attention_module_tree(self):
+        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
+        config.num_hidden_layers = 1
+        config.layer_types = ["full_attention"]
+        with init_empty_weights(include_buffers=True):
+            shell = AutoModelForCausalLM.from_config(config, trust_remote_code=False)
+
+        decoder_layer = shell.model.layers[0]
+        self.assertTrue(hasattr(decoder_layer.self_attn, "q_norm"))
+        self.assertTrue(hasattr(decoder_layer.self_attn, "k_norm"))
+        self.assertIn("q_norm:!", Qwen3NextGPTQ.module_tree[-1]["self_attn"])
+        self.assertIn("k_norm:!", Qwen3NextGPTQ.module_tree[-1]["self_attn"])
