@@ -10,6 +10,7 @@ from gptqmodel.utils.eval import EVAL
 
 class TestGPTOSS(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gpt-oss-20b-BF16/"
+    USE_FLASH_ATTN = False
     EVAL_TASKS = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": False,
