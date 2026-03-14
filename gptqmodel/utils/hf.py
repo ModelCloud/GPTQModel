@@ -22,7 +22,7 @@ except ImportError:
 from ..utils.logger import setup_logger
 
 
-__all__ = ["no_init_weights"]
+__all__ = ["no_init_weights", "prepare_remote_code_compat"]
 
 log = setup_logger()
 
@@ -122,10 +122,41 @@ def _patch_transformers_remote_code_compat() -> None:
         PreTrainedModel.get_expanded_tied_weights_keys = get_expanded_tied_weights_keys
         PreTrainedModel._gptqmodel_legacy_tied_weights_patch = True
 
+    if not getattr(PreTrainedModel, "_gptqmodel_missing_all_tied_weights_patch", False):
+        original_getattr = PreTrainedModel.__getattr__
 
-# Restore the pre-transformers-5 RoPE config shape expected by older MiniCPM
-# remote code before HF instantiates the architecture from config.
+        def __getattr__(self, name: str):
+            if name == "all_tied_weights_keys":
+                # Older remote-code models may skip `post_init()`, so lazily
+                # synthesize the tied-weight map the first time HF asks for it.
+                tied_keys = self.get_expanded_tied_weights_keys(all_submodels=True)
+                object.__setattr__(self, name, tied_keys)
+                return tied_keys
+
+            return original_getattr(self, name)
+
+        PreTrainedModel.__getattr__ = __getattr__
+        PreTrainedModel._gptqmodel_missing_all_tied_weights_patch = True
+
+
+def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
+    if getattr(config, "model_type", None) != "chatglm":
+        return
+
+    if not hasattr(config, "seq_length") or hasattr(config, "max_length"):
+        return
+
+    # Older ChatGLM remote model code still reads `config.max_length`, while
+    # newer transformers only preserves the serialized `seq_length` field.
+    config.attribute_map = dict(getattr(config, "attribute_map", {}) or {})
+    config.attribute_map["max_length"] = "seq_length"
+
+
+# Restore config fields renamed by transformers 5.x before older trust_remote_code
+# model files instantiate their architectures from the config object.
 def _normalize_remote_code_config_compat(config: Any) -> None:
+    _normalize_chatglm_remote_code_config_compat(config)
+
     # transformers 5.x normalizes RoPE config to `rope_type`, but older
     # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.
     rope_scaling = getattr(config, "rope_scaling", None)
@@ -141,6 +172,13 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
 
     config.rope_scaling = dict(rope_scaling)
     config.rope_scaling["type"] = rope_type
+
+
+def prepare_remote_code_compat(config: Any) -> None:
+    # Remote-code loads need both the transformers API shims and any config
+    # field migrations applied before instantiation happens.
+    _patch_transformers_remote_code_compat()
+    _normalize_remote_code_config_compat(config)
 
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False
@@ -271,8 +309,7 @@ def build_shell_model(
     # All nn.Parameters and buffers are created
 
     if trust_remote_code:
-        _patch_transformers_remote_code_compat()
-        _normalize_remote_code_config_compat(config)
+        prepare_remote_code_compat(config)
 
     # All nn.Parameters and buffers are created on 'meta' and initializers are skipped.
     pb = log.spinner(title="Model loading...", interval=0.1)

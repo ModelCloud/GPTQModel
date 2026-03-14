@@ -18,6 +18,7 @@ from ..nn_modules.hooked_linear import StopForward
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.device import get_device
 from ..utils.env import env_flag
+from ..utils.inspect import get_supported_kwargs
 from ..utils.logger import setup_logger
 from ..utils.model import move_to, nested_move_to
 from ..utils.safe import ThreadSafe
@@ -378,8 +379,12 @@ def forward_batch_worker(
         attn_tensor = move_to(attention_mask, device=module_device)
 
     additional_inputs: Dict[str, torch.Tensor] = {}
-    if support_batch_quantize and attn_tensor is not None:
-        additional_inputs["attention_mask"] = attn_tensor
+    accepts_var_kw, allowed_kwargs = get_supported_kwargs(module.forward)
+    supports_attention_mask = accepts_var_kw or allowed_kwargs is None or "attention_mask" in allowed_kwargs
+    if supports_attention_mask:
+        # Some layers, such as ChatGLM blocks, still require the kwarg even
+        # when the effective mask is `None`.
+        additional_inputs["attention_mask"] = attn_tensor if support_batch_quantize else None
 
     if position_ids is not None:
         additional_inputs["position_ids"] = move_to(position_ids, device=module_device)
