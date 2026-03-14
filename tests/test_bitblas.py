@@ -370,9 +370,9 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
         "Kernel",
         "Mean ms",
         "Std ms",
-        "Max |Δ|",
-        "Mean |Δ|",
-        "Max Rel Δ",
+        "Max |d|",
+        "Mean |d|",
+        "Max Rel d",
         "Accuracy",
     ]
     print(tabulate(results, headers=headers, tablefmt="github"))
