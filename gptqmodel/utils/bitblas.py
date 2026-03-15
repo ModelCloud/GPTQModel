@@ -18,6 +18,15 @@ from .torch import torch_empty_cache
 
 log = setup_logger()
 
+
+def _should_enable_bitblas_tuning(repack: bool) -> bool:
+    """Keep GPTQ repacks responsive unless tuning is explicitly requested."""
+    raw = os.getenv("BITBLAS_ENABLE_TUNING")
+    if raw is not None:
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+    return not repack
+
+
 def prepare_model_for_bitblas_load(
         model,
         qcfg: QuantizeConfig,
@@ -83,6 +92,8 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
         else (lambda *args, **kwargs: nullcontext())
     )
 
+    enable_tuning = _should_enable_bitblas_tuning(repack)
+
     with threadpool_limits(limits=1):
         os.environ["NUMEXPR_MAX_THREADS"] = "1"
 
@@ -107,7 +118,7 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
                     out_features=module.out_features,
                     pack_dtype=qcfg.pack_dtype,
                     bias=module.bias is not None,
-                    enable_tuning=True,
+                    enable_tuning=enable_tuning,
                     adapter=qcfg.adapter,
                 )
 
