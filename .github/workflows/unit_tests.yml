@@ -51,9 +51,9 @@ on:
           - 'fast'
           - 'slow'
       model-gpu-count:
-        description: 'GPUs per model compat test job'
+        description: 'Deprecated: model compat jobs are pinned to 1 visible GPU'
         required: false
-        default: '2'
+        default: '1'
       exclusive-gpu:
         description: 'One Test Per GPU'
         type: boolean
@@ -90,7 +90,7 @@ env:
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py,models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   GPTQMODEL_FORCE_BUILD: 1
   MODEL_TEST_MODE: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
-  MODEL_TEST_GPU_COUNT: ${{ github.event.inputs['model-gpu-count'] || '2' }}
+  MODEL_TEST_GPU_COUNT: '1'
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
 
@@ -887,7 +887,7 @@ jobs:
           runner_q=$(urlencode "$RUNNER")
           exclusive_q=$(urlencode "$EXCLUSIVE")
 
-          count="${MODEL_TEST_GPU_COUNT}"
+          count="1"
           start_s=$(date +%s)
           gpu_id=""
 
@@ -932,6 +932,10 @@ jobs:
             fi
 
             gpu_id="$resp"
+            if [[ "$gpu_id" == *,* ]]; then
+              echo "Allocator returned multiple GPUs for model compat job: $gpu_id"
+              exit 1
+            fi
             echo "Allocated GPU ID: $gpu_id"
             break
           done
