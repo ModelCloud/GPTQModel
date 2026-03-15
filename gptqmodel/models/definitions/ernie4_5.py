@@ -3,13 +3,46 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ...utils.logger import setup_logger
 from . import LlamaQModel
+
+
+log = setup_logger()
 
 
 class Ernie4_5QModel(LlamaQModel):
     require_trust_remote_code = True
     support_batch_quantize = False
     require_monkeypatch = True
+    _NATIVE_MODULE_PREFIX = "transformers.models.ernie4_5."
+
+    @classmethod
+    def _is_native_ernie4_5_module(cls, obj) -> bool:
+        module_name = getattr(type(obj), "__module__", "")
+        return module_name.startswith(cls._NATIVE_MODULE_PREFIX)
+
+    def _should_apply_native_monkeypatch(self) -> bool:
+        if self.load_quantized_model:
+            return False
+
+        model = getattr(getattr(self, "model", None), "model", None)
+        if model is None:
+            return False
+
+        layers = getattr(model, "layers", None)
+        first_layer = layers[0] if layers else None
+        if first_layer is None:
+            return False
+
+        if self._is_native_ernie4_5_module(model) and self._is_native_ernie4_5_module(first_layer):
+            return True
+
+        log.info(
+            "ERNIE 4.5: skipping native monkeypatch for non-native model classes `%s` / `%s`.",
+            getattr(type(model), "__module__", "unknown"),
+            getattr(type(first_layer), "__module__", "unknown"),
+        )
+        return False
 
     def monkey_patch(self):
         from typing import Optional
@@ -174,9 +207,11 @@ class Ernie4_5QModel(LlamaQModel):
                 attentions=all_self_attns,
             )
 
-        if not self.load_quantized_model:
-            ernie4_5_model = type(self.model.model)
-            ernie4_5_model.forward = ernie4_5_model_forward
+        if not self._should_apply_native_monkeypatch():
+            return
 
-            ernie4_5_layer = type(self.model.model.layers[0])
-            ernie4_5_layer.forward = ernie4_5_decode_layer_forward
+        ernie4_5_model = type(self.model.model)
+        ernie4_5_model.forward = ernie4_5_model_forward
+
+        ernie4_5_layer = type(self.model.model.layers[0])
+        ernie4_5_layer.forward = ernie4_5_decode_layer_forward
