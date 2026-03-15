@@ -212,7 +212,8 @@ def mmlupro(model: PreTrainedModel,
             save_dir: str = "results",
             global_record_file: str="eval_record_collection.csv",
             batch_size: int = 1,
-            seed: int = 12345):
+            seed: int = 12345,
+            max_samples: int | None = None):
     random.seed(seed)
     os.makedirs(save_dir, exist_ok=True)
     model_name = os.path.basename(model.config.name_or_path)
@@ -255,6 +256,8 @@ def mmlupro(model: PreTrainedModel,
         if subject not in sta_dict:
             sta_dict[subject] = {"corr": 0.0, "wrong": 0.0, "accu": 0.0}
         test_df = select_by_category(full_test_df, subject)
+        if max_samples is not None:
+            test_df = test_df[:max_samples]
         val_df = select_by_category(full_val_df, subject)
         output_path = os.path.join(save_result_dir, "{}.json".format(subject))
 
@@ -294,4 +297,3 @@ def mmlupro(model: PreTrainedModel,
         summary = file.read()
 
     return summary
-
