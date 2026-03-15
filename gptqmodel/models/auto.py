@@ -670,7 +670,8 @@ class GPTQModel:
                               seed=random_seed,
                               selected_subjects=selected_subjects,
                               ntrain=ntrain,
-                              batch_size=batch_size)
+                              batch_size=batch_size,
+                              max_samples=args.pop("max_samples", None))
 
             print('--------MMLUPro Eval Result---------')
             print(results)
