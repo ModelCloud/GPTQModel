@@ -81,6 +81,48 @@ def test_bitblas_tuning_env_override(monkeypatch):
     assert bitblas_utils._should_enable_bitblas_tuning(repack=False) is False
 
 
+def test_bitblas_prefers_float32_accumulation_for_fp16_inputs(monkeypatch):
+    """Use fp32 accumulation to keep dequantized GPTQ inference numerically stable."""
+
+    captured = {}
+
+    class _DummyMatmul:
+        weight_transform = None
+
+        @staticmethod
+        def retrieve_weight_shape():
+            return (1, 1)
+
+    def _fake_get_or_create(self, config, enable_tuning):
+        captured["config"] = config
+        captured["enable_tuning"] = enable_tuning
+        return _DummyMatmul()
+
+    monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
+    monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
+    monkeypatch.setattr(
+        bitblas_module.BitblasQuantLinear,
+        "_get_or_create_bitblas_operator",
+        _fake_get_or_create,
+    )
+
+    bitblas_module.BitblasQuantLinear(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        in_features=32,
+        out_features=32,
+        pack_dtype=torch.int32,
+        bias=False,
+        enable_tuning=False,
+    )
+
+    assert captured["config"].A_dtype == "float16"
+    assert captured["config"].out_dtype == "float16"
+    assert captured["config"].accum_dtype == "float32"
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
 @pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_bitblas_forward_pass_future_target_fallback():

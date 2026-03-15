@@ -490,6 +490,8 @@ class BitblasQuantLinear(BaseQuantLinear):
         from bitblas import MatmulConfig
 
         bitblas_dtype = "float16" if params_dtype == torch.float16 else "bfloat16"
+        # FP16/BF16 accumulation drifted enough to derail autoregressive decoding.
+        accum_dtype = "float32"
         W_dtype = f"uint{bits}" if self.quant_config.is_sym is False else f"int{bits}"
         matmul_config = MatmulConfig(
             M=self.opt_features,
@@ -498,7 +500,7 @@ class BitblasQuantLinear(BaseQuantLinear):
             A_dtype=bitblas_dtype,
             W_dtype=W_dtype,
             out_dtype=bitblas_dtype,
-            accum_dtype="int32" if bitblas_dtype == "int8" else bitblas_dtype,
+            accum_dtype="int32" if bitblas_dtype == "int8" else accum_dtype,
             storage_dtype=self.quant_config.storage_dtype,
             with_scaling=True,
             with_zeros=self.quant_config.with_zeros,
@@ -586,8 +588,6 @@ class BitblasQuantLinear(BaseQuantLinear):
         if self.bitblas_matmul.weight_transform is not None:
             qweight = self.bitblas_matmul.weight_transform(intweight.cpu()).to(device)
         else:
-            from bitblas.quantization.utils import general_compress
-
             compressed = general_compress(intweight.cpu().numpy(), bits)
             qweight = torch.from_numpy(compressed).to(
                 device=device, dtype=self.quant_config.torch_storage_dtype
