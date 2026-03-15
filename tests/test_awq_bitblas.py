@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 
 import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
@@ -95,6 +96,11 @@ def test_awq_bitblas_selects_bitblas_awq_for_awq_gemm(monkeypatch):
 
 def test_awq_bitblas_kernel_mapping_uses_awq_backend():
     assert get_kernel_for_backend(BACKEND.BITBLAS_AWQ, METHOD.AWQ, FORMAT.BITBLAS) is AWQBitBlasKernel
+
+
+def test_awq_bitblas_kernel_mapping_rejects_gptq_bitblas_backend():
+    with pytest.raises(ValueError, match="Unsupported backend"):
+        get_kernel_for_backend(BACKEND.BITBLAS, METHOD.AWQ, FORMAT.BITBLAS)
 
 
 def test_awq_bitblas_uses_unsigned_weights_and_qzeros(monkeypatch):
