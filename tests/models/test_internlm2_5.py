@@ -3,7 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import unittest
+
+from packaging.version import Version
 from model_test import ModelTest
+
+import transformers
 
 from gptqmodel.utils.eval import EVAL
 
@@ -28,9 +33,15 @@ class TestInternlm2_5(ModelTest):
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if Version(transformers.__version__) > Version("4.44.2"):
+            raise unittest.SkipTest(
+                "InternLM2.5 requires transformers<=4.44.2 in this test environment"
+            )
 
     def test_internlm2_5(self):
         # transformers<=4.44.2 run normal
         self.quant_lm_eval()
-
 

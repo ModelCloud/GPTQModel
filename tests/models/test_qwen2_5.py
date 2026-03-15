@@ -36,7 +36,35 @@ class TestQwen2_5(ModelTest):
             "acc": {"value": 0.3942, "floor_pct": 0.04},
         },
     }
-    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
+    EVAL_TASKS_FAST = {
+        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+            "chat_template": True,
+            "exact_match,flexible-extract": {
+                "value": 0.38626964433416044,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {
+                "value": 0.2977815699658703,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+            "acc_norm": {
+                "value": 0.34044368600682595,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
+            "acc": {
+                "value": 0.3967649857278782,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+    }
 
     def test_qwen2_5(self):
         self.quant_lm_eval()
