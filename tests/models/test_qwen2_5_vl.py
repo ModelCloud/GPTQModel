@@ -22,8 +22,9 @@ class TestQwen2_5_VL(ModelTest):
     EVAL_BATCH_SIZE = 6
 
     def test_qwen2_vl(self):
-        model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
-                                                      dtype=self.TORCH_DTYPE)
+        with self.model_compat_test_context():
+            model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
+                                                          dtype=self.TORCH_DTYPE)
 
         # check image to text
         messages = [
@@ -70,7 +71,8 @@ class TestQwen2_5_VL(ModelTest):
         # check lm_eval results
         self.check_kernel(model, self.KERNEL_INFERENCE)
 
-        task_results = self.lm_eval(model=model,
-                                    trust_remote_code=self.TRUST_REMOTE_CODE,
-                                    delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
+        with self.model_compat_test_context():
+            task_results = self.lm_eval(model=model,
+                                        trust_remote_code=self.TRUST_REMOTE_CODE,
+                                        delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
         self.check_results(task_results)
