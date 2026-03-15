@@ -12,9 +12,11 @@ from tabulate import tabulate
 from gptqmodel import BACKEND, GPTQModel
 import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
 import gptqmodel.utils.bitblas as bitblas_utils
+from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear, marlin_import_exception
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
+from gptqmodel.utils.importer import get_kernel_for_backend
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
@@ -62,6 +64,10 @@ def test_bitblas_target_normalization_strips_supported_arch_suffix():
 @pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
 def test_bitblas_target_normalization_falls_back_for_future_arch():
     assert bitblas_module._normalize_bitblas_target("cuda -arch=sm_120") == bitblas_module._bitblas_fallback_target()
+
+
+def test_bitblas_supports_gptq_v2_kernel_selection():
+    assert get_kernel_for_backend(BACKEND.BITBLAS, METHOD.GPTQ, FORMAT.GPTQ_V2) is bitblas_module.BitblasQuantLinear
 
 
 def test_bitblas_tuning_defaults_off_for_repack(monkeypatch):

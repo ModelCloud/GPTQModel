@@ -466,6 +466,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.GEMV,
         FORMAT.GEMV_FAST,
         FORMAT.MARLIN,
+        FORMAT.BITBLAS,
         FORMAT.LLM_AWQ,
     },
 }
@@ -780,7 +781,7 @@ class QuantizeConfig():
                 self.damp_auto_increment = 0.01
 
         # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
-        if self.quant_method == METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM, FORMAT.LLM_AWQ]:
+        if self.quant_method == METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM, FORMAT.BITBLAS, FORMAT.LLM_AWQ]:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
 

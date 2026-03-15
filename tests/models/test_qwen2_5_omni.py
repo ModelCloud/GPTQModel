@@ -6,7 +6,6 @@ import os
 import unittest
 from importlib.metadata import PackageNotFoundError, version
 
-import soundfile as sf
 from packaging.version import Version
 from model_test import ModelTest
 
@@ -48,7 +47,14 @@ class TestQwen2_5_Omni(ModelTest):
                     f"Qwen2.5 Omni requires {pkg}>={minimum}, found {installed}"
                 )
 
+        try:
+            version("soundfile")
+        except PackageNotFoundError:
+            raise unittest.SkipTest("Qwen2.5 Omni requires soundfile")
+
     def test_qwen2_5_omni(self):
+        import soundfile as sf
+
         model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
                                                       dtype=self.TORCH_DTYPE)
         spk_path = self.NATIVE_MODEL_ID + '/spk_dict.pt'

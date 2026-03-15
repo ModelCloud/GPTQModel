@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from model_test import ModelTest
 
 from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 from gptqmodel.utils.eval import EVAL
 
 
@@ -31,6 +32,7 @@ class TestQwen3MoeAwq(ModelTest):
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
+    MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride())
 
     def test_moe_awq(self):
         self.quant_lm_eval()

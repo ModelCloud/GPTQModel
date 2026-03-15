@@ -143,6 +143,15 @@ class ModelTest(unittest.TestCase):
     GENERATE_EVAL_SIZE_MAX = 128
 
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        model_id = getattr(cls, "NATIVE_MODEL_ID", None)
+        if isinstance(model_id, str):
+            model_id = model_id.strip()
+            if os.path.isabs(model_id) and not os.path.isdir(model_id):
+                raise unittest.SkipTest(f"Model path missing: {model_id}")
     EXPECT_LM_HEAD_LOSS = None
     STOP_AFTER_LAYER: Optional[int] = None
     MOE_CONFIG: Optional[MoEConfig] = None

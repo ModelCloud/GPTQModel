@@ -113,7 +113,7 @@ def check_versions(model_class, requirements: List[str]):
 
 def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
-    if is_local:
+    if is_local or os.path.isabs(pretrained_model_id_or_path):
         return os.path.normpath(pretrained_model_id_or_path)
     def _log_removed(removed: list[str]):
         log.debug("Loader: dropping unsupported snapshot_download kwargs: %s", ", ".join(removed))
