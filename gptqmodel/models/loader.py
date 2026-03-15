@@ -142,6 +142,7 @@ def ModelLoader(cls):
         import torch._dynamo
         torch._dynamo.disable()
 
+        tokenizer_trust_remote_code = model_init_kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs)
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
 
@@ -164,7 +165,10 @@ def ModelLoader(cls):
             # Align config metadata with the dtype we will materialize weights in.
             config.torch_dtype = dtype
 
-        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(
+            pretrained_model_id_or_path,
+            trust_remote_code=tokenizer_trust_remote_code,
+        )
 
         # Some models have multiple configurations.
         # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
@@ -342,7 +346,7 @@ def ModelLoader(cls):
 
         import torch._dynamo
         torch._dynamo.reset()
-
+        tokenizer_trust_remote_code = kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
         requested_device_map = device_map
         explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
 
@@ -448,7 +452,10 @@ def ModelLoader(cls):
 
         qcfg.calculate_bits_per_weight()
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id_or_path,
+            trust_remote_code=tokenizer_trust_remote_code,
+        )
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if backend == BACKEND.VLLM:

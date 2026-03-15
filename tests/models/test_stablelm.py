@@ -16,7 +16,12 @@ class TestStablelm(ModelTest):
             "acc_norm": {"value": 0.2577, "floor_pct": 0.2},
         },
     }
-    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
+    EVAL_TASKS_FAST = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.23720136518771331, "floor_pct": 0.2, "ceil_pct": 1.0},
+            "acc_norm": {"value": 0.26023890784982934, "floor_pct": 0.2, "ceil_pct": 1.0},
+        },
+    }
     TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 6
 

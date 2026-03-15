@@ -336,6 +336,7 @@ class GPTQModel:
     ):
         if isinstance(model_id_or_path, str):
             model_id_or_path = model_id_or_path.strip()
+        requested_trust_remote_code = trust_remote_code
         trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
 
         # normalize config to cfg instance
@@ -372,6 +373,7 @@ class GPTQModel:
                 device=device,
                 backend=backend,
                 trust_remote_code=trust_remote_code,
+                tokenizer_trust_remote_code=requested_trust_remote_code,
                 **kwargs,
             )
         else:
@@ -381,6 +383,7 @@ class GPTQModel:
                 device_map=device_map,
                 device=device,
                 trust_remote_code=trust_remote_code,
+                tokenizer_trust_remote_code=requested_trust_remote_code,
                 **kwargs,
             )
 
@@ -399,6 +402,11 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseQModel:
+        requested_trust_remote_code = trust_remote_code
+        tokenizer_trust_remote_code = model_init_kwargs.pop(
+            "tokenizer_trust_remote_code",
+            requested_trust_remote_code,
+        )
         trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
         config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
         if _is_supported_quantization_config(config):
@@ -417,6 +425,7 @@ class GPTQModel:
             pretrained_model_id_or_path=model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
+            tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             **model_init_kwargs,
         )
 
@@ -431,6 +440,8 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **kwargs,
     ) -> BaseQModel:
+        requested_trust_remote_code = trust_remote_code
+        tokenizer_trust_remote_code = kwargs.pop("tokenizer_trust_remote_code", requested_trust_remote_code)
         trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
         # normalize adapter to instance
         adapter = normalize_adapter(adapter)
@@ -447,6 +458,7 @@ class GPTQModel:
             device=device,
             backend=backend,
             trust_remote_code=trust_remote_code,
+            tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             adapter=adapter,
             **kwargs,
         )
