@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import importlib.util
 import unittest
 
 from model_test import ModelTest
@@ -24,9 +23,12 @@ class TestCodeGen(ModelTest):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        if importlib.util.find_spec("transformers.onnx") is None:
+        try:
+            from transformers.onnx import OnnxConfigWithPast, PatchingSpec  # noqa: F401
+        except Exception:
             raise unittest.SkipTest(
-                "CodeGen remote config requires transformers.onnx, which is unavailable in this environment"
+                "CodeGen remote config requires transformers.onnx.OnnxConfigWithPast and "
+                "transformers.onnx.PatchingSpec, which are unavailable in this environment"
             )
 
     def test_codegen(self):
