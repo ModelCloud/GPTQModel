@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # -- do not touch
+import copy
 import os
+import re
 import sys
 
 
@@ -105,6 +107,12 @@ class ModelTest(unittest.TestCase):
     EVAL_TASKS = None
     EVAL_SINGLE_GPU = True
     LOAD_MODEL_EXTRA_ARGS: Dict[str, Any] = {}
+    EVAL_TASKS_FAST = None
+    EVAL_TASKS_SLOW = None
+    MODEL_TEST_MODE_ENV = "GPTQMODEL_MODEL_TEST_MODE"
+    MODEL_TEST_MODE_FAST = "fast"
+    MODEL_TEST_MODE_SLOW = "slow"
+    MODEL_COMPAT_FAST_LAYER_COUNT = 4
 
     KERNEL_QUANT = {}  # kernel sets
     KERNEL_INFERENCE = {}  # kernel sets
@@ -147,6 +155,153 @@ class ModelTest(unittest.TestCase):
         {"prompt": "What gas do plants primarily absorb from the atmosphere during photosynthesis?", "keywords": ["carbon dioxide"]},
         {"prompt": "Name the largest ocean on Earth.", "keywords": ["pacific"]},
     ]
+
+    @classmethod
+    def derive_fast_eval_tasks(cls, eval_tasks, min_ceil_pct: float = 1.0):
+        if eval_tasks is None:
+            return None
+
+        fast_tasks = copy.deepcopy(eval_tasks)
+        for metrics in fast_tasks.values():
+            if not isinstance(metrics, dict):
+                continue
+            for metric_name, spec in list(metrics.items()):
+                if metric_name == "chat_template":
+                    continue
+                if isinstance(spec, dict):
+                    current_ceil = spec.get("ceil_pct", spec.get("max_delta_ceil_percent", DEFAULT_CEIL_PCT))
+                    spec["ceil_pct"] = max(float(current_ceil), float(min_ceil_pct))
+                else:
+                    metrics[metric_name] = {
+                        "value": float(spec),
+                        "floor_pct": DEFAULT_FLOOR_PCT,
+                        "ceil_pct": float(min_ceil_pct),
+                    }
+        return fast_tasks
+
+    def _model_test_mode(self) -> str:
+        raw = os.environ.get(self.MODEL_TEST_MODE_ENV, self.MODEL_TEST_MODE_FAST)
+        normalized = str(raw).strip().lower()
+        if normalized in {"", self.MODEL_TEST_MODE_FAST}:
+            return self.MODEL_TEST_MODE_FAST
+        if normalized in {self.MODEL_TEST_MODE_SLOW, "full"}:
+            return self.MODEL_TEST_MODE_SLOW
+        raise ValueError(
+            f"Unsupported {self.MODEL_TEST_MODE_ENV}={raw!r}; expected "
+            f"`{self.MODEL_TEST_MODE_FAST}` or `{self.MODEL_TEST_MODE_SLOW}`."
+        )
+
+    def _is_fast_model_test_mode(self) -> bool:
+        return self._model_test_mode() == self.MODEL_TEST_MODE_FAST
+
+    @contextlib.contextmanager
+    def model_compat_test_context(self):
+        previous = getattr(self, "_model_compat_eval_in_progress", False)
+        self._model_compat_eval_in_progress = True
+        try:
+            yield
+        finally:
+            self._model_compat_eval_in_progress = previous
+
+    def _in_model_compat_eval_flow(self) -> bool:
+        return bool(getattr(self, "_model_compat_eval_in_progress", False))
+
+    def _should_use_fast_model_compat_quant(self) -> bool:
+        return self._in_model_compat_eval_flow() and self._is_fast_model_test_mode()
+
+    def _selected_eval_tasks_config(self):
+        if self._is_fast_model_test_mode():
+            if self.EVAL_TASKS_FAST is not None:
+                return self.EVAL_TASKS_FAST
+            if self.EVAL_TASKS_SLOW is not None:
+                return self.derive_fast_eval_tasks(self.EVAL_TASKS_SLOW)
+            if self.EVAL_TASKS is not None:
+                return self.derive_fast_eval_tasks(self.EVAL_TASKS)
+        else:
+            if self.EVAL_TASKS_SLOW is not None:
+                return self.EVAL_TASKS_SLOW
+        return self.EVAL_TASKS
+
+    def _mode_specific_baseline_value(self, attr_name: str):
+        mode_suffix = "FAST" if self._is_fast_model_test_mode() else "SLOW"
+        preferred = f"{attr_name}_{mode_suffix}"
+        if hasattr(self, preferred):
+            return getattr(self, preferred)
+
+        if self._is_fast_model_test_mode():
+            fallback = f"{attr_name}_SLOW"
+            if hasattr(self, fallback):
+                return getattr(self, fallback)
+
+        return getattr(self, attr_name, None)
+
+    def _legacy_metric_ceil_pct(self) -> float:
+        if self._is_fast_model_test_mode():
+            return 1.0
+        return DEFAULT_CEIL_PCT
+
+    @staticmethod
+    def _merge_dynamic_configs(*configs):
+        merged = {}
+        for config in configs:
+            if not config:
+                continue
+            merged.update(copy.deepcopy(config))
+        return merged or None
+
+    def _build_fast_model_compat_dynamic(self, model) -> Optional[Dict[str, Dict[str, Any]]]:
+        if not self._should_use_fast_model_compat_quant():
+            return None
+
+        layer_limit = max(int(self.MODEL_COMPAT_FAST_LAYER_COUNT), 0)
+        quantize_config = model.quantize_config
+        model_config = getattr(model, "config", None)
+        quant_method = getattr(quantize_config, "quant_method", self.METHOD)
+        is_awq_quantize = quant_method == METHOD.AWQ
+        layer_blocks = model.simple_layer_modules(model_config, quantize_config, is_awq_quantize=is_awq_quantize)
+        layers_node = model.extract_layers_node()
+        if isinstance(layers_node, (list, tuple)):
+            if not layers_node:
+                return None
+            layers_node = layers_node[0]
+
+        layers = model.model
+        for part in layers_node.split("."):
+            layers = getattr(layers, part)
+
+        layer_count = len(layers)
+        if layer_count <= layer_limit:
+            return None
+
+        dynamic = {}
+        skipped_layers = layer_count - layer_limit
+        skipped_modules = 0
+        for layer_idx in range(layer_limit, layer_count):
+            for block in layer_blocks:
+                for module_name in block:
+                    clean_name = module_name.replace(":!", "").replace(":?", "")
+                    full_name = clean_name
+                    if not full_name.startswith(f"{layers_node}."):
+                        full_name = f"{layers_node}.{layer_idx}.{clean_name}"
+                    dynamic[f"-:^{re.escape(full_name)}$"] = {}
+                    skipped_modules += 1
+
+        log.info(
+            "Model compat `%s` mode: quantizing first %s layers and dynamically skipping %s later layers (%s modules).",
+            self.MODEL_TEST_MODE_FAST,
+            layer_limit,
+            skipped_layers,
+            skipped_modules,
+        )
+        return dynamic
+
+    def _apply_model_compat_quant_overrides(self, model) -> None:
+        dynamic = self._build_fast_model_compat_dynamic(model)
+        if dynamic is None:
+            return
+
+        model.quantize_config.dynamic = self._merge_dynamic_configs(model.quantize_config.dynamic, dynamic)
+        self._model_compat_fast_dynamic = dynamic
 
     @staticmethod
     def _build_layer_stop_callback(layer_idx: int):
@@ -230,17 +385,20 @@ class ModelTest(unittest.TestCase):
     def _legacy_arc_tasks(self):
         baselines = {}
         arc_metrics = {}
-        if hasattr(self, "NATIVE_ARC_CHALLENGE_ACC"):
+        native_acc = self._mode_specific_baseline_value("NATIVE_ARC_CHALLENGE_ACC")
+        native_acc_norm = self._mode_specific_baseline_value("NATIVE_ARC_CHALLENGE_ACC_NORM")
+        ceil_pct = self._legacy_metric_ceil_pct()
+        if native_acc is not None:
             arc_metrics["acc"] = {
-                "value": self.NATIVE_ARC_CHALLENGE_ACC,
+                "value": native_acc,
                 "floor_pct": DEFAULT_FLOOR_PCT,
-                "ceil_pct": DEFAULT_CEIL_PCT,
+                "ceil_pct": ceil_pct,
             }
-        if hasattr(self, "NATIVE_ARC_CHALLENGE_ACC_NORM"):
+        if native_acc_norm is not None:
             arc_metrics["acc_norm"] = {
-                "value": self.NATIVE_ARC_CHALLENGE_ACC_NORM,
+                "value": native_acc_norm,
                 "floor_pct": DEFAULT_FLOOR_PCT,
-                "ceil_pct": DEFAULT_CEIL_PCT,
+                "ceil_pct": ceil_pct,
             }
         if arc_metrics:
             normalized = self._normalize_task_identifier(EVAL.LM_EVAL.ARC_CHALLENGE)
@@ -287,9 +445,10 @@ class ModelTest(unittest.TestCase):
     def get_eval_tasks(self):
         self._resolved_task_lookup = {}
         self._task_chat_template = {}
-        if self.EVAL_TASKS:
+        eval_tasks = self._selected_eval_tasks_config()
+        if eval_tasks:
             baselines = {}
-            for task, metrics in self.EVAL_TASKS.items():
+            for task, metrics in eval_tasks.items():
                 resolved_task = self._resolve_task_enum(task)
                 normalized_task = self._normalize_task_identifier(resolved_task)
                 self._resolved_task_lookup[normalized_task] = resolved_task
@@ -950,7 +1109,10 @@ class ModelTest(unittest.TestCase):
         tokenizer = model.tokenizer
         self._post_quant_eval_records = {}
         self._effective_load_backend = None
+        self._model_compat_fast_dynamic = None
         processor = None
+
+        self._apply_model_compat_quant_overrides(model)
 
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
         calibration_dataset = get_calib_dataset(model) if is_image_to_text_model else self.load_dataset(tokenizer, self.DATASET_SIZE)
@@ -1253,8 +1415,10 @@ class ModelTest(unittest.TestCase):
         #if self.QUANT_SAVE_PATH:
         #    self.model, _ = self.quantModel(self.QUANT_SAVE_PATH, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
 
-        if not self.model:
-            self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
+        log.info("Model compat test mode: %s", self._model_test_mode())
+        with self.model_compat_test_context():
+            if not self.model:
+                self.model, _ = self.quantModel(self.NATIVE_MODEL_ID, batch_size=self.QUANT_BATCH_SIZE, trust_remote_code=self.TRUST_REMOTE_CODE, dtype=self.TORCH_DTYPE)
 
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
 
@@ -1268,11 +1432,12 @@ class ModelTest(unittest.TestCase):
             log.info("Reusing evaluation results for backend `%s`; skipping duplicate lm_eval run", target_backend.name)
             task_results = eval_records[target_backend]
         else:
-            task_results = self.lm_eval(
-                model=self.SAVE_PATH if self.SAVE_PATH else self.model,
-                trust_remote_code=self.TRUST_REMOTE_CODE,
-                delete_quantized_model=self.DELETE_QUANTIZED_MODEL,
-            )
+            with self.model_compat_test_context():
+                task_results = self.lm_eval(
+                    model=self.SAVE_PATH if self.SAVE_PATH else self.model,
+                    trust_remote_code=self.TRUST_REMOTE_CODE,
+                    delete_quantized_model=self.DELETE_QUANTIZED_MODEL,
+                )
         self.check_results(task_results)
         self._cleanup_quantized_model(self.model, enabled=self.DELETE_QUANTIZED_MODEL)
 

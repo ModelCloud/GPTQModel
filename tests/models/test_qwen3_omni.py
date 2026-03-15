@@ -10,12 +10,13 @@ from gptqmodel.utils.eval import EVAL
 
 class TestQwen3Omni(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-Omni-30B-A3B-Instruct/"
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {"value": 0.2739, "floor_pct": 0.2},
             "acc_norm": {"value": 0.3055, "floor_pct": 0.2},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     # # TRUST_REMOTE_CODE = False
     # APPLY_CHAT_TEMPLATE = True
     # # EVAL_BATCH_SIZE = 6

@@ -27,7 +27,7 @@ class TestQwen3Moe(ModelTest):
     # DEVICE = torch.device("cpu")
     # HESSIAN_CHUNK_SIZE = 256 * 1024 * 1024
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {"value": 0.5137, "floor_pct": 0.04},
             "acc_norm": {"value": 0.5307, "floor_pct": 0.04},
@@ -64,6 +64,7 @@ class TestQwen3Moe(ModelTest):
             },
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     VRAM_STRATEGY = VramStrategy.BALANCED
     # TRUST_REMOTE_CODE = False

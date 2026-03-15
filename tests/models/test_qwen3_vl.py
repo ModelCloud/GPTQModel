@@ -11,19 +11,21 @@ from gptqmodel.utils.eval import EVAL
 
 class TestQwen3_VL(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-VL-2B-Instruct/"
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {"value": 0.3618, "floor_pct": 0.04},
             "acc_norm": {"value": 00.3882, "floor_pct": 0.04},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
 
     def test_qwen3_vl(self):
-        model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
-                                                      dtype=self.TORCH_DTYPE)
+        with self.model_compat_test_context():
+            model, tokenizer, processor = self.quantModel(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE,
+                                                          dtype=self.TORCH_DTYPE)
 
         # check image to text
         messages = [
@@ -70,7 +72,8 @@ class TestQwen3_VL(ModelTest):
         # check lm_eval results
         self.check_kernel(model, self.KERNEL_INFERENCE)
 
-        task_results = self.lm_eval(model=model,
-                                    trust_remote_code=self.TRUST_REMOTE_CODE,
-                                    delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
+        with self.model_compat_test_context():
+            task_results = self.lm_eval(model=model,
+                                        trust_remote_code=self.TRUST_REMOTE_CODE,
+                                        delete_quantized_model=self.DELETE_QUANTIZED_MODEL)
         self.check_results(task_results)

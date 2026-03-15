@@ -31,7 +31,7 @@ class TestLlama3_2_awq(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048 # new
     # STOP_AFTER_LAYER = 0
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
@@ -58,6 +58,7 @@ class TestLlama3_2_awq(ModelTest):
             },
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
     SYM = True

@@ -18,7 +18,7 @@ class TestMarin(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/marin-32b-base"
     # VRAM_STRATEGY = VramStrategy.BALANCED
     # Marin inherits Qwen3's backbone with QK-Norm attention.
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {"value": 0.5828, "floor_pct": 0.04},
             "acc_norm": {"value": 0.6007, "floor_pct": 0.04},
@@ -27,6 +27,7 @@ class TestMarin(ModelTest):
             "acc": {"value": 0.6673, "floor_pct": 0.04},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     def test_marin(self):
         self.quant_lm_eval()

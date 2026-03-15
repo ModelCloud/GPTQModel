@@ -5,11 +5,12 @@
 
 import json
 import warnings
+from functools import lru_cache
 from typing import Any, Optional
 
 import torch
 from accelerate import init_empty_weights
-from transformers import GenerationConfig, PreTrainedModel
+from transformers import AutoConfig, AutoModelForCausalLM, GenerationConfig, PreTrainedModel
 
 
 # Compatibility wrapper for no_init_weights across different transformers versions
@@ -23,9 +24,69 @@ except ImportError:
 from ..utils.logger import setup_logger
 
 
-__all__ = ["no_init_weights", "normalize_hf_config_compat", "prepare_remote_code_compat", "load_tokenizer"]
+__all__ = [
+    "no_init_weights",
+    "normalize_hf_config_compat",
+    "prepare_remote_code_compat",
+    "has_native_transformers_causallm_support",
+    "resolve_trust_remote_code",
+    "load_tokenizer",
+]
 
 log = setup_logger()
+_TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
+
+
+@lru_cache(maxsize=None)
+def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple[bool, Optional[str], Optional[str]]:
+    try:
+        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=False)
+    except Exception as exc:
+        log.debug("HF: native transformers support check failed for `%s`: %s", model_id_or_path, exc)
+        return False, None, None
+
+    model_type = getattr(config, "model_type", None)
+    try:
+        model_cls = AutoModelForCausalLM._model_mapping[type(config)]
+    except Exception as exc:
+        log.debug(
+            "HF: config `%s` for `%s` has no native AutoModelForCausalLM mapping: %s",
+            type(config).__name__,
+            model_id_or_path,
+            exc,
+        )
+        return False, model_type, None
+
+    return True, model_type, getattr(model_cls, "__name__", str(model_cls))
+
+
+def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool) -> bool:
+    if not trust_remote_code or not model_id_or_path:
+        return trust_remote_code
+
+    native_supported, model_type, model_cls_name = _detect_native_transformers_causallm_support(str(model_id_or_path))
+    if not native_supported:
+        return True
+
+    warning_key = (str(model_id_or_path), model_type or "unknown", model_cls_name or "unknown")
+    if warning_key not in _TRUST_REMOTE_CODE_OVERRIDE_WARNED:
+        log.warning(
+            "HF: overriding trust_remote_code=True to False for `%s` because model_type `%s` is integrated in installed transformers as `%s`.",
+            model_id_or_path,
+            model_type or "unknown",
+            model_cls_name or "unknown",
+        )
+        _TRUST_REMOTE_CODE_OVERRIDE_WARNED.add(warning_key)
+
+    return False
+
+
+def has_native_transformers_causallm_support(model_id_or_path: Optional[str]) -> bool:
+    if not model_id_or_path:
+        return False
+
+    native_supported, _, _ = _detect_native_transformers_causallm_support(str(model_id_or_path))
+    return native_supported
 
 
 # Older remote model files sometimes store `_tied_weights_keys` as a plain list
@@ -245,6 +306,11 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
 
     _patch_transformers_remote_code_compat()
     _normalize_remote_code_config_compat(config)
+    # Some config classes synchronize `rope_scaling` and `rope_parameters`, so
+    # remote-code normalization that clears legacy default `rope_scaling` can
+    # also reset `rope_parameters` back to None. Re-apply the RoPE backfill
+    # after remote-code field cleanup so from_config() sees stable metadata.
+    _normalize_rope_parameters_config_compat(config)
 
 
 def prepare_remote_code_compat(config: Any) -> None:

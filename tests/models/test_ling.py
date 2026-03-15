@@ -10,13 +10,14 @@ from gptqmodel.utils.eval import EVAL
 
 class TestLing(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ling-mini-2.0/"
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {"value": 0.5009, "floor_pct": 0.2},
             "acc_norm": {"value": 0.5137, "floor_pct": 0.2},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     TRUST_REMOTE_CODE = True
     # EVAL_BATCH_SIZE = 6
     GPTQA = False

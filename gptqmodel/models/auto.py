@@ -69,6 +69,7 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from ..quantization import METHOD, QUANT_CONFIG_FILENAME  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
+from ..utils.hf import resolve_trust_remote_code  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
 from .base import BaseQModel, QuantizeConfig  # noqa: E402
@@ -304,6 +305,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
 
 
 def check_and_get_model_definition(model_dir, trust_remote_code=False):
+    trust_remote_code = resolve_trust_remote_code(model_dir, trust_remote_code=trust_remote_code)
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
     model_type = config.model_type.lower()
 
@@ -334,6 +336,8 @@ class GPTQModel:
     ):
         if isinstance(model_id_or_path, str):
             model_id_or_path = model_id_or_path.strip()
+        requested_trust_remote_code = trust_remote_code
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
 
         # normalize config to cfg instance
         if isinstance(quantize_config, Dict):
@@ -369,6 +373,7 @@ class GPTQModel:
                 device=device,
                 backend=backend,
                 trust_remote_code=trust_remote_code,
+                tokenizer_trust_remote_code=requested_trust_remote_code,
                 **kwargs,
             )
         else:
@@ -378,6 +383,7 @@ class GPTQModel:
                 device_map=device_map,
                 device=device,
                 trust_remote_code=trust_remote_code,
+                tokenizer_trust_remote_code=requested_trust_remote_code,
                 **kwargs,
             )
 
@@ -396,6 +402,12 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseQModel:
+        requested_trust_remote_code = trust_remote_code
+        tokenizer_trust_remote_code = model_init_kwargs.pop(
+            "tokenizer_trust_remote_code",
+            requested_trust_remote_code,
+        )
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
         config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
         if _is_supported_quantization_config(config):
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
@@ -413,6 +425,7 @@ class GPTQModel:
             pretrained_model_id_or_path=model_id_or_path,
             quantize_config=quantize_config,
             trust_remote_code=trust_remote_code,
+            tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             **model_init_kwargs,
         )
 
@@ -427,6 +440,9 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **kwargs,
     ) -> BaseQModel:
+        requested_trust_remote_code = trust_remote_code
+        tokenizer_trust_remote_code = kwargs.pop("tokenizer_trust_remote_code", requested_trust_remote_code)
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
         # normalize adapter to instance
         adapter = normalize_adapter(adapter)
 
@@ -442,6 +458,7 @@ class GPTQModel:
             device=device,
             backend=backend,
             trust_remote_code=trust_remote_code,
+            tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             adapter=adapter,
             **kwargs,
         )
@@ -463,6 +480,9 @@ class GPTQModel:
             ntrain: int = 1,  # only for framework=EVAL.MMLUPRO
             **args
     ):
+        if isinstance(model_or_id_or_path, str):
+            trust_remote_code = resolve_trust_remote_code(model_or_id_or_path, trust_remote_code=trust_remote_code)
+
         from peft import PeftModel
         if model_args is None:
             model_args = {}
@@ -682,6 +702,7 @@ class GPTQModel:
 
     @staticmethod
     def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
         # load config
         config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
 

@@ -20,7 +20,7 @@ class TestBrumby(ModelTest):
     TRUST_REMOTE_CODE = True
     LOAD_MODEL_EXTRA_ARGS = {"use_cache": False}
     DATASET_CONCAT_SIZE = 2048
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
@@ -44,6 +44,7 @@ class TestBrumby(ModelTest):
             "acc": {"value": 0.71, "floor_pct": 0.05, "ceil_pct": 0.10},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     @classmethod
     def setUpClass(cls):

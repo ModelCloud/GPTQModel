@@ -20,7 +20,7 @@ class TestQwen2_5(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
@@ -34,6 +34,35 @@ class TestQwen2_5(ModelTest):
         },
         EVAL.LM_EVAL.MMLU_STEM: {
             "acc": {"value": 0.3942, "floor_pct": 0.04},
+        },
+    }
+    EVAL_TASKS_FAST = {
+        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+            "chat_template": True,
+            "exact_match,flexible-extract": {
+                "value": 0.38626964433416044,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {
+                "value": 0.2977815699658703,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+            "acc_norm": {
+                "value": 0.34044368600682595,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
+            "acc": {
+                "value": 0.3967649857278782,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
         },
     }
 

@@ -111,3 +111,25 @@ def test_prepare_dataset_splits_long_row_across_blocks():
     assert first_mask == [[1, 1, 1, 1, 1]]
     assert second_ids == [[6, 0, 0, 0, 0]]
     assert second_mask == [[1, 0, 0, 0, 0]]
+
+
+def test_prepare_dataset_normalizes_rank_4_attention_mask():
+    qmodel = _make_qmodel()
+    keep = torch.tensor([True, True, True, False, False], dtype=torch.bool)
+    seq_len = keep.numel()
+    causal = torch.zeros((1, 1, seq_len, seq_len), dtype=torch.bool)
+    for query_idx in range(seq_len):
+        causal[0, 0, query_idx] = keep & (torch.arange(seq_len) <= query_idx)
+
+    dataset = [{"input_ids": [[1, 2, 3, 0, 0]], "attention_mask": causal}]
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_sort=None,
+        batch_size=1,
+        calibration_data_min_length=0,
+    )
+
+    assert len(batches) == 1
+    assert batches[0]["input_ids"].tolist() == [[1, 2, 3, 0, 0]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1, 0, 0]]

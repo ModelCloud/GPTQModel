@@ -16,7 +16,7 @@ from gptqmodel.utils.eval import EVAL
 # | mmlu_stem :: acc,none          |   0.8403 |
 class TestQwen3Next(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-Next-80B-A3B-Instruct"
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {"value": 0.6271, "floor_pct": 0.04},
             "acc_norm": {"value": 0.6613, "floor_pct": 0.04},
@@ -25,6 +25,7 @@ class TestQwen3Next(ModelTest):
             "acc": {"value": 0.8403, "floor_pct": 0.04},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     VRAM_STRATEGY = VramStrategy.BALANCED
     # DATASET_SIZE = 2048
