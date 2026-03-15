@@ -20,7 +20,7 @@ class TestQwen2_5(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
@@ -36,6 +36,7 @@ class TestQwen2_5(ModelTest):
             "acc": {"value": 0.3942, "floor_pct": 0.04},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     def test_qwen2_5(self):
         self.quant_lm_eval()

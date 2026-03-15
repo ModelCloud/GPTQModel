@@ -30,3 +30,12 @@ def test_normalize_hf_config_compat_drops_default_remote_rope_scaling_dict():
     normalize_hf_config_compat(config, trust_remote_code=True)
 
     assert config.rope_scaling is None
+
+
+def test_normalize_hf_config_compat_preserves_rope_parameters_after_remote_cleanup():
+    config = LlamaConfig(rope_scaling={"rope_type": "default", "rope_theta": 10000.0})
+
+    normalize_hf_config_compat(config, trust_remote_code=True)
+
+    assert config.rope_parameters["rope_type"] == "default"
+    assert config.rope_parameters["rope_theta"] == 10000.0

@@ -18,7 +18,7 @@ class TestQwen3_5(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3.5-27B"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {"value": 0.6092, "floor_pct": 0.04},
             "acc_norm": {"value": 0.6143, "floor_pct": 0.04},
@@ -27,6 +27,7 @@ class TestQwen3_5(ModelTest):
             "acc": {"value": 0.8461, "floor_pct": 0.04},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
 
     def test_qwen3_5(self):

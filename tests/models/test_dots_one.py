@@ -21,7 +21,7 @@ class TestDotsOne(ModelTest):
     TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
@@ -48,6 +48,7 @@ class TestDotsOne(ModelTest):
             },
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     # llama 3.2 Instruct requires chat = true to have normal ARC scores
     # mmlu requires chat = false

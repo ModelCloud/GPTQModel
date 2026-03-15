@@ -12,16 +12,21 @@ class TestInternlm2_5(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/internlm2_5-1_8b-chat" # "internlm/internlm2_5-1_8b-chat"
     NATIVE_ARC_CHALLENGE_ACC = 0.3217
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3575
+    NATIVE_ARC_CHALLENGE_ACC_SLOW = NATIVE_ARC_CHALLENGE_ACC
+    NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
+    NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
+    NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
     TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 6
     USE_VLLM = False
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
 
     def test_internlm2_5(self):

@@ -10,13 +10,14 @@ from gptqmodel.utils.eval import EVAL
 
 class TestHybridActOrder(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {"value": 0.3140, "floor_pct": 0.05},
             "acc_norm": {"value": 0.3439, "floor_pct": 0.05},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     GPTQA = False
     ACT_GROUP_AWARE = True
 
