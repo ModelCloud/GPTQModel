@@ -245,6 +245,11 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
 
     _patch_transformers_remote_code_compat()
     _normalize_remote_code_config_compat(config)
+    # Some config classes synchronize `rope_scaling` and `rope_parameters`, so
+    # remote-code normalization that clears legacy default `rope_scaling` can
+    # also reset `rope_parameters` back to None. Re-apply the RoPE backfill
+    # after remote-code field cleanup so from_config() sees stable metadata.
+    _normalize_rope_parameters_config_compat(config)
 
 
 def prepare_remote_code_compat(config: Any) -> None:
