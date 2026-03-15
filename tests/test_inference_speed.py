@@ -38,7 +38,7 @@ class TestInferenceSpeed(InferenceSpeed):
         [
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_EORA, 282.64, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.MARLIN, 286.74, False, False),
-            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 176.00, False, False),
+            (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 259.00, False, False),  # 4090/A100 max expectation within the current 75%-125% pass band
             # (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 53, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.EXLLAMA_V2, 290.60, False, False),
             (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 239.58, False, False),

@@ -332,9 +332,21 @@ def ModelLoader(cls):
         import torch._dynamo
         torch._dynamo.reset()
 
+        requested_device_map = device_map
+
+        if requested_device_map is None:
+            explicit_device = None
+            if isinstance(device, str) and ":" in device:
+                explicit_device = device
+            elif isinstance(device, torch.device) and device.index is not None:
+                explicit_device = str(device)
+
+            if explicit_device is not None:
+                requested_device_map = {"": explicit_device}
+
         # normalized device + device_map into single device
-        normalized_device = device if device_map is None else None  # let device_map dictate placement when present
-        device = normalize_device_device_map(normalized_device, device_map)
+        normalized_device = device if requested_device_map is None else None  # let device_map dictate placement when present
+        device = normalize_device_device_map(normalized_device, requested_device_map)
 
         # TODO need to normalize backend and others in a unified api
         if isinstance(backend, str):
@@ -594,7 +606,7 @@ def ModelLoader(cls):
                 device=device,
             )
 
-        if isinstance(device_map, str) and device_map not in [
+        if isinstance(requested_device_map, str) and requested_device_map not in [
                 "auto",
                 "balanced",
                 "balanced_low_0",
@@ -788,13 +800,17 @@ def ModelLoader(cls):
             return device_map
 
         log.info(f"Loader: device = {device}")
-        layers, _ = get_module_by_name_prefix(model, extract_layers_node)
-        num_gpus = 1
-        if device is DEVICE.CUDA:
-            num_gpus = torch.cuda.device_count()
-        elif device is DEVICE.XPU:
-            num_gpus = torch.xpu.device_count()
-        device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
+        if requested_device_map is None:
+            layers, _ = get_module_by_name_prefix(model, extract_layers_node)
+            num_gpus = 1
+            if device is DEVICE.CUDA:
+                num_gpus = torch.cuda.device_count()
+            elif device is DEVICE.XPU:
+                num_gpus = torch.xpu.device_count()
+            device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
+        else:
+            device_map = dict(requested_device_map) if isinstance(requested_device_map, dict) else requested_device_map
+            log.info(f"Loader: honoring explicit device_map request: {device_map}")
         log.info(f"Loader: device_map = {device_map}")
 
         load_checkpoint_in_model = True
