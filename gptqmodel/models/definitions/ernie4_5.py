@@ -73,7 +73,7 @@ class Ernie4_5QModel(LlamaQModel):
                 past_key_values=None,
                 output_attentions=False,
                 output_hidden_states=None,
-                return_dict=False,
+                return_dict=True,
                 **kwargs,
         ):
             use_cache = use_cache if use_cache is not None else self.config.use_cache
@@ -155,7 +155,7 @@ class Ernie4_5QModel(LlamaQModel):
 
             next_cache = next_decoder_cache if use_cache else None
 
-            if not return_dict:
+            if return_dict is False:
                 return tuple(
                     v
                     for v in [
