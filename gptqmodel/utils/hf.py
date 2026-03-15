@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import json
+import warnings
 from typing import Any, Optional
 
 import torch
@@ -22,7 +23,7 @@ except ImportError:
 from ..utils.logger import setup_logger
 
 
-__all__ = ["no_init_weights", "normalize_hf_config_compat", "prepare_remote_code_compat"]
+__all__ = ["no_init_weights", "normalize_hf_config_compat", "prepare_remote_code_compat", "load_tokenizer"]
 
 log = setup_logger()
 
@@ -211,7 +212,17 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
     # transformers 5.x normalizes RoPE config to `rope_type`, but older
     # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.
     rope_scaling = getattr(config, "rope_scaling", None)
-    if not isinstance(rope_scaling, dict) or "type" in rope_scaling:
+    if not isinstance(rope_scaling, dict):
+        return
+
+    if rope_scaling.get("rope_type") == "default" and set(rope_scaling).issubset({"rope_type", "rope_theta"}):
+        # transformers 5.x materializes default RoPE metadata into
+        # `rope_scaling`, but older remote MiniCPM code treats any dict here
+        # as a scaled-RoPE config and expects an explicit `factor`.
+        config.rope_scaling = None
+        return
+
+    if "type" in rope_scaling:
         return
 
     rope_type = rope_scaling.get("rope_type")
@@ -240,6 +251,18 @@ def prepare_remote_code_compat(config: Any) -> None:
     # Remote-code loads need both the transformers API shims and any config
     # field migrations applied before instantiation happens.
     normalize_hf_config_compat(config, trust_remote_code=True)
+
+
+def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
+    from tokenicer import Tokenicer
+
+    warnings.warn(
+        "gptqmodel.utils.hf.load_tokenizer() is deprecated; use Tokenicer.load(..., model_config=...) instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return Tokenicer.load(tokenizer_or_path, model_config=model_config, **kwargs)
+
 
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False

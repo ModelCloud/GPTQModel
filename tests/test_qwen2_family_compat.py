@@ -3,8 +3,10 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import types
+import warnings
 
 from PIL import Image
+from tokenicer import Tokenicer
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -127,7 +129,7 @@ def test_qwen2_5_omni_pre_quantize_hooks_use_thinker_layout():
     assert instance.model.thinker.model.embed_tokens.weight.device.type == "cpu"
 
 
-def test_load_tokenizer_uses_text_config_for_qwen2_5_omni_style_composite_configs():
+def test_tokenicer_load_uses_text_config_for_qwen2_5_omni_style_composite_configs():
     backend = Tokenizer(WordLevel({"<pad>": 0, "<eos>": 1, "hello": 2}, unk_token="<pad>"))
     backend.pre_tokenizer = Whitespace()
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="<pad>", eos_token="<eos>")
@@ -143,8 +145,28 @@ def test_load_tokenizer_uses_text_config_for_qwen2_5_omni_style_composite_config
         def get_text_config(self):
             return text_config
 
-    wrapped = load_tokenizer(tokenizer, model_config=_CompositeConfig())
+    wrapped = Tokenicer.load(tokenizer, model_config=_CompositeConfig())
 
     assert wrapped.model_config is text_config
     assert wrapped.eos_token_id == tokenizer.eos_token_id
+    assert text_config.pad_token_id == tokenizer.pad_token_id
     assert text_config.eos_token_id == tokenizer.eos_token_id
+
+
+def test_load_tokenizer_deprecated_shim_forwards_to_tokenicer():
+    backend = Tokenizer(WordLevel({"<pad>": 0, "<eos>": 1}, unk_token="<pad>"))
+    backend.pre_tokenizer = Whitespace()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="<pad>", eos_token="<eos>")
+
+    text_config = types.SimpleNamespace(model_type="qwen2_5_omni_text", pad_token_id=None, eos_token_id=None)
+
+    class _CompositeConfig:
+        def get_text_config(self):
+            return text_config
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        wrapped = load_tokenizer(tokenizer, model_config=_CompositeConfig())
+
+    assert any(item.category is DeprecationWarning for item in caught)
+    assert wrapped.model_config is text_config
