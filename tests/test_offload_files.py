@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,51 @@ def test_offload_to_disk_writes_single_dat_file(tmp_path):
     undo_offload_to_disk(model.linear, delete_offload_folders=False)
     for name, tensor in model.linear.state_dict().items():
         torch.testing.assert_close(tensor, original_state[name])
+
+
+def test_streaming_state_dict_pads_safetensors_header_to_8_bytes(tmp_path):
+    model = nn.Linear(3, 5, bias=False)
+    state_dict = get_state_dict_for_save(model)
+
+    # Force an unaligned raw header so the regression test would fail without padding.
+    metadata = {"format": "pt"}
+    for size in range(1, 33):
+        candidate = dict(metadata, pad=("x" * size))
+        raw_header = {
+            "__metadata__": candidate,
+            "weight": {
+                "dtype": "F32",
+                "shape": list(model.weight.shape),
+                "data_offsets": [0, model.weight.numel() * model.weight.element_size()],
+            },
+        }
+        raw_header_len = len(json.dumps(raw_header, separators=(",", ":")).encode("utf-8"))
+        if raw_header_len % 8 != 0:
+            metadata = candidate
+            break
+    else:
+        raise AssertionError("Failed to construct an unaligned safetensors header for the regression test.")
+
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    expected_files, _, _ = streaming_state_dict_to_shards(
+        state_dict,
+        save_dir=str(save_dir),
+        model_base_name="model",
+        single_file_name="model.safetensors",
+        metadata=metadata,
+        max_shard_size=None,
+    )
+
+    shard_path = save_dir / expected_files[0]
+    with shard_path.open("rb") as handle:
+        stored_header_len = struct.unpack("<Q", handle.read(8))[0]
+
+    assert raw_header_len % 8 != 0
+    assert stored_header_len % 8 == 0
+
+    with safe_open(str(shard_path), framework="pt", device="cpu") as handler:
+        torch.testing.assert_close(handler.get_tensor("weight"), model.weight.detach())
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for offload rematerialization test")

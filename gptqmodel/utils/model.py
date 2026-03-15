@@ -1573,6 +1573,11 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
         offset += entry.num_bytes
 
     header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    # Safetensors pads the JSON header to an 8-byte boundary.
+    # Without that padding, some readers reject the file as malformed.
+    header_padding = (-len(header_bytes)) % 8
+    if header_padding:
+        header_bytes += b" " * header_padding
 
     with open(path, "wb") as out:
         out.write(struct.pack("<Q", len(header_bytes)))
