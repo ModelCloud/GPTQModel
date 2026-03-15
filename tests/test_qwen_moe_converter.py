@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from defuser import convert_model
 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeConfig, Qwen2MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextConfig, Qwen3NextForCausalLM
@@ -29,8 +30,9 @@ def _make_tiny_moe_config(config_cls):
 
 
 def _assert_converted_experts(layer, hidden_size: int):
-    assert isinstance(layer.mlp.experts, torch.nn.ModuleList)
-    assert len(layer.mlp.experts) == 4
+    assert isinstance(layer.mlp.experts, torch.nn.Module)
+    assert not hasattr(layer.mlp.experts, "gate_up_proj")
+    assert len([name for name, _ in layer.mlp.experts.named_children() if name.isdigit()]) == 4
 
     expert0 = layer.mlp.experts[0]
     assert hasattr(expert0, "gate_proj")
@@ -41,32 +43,35 @@ def _assert_converted_experts(layer, hidden_size: int):
     assert output.shape == (2, 3, hidden_size)
 
 
-def test_qwen2_moe_converter_expands_fused_experts():
-    model = Qwen2MoeForCausalLM(_make_tiny_moe_config(Qwen2MoeConfig))
-    layer = model.model.layers[0]
+def test_qwen2_moe_uses_defuser_for_fused_experts():
+    assert "qwen2_moe" not in MODULE_CONVERTER_MAP
 
-    MODULE_CONVERTER_MAP["qwen2_moe"](layer, model.config)
+    model = Qwen2MoeForCausalLM(_make_tiny_moe_config(Qwen2MoeConfig))
+    convert_model(model, cleanup_original=False)
+    layer = model.model.layers[0]
 
     assert hasattr(layer.mlp, "shared_expert")
     assert hasattr(layer.mlp, "shared_expert_gate")
     _assert_converted_experts(layer, hidden_size=model.config.hidden_size)
 
 
-def test_qwen3_moe_converter_expands_fused_experts():
-    model = Qwen3MoeForCausalLM(_make_tiny_moe_config(Qwen3MoeConfig))
-    layer = model.model.layers[0]
+def test_qwen3_moe_uses_defuser_for_fused_experts():
+    assert "qwen3_moe" not in MODULE_CONVERTER_MAP
 
-    MODULE_CONVERTER_MAP["qwen3_moe"](layer, model.config)
+    model = Qwen3MoeForCausalLM(_make_tiny_moe_config(Qwen3MoeConfig))
+    convert_model(model, cleanup_original=False)
+    layer = model.model.layers[0]
 
     assert not hasattr(layer.mlp, "shared_expert")
     _assert_converted_experts(layer, hidden_size=model.config.hidden_size)
 
 
-def test_qwen3_next_converter_expands_fused_experts():
-    model = Qwen3NextForCausalLM(_make_tiny_moe_config(Qwen3NextConfig))
-    layer = model.model.layers[0]
+def test_qwen3_next_uses_defuser_for_fused_experts():
+    assert "qwen3_next" not in MODULE_CONVERTER_MAP
 
-    MODULE_CONVERTER_MAP["qwen3_next"](layer, model.config)
+    model = Qwen3NextForCausalLM(_make_tiny_moe_config(Qwen3NextConfig))
+    convert_model(model, cleanup_original=False)
+    layer = model.model.layers[0]
 
     assert hasattr(layer.mlp, "shared_expert")
     assert hasattr(layer.mlp, "shared_expert_gate")

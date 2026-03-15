@@ -200,42 +200,6 @@ def convert_glm4v_mlp_converter(module, config):
     return module
 
 
-def convert_qwen2_moe_expert_converter(module, config):
-    from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeMLP, Qwen2MoeSparseMoeBlock
-
-    return _convert_qwen_sparse_moe_layer(
-        module,
-        config=config,
-        sparse_moe_cls=Qwen2MoeSparseMoeBlock,
-        expert_mlp_cls=Qwen2MoeMLP,
-        has_shared_expert=True,
-    )
-
-
-def convert_qwen3_moe_expert_converter(module, config):
-    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP, Qwen3MoeSparseMoeBlock
-
-    return _convert_qwen_sparse_moe_layer(
-        module,
-        config=config,
-        sparse_moe_cls=Qwen3MoeSparseMoeBlock,
-        expert_mlp_cls=Qwen3MoeMLP,
-        has_shared_expert=False,
-    )
-
-
-def convert_qwen3_next_expert_converter(module, config):
-    from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextMLP, Qwen3NextSparseMoeBlock
-
-    return _convert_qwen_sparse_moe_layer(
-        module,
-        config=config,
-        sparse_moe_cls=Qwen3NextSparseMoeBlock,
-        expert_mlp_cls=Qwen3NextMLP,
-        has_shared_expert=True,
-    )
-
-
 def convert_qwen3_omni_moe_expert_converter(module, config):
     from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
         Qwen3OmniMoeThinkerTextMLP,
@@ -254,8 +218,6 @@ MODULE_CONVERTER_MAP = {
     "llama4": convert_llama4_expert_converter,
     "gpt_oss": convert_gpt_oss_expert_converter,
     "glm4v": convert_glm4v_mlp_converter,
-    "qwen2_moe": convert_qwen2_moe_expert_converter,
-    "qwen3_moe": convert_qwen3_moe_expert_converter,
-    "qwen3_next": convert_qwen3_next_expert_converter,
+    # qwen2_moe/qwen3_moe/qwen3_next are handled by Defuser>=0.0.9 during model load.
     "qwen3_omni_moe": convert_qwen3_omni_moe_expert_converter,
 }
