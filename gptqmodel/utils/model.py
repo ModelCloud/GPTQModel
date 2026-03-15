@@ -177,7 +177,30 @@ def recurse_setattr(module, name, value):
         recurse_setattr(getattr(module, name), rest, value)
 
 
+def _module_has_meta_tensors(module: nn.Module) -> bool:
+    for param in module.parameters(recurse=True):
+        if getattr(param, "is_meta", False) or param.device.type == "meta":
+            return True
+    for buf in module.buffers(recurse=True):
+        if getattr(buf, "is_meta", False) or buf.device.type == "meta":
+            return True
+    return False
+
+
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None):
+    if isinstance(obj, nn.Module) and _module_has_meta_tensors(obj):
+        if not accelerate.utils.has_offloaded_params(obj):
+            raise NotImplementedError(
+                "Cannot move a module that still contains meta tensors without offload hooks. "
+                "Materialize it first before calling move_to()."
+            )
+
+        # Accelerate disk-offloaded modules keep meta placeholders until they are
+        # explicitly restored, so materialize those leaves before the device move.
+        from .offload import undo_offload_to_disk
+
+        return undo_offload_to_disk(obj, device=device, dtype=dtype)
+
     if get_device(obj) != device or dtype is not None:
         obj = obj.to(device=device, dtype=dtype, non_blocking=False)
 
@@ -1550,6 +1573,11 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
         offset += entry.num_bytes
 
     header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    # Safetensors pads the JSON header to an 8-byte boundary.
+    # Without that padding, some readers reject the file as malformed.
+    header_padding = (-len(header_bytes)) % 8
+    if header_padding:
+        header_bytes += b" " * header_padding
 
     with open(path, "wb") as out:
         out.write(struct.pack("<Q", len(header_bytes)))

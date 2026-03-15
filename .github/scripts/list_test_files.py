@@ -41,9 +41,10 @@ def getFiles(
 
     # all tests under tests/**/test_*.py (includes tests/models/**)
     all_tests = {
-        str(p.relative_to(tests_root).with_suffix(""))
+        rel
         for p in tests_root.rglob("test_*.py")
-        if p.stem not in ignored_set
+        for rel in [str(p.relative_to(tests_root).with_suffix(""))]
+        if rel not in ignored_set and p.stem not in ignored_set
     }
 
     # torch tests

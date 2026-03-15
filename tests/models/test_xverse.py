@@ -23,4 +23,11 @@ class TestXVerse(ModelTest):
     USE_FLASH_ATTN = False
 
     def test_xverse(self):
+        try:
+            self.load_tokenizer(self.NATIVE_MODEL_ID, trust_remote_code=self.TRUST_REMOTE_CODE)
+        except Exception as exc:
+            if "add_prefix_space does not match declared prepend_scheme" in str(exc):
+                self.skipTest(f"Tokenizer assets are incompatible with the installed tokenizers runtime: {exc}")
+            raise
+
         self.quant_lm_eval()

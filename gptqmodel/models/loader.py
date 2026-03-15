@@ -35,7 +35,7 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
-from ..utils.hf import no_init_weights, prepare_remote_code_compat
+from ..utils.hf import no_init_weights, normalize_hf_config_compat
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
@@ -143,8 +143,7 @@ def ModelLoader(cls):
 
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
 
-        if trust_remote_code:
-            prepare_remote_code_compat(config)
+        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
         atten_impl = model_init_kwargs.get("attn_implementation", None)
 
@@ -165,6 +164,7 @@ def ModelLoader(cls):
         # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
         if cls.config_class is not None and cls.config_class == config.sub_configs.get("text_config", None):
             config = config.get_text_config()
+            normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
         if quantize_config is None:
             model_init_kwargs["device_map"] =device_map if device_map else "auto"
@@ -269,6 +269,7 @@ def ModelLoader(cls):
             finally:
                 turtle_spinner.close()
 
+            defuser.convert_model(turtle_model, cleanup_original=False)
             # TODO FIX ME...temp store model_init args
             turtle_model._model_init_kwargs = model_init_kwargs
             # print("actual turtle model-----------")
@@ -331,9 +332,21 @@ def ModelLoader(cls):
         import torch._dynamo
         torch._dynamo.reset()
 
+        requested_device_map = device_map
+
+        if requested_device_map is None:
+            explicit_device = None
+            if isinstance(device, str) and ":" in device:
+                explicit_device = device
+            elif isinstance(device, torch.device) and device.index is not None:
+                explicit_device = str(device)
+
+            if explicit_device is not None:
+                requested_device_map = {"": explicit_device}
+
         # normalized device + device_map into single device
-        normalized_device = device if device_map is None else None  # let device_map dictate placement when present
-        device = normalize_device_device_map(normalized_device, device_map)
+        normalized_device = device if requested_device_map is None else None  # let device_map dictate placement when present
+        device = normalize_device_device_map(normalized_device, requested_device_map)
 
         # TODO need to normalize backend and others in a unified api
         if isinstance(backend, str):
@@ -389,8 +402,7 @@ def ModelLoader(cls):
             **cached_file_kwargs,
         )
 
-        if trust_remote_code:
-            prepare_remote_code_compat(config)
+        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
         if cls.require_dtype:
             dtype = cls.require_dtype
@@ -556,6 +568,7 @@ def ModelLoader(cls):
             # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
             if cls.config_class == config.sub_configs.get("text_config", None):
                 config = config.get_text_config()
+                normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, dtype=dtype, **args
@@ -593,7 +606,7 @@ def ModelLoader(cls):
                 device=device,
             )
 
-        if isinstance(device_map, str) and device_map not in [
+        if isinstance(requested_device_map, str) and requested_device_map not in [
                 "auto",
                 "balanced",
                 "balanced_low_0",
@@ -787,13 +800,17 @@ def ModelLoader(cls):
             return device_map
 
         log.info(f"Loader: device = {device}")
-        layers, _ = get_module_by_name_prefix(model, extract_layers_node)
-        num_gpus = 1
-        if device is DEVICE.CUDA:
-            num_gpus = torch.cuda.device_count()
-        elif device is DEVICE.XPU:
-            num_gpus = torch.xpu.device_count()
-        device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
+        if requested_device_map is None:
+            layers, _ = get_module_by_name_prefix(model, extract_layers_node)
+            num_gpus = 1
+            if device is DEVICE.CUDA:
+                num_gpus = torch.cuda.device_count()
+            elif device is DEVICE.XPU:
+                num_gpus = torch.xpu.device_count()
+            device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
+        else:
+            device_map = dict(requested_device_map) if isinstance(requested_device_map, dict) else requested_device_map
+            log.info(f"Loader: honoring explicit device_map request: {device_map}")
         log.info(f"Loader: device_map = {device_map}")
 
         load_checkpoint_in_model = True

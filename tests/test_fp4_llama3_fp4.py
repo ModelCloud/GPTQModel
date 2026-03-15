@@ -22,6 +22,13 @@ except Exception:
 MODEL_DIR = Path("/monster/data/model/Llama-3.3-70B-Instruct-FP4")
 
 
+def _nvfp4_to_dtype(nv_tensor, dtype: torch.dtype) -> torch.Tensor:
+    to_dtype = getattr(nv_tensor, "to_dtype", None)
+    if callable(to_dtype):
+        return to_dtype(dtype)
+    return nv_tensor.dequantize(dtype)
+
+
 @pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")
 @pytest.mark.skipif(not MODEL_DIR.exists(), reason="Llama-3.3 FP4 model not available")
 def test_fp4_llama3_module_dequant_matches_nvfp4_tensor():
@@ -35,7 +42,7 @@ def test_fp4_llama3_module_dequant_matches_nvfp4_tensor():
     dequant = dequantize_f4_e2m1(weight, scale=scales, axis=None, target_dtype=torch.bfloat16)
 
     nv_tensor = NVFP4Tensor(weight, scales, block_size=16, orig_dtype=torch.bfloat16)
-    expected = nv_tensor.to_dtype(torch.bfloat16)
+    expected = _nvfp4_to_dtype(nv_tensor, torch.bfloat16)
 
     diff = torch.max(torch.abs(dequant - expected)).item()
     assert torch.allclose(dequant, expected, atol=1e-3, rtol=1e-3), diff
