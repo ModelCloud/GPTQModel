@@ -82,11 +82,22 @@ class BaseQwen3VLGPTQ(BaseQModel):
         _, core_model = self._resolve_multimodal_layout(self.model)
         return core_model
 
+    def _materialize_core_module(self, parent, attr_name: str):
+        module = getattr(parent, attr_name)
+        if "_turtle_lock" not in self.__dict__ and "shell_module_materialize" not in self.__dict__:
+            setattr(parent, attr_name, move_to(module, device=self.quantize_config.device))
+            return
+        setattr(
+            parent,
+            attr_name,
+            self.shell_module_materialize(module, self.quantize_config.device),
+        )
+
     def pre_quantize_generate_hook_start(self):
         core_model = self._core_multimodal_model()
-        core_model.language_model.embed_tokens = move_to(core_model.language_model.embed_tokens, device=self.quantize_config.device)
-        core_model.language_model.rotary_emb = move_to(core_model.language_model.rotary_emb, device=self.quantize_config.device)
-        core_model.visual = move_to(core_model.visual, device=self.quantize_config.device)
+        self._materialize_core_module(core_model.language_model, "embed_tokens")
+        self._materialize_core_module(core_model.language_model, "rotary_emb")
+        self._materialize_core_module(core_model, "visual")
 
     def pre_quantize_generate_hook_end(self):
         core_model = self._core_multimodal_model()

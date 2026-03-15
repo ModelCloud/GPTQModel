@@ -10,6 +10,7 @@ from tokenicer import Tokenicer
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
+import torch
 from torch import nn
 from transformers import PreTrainedTokenizerFast
 
@@ -77,6 +78,38 @@ def test_qwen2_vl_layout_resolution_supports_nested_wrapper():
         "language_model.layers",
     ]
     assert base_qwen2_vl.BaseQwen2VLGPTQ.get_base_modules(model) == ["model.visual", "model.merger"]
+
+
+def test_qwen2_vl_pre_quantize_hooks_materialize_meta_modules():
+    instance = object.__new__(base_qwen2_vl.BaseQwen2VLGPTQ)
+    instance.model = types.SimpleNamespace(
+        language_model=types.SimpleNamespace(
+            embed_tokens=nn.Embedding(4, 4, device="meta"),
+            rotary_emb=nn.Linear(4, 4, device="meta"),
+        ),
+        visual=nn.Linear(4, 4, device="meta"),
+    )
+    instance.quantize_config = types.SimpleNamespace(
+        device="cpu",
+        offload_to_disk=False,
+        offload_to_disk_path="/tmp/unused",
+    )
+
+    materialized = {}
+
+    def fake_materialize(module, device):
+        replacement = nn.Linear(4, 4) if isinstance(module, nn.Linear) else nn.Embedding(4, 4)
+        materialized[id(module)] = (replacement, device)
+        return replacement
+
+    instance.shell_module_materialize = fake_materialize
+
+    instance.pre_quantize_generate_hook_start()
+
+    assert instance.model.visual.weight.device == torch.device("cpu")
+    assert instance.model.language_model.embed_tokens.weight.device == torch.device("cpu")
+    assert instance.model.language_model.rotary_emb.weight.device == torch.device("cpu")
+    assert len(materialized) == 3
 
 
 def test_qwen2_5_omni_image_only_process_vision_info_returns_image_list():

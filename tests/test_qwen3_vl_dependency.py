@@ -8,6 +8,7 @@ import types
 
 import pytest
 from PIL import Image
+import torch
 from torch import nn
 
 from gptqmodel.models.definitions import base_qwen3_vl
@@ -122,3 +123,37 @@ def test_qwen3_vl_layout_resolution_supports_nested_wrapper():
         "language_model.layers",
     ]
     assert base_qwen3_vl.BaseQwen3VLGPTQ.get_base_modules(model) == ["model.visual", "model.vision_router"]
+
+
+def test_qwen3_vl_pre_quantize_hooks_materialize_meta_modules_with_nested_layout():
+    instance = object.__new__(base_qwen3_vl.BaseQwen3VLGPTQ)
+    instance.model = types.SimpleNamespace(
+        model=types.SimpleNamespace(
+            language_model=types.SimpleNamespace(
+                embed_tokens=nn.Embedding(4, 4, device="meta"),
+                rotary_emb=nn.Linear(4, 4, device="meta"),
+            ),
+            visual=nn.Linear(4, 4, device="meta"),
+        )
+    )
+    instance.quantize_config = types.SimpleNamespace(
+        device="cpu",
+        offload_to_disk=False,
+        offload_to_disk_path="/tmp/unused",
+    )
+
+    materialized = {}
+
+    def fake_materialize(module, device):
+        replacement = nn.Linear(4, 4) if isinstance(module, nn.Linear) else nn.Embedding(4, 4)
+        materialized[id(module)] = (replacement, device)
+        return replacement
+
+    instance.shell_module_materialize = fake_materialize
+
+    instance.pre_quantize_generate_hook_start()
+
+    assert instance.model.model.visual.weight.device == torch.device("cpu")
+    assert instance.model.model.language_model.embed_tokens.weight.device == torch.device("cpu")
+    assert instance.model.model.language_model.rotary_emb.weight.device == torch.device("cpu")
+    assert len(materialized) == 3
