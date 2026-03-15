@@ -8,7 +8,7 @@ from gptqmodel.nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.importer import select_quant_linear
+from gptqmodel.utils.importer import get_kernel_for_backend, select_quant_linear
 
 
 def _compress_ints(lowprecision_weight: torch.Tensor, bits: int) -> torch.Tensor:
@@ -74,7 +74,7 @@ def _install_dummy_bitblas(monkeypatch):
     return captured
 
 
-def test_awq_bitblas_selects_bitblas_for_awq_gemm(monkeypatch):
+def test_awq_bitblas_selects_bitblas_awq_for_awq_gemm(monkeypatch):
     _install_dummy_bitblas(monkeypatch)
 
     selected = select_quant_linear(
@@ -82,7 +82,7 @@ def test_awq_bitblas_selects_bitblas_for_awq_gemm(monkeypatch):
         group_size=32,
         desc_act=False,
         sym=True,
-        backend=BACKEND.BITBLAS,
+        backend=BACKEND.BITBLAS_AWQ,
         format=FORMAT.GEMM,
         quant_method=METHOD.AWQ,
         device=DEVICE.CUDA,
@@ -91,6 +91,10 @@ def test_awq_bitblas_selects_bitblas_for_awq_gemm(monkeypatch):
     )
 
     assert selected is AWQBitBlasKernel
+
+
+def test_awq_bitblas_kernel_mapping_uses_awq_backend():
+    assert get_kernel_for_backend(BACKEND.BITBLAS_AWQ, METHOD.AWQ, FORMAT.BITBLAS) is AWQBitBlasKernel
 
 
 def test_awq_bitblas_uses_unsigned_weights_and_qzeros(monkeypatch):

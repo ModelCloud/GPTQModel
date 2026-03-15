@@ -285,7 +285,7 @@ def make_quant(
     pack_dtype = qcfg.pack_dtype
 
     # BitBLAS-native checkpoints can load directly. Other formats need a compatible preload kernel first.
-    if not pack and backend == BACKEND.BITBLAS:
+    if not pack and backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
         if format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
             backend = BACKEND.TORCH
         elif qcfg.quant_method == METHOD.AWQ and format == FORMAT.GEMM:

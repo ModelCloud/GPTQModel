@@ -4,7 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
+import time
 import unittest
+from dataclasses import dataclass
 from typing import List, Tuple
 
 import torch
@@ -43,6 +45,13 @@ class Data:
         self.m = 1
         self.k = -1
         self.x = []  # random X input of shape (m, k)
+
+
+@dataclass
+class ForwardResult:
+    outputs: List[torch.Tensor]
+    total_ms: float
+    mean_ms: float
 
 class TestKernelOutput(unittest.TestCase):
     # model_path = "sliuau/llama3.2-1b-4bit-group128" # hf "sliuau/llama3.2-1b-4bit-group128"
@@ -132,32 +141,48 @@ class TestKernelOutput(unittest.TestCase):
             AdapterCache.reset() # allow next load to complete since we are hacking to get consume only 1 lora module
 
             # TORCH as reference output
-            data.torch_kernel_out = cls.forward(cls, backend=BACKEND.TORCH, dtype=dtype)
-            data.torch_kernel_out_with_lora = cls.forward(cls, backend=BACKEND.TORCH, dtype=dtype, adapter=data.adapter)
+            data.torch_kernel = cls.forward(cls, backend=BACKEND.TORCH, dtype=dtype)
+            data.torch_kernel_out = data.torch_kernel.outputs
+            data.torch_kernel_with_lora = cls.forward(cls, backend=BACKEND.TORCH, dtype=dtype, adapter=data.adapter)
+            data.torch_kernel_out_with_lora = data.torch_kernel_with_lora.outputs
 
 
-    def forward(self, backend: BACKEND, dtype: torch.dtype, adapter: Adapter = None):
+    @staticmethod
+    def _synchronize(device: torch.device) -> None:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
+    def forward(self, backend: BACKEND, dtype: torch.dtype, adapter: Adapter = None) -> ForwardResult:
         model = GPTQModel.load(self.model_path, backend=backend, adapter=adapter, dtype=dtype, device=DEVICE)
 
         target_qlinear_cls = self.target_qliner_map[backend]
 
         modules = find_modules(model.model, layers=[target_qlinear_cls])
         result = []
+        total_s = 0.0
         for name, module in modules.items():
             if name == self.target:
                 data = self.data[dtype]
+                if data.x:
+                    self._synchronize(DEVICE)
+                    module(data.x[0])
+                    self._synchronize(DEVICE)
                 for i in log.pb(self.random_input_sample_size).title("Forward Pass on Random Input"):
                     assert data.x[i].dtype == dtype
+                    self._synchronize(DEVICE)
+                    started = time.perf_counter()
                     result.append(module(data.x[i]))
+                    self._synchronize(DEVICE)
+                    total_s += time.perf_counter() - started
                 break
-
-        assert result is not None
 
         del module
         del model
         torch.cuda.empty_cache()
 
-        return result
+        total_ms = total_s * 1000.0
+        mean_ms = total_ms / len(result) if result else 0.0
+        return ForwardResult(outputs=result, total_ms=total_ms, mean_ms=mean_ms)
 
     def _summarize_results(
         self,
@@ -168,15 +193,24 @@ class TestKernelOutput(unittest.TestCase):
         atol: float,
         title: str,
         reference_label: str,
+        reference_mean_ms: float,
+        actual_mean_ms: float,
     ):
         failures = []
         total = len(actual_outputs)
+        max_abs_diff = 0.0
+        mean_abs_diff = 0.0
 
         for i in range(total):
             reference = reference_outputs[i]
             actual = actual_outputs[i]
+            reference_fp32 = reference.to(torch.float32)
+            actual_fp32 = actual.to(torch.float32)
+            diff = torch.abs(reference_fp32 - actual_fp32)
+            max_abs_diff = max(max_abs_diff, float(diff.max().item()))
+            mean_abs_diff += float(diff.mean().item())
 
-            is_close_tensor = torch.isclose(reference, actual, rtol=0.15, atol=atol)
+            is_close_tensor = torch.isclose(reference_fp32, actual_fp32, rtol=0.15, atol=atol)
             passed = bool(torch.all(is_close_tensor))
 
             if not passed:
@@ -184,12 +218,14 @@ class TestKernelOutput(unittest.TestCase):
                     "Sample {idx}:\nExpected ({ref_label}) = {expected}\nActual = {actual_val}".format(
                         idx=i,
                         ref_label=reference_label,
-                        expected=reference.detach().cpu().tolist(),
-                        actual_val=actual.detach().cpu().tolist(),
+                        expected=reference_fp32.detach().cpu().tolist(),
+                        actual_val=actual_fp32.detach().cpu().tolist(),
                     )
                 )
 
         status = f"{GREEN}PASS{RESET}" if not failures else f"{RED}FAIL{RESET}"
+        avg_abs_diff = mean_abs_diff / total if total else 0.0
+        speedup = reference_mean_ms / actual_mean_ms if actual_mean_ms else 0.0
         details = "\n\n".join(str(detail) for detail in failures) if failures else "-"
 
         table = tabulate(
@@ -198,6 +234,10 @@ class TestKernelOutput(unittest.TestCase):
                     backend.name,
                     str(dtype),
                     total,
+                    f"{actual_mean_ms:.4f}",
+                    f"{speedup:.2f}x",
+                    f"{max_abs_diff:.6f}",
+                    f"{avg_abs_diff:.6f}",
                     status,
                     len(failures),
                     details,
@@ -207,6 +247,10 @@ class TestKernelOutput(unittest.TestCase):
                 "Backend",
                 "DType",
                 "Samples",
+                "MeanLatencyMs",
+                "SpeedupVsRef",
+                "MaxAbsDiff",
+                "MeanAbsDiff",
                 "Status",
                 "Failures",
                 "Expected vs Actual",
@@ -247,13 +291,15 @@ class TestKernelOutput(unittest.TestCase):
         out = self.forward(backend=backend, dtype=dtype)
 
         self._summarize_results(
-            reference_outputs=data.torch_kernel_out,
-            actual_outputs=out,
+            reference_outputs=data.torch_kernel.outputs,
+            actual_outputs=out.outputs,
             backend=backend,
             dtype=dtype,
             atol=a_tolerance,
             title=f"Kernel Output {dtype}",
             reference_label="Torch output",
+            reference_mean_ms=data.torch_kernel.mean_ms,
+            actual_mean_ms=out.mean_ms,
         )
 
     bfloat16_cases = [
@@ -273,13 +319,15 @@ class TestKernelOutput(unittest.TestCase):
         out = self.forward(backend=backend, dtype=dtype)
 
         self._summarize_results(
-            reference_outputs=data.torch_kernel_out,
-            actual_outputs=out,
+            reference_outputs=data.torch_kernel.outputs,
+            actual_outputs=out.outputs,
             backend=backend,
             dtype=dtype,
             atol=a_tolerance,
             title=f"Kernel Output {dtype}",
             reference_label="Torch output",
+            reference_mean_ms=data.torch_kernel.mean_ms,
+            actual_mean_ms=out.mean_ms,
         )
 
     float16_lora_cases = [
@@ -298,13 +346,15 @@ class TestKernelOutput(unittest.TestCase):
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
         self._summarize_results(
-            reference_outputs=data.torch_kernel_out_with_lora,
-            actual_outputs=out,
+            reference_outputs=data.torch_kernel_with_lora.outputs,
+            actual_outputs=out.outputs,
             backend=backend,
             dtype=dtype,
             atol=a_tolerance,
             title=f"Kernel Output With Lora {dtype}",
             reference_label="Torch with Lora output",
+            reference_mean_ms=data.torch_kernel_with_lora.mean_ms,
+            actual_mean_ms=out.mean_ms,
         )
 
     bfloat16_lora_cases = [
@@ -323,11 +373,13 @@ class TestKernelOutput(unittest.TestCase):
         data = self.data[dtype]
         out = self.forward(backend=backend, dtype=dtype, adapter=data.adapter)
         self._summarize_results(
-            reference_outputs=data.torch_kernel_out_with_lora,
-            actual_outputs=out,
+            reference_outputs=data.torch_kernel_with_lora.outputs,
+            actual_outputs=out.outputs,
             backend=backend,
             dtype=dtype,
             atol=a_tolerance,
             title=f"Kernel Output With Lora {dtype}",
             reference_label="Torch with Lora output",
+            reference_mean_ms=data.torch_kernel_with_lora.mean_ms,
+            actual_mean_ms=out.mean_ms,
         )

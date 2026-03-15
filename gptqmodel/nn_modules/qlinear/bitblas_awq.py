@@ -28,7 +28,7 @@ from .bitblas import (
 
 
 class AWQBitBlasKernel(BitblasQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.BITBLAS]
+    SUPPORTS_BACKENDS = [BACKEND.BITBLAS_AWQ]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 0, FORMAT.BITBLAS: 30}
     SUPPORTS_BITS = [4]
@@ -82,7 +82,7 @@ class AWQBitBlasKernel(BitblasQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.BITBLAS),
+            backend=kwargs.pop("backend", BACKEND.BITBLAS_AWQ),
             adapter=adapter,
             register_buffers=False,
             **kwargs,
@@ -140,12 +140,12 @@ class AWQBitBlasKernel(BitblasQuantLinear):
         # Broadcast per-group affine parameters across K so we can recover the stored AWQ integer codes.
         scale_zeros = (zeros * scales).index_select(0, group_idx).t()
         scales_by_input = scales.index_select(0, group_idx).t()
-        intweight = torch.round((weight + scale_zeros) / scales_by_input).clamp_(0, self.maxq).to(torch.int32)
+        intweight = torch.round((weight + scale_zeros) / scales_by_input).clamp_(0, self.maxq).to(torch.int8)
 
         self._load_bitblas_quant_state(
             intweight_out_in=intweight,
             scales_out_group=scales.t().contiguous(),
-            intzeros_group_out=torch.round(zeros).to(torch.int32).contiguous(),
+            intzeros_group_out=torch.round(zeros).to(torch.int8).contiguous(),
             bias=linear.bias.detach() if linear.bias is not None else None,
         )
 
@@ -163,8 +163,8 @@ class AWQBitBlasKernel(BitblasQuantLinear):
         intweight, intzeros = reverse_awq_order(intweight, intzeros, self.bits)
 
         maxq = (1 << self.bits) - 1
-        intweight = torch.bitwise_and(intweight, maxq).to(torch.int32).t().contiguous()
-        intzeros = torch.bitwise_and(intzeros, maxq).to(torch.int32).contiguous()
+        intweight = torch.bitwise_and(intweight, maxq).to(torch.int8).t().contiguous()
+        intzeros = torch.bitwise_and(intzeros, maxq).to(torch.int8).contiguous()
 
         self._load_bitblas_quant_state(
             intweight_out_in=intweight,

@@ -686,7 +686,7 @@ class BaseQModel(nn.Module):
                 if self.quantize_config.format == FORMAT.GEMM:
                     preferred_backend = BACKEND.GEMM
                 elif self.quantize_config.format == FORMAT.BITBLAS:
-                    preferred_backend = BACKEND.BITBLAS
+                    preferred_backend = BACKEND.BITBLAS_AWQ
                 elif self.quantize_config.format == FORMAT.GEMV:
                     preferred_backend = BACKEND.GEMV
                 elif self.quantize_config.format in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
