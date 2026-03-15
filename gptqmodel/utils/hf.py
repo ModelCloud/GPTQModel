@@ -250,6 +250,11 @@ def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) 
     # also reset `rope_parameters` back to None. Re-apply the RoPE backfill
     # after remote-code field cleanup so from_config() sees stable metadata.
     _normalize_rope_parameters_config_compat(config)
+    # Re-apply the remote-code field migration after the RoPE backfill because
+    # some config setters mirror `rope_parameters` back into `rope_scaling`
+    # without restoring legacy keys like `type`, which older remote model code
+    # still indexes directly.
+    _normalize_remote_code_config_compat(config)
 
 
 def prepare_remote_code_compat(config: Any) -> None:

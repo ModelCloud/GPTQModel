@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import unittest
+
+from transformers.cache_utils import DynamicCache
 from model_test import ModelTest
 
 
@@ -17,7 +20,14 @@ class TestExaone(ModelTest):
     TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 6
 
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if not hasattr(DynamicCache, "from_legacy_cache"):
+            raise unittest.SkipTest(
+                "Exaone remote code requires transformers.cache_utils.DynamicCache.from_legacy_cache"
+            )
+
     def test_exaone(self):
         self.quant_lm_eval()
-
 
