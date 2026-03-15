@@ -48,6 +48,22 @@ DEVICE_THREAD_POOL = DeviceThreadPool(
     empty_cache_every_n=512,
 )
 
+
+def exllama_set_max_input_length(model, max_input_length: int):
+    # Optimum still imports this legacy helper from the package root. Re-run
+    # GPTQModel post-init so exllama-backed kernels can resize scratch buffers.
+    from .utils.model import hf_gptqmodel_post_init
+
+    quantize_config = getattr(model, "quantize_config", None)
+    use_act_order = bool(getattr(quantize_config, "desc_act", False))
+    return hf_gptqmodel_post_init(
+        model,
+        use_act_order=use_act_order,
+        quantize_config=quantize_config,
+        max_input_length=max_input_length,
+    )
+
+
 from .models import GPTQModel, get_best_device
 from .models.auto import ASCII_LOGO
 from .quantization import BaseQuantizeConfig, GPTAQConfig, QuantizeConfig
