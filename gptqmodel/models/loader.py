@@ -113,7 +113,7 @@ def check_versions(model_class, requirements: List[str]):
 
 def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
-    if is_local:
+    if is_local or os.path.isabs(pretrained_model_id_or_path):
         return os.path.normpath(pretrained_model_id_or_path)
     def _log_removed(removed: list[str]):
         log.debug("Loader: dropping unsupported snapshot_download kwargs: %s", ", ".join(removed))
@@ -518,11 +518,14 @@ def ModelLoader(cls):
 
         if qcfg.format == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
-            if backend != BACKEND.BITBLAS and backend != BACKEND.AUTO:
-                raise TypeError(f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.BITBLAS: actual = `{backend}`.")
-            backend = BACKEND.BITBLAS
+            expected_backend = BACKEND.BITBLAS_AWQ if qcfg.quant_method == METHOD.AWQ else BACKEND.BITBLAS
+            if backend != expected_backend and backend != BACKEND.AUTO:
+                raise TypeError(
+                    f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.{expected_backend.name}: actual = `{backend}`."
+                )
+            backend = expected_backend
 
-        if backend == BACKEND.BITBLAS:
+        if backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
@@ -892,7 +895,7 @@ def ModelLoader(cls):
                 raise ValueError("Marlin kernel requires dtype=torch.float16.")
 
 
-        if backend == BACKEND.BITBLAS:
+        if backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
             from ..utils.bitblas import prepare_model_for_bitblas_load
 
             # Prepare model for bitblas load.
@@ -911,7 +914,7 @@ def ModelLoader(cls):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if load_checkpoint_in_model and backend not in [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
+        if load_checkpoint_in_model and backend not in [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,

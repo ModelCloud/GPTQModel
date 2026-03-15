@@ -11,7 +11,7 @@ from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMi
 
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
-from ...utils.model import MODALITY, move_to
+from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
@@ -35,7 +35,7 @@ def _load_fetch_video():
 class BaseQwen3VLGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
 
-    pre_lm_head_norm_module = "model.norm"
+    pre_lm_head_norm_module = ["model.norm", "norm"]
 
     module_tree = [
         "model",
@@ -54,8 +54,33 @@ class BaseQwen3VLGPTQ(BaseQModel):
 
     require_load_processor = True
 
+    @classmethod
+    def extract_layers_node(cls):
+        return ["model.language_model.layers", "language_model.layers"]
+
+    @classmethod
+    def get_base_modules(cls, model):
+        prefix, core_model = cls._resolve_multimodal_layout(model)
+        base_modules = []
+        for name, _ in core_model.named_children():
+            if name != "language_model":
+                base_modules.append(f"{prefix}.{name}" if prefix else name)
+        return base_modules
+
+    @classmethod
+    def _resolve_multimodal_layout(cls, model):
+        for prefix in ("model", ""):
+            core_model = get_module(model, prefix) if prefix else model
+            if core_model is None:
+                continue
+            if hasattr(core_model, "language_model") and hasattr(core_model, "visual"):
+                return prefix, core_model
+
+        raise AttributeError("Unable to resolve a Qwen VL core model with `language_model` and `visual` modules.")
+
     def _core_multimodal_model(self):
-        return getattr(self.model, "model", self.model)
+        _, core_model = self._resolve_multimodal_layout(self.model)
+        return core_model
 
     def pre_quantize_generate_hook_start(self):
         core_model = self._core_multimodal_model()

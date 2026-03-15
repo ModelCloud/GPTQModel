@@ -4,6 +4,84 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 
+def _convert_qwen_sparse_moe_layer(
+    module,
+    *,
+    config,
+    sparse_moe_cls,
+    expert_mlp_cls,
+    has_shared_expert: bool,
+):
+    import torch
+    import torch.nn as nn
+
+    from ..utils.hf import no_init_weights
+
+    class SequentialQwenExperts(nn.ModuleList):
+        def __init__(self, config, original):
+            self.num_experts = original.gate_up_proj.shape[0]
+            intermediate_size = original.down_proj.shape[-1]
+
+            with no_init_weights():
+                super().__init__([
+                    expert_mlp_cls(config, intermediate_size=intermediate_size)
+                    for _ in range(self.num_experts)
+                ])
+
+            with torch.inference_mode():
+                gate_up_batch = original.gate_up_proj.detach()
+                down_batch = original.down_proj.detach()
+
+                gate_batch = gate_up_batch[:, :, :intermediate_size].transpose(-2, -1).contiguous()
+                up_batch = gate_up_batch[:, :, intermediate_size:].transpose(-2, -1).contiguous()
+                down_batch = down_batch.contiguous()
+
+                for i in range(self.num_experts):
+                    self[i].gate_proj.weight.data.copy_(gate_batch[i])
+                    self[i].up_proj.weight.data.copy_(up_batch[i])
+                    self[i].down_proj.weight.data.copy_(down_batch[i])
+
+    class SequentialQwenSparseMoeBlock(nn.Module):
+        def __init__(self, config, original):
+            super().__init__()
+            self.hidden_dim = config.hidden_size
+            self.gate = original.gate
+            self.experts = SequentialQwenExperts(config, original.experts)
+
+            if has_shared_expert:
+                self.shared_expert = original.shared_expert
+                self.shared_expert_gate = original.shared_expert_gate
+
+        def forward(self, hidden_states: torch.Tensor):
+            batch_size, sequence_length, hidden_dim = hidden_states.shape
+            hidden_states_reshaped = hidden_states.reshape(-1, hidden_dim)
+
+            _, routing_weights, selected_experts = self.gate(hidden_states_reshaped)
+            final_hidden_states = hidden_states_reshaped.new_zeros(hidden_states_reshaped.shape)
+
+            for expert_idx, expert in enumerate(self.experts):
+                token_indices, top_indices = torch.where(selected_experts == expert_idx)
+                if token_indices.numel() == 0:
+                    continue
+
+                expert_input = hidden_states_reshaped[token_indices]
+                expert_output = expert(expert_input)
+                expert_weight = routing_weights[token_indices, top_indices].unsqueeze(-1)
+                final_hidden_states.index_add_(0, token_indices, expert_output * expert_weight)
+
+            if has_shared_expert:
+                shared_expert_output = self.shared_expert(hidden_states_reshaped)
+                shared_expert_output = torch.sigmoid(self.shared_expert_gate(hidden_states_reshaped)) * shared_expert_output
+                final_hidden_states = final_hidden_states + shared_expert_output
+
+            return final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+
+    if hasattr(module, "mlp") and isinstance(module.mlp, sparse_moe_cls):
+        module.mlp = SequentialQwenSparseMoeBlock(config=config, original=module.mlp)
+
+    return module
+
+
 def convert_gpt_oss_expert_converter(module, config):
     import torch.nn as nn
     import transformers.models.gpt_oss.modeling_gpt_oss as gpt_oss_modeling
@@ -121,8 +199,25 @@ def convert_glm4v_mlp_converter(module, config):
             setattr(module, name, new_module)
     return module
 
+
+def convert_qwen3_omni_moe_expert_converter(module, config):
+    from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+        Qwen3OmniMoeThinkerTextMLP,
+        Qwen3OmniMoeThinkerTextSparseMoeBlock,
+    )
+
+    return _convert_qwen_sparse_moe_layer(
+        module,
+        config=config.thinker_config,
+        sparse_moe_cls=Qwen3OmniMoeThinkerTextSparseMoeBlock,
+        expert_mlp_cls=Qwen3OmniMoeThinkerTextMLP,
+        has_shared_expert=False,
+    )
+
 MODULE_CONVERTER_MAP = {
     "llama4": convert_llama4_expert_converter,
     "gpt_oss": convert_gpt_oss_expert_converter,
     "glm4v": convert_glm4v_mlp_converter,
+    # qwen2_moe/qwen3_moe/qwen3_next are handled by Defuser>=0.0.9 during model load.
+    "qwen3_omni_moe": convert_qwen3_omni_moe_expert_converter,
 }

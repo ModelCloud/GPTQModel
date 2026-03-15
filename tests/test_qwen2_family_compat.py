@@ -56,6 +56,29 @@ def test_qwen2_vl_pre_quantize_hooks_use_inner_model_layout():
     assert instance.model.language_model.embed_tokens.weight.device.type == "cpu"
 
 
+def test_qwen2_vl_layout_resolution_supports_nested_wrapper():
+    class _InnerModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_model = nn.Module()
+            self.language_model.layers = nn.ModuleList([nn.Identity()])
+            self.visual = nn.Identity()
+            self.merger = nn.Identity()
+
+    class _OuterModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = _InnerModel()
+
+    model = _OuterModel()
+
+    assert base_qwen2_vl.BaseQwen2VLGPTQ.extract_layers_node() == [
+        "model.language_model.layers",
+        "language_model.layers",
+    ]
+    assert base_qwen2_vl.BaseQwen2VLGPTQ.get_base_modules(model) == ["model.visual", "model.merger"]
+
+
 def test_qwen2_5_omni_image_only_process_vision_info_returns_image_list():
     image = Image.new("RGB", (2, 2), color="white")
     messages = [

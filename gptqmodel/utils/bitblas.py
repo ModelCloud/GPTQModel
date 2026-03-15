@@ -9,7 +9,8 @@ from contextlib import nullcontext
 import torch
 
 from ..nn_modules.qlinear.bitblas import BitBLASQuantLinear
-from ..quantization import FORMAT, QuantizeConfig
+from ..nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
+from ..quantization import FORMAT, METHOD, QuantizeConfig
 from ..utils.logger import setup_logger
 from .model import load_checkpoint_in_model_then_tie_weights
 from .safe import THREADPOOLCTL
@@ -17,6 +18,12 @@ from .torch import torch_empty_cache
 
 
 log = setup_logger()
+
+
+def _select_bitblas_kernel_class(qcfg: QuantizeConfig):
+    if qcfg.quant_method == METHOD.AWQ:
+        return AWQBitBlasKernel
+    return BitBLASQuantLinear
 
 
 def _should_enable_bitblas_tuning(repack: bool) -> bool:
@@ -41,7 +48,7 @@ def prepare_model_for_bitblas_load(
     # The model (e.g. model.safetensors) is already serialized in the BitBLAS format, load it directly.
     if qcfg.format == FORMAT.BITBLAS:
         # if the checkpoint is already in bitblas format, we can load it directly.
-        log.info(f"Loading a GPTQ model, detected BitBLAS serialized format at {model_save_name}.")
+        log.info(f"Loading a {qcfg.quant_method.upper()} model, detected BitBLAS serialized format at {model_save_name}.")
         model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=False)
         load_checkpoint_in_model_then_tie_weights(
             model,
@@ -85,6 +92,8 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
         # TODO: load directly BitBLAS QuantLinear.
         message = "Overriding QuantLinear layers to use BitBLAS's QuantLinear..."
 
+    bitblas_quantlinear = _select_bitblas_kernel_class(qcfg)
+
     # TODO: need to benchmark to see multiple threads help with bitblas/tvm compilation and runtime
     threadpool_limits = (
         THREADPOOLCTL.threadpool_limits
@@ -109,7 +118,7 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
             # We could use `torch.count_nonzero(module.bias) > 0` here to discard zero bias, but this has issues when loading weights
             # from checkpoints holding zero bias.
             with torch.device("meta"):
-                bitblas_module = BitBLASQuantLinear(
+                bitblas_module = bitblas_quantlinear(
                     bits=qcfg.bits,
                     group_size=qcfg.group_size,
                     sym=sym,
@@ -124,7 +133,10 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
 
             # convert to bitblas format
             if repack:
-                bitblas_module.repack_from_gptq(module)
+                if qcfg.quant_method == METHOD.AWQ:
+                    bitblas_module.repack_from_awq(module)
+                else:
+                    bitblas_module.repack_from_gptq(module)
 
             # Save to parent.
             parent_module = model.get_submodule(parent_name)

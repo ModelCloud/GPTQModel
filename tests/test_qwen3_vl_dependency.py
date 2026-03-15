@@ -78,3 +78,47 @@ def test_qwen3_vl_pre_quantize_hooks_use_inner_model_layout():
     instance.pre_quantize_generate_hook_end()
 
     assert instance.model.model.language_model.embed_tokens.weight.device.type == "cpu"
+
+
+def test_qwen3_vl_pre_quantize_hooks_support_direct_layout():
+    instance = object.__new__(base_qwen3_vl.BaseQwen3VLGPTQ)
+    instance.model = types.SimpleNamespace(
+        language_model=types.SimpleNamespace(
+            embed_tokens=nn.Embedding(4, 4),
+            rotary_emb=nn.Identity(),
+        ),
+        visual=nn.Identity(),
+    )
+    instance.quantize_config = types.SimpleNamespace(
+        device="cpu",
+        offload_to_disk=False,
+        offload_to_disk_path="/tmp/unused",
+    )
+
+    instance.pre_quantize_generate_hook_start()
+    instance.pre_quantize_generate_hook_end()
+
+    assert instance.model.language_model.embed_tokens.weight.device.type == "cpu"
+
+
+def test_qwen3_vl_layout_resolution_supports_nested_wrapper():
+    class _InnerModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_model = nn.Module()
+            self.language_model.layers = nn.ModuleList([nn.Identity()])
+            self.visual = nn.Identity()
+            self.vision_router = nn.Identity()
+
+    class _OuterModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = _InnerModel()
+
+    model = _OuterModel()
+
+    assert base_qwen3_vl.BaseQwen3VLGPTQ.extract_layers_node() == [
+        "model.language_model.layers",
+        "language_model.layers",
+    ]
+    assert base_qwen3_vl.BaseQwen3VLGPTQ.get_base_modules(model) == ["model.visual", "model.vision_router"]

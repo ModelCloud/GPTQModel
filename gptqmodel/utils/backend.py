@@ -35,6 +35,7 @@ class BACKEND(str, Enum):
     TORCH_FUSED_AWQ = "torch_fused_awq"  # AWQ variant of torch fused kernel
     HF_KERNEL_AWQ = "hf_kernel_awq"  # AWQ variant of HF kernel
     TORCH_AWQ = "torch_awq"
+    BITBLAS_AWQ = "bitblas_awq"  # BitBLAS variant for AWQ-packed checkpoints
 
     # external
     VLLM = "vllm" # External inference engine: CUDA + ROCm + IPEX

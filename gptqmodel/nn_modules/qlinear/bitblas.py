@@ -325,7 +325,7 @@ class BitblasQuantizationConfig:
 
 class BitblasQuantLinear(BaseQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.BITBLAS]
-    SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30}
+    SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30, FORMAT.GPTQ_V2: 30}
     SUPPORTS_BITS = BITBLAS_SUPPORTED_BITS
     SUPPORTS_GROUP_SIZE = BITBLAS_SUPPORTED_GROUP_SIZES
     SUPPORTS_DESC_ACT = [False, True]
@@ -552,6 +552,53 @@ class BitblasQuantLinear(BaseQuantLinear):
     def post_init(self) -> None:
         super().post_init()
 
+    def _transform_bitblas_weight(self, intweight_out_in: torch.Tensor, device: torch.device) -> torch.Tensor:
+        from bitblas.quantization.utils import general_compress
+
+        if self.bitblas_matmul.weight_transform is not None:
+            qweight = self.bitblas_matmul.weight_transform(intweight_out_in.cpu()).to(device)
+        else:
+            compressed = general_compress(intweight_out_in.cpu().numpy(), self.bits)
+            qweight = torch.from_numpy(compressed).to(
+                device=device,
+                dtype=self.quant_config.torch_storage_dtype,
+            )
+        return qweight.contiguous()
+
+    def _compress_bitblas_zeros(
+        self,
+        intzeros_group_out: Optional[torch.Tensor],
+        device: torch.device,
+    ) -> torch.Tensor:
+        from bitblas.quantization.utils import general_compress
+
+        if not self.quant_config.with_zeros or intzeros_group_out is None:
+            return torch.empty(0, dtype=self.quant_config.torch_storage_dtype, device=device)
+
+        compressed = general_compress(intzeros_group_out.contiguous().cpu().numpy(), self.bits)
+        return torch.from_numpy(compressed).to(
+            device=device,
+            dtype=self.quant_config.torch_storage_dtype,
+        ).contiguous()
+
+    def _load_bitblas_quant_state(
+        self,
+        intweight_out_in: torch.Tensor,
+        scales_out_group: torch.Tensor,
+        intzeros_group_out: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+    ) -> None:
+        device = self._buffer_device()
+
+        self._buffers["qweight"] = self._transform_bitblas_weight(intweight_out_in, device)
+        self._buffers["scales"] = scales_out_group.to(device=device, dtype=self.TORCH_DTYPE).contiguous()
+        self._buffers["qzeros"] = self._compress_bitblas_zeros(intzeros_group_out, device)
+
+        if self.bias is not None and bias is not None:
+            self._buffers["bias"] = bias.detach().to(device=device, dtype=self.TORCH_DTYPE)
+
+        self.zeros = self.qzeros
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dtype not in (torch.float16, torch.bfloat16):
             x = x.to(self.TORCH_DTYPE)
@@ -575,42 +622,24 @@ class BitblasQuantLinear(BaseQuantLinear):
         return out
 
     def repack_from_gptq(self, gptq_module: BaseQuantLinear) -> None:
-        from bitblas.quantization.utils import general_compress
-
-        device = self._buffer_device()
-
         bits = self.bits
         packed_weight = (
             gptq_module.qweight.detach().T.contiguous().view(self.quant_config.torch_storage_dtype)
         )
         intweight = unpack_gptq_qweight(packed_weight, bits).contiguous()
 
-        if self.bitblas_matmul.weight_transform is not None:
-            qweight = self.bitblas_matmul.weight_transform(intweight.cpu()).to(device)
-        else:
-            compressed = general_compress(intweight.cpu().numpy(), bits)
-            qweight = torch.from_numpy(compressed).to(
-                device=device, dtype=self.quant_config.torch_storage_dtype
-            )
-
-        self._buffers["qweight"] = qweight.contiguous()
-
-        scales = gptq_module.scales.detach().T.contiguous().to(self.TORCH_DTYPE)
-        self._buffers["scales"] = scales.to(device)
-
+        intzeros = None
         if self.quant_config.with_zeros and hasattr(gptq_module, "qzeros") and gptq_module.qzeros is not None:
-            intzeros = unpack_gptq_qzeros(gptq_module.qzeros.detach(), bits).T.contiguous()
+            intzeros = unpack_gptq_qzeros(gptq_module.qzeros.detach(), bits).contiguous()
             intzeros = intzeros - 1  # GPTQ stores qzeros offset by +1
-            compressed = general_compress(intzeros.T.contiguous().cpu().numpy(), bits)
-            zeros = torch.from_numpy(compressed).to(device=device, dtype=self.quant_config.torch_storage_dtype)
-            self._buffers["qzeros"] = zeros.contiguous()
-        else:
-            self._buffers["qzeros"] = torch.empty(0, dtype=self.quant_config.torch_storage_dtype, device=device)
 
-        if self.bias is not None and hasattr(gptq_module, "bias") and gptq_module.bias is not None:
-            self._buffers["bias"] = gptq_module.bias.detach().to(device=device, dtype=self.TORCH_DTYPE)
-
-        self.zeros = self.qzeros
+        bias = gptq_module.bias.detach() if self.bias is not None and getattr(gptq_module, "bias", None) is not None else None
+        self._load_bitblas_quant_state(
+            intweight_out_in=intweight,
+            scales_out_group=gptq_module.scales.detach().T.contiguous(),
+            intzeros_group_out=intzeros,
+            bias=bias,
+        )
 
 
 BitBLASQuantLinear = BitblasQuantLinear
