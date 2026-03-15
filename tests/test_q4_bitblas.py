@@ -59,8 +59,14 @@ class TestQ4BitBLAS(unittest.TestCase):
         for _, param in self.model_q.named_buffers():
             self.assertNotEqual(param.device, torch.device("meta"))
 
-        self.assertTrue(torch.count_nonzero(self.model_q.model.model.decoder.layers[0].self_attn.q_proj.bias) > 0)
-        self.assertTrue(torch.count_nonzero(self.model_q.model.model.decoder.layers[0].fc1.bias) > 0)
+        self.assertGreater(
+            torch.count_nonzero(self.model_q.model.model.decoder.layers[0].self_attn.q_proj.bias),
+            0,
+        )
+        self.assertGreater(
+            torch.count_nonzero(self.model_q.model.model.decoder.layers[0].fc1.bias),
+            0,
+        )
 
         prompt = "The capital city of France is named"
         predicted_text = ModelTest.generate_stable_with_limit(
