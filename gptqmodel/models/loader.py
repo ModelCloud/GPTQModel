@@ -98,6 +98,20 @@ def compare_versions(installed_version, required_version, operator):
         raise ValueError(f"Unsupported operator: {operator}")
 
 
+def resolve_loader_config(model_cls, config: PretrainedConfig, *, trust_remote_code: bool):
+    sub_configs = getattr(config, "sub_configs", None)
+    text_config_cls = sub_configs.get("text_config") if isinstance(sub_configs, dict) else None
+
+    # Some architectures expose composite configs but require the text sub-config
+    # for text-only loaders. Avoid collapsing unrelated composite configs when the
+    # model definition does not explicitly opt into text-config loading.
+    if model_cls.config_class is not None and model_cls.config_class == text_config_cls:
+        config = config.get_text_config()
+        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
+
+    return config
+
+
 def check_versions(model_class, requirements: List[str]):
     if requirements is None:
         return
@@ -170,11 +184,7 @@ def ModelLoader(cls):
             trust_remote_code=tokenizer_trust_remote_code,
         )
 
-        # Some models have multiple configurations.
-        # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
-        if cls.config_class is not None and cls.config_class == config.sub_configs.get("text_config", None):
-            config = config.get_text_config()
-            normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
+        config = resolve_loader_config(cls, config, trust_remote_code=trust_remote_code)
 
         if quantize_config is None:
             model_init_kwargs["device_map"] =device_map if device_map else "auto"
@@ -589,11 +599,7 @@ def ModelLoader(cls):
                     args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
                     log.info("Loader: Auto enabling flash attention2")
 
-            # Some models have multiple configurations.
-            # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
-            if cls.config_class == config.sub_configs.get("text_config", None):
-                config = config.get_text_config()
-                normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
+            config = resolve_loader_config(cls, config, trust_remote_code=trust_remote_code)
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, dtype=dtype, **args
