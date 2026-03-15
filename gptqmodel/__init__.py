@@ -19,6 +19,36 @@ try:
 except Exception:
     pass
 
+
+def _patch_transformers_gptq_device_map_compat():
+    """Preserve concrete single-device GPTQ maps for Optimum's later packing step."""
+    try:
+        from functools import wraps
+
+        from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
+    except Exception:
+        return
+
+    original_process = GptqHfQuantizer._process_model_before_weight_loading
+    if getattr(original_process, "_gptqmodel_device_map_compat", False):
+        return
+
+    @wraps(original_process)
+    def _process_model_before_weight_loading_with_device_map(self, model, **kwargs):
+        """Backfill `hf_device_map` when GPTQ uses a single concrete device."""
+        device_map = kwargs.get("device_map")
+        if (
+            isinstance(device_map, dict)
+            and device_map
+            and len(set(device_map.values())) == 1
+            and not hasattr(model, "hf_device_map")
+        ):
+            model.hf_device_map = dict(device_map)
+        return original_process(self, model, **kwargs)
+
+    _process_model_before_weight_loading_with_device_map._gptqmodel_device_map_compat = True
+    GptqHfQuantizer._process_model_before_weight_loading = _process_model_before_weight_loading_with_device_map
+
 from .utils.env import env_flag
 from .utils.logger import setup_logger
 from .utils.modelscope import ensure_modelscope_available
@@ -47,6 +77,11 @@ DEVICE_THREAD_POOL = DeviceThreadPool(
     },
     empty_cache_every_n=512,
 )
+
+
+_patch_transformers_gptq_device_map_compat()
+
+
 def exllama_set_max_input_length(model, max_input_length: int):
     """Resize exllama scratch buffers through the legacy package-root API."""
     from .utils.model import hf_gptqmodel_post_init
