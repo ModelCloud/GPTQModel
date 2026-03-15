@@ -7,6 +7,7 @@ import tempfile
 
 import pytest
 from datasets import load_dataset
+from lm_eval.utils import make_table
 from logbar import LogBar
 
 from gptqmodel import GPTAQConfig, GPTQModel, QuantizeConfig
@@ -61,35 +62,38 @@ quant_config = QuantizeConfig(
     gptaq=GPTAQConfig() if CFG_V2 else None,
 )
 
-log.info(f"QuantConfig: {quant_config}")
+def _run_simple_quant_eval():
+    """Run the legacy simple-quant flow as a real pytest workload."""
+    log.info(f"QuantConfig: {quant_config}")
 
-if not EVAL_ONLY:
-    log.info(f"Save Path: {QUANT_SAVE_PATH}")
+    if not EVAL_ONLY:
+        log.info(f"Save Path: {QUANT_SAVE_PATH}")
 
-    # load un-quantized native model
-    model = GPTQModel.load(MODEL_ID, quant_config)
+        # load un-quantized native model
+        model = GPTQModel.load(MODEL_ID, quant_config)
 
-    # load calibration data
-    calibration_dataset = get_calib_data(tokenizer=model.tokenizer, rows=256)
+        # load calibration data
+        calibration_dataset = get_calib_data(tokenizer=model.tokenizer, rows=256)
 
-    model.quantize(calibration_dataset, batch_size=1)
+        model.quantize(calibration_dataset, batch_size=1)
 
-    model.save(QUANT_SAVE_PATH)
-    log.info(f"Quant Model Saved to: {QUANT_SAVE_PATH}")
+        model.save(QUANT_SAVE_PATH)
+        log.info(f"Quant Model Saved to: {QUANT_SAVE_PATH}")
 
-# eval
-from lm_eval.utils import make_table
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        results = GPTQModel.eval(
+            QUANT_SAVE_PATH,
+            tasks=[EVAL.LM_EVAL.GSM8K_COT],  #, EVAL.LM_EVAL.GSM8K_PLATINUM_COT],
+            apply_chat_template=True,
+            random_seed=898,
+            output_path=tmp_dir,
+        )
+
+        print(make_table(results))
+        if "groups" in results:
+            print(make_table(results, "groups"))
 
 
-with tempfile.TemporaryDirectory() as tmp_dir:
-    results = GPTQModel.eval(
-        QUANT_SAVE_PATH,
-        tasks=[EVAL.LM_EVAL.GSM8K_COT], #, EVAL.LM_EVAL.GSM8K_PLATINUM_COT],
-        apply_chat_template=True,
-        random_seed=898,
-        output_path= tmp_dir,
-    )
-
-    print(make_table(results))
-    if "groups" in results:
-        print(make_table(results, "groups"))
+def test_simple_quant():
+    """Keep the simple-quant regression runnable under pytest collection."""
+    _run_simple_quant_eval()

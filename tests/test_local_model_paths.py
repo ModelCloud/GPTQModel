@@ -123,4 +123,7 @@ def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
     assert turtle_configs[0] is base_config
     assert shell_configs[0]._experts_implementation == "linear_loop"
     assert turtle_configs[0]._experts_implementation is None
+    assert instance.model.config._experts_implementation == "linear_loop"
+    assert instance.turtle_model.config._experts_implementation == "linear_loop"
+    assert instance.turtle_model.config is not base_config
     assert instance.turtle_model is not None

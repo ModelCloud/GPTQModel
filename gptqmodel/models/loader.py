@@ -269,6 +269,8 @@ def ModelLoader(cls):
             finally:
                 turtle_spinner.close()
 
+            if getattr(turtle_model, "config", None) is config:
+                turtle_model.config = copy.deepcopy(config)
             defuser.convert_model(turtle_model, cleanup_original=False)
             # TODO FIX ME...temp store model_init args
             turtle_model._model_init_kwargs = model_init_kwargs
@@ -277,6 +279,8 @@ def ModelLoader(cls):
         else:
             print("loading model directly to CPU (not using meta device or turtle_model)-----------")
             model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
+            if getattr(model, "config", None) is config:
+                model.config = copy.deepcopy(config)
             defuser.convert_model(model, cleanup_original=False)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)
