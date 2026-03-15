@@ -35,7 +35,12 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
-from ..utils.hf import no_init_weights, normalize_hf_config_compat
+from ..utils.hf import (
+    has_native_transformers_causallm_support,
+    no_init_weights,
+    normalize_hf_config_compat,
+    resolve_trust_remote_code,
+)
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
@@ -138,6 +143,7 @@ def ModelLoader(cls):
         torch._dynamo.disable()
 
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs)
+        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
 
         model_init_kwargs["trust_remote_code"] = trust_remote_code
 
@@ -206,7 +212,8 @@ def ModelLoader(cls):
             raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
                              f"but quantize_config.desc_act is {quantize_config.desc_act}.")
 
-        if cls.require_trust_remote_code and not trust_remote_code:
+        native_support = has_native_transformers_causallm_support(model_local_path)
+        if cls.require_trust_remote_code and not trust_remote_code and not native_support:
             raise ValueError(
                 f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
@@ -365,15 +372,17 @@ def ModelLoader(cls):
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
+        model_local_path = get_model_local_path(model_id_or_path, **kwargs)
+        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
+        native_support = has_native_transformers_causallm_support(model_local_path)
+
         """load quantized model from local disk"""
-        if cls.require_trust_remote_code and not trust_remote_code:
+        if cls.require_trust_remote_code and not trust_remote_code and not native_support:
             raise ValueError(
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
         check_versions(cls, cls.require_pkgs)
-
-        model_local_path = get_model_local_path(model_id_or_path, **kwargs)
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)

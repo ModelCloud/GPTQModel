@@ -73,6 +73,7 @@ from gptqmodel.quantization.config import (  # noqa: E402
     VramStrategy,
 )
 from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.utils.hf import resolve_trust_remote_code  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
@@ -974,6 +975,7 @@ class ModelTest(unittest.TestCase):
 
     @classmethod
     def load_tokenizer(cls, model_id_or_path, trust_remote_code=False):
+        trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)
         tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
         return tokenizer
 

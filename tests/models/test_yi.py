@@ -14,8 +14,8 @@ class TestYi(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.2986
     NATIVE_ARC_CHALLENGE_ACC_SLOW = NATIVE_ARC_CHALLENGE_ACC
     NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW = NATIVE_ARC_CHALLENGE_ACC_NORM
-    NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
-    NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
+    NATIVE_ARC_CHALLENGE_ACC_FAST = 0.24232081911262798
+    NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = 0.2781569965870307
     TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 4
     EVAL_TASKS_SLOW = {
@@ -25,7 +25,13 @@ class TestYi(ModelTest):
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},
         },
     }
-    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
+    EVAL_TASKS_FAST = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
+            "acc": {"value": NATIVE_ARC_CHALLENGE_ACC_FAST, "ceil_pct": 1.0},
+            "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM_FAST, "ceil_pct": 1.0},
+        },
+    }
 
     def test_yi(self):
         self.quant_lm_eval()
