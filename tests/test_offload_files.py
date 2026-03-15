@@ -6,12 +6,13 @@
 import json
 from pathlib import Path
 
+import pytest
 import torch
 from safetensors import safe_open
 from tabulate import tabulate
 from torch import nn
 
-from gptqmodel.utils.model import get_state_dict_for_save, streaming_state_dict_to_shards
+from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
 
 
@@ -79,3 +80,18 @@ def test_offload_to_disk_writes_single_dat_file(tmp_path):
     undo_offload_to_disk(model.linear, delete_offload_folders=False)
     for name, tensor in model.linear.state_dict().items():
         torch.testing.assert_close(tensor, original_state[name])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for offload rematerialization test")
+def test_move_to_restores_offloaded_meta_leaves_before_gpu_transfer(tmp_path):
+    model = _LinearWithBuffers(in_features=32, out_features=24)
+    original_state = _clone_state_dict(model.linear)
+
+    offload_root = tmp_path / "offload_root"
+    offload_to_disk(module=model.linear, model=model, disk_path=str(offload_root))
+
+    restored = move_to(model.linear, device=torch.device("cuda", 0))
+
+    for name, tensor in restored.state_dict().items():
+        assert tensor.device.type == "cuda"
+        torch.testing.assert_close(tensor.cpu(), original_state[name])

@@ -22,7 +22,7 @@ except ImportError:
 from ..utils.logger import setup_logger
 
 
-__all__ = ["no_init_weights", "prepare_remote_code_compat"]
+__all__ = ["no_init_weights", "normalize_hf_config_compat", "prepare_remote_code_compat"]
 
 log = setup_logger()
 
@@ -152,6 +152,57 @@ def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
     config.attribute_map["max_length"] = "seq_length"
 
 
+def _normalize_rope_parameters_config_compat(config: Any) -> None:
+    rope_parameters = getattr(config, "rope_parameters", None)
+    if (
+        isinstance(rope_parameters, dict)
+        and rope_parameters.get("rope_type") is not None
+        and rope_parameters.get("rope_theta") is not None
+    ):
+        return
+
+    convert_rope_params = getattr(config, "convert_rope_params_to_dict", None)
+    if callable(convert_rope_params):
+        try:
+            convert_rope_params()
+        except Exception as exc:
+            log.debug("Config: RoPE conversion fallback for %s failed: %s", type(config).__name__, exc)
+        else:
+            rope_parameters = getattr(config, "rope_parameters", None)
+            if (
+                isinstance(rope_parameters, dict)
+                and rope_parameters.get("rope_type") is not None
+                and rope_parameters.get("rope_theta") is not None
+            ):
+                return
+
+    legacy_rope_scaling = getattr(config, "rope_scaling", None)
+    rope_parameters = dict(legacy_rope_scaling) if isinstance(legacy_rope_scaling, dict) else dict(rope_parameters or {})
+
+    if not rope_parameters and getattr(config, "rope_theta", None) is None and getattr(config, "default_theta", None) is None:
+        return
+
+    rope_parameters.setdefault("rope_type", rope_parameters.get("type", "default"))
+    if rope_parameters.get("rope_theta") is None:
+        rope_theta = getattr(config, "rope_theta", None)
+        if rope_theta is None:
+            rope_theta = getattr(config, "default_theta", 10_000.0)
+        rope_parameters["rope_theta"] = rope_theta
+
+    partial_rotary_factor = getattr(config, "partial_rotary_factor", None)
+    if partial_rotary_factor is not None:
+        rope_parameters.setdefault("partial_rotary_factor", partial_rotary_factor)
+
+    if rope_parameters["rope_type"] in {"llama3", "yarn", "longrope"}:
+        original_max_position_embeddings = getattr(config, "original_max_position_embeddings", None)
+        if original_max_position_embeddings is None:
+            original_max_position_embeddings = getattr(config, "max_position_embeddings", None)
+        if original_max_position_embeddings is not None:
+            rope_parameters.setdefault("original_max_position_embeddings", original_max_position_embeddings)
+
+    config.rope_parameters = rope_parameters
+
+
 # Restore config fields renamed by transformers 5.x before older trust_remote_code
 # model files instantiate their architectures from the config object.
 def _normalize_remote_code_config_compat(config: Any) -> None:
@@ -164,21 +215,31 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
         return
 
     rope_type = rope_scaling.get("rope_type")
-    factor = rope_scaling.get("factor")
-
-    if rope_type in (None, "default") and factor is None:
-        config.rope_scaling = None
+    if rope_type is None:
         return
 
-    config.rope_scaling = dict(rope_scaling)
-    config.rope_scaling["type"] = rope_type
+    rope_scaling = dict(rope_scaling)
+    rope_scaling["type"] = rope_type
+    config.rope_scaling = rope_scaling
+
+
+def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) -> None:
+    # Some transformers 5.x model classes now read `config.rope_parameters`
+    # directly during `from_config()`, but older local configs may only carry
+    # legacy RoPE fields or nothing but a default `rope_theta`.
+    _normalize_rope_parameters_config_compat(config)
+
+    if not trust_remote_code:
+        return
+
+    _patch_transformers_remote_code_compat()
+    _normalize_remote_code_config_compat(config)
 
 
 def prepare_remote_code_compat(config: Any) -> None:
     # Remote-code loads need both the transformers API shims and any config
     # field migrations applied before instantiation happens.
-    _patch_transformers_remote_code_compat()
-    _normalize_remote_code_config_compat(config)
+    normalize_hf_config_compat(config, trust_remote_code=True)
 
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False
@@ -308,8 +369,7 @@ def build_shell_model(
     del init_kwargs["_fast_init"]
     # All nn.Parameters and buffers are created
 
-    if trust_remote_code:
-        prepare_remote_code_compat(config)
+    normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
     # All nn.Parameters and buffers are created on 'meta' and initializers are skipped.
     pb = log.spinner(title="Model loading...", interval=0.1)

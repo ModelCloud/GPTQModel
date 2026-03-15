@@ -9,7 +9,7 @@ from gptqmodel.utils.eval import EVAL
 
 
 class TestVoxtral(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/shared/model/Voxtral-Mini-3B-2507/"
+    NATIVE_MODEL_ID = "/monster/data/model/Voxtral-Mini-3B-2507"
     NATIVE_ARC_CHALLENGE_ACC = 0.3392
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.3360
     TRUST_REMOTE_CODE = False

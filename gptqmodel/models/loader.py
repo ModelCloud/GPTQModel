@@ -35,7 +35,7 @@ from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2
 from ..utils.backend import BACKEND
-from ..utils.hf import no_init_weights, prepare_remote_code_compat
+from ..utils.hf import no_init_weights, normalize_hf_config_compat
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
@@ -143,8 +143,7 @@ def ModelLoader(cls):
 
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
 
-        if trust_remote_code:
-            prepare_remote_code_compat(config)
+        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
         atten_impl = model_init_kwargs.get("attn_implementation", None)
 
@@ -165,6 +164,7 @@ def ModelLoader(cls):
         # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
         if cls.config_class is not None and cls.config_class == config.sub_configs.get("text_config", None):
             config = config.get_text_config()
+            normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
         if quantize_config is None:
             model_init_kwargs["device_map"] =device_map if device_map else "auto"
@@ -269,6 +269,7 @@ def ModelLoader(cls):
             finally:
                 turtle_spinner.close()
 
+            defuser.convert_model(turtle_model, cleanup_original=False)
             # TODO FIX ME...temp store model_init args
             turtle_model._model_init_kwargs = model_init_kwargs
             # print("actual turtle model-----------")
@@ -389,8 +390,7 @@ def ModelLoader(cls):
             **cached_file_kwargs,
         )
 
-        if trust_remote_code:
-            prepare_remote_code_compat(config)
+        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
         if cls.require_dtype:
             dtype = cls.require_dtype
@@ -556,6 +556,7 @@ def ModelLoader(cls):
             # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
             if cls.config_class == config.sub_configs.get("text_config", None):
                 config = config.get_text_config()
+                normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, dtype=dtype, **args
