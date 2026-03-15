@@ -32,7 +32,7 @@ class TestQwen2_5_Omni(ModelTest):
 
         required = {
             "audioread": Version("3.1.0"),
-            "librosa": Version("0.11.1"),
+            "librosa": Version("0.11.0"),
             "av": Version("16.0.1"),
         }
         for pkg, minimum in required.items():
