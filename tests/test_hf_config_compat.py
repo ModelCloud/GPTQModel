@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from transformers import GPTNeoXConfig, LlamaConfig
 
 from gptqmodel.utils.hf import normalize_hf_config_compat
@@ -20,3 +22,11 @@ def test_normalize_hf_config_compat_uses_gpt_neox_defaults():
     assert config.rope_parameters["rope_type"] == "default"
     assert config.rope_parameters["rope_theta"] == config.default_theta
     assert config.rope_parameters["partial_rotary_factor"] == 0.25
+
+
+def test_normalize_hf_config_compat_drops_default_remote_rope_scaling_dict():
+    config = SimpleNamespace(rope_scaling={"rope_type": "default", "rope_theta": 10000.0})
+
+    normalize_hf_config_compat(config, trust_remote_code=True)
+
+    assert config.rope_scaling is None

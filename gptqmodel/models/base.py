@@ -274,7 +274,11 @@ class BaseQModel(nn.Module):
 
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
-                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=trust_remote_code)
+                self.tokenizer = Tokenicer.load(
+                    tokenizer,
+                    trust_remote_code=trust_remote_code,
+                    model_config=getattr(self.model, "config", None),
+                )
             else:
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
@@ -712,7 +716,11 @@ class BaseQModel(nn.Module):
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
                 # TODO FIX ME...this is a bug
-                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
+                self.tokenizer = Tokenicer.load(
+                    tokenizer,
+                    trust_remote_code=self.trust_remote_code,
+                    model_config=getattr(self.model, "config", None),
+                )
             else:
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
@@ -892,7 +900,11 @@ class BaseQModel(nn.Module):
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
                 # TODO FIX ME...this is a bug
-                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
+                self.tokenizer = Tokenicer.load(
+                    tokenizer,
+                    trust_remote_code=self.trust_remote_code,
+                    model_config=getattr(self.model, "config", None),
+                )
             else:
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
