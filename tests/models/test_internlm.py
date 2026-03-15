@@ -3,7 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import unittest
+
+from packaging.version import Version
 from model_test import ModelTest
+
+import transformers
 
 
 class TestInternlm(ModelTest):
@@ -17,6 +22,14 @@ class TestInternlm(ModelTest):
     TRUST_REMOTE_CODE = True
     USE_VLLM = False
     USE_FLASH_ATTN = False
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if Version(transformers.__version__) > Version("4.44.2"):
+            raise unittest.SkipTest(
+                "InternLM requires transformers<=4.44.2 in this test environment"
+            )
 
     def test_internlm(self):
         # transformers<=4.44.2 run normal
