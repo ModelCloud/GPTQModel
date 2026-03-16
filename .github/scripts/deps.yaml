@@ -5,6 +5,9 @@ common:
   - swig # for models/tests
 
 tests:
+  test_awq_bitblas.py:
+    - http://10.0.13.31/files/bitblas-0.1.0.post1+ubuntu.22.4.cu131-py3-none-any.whl
+
   test_q4_bitblas.py:
     - http://10.0.13.31/files/bitblas-0.1.0.post1+ubuntu.22.4.cu131-py3-none-any.whl
 
