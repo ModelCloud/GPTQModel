@@ -235,25 +235,9 @@ def convert_glm4v_mlp_converter(module, config):
     return module
 
 
-def convert_qwen3_omni_moe_expert_converter(module, config):
-    from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
-        Qwen3OmniMoeThinkerTextMLP,
-        Qwen3OmniMoeThinkerTextSparseMoeBlock,
-    )
-
-    thinker_config = getattr(config, "thinker_config", config)
-    return _convert_qwen_sparse_moe_layer(
-        module,
-        config=_resolve_text_decoder_config(thinker_config),
-        sparse_moe_cls=Qwen3OmniMoeThinkerTextSparseMoeBlock,
-        expert_mlp_cls=Qwen3OmniMoeThinkerTextMLP,
-        has_shared_expert=False,
-    )
-
 MODULE_CONVERTER_MAP = {
     "llama4": convert_llama4_expert_converter,
     "gpt_oss": convert_gpt_oss_expert_converter,
     "glm4v": convert_glm4v_mlp_converter,
-    # qwen2_moe/qwen3_moe/qwen3_next are handled by Defuser>=0.0.9 during model load.
-    "qwen3_omni_moe": convert_qwen3_omni_moe_expert_converter,
+    # qwen2_moe/qwen3_moe/qwen3_next/qwen3_omni_moe are handled by Defuser>=0.0.10 during model load.
 }

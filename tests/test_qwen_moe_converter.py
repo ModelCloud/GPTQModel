@@ -3,19 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from types import SimpleNamespace
+import torch
 
 from defuser import convert_model
 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeConfig, Qwen2MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextConfig, Qwen3NextForCausalLM
-from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeTextConfig
-from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeThinkerTextSparseMoeBlock
+from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import Qwen3OmniMoeConfig
+from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3OmniMoeForConditionalGeneration
 
-from gptqmodel.nn_modules.converter import MODULE_CONVERTER_MAP, convert_qwen3_omni_moe_expert_converter
+from gptqmodel.nn_modules.converter import MODULE_CONVERTER_MAP
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
-
-import torch
 
 
 def _make_tiny_moe_config(config_cls):
@@ -30,6 +28,50 @@ def _make_tiny_moe_config(config_cls):
         num_experts_per_tok=2,
         vocab_size=128,
         pad_token_id=0,
+    )
+
+
+def _make_tiny_qwen3_omni_config():
+    return Qwen3OmniMoeConfig(
+        enable_audio_output=False,
+        thinker_config={
+            "text_config": {
+                "num_hidden_layers": 1,
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "moe_intermediate_size": 32,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "num_experts": 4,
+                "num_experts_per_tok": 2,
+                "vocab_size": 128,
+                "pad_token_id": 0,
+                "bos_token_id": 1,
+                "eos_token_id": 2,
+            },
+            "vision_config": {
+                "depth": 1,
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_heads": 4,
+                "out_hidden_size": 64,
+                "num_position_embeddings": 64,
+                "deepstack_visual_indexes": [0],
+            },
+            "audio_config": {
+                "num_mel_bins": 16,
+                "encoder_layers": 1,
+                "encoder_attention_heads": 4,
+                "encoder_ffn_dim": 128,
+                "d_model": 64,
+                "output_dim": 64,
+                "max_source_positions": 32,
+                "n_window": 4,
+                "n_window_infer": 4,
+                "conv_chunksize": 16,
+                "downsample_hidden_size": 32,
+            },
+        },
     )
 
 
@@ -82,34 +124,18 @@ def test_qwen3_next_uses_defuser_for_fused_experts():
     _assert_converted_experts(layer, hidden_size=model.config.hidden_size)
 
 
-def test_qwen3_omni_converter_uses_nested_text_config():
-    text_config = Qwen3OmniMoeTextConfig(
-        num_hidden_layers=1,
-        hidden_size=64,
-        intermediate_size=128,
-        moe_intermediate_size=32,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        num_experts=4,
-        num_experts_per_tok=2,
-        vocab_size=128,
-        pad_token_id=0,
-    )
+def test_qwen3_omni_uses_defuser_for_fused_experts():
+    assert "qwen3_omni_moe" not in MODULE_CONVERTER_MAP
 
-    class DummyLayer(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.mlp = Qwen3OmniMoeThinkerTextSparseMoeBlock(text_config)
+    model = Qwen3OmniMoeForConditionalGeneration(_make_tiny_qwen3_omni_config())
+    convert_model(model, cleanup_original=False, max_layers=1)
+    layer = model.thinker.model.layers[0]
 
-    layer = DummyLayer()
-    layer.mlp = layer.mlp.to(dtype=torch.bfloat16)
-    convert_qwen3_omni_moe_expert_converter(
+    _assert_converted_experts(
         layer,
-        SimpleNamespace(thinker_config=SimpleNamespace(text_config=text_config)),
+        hidden_size=model.config.get_text_config().hidden_size,
+        dtype=next(layer.mlp.experts[0].gate_proj.parameters()).dtype,
     )
-
-    _assert_converted_experts(layer, hidden_size=text_config.hidden_size, dtype=torch.bfloat16)
-    assert layer.mlp.experts[0].gate_proj.weight.dtype == torch.bfloat16
 
 
 def test_awq_single_bit_validation_allows_skip_only_dynamic_rules():
