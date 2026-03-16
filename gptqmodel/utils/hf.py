@@ -153,7 +153,7 @@ def _patch_transformers_remote_code_compat() -> None:
 
         import_utils.is_torch_fx_available = is_torch_fx_available
 
-    if not getattr(PreTrainedModel, "_gptqmodel_legacy_tied_weights_patch", False):
+    if not getattr(PreTrainedModel, "_gptqmodel_legacy_tied_weights_patch", False) and hasattr(PreTrainedModel, "get_expanded_tied_weights_keys"):
         original_get_expanded_tied_weights_keys = PreTrainedModel.get_expanded_tied_weights_keys
 
         def get_expanded_tied_weights_keys(self, all_submodels: bool = False) -> dict:
