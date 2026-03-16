@@ -144,8 +144,10 @@ def _discover_compressed_tensors_module_schemes(
     init_empty_weights = deps["init_empty_weights"]
     apply_quantization_config = deps["apply_quantization_config"]
     map_module_to_scheme = deps["map_module_to_scheme"]
+    from .hf import prepare_remote_code_compat
 
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    prepare_remote_code_compat(config)
 
     loader_candidates = (
         deps["AutoModelForCausalLM"],

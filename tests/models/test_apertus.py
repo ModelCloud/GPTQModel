@@ -11,13 +11,14 @@ from gptqmodel.utils.eval import EVAL
 
 class TestApertus(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Apertus-8B-Instruct-2509/"
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {"value": 0.5145, "floor_pct": 0.2},
             "acc_norm": {"value": 0.5256, "floor_pct": 0.2},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
     LOAD_BACKEND = BACKEND.TORCH

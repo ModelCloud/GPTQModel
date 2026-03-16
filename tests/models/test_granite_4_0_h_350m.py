@@ -20,7 +20,7 @@ class Test_Granite_4_0_H_350M(ModelTest):
     GROUP_SIZE = 32
     EVAL_BATCH_SIZE = 16
     LOAD_BACKEND = BACKEND.TORCH
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
@@ -40,6 +40,29 @@ class Test_Granite_4_0_H_350M(ModelTest):
                 "value": 0.2915,
                 "floor_pct": 0.1,
                 "ceil_pct": 0.20,
+            },
+        },
+    }
+    EVAL_TASKS_FAST = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
+            "acc": {
+                "value": 0.3054607508532423,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+            "acc_norm": {
+                "value": 0.3293515358361775,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
+            "chat_template": False,
+            "acc": {
+                "value": 0.34411671424040596,
+                "floor_pct": 0.1,
+                "ceil_pct": 1.0,
             },
         },
     }

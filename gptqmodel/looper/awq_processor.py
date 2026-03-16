@@ -50,6 +50,74 @@ class _AWQLayerState:
     pending_modules: Set[str] = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
+
+def _accumulate_awq_weight_mean(
+    layers: List[nn.Linear],
+    group_size: int,
+) -> Tuple[torch.Tensor, int]:
+    if not layers:
+        raise ValueError("Expected at least one linear layer to compute the AWQ weight mean.")
+
+    first_weight = layers[0].weight.detach()
+    num_channels = first_weight.shape[1]
+    effective_group_size = group_size if group_size > 0 else num_channels
+    if num_channels % effective_group_size != 0:
+        raise ValueError(
+            f"Expected in_features ({num_channels}) to be divisible by group_size ({effective_group_size})."
+        )
+
+    if first_weight.device.type == CPU:
+        weights = []
+        row_count = 0
+        for layer in layers:
+            weight = layer.weight.detach()
+            if weight.shape[1] != num_channels:
+                raise ValueError(
+                    f"Expected consistent in_features across layers ({num_channels}), "
+                    f"got {weight.shape[1]} for layer {layer}."
+                )
+            weights.append(weight.to(dtype=torch.float32))
+            row_count += weight.shape[0]
+
+        weight = torch.cat(weights, dim=0)
+        weight = weight.abs().reshape(row_count, -1, effective_group_size)
+        group_scale = weight.amax(dim=2, keepdim=True)
+        weight.div_(group_scale.add_(1e-6))
+        return weight.reshape(row_count, num_channels).sum(dim=0), row_count
+
+    w_sum = torch.zeros(num_channels, dtype=torch.float32, device=first_weight.device)
+    row_count = 0
+
+    for layer in layers:
+        weight = layer.weight.detach()
+        if weight.shape[1] != num_channels:
+            raise ValueError(
+                f"Expected consistent in_features across layers ({num_channels}), "
+                f"got {weight.shape[1]} for layer {layer}."
+            )
+
+        rows = weight.shape[0]
+        weight_abs = weight.abs()
+        weight_view = weight_abs.reshape(rows, -1, effective_group_size)
+        group_scale = weight_view.amax(dim=2, keepdim=True)
+        weight_view.div_(group_scale.add_(1e-6))
+        w_sum += weight_abs.sum(dim=0, dtype=torch.float32)
+        row_count += rows
+
+    return w_sum, row_count
+
+
+def _compute_awq_weight_mean(
+    layers: List[nn.Linear],
+    group_size: int,
+) -> torch.Tensor:
+    w_sum, row_count = _accumulate_awq_weight_mean(layers, group_size)
+    first_weight = layers[0].weight.detach()
+    if row_count == 0:
+        return torch.zeros(first_weight.shape[1], dtype=first_weight.dtype, device=first_weight.device)
+    return (w_sum / row_count).to(first_weight.dtype)
+
+
 class AWQProcessor(LoopProcessor):
     def __init__(
         self,
@@ -733,33 +801,7 @@ class AWQProcessor(LoopProcessor):
         # previous cat()+view pipeline while keeping peak memory low: for every group we normalise
         # |w| by its per-group max so the values land on a [0, 1] scale, then accumulate the totals
         # per output channel so the mean can be computed without allocating the combined tensor.
-        first_weight = layers[0].weight
-        weight_dtype = first_weight.dtype
-        weight_device = first_weight.device
-        num_channels = first_weight.shape[1]
-        w_sum = torch.zeros(num_channels, dtype=torch.float32, device=weight_device)
-        row_count = 0
-
-        for layer in layers:
-            weight = layer.weight
-            if weight.shape[1] != num_channels:
-                raise ValueError(
-                    f"Expected consistent in_features across layers ({num_channels}), "
-                    f"got {weight.shape[1]} for layer {layer}."
-                )
-            org_shape = weight.shape
-            weight_abs = weight.abs()
-            weight_group = weight_abs.view(-1, self.qcfg.group_size)
-            group_scale = weight_group.amax(dim=1, keepdim=True) + 1e-6
-            normalized = weight_group / group_scale
-            normalized = normalized.view(org_shape)
-            w_sum += normalized.sum(dim=0, dtype=torch.float32)
-            row_count += org_shape[0]
-
-        if row_count == 0:
-            w_mean = torch.zeros(num_channels, dtype=weight_dtype, device=weight_device)
-        else:
-            w_mean = (w_sum / row_count).to(weight_dtype)
+        w_mean = _compute_awq_weight_mean(layers, self.qcfg.group_size)
 
         # [STEP 2]: Compute per-channel mean of the input activation with chunking
         # Stream directly on the source device to avoid creating full CPU copies while still enforcing

@@ -61,7 +61,7 @@ from ..utils.device import get_device
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
-from ..utils.model import MODALITY, find_modules, get_module_by_name_prefix, move_to
+from ..utils.model import MODALITY, _module_has_meta_tensors, find_modules, get_module_by_name_prefix, move_to
 from ..utils.structure import alias_from_turtle_for_submodule
 from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from ._const import (
@@ -285,7 +285,11 @@ class BaseQModel(nn.Module):
 
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
-                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=trust_remote_code)
+                self.tokenizer = Tokenicer.load(
+                    tokenizer,
+                    trust_remote_code=trust_remote_code,
+                    model_config=getattr(self.model, "config", None),
+                )
             else:
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
@@ -696,6 +700,8 @@ class BaseQModel(nn.Module):
             if export_quant_method == METHOD.AWQ:
                 if format_code == FORMAT.GEMM:
                     preferred_backend = BACKEND.GEMM
+                elif format_code == FORMAT.BITBLAS:
+                    preferred_backend = BACKEND.BITBLAS_AWQ
                 elif format_code == FORMAT.GEMV:
                     preferred_backend = BACKEND.GEMV
                 elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
@@ -750,7 +756,11 @@ class BaseQModel(nn.Module):
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
                 # TODO FIX ME...this is a bug
-                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
+                self.tokenizer = Tokenicer.load(
+                    tokenizer,
+                    trust_remote_code=self.trust_remote_code,
+                    model_config=getattr(self.model, "config", None),
+                )
             else:
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
@@ -1023,7 +1033,11 @@ class BaseQModel(nn.Module):
         if tokenizer is not None:
             if isinstance(tokenizer, PreTrainedTokenizerBase):
                 # TODO FIX ME...this is a bug
-                self.tokenizer = Tokenicer.load(tokenizer, trust_remote_code=self.trust_remote_code)
+                self.tokenizer = Tokenicer.load(
+                    tokenizer,
+                    trust_remote_code=self.trust_remote_code,
+                    model_config=getattr(self.model, "config", None),
+                )
             else:
                 raise ValueError(
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
@@ -1300,7 +1314,7 @@ class BaseQModel(nn.Module):
         return inputs
 
     def pre_quantize(self, module: nn.Module) -> nn.Module:
-        if get_device(module) == META:
+        if get_device(module) == META or _module_has_meta_tensors(module):
             return self.shell_module_materialize(
                 target_submodule=module,
                 device=self.quantize_config.device,
@@ -1640,7 +1654,9 @@ class BaseQModel(nn.Module):
                     assert turtle_model is not None and model_local_path is not None
 
                     reload_kwargs = self._clone_model_init_kwargs(turtle_model)
-                    config = turtle_model.config
+                    config = copy.deepcopy(turtle_model.config)
+                    if hasattr(config, "_experts_implementation"):
+                        config._experts_implementation = None
                     del turtle_model
 
                     new_model = loader.from_pretrained(
@@ -1649,6 +1665,9 @@ class BaseQModel(nn.Module):
                         low_cpu_mem_usage=True,
                         **reload_kwargs,
                     )
+                    import defuser
+
+                    defuser.convert_model(new_model, cleanup_original=False)
                     new_model._model_init_kwargs = reload_kwargs
                     new_model.eval()
                     self.turtle_model = new_model

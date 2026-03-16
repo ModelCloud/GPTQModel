@@ -21,7 +21,7 @@ class TestQwen3_5Moe(ModelTest):
     METHOD = METHOD.AWQ
 
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3.5-35B-A3B"
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {"value": 0.5887, "floor_pct": 0.04},
             "acc_norm": {"value": 0.6100, "floor_pct": 0.04},
@@ -34,6 +34,7 @@ class TestQwen3_5Moe(ModelTest):
             },
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     VRAM_STRATEGY = VramStrategy.BALANCED
     OFFLOAD_TO_DISK = False  # FIXME Currently, after defuser transforms the model, OFFLOAD_TO_DISK must be False for quantization.

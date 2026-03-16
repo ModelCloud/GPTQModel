@@ -22,7 +22,7 @@ class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
@@ -46,6 +46,37 @@ class TestLlama3_2(ModelTest):
             "acc_norm": {
                 "value": 0.3643,  # 0.3558 4096, 0.3635 2048
                 "floor_pct": 0.04,
+            },
+        },
+    }
+    EVAL_TASKS_FAST = {
+        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+            "chat_template": True,
+            "exact_match,flexible-extract": {
+                "value": 0.4235,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
+            "chat_template": False,
+            "acc": {
+                "value": 0.4012,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
+            "acc": {
+                "value": 0.3089,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+            "acc_norm": {
+                "value": 0.3549,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
             },
         },
     }

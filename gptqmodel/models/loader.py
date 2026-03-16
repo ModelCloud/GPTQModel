@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import time
 from importlib.metadata import PackageNotFoundError, version
@@ -37,7 +38,12 @@ from ..quantization import QuantizeConfig
 from ..quantization.config import BaseQuantizeConfig, FORMAT, METHOD, MIN_VERSION_WITH_V2, resolve_quant_format
 from ..utils.backend import BACKEND
 from ..utils.exllamav3 import replace_exllamav3_placeholders
-from ..utils.hf import no_init_weights
+from ..utils.hf import (
+    has_native_transformers_causallm_support,
+    no_init_weights,
+    normalize_hf_config_compat,
+    resolve_trust_remote_code,
+)
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
@@ -95,6 +101,20 @@ def compare_versions(installed_version, required_version, operator):
         raise ValueError(f"Unsupported operator: {operator}")
 
 
+def resolve_loader_config(model_cls, config: PretrainedConfig, *, trust_remote_code: bool):
+    sub_configs = getattr(config, "sub_configs", None)
+    text_config_cls = sub_configs.get("text_config") if isinstance(sub_configs, dict) else None
+
+    # Some architectures expose composite configs but require the text sub-config
+    # for text-only loaders. Avoid collapsing unrelated composite configs when the
+    # model definition does not explicitly opt into text-config loading.
+    if model_cls.config_class is not None and model_cls.config_class == text_config_cls:
+        config = config.get_text_config()
+        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
+
+    return config
+
+
 def check_versions(model_class, requirements: List[str]):
     if requirements is None:
         return
@@ -110,7 +130,7 @@ def check_versions(model_class, requirements: List[str]):
 
 def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
-    if is_local:
+    if is_local or os.path.isabs(pretrained_model_id_or_path):
         return os.path.normpath(pretrained_model_id_or_path)
     def _log_removed(removed: list[str]):
         log.debug("Loader: dropping unsupported snapshot_download kwargs: %s", ", ".join(removed))
@@ -139,11 +159,15 @@ def ModelLoader(cls):
         import torch._dynamo
         torch._dynamo.disable()
 
+        tokenizer_trust_remote_code = model_init_kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs)
+        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
 
         model_init_kwargs["trust_remote_code"] = trust_remote_code
 
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
+
+        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
         atten_impl = model_init_kwargs.get("attn_implementation", None)
 
@@ -158,12 +182,12 @@ def ModelLoader(cls):
             # Align config metadata with the dtype we will materialize weights in.
             config.torch_dtype = dtype
 
-        tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id_or_path, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(
+            pretrained_model_id_or_path,
+            trust_remote_code=tokenizer_trust_remote_code,
+        )
 
-        # Some models have multiple configurations.
-        # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
-        if cls.config_class is not None and cls.config_class == config.sub_configs.get("text_config", None):
-            config = config.get_text_config()
+        config = resolve_loader_config(cls, config, trust_remote_code=trust_remote_code)
 
         if quantize_config is None:
             model_init_kwargs["device_map"] =device_map if device_map else "auto"
@@ -205,7 +229,8 @@ def ModelLoader(cls):
             raise ValueError(f"{cls} only supports desc_act={cls.supports_desc_act}, "
                              f"but quantize_config.desc_act is {quantize_config.desc_act}.")
 
-        if cls.require_trust_remote_code and not trust_remote_code:
+        native_support = has_native_transformers_causallm_support(model_local_path)
+        if cls.require_trust_remote_code and not trust_remote_code and not native_support:
             raise ValueError(
                 f"{pretrained_model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
@@ -250,7 +275,8 @@ def ModelLoader(cls):
             log.warn(f"{cls} doesn't support offload_to_disk, set quantize_config.offload_to_disk to False.")
 
         if quantize_config.offload_to_disk:
-            model = build_shell_model(cls.loader, config=config, **model_init_kwargs)
+            shell_config = copy.deepcopy(config)
+            model = build_shell_model(cls.loader, config=shell_config, **model_init_kwargs)
             defuser.convert_model(model, cleanup_original=False)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)
@@ -267,6 +293,9 @@ def ModelLoader(cls):
             finally:
                 turtle_spinner.close()
 
+            if getattr(turtle_model, "config", None) is config:
+                turtle_model.config = copy.deepcopy(config)
+            defuser.convert_model(turtle_model, cleanup_original=False)
             # TODO FIX ME...temp store model_init args
             turtle_model._model_init_kwargs = model_init_kwargs
             # print("actual turtle model-----------")
@@ -274,6 +303,8 @@ def ModelLoader(cls):
         else:
             print("loading model directly to CPU (not using meta device or turtle_model)-----------")
             model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
+            if getattr(model, "config", None) is config:
+                model.config = copy.deepcopy(config)
             defuser.convert_model(model, cleanup_original=False)
             model._model_init_kwargs = model_init_kwargs
             print_module_tree(model=model)
@@ -328,10 +359,24 @@ def ModelLoader(cls):
 
         import torch._dynamo
         torch._dynamo.reset()
+        tokenizer_trust_remote_code = kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
+        requested_device_map = device_map
+        explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
+
+        if requested_device_map is None:
+            explicit_device = None
+            if isinstance(device, str) and ":" in device:
+                explicit_device = device
+            elif isinstance(device, torch.device) and device.index is not None:
+                explicit_device = str(device)
+
+            if explicit_device is not None:
+                explicit_device_map = {"": explicit_device}
+                requested_device_map = explicit_device_map
 
         # normalized device + device_map into single device
-        normalized_device = device if device_map is None else None  # let device_map dictate placement when present
-        device = normalize_device_device_map(normalized_device, device_map)
+        normalized_device = device if requested_device_map is None else None  # let device_map dictate placement when present
+        device = normalize_device_device_map(normalized_device, requested_device_map)
 
         # TODO need to normalize backend and others in a unified api
         if isinstance(backend, str):
@@ -344,15 +389,17 @@ def ModelLoader(cls):
             # to optimize vllm inference, set an environment variable 'VLLM_ATTENTION_BACKEND' to 'FLASHINFER'.
             os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASHINFER'
 
+        model_local_path = get_model_local_path(model_id_or_path, **kwargs)
+        trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
+        native_support = has_native_transformers_causallm_support(model_local_path)
+
         """load quantized model from local disk"""
-        if cls.require_trust_remote_code and not trust_remote_code:
+        if cls.require_trust_remote_code and not trust_remote_code and not native_support:
             raise ValueError(
                 f"{model_id_or_path} requires trust_remote_code=True. Please set trust_remote_code=True to load this model."
             )
 
         check_versions(cls, cls.require_pkgs)
-
-        model_local_path = get_model_local_path(model_id_or_path, **kwargs)
 
         # Parameters related to loading from Hugging Face Hub
         cache_dir = kwargs.pop("cache_dir", None)
@@ -386,6 +433,8 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
         )
+
+        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
         if cls.require_dtype:
             dtype = cls.require_dtype
@@ -432,7 +481,10 @@ def ModelLoader(cls):
 
         qcfg.calculate_bits_per_weight()
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id_or_path,
+            trust_remote_code=tokenizer_trust_remote_code,
+        )
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             if backend == BACKEND.VLLM:
@@ -495,11 +547,14 @@ def ModelLoader(cls):
 
         if format_code == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
-            if backend != BACKEND.BITBLAS and backend != BACKEND.AUTO:
-                raise TypeError(f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.BITBLAS: actual = `{backend}`.")
-            backend = BACKEND.BITBLAS
+            expected_backend = BACKEND.BITBLAS_AWQ if qcfg.quant_method == METHOD.AWQ else BACKEND.BITBLAS
+            if backend != expected_backend and backend != BACKEND.AUTO:
+                raise TypeError(
+                    f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.{expected_backend.name}: actual = `{backend}`."
+                )
+            backend = expected_backend
 
-        if backend == BACKEND.BITBLAS:
+        if backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
@@ -566,10 +621,7 @@ def ModelLoader(cls):
                     args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
                     log.info("Loader: Auto enabling flash attention2")
 
-            # Some models have multiple configurations.
-            # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
-            if cls.config_class == config.sub_configs.get("text_config", None):
-                config = config.get_text_config()
+            config = resolve_loader_config(cls, config, trust_remote_code=trust_remote_code)
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, dtype=dtype, **args
@@ -618,9 +670,10 @@ def ModelLoader(cls):
                     backend=backend,
                     lm_head_name=cls.lm_head,
                     device=device,
+                    dtype=dtype,
                 )
 
-        if isinstance(device_map, str) and device_map not in [
+        if isinstance(requested_device_map, str) and requested_device_map not in [
                 "auto",
                 "balanced",
                 "balanced_low_0",
@@ -814,11 +867,7 @@ def ModelLoader(cls):
             return device_map
 
         log.info(f"Loader: device = {device}")
-        explicit_device_map = device_map if isinstance(device_map, dict) else None
-        if explicit_device_map is not None:
-            device_map = {str(key): str(value) for key, value in explicit_device_map.items()}
-            log.info(f"Loader: honoring explicit device_map = {device_map}")
-        else:
+        if explicit_device_map is None:
             layers, _ = get_module_by_name_prefix(model, extract_layers_node)
             num_gpus = 1
             if device is DEVICE.CUDA:
@@ -826,7 +875,10 @@ def ModelLoader(cls):
             elif device is DEVICE.XPU:
                 num_gpus = torch.xpu.device_count()
             device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
-            log.info(f"Loader: device_map = {device_map}")
+        else:
+            device_map = dict(explicit_device_map)
+            log.info(f"Loader: honoring explicit device_map request: {device_map}")
+        log.info(f"Loader: device_map = {device_map}")
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
@@ -885,7 +937,7 @@ def ModelLoader(cls):
                 raise ValueError("Marlin kernel requires dtype=torch.float16.")
 
 
-        if backend == BACKEND.BITBLAS:
+        if backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
             from ..utils.bitblas import prepare_model_for_bitblas_load
 
             # Prepare model for bitblas load.
@@ -904,7 +956,7 @@ def ModelLoader(cls):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if load_checkpoint_in_model and backend not in [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
+        if load_checkpoint_in_model and backend not in [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,

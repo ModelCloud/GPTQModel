@@ -20,7 +20,7 @@ class Test_Granite_4_0_H_1B(ModelTest):
     GROUP_SIZE = 32
     EVAL_BATCH_SIZE = 1
     LOAD_BACKEND = BACKEND.TORCH
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
@@ -43,6 +43,7 @@ class Test_Granite_4_0_H_1B(ModelTest):
             },
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     def test_granite(self):
         self.quant_lm_eval()

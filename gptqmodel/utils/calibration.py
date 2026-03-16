@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 import torch
 
+from .attn_mask import normalize_seq_mask
 from .data import collate_data
 from .logger import setup_logger
 
@@ -119,21 +120,46 @@ def prepare_calibration_dataset(
             )
         return tensor
 
+    def _normalize_attention_mask(mask_value: Any, ids_tensor: torch.Tensor, idx: int) -> torch.Tensor:
+        try:
+            mask_tensor = torch.as_tensor(mask_value)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise ValueError(
+                f"Quantize: failed to convert `attention_mask` to tensor for calibration item {idx}."
+            ) from exc
+
+        if mask_tensor.ndim == 0:
+            raise ValueError(
+                f"Quantize: `attention_mask` for calibration item {idx} must be rank 1 or higher, got scalar."
+            )
+        if mask_tensor.ndim == 1:
+            mask_tensor = mask_tensor.unsqueeze(0)
+
+        try:
+            keep_mask = normalize_seq_mask(mask_tensor, seq_len=ids_tensor.shape[-1])
+        except ValueError as exc:
+            raise ValueError(
+                f"Quantize: failed to normalize `attention_mask` for calibration item {idx}: {exc}"
+            ) from exc
+
+        mask_tensor = keep_mask.to(dtype=torch.long)
+        if mask_tensor.shape != ids_tensor.shape:
+            if mask_tensor.numel() == ids_tensor.numel():
+                mask_tensor = mask_tensor.reshape(ids_tensor.shape)
+            else:
+                raise ValueError(
+                    f"Quantize: attention_mask shape {tuple(mask_tensor.shape)} does not match input_ids shape "
+                    f"{tuple(ids_tensor.shape)} for calibration item {idx}."
+                )
+        return mask_tensor
+
     def _pack_ids(ids_value: Any, mask_value: Any, idx: int) -> Dict[str, torch.Tensor]:
         ids_tensor = _to_2d_long_tensor(ids_value, "input_ids", idx)
 
         if mask_value is None:
             mask_tensor = torch.ones_like(ids_tensor, dtype=torch.long)
         else:
-            mask_tensor = _to_2d_long_tensor(mask_value, "attention_mask", idx)
-            if mask_tensor.shape != ids_tensor.shape:
-                if mask_tensor.numel() == ids_tensor.numel():
-                    mask_tensor = mask_tensor.reshape(ids_tensor.shape)
-                else:
-                    raise ValueError(
-                        f"Quantize: attention_mask shape {tuple(mask_tensor.shape)} does not match input_ids shape "
-                        f"{tuple(ids_tensor.shape)} for calibration item {idx}."
-                    )
+            mask_tensor = _normalize_attention_mask(mask_value, ids_tensor, idx)
 
         return {
             "input_ids": ids_tensor.detach(),

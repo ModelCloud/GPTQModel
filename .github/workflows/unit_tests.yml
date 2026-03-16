@@ -41,7 +41,19 @@ on:
       max-parallel:
         description: 'Parallel jobs'
         required: false
-        default: '10'
+        default: '6'
+      model-test-mode:
+        description: 'Model compat test mode'
+        type: choice
+        required: false
+        default: 'fast'
+        options:
+          - 'fast'
+          - 'slow'
+      model-gpu-count:
+        description: 'Deprecated: model compat jobs are pinned to 1 visible GPU'
+        required: false
+        default: '1'
       exclusive-gpu:
         description: 'One Test Per GPU'
         type: boolean
@@ -77,8 +89,11 @@ env:
   GPTQMODEL_BUILD_EORA: 1
   IGNORED_TEST_FILES: "test_tgi.py,test_gptneox.py,models/test_mixtral.py,models/test_phi_3_moe.py,test_bits_new.py,models/test_internlm.py,models/test_internlm2_5.py,models/test_xverse.py"
   GPTQMODEL_FORCE_BUILD: 1
+  MODEL_TEST_MODE: ${{ github.event.inputs['model-test-mode'] || 'fast' }}
+  MODEL_TEST_GPU_COUNT: '1'
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-unit-tests-${{ github.event.inputs.test_names }}
@@ -129,6 +144,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       torch-files: ${{ steps.files.outputs.torch-files }}
+      model-files: ${{ steps.files.outputs.model-files }}
       m4-files: ${{ steps.files.outputs.m4-files }}
 
     steps:
@@ -155,13 +171,15 @@ jobs:
           --test-names "${{ github.event.inputs.test_names }}" \
           --test-regex "${{ github.event.inputs.test_regex }}")
 
-          IFS='|' read -r torch_test_files mlx_files <<< "$test_files"
+          IFS='|' read -r torch_test_files model_test_files mlx_files <<< "$test_files"
 
           echo "torch-files=$torch_test_files" >> "$GITHUB_OUTPUT"
+          echo "model-files=$model_test_files" >> "$GITHUB_OUTPUT"
           echo "m4-files=$mlx_files" >> "$GITHUB_OUTPUT"
 
           echo "Test files: $test_files"
           echo "Torch Test files: $torch_test_files"
+          echo "Model Compat Test files: $model_test_files"
           echo "MLX Test files: $mlx_files"
           echo "Ignored Test files: $IGNORED_TEST_FILES"
 
@@ -170,7 +188,7 @@ jobs:
     needs:
       - check-vm
       - list-test-files
-    if: needs.list-test-files.outputs.torch-files != '[]'
+    if: needs.list-test-files.outputs.torch-files != '[]' || needs.list-test-files.outputs.model-files != '[]'
     container:
       image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0206
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
@@ -220,12 +238,12 @@ jobs:
       - name: Setup uv env
         run: |
           bash /opt/env/init_compiler_torch_only.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
-          
+
           echo "::group::uv python list"
           uv python list
           ls -ahl /opt/uv/venvs
           echo "::endgroup::"
-          
+
           echo "== python =="
           python --version
           which python
@@ -250,7 +268,7 @@ jobs:
           sha256=$(sha256sum dist/gptqmodel_source.tar.gz)
           echo "hash=$sha256"
           echo "SOURCE_HASH=$sha256" >> $GITHUB_ENV
-      
+
 
       #      - name: Upload source to local
       #        continue-on-error: true
@@ -271,7 +289,7 @@ jobs:
         timeout-minutes: 45
         run: |
           set -euo pipefail
-          
+
           echo "::group::python version"
           which python
           which pip || true
@@ -287,20 +305,20 @@ jobs:
             python setup.py bdist_wheel 2>&1 | tee $log_file
             echo "::endgroup::"
           }
-          
+
           echo "==> Attempt #1 (no extra env)"
           if build_once; then
             echo "Build succeeded on attempt #1"
             exit 0
           fi
-          
+
           echo "==> Attempt #1 failed, retrying with env vars..."
           export VERBOSE=1
           export CMAKE_VERBOSE_MAKEFILE=ON
           export TORCH_EXTENSIONS_DIR=/tmp/torch_extensions
           export MAX_JOBS=1
           export NVCC_THREADS=1
-          
+
           echo "==> Attempt #2 (with env)"
           build_once
 
@@ -418,38 +436,6 @@ jobs:
           python .github/scripts/install_deps.py ${{ matrix.test_script }}
           python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
 
-      - name: Print uv env
-        run: |
-          echo "::group::uv python list"
-          uv python list
-          ls -ahl /opt/uv/venvs
-          echo "::endgroup::"
-          
-          which python
-          which pip || true
-          python -V
-
-          echo "::group::uv python list"
-          uv python list
-          echo "::endgroup::"
-
-          echo "== nvcc =="
-          nvcc --version
-
-          echo "::group::pip list"
-          uv pip list
-          echo "::endgroup::"
-
-          echo "== torch =="
-          uv pip show torch || true
-
-          echo "::group::project files"
-          ls -ahl
-          echo "::endgroup::"
-
-          echo "== torch =="
-          uv pip show torch
-
       #      - name: Install requirements
       #        run: |
       #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version${{ env.PYTHON_VERSION }}
@@ -486,7 +472,7 @@ jobs:
           echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
 
           ls -ahl $DIR
-          
+
           mkdir dist || true
 
           cp $DIR/*.whl dist/
@@ -539,46 +525,78 @@ jobs:
           # deps may reinstalled torch
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
 
+      - name: Print uv env
+        run: |
+          echo "::group::uv python list"
+          uv python list
+          ls -ahl /opt/uv/venvs
+          echo "::endgroup::"
+
+          which python
+          which pip || true
+          python -V
+
+          echo "::group::uv python list"
+          uv python list
+          echo "::endgroup::"
+
+          echo "== nvcc =="
+          nvcc --version
+
+          echo "::group::pip list"
+          uv pip list
+          echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch || true
+
+          echo "::group::project files"
+          ls -ahl
+          echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch
+
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
         run: |
           set -Eeuo pipefail
-          
+
           # -------------------- Configuration --------------------
           BASE_URL="http://${XEON5}"
           RUN_ID="${{ github.run_id }}"
           TEST="${{ matrix.test_script }}"
           RUNNER="${RUNNER_NAME:-unknown}"
           EXCLUSIVE="${{ github.event.inputs['exclusive-gpu'] }}"
-          
+
           SLEEP_SEC=5
           TIMEOUT_SEC=18000   # Max wait time: 300 minutes
           # -------------------------------------------------------
-          
+
           # URL encode helper to avoid breaking query parameters
           urlencode(){ python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],""))' "$1"; }
-          
+
           test_q=$(urlencode "$TEST")
           runner_q=$(urlencode "$RUNNER")
           exclusive_q=$(urlencode "$EXCLUSIVE")
-          
+
           count=1
           if [[ "${{ matrix.test_script }}" == *test_multi_gpu_inference* ]]; then
             count=5
           fi
-          
+
           start_s=$(date +%s)
           gpu_id=""
-          
+
           echo "Requesting GPU from allocator"
           echo "run_id=$RUN_ID test=$TEST runner=$RUNNER exclusive=$EXCLUSIVE"
-          
+
           while true; do
             # Refresh timestamp every request to avoid cache or duplicated requests
             ts_ms=$(date +%s%3N)
             url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&exclusive=$exclusive_q&count=$count"
             echo "requesting GPU with: $url"
-          
+
             # Call allocator
             # - May return:
             #   * integer >= 0  : allocated GPU ID
@@ -589,47 +607,47 @@ jobs:
                    --retry 3 --retry-delay 1 --retry-all-errors \
                    "$url" 2>/dev/null || true
             )"
-          
+
             echo "resp={$resp}"
-          
+
             # Normalize response
             resp="${resp//$'\r'/}"
             resp="${resp//$'\n'/}"
-          
-            # If response is empty or not an integer, treat as temporary error
+
+            # If response is empty or not an integer/list of integers, treat as temporary error
             if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+(,-?[0-9]+)*$ ]]; then
               echo "Allocator returned invalid response: '$resp' (temporary error)"
               curl -fsSL "$BASE_URL/gpu/status" || true
               sleep "$SLEEP_SEC"
               continue
             fi
-          
-            # Negative integer means no GPU available yet
-            if (( resp < 0 )); then
+
+            # Negative single integer means no GPU available yet
+            if [[ "$resp" =~ ^-[0-9]+$ ]]; then
               elapsed=$(( $(date +%s) - start_s ))
               if (( elapsed >= TIMEOUT_SEC )); then
                 echo "Timed out after ${TIMEOUT_SEC}s waiting for GPU (last response=$resp)"
                 curl -fsSL "$BASE_URL/gpu/status" || true
                 exit 1
               fi
-          
+
               echo "No GPU available (response=$resp). Waiting ${SLEEP_SEC}s... elapsed=${elapsed}s"
               curl -fsSL "$BASE_URL/gpu/status" || true
               sleep "$SLEEP_SEC"
               continue
             fi
-          
+
             # Successful allocation
             gpu_id="$resp"
             echo "Allocated GPU ID: $gpu_id"
             break
           done
-          
+
           # Export environment variables for subsequent steps
           echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> "$GITHUB_ENV"
           echo "STEP_TIMESTAMP=$(date +%s%3N)" >> "$GITHUB_ENV"
           echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
-          
+
           # Final status snapshot
           curl -fsSL "$BASE_URL/gpu/status" || true
 
@@ -645,13 +663,13 @@ jobs:
             uv pip uninstall vllm -y
             uv pip list
           fi
-          
+
           start_monitor() {
             keep_alive_url="http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&exclusive=${{ github.event.inputs['exclusive-gpu'] }}&gpu=${CUDA_VISIBLE_DEVICES}"
             echo "start to keep alive... ${keep_alive_url}"
             while true; do
               resp=$(curl -fsSL $keep_alive_url 2>/dev/null || echo "")
-          
+
               if [ "$(echo "$resp" | tr -d '[:space:]')" = "-1" ]; then
                 echo "Server returned -1, terminating job..."
                 pkill -9 -f "pytest.*${{ matrix.test_script }}" 2>/dev/null || true
@@ -659,32 +677,40 @@ jobs:
               else
                 echo "gpu is kept alive..."
               fi
-          
+
               sleep 60
             done
           }
-          
+
           start_monitor &
           MONITOR_PID=$!
-          
+
           cleanup() {
             echo "trap cleanup EXIT..."
             kill $MONITOR_PID 2>/dev/null || true
             wait $MONITOR_PID 2>/dev/null || true
           }
           trap cleanup EXIT
-          
+
           log_dir=/opt/dist/${{ github.run_id }}/logs
           log_file=$log_dir/${{ matrix.test_script }}.log
-          
+
           mkdir -p "$(dirname "$log_file")"
-          
+
           start_time=$(date +%s)
-          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee $log_file
-          test ${PIPESTATUS[0]} -eq 0 || { echo "ERROR=2" >> $GITHUB_ENV; echo "pipe status wrong: ${PIPESTATUS[0]} $PIPESTATUS"; exit 2; }
+
+          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee "$log_file"
+          pipe_status=("${PIPESTATUS[@]}")
+
+          if (( pipe_status[0] != 0 )); then
+            echo "ERROR=22" >> "$GITHUB_ENV"
+            echo "pipe status wrong: ${pipe_status[*]}"
+            exit 22
+          fi
+
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
-          
+
           ls -ahl $log_dir || true
 
           curl "http://$XEON5/gpu/logVram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
@@ -695,7 +721,7 @@ jobs:
         run: |
           log_dir=/opt/dist/${{ github.run_id }}/logs
           log_file=$log_dir/${{ matrix.test_script }}.log
-          
+
           grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
           exit 1
 
@@ -717,6 +743,299 @@ jobs:
         run: |
           # rm ~/.cache/evalplus/*pkl || true
           # pip cache purge && uv cache clean
+          rm -rf rm -rf ./* .[^.] .??*
+
+  torch-models:
+    needs:
+      - build
+      - list-test-files
+      - check-vm
+    runs-on: [ self-hosted, xeon5 ]
+    container:
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0206
+      options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
+      volumes:
+        - /monster/ci/env/entrypoint.sh:/entrypoint.sh
+        - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
+        - /dev/dri/by-path:/dev/dri/by-path
+        - /monster/ci/models:/monster/data/model
+        - /monster/ci/dataset:/monster/data/model/dataset
+        - /monster/ci/huggingface:/github/home/.cache/huggingface
+        - /monster/ci/uv:/opt/uv
+        - /monster/ci/env:/opt/env
+        - /monster/ci/dist:/opt/dist
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJson(needs.check-vm.outputs['max-parallel']).size || 20 }}
+      matrix:
+        test_script: ${{ fromJSON(needs.list-test-files.outputs.model-files) }}
+    if: always() && !cancelled() && (needs.build.result == 'success') && needs.list-test-files.outputs.model-files != '[]'
+    steps:
+      - name: Checkout Codes
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.repo }}
+          ref: ${{ env.ref }}
+
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git config --global --add safe.directory $(pwd)
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
+
+      - name: Print env
+        run: |
+          echo PATH=$PATH
+          echo UV_INSTALL_DIR=$UV_INSTALL_DIR
+          echo UV_PYTHON_BIN_DIR=$UV_PYTHON_BIN_DIR
+          echo UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR
+          echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
+          echo UV_CACHE_DIR=$UV_CACHE_DIR
+          echo VENV_ROOT=$VENV_ROOT
+          echo MODEL_TEST_MODE=$MODEL_TEST_MODE
+          echo MODEL_TEST_GPU_COUNT=$MODEL_TEST_GPU_COUNT
+          ls /root -ahl
+
+      - name: Activate uv env
+        run: |
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_model_${{ matrix.test_script }}"
+          /opt/uv/setup_uv_venv.sh $env_name
+
+      - name: Setup uv env
+        run: |
+          python -V
+          which python
+          which pip || true
+
+          echo "setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=${{ env.PYTHON_VERSION }}"
+          bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
+          python .github/scripts/install_deps.py ${{ matrix.test_script }}
+          python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
+
+      - name: Download wheel from local
+        continue-on-error: true
+        run: |
+          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
+          [ -d $DIR ] || exit 1
+          echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
+
+          ls -ahl $DIR
+
+          mkdir dist || true
+
+          cp $DIR/*.whl dist/
+
+      - name: Download artifact from github
+        if: env.WHL_DOWNLOADED == '' && !cancelled()
+        uses: actions/download-artifact@v8
+        with:
+          name: whl
+          path: dist
+          run-id: ${{ needs.check-vm.outputs.run_id }}
+
+      - name: Install wheel
+        run: |
+          uv pip uninstall gptqmodel
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+          uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          uv pip install dist/*.whl -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
+          /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+
+      - name: Print uv env
+        run: |
+          echo "::group::uv python list"
+          uv python list
+          ls -ahl /opt/uv/venvs
+          echo "::endgroup::"
+
+          which python
+          which pip || true
+          python -V
+
+          echo "::group::uv python list"
+          uv python list
+          echo "::endgroup::"
+
+          echo "== nvcc =="
+          nvcc --version
+
+          echo "::group::pip list"
+          uv pip list
+          echo "::endgroup::"
+
+          echo "::group::project files"
+          ls -ahl
+          echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch
+
+      - name: Find suitable GPU
+        if: ${{ !cancelled() }}
+        run: |
+          set -Eeuo pipefail
+
+          BASE_URL="http://${XEON5}"
+          RUN_ID="${{ github.run_id }}"
+          TEST="${{ matrix.test_script }}"
+          RUNNER="${RUNNER_NAME:-unknown}"
+          EXCLUSIVE="${{ github.event.inputs['exclusive-gpu'] }}"
+
+          SLEEP_SEC=5
+          TIMEOUT_SEC=18000
+
+          urlencode(){ python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],""))' "$1"; }
+
+          test_q=$(urlencode "$TEST")
+          runner_q=$(urlencode "$RUNNER")
+          exclusive_q=$(urlencode "$EXCLUSIVE")
+
+          count="1"
+          start_s=$(date +%s)
+          gpu_id=""
+
+          echo "Requesting GPU from allocator"
+          echo "run_id=$RUN_ID test=$TEST runner=$RUNNER exclusive=$EXCLUSIVE count=$count"
+
+          while true; do
+            ts_ms=$(date +%s%3N)
+            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&exclusive=$exclusive_q&count=$count"
+            echo "requesting GPU with: $url"
+
+            resp="$(
+              curl -fsSL --connect-timeout 3 --max-time 10 \
+                   --retry 3 --retry-delay 1 --retry-all-errors \
+                   "$url" 2>/dev/null || true
+            )"
+
+            echo "resp={$resp}"
+
+            resp="${resp//$'\r'/}"
+            resp="${resp//$'\n'/}"
+
+            if [[ -z "$resp" || ! "$resp" =~ ^-?[0-9]+(,-?[0-9]+)*$ ]]; then
+              echo "Allocator returned invalid response: '$resp' (temporary error)"
+              curl -fsSL "$BASE_URL/gpu/status" || true
+              sleep "$SLEEP_SEC"
+              continue
+            fi
+
+            if [[ "$resp" =~ ^-[0-9]+$ ]]; then
+              elapsed=$(( $(date +%s) - start_s ))
+              if (( elapsed >= TIMEOUT_SEC )); then
+                echo "Timed out after ${TIMEOUT_SEC}s waiting for GPU (last response=$resp)"
+                curl -fsSL "$BASE_URL/gpu/status" || true
+                exit 1
+              fi
+
+              echo "No GPU available (response=$resp). Waiting ${SLEEP_SEC}s... elapsed=${elapsed}s"
+              curl -fsSL "$BASE_URL/gpu/status" || true
+              sleep "$SLEEP_SEC"
+              continue
+            fi
+
+            gpu_id="$resp"
+            if [[ "$gpu_id" == *,* ]]; then
+              echo "Allocator returned multiple GPUs for model compat job: $gpu_id"
+              exit 1
+            fi
+            echo "Allocated GPU ID: $gpu_id"
+            break
+          done
+
+          echo "CUDA_VISIBLE_DEVICES=$gpu_id" >> "$GITHUB_ENV"
+          echo "STEP_TIMESTAMP=$(date +%s%3N)" >> "$GITHUB_ENV"
+          echo "CUDA_VISIBLE_DEVICES set to $gpu_id"
+
+          curl -fsSL "$BASE_URL/gpu/status" || true
+
+      - name: Run tests
+        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
+        run: |
+          export GPTQMODEL_MODEL_TEST_MODE="${MODEL_TEST_MODE}"
+          echo "GPTQMODEL_MODEL_TEST_MODE=$GPTQMODEL_MODEL_TEST_MODE"
+          echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+
+          start_monitor() {
+            keep_alive_url="http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&exclusive=${{ github.event.inputs['exclusive-gpu'] }}&gpu=${CUDA_VISIBLE_DEVICES}"
+            echo "start to keep alive... ${keep_alive_url}"
+            while true; do
+              resp=$(curl -fsSL $keep_alive_url 2>/dev/null || echo "")
+
+              if [ "$(echo "$resp" | tr -d '[:space:]')" = "-1" ]; then
+                echo "Server returned -1, terminating job..."
+                pkill -9 -f "pytest.*${{ matrix.test_script }}" 2>/dev/null || true
+                exit 3
+              else
+                echo "gpu is kept alive..."
+              fi
+
+              sleep 60
+            done
+          }
+
+          start_monitor &
+          MONITOR_PID=$!
+
+          cleanup() {
+            echo "trap cleanup EXIT..."
+            kill $MONITOR_PID 2>/dev/null || true
+            wait $MONITOR_PID 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          log_dir=/opt/dist/${{ github.run_id }}/logs
+          log_file=$log_dir/${{ matrix.test_script }}.log
+
+          mkdir -p "$(dirname "$log_file")"
+
+          start_time=$(date +%s)
+
+          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee "$log_file"
+          pipe_status=("${PIPESTATUS[@]}")
+
+          if (( pipe_status[0] != 0 )); then
+            echo "ERROR=22" >> "$GITHUB_ENV"
+            echo "pipe status wrong: ${pipe_status[*]}"
+            exit 22
+          fi
+
+          execution_time=$(( $(date +%s) - start_time ))
+          echo "$((execution_time / 60))m $((execution_time % 60))s"
+
+          ls -ahl $log_dir || true
+
+          curl "http://$XEON5/gpu/logVram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
+
+      - name: Check log
+        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() && failure() }}
+        continue-on-error: true
+        run: |
+          log_dir=/opt/dist/${{ github.run_id }}/logs
+          log_file=$log_dir/${{ matrix.test_script }}.log
+
+          grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
+          exit 1
+
+      - name: Release GPU
+        if: always()
+        run: |
+          url="http://$XEON5/gpu/release?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&timestamp=${{ env.STEP_TIMESTAMP }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}"
+          echo "$url"
+          resp=$(curl -fsSL $url)
+
+          echo "response: $resp"
+          if [ "$resp" != "${{ env.CUDA_VISIBLE_DEVICES }}" ]; then
+            echo "Error: response ($resp) != expected (${{ env.CUDA_VISIBLE_DEVICES }})"
+            exit 0
+          fi
+
+      - name: Clean cache
+        if: always()
+        run: |
           rm -rf rm -rf ./* .[^.] .??*
 
 #  show-statistics:

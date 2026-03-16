@@ -32,6 +32,71 @@ except Exception:  # pragma: no cover - optional dependency
 
 log = setup_logger()
 
+
+class _LinearWeightMetadata:
+    """Tensor-like metadata shim for integrations that only inspect `weight` attrs."""
+
+    def __init__(self, module: "TorchQuantLinear", transposed: bool = False):
+        self._module = module
+        self._transposed = transposed
+
+    def _shape(self) -> torch.Size:
+        shape = (self._module.out_features, self._module.in_features)
+        if self._transposed:
+            shape = (shape[1], shape[0])
+        return torch.Size(shape)
+
+    def _first_tensor(self) -> torch.Tensor | None:
+        for name in ("qweight", "scales", "bias", "qzeros", "g_idx"):
+            tensor = getattr(self._module, name, None)
+            if tensor is not None:
+                return tensor
+        return None
+
+    @property
+    def device(self) -> torch.device:
+        tensor = self._first_tensor()
+        return tensor.device if tensor is not None else torch.device("cpu")
+
+    @property
+    def dtype(self) -> torch.dtype:
+        for name in ("bias", "scales", "qweight"):
+            tensor = getattr(self._module, name, None)
+            if tensor is not None:
+                return tensor.dtype
+        return torch.float16
+
+    @property
+    def is_cuda(self) -> bool:
+        return self.device.type == "cuda"
+
+    @property
+    def ndim(self) -> int:
+        return 2
+
+    @property
+    def shape(self) -> torch.Size:
+        return self._shape()
+
+    @property
+    def requires_grad(self) -> bool:
+        return False
+
+    @property
+    def T(self) -> "_LinearWeightMetadata":
+        return _LinearWeightMetadata(self._module, transposed=not self._transposed)
+
+    def size(self, dim: int | None = None):
+        shape = self._shape()
+        return shape if dim is None else shape[dim]
+
+    def __repr__(self) -> str:
+        return (
+            f"_LinearWeightMetadata(device={self.device}, dtype={self.dtype}, "
+            f"shape={tuple(self.shape)})"
+        )
+
+
 class TorchQuantLinear(PackableQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.TORCH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
@@ -111,6 +176,7 @@ class TorchQuantLinear(PackableQuantLinear):
         self._prefetched_weights = {}
         self._prefetch_events = {}
         self._prefetch_streams = {}
+        self._weight_metadata = _LinearWeightMetadata(self)
 
         # if self.group_size != self.in_features:
         #     self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
@@ -138,10 +204,7 @@ class TorchQuantLinear(PackableQuantLinear):
 
     @property
     def weight(self):
-        # Some upstream model implementations only probe `weight.device` to
-        # select a fast path. Expose the packed buffer for that compatibility
-        # check without materializing a dense dequantized tensor.
-        return self.qweight
+        return self._weight_metadata
 
     def dequantize_weight(self, num_itr: int = 1):
         # Triton dequant currently handles the common single-iteration layout.

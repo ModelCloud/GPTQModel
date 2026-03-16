@@ -11,13 +11,14 @@ from gptqmodel.utils.eval import EVAL
 class TestGPTOSS(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/gpt-oss-20b-BF16/"
     USE_FLASH_ATTN = False
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": False,
             "acc": {"value": 0.4411, "floor_pct": 0.2},
             "acc_norm": {"value": 0.4718, "floor_pct": 0.2},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
     USE_VLLM = False

@@ -200,7 +200,30 @@ def recurse_setattr(module, name, value):
         recurse_setattr(getattr(module, name), rest, value)
 
 
+def _module_has_meta_tensors(module: nn.Module) -> bool:
+    for param in module.parameters(recurse=True):
+        if getattr(param, "is_meta", False) or param.device.type == "meta":
+            return True
+    for buf in module.buffers(recurse=True):
+        if getattr(buf, "is_meta", False) or buf.device.type == "meta":
+            return True
+    return False
+
+
 def move_to(obj: torch.Tensor | nn.Module, device: torch.device, dtype: torch.dtype = None):
+    if isinstance(obj, nn.Module) and _module_has_meta_tensors(obj):
+        if not accelerate.utils.has_offloaded_params(obj):
+            raise NotImplementedError(
+                "Cannot move a module that still contains meta tensors without offload hooks. "
+                "Materialize it first before calling move_to()."
+            )
+
+        # Accelerate disk-offloaded modules keep meta placeholders until they are
+        # explicitly restored, so materialize those leaves before the device move.
+        from .offload import undo_offload_to_disk
+
+        return undo_offload_to_disk(obj, device=device, dtype=dtype)
+
     if get_device(obj) != device or dtype is not None:
         obj = obj.to(device=device, dtype=dtype, non_blocking=False)
 
@@ -273,6 +296,7 @@ def make_quant(
     pack: bool = False,
     device: DEVICE = None,
     from_quantized: bool = False,
+    dtype: Optional[torch.dtype] = None,
 ) -> Type[BaseQuantLinear]:
 
     bits = qcfg.runtime_bits
@@ -285,9 +309,12 @@ def make_quant(
     pack_dtype = qcfg.pack_dtype
     init_kwargs = qcfg.quant_linear_init_kwargs()
 
-    # Bitblas needs to be loaded as gptq's quant linear first, and then converted to bitblas format.
-    if not pack and format in (FORMAT.GPTQ, FORMAT.GPTQ_V2) and backend == BACKEND.BITBLAS:
-        backend = BACKEND.TORCH
+    # BitBLAS-native checkpoints can load directly. Other formats need a compatible preload kernel first.
+    if not pack and backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
+        if format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+            backend = BACKEND.TORCH
+        elif qcfg.quant_method == METHOD.AWQ and format == FORMAT.GEMM:
+            backend = BACKEND.TORCH_AWQ
 
     export_quant_method = qcfg.export_quant_method()
 
@@ -304,6 +331,7 @@ def make_quant(
         dynamic=dynamic,
         device=device,
         pack_dtype=pack_dtype,
+        dtype=dtype,
         multi_select=True,
         adapter=extension,
     )
@@ -334,6 +362,7 @@ def make_quant(
                 adapter=qcfg.adapter,
                 format=format,
                 init_kwargs=init_kwargs,
+                dtype=dtype,
             )
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
@@ -364,6 +393,7 @@ def create_quant_module(
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
     init_kwargs: Optional[Dict[str, Any]] = None,
+    dtype: Optional[torch.dtype] = None,
 
 ):
     # unwrap named module
@@ -465,6 +495,7 @@ def create_quant_module(
         desc_act=tmp_desc_act,
         sym=tmp_sym,
         pack_dtype=tmp_pack_dtype,
+        dtype=dtype,
         in_features=in_features,
         out_features=out_features,
         device=DEVICE(device) if isinstance(device, str) else device,
@@ -482,6 +513,7 @@ def create_quant_module(
         out_features=out_features,
         pack_dtype=tmp_pack_dtype,
         bias=bias,
+        dtype=dtype,
         #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
         name=name,
         lm_head_name=lm_head_name,
@@ -509,6 +541,7 @@ def create_quant_layer(
         adapter: Optional[Adapter] = None,
         format: FORMAT = FORMAT.GPTQ,
         init_kwargs: Optional[Dict[str, Any]] = None,
+        dtype: Optional[torch.dtype] = None,
 
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
@@ -535,6 +568,7 @@ def create_quant_layer(
             backend=backend,
             adapter=adapter,
             init_kwargs=init_kwargs,
+            dtype=dtype,
         )
 
     return linear_cls
@@ -1613,6 +1647,11 @@ def _write_shard_file(path: str, entries: List[TensorSource], metadata: Dict[str
         offset += entry.num_bytes
 
     header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    # Safetensors pads the JSON header to an 8-byte boundary.
+    # Without that padding, some readers reject the file as malformed.
+    header_padding = (-len(header_bytes)) % 8
+    if header_padding:
+        header_bytes += b" " * header_padding
 
     with open(path, "wb") as out:
         out.write(struct.pack("<Q", len(header_bytes)))

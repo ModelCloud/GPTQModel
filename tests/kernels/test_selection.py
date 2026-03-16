@@ -8,6 +8,8 @@ import torch
 
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel import HFKernelLinear
 from gptqmodel.nn_modules.qlinear.gemm_hf_kernel_awq import HFKernelAwqLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
@@ -340,3 +342,30 @@ def test_gguf_does_not_accept_generic_torch_backend():
             quant_method=METHOD.GGUF,
             pack_dtype=torch.int32,
         )
+
+
+def test_exllama_eora_falls_back_to_exllamav2_when_kernel_is_missing(monkeypatch):
+    monkeypatch.setattr(
+        ExllamaEoraQuantLinear,
+        "validate",
+        classmethod(lambda qlinear_cls, **kwargs: (False, ImportError("No module named 'gptqmodel_exllama_eora'"))),
+    )
+    monkeypatch.setattr(
+        ExllamaV2QuantLinear,
+        "validate",
+        classmethod(lambda qlinear_cls, **kwargs: (True, None)),
+    )
+
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.EXLLAMA_EORA,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is ExllamaV2QuantLinear

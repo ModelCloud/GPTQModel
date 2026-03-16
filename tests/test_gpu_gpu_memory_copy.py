@@ -132,7 +132,7 @@ def cpu_cpu():
     args, _ = parser.parse_known_args()
 
     if not torch.cuda.is_available():
-        raise SystemExit("CUDA not available.")
+        pytest.skip("CUDA not available.")
     if args.chunk_gib <= 0 or args.total_gib <= 0 or args.total_gib < args.chunk_gib:
         raise SystemExit("Invalid sizes: ensure total-gib >= chunk-gib > 0.")
 
@@ -206,8 +206,10 @@ def gpu_gpu():
     parser.add_argument("--chunk-gib", type=float, default=1.0, help="chunk size GiB per copy")
     args, _ = parser.parse_known_args()
 
-    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
-        raise SystemExit("Need at least 2 CUDA devices.")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available.")
+    if torch.cuda.device_count() < 2:
+        pytest.skip("Need at least 2 CUDA devices.")
 
     # Basic info
     print(f"Detected {torch.cuda.device_count()} CUDA devices.")
@@ -225,6 +227,10 @@ def gpu_gpu():
 
 
 class Test(ModelTest):
-    def test(self):
+    def test_cpu_gpu(self):
+        """Measure pageable and pinned CPU/GPU copy bandwidth."""
         cpu_cpu()
+
+    def test_gpu_gpu(self):
+        """Measure inter-GPU copy bandwidth when two CUDA devices are visible."""
         gpu_gpu()

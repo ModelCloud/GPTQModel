@@ -378,8 +378,14 @@ class BaseQuantLinear(nn.Module):
             for pattern, pattern_dict in dynamic.items():
                 dynamic_bits[pattern] = pattern_dict.get("bits", bits)
             if len(cls.SUPPORTS_BITS) == 1:
-                err = f"{cls} not supported dynamic_bits, only support `{cls.SUPPORTS_BITS}` bits"
-                return False, NotImplementedError(err)
+                unsupported_dynamic_bits = {
+                    layer: dynamic_bits_value
+                    for layer, dynamic_bits_value in dynamic_bits.items()
+                    if dynamic_bits_value != bits
+                }
+                if unsupported_dynamic_bits:
+                    err = f"{cls} not supported dynamic_bits, only support `{cls.SUPPORTS_BITS}` bits"
+                    return False, NotImplementedError(err)
             else:
                 for layer, bits in dynamic_bits.items():
                     if bits not in cls.SUPPORTS_BITS:

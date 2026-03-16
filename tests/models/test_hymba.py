@@ -10,13 +10,14 @@ from gptqmodel.utils.eval import EVAL
 
 class TestHymba(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Hymba-1.5B-Instruct/"  # "baichuan-inc/Baichuan2-7B-Chat"
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {"value": 0.2073, "floor_pct": 0.75},
             "acc_norm": {"value": 0.2713, "floor_pct": 0.75},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     MODEL_MAX_LEN = 8192
     TRUST_REMOTE_CODE = True
     # Hymba currently only supports a batch size of 1.

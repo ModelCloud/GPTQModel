@@ -1060,6 +1060,7 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.GEMV,
         FORMAT.GEMV_FAST,
         FORMAT.MARLIN,
+        FORMAT.BITBLAS,
         FORMAT.LLM_AWQ,
     },
 }
@@ -1925,6 +1926,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             raise ValueError(
                 f"{self.__class__.__name__}: `method` must be one of {[v.value for v in allowed_methods]}."
             )
+
+        # TODO FIXME awq compat which didn't have checkpoint_format before merging to gptqmodel
+        if self.quant_method == METHOD.AWQ and self.format not in [FORMAT.MARLIN, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.GEMM, FORMAT.BITBLAS, FORMAT.LLM_AWQ]:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
+            self.format = FORMAT.GEMM
+            format_family = self._resolve_checkpoint_format()
 
         valid_formats = self.supported_export_formats()
         if format_family not in valid_formats:

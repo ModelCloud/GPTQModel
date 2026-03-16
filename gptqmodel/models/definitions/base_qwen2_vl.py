@@ -10,7 +10,7 @@ from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMi
 
 from ...utils.calibration import batched
 from ...utils.image import extract_vision_info, fetch_image
-from ...utils.model import MODALITY, move_to
+from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
@@ -19,7 +19,7 @@ from ..base import BaseQModel
 class BaseQwen2VLGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
 
-    pre_lm_head_norm_module = "model.norm"
+    pre_lm_head_norm_module = ["model.language_model.norm", "language_model.norm"]
 
     module_tree = [
         "model",
@@ -38,30 +38,73 @@ class BaseQwen2VLGPTQ(BaseQModel):
 
     require_load_processor = True
 
+    @classmethod
+    def extract_layers_node(cls):
+        return ["model.language_model.layers", "language_model.layers"]
+
+    @classmethod
+    def get_base_modules(cls, model):
+        prefix, core_model = cls._resolve_multimodal_layout(model)
+        base_modules = []
+        for name, _ in core_model.named_children():
+            if name != "language_model":
+                base_modules.append(f"{prefix}.{name}" if prefix else name)
+        return base_modules
+
+    @classmethod
+    def _resolve_multimodal_layout(cls, model):
+        for prefix in ("model", ""):
+            core_model = get_module(model, prefix) if prefix else model
+            if core_model is None:
+                continue
+            if hasattr(core_model, "language_model") and hasattr(core_model, "visual"):
+                return prefix, core_model
+
+        raise AttributeError("Unable to resolve a Qwen VL core model with `language_model` and `visual` modules.")
+
+    def _core_multimodal_model(self):
+        _, core_model = self._resolve_multimodal_layout(self.model)
+        return core_model
+
+    def _materialize_core_module(self, parent, attr_name: str):
+        module = getattr(parent, attr_name)
+        if "_turtle_lock" not in self.__dict__ and "shell_module_materialize" not in self.__dict__:
+            setattr(parent, attr_name, move_to(module, device=self.quantize_config.device))
+            return
+        setattr(
+            parent,
+            attr_name,
+            self.shell_module_materialize(module, self.quantize_config.device),
+        )
+
     def pre_quantize_generate_hook_start(self):
-        self.model.language_model.embed_tokens = move_to(self.model.language_model.embed_tokens, device=self.quantize_config.device)
-        self.model.language_model.rotary_emb = move_to(self.model.language_model.rotary_emb, device=self.quantize_config.device)
-        self.model.visual = move_to(self.model.visual, device=self.quantize_config.device)
+        core_model = self._core_multimodal_model()
+        language_model = core_model.language_model
+        self._materialize_core_module(core_model, "visual")
+        self._materialize_core_module(language_model, "embed_tokens")
+        self._materialize_core_module(language_model, "rotary_emb")
 
     def pre_quantize_generate_hook_end(self):
+        core_model = self._core_multimodal_model()
+        language_model = core_model.language_model
         if self.quantize_config.offload_to_disk:
-            offload_to_disk(model=self.model.language_model,
-                            module=self.model.language_model.embed_tokens,
+            offload_to_disk(model=language_model,
+                            module=language_model.embed_tokens,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
-            offload_to_disk(model=self.model.language_model,
-                            module=self.model.language_model.rotary_emb,
+            offload_to_disk(model=language_model,
+                            module=language_model.rotary_emb,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
-            offload_to_disk(model=self.model,
-                            module=self.model.visual,
+            offload_to_disk(model=core_model,
+                            module=core_model.visual,
                             disk_path=self.quantize_config.offload_to_disk_path,
                             )
             return
 
-        self.model.language_model.embed_tokens = move_to(self.model.language_model.embed_tokens, device=CPU)
-        self.model.language_model.rotary_emb = move_to(self.model.language_model.rotary_emb, device=CPU)
-        self.model.visual = move_to(self.model.visual, device=CPU)
+        language_model.embed_tokens = move_to(language_model.embed_tokens, device=CPU)
+        language_model.rotary_emb = move_to(language_model.rotary_emb, device=CPU)
+        core_model.visual = move_to(core_model.visual, device=CPU)
 
     @staticmethod
     def process_vision_info(

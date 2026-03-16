@@ -31,6 +31,11 @@ BITBLAS_OPTIMIZE_FEATURES: List[int] = [1, 16, 32, 64, 128, 256, 512, 1024]
 BITBLAS_SUPPORTED_GROUP_SIZES: List[int] = [-1, 32, 64, 128]
 BITBLAS_SUPPORTED_BITS: List[int] = [1, 2, 4, 8]
 BITBLAS_SUPPORTED_SYM: List[bool] = [False, True]
+# Keep bf16 exposed overall: upstream BitBLAS can successfully compile bf16 for some dtype/shape
+# combinations (for example unsigned low-bit paths used by AWQ). The specific incompatibility we
+# reproduced is the signed low-bit GPTQ dequant path, which can emit CUDA that tries to construct
+# `cutlass::bfloat16_t(int)` and fails during BitBLAS runtime compilation.
+BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS = frozenset({2, 4, 8})
 BITBLAS_DEFAULT_ZEROS_MODE = "quantized"
 BITBLAS_PROPAGATE_WEIGHTS = False
 BITBLAS_MAX_SUPPORTED_SM = 90
@@ -283,6 +288,16 @@ def unpack_gptq_qweight(qweight: torch.Tensor, bits: int) -> torch.Tensor:
     return torch.bitwise_and(unpacked_weight, 2**bits - 1)
 
 
+def remap_gptq_symmetric_codes_to_bitblas(qweight_codes: torch.Tensor, bits: int) -> torch.Tensor:
+    # GPTQ symmetric weights are packed as two's-complement bitfields. BitBLAS' signed intN
+    # dequant path instead interprets stored codes as a biased range and reconstructs values as
+    # `code - 2^(bits-1)`. Flip the sign bit so GPTQ's two's-complement layout lands on the
+    # code range BitBLAS actually decodes.
+    sign_bit = 1 << (bits - 1)
+    remapped = torch.bitwise_xor(qweight_codes.to(torch.int16), sign_bit)
+    return remapped.to(torch.int8).contiguous()
+
+
 def _num_groups(group_size: int, in_features: int) -> int:
     if group_size in (-1, in_features):
         return 1
@@ -295,6 +310,7 @@ class BitblasQuantizationConfig:
     group_size: int
     desc_act: bool
     is_sym: bool
+    torch_dtype: torch.dtype = torch.float16
     zeros_mode: str = BITBLAS_DEFAULT_ZEROS_MODE
     storage_dtype: str = "int8"
     quant_method: str = "gptq"
@@ -314,9 +330,10 @@ class BitblasQuantizationConfig:
             )
         if 32 % self.weight_bits != 0:
             raise ValueError("weight_bits must divide 32 for GPTQ packing")
+        if self.torch_dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("BitBLAS only supports torch.float16 and torch.bfloat16 compute dtypes")
         self.pack_factor = 32 // self.weight_bits
         self.torch_storage_dtype = getattr(torch, self.storage_dtype)
-        self.torch_dtype = torch.float16
 
     @property
     def with_zeros(self) -> bool:
@@ -325,10 +342,12 @@ class BitblasQuantizationConfig:
 
 class BitblasQuantLinear(BaseQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.BITBLAS]
-    SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30}
+    SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30, FORMAT.GPTQ_V2: 30}
     SUPPORTS_BITS = BITBLAS_SUPPORTED_BITS
     SUPPORTS_GROUP_SIZE = BITBLAS_SUPPORTED_GROUP_SIZES
-    SUPPORTS_DESC_ACT = [False, True]
+    # BitBLAS' public matmul API does not expose GPTQ activation-order metadata (`g_idx` /
+    # permutation tensors). Keep desc_act disabled until upstream adds a supported act-order path.
+    SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = BITBLAS_SUPPORTED_SYM
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
@@ -349,6 +368,57 @@ class BitblasQuantLinear(BaseQuantLinear):
     OPT_FEATURES = BITBLAS_OPTIMIZE_FEATURES
     TORCH_DTYPE = torch.float16
 
+    @classmethod
+    def _bf16_signed_weight_error(cls, bits: int, layer: Optional[str] = None) -> NotImplementedError:
+        location = f" for layer pattern `{layer}`" if layer is not None else ""
+        return NotImplementedError(
+            f"{cls.__name__} does not support `torch.bfloat16` with symmetric `{bits}`-bit GPTQ weights{location}. "
+            "This is blocked by an upstream BitBLAS CUDA codegen failure for signed low-bit dequantization. "
+            "Use `torch.float16`, asymmetric GPTQ/unsigned weights, or a different backend."
+        )
+
+    @classmethod
+    def _validate_bf16_bitblas_combo(
+        cls,
+        *,
+        bits: int,
+        sym: bool,
+        dtype: Optional[torch.dtype],
+        dynamic: Optional[dict] = None,
+    ) -> Tuple[bool, Optional[Exception]]:
+        if METHOD.GPTQ not in cls.SUPPORTS_METHODS or dtype != torch.bfloat16:
+            return True, None
+
+        if sym and bits in BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS:
+            return False, cls._bf16_signed_weight_error(bits)
+
+        if dynamic is None:
+            return True, None
+
+        for layer, overrides in dynamic.items():
+            layer_bits = overrides.get("bits", bits)
+            layer_sym = overrides.get("sym", sym)
+            if layer_sym and layer_bits in BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS:
+                return False, cls._bf16_signed_weight_error(layer_bits, layer=layer)
+
+        return True, None
+    def _build_quant_config(
+        self,
+        *,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        dtype: torch.dtype,
+    ) -> BitblasQuantizationConfig:
+        return BitblasQuantizationConfig(
+            weight_bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            is_sym=sym,
+            torch_dtype=dtype,
+        )
+
     def __init__(
         self,
         bits: int,
@@ -359,6 +429,7 @@ class BitblasQuantLinear(BaseQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        dtype: torch.dtype = torch.float16,
         adapter: Adapter = None,
         enable_tuning: bool = False,
         fast_decoding: bool = True,  # kept for API compatibility
@@ -368,6 +439,13 @@ class BitblasQuantLinear(BaseQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ) -> None:
+        if dtype not in self.SUPPORTS_DTYPES:
+            raise ValueError(f"{self.__class__.__name__} only supports dtypes {self.SUPPORTS_DTYPES}: actual dtype = {dtype}")
+
+        ok, err = self._validate_bf16_bitblas_combo(bits=bits, sym=sym, dtype=dtype)
+        if not ok:
+            raise err
+
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -388,11 +466,13 @@ class BitblasQuantLinear(BaseQuantLinear):
         if not BITBLAS_AVAILABLE:
             raise ImportError(BITBLAS_INSTALL_HINT)
 
-        self.quant_config = BitblasQuantizationConfig(
-            weight_bits=bits,
+        self.TORCH_DTYPE = dtype
+        self.quant_config = self._build_quant_config(
+            bits=bits,
             group_size=group_size,
             desc_act=desc_act,
-            is_sym=sym,
+            sym=sym,
+            dtype=dtype,
         )
         self.enable_tuning = enable_tuning
         self.layout = layout
@@ -424,11 +504,56 @@ class BitblasQuantLinear(BaseQuantLinear):
             return False, exc
         return True, None
 
+    @classmethod
+    def validate(
+        cls,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        in_features: int = None,
+        out_features: int = None,
+        pack_dtype: torch.dtype = None,
+        dtype: Optional[torch.dtype] = None,
+        dynamic: Optional[dict] = None,
+        device: Optional[DEVICE] = None,
+        trainable: Optional[bool] = None,
+        adapter: Optional[Adapter] = None,
+    ) -> Tuple[bool, Optional[Exception]]:
+        ok, err = cls._validate_bf16_bitblas_combo(bits=bits, sym=sym, dtype=dtype, dynamic=dynamic)
+        if not ok:
+            return False, err
+
+        return super().validate(
+            bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            in_features=in_features,
+            out_features=out_features,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
+
     def _validate_parameters(self, in_features: int, out_features: int) -> None:
-        if in_features % 16 != 0:
-            raise ValueError("`in_features` must be divisible by 16 for BitBLAS")
-        if out_features % 16 != 0:
-            raise ValueError("`out_features` must be divisible by 16 for BitBLAS")
+        # This wrapper keeps a conservative 16-wide gate because the current GPTQ/AWQ BitBLAS
+        # integration is built around TensorCore-oriented 16x16 micro-kernel paths. BitBLAS itself
+        # is looser in some cases: local probes showed odd N/out_features can still build, while
+        # the hard upstream packing constraint we confirmed is K/in_features divisible by 8 / bits
+        # for quant-compressed weights. We keep the stricter gate here until the relaxed shapes are
+        # regression-tested across the full load/repack/forward path.
+        if any(in_features % divisor != 0 for divisor in self.SUPPORTS_IN_FEATURES_DIVISIBLE_BY):
+            raise ValueError(
+                f"`in_features` must be divisible by {self.SUPPORTS_IN_FEATURES_DIVISIBLE_BY} for BitBLAS"
+            )
+        if any(out_features % divisor != 0 for divisor in self.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY):
+            raise ValueError(
+                f"`out_features` must be divisible by {self.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY} for BitBLAS"
+            )
         if self.group_size not in (-1, in_features) and in_features % self.group_size != 0:
             raise ValueError("`in_features` must be divisible by `group_size`.")
 
@@ -490,6 +615,8 @@ class BitblasQuantLinear(BaseQuantLinear):
         from bitblas import MatmulConfig
 
         bitblas_dtype = "float16" if params_dtype == torch.float16 else "bfloat16"
+        # FP16/BF16 accumulation drifted enough to derail autoregressive decoding.
+        accum_dtype = "float32"
         W_dtype = f"uint{bits}" if self.quant_config.is_sym is False else f"int{bits}"
         matmul_config = MatmulConfig(
             M=self.opt_features,
@@ -498,7 +625,7 @@ class BitblasQuantLinear(BaseQuantLinear):
             A_dtype=bitblas_dtype,
             W_dtype=W_dtype,
             out_dtype=bitblas_dtype,
-            accum_dtype="int32" if bitblas_dtype == "int8" else bitblas_dtype,
+            accum_dtype="int32" if bitblas_dtype == "int8" else accum_dtype,
             storage_dtype=self.quant_config.storage_dtype,
             with_scaling=True,
             with_zeros=self.quant_config.with_zeros,
@@ -509,6 +636,18 @@ class BitblasQuantLinear(BaseQuantLinear):
         )
         self.bitblas_matmul = self._get_or_create_bitblas_operator(
             matmul_config, enable_tuning
+        )
+        self._ensure_runnable_bitblas_operator(self.bitblas_matmul, matmul_config)
+
+    def _ensure_runnable_bitblas_operator(self, bitblas_matmul, config) -> None:
+        if getattr(bitblas_matmul, "lib", None) is not None:
+            return
+        if callable(getattr(bitblas_matmul, "torch_func", None)):
+            return
+        raise NotImplementedError(
+            "BitBLAS could not build a runnable matmul for "
+            f"A_dtype={config.A_dtype}, W_dtype={config.W_dtype}, out_dtype={config.out_dtype}, "
+            f"accum_dtype={config.accum_dtype}, group_size={config.group_size}."
         )
 
     def _get_or_create_bitblas_operator(self, config, enable_tuning):
@@ -550,8 +689,56 @@ class BitblasQuantLinear(BaseQuantLinear):
     def post_init(self) -> None:
         super().post_init()
 
+    def _transform_bitblas_weight(self, intweight_out_in: torch.Tensor, device: torch.device) -> torch.Tensor:
+        from bitblas.quantization.utils import general_compress
+
+        if self.bitblas_matmul.weight_transform is not None:
+            qweight = self.bitblas_matmul.weight_transform(intweight_out_in.cpu()).to(device)
+        else:
+            compressed = general_compress(intweight_out_in.cpu().numpy(), self.bits)
+            qweight = torch.from_numpy(compressed).to(
+                device=device,
+                dtype=self.quant_config.torch_storage_dtype,
+            )
+        return qweight.contiguous()
+
+    def _compress_bitblas_zeros(
+        self,
+        intzeros_group_out: Optional[torch.Tensor],
+        device: torch.device,
+    ) -> torch.Tensor:
+        from bitblas.quantization.utils import general_compress
+
+        if not self.quant_config.with_zeros or intzeros_group_out is None:
+            return torch.empty(0, dtype=self.quant_config.torch_storage_dtype, device=device)
+
+        compressed = general_compress(intzeros_group_out.contiguous().cpu().numpy(), self.bits)
+        return torch.from_numpy(compressed).to(
+            device=device,
+            dtype=self.quant_config.torch_storage_dtype,
+        ).contiguous()
+
+    def _load_bitblas_quant_state(
+        self,
+        intweight_out_in: torch.Tensor,
+        scales_out_group: torch.Tensor,
+        intzeros_group_out: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+    ) -> None:
+        device = self._buffer_device()
+
+        self._buffers["qweight"] = self._transform_bitblas_weight(intweight_out_in, device)
+        self._buffers["scales"] = scales_out_group.to(device=device, dtype=self.TORCH_DTYPE).contiguous()
+        self._buffers["qzeros"] = self._compress_bitblas_zeros(intzeros_group_out, device)
+
+        if self.bias is not None and bias is not None:
+            self._buffers["bias"] = bias.detach().to(device=device, dtype=self.TORCH_DTYPE)
+
+        self.zeros = self.qzeros
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dtype not in (torch.float16, torch.bfloat16):
+        input_dtype = x.dtype
+        if input_dtype != self.TORCH_DTYPE:
             x = x.to(self.TORCH_DTYPE)
 
         orig_shape = x.shape[:-1]
@@ -570,47 +757,32 @@ class BitblasQuantLinear(BaseQuantLinear):
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 
+        if input_dtype in self.SUPPORTS_DTYPES and out.dtype != input_dtype:
+            out = out.to(dtype=input_dtype)
+
         return out
 
     def repack_from_gptq(self, gptq_module: BaseQuantLinear) -> None:
-        from bitblas.quantization.utils import general_compress
-
-        device = self._buffer_device()
-
         bits = self.bits
         packed_weight = (
             gptq_module.qweight.detach().T.contiguous().view(self.quant_config.torch_storage_dtype)
         )
         intweight = unpack_gptq_qweight(packed_weight, bits).contiguous()
+        if self.quant_config.is_sym:
+            intweight = remap_gptq_symmetric_codes_to_bitblas(intweight, bits)
 
-        if self.bitblas_matmul.weight_transform is not None:
-            qweight = self.bitblas_matmul.weight_transform(intweight.cpu()).to(device)
-        else:
-            from bitblas.quantization.utils import general_compress
-
-            compressed = general_compress(intweight.cpu().numpy(), bits)
-            qweight = torch.from_numpy(compressed).to(
-                device=device, dtype=self.quant_config.torch_storage_dtype
-            )
-
-        self._buffers["qweight"] = qweight.contiguous()
-
-        scales = gptq_module.scales.detach().T.contiguous().to(self.TORCH_DTYPE)
-        self._buffers["scales"] = scales.to(device)
-
+        intzeros = None
         if self.quant_config.with_zeros and hasattr(gptq_module, "qzeros") and gptq_module.qzeros is not None:
-            intzeros = unpack_gptq_qzeros(gptq_module.qzeros.detach(), bits).T.contiguous()
+            intzeros = unpack_gptq_qzeros(gptq_module.qzeros.detach(), bits).contiguous()
             intzeros = intzeros - 1  # GPTQ stores qzeros offset by +1
-            compressed = general_compress(intzeros.T.contiguous().cpu().numpy(), bits)
-            zeros = torch.from_numpy(compressed).to(device=device, dtype=self.quant_config.torch_storage_dtype)
-            self._buffers["qzeros"] = zeros.contiguous()
-        else:
-            self._buffers["qzeros"] = torch.empty(0, dtype=self.quant_config.torch_storage_dtype, device=device)
 
-        if self.bias is not None and hasattr(gptq_module, "bias") and gptq_module.bias is not None:
-            self._buffers["bias"] = gptq_module.bias.detach().to(device=device, dtype=self.TORCH_DTYPE)
-
-        self.zeros = self.qzeros
+        bias = gptq_module.bias.detach() if self.bias is not None and getattr(gptq_module, "bias", None) is not None else None
+        self._load_bitblas_quant_state(
+            intweight_out_in=intweight,
+            scales_out_group=gptq_module.scales.detach().T.contiguous(),
+            intzeros_group_out=intzeros,
+            bias=bias,
+        )
 
 
 BitBLASQuantLinear = BitblasQuantLinear

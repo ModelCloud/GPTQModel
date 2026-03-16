@@ -42,7 +42,7 @@ from ..quantization.config import (
 )
 from ..utils.backend import BACKEND
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
-from ..utils.hf import no_init_weights, sanitize_generation_config_file
+from ..utils.hf import no_init_weights, prepare_remote_code_compat, sanitize_generation_config_file
 from ..utils.logger import setup_logger
 from ..utils.model import (
     copy_py_files,
@@ -535,6 +535,7 @@ def ModelWriter(cls):
             model_id_or_path,
             trust_remote_code=True,
         )
+        prepare_remote_code_compat(config)
 
         def skip(*args, **kwargs):
             pass

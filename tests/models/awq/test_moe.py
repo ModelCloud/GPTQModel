@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from model_test import ModelTest
 
 from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 from gptqmodel.utils.eval import EVAL
 
 
@@ -22,14 +23,16 @@ from gptqmodel.utils.eval import EVAL
 class TestQwen3MoeAwq(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
     DATASET_CONCAT_SIZE = 2048
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {"value": 0.5094, "floor_pct": 0.04},
             "acc_norm": {"value": 0.5486, "floor_pct": 0.04},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
+    MOE_CONFIG = MoEConfig(routing=ExpertsRoutingOverride())
 
     def test_moe_awq(self):
         self.quant_lm_eval()

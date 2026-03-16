@@ -10,10 +10,16 @@ from gptqmodel.utils.eval import EVAL
 
 class TestStablelm(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/stablelm-base-alpha-3b"
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "acc": {"value": 0.2363, "floor_pct": 0.2},
             "acc_norm": {"value": 0.2577, "floor_pct": 0.2},
+        },
+    }
+    EVAL_TASKS_FAST = {
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "acc": {"value": 0.23720136518771331, "floor_pct": 0.2, "ceil_pct": 1.0},
+            "acc_norm": {"value": 0.26023890784982934, "floor_pct": 0.2, "ceil_pct": 1.0},
         },
     }
     TRUST_REMOTE_CODE = True

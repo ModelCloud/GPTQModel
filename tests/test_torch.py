@@ -169,22 +169,29 @@ def test_gptq_post_init_creates_wf_unpack_buffers():
     assert module.wf_unsqueeze_neg_one is not None
 
 
-def test_torch_quant_linear_weight_property_uses_packed_buffer_device():
+def test_torch_quant_linear_exposes_weight_metadata():
     module = TorchQuantLinear(
         bits=4,
         group_size=32,
         sym=True,
         desc_act=False,
         in_features=64,
-        out_features=64,
+        out_features=96,
         bias=False,
         pack_dtype=torch.int32,
         adapter=None,
         register_buffers=True,
     )
 
-    assert module.weight is module.qweight
-    assert module.weight.device == module.qweight.device
+    weight = module.weight
+
+    assert weight.device == module.qweight.device
+    assert weight.dtype == module.scales.dtype
+    assert weight.shape == torch.Size((module.out_features, module.in_features))
+    assert weight.size(0) == module.out_features
+    assert weight.size(1) == module.in_features
+    assert weight.T.shape == torch.Size((module.in_features, module.out_features))
+    assert ("cuda" in weight.device.type) == weight.is_cuda
 
 
 def test_cached_forward_matches_baseline():

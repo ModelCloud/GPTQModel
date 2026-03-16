@@ -4,11 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import json
+import warnings
+from functools import lru_cache
 from typing import Any, Optional
 
 import torch
 from accelerate import init_empty_weights
-from transformers import GenerationConfig, PreTrainedModel
+from transformers import AutoConfig, AutoModelForCausalLM, GenerationConfig, PreTrainedModel
 
 
 # Compatibility wrapper for no_init_weights across different transformers versions
@@ -22,9 +24,69 @@ except ImportError:
 from ..utils.logger import setup_logger
 
 
-__all__ = ["no_init_weights"]
+__all__ = [
+    "no_init_weights",
+    "normalize_hf_config_compat",
+    "prepare_remote_code_compat",
+    "has_native_transformers_causallm_support",
+    "resolve_trust_remote_code",
+    "load_tokenizer",
+]
 
 log = setup_logger()
+_TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
+
+
+@lru_cache(maxsize=None)
+def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple[bool, Optional[str], Optional[str]]:
+    try:
+        config = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=False)
+    except Exception as exc:
+        log.debug("HF: native transformers support check failed for `%s`: %s", model_id_or_path, exc)
+        return False, None, None
+
+    model_type = getattr(config, "model_type", None)
+    try:
+        model_cls = AutoModelForCausalLM._model_mapping[type(config)]
+    except Exception as exc:
+        log.debug(
+            "HF: config `%s` for `%s` has no native AutoModelForCausalLM mapping: %s",
+            type(config).__name__,
+            model_id_or_path,
+            exc,
+        )
+        return False, model_type, None
+
+    return True, model_type, getattr(model_cls, "__name__", str(model_cls))
+
+
+def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool) -> bool:
+    if not trust_remote_code or not model_id_or_path:
+        return trust_remote_code
+
+    native_supported, model_type, model_cls_name = _detect_native_transformers_causallm_support(str(model_id_or_path))
+    if not native_supported:
+        return True
+
+    warning_key = (str(model_id_or_path), model_type or "unknown", model_cls_name or "unknown")
+    if warning_key not in _TRUST_REMOTE_CODE_OVERRIDE_WARNED:
+        log.warning(
+            "HF: overriding trust_remote_code=True to False for `%s` because model_type `%s` is integrated in installed transformers as `%s`.",
+            model_id_or_path,
+            model_type or "unknown",
+            model_cls_name or "unknown",
+        )
+        _TRUST_REMOTE_CODE_OVERRIDE_WARNED.add(warning_key)
+
+    return False
+
+
+def has_native_transformers_causallm_support(model_id_or_path: Optional[str]) -> bool:
+    if not model_id_or_path:
+        return False
+
+    native_supported, _, _ = _detect_native_transformers_causallm_support(str(model_id_or_path))
+    return native_supported
 
 def _resolve_input_embedding_weight_name(model: PreTrainedModel) -> Optional[str]:
     get_input_embeddings = getattr(model, "get_input_embeddings", None)
@@ -108,7 +170,7 @@ def _patch_transformers_remote_code_compat() -> None:
 
         import_utils.is_torch_fx_available = is_torch_fx_available
 
-    if not getattr(PreTrainedModel, "_gptqmodel_legacy_tied_weights_patch", False):
+    if not getattr(PreTrainedModel, "_gptqmodel_legacy_tied_weights_patch", False) and hasattr(PreTrainedModel, "get_expanded_tied_weights_keys"):
         original_get_expanded_tied_weights_keys = PreTrainedModel.get_expanded_tied_weights_keys
 
         def get_expanded_tied_weights_keys(self, all_submodels: bool = False) -> dict:
@@ -141,25 +203,151 @@ def _patch_transformers_remote_code_compat() -> None:
         PreTrainedModel.get_expanded_tied_weights_keys = get_expanded_tied_weights_keys
         PreTrainedModel._gptqmodel_legacy_tied_weights_patch = True
 
+    if not getattr(PreTrainedModel, "_gptqmodel_missing_all_tied_weights_patch", False):
+        original_getattr = PreTrainedModel.__getattr__
 
-# Restore the pre-transformers-5 RoPE config shape expected by older MiniCPM
-# remote code before HF instantiates the architecture from config.
+        def __getattr__(self, name: str):
+            if name == "all_tied_weights_keys":
+                # Older remote-code models may skip `post_init()`, so lazily
+                # synthesize the tied-weight map the first time HF asks for it.
+                tied_keys = self.get_expanded_tied_weights_keys(all_submodels=True)
+                object.__setattr__(self, name, tied_keys)
+                return tied_keys
+
+            return original_getattr(self, name)
+
+        PreTrainedModel.__getattr__ = __getattr__
+        PreTrainedModel._gptqmodel_missing_all_tied_weights_patch = True
+
+
+def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
+    if getattr(config, "model_type", None) != "chatglm":
+        return
+
+    if not hasattr(config, "seq_length") or hasattr(config, "max_length"):
+        return
+
+    # Older ChatGLM remote model code still reads `config.max_length`, while
+    # newer transformers only preserves the serialized `seq_length` field.
+    config.attribute_map = dict(getattr(config, "attribute_map", {}) or {})
+    config.attribute_map["max_length"] = "seq_length"
+
+
+def _normalize_rope_parameters_config_compat(config: Any) -> None:
+    rope_parameters = getattr(config, "rope_parameters", None)
+    if (
+        isinstance(rope_parameters, dict)
+        and rope_parameters.get("rope_type") is not None
+        and rope_parameters.get("rope_theta") is not None
+    ):
+        return
+
+    convert_rope_params = getattr(config, "convert_rope_params_to_dict", None)
+    if callable(convert_rope_params):
+        try:
+            convert_rope_params()
+        except Exception as exc:
+            log.debug("Config: RoPE conversion fallback for %s failed: %s", type(config).__name__, exc)
+        else:
+            rope_parameters = getattr(config, "rope_parameters", None)
+            if (
+                isinstance(rope_parameters, dict)
+                and rope_parameters.get("rope_type") is not None
+                and rope_parameters.get("rope_theta") is not None
+            ):
+                return
+
+    legacy_rope_scaling = getattr(config, "rope_scaling", None)
+    rope_parameters = dict(legacy_rope_scaling) if isinstance(legacy_rope_scaling, dict) else dict(rope_parameters or {})
+
+    if not rope_parameters and getattr(config, "rope_theta", None) is None and getattr(config, "default_theta", None) is None:
+        return
+
+    rope_parameters.setdefault("rope_type", rope_parameters.get("type", "default"))
+    if rope_parameters.get("rope_theta") is None:
+        rope_theta = getattr(config, "rope_theta", None)
+        if rope_theta is None:
+            rope_theta = getattr(config, "default_theta", 10_000.0)
+        rope_parameters["rope_theta"] = rope_theta
+
+    partial_rotary_factor = getattr(config, "partial_rotary_factor", None)
+    if partial_rotary_factor is not None:
+        rope_parameters.setdefault("partial_rotary_factor", partial_rotary_factor)
+
+    if rope_parameters["rope_type"] in {"llama3", "yarn", "longrope"}:
+        original_max_position_embeddings = getattr(config, "original_max_position_embeddings", None)
+        if original_max_position_embeddings is None:
+            original_max_position_embeddings = getattr(config, "max_position_embeddings", None)
+        if original_max_position_embeddings is not None:
+            rope_parameters.setdefault("original_max_position_embeddings", original_max_position_embeddings)
+
+    config.rope_parameters = rope_parameters
+
+
+# Restore config fields renamed by transformers 5.x before older trust_remote_code
+# model files instantiate their architectures from the config object.
 def _normalize_remote_code_config_compat(config: Any) -> None:
+    _normalize_chatglm_remote_code_config_compat(config)
+
     # transformers 5.x normalizes RoPE config to `rope_type`, but older
     # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.
     rope_scaling = getattr(config, "rope_scaling", None)
-    if not isinstance(rope_scaling, dict) or "type" in rope_scaling:
+    if not isinstance(rope_scaling, dict):
         return
 
-    rope_type = rope_scaling.get("rope_type")
-    factor = rope_scaling.get("factor")
-
-    if rope_type in (None, "default") and factor is None:
+    if rope_scaling.get("rope_type") == "default" and set(rope_scaling).issubset({"rope_type", "rope_theta"}):
+        # transformers 5.x materializes default RoPE metadata into
+        # `rope_scaling`, but older remote MiniCPM code treats any dict here
+        # as a scaled-RoPE config and expects an explicit `factor`.
         config.rope_scaling = None
         return
 
-    config.rope_scaling = dict(rope_scaling)
-    config.rope_scaling["type"] = rope_type
+    if "type" in rope_scaling:
+        return
+
+    rope_type = rope_scaling.get("rope_type")
+    if rope_type is None:
+        return
+
+    rope_scaling = dict(rope_scaling)
+    rope_scaling["type"] = rope_type
+    config.rope_scaling = rope_scaling
+
+
+def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) -> None:
+    # Some transformers 5.x model classes now read `config.rope_parameters`
+    # directly during `from_config()`, but older local configs may only carry
+    # legacy RoPE fields or nothing but a default `rope_theta`.
+    _normalize_rope_parameters_config_compat(config)
+
+    if not trust_remote_code:
+        return
+
+    _patch_transformers_remote_code_compat()
+    _normalize_remote_code_config_compat(config)
+    # Some config classes synchronize `rope_scaling` and `rope_parameters`, so
+    # remote-code normalization that clears legacy default `rope_scaling` can
+    # also reset `rope_parameters` back to None. Re-apply the RoPE backfill
+    # after remote-code field cleanup so from_config() sees stable metadata.
+    _normalize_rope_parameters_config_compat(config)
+
+
+def prepare_remote_code_compat(config: Any) -> None:
+    # Remote-code loads need both the transformers API shims and any config
+    # field migrations applied before instantiation happens.
+    normalize_hf_config_compat(config, trust_remote_code=True)
+
+
+def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
+    from tokenicer import Tokenicer
+
+    warnings.warn(
+        "gptqmodel.utils.hf.load_tokenizer() is deprecated; use Tokenicer.load(..., model_config=...) instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return Tokenicer.load(tokenizer_or_path, model_config=model_config, **kwargs)
+
 
 
 _patch_transformers_remote_code_compat()
@@ -292,9 +480,7 @@ def build_shell_model(
     del init_kwargs["_fast_init"]
     # All nn.Parameters and buffers are created
 
-    if trust_remote_code:
-        _patch_transformers_remote_code_compat()
-        _normalize_remote_code_config_compat(config)
+    normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
 
     # All nn.Parameters and buffers are created on 'meta' and initializers are skipped.
     pb = log.spinner(title="Model loading...", interval=0.1)

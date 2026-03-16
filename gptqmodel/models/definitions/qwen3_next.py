@@ -36,19 +36,19 @@ class Qwen3NextGPTQ(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             # Token mixers
-            #"self_attn": ("k_proj", "v_proj", "q_proj", "o_proj"),
-            "linear_attn": ("in_proj_qkvz", "in_proj_ba:!", "out_proj"),  # conv1d intentionally excluded
+            "self_attn": ("q_norm:!", "k_norm:!", "q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "linear_attn": ("norm:!", "conv1d:!", "in_proj_qkvz:0", "in_proj_ba:!:0", "out_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             # MLP / MoE
             "mlp:moe": {
                 # MoE router + shared expert (Qwen3NextSparseMoeBlock)
                 "gate": ("gate:!",),  # router gate linear
                 "shared_expert_gate": ("shared_expert_gate:!",), # <-- single (1, N) logic projections should not be quantized
-                "shared_expert": ("gate_proj", "up_proj", "down_proj"),
+                "shared_expert": ("gate_proj:0", "up_proj:0", "down_proj:1"),
 
                 # Experts list with dynamic index
                 "experts": {
-                    "#": ("gate_proj", "up_proj", "down_proj"),
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },
         },

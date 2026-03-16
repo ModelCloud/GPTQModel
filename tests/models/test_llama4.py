@@ -10,13 +10,14 @@ from gptqmodel.utils.eval import EVAL
 
 class TestLlama4(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-4-Scout-17B-16E-Instruct" # "meta-llama/Llama-4-Scout-17B-16E-Instruct"
-    EVAL_TASKS = {
+    EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {"value": 0.3567, "floor_pct": 0.36},
             "acc_norm": {"value": 0.3805, "floor_pct": 0.36},
         },
     }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
     TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
 

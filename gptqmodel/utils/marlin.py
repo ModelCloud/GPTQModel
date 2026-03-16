@@ -64,13 +64,14 @@ def marlin_make_workspace_new(device: torch.device,
 def update_tensor_inplace(dst: torch.Tensor, src: torch.Tensor):
     assert dst.dtype == src.dtype, "Tensors must have the same dtype"
 
-    # update tensor shape and stride
-    dst.as_strided_(src.shape, src.stride())
+    with torch.no_grad():
+        # Mutating a registered Parameter must bypass autograd bookkeeping.
+        dst.as_strided_(src.shape, src.stride())
 
-    # If not the same underlying storage move tensor data
-    if dst.data_ptr() != src.data_ptr():
-        dst.copy_(src)
-        del src
+        # If not the same underlying storage move tensor data
+        if dst.data_ptr() != src.data_ptr():
+            dst.copy_(src)
+            del src
 
 
 # Newly generated tensors need to replace existing tensors that are

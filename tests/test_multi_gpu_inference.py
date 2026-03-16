@@ -30,7 +30,8 @@ class TestMultiGPUInference(unittest.TestCase):
 
     def test_multi_gpu_inference(self):
         cuda_device_count = torch.cuda.device_count()
-        self.assertGreaterEqual(cuda_device_count, 5, f"Expected CUDA device count to be greater than or equal to 5, but got {cuda_device_count}")
+        if cuda_device_count < 5:
+            self.skipTest(f"Need at least 5 visible CUDA devices, got {cuda_device_count}.")
         model = GPTQModel.load(
             self.MODEL_PATH,
             backend=BACKEND.TORCH,

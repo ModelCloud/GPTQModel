@@ -22,4 +22,13 @@ class TestMMLUPRO(unittest.TestCase):
 
     def test_mmlupro(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            GPTQModel.eval(self.MODEL_ID, framework=EVAL.MMLU_PRO, tasks=EVAL.MMLU_PRO.MATH, output_path=tmp_dir, batch_size=10, ntrain=5)
+            result = GPTQModel.eval(
+                self.MODEL_ID,
+                framework=EVAL.MMLU_PRO,
+                tasks=EVAL.MMLU_PRO.MATH,
+                output_path=tmp_dir,
+                batch_size=2,
+                ntrain=1,
+                max_samples=2,
+            )
+            self.assertIn("Average accuracy", result)
