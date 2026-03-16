@@ -697,8 +697,16 @@ jobs:
           mkdir -p "$(dirname "$log_file")"
 
           start_time=$(date +%s)
-          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee $log_file
-          test ${PIPESTATUS[0]} -eq 0 || { echo "ERROR=2" >> $GITHUB_ENV; echo "pipe status wrong: ${PIPESTATUS[0]} $PIPESTATUS"; exit 2; }
+          
+          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee "$log_file"
+          pipe_status=("${PIPESTATUS[@]}")
+          
+          if (( pipe_status[0] != 0 )); then
+            echo "ERROR=22" >> "$GITHUB_ENV"
+            echo "pipe status wrong: ${pipe_status[*]}"
+            exit 22
+          fi
+          
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
 
@@ -984,8 +992,16 @@ jobs:
           mkdir -p "$(dirname "$log_file")"
 
           start_time=$(date +%s)
-          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee $log_file
-          test ${PIPESTATUS[0]} -eq 0 || { echo "ERROR=2" >> $GITHUB_ENV; echo "pipe status wrong: ${PIPESTATUS[0]} $PIPESTATUS"; exit 2; }
+          
+          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee "$log_file"
+          pipe_status=("${PIPESTATUS[@]}")
+          
+          if (( pipe_status[0] != 0 )); then
+            echo "ERROR=22" >> "$GITHUB_ENV"
+            echo "pipe status wrong: ${pipe_status[*]}"
+            exit 22
+          fi
+          
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
 
