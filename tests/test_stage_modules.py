@@ -9,6 +9,7 @@ from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.looper.stage_layer import run_layer_stage
 from gptqmodel.looper.stage_subset import SubsetForwardContext, SubsetStageResult
+from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.pause_resume import PauseResumeController
 
 
@@ -261,7 +262,11 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         def __init__(self):
             self.model = torch.nn.Module()
             self.model.config = types.SimpleNamespace(model_type="llama")
-            self.quantize_config = types.SimpleNamespace(lm_head=False)
+            self.quantize_config = QuantizeConfig(
+                bits=4,
+                group_size=128,
+                offload_to_disk=False,
+            )
             self.lm_head = None
 
         def pre_quantize(self, module):
@@ -329,3 +334,207 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
     )
 
     assert calls == [0]
+
+
+def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
+    calls = []
+
+    def fake_run_subset_stage(looper, **kwargs):
+        calls.append(kwargs["layer_index"])
+        return SubsetStageResult(
+            processed_subset={},
+            layer_inputs=kwargs["layer_inputs"],
+            forward_context=SubsetForwardContext(
+                subset={},
+                forward_device_map={},
+                subset_forward_serial=False,
+                subset_total=kwargs["subset_total"],
+                subset_index=kwargs["subset_index"],
+            ),
+        )
+
+    monkeypatch.setattr("gptqmodel.looper.stage_layer.run_subset_stage", fake_run_subset_stage)
+    monkeypatch.setattr("gptqmodel.looper.stage_layer.find_modules", lambda *_, **__: {})
+
+    class DummyPB:
+        def __init__(self, iterable):
+            self._iterable = list(iterable)
+            self.current_iter_step = 0
+            self.close_calls = 0
+
+        def __iter__(self):
+            return iter(self._iterable)
+
+        def __len__(self):
+            return len(self._iterable)
+
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            return self
+
+        def title(self, *_):
+            return self
+
+        def subtitle(self, *_):
+            return self
+
+        def draw(self):
+            return self
+
+        def next(self):
+            return self
+
+        def close(self):
+            self.close_calls += 1
+            return self
+
+    class DummyLogger:
+        def pb(self, iterable):
+            return DummyPB(iterable)
+
+        def info(self, *_, **__):
+            return None
+
+        def debug(self, *_, **__):
+            return None
+
+        def warning(self, *_, **__):
+            return None
+
+        warn = warning
+
+        def error(self, *_, **__):
+            return None
+
+    class DummyProcessor:
+        fwd_all_modules_in_single_pass = False
+        fwd_after_process = False
+
+        def __init__(self):
+            tensor = torch.zeros(1, 1, 1)
+            self.inputs_cache = types.SimpleNamespace(
+                layer_inputs=[[tensor]],
+                layer_input_kwargs=[{}],
+                position_ids=[],
+                attention_masks=[],
+            )
+            self.calibration_dataset = []
+            self.log = []
+            self.tasks = {}
+
+        def collect_memory_info(self, *_):
+            return None
+
+        def pre_process_fwd_hook(self, *_):
+            return lambda *a, **k: None
+
+        def process(self, *_, **__):
+            return None
+
+        def clear_cache_data(self):
+            return None
+
+        def receive_layer_inputs(self, inputs):
+            self.inputs_cache.layer_inputs = inputs
+
+        def set_fwd_time(self, *_):
+            return None
+
+        def name(self):
+            return "dummy"
+
+        def submodule_finalize(self, *_, **__):
+            return None
+
+        def finalize(self, *_, **__):
+            return None
+
+        def log_plotly(self):
+            return None
+
+    class DummyGptqModel:
+        def __init__(self):
+            self.model = torch.nn.Module()
+            self.model.config = types.SimpleNamespace(model_type="llama")
+            self.quantize_config = QuantizeConfig(
+                bits=4,
+                group_size=128,
+                offload_to_disk=False,
+                dynamic={
+                    r"-:^model\.layers\.1\.foo$": {},
+                    r"-:^model\.layers\.2\.foo$": {},
+                },
+            )
+            self.lm_head = None
+
+        def pre_quantize(self, module):
+            return module
+
+        def post_quantize(self, module):
+            return module
+
+        def lm_head_pre_quantize_generate_hook(self, value):
+            return value
+
+    class DummyLooper:
+        def __init__(self):
+            self.gptq_model = DummyGptqModel()
+            self.processors = [DummyProcessor()]
+            self._quant_devices = [torch.device("cpu")]
+            self._module_device_map = {}
+            self._quant_device_lock = threading.Lock()
+            self._moe_subset_threshold = 16
+            self._vram_strategy = types.SimpleNamespace()
+            self._layer_events = []
+            self.named_module_layers = []
+            self.pause_controller = PauseResumeController()
+
+        def _check_loop_stop(self):
+            return False
+
+        def _emit_layer_complete(self, *, layer_idx, submodule_finalized, raise_in_place):
+            self._layer_events.append((layer_idx, submodule_finalized, raise_in_place))
+
+        def _request_loop_stop(self, exc):
+            self._stop_exc = exc
+
+        def _subset_event_dispatch(self, *kwargs):
+            pass
+
+        def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor,
+                                 failsafe, layer_module=None) -> Dict[str, NamedModule]:
+            self.named_module_layers.append(layer_index)
+            return {
+                "self_attn.q_proj": NamedModule(
+                    module,
+                    name="self_attn.q_proj",
+                    full_name=full,
+                    layer_index=layer_index,
+                )
+            }
+
+    looper = DummyLooper()
+    processor = looper.processors[0]
+    pb = DummyPB(range(3))
+    processor.layer_count = 3
+    processor.pb = pb
+
+    run_layer_stage(
+        looper,
+        layers=[torch.nn.Linear(64, 64) for _ in range(3)],
+        layer_modules=[["foo"]],
+        layers_prefix="model.layers",
+        failsafe=True,
+        shared_kv_cache_dict={},
+        pb=pb,
+        layer_count=3,
+        region_timer=None,
+        finalize_progress_cls=FinalizeProgressInfo,
+        logger=DummyLogger(),
+    )
+
+    assert calls == [0]
+    assert looper.named_module_layers == [0]
+    assert pb.close_calls == 1
