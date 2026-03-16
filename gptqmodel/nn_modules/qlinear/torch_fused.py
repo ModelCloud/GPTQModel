@@ -69,7 +69,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = True
 
@@ -236,6 +236,9 @@ class TorchFusedQuantLinear(PackableQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.reshape(-1, x.shape[-1])
+        input_dtype = x.dtype
+        if input_dtype == torch.float32:
+            x = x.to(torch.bfloat16)
         if not self.training and not x.requires_grad and self.linear_mode is None and TORCH_HAS_FUSED_OPS:
             # one-time transform per module for xpu aten fused ops
             self.transform(x.dtype, x.device.type)
@@ -267,6 +270,9 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             out.add_(self.bias)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
+
+        if input_dtype == torch.float32:
+            out = out.to(torch.float32)
 
         return out
 
