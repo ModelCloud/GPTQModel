@@ -93,6 +93,7 @@ env:
   MODEL_TEST_GPU_COUNT: '1'
   repo: ${{ github.event.inputs.repo || github.repository }}
   ref: ${{ github.event.inputs.ref || github.ref }}
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 concurrency:
   group: ${{ github.event.inputs.ref || github.ref }}-workflow-unit-tests-${{ github.event.inputs.test_names }}
