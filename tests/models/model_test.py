@@ -263,11 +263,7 @@ class ModelTest(unittest.TestCase):
             return None
 
         layer_limit = max(int(self.MODEL_COMPAT_FAST_LAYER_COUNT), 0)
-        quantize_config = model.quantize_config
-        model_config = getattr(model, "config", None)
-        quant_method = getattr(quantize_config, "quant_method", self.METHOD)
-        is_awq_quantize = quant_method == METHOD.AWQ
-        layer_blocks = model.simple_layer_modules(model_config, quantize_config, is_awq_quantize=is_awq_quantize)
+
         layers_node = model.extract_layers_node()
         if isinstance(layers_node, (list, tuple)):
             if not layers_node:
@@ -282,26 +278,17 @@ class ModelTest(unittest.TestCase):
         if layer_count <= layer_limit:
             return None
 
-        dynamic = {}
-        skipped_layers = layer_count - layer_limit
-        skipped_modules = 0
-        for layer_idx in range(layer_limit, layer_count):
-            for block in layer_blocks:
-                for module_name in block:
-                    clean_name = module_name.replace(":!", "").replace(":?", "")
-                    full_name = clean_name
-                    if not full_name.startswith(f"{layers_node}."):
-                        full_name = f"{layers_node}.{layer_idx}.{clean_name}"
-                    dynamic[f"-:^{re.escape(full_name)}$"] = {}
-                    skipped_modules += 1
+        dynamic = {
+            f"-:^{layers_node}\\.{i}\\.": {}
+            for i in range(layer_limit, layer_count)
+        }
 
         log.info(
-            "Model compat `%s` mode: quantizing first %s layers and dynamically skipping %s later layers (%s modules).",
-            self.MODEL_TEST_MODE_FAST,
+            "Fast quant mode: quantizing first %s layers, skipping %s layers.",
             layer_limit,
-            skipped_layers,
-            skipped_modules,
+            layer_count - layer_limit,
         )
+
         return dynamic
 
     def _apply_model_compat_quant_overrides(self, model) -> None:
