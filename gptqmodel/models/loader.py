@@ -635,6 +635,7 @@ def ModelLoader(cls):
                 backend=backend,
                 lm_head_name=cls.lm_head,
                 device=device,
+                dtype=dtype,
             )
 
         if isinstance(requested_device_map, str) and requested_device_map not in [

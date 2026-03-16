@@ -40,6 +40,21 @@ RESET = "\033[0m"
 os.environ.setdefault("BITBLAS_ENABLE_TUNING", "0")
 os.environ.setdefault("BITBLAS_ENABLE_TENSORCORE", "0")
 
+
+def _bitblas_supports_gptq_case(dtype: torch.dtype) -> bool:
+    valid, _ = BitblasQuantLinear.validate(
+        bits=4,
+        group_size=128,
+        desc_act=True,
+        sym=True,
+        in_features=3072,
+        out_features=1024,
+        pack_dtype=torch.int32,
+        dtype=dtype,
+    )
+    return valid
+
+
 class Data:
     def __init__(self):
         self.m = 1
@@ -280,8 +295,9 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0068),
         (BACKEND.MACHETE, torch.float16, 0.00040),
         (BACKEND.MARLIN, torch.float16, 0.00035),
-        (BACKEND.BITBLAS, torch.float16, 0.0035),
     ]
+    if _bitblas_supports_gptq_case(torch.float16):
+        float16_cases.append((BACKEND.BITBLAS, torch.float16, 0.0035))
 
     @parameterized.expand(float16_cases)
     def test_kernel_float16(self, backend: BACKEND,  dtype: torch.dtype, a_tolerance: float):
@@ -308,8 +324,9 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0054),
         (BACKEND.MACHETE, torch.bfloat16, 0.0033),
         (BACKEND.MARLIN, torch.bfloat16, 0.0031),
-        (BACKEND.BITBLAS, torch.bfloat16, 0.0031),
     ]
+    if _bitblas_supports_gptq_case(torch.bfloat16):
+        bfloat16_cases.append((BACKEND.BITBLAS, torch.bfloat16, 0.0031))
 
     @parameterized.expand(bfloat16_cases)
     def test_kernel_bfloat16(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
@@ -336,8 +353,9 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.EXLLAMA_V2, torch.float16, 0.0065),
         (BACKEND.MACHETE, torch.float16, 0.00040),
         (BACKEND.MARLIN, torch.float16, 0.00035),
-        (BACKEND.BITBLAS, torch.float16, 0.00035),
     ]
+    if _bitblas_supports_gptq_case(torch.float16):
+        float16_lora_cases.append((BACKEND.BITBLAS, torch.float16, 0.00035))
 
     @parameterized.expand(float16_lora_cases)
     def test_kernel_float16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):
@@ -363,8 +381,9 @@ class TestKernelOutput(unittest.TestCase):
         (BACKEND.EXLLAMA_V2, torch.bfloat16, 0.0059),
         (BACKEND.MACHETE, torch.bfloat16, 0.0033),
         (BACKEND.MARLIN, torch.bfloat16, 0.0050),
-        (BACKEND.BITBLAS, torch.bfloat16, 0.0033),
     ]
+    if _bitblas_supports_gptq_case(torch.bfloat16):
+        bfloat16_lora_cases.append((BACKEND.BITBLAS, torch.bfloat16, 0.0033))
 
     @parameterized.expand(bfloat16_lora_cases)
     def test_kernel_bfloat16_with_lora(self, backend: BACKEND, dtype: torch.dtype, a_tolerance: float):

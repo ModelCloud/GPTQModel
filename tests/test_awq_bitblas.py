@@ -54,6 +54,7 @@ def _install_dummy_bitblas(monkeypatch):
     class _DummyMatmul:
         def __init__(self, config):
             self.config = config
+            self.lib = object()
             self.weight_transform = None
 
         @staticmethod
