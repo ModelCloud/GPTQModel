@@ -288,6 +288,16 @@ def unpack_gptq_qweight(qweight: torch.Tensor, bits: int) -> torch.Tensor:
     return torch.bitwise_and(unpacked_weight, 2**bits - 1)
 
 
+def remap_gptq_symmetric_codes_to_bitblas(qweight_codes: torch.Tensor, bits: int) -> torch.Tensor:
+    # GPTQ symmetric weights are packed as two's-complement bitfields. BitBLAS' signed intN
+    # dequant path instead interprets stored codes as a biased range and reconstructs values as
+    # `code - 2^(bits-1)`. Flip the sign bit so GPTQ's two's-complement layout lands on the
+    # code range BitBLAS actually decodes.
+    sign_bit = 1 << (bits - 1)
+    remapped = torch.bitwise_xor(qweight_codes.to(torch.int16), sign_bit)
+    return remapped.to(torch.int8).contiguous()
+
+
 def _num_groups(group_size: int, in_features: int) -> int:
     if group_size in (-1, in_features):
         return 1
@@ -756,6 +766,8 @@ class BitblasQuantLinear(BaseQuantLinear):
             gptq_module.qweight.detach().T.contiguous().view(self.quant_config.torch_storage_dtype)
         )
         intweight = unpack_gptq_qweight(packed_weight, bits).contiguous()
+        if self.quant_config.is_sym:
+            intweight = remap_gptq_symmetric_codes_to_bitblas(intweight, bits)
 
         intzeros = None
         if self.quant_config.with_zeros and hasattr(gptq_module, "qzeros") and gptq_module.qzeros is not None:

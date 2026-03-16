@@ -177,6 +177,74 @@ def test_bitblas_uses_bfloat16_configuration_when_requested(monkeypatch):
     assert layer.bias.dtype == torch.bfloat16
 
 
+def test_bitblas_repack_from_symmetric_gptq_remaps_signed_codes(monkeypatch):
+    class _DummyMatmul:
+        lib = object()
+        weight_transform = None
+
+        @staticmethod
+        def retrieve_weight_shape():
+            return (1, 1)
+
+    monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
+    monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
+    monkeypatch.setattr(
+        bitblas_module.BitblasQuantLinear,
+        "_get_or_create_bitblas_operator",
+        lambda self, config, enable_tuning: _DummyMatmul(),
+    )
+
+    bits = 4
+    group_size = 32
+    in_features = 32
+    out_features = 32
+
+    linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
+    gptq_linear = TorchQuantLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=torch.int32,
+        bias=False,
+    )
+    gptq_linear.pack_block(linear, scales.T, zeros.T, g_idx=g_idx.to(torch.int32))
+
+    captured = {}
+    layer = bitblas_module.BitblasQuantLinear(
+        bits=bits,
+        group_size=group_size,
+        desc_act=False,
+        sym=True,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=torch.int32,
+        bias=False,
+        enable_tuning=False,
+    )
+
+    def _capture_quant_state(*, intweight_out_in, scales_out_group, intzeros_group_out=None, bias=None):
+        captured["intweight"] = intweight_out_in.clone()
+        captured["scales"] = scales_out_group.clone()
+        captured["intzeros"] = intzeros_group_out
+        captured["bias"] = bias
+
+    layer._load_bitblas_quant_state = _capture_quant_state
+    layer.repack_from_gptq(gptq_linear)
+
+    packed_weight = gptq_linear.qweight.detach().T.contiguous().view(layer.quant_config.torch_storage_dtype)
+    unpacked_codes = bitblas_module.unpack_gptq_qweight(packed_weight, bits).contiguous()
+    expected = bitblas_module.remap_gptq_symmetric_codes_to_bitblas(unpacked_codes, bits)
+
+    torch.testing.assert_close(captured["intweight"], expected)
+    assert not torch.equal(captured["intweight"], unpacked_codes)
+    torch.testing.assert_close(captured["scales"], gptq_linear.scales.detach().T.contiguous())
+    assert captured["intzeros"] is None
+    assert captured["bias"] is None
+
+
 def test_bitblas_validate_rejects_unsupported_bf16_signed_gptq():
     valid, err = bitblas_module.BitblasQuantLinear.validate(
         bits=4,
@@ -249,6 +317,51 @@ def test_bitblas_validate_rejects_non_divisible_out_features():
     assert valid is False
     assert isinstance(err, NotImplementedError)
     assert "must be divisible by [16]" in str(err)
+
+
+def test_convert_to_bitblas_preserves_name_and_dtype(monkeypatch):
+    class _SourceQuantLinear(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.in_features = 32
+            self.out_features = 64
+            self.bias = torch.zeros(64)
+
+    class _ReplacementBitblas(nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.kwargs = kwargs
+            self.in_features = kwargs["in_features"]
+            self.out_features = kwargs["out_features"]
+            self.bias = torch.zeros(self.out_features) if kwargs["bias"] else None
+
+    monkeypatch.setattr(bitblas_utils, "_select_bitblas_kernel_class", lambda qcfg: _ReplacementBitblas)
+
+    model = nn.Module()
+    model.proj = _SourceQuantLinear()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        format=FORMAT.BITBLAS,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+
+    bitblas_utils.convert_to_bitblas(
+        model,
+        _SourceQuantLinear,
+        qcfg,
+        sym=True,
+        desc_act=False,
+        repack=False,
+        dtype=torch.bfloat16,
+    )
+
+    assert isinstance(model.proj, _ReplacementBitblas)
+    assert model.proj.kwargs["name"] == "proj"
+    assert model.proj.kwargs["dtype"] == torch.bfloat16
 
 
 def test_create_quant_module_propagates_dtype_to_quant_linear():

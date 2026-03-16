@@ -49,7 +49,7 @@ def prepare_model_for_bitblas_load(
     if qcfg.format == FORMAT.BITBLAS:
         # if the checkpoint is already in bitblas format, we can load it directly.
         log.info(f"Loading a {qcfg.quant_method.upper()} model, detected BitBLAS serialized format at {model_save_name}.")
-        model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=False)
+        model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=False, dtype=dtype)
         load_checkpoint_in_model_then_tie_weights(
             model,
             dtype=dtype,
@@ -73,12 +73,20 @@ def prepare_model_for_bitblas_load(
                 offload_buffers=True,
             )
         # Convert model to bitblas, repacking weights into BitBLAS format.
-        model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=True)
+        model = convert_to_bitblas(model, quant_linear_class, qcfg, sym, desc_act, repack=True, dtype=dtype)
     return model
 
 
 @torch.inference_mode()
-def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool, desc_act: bool, repack: bool):
+def convert_to_bitblas(
+    model,
+    model_quantlinear,
+    qcfg: QuantizeConfig,
+    sym: bool,
+    desc_act: bool,
+    repack: bool,
+    dtype: torch.dtype = torch.float16,
+):
     """
     Converts GPTQ-packed weights to the Bitblas format.
 
@@ -112,8 +120,7 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
             if not isinstance(module, model_quantlinear):
                 continue
 
-            parent_name = ".".join(name.split(".")[:-1])
-            layer_name = name[len(parent_name) + 1:]
+            parent_name, _, layer_name = name.rpartition(".")
 
             # We could use `torch.count_nonzero(module.bias) > 0` here to discard zero bias, but this has issues when loading weights
             # from checkpoints holding zero bias.
@@ -127,8 +134,10 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
                     out_features=module.out_features,
                     pack_dtype=qcfg.pack_dtype,
                     bias=module.bias is not None,
+                    dtype=dtype,
                     enable_tuning=enable_tuning,
                     adapter=qcfg.adapter,
+                    name=name,
                 )
 
             # convert to bitblas format
@@ -139,7 +148,7 @@ def convert_to_bitblas(model, model_quantlinear, qcfg: QuantizeConfig, sym: bool
                     bitblas_module.repack_from_gptq(module)
 
             # Save to parent.
-            parent_module = model.get_submodule(parent_name)
+            parent_module = model if parent_name == "" else model.get_submodule(parent_name)
             setattr(parent_module, layer_name, bitblas_module)
 
             # Free cuda memory.
