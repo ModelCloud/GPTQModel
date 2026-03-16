@@ -390,7 +390,6 @@ class BitblasQuantLinear(BaseQuantLinear):
                 return False, cls._bf16_signed_weight_error(layer_bits, layer=layer)
 
         return True, None
-
     def _build_quant_config(
         self,
         *,

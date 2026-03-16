@@ -234,7 +234,6 @@ def convert_glm4v_mlp_converter(module, config):
             setattr(module, name, new_module)
     return module
 
-
 MODULE_CONVERTER_MAP = {
     "llama4": convert_llama4_expert_converter,
     "gpt_oss": convert_gpt_oss_expert_converter,

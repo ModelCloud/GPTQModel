@@ -41,7 +41,7 @@ on:
       max-parallel:
         description: 'Parallel jobs'
         required: false
-        default: '10'
+        default: '6'
       model-test-mode:
         description: 'Model compat test mode'
         type: choice
@@ -435,38 +435,6 @@ jobs:
           python .github/scripts/install_deps.py ${{ matrix.test_script }}
           python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
 
-      - name: Print uv env
-        run: |
-          echo "::group::uv python list"
-          uv python list
-          ls -ahl /opt/uv/venvs
-          echo "::endgroup::"
-
-          which python
-          which pip || true
-          python -V
-
-          echo "::group::uv python list"
-          uv python list
-          echo "::endgroup::"
-
-          echo "== nvcc =="
-          nvcc --version
-
-          echo "::group::pip list"
-          uv pip list
-          echo "::endgroup::"
-
-          echo "== torch =="
-          uv pip show torch || true
-
-          echo "::group::project files"
-          ls -ahl
-          echo "::endgroup::"
-
-          echo "== torch =="
-          uv pip show torch
-
       #      - name: Install requirements
       #        run: |
       #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version${{ env.PYTHON_VERSION }}
@@ -555,6 +523,38 @@ jobs:
 
           # deps may reinstalled torch
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+
+      - name: Print uv env
+        run: |
+          echo "::group::uv python list"
+          uv python list
+          ls -ahl /opt/uv/venvs
+          echo "::endgroup::"
+
+          which python
+          which pip || true
+          python -V
+
+          echo "::group::uv python list"
+          uv python list
+          echo "::endgroup::"
+
+          echo "== nvcc =="
+          nvcc --version
+
+          echo "::group::pip list"
+          uv pip list
+          echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch || true
+
+          echo "::group::project files"
+          ls -ahl
+          echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
@@ -697,8 +697,16 @@ jobs:
           mkdir -p "$(dirname "$log_file")"
 
           start_time=$(date +%s)
-          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee $log_file
-          test ${PIPESTATUS[0]} -eq 0 || { echo "ERROR=2" >> $GITHUB_ENV; echo "pipe status wrong: ${PIPESTATUS[0]} $PIPESTATUS"; exit 2; }
+
+          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee "$log_file"
+          pipe_status=("${PIPESTATUS[@]}")
+
+          if (( pipe_status[0] != 0 )); then
+            echo "ERROR=22" >> "$GITHUB_ENV"
+            echo "pipe status wrong: ${pipe_status[*]}"
+            exit 22
+          fi
+
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
 
@@ -806,38 +814,6 @@ jobs:
           python .github/scripts/install_deps.py ${{ matrix.test_script }}
           python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
 
-      - name: Print uv env
-        run: |
-          echo "::group::uv python list"
-          uv python list
-          ls -ahl /opt/uv/venvs
-          echo "::endgroup::"
-
-          which python
-          which pip || true
-          python -V
-
-          echo "::group::uv python list"
-          uv python list
-          echo "::endgroup::"
-
-          echo "== nvcc =="
-          nvcc --version
-
-          echo "::group::pip list"
-          uv pip list
-          echo "::endgroup::"
-
-          echo "== torch =="
-          uv pip show torch || true
-
-          echo "::group::project files"
-          ls -ahl
-          echo "::endgroup::"
-
-          echo "== torch =="
-          uv pip show torch
-
       - name: Download wheel from local
         continue-on-error: true
         run: |
@@ -866,6 +842,35 @@ jobs:
           uv pip install -r requirements.txt  -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           uv pip install dist/*.whl -i http://$RUNNER/simple/ --trusted-host $RUNNER --extra-index-url https://pypi.org/simple
           /opt/env/install_torch.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }}
+
+      - name: Print uv env
+        run: |
+          echo "::group::uv python list"
+          uv python list
+          ls -ahl /opt/uv/venvs
+          echo "::endgroup::"
+
+          which python
+          which pip || true
+          python -V
+
+          echo "::group::uv python list"
+          uv python list
+          echo "::endgroup::"
+
+          echo "== nvcc =="
+          nvcc --version
+
+          echo "::group::pip list"
+          uv pip list
+          echo "::endgroup::"
+
+          echo "::group::project files"
+          ls -ahl
+          echo "::endgroup::"
+
+          echo "== torch =="
+          uv pip show torch
 
       - name: Find suitable GPU
         if: ${{ !cancelled() }}
@@ -987,8 +992,16 @@ jobs:
           mkdir -p "$(dirname "$log_file")"
 
           start_time=$(date +%s)
-          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee $log_file
-          test ${PIPESTATUS[0]} -eq 0 || { echo "ERROR=2" >> $GITHUB_ENV; echo "pipe status wrong: ${PIPESTATUS[0]} $PIPESTATUS"; exit 2; }
+
+          pytest --durations=0 tests/${{ matrix.test_script }}.py 2>&1 | tee "$log_file"
+          pipe_status=("${PIPESTATUS[@]}")
+
+          if (( pipe_status[0] != 0 )); then
+            echo "ERROR=22" >> "$GITHUB_ENV"
+            echo "pipe status wrong: ${pipe_status[*]}"
+            exit 22
+          fi
+
           execution_time=$(( $(date +%s) - start_time ))
           echo "$((execution_time / 60))m $((execution_time % 60))s"
 

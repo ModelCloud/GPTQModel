@@ -15,7 +15,6 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3Omni
 from gptqmodel.nn_modules.converter import MODULE_CONVERTER_MAP
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 
-
 def _make_tiny_moe_config(config_cls):
     return config_cls(
         num_hidden_layers=1,
@@ -73,8 +72,6 @@ def _make_tiny_qwen3_omni_config():
             },
         },
     )
-
-
 def _assert_converted_experts(layer, hidden_size: int, *, dtype: torch.dtype = torch.float32):
     assert isinstance(layer.mlp.experts, torch.nn.Module)
     assert not hasattr(layer.mlp.experts, "gate_up_proj")
@@ -136,7 +133,6 @@ def test_qwen3_omni_uses_defuser_for_fused_experts():
         hidden_size=model.config.get_text_config().hidden_size,
         dtype=next(layer.mlp.experts[0].gate_proj.parameters()).dtype,
     )
-
 
 def test_awq_single_bit_validation_allows_skip_only_dynamic_rules():
     ok, err = AwqTorchQuantLinear.validate(

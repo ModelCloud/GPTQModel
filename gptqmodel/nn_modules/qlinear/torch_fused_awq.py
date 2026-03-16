@@ -49,7 +49,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
     SUPPORTS_ADAPTERS = TorchFusedQuantLinear.SUPPORTS_ADAPTERS
     REQUIRES_FORMAT_V2 = TorchFusedQuantLinear.REQUIRES_FORMAT_V2
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
     def __init__(
         self,
@@ -233,7 +233,6 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             scales=self.scales,
             bits=self.bits,
             group_size=self.group_size,
-            sym=self.sym,
         ).to(device=device, dtype=dtype)
 
     def transform(self, dtype, device):
@@ -249,7 +248,10 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
-        self.assert_supported_dtype(x_flat.dtype)
+        input_dtype = x_flat.dtype
+        self.assert_supported_dtype(input_dtype)
+        if input_dtype == torch.float32:
+            x_flat = x_flat.to(torch.bfloat16)
         if (
             not self.training
             and not x_flat.requires_grad
@@ -280,6 +282,9 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             out.add_(self.bias)
         if self.adapter:
             out = self.adapter.apply(x=x_flat, out=out)
+
+        if input_dtype == torch.float32:
+            out = out.to(torch.float32)
 
         return out.reshape(out_shape)
 
