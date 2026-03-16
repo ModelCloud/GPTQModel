@@ -31,6 +31,10 @@ BITBLAS_OPTIMIZE_FEATURES: List[int] = [1, 16, 32, 64, 128, 256, 512, 1024]
 BITBLAS_SUPPORTED_GROUP_SIZES: List[int] = [-1, 32, 64, 128]
 BITBLAS_SUPPORTED_BITS: List[int] = [1, 2, 4, 8]
 BITBLAS_SUPPORTED_SYM: List[bool] = [False, True]
+# Keep bf16 exposed overall: upstream BitBLAS can successfully compile bf16 for some dtype/shape
+# combinations (for example unsigned low-bit paths used by AWQ). The specific incompatibility we
+# reproduced is the signed low-bit GPTQ dequant path, which can emit CUDA that tries to construct
+# `cutlass::bfloat16_t(int)` and fails during BitBLAS runtime compilation.
 BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS = frozenset({2, 4, 8})
 BITBLAS_DEFAULT_ZEROS_MODE = "quantized"
 BITBLAS_PROPAGATE_WEIGHTS = False
@@ -525,6 +529,12 @@ class BitblasQuantLinear(BaseQuantLinear):
         )
 
     def _validate_parameters(self, in_features: int, out_features: int) -> None:
+        # This wrapper keeps a conservative 16-wide gate because the current GPTQ/AWQ BitBLAS
+        # integration is built around TensorCore-oriented 16x16 micro-kernel paths. BitBLAS itself
+        # is looser in some cases: local probes showed odd N/out_features can still build, while
+        # the hard upstream packing constraint we confirmed is K/in_features divisible by 8 / bits
+        # for quant-compressed weights. We keep the stricter gate here until the relaxed shapes are
+        # regression-tested across the full load/repack/forward path.
         if in_features % 16 != 0:
             raise ValueError("`in_features` must be divisible by 16 for BitBLAS")
         if out_features % 16 != 0:
