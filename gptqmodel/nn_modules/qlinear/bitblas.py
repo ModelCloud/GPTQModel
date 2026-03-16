@@ -345,7 +345,9 @@ class BitblasQuantLinear(BaseQuantLinear):
     SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30, FORMAT.GPTQ_V2: 30}
     SUPPORTS_BITS = BITBLAS_SUPPORTED_BITS
     SUPPORTS_GROUP_SIZE = BITBLAS_SUPPORTED_GROUP_SIZES
-    SUPPORTS_DESC_ACT = [False, True]
+    # BitBLAS' public matmul API does not expose GPTQ activation-order metadata (`g_idx` /
+    # permutation tensors). Keep desc_act disabled until upstream adds a supported act-order path.
+    SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = BITBLAS_SUPPORTED_SYM
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False

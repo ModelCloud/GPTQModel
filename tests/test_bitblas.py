@@ -249,7 +249,7 @@ def test_bitblas_validate_rejects_unsupported_bf16_signed_gptq():
     valid, err = bitblas_module.BitblasQuantLinear.validate(
         bits=4,
         group_size=128,
-        desc_act=True,
+        desc_act=False,
         sym=True,
         in_features=3072,
         out_features=1024,
@@ -274,12 +274,52 @@ def test_bitblas_constructor_rejects_unsupported_bf16_signed_gptq(monkeypatch):
         bitblas_module.BitblasQuantLinear(
             bits=4,
             group_size=128,
-            desc_act=True,
+            desc_act=False,
             sym=True,
             in_features=3072,
             out_features=1024,
             pack_dtype=torch.int32,
             dtype=torch.bfloat16,
+            bias=False,
+            enable_tuning=False,
+        )
+
+
+def test_bitblas_validate_rejects_desc_act_gptq():
+    valid, err = bitblas_module.BitblasQuantLinear.validate(
+        bits=4,
+        group_size=128,
+        desc_act=True,
+        sym=True,
+        in_features=3072,
+        out_features=1024,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert valid is False
+    assert isinstance(err, NotImplementedError)
+    assert "actual desc_act" in str(err)
+
+
+def test_bitblas_constructor_rejects_desc_act_gptq(monkeypatch):
+    monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
+    monkeypatch.setattr(
+        bitblas_module,
+        "import_bitblas",
+        lambda: pytest.fail("desc_act=True should be rejected before BitBLAS import"),
+    )
+
+    with pytest.raises(NotImplementedError, match="actual desc_act"):
+        bitblas_module.BitblasQuantLinear(
+            bits=4,
+            group_size=128,
+            desc_act=True,
+            sym=True,
+            in_features=3072,
+            out_features=1024,
+            pack_dtype=torch.int32,
+            dtype=torch.float16,
             bias=False,
             enable_tuning=False,
         )
