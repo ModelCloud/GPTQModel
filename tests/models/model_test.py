@@ -1442,36 +1442,64 @@ class ModelTest(unittest.TestCase):
         if not baselines:
             raise AssertionError("No evaluation baselines configured for result validation.")
 
+        errors = []
+        diffs = []
+
         for task_name, expected_metrics in baselines.items():
             metrics = task_results.get(task_name)
+
             if metrics is None:
-                self.fail(f"No evaluation results returned for task `{task_name}`")
+                errors.append(f"No evaluation results returned for task `{task_name}`")
+                continue
+
             if not isinstance(metrics, dict):
-                raise TypeError(f"Expected metrics for task `{task_name}` to be a dictionary, got {type(metrics).__name__}")
+                raise TypeError(
+                    f"Expected metrics for task `{task_name}` to be a dictionary, got {type(metrics).__name__}"
+                )
 
             for metric_name, baseline_spec in expected_metrics.items():
                 metric_key = baseline_spec.get("metric_key") or metric_name
                 metric_key = self._resolve_metric_key(metric_key, metrics)
+
                 if metric_key is None:
-                    self.fail(f"Metric `{metric_name}` missing from results for task `{task_name}`")
+                    errors.append(f"Metric `{metric_name}` missing from results for task `{task_name}`")
+                    continue
 
                 value = metrics[metric_key]
                 expected_value = baseline_spec["value"]
+
                 diff_pct, expected_value = self.calculatorPer(
                     task_name=task_name,
                     metric_name=metric_name,
                     value=value,
                     expected=expected_value,
                 )
+
                 floor_pct = baseline_spec["floor_pct"]
                 ceil_pct = baseline_spec["ceil_pct"]
+
                 negative_pct = 100 * (1 - floor_pct)
                 positive_pct = 100 * (1 + ceil_pct)
-                self.assertTrue(
-                    negative_pct <= diff_pct <= positive_pct,
-                    f"{task_name}:{metric_name}: `{value}` vs expected `{expected_value}`, "
-                    f"diff {diff_pct:.2f}% is out of the expected range [{negative_pct}-{positive_pct}%]",
+
+                diffs.append(
+                    f"{task_name}:{metric_name} -> value={value}, expected={expected_value}, diff={diff_pct:.2f}% "
+                    f"(allowed [{negative_pct}-{positive_pct}%])"
                 )
+
+                if not (negative_pct <= diff_pct <= positive_pct):
+                    errors.append(
+                        f"{task_name}:{metric_name} out of range: `{value}` vs expected `{expected_value}`, "
+                        f"diff {diff_pct:.2f}% not in [{negative_pct}-{positive_pct}%]"
+                    )
+
+        print("\nEvaluation diff summary:")
+        for d in diffs:
+            print(d)
+
+        if errors:
+            raise AssertionError(
+                "Evaluation failed:\n" + "\n".join(errors)
+            )
 
     @staticmethod
     def _resolve_metric_key(metric_name, metrics):
