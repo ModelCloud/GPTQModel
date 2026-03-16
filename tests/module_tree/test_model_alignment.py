@@ -16,6 +16,8 @@ from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
 from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
+from gptqmodel.models.definitions.qwen3_5 import Qwen3_5QModel
+from gptqmodel.models.definitions.qwen3_5_moe import Qwen3_5_MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.models.definitions.qwen3_next import Qwen3NextGPTQ
 from gptqmodel.models.definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
@@ -125,7 +127,9 @@ class TestQwen2MoeModuleTree(ModelTest):
         self.assertFalse(hasattr(decoder_layer.self_attn, "q_norm"))
         self.assertTrue(hasattr(decoder_layer.mlp, "gate"))
         self.assertTrue(hasattr(decoder_layer.mlp, "shared_expert"))
+        self.assertTrue(hasattr(decoder_layer.mlp, "shared_expert_gate"))
         self.assertTrue(hasattr(decoder_layer.mlp, "experts"))
+        self.assertIn("shared_expert_gate", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
         self.assertIn("shared_expert:0", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
         self.assertIn("experts:0", Qwen2MoeQModel.module_tree[-1]["mlp:moe:?"])
 
@@ -194,6 +198,55 @@ class TestQwen3MoeModuleTree(ModelTest):
         self.assertIn("k_norm:!", Qwen3MoeQModel.module_tree[-1]["self_attn"])
 
 
+class TestQwen3_5ModuleTree(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen3.5-27B"
+
+    def test_qwen3_5_linear_attention_module_tree(self):
+        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
+        config = config.text_config
+        config.num_hidden_layers = 1
+        config.layer_types = ["linear_attention"]
+        with init_empty_weights(include_buffers=True):
+            shell = AutoModelForCausalLM.from_config(config, trust_remote_code=False)
+
+        decoder_layer = shell.model.layers[0]
+        self.assertTrue(hasattr(decoder_layer.linear_attn, "conv1d"))
+        self.assertTrue(hasattr(decoder_layer.linear_attn, "in_proj_b"))
+        self.assertTrue(hasattr(decoder_layer.linear_attn, "in_proj_a"))
+        self.assertIn("conv1d:!", Qwen3_5QModel.module_tree[-1]["linear_attn"])
+        self.assertIn("in_proj_b:!:1", Qwen3_5QModel.module_tree[-1]["linear_attn"])
+        self.assertIn("in_proj_a:!:1", Qwen3_5QModel.module_tree[-1]["linear_attn"])
+
+
+class TestQwen3_5MoeModuleTree(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen3.5-35B-A3B"
+
+    def test_qwen3_5_moe_module_tree(self):
+        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
+        config.text_config.num_hidden_layers = 2
+        config.text_config.layer_types = ["linear_attention", "full_attention"]
+        with init_empty_weights(include_buffers=True):
+            shell = AutoModelForImageTextToText.from_config(config, trust_remote_code=False)
+
+        linear_layer = shell.model.language_model.layers[0]
+        full_layer = shell.model.language_model.layers[1]
+
+        self.assertTrue(hasattr(linear_layer.linear_attn, "conv1d"))
+        self.assertTrue(hasattr(linear_layer.linear_attn, "in_proj_b"))
+        self.assertTrue(hasattr(linear_layer.linear_attn, "in_proj_a"))
+        self.assertTrue(hasattr(linear_layer.mlp, "shared_expert"))
+        self.assertTrue(hasattr(linear_layer.mlp, "shared_expert_gate"))
+        self.assertTrue(hasattr(full_layer.self_attn, "q_norm"))
+        self.assertTrue(hasattr(full_layer.self_attn, "k_norm"))
+        self.assertIn("q_norm:!", Qwen3_5_MoeQModel.module_tree[-1]["self_attn"])
+        self.assertIn("k_norm:!", Qwen3_5_MoeQModel.module_tree[-1]["self_attn"])
+        self.assertIn("conv1d:!", Qwen3_5_MoeQModel.module_tree[-1]["linear_attn"])
+        self.assertIn("in_proj_b:!:1", Qwen3_5_MoeQModel.module_tree[-1]["linear_attn"])
+        self.assertIn("in_proj_a:!:1", Qwen3_5_MoeQModel.module_tree[-1]["linear_attn"])
+        self.assertIn("shared_expert_gate", Qwen3_5_MoeQModel.module_tree[-1]["mlp:moe:?"])
+        self.assertIn("shared_expert", Qwen3_5_MoeQModel.module_tree[-1]["mlp:moe:?"])
+
+
 class TestQwen3OmniModuleTree(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-Omni-30B-A3B-Instruct"
 
@@ -205,6 +258,7 @@ class TestQwen3OmniModuleTree(ModelTest):
         decoder_layer = shell.thinker.model.layers[0]
         self.assertTrue(hasattr(decoder_layer.self_attn, "q_norm"))
         self.assertTrue(hasattr(decoder_layer.self_attn, "k_norm"))
+        self.assertEqual(Qwen3OmniMoeGPTQ.module_tree[-1]["mlp:moe"]["gate"], ("gate:!",))
         self.assertIn("q_norm:!", Qwen3OmniMoeGPTQ.module_tree[-1]["self_attn"])
         self.assertIn("k_norm:!", Qwen3OmniMoeGPTQ.module_tree[-1]["self_attn"])
 
@@ -224,3 +278,30 @@ class TestQwen3NextModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.self_attn, "k_norm"))
         self.assertIn("q_norm:!", Qwen3NextGPTQ.module_tree[-1]["self_attn"])
         self.assertIn("k_norm:!", Qwen3NextGPTQ.module_tree[-1]["self_attn"])
+
+    def test_qwen3_next_linear_attention_module_tree(self):
+        config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
+        config.num_hidden_layers = 1
+        config.layer_types = ["linear_attention"]
+        with init_empty_weights(include_buffers=True):
+            shell = AutoModelForCausalLM.from_config(config, trust_remote_code=False)
+
+        decoder_layer = shell.model.layers[0]
+        self.assertTrue(hasattr(decoder_layer.linear_attn, "norm"))
+        self.assertTrue(hasattr(decoder_layer.linear_attn, "conv1d"))
+        self.assertTrue(hasattr(decoder_layer.linear_attn, "in_proj_ba"))
+        self.assertTrue(hasattr(decoder_layer.mlp, "shared_expert_gate"))
+        self.assertIn("norm:!", Qwen3NextGPTQ.module_tree[-1]["linear_attn"])
+        self.assertIn("conv1d:!", Qwen3NextGPTQ.module_tree[-1]["linear_attn"])
+        self.assertIn("in_proj_qkvz:0", Qwen3NextGPTQ.module_tree[-1]["linear_attn"])
+        self.assertIn("in_proj_ba:!:0", Qwen3NextGPTQ.module_tree[-1]["linear_attn"])
+
+        blocks = Qwen3NextGPTQ.build_layer_modules(Qwen3NextGPTQ.module_tree)
+        linear_in_block = next(block for block in blocks if "linear_attn.in_proj_qkvz" in block)
+        linear_out_block = next(block for block in blocks if "linear_attn.out_proj" in block)
+        shared_expert_block = next(block for block in blocks if "mlp.shared_expert.gate_proj" in block)
+
+        self.assertNotIn("linear_attn.out_proj", linear_in_block)
+        self.assertNotIn("linear_attn.in_proj_qkvz", linear_out_block)
+        self.assertIn("mlp.shared_expert.up_proj", shared_expert_block)
+        self.assertNotIn("mlp.shared_expert.down_proj", shared_expert_block)

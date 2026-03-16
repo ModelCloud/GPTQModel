@@ -5,8 +5,11 @@
 
 import json
 import os
+import time
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -16,6 +19,8 @@ from safetensors.torch import safe_open
 from tabulate import tabulate
 
 from gptqmodel import BACKEND
+from gptqmodel.nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+from gptqmodel.nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
 from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import (
     AwqMarlinQuantLinear,
@@ -50,6 +55,13 @@ RED = "\033[31m"
 RESET = "\033[0m"
 
 
+@dataclass
+class ForwardResult:
+    outputs: List[torch.Tensor]
+    total_ms: float
+    mean_ms: float
+
+
 def _xpu_available() -> bool:
     return hasattr(torch, "xpu") and torch.xpu.is_available()
 
@@ -66,6 +78,7 @@ class TestAwqKernelOutput(unittest.TestCase):
         (baseline_backend, torch.float16, 0.0),
         # (baseline_backend, torch.bfloat16, 0.0),
         (BACKEND.GEMM, torch.float16, 0.004),
+        (BACKEND.BITBLAS_AWQ, torch.float16, 0.004),
         # (BACKEND.GEMM, torch.bfloat16, 0.05),
         (BACKEND.TRITON, torch.float16, 0.004),
         (BACKEND.MARLIN, torch.float16, 0.006),
@@ -83,9 +96,14 @@ class TestAwqKernelOutput(unittest.TestCase):
         cls.backend_skip_reason: Dict[BACKEND, str] = {}
         if not cls.cuda_available:
             cls.backend_skip_reason[BACKEND.GEMM] = "CUDA is required for GEMM backend."
+            cls.backend_skip_reason[BACKEND.BITBLAS_AWQ] = "CUDA is required for BitBLAS AWQ backend."
             cls.backend_skip_reason[BACKEND.TRITON] = "CUDA is required for AWQ Triton backend."
             cls.backend_skip_reason[BACKEND.MARLIN] = "CUDA is required for AWQ Marlin kernel."
             cls.backend_skip_reason[BACKEND.EXLLAMA_V2] = "CUDA is required for ExLlama v2 AWQ kernel."
+        elif os.getenv("RUN_BITBLAS_TESTS", "0") != "1":
+            cls.backend_skip_reason[BACKEND.BITBLAS_AWQ] = "BitBLAS disabled (set RUN_BITBLAS_TESTS=1 to enable)."
+        elif not BITBLAS_AVAILABLE:
+            cls.backend_skip_reason[BACKEND.BITBLAS_AWQ] = BITBLAS_INSTALL_HINT
         if awq_triton_import_exception is not None:
             cls.backend_skip_reason[BACKEND.TRITON] = (
                 f"AWQ Triton kernel unavailable: {awq_triton_import_exception}"
@@ -123,6 +141,16 @@ class TestAwqKernelOutput(unittest.TestCase):
         )
 
         try:
+            cls.modules[BACKEND.BITBLAS_AWQ] = (
+                cls._build_bitblas_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
+                if BACKEND.BITBLAS_AWQ not in cls.backend_skip_reason
+                else None
+            )
+        except Exception as exc:
+            cls.backend_skip_reason[BACKEND.BITBLAS_AWQ] = f"AWQ BitBLAS kernel unavailable: {exc}"
+            cls.modules[BACKEND.BITBLAS_AWQ] = None
+
+        try:
             cls.modules[BACKEND.TRITON] = (
                 cls._build_gemm_triton_module(qweight_cpu, qzeros_cpu, scales_cpu, bias_cpu)
                 if cls.cuda_available
@@ -156,7 +184,7 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         base_inputs = cls._generate_inputs()
         cls.inputs: Dict[torch.dtype, List[torch.Tensor]] = {}
-        cls.reference_outputs: Dict[torch.dtype, List[torch.Tensor]] = {}
+        cls.reference_results: Dict[torch.dtype, ForwardResult] = {}
 
         for dtype in cls.SUPPORTED_DTYPES:
             converted_inputs = [
@@ -174,7 +202,7 @@ class TestAwqKernelOutput(unittest.TestCase):
                     "compute_dtype": torch.float16,
                     "output_dtype": dtype,
                 }
-            cls.reference_outputs[dtype] = cls._forward(
+            cls.reference_results[dtype] = cls._forward(
                 torch_module,
                 converted_inputs,
                 **forward_kwargs,
@@ -238,6 +266,35 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         module.eval()
         module.post_init()
+        return module
+
+    @classmethod
+    def _build_bitblas_module(
+        cls,
+        qweight_cpu: torch.Tensor,
+        qzeros_cpu: torch.Tensor,
+        scales_cpu: torch.Tensor,
+        bias_cpu: torch.Tensor,
+    ) -> AWQBitBlasKernel:
+        module = AWQBitBlasKernel(
+            bits=cls.BITS,
+            group_size=cls.GROUP_SIZE,
+            sym=True,
+            desc_act=False,
+            in_features=cls.in_features,
+            out_features=cls.out_features,
+            bias=True,
+            adapter=None,
+        ).to(cls.device)
+
+        source_module = SimpleNamespace(
+            qweight=qweight_cpu.to(cls.device),
+            qzeros=qzeros_cpu.to(cls.device),
+            scales=scales_cpu.to(torch.float16).to(cls.device),
+            bias=bias_cpu.to(torch.float16).to(cls.device),
+        )
+        module.repack_from_awq(source_module)
+        module.eval()
         return module
 
     @classmethod
@@ -453,22 +510,46 @@ class TestAwqKernelOutput(unittest.TestCase):
         compute_dtype: Optional[torch.dtype] = None,
         output_dtype: Optional[torch.dtype] = None,
         target_device: Optional[torch.device] = None,
-    ) -> List[torch.Tensor]:
+    ) -> ForwardResult:
         if target_device is None:
             target_device = cls._infer_module_device(module)
+        prepared_inputs = list(inputs)
         outputs: List[torch.Tensor] = []
+        total_s = 0.0
         with torch.inference_mode():
-            for tensor in inputs:
+            if prepared_inputs:
+                warmup_tensor = prepared_inputs[0]
+                if warmup_tensor.device != target_device:
+                    warmup_tensor = warmup_tensor.to(device=target_device)
+                if compute_dtype is not None and warmup_tensor.dtype != compute_dtype:
+                    warmup_tensor = warmup_tensor.to(dtype=compute_dtype)
+                cls._synchronize(target_device)
+                module(warmup_tensor)
+                cls._synchronize(target_device)
+            for tensor in prepared_inputs:
                 local_tensor = tensor
                 if local_tensor.device != target_device:
                     local_tensor = local_tensor.to(device=target_device)
                 if compute_dtype is not None and local_tensor.dtype != compute_dtype:
                     local_tensor = local_tensor.to(dtype=compute_dtype)
+                cls._synchronize(target_device)
+                started = time.perf_counter()
                 result = module(local_tensor)
+                cls._synchronize(target_device)
+                total_s += time.perf_counter() - started
                 if output_dtype is not None and result.dtype != output_dtype:
                     result = result.to(dtype=output_dtype)
                 outputs.append(result.detach().cpu())
-        return outputs
+        total_ms = total_s * 1000.0
+        mean_ms = total_ms / len(outputs) if outputs else 0.0
+        return ForwardResult(outputs=outputs, total_ms=total_ms, mean_ms=mean_ms)
+
+    @staticmethod
+    def _synchronize(device: torch.device) -> None:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elif device.type == "xpu" and _xpu_available():
+            torch.xpu.synchronize()
 
     @staticmethod
     def _infer_module_device(module: torch.nn.Module) -> torch.device:
@@ -498,6 +579,8 @@ class TestAwqKernelOutput(unittest.TestCase):
         title: str,
         reference_label: str,
         device: Optional[torch.device] = None,
+        reference_mean_ms: float = 0.0,
+        actual_mean_ms: float = 0.0,
     ) -> None:
         failures = []
         total = len(actual_outputs)
@@ -523,6 +606,7 @@ class TestAwqKernelOutput(unittest.TestCase):
 
         status = f"{GREEN}PASS{RESET}" if not failures else f"{RED}FAIL{RESET}"
         avg_abs_diff = mean_abs_diff / total if total else 0.0
+        speedup = reference_mean_ms / actual_mean_ms if actual_mean_ms else 0.0
         details = "\n\n".join(str(detail) for detail in failures) if failures else "-"
         device_label = str(device) if device is not None else "-"
 
@@ -533,6 +617,8 @@ class TestAwqKernelOutput(unittest.TestCase):
                     str(dtype),
                     device_label,
                     total,
+                    f"{actual_mean_ms:.4f}",
+                    f"{speedup:.2f}x",
                     f"{max_abs_diff:.6f}",
                     f"{avg_abs_diff:.6f}",
                     status,
@@ -545,6 +631,8 @@ class TestAwqKernelOutput(unittest.TestCase):
                 "DType",
                 "Device",
                 "Samples",
+                "MeanLatencyMs",
+                "SpeedupVsRef",
                 "MaxAbsDiff",
                 "MeanAbsDiff",
                 "Status",
@@ -569,19 +657,21 @@ class TestAwqKernelOutput(unittest.TestCase):
             self.skipTest(f"Backend `{backend}` module unavailable.")
 
         inputs = self.inputs[dtype]
-        reference_outputs = self.reference_outputs[dtype]
+        reference_result = self.reference_results[dtype]
         if backend == self.baseline_backend:
-            actual_outputs = reference_outputs
+            actual_result = reference_result
         else:
-            actual_outputs = self._forward(module, inputs)
+            actual_result = self._forward(module, inputs)
         self._summarize_results(
-            reference_outputs=reference_outputs,
-            actual_outputs=actual_outputs,
+            reference_outputs=reference_result.outputs,
+            actual_outputs=actual_result.outputs,
             backend=backend,
             dtype=dtype,
             atol=atol,
             title=f"AWQ Kernel Output {dtype}",
             reference_label="Torch AWQ output",
+            reference_mean_ms=reference_result.mean_ms,
+            actual_mean_ms=actual_result.mean_ms,
         )
 
     @parameterized.expand(
@@ -605,20 +695,22 @@ class TestAwqKernelOutput(unittest.TestCase):
         )
 
         try:
-            actual_outputs = self._forward(
+            actual_result = self._forward(
                 module,
                 self.inputs[torch.float16],
                 target_device=device,
             )
             self._summarize_results(
-                reference_outputs=self.reference_outputs[torch.float16],
-                actual_outputs=actual_outputs,
+                reference_outputs=self.reference_results[torch.float16].outputs,
+                actual_outputs=actual_result.outputs,
                 backend=BACKEND.TORCH_FUSED_AWQ,
                 dtype=torch.float16,
                 atol=0.004,
                 title=f"Torch Fused AWQ Device {device_str}",
                 reference_label="Torch AWQ output",
                 device=device,
+                reference_mean_ms=self.reference_results[torch.float16].mean_ms,
+                actual_mean_ms=actual_result.mean_ms,
             )
         finally:
             del module

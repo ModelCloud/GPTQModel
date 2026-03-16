@@ -284,9 +284,12 @@ def make_quant(
     dynamic = qcfg.dynamic
     pack_dtype = qcfg.pack_dtype
 
-    # Bitblas needs to be loaded as gptq's quant linear first, and then converted to bitblas format.
-    if not pack and format in (FORMAT.GPTQ, FORMAT.GPTQ_V2) and backend == BACKEND.BITBLAS:
-        backend = BACKEND.TORCH
+    # BitBLAS-native checkpoints can load directly. Other formats need a compatible preload kernel first.
+    if not pack and backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
+        if format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+            backend = BACKEND.TORCH
+        elif qcfg.quant_method == METHOD.AWQ and format == FORMAT.GEMM:
+            backend = BACKEND.TORCH_AWQ
 
     # returns multiple validated kernels
     quant_linear_candidates = select_quant_linear(

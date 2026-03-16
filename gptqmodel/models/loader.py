@@ -98,6 +98,20 @@ def compare_versions(installed_version, required_version, operator):
         raise ValueError(f"Unsupported operator: {operator}")
 
 
+def resolve_loader_config(model_cls, config: PretrainedConfig, *, trust_remote_code: bool):
+    sub_configs = getattr(config, "sub_configs", None)
+    text_config_cls = sub_configs.get("text_config") if isinstance(sub_configs, dict) else None
+
+    # Some architectures expose composite configs but require the text sub-config
+    # for text-only loaders. Avoid collapsing unrelated composite configs when the
+    # model definition does not explicitly opt into text-config loading.
+    if model_cls.config_class is not None and model_cls.config_class == text_config_cls:
+        config = config.get_text_config()
+        normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
+
+    return config
+
+
 def check_versions(model_class, requirements: List[str]):
     if requirements is None:
         return
@@ -113,7 +127,7 @@ def check_versions(model_class, requirements: List[str]):
 
 def get_model_local_path(pretrained_model_id_or_path, **kwargs):
     is_local = os.path.isdir(pretrained_model_id_or_path)
-    if is_local:
+    if is_local or os.path.isabs(pretrained_model_id_or_path):
         return os.path.normpath(pretrained_model_id_or_path)
     def _log_removed(removed: list[str]):
         log.debug("Loader: dropping unsupported snapshot_download kwargs: %s", ", ".join(removed))
@@ -170,11 +184,7 @@ def ModelLoader(cls):
             trust_remote_code=tokenizer_trust_remote_code,
         )
 
-        # Some models have multiple configurations.
-        # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
-        if cls.config_class is not None and cls.config_class == config.sub_configs.get("text_config", None):
-            config = config.get_text_config()
-            normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
+        config = resolve_loader_config(cls, config, trust_remote_code=trust_remote_code)
 
         if quantize_config is None:
             model_init_kwargs["device_map"] =device_map if device_map else "auto"
@@ -518,11 +528,14 @@ def ModelLoader(cls):
 
         if qcfg.format == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
-            if backend != BACKEND.BITBLAS and backend != BACKEND.AUTO:
-                raise TypeError(f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.BITBLAS: actual = `{backend}`.")
-            backend = BACKEND.BITBLAS
+            expected_backend = BACKEND.BITBLAS_AWQ if qcfg.quant_method == METHOD.AWQ else BACKEND.BITBLAS
+            if backend != expected_backend and backend != BACKEND.AUTO:
+                raise TypeError(
+                    f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.{expected_backend.name}: actual = `{backend}`."
+                )
+            backend = expected_backend
 
-        if backend == BACKEND.BITBLAS:
+        if backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
@@ -586,11 +599,7 @@ def ModelLoader(cls):
                     args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
                     log.info("Loader: Auto enabling flash attention2")
 
-            # Some models have multiple configurations.
-            # For example, in llama4 and qwen3_5, model_class.form_config requires TextConfig.
-            if cls.config_class == config.sub_configs.get("text_config", None):
-                config = config.get_text_config()
-                normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
+            config = resolve_loader_config(cls, config, trust_remote_code=trust_remote_code)
 
             model = cls.loader.from_config(
                 config, trust_remote_code=trust_remote_code, dtype=dtype, **args
@@ -892,7 +901,7 @@ def ModelLoader(cls):
                 raise ValueError("Marlin kernel requires dtype=torch.float16.")
 
 
-        if backend == BACKEND.BITBLAS:
+        if backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
             from ..utils.bitblas import prepare_model_for_bitblas_load
 
             # Prepare model for bitblas load.
@@ -911,7 +920,7 @@ def ModelLoader(cls):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if load_checkpoint_in_model and backend not in [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS]:
+        if load_checkpoint_in_model and backend not in [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,

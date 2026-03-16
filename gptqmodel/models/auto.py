@@ -347,18 +347,24 @@ class GPTQModel:
             backend = BACKEND(backend)
 
         is_gptqmodel_quantized = False
-        model_cfg = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
-        if _is_supported_quantization_config(model_cfg):
+        treat_as_local_path = isinstance(model_id_or_path, str) and (
+            isdir(model_id_or_path) or os.path.isabs(model_id_or_path)
+        )
+
+        model_cfg = None
+        if not (treat_as_local_path and not isdir(model_id_or_path)):
+            model_cfg = AutoConfig.from_pretrained(model_id_or_path, trust_remote_code=trust_remote_code)
+
+        if model_cfg is not None and _is_supported_quantization_config(model_cfg):
             # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
             is_gptqmodel_quantized = True
         else:
             # TODO FIX ME...not decoded to check if quant method is compatible or quantized by gptqmodel
             for name in [QUANT_CONFIG_FILENAME, "quant_config.json"]:
-                if isdir(model_id_or_path):  # Local
-                    if os.path.exists(join(model_id_or_path, name)):
+                if treat_as_local_path:  # Local paths should never trigger remote Hub lookups
+                    if isdir(model_id_or_path) and os.path.exists(join(model_id_or_path, name)):
                         is_gptqmodel_quantized = True
                         break
-
                 else:  # Remote
                     files = list_repo_files(repo_id=model_id_or_path)
                     for f in files:
