@@ -35,6 +35,39 @@ if TYPE_CHECKING:  # pragma: no cover - type hints only
     from .module_looper import ModuleLooper
 
 
+def _find_last_quantized_layer_index(
+    looper: "ModuleLooper",
+    *,
+    layer_modules: List[List[str]],
+    layers_prefix: Optional[str],
+    layer_count: int,
+) -> Optional[int]:
+    """Return the last transformer layer index that still has quantization work."""
+    if looper.gptq_model.quantize_config.lm_head or not layers_prefix:
+        return None
+
+    layer_module_names = {
+        name.split("#", 1)[0]
+        for module_group in layer_modules
+        for name in module_group
+        if name
+    }
+    if not layer_module_names:
+        return None
+
+    last_quantized_layer_index = -1
+    for candidate_layer_index in range(layer_count):
+        for module_name in layer_module_names:
+            module_full_name = f"{layers_prefix}.{candidate_layer_index}.{module_name}"
+            # If at least one module in this layer is not dynamically excluded,
+            # the layer still needs forward/quantization work.
+            if looper.gptq_model.quantize_config.dynamic_get(layer_name=module_full_name) != False:
+                last_quantized_layer_index = candidate_layer_index
+                break
+
+    return last_quantized_layer_index
+
+
 def run_layer_stage(
     looper: 'ModuleLooper',
     *,
@@ -50,6 +83,13 @@ def run_layer_stage(
     logger=None,
 ) -> None:
     """Execute the main per-layer quantization loop."""
+    last_quantized_layer_index = _find_last_quantized_layer_index(
+        looper,
+        layer_modules=layer_modules,
+        layers_prefix=layers_prefix,
+        layer_count=layer_count,
+    )
+
     log = logger or setup_logger()
     for layer_index in pb:
         # Iterate over every transformer layer (plus lm_head when enabled) as
@@ -57,6 +97,19 @@ def run_layer_stage(
         if looper._check_loop_stop():
             break
         is_lm_head_module = layer_index >= layer_count
+
+        if (
+            not is_lm_head_module
+            and last_quantized_layer_index is not None
+            and layer_index > last_quantized_layer_index
+        ):
+            log.debug(
+                "StageLayer: early stop at layer=%s, last_quantized_layer=%s",
+                layer_index,
+                last_quantized_layer_index,
+            )
+            pb.close()
+            break
 
         if is_lm_head_module:
             layer_title = "Quantizing lm_head"
