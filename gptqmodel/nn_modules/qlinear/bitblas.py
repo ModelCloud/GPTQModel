@@ -295,6 +295,7 @@ class BitblasQuantizationConfig:
     group_size: int
     desc_act: bool
     is_sym: bool
+    torch_dtype: torch.dtype = torch.float16
     zeros_mode: str = BITBLAS_DEFAULT_ZEROS_MODE
     storage_dtype: str = "int8"
     quant_method: str = "gptq"
@@ -314,9 +315,10 @@ class BitblasQuantizationConfig:
             )
         if 32 % self.weight_bits != 0:
             raise ValueError("weight_bits must divide 32 for GPTQ packing")
+        if self.torch_dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("BitBLAS only supports torch.float16 and torch.bfloat16 compute dtypes")
         self.pack_factor = 32 // self.weight_bits
         self.torch_storage_dtype = getattr(torch, self.storage_dtype)
-        self.torch_dtype = torch.float16
 
     @property
     def with_zeros(self) -> bool:
@@ -356,12 +358,14 @@ class BitblasQuantLinear(BaseQuantLinear):
         group_size: int,
         desc_act: bool,
         sym: bool,
+        dtype: torch.dtype,
     ) -> BitblasQuantizationConfig:
         return BitblasQuantizationConfig(
             weight_bits=bits,
             group_size=group_size,
             desc_act=desc_act,
             is_sym=sym,
+            torch_dtype=dtype,
         )
 
     def __init__(
@@ -374,6 +378,7 @@ class BitblasQuantLinear(BaseQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        dtype: torch.dtype = torch.float16,
         adapter: Adapter = None,
         enable_tuning: bool = False,
         fast_decoding: bool = True,  # kept for API compatibility
@@ -383,6 +388,9 @@ class BitblasQuantLinear(BaseQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ) -> None:
+        if dtype not in self.SUPPORTS_DTYPES:
+            raise ValueError(f"{self.__class__.__name__} only supports dtypes {self.SUPPORTS_DTYPES}: actual dtype = {dtype}")
+
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -403,11 +411,13 @@ class BitblasQuantLinear(BaseQuantLinear):
         if not BITBLAS_AVAILABLE:
             raise ImportError(BITBLAS_INSTALL_HINT)
 
+        self.TORCH_DTYPE = dtype
         self.quant_config = self._build_quant_config(
             bits=bits,
             group_size=group_size,
             desc_act=desc_act,
             sym=sym,
+            dtype=dtype,
         )
         self.enable_tuning = enable_tuning
         self.layout = layout
@@ -615,7 +625,8 @@ class BitblasQuantLinear(BaseQuantLinear):
         self.zeros = self.qzeros
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dtype not in (torch.float16, torch.bfloat16):
+        input_dtype = x.dtype
+        if input_dtype != self.TORCH_DTYPE:
             x = x.to(self.TORCH_DTYPE)
 
         orig_shape = x.shape[:-1]
@@ -633,6 +644,9 @@ class BitblasQuantLinear(BaseQuantLinear):
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
+
+        if input_dtype in self.SUPPORTS_DTYPES and out.dtype != input_dtype:
+            out = out.to(dtype=input_dtype)
 
         return out
 

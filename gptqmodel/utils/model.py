@@ -273,6 +273,7 @@ def make_quant(
     pack: bool = False,
     device: DEVICE = None,
     from_quantized: bool = False,
+    dtype: Optional[torch.dtype] = None,
 ) -> Type[BaseQuantLinear]:
 
     bits = qcfg.bits
@@ -304,6 +305,7 @@ def make_quant(
         dynamic=dynamic,
         device=device,
         pack_dtype=pack_dtype,
+        dtype=dtype,
         multi_select=True,
         adapter=extension,
     )
@@ -332,6 +334,7 @@ def make_quant(
                 pack_dtype=pack_dtype,
                 backend=backend,
                 adapter=qcfg.adapter,
+                dtype=dtype,
             )
             log.info(f"Kernel: selected -> `{linear_cls.__name__}`.")
             return linear_cls
@@ -360,6 +363,7 @@ def create_quant_module(
     backend: BACKEND = BACKEND.AUTO,
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
+    dtype: Optional[torch.dtype] = None,
 
 ):
     # unwrap named module
@@ -433,6 +437,7 @@ def create_quant_module(
         desc_act=tmp_desc_act,
         sym=tmp_sym,
         pack_dtype=tmp_pack_dtype,
+        dtype=dtype,
         in_features=in_features,
         out_features=out_features,
         device=device,
@@ -450,6 +455,7 @@ def create_quant_module(
         out_features=out_features,
         pack_dtype=tmp_pack_dtype,
         bias=bias,
+        dtype=dtype,
         #weight_dtype=submodule.qweight.dtype if isinstance(submodule, BaseQuantLinear) else submodule.weight.dtype,
         name=name,
         lm_head_name=lm_head_name,
@@ -474,6 +480,7 @@ def create_quant_layer(
         pack_dtype: torch.dtype,
         backend: BACKEND,
         adapter: Optional[Adapter] = None,
+        dtype: Optional[torch.dtype] = None,
 
 ) -> Type[BaseQuantLinear]:
     if isinstance(module, linear_cls):
@@ -498,6 +505,7 @@ def create_quant_layer(
             pack_dtype=pack_dtype,
             backend=backend,
             adapter=adapter,
+            dtype=dtype,
         )
 
     return linear_cls

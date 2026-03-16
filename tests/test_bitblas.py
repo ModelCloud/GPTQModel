@@ -12,6 +12,7 @@ from tabulate import tabulate
 from gptqmodel import BACKEND, GPTQModel
 import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
 import gptqmodel.utils.bitblas as bitblas_utils
+import gptqmodel.utils.model as model_utils
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear, marlin_import_exception
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
@@ -127,6 +128,92 @@ def test_bitblas_prefers_float32_accumulation_for_fp16_inputs(monkeypatch):
     assert captured["config"].A_dtype == "float16"
     assert captured["config"].out_dtype == "float16"
     assert captured["config"].accum_dtype == "float32"
+
+
+def test_bitblas_uses_bfloat16_configuration_when_requested(monkeypatch):
+    """Keep BitBLAS buffers and operator config aligned with bf16 model loads."""
+
+    captured = {}
+
+    class _DummyMatmul:
+        weight_transform = None
+
+        @staticmethod
+        def retrieve_weight_shape():
+            return (1, 1)
+
+    def _fake_get_or_create(self, config, enable_tuning):
+        captured["config"] = config
+        captured["enable_tuning"] = enable_tuning
+        return _DummyMatmul()
+
+    monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
+    monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
+    monkeypatch.setattr(
+        bitblas_module.BitblasQuantLinear,
+        "_get_or_create_bitblas_operator",
+        _fake_get_or_create,
+    )
+
+    layer = bitblas_module.BitblasQuantLinear(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        in_features=32,
+        out_features=32,
+        pack_dtype=torch.int32,
+        dtype=torch.bfloat16,
+        bias=True,
+        enable_tuning=False,
+    )
+
+    assert captured["config"].A_dtype == "bfloat16"
+    assert captured["config"].out_dtype == "bfloat16"
+    assert captured["config"].accum_dtype == "float32"
+    assert layer.scales.dtype == torch.bfloat16
+    assert layer.bias.dtype == torch.bfloat16
+
+
+def test_create_quant_module_propagates_dtype_to_quant_linear():
+    """Quantized checkpoint loads must instantiate the selected kernel with the requested dtype."""
+
+    seen = {}
+
+    class _DummyQuantLinear(nn.Module):
+        @classmethod
+        def validate(cls, **kwargs):
+            seen["validate_dtype"] = kwargs.get("dtype")
+            return True, None
+
+        def __init__(self, **kwargs):
+            super().__init__()
+            seen["init_dtype"] = kwargs.get("dtype")
+            self.bias = None
+
+    module = nn.Module()
+    module.proj = nn.Linear(32, 32, bias=False)
+
+    model_utils.create_quant_module(
+        name="proj",
+        linear_cls=_DummyQuantLinear,
+        bits=4,
+        desc_act=False,
+        dynamic=None,
+        group_size=32,
+        module=module,
+        submodule=module.proj,
+        sym=True,
+        device=None,
+        lm_head_name="lm_head",
+        pack_dtype=torch.int32,
+        backend=BACKEND.BITBLAS,
+        dtype=torch.bfloat16,
+    )
+
+    assert seen["validate_dtype"] == torch.bfloat16
+    assert seen["init_dtype"] == torch.bfloat16
+    assert isinstance(module.proj, _DummyQuantLinear)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
@@ -311,6 +398,7 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
         in_features=in_features,
         out_features=out_features,
         pack_dtype=torch.int32,
+        dtype=dtype,
         bias=False,
         enable_tuning=False,
     )
@@ -319,7 +407,7 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
 
     device = torch.device("cuda")
     torch_linear = torch_linear.to(device=device, dtype=dtype)
-    bitblas_linear = bitblas_linear.to(device=device, dtype=dtype)
+    bitblas_linear = bitblas_linear.to(device=device)
 
     marlin_linear = MarlinQuantLinear(
         bits=bits,

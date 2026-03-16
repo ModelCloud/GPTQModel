@@ -59,6 +59,7 @@ class AWQBitBlasKernel(BitblasQuantLinear):
         out_features: int,
         bias: bool = False,
         pack_dtype: torch.dtype = torch.int32,
+        dtype: torch.dtype = torch.float16,
         adapter: Adapter = None,
         enable_tuning: bool = False,
         fast_decoding: bool = True,
@@ -77,6 +78,7 @@ class AWQBitBlasKernel(BitblasQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
+            dtype=dtype,
             adapter=adapter,
             enable_tuning=enable_tuning,
             fast_decoding=fast_decoding,
@@ -95,6 +97,7 @@ class AWQBitBlasKernel(BitblasQuantLinear):
         group_size: int,
         desc_act: bool,
         sym: bool,
+        dtype: torch.dtype,
     ) -> BitblasQuantizationConfig:
         del sym
 
@@ -104,6 +107,7 @@ class AWQBitBlasKernel(BitblasQuantLinear):
             group_size=group_size,
             desc_act=desc_act,
             is_sym=False,
+            torch_dtype=dtype,
             quant_method="awq",
         )
 
