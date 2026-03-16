@@ -93,6 +93,25 @@ def _run_simple_quant_eval():
         if "groups" in results:
             print(make_table(results, "groups"))
 
+        metrics = results["results"].get("gsm8k_cot", {})
+        filtered_metrics = {
+            metric: value
+            for metric, value in metrics.items()
+            if metric != "alias" and "stderr" not in metric
+        }
+
+        value = filtered_metrics['exact_match,flexible-extract']
+        expected = 0.7998
+        diff_pct = (value / expected) * 100
+        floor_pct = 0.05
+        ceil_pct = 0.10
+        negative_pct = 100 * (1 - floor_pct)
+        positive_pct = 100 * (1 + ceil_pct)
+
+        assert negative_pct <= diff_pct <= positive_pct, (f"gsm8k_cot:exact_match,flexible-extract: `{value}` vs "
+                                                          f"expected `{expected}`, diff {diff_pct:.2f}% is out of the "
+                                                          f"expected range [{negative_pct}-{positive_pct}%]")
+
 
 def test_simple_quant():
     """Keep the simple-quant regression runnable under pytest collection."""
