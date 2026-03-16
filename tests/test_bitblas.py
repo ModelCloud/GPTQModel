@@ -13,7 +13,7 @@ from gptqmodel import BACKEND, GPTQModel
 import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
 import gptqmodel.utils.bitblas as bitblas_utils
 import gptqmodel.utils.model as model_utils
-from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear, marlin_import_exception
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
@@ -94,6 +94,7 @@ def test_bitblas_prefers_float32_accumulation_for_fp16_inputs(monkeypatch):
     captured = {}
 
     class _DummyMatmul:
+        lib = object()
         weight_transform = None
 
         @staticmethod
@@ -136,6 +137,7 @@ def test_bitblas_uses_bfloat16_configuration_when_requested(monkeypatch):
     captured = {}
 
     class _DummyMatmul:
+        lib = object()
         weight_transform = None
 
         @staticmethod
@@ -214,6 +216,88 @@ def test_create_quant_module_propagates_dtype_to_quant_linear():
     assert seen["validate_dtype"] == torch.bfloat16
     assert seen["init_dtype"] == torch.bfloat16
     assert isinstance(module.proj, _DummyQuantLinear)
+
+
+def test_bitblas_rejects_unrunnable_operator(monkeypatch):
+    """Surface BitBLAS build failures during construction so auto-selection can fall back."""
+
+    class _BrokenMatmul:
+        weight_transform = None
+
+        @staticmethod
+        def retrieve_weight_shape():
+            return (1, 1)
+
+    monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
+    monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
+    monkeypatch.setattr(
+        bitblas_module.BitblasQuantLinear,
+        "_get_or_create_bitblas_operator",
+        lambda self, config, enable_tuning: _BrokenMatmul(),
+    )
+
+    with pytest.raises(NotImplementedError, match="BitBLAS could not build a runnable matmul"):
+        bitblas_module.BitblasQuantLinear(
+            bits=4,
+            group_size=32,
+            desc_act=False,
+            sym=True,
+            in_features=32,
+            out_features=32,
+            pack_dtype=torch.int32,
+            dtype=torch.bfloat16,
+            bias=False,
+            enable_tuning=False,
+        )
+
+
+def test_make_quant_falls_back_when_bitblas_operator_is_unrunnable(monkeypatch):
+    """Auto kernel selection should skip BitBLAS when the runtime build is unusable."""
+
+    class _BrokenMatmul:
+        weight_transform = None
+
+        @staticmethod
+        def retrieve_weight_shape():
+            return (1, 1)
+
+    monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
+    monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
+    monkeypatch.setattr(
+        bitblas_module.BitblasQuantLinear,
+        "_get_or_create_bitblas_operator",
+        lambda self, config, enable_tuning: _BrokenMatmul(),
+    )
+    monkeypatch.setattr(
+        model_utils,
+        "select_quant_linear",
+        lambda **kwargs: [bitblas_module.BitblasQuantLinear, TorchQuantLinear],
+    )
+    bitblas_module.BitblasQuantLinear.cached_validate_once.cache_clear()
+
+    module = nn.Module()
+    module.proj = nn.Linear(32, 32, bias=False)
+
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+
+    selected = model_utils.make_quant(
+        module,
+        qcfg=qcfg,
+        quant_result={"proj": module.proj},
+        backend=BACKEND.AUTO,
+        lm_head_name="lm_head",
+        dtype=torch.bfloat16,
+    )
+
+    assert selected is TorchQuantLinear
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
@@ -376,6 +460,7 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
     out_features = 8192
 
     linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
+    device = torch.device("cuda")
 
     torch_linear = TorchQuantLinear(
         bits=bits,
@@ -390,24 +475,26 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
     torch_linear.pack_block(linear, scales.T, zeros.T, g_idx=g_idx.to(torch.int32))
     torch_linear.post_init()
 
-    bitblas_linear = bitblas_module.BitblasQuantLinear(
-        bits=bits,
-        group_size=group_size,
-        desc_act=False,
-        sym=True,
-        in_features=in_features,
-        out_features=out_features,
-        pack_dtype=torch.int32,
-        dtype=dtype,
-        bias=False,
-        enable_tuning=False,
-    )
-    bitblas_linear.repack_from_gptq(torch_linear)
-    bitblas_linear.post_init()
-
-    device = torch.device("cuda")
-    torch_linear = torch_linear.to(device=device, dtype=dtype)
-    bitblas_linear = bitblas_linear.to(device=device)
+    bitblas_linear = None
+    bitblas_error = None
+    try:
+        bitblas_linear = bitblas_module.BitblasQuantLinear(
+            bits=bits,
+            group_size=group_size,
+            desc_act=False,
+            sym=True,
+            in_features=in_features,
+            out_features=out_features,
+            pack_dtype=torch.int32,
+            dtype=dtype,
+            bias=False,
+            enable_tuning=False,
+        )
+        bitblas_linear.repack_from_gptq(torch_linear)
+        bitblas_linear.post_init()
+        bitblas_linear = bitblas_linear.to(device=device)
+    except Exception as exc:  # pragma: no cover - diagnostic path
+        bitblas_error = str(exc)
 
     marlin_linear = MarlinQuantLinear(
         bits=bits,
@@ -445,11 +532,12 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
     triton_linear = triton_linear.to(device=device, dtype=dtype).eval()
 
     modules = {
-        "Torch": torch_linear.eval(),
-        "BitBLAS": bitblas_linear.eval(),
+        "Torch": torch_linear.to(device=device, dtype=dtype).eval(),
         "Marlin": marlin_linear.eval(),
         "TritonV2": triton_linear,
     }
+    if bitblas_linear is not None:
+        modules["BitBLAS"] = bitblas_linear.eval()
 
     x = torch.randn((batch, in_features), dtype=dtype, device=device)
 
@@ -457,6 +545,8 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
     reference_out = None
     outputs: dict[str, torch.Tensor] = {}
     errors: dict[str, str] = {}
+    if bitblas_error is not None:
+        errors["BitBLAS"] = bitblas_error
 
     for name, module in modules.items():
         try:
@@ -467,7 +557,8 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
         except Exception as exc:  # pragma: no cover - diagnostic path
             errors[name] = str(exc)
 
-    for name, module in modules.items():
+    for name in ("Torch", "BitBLAS", "Marlin", "TritonV2"):
+        module = modules.get(name)
         err = errors.get(name)
         if err:
             results.append([
@@ -480,6 +571,8 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
                 "-",
                 "\033[91mERR\033[0m",
             ])
+            continue
+        if module is None:
             continue
 
         out = outputs[name]

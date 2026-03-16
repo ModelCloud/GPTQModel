@@ -537,6 +537,18 @@ class BitblasQuantLinear(BaseQuantLinear):
         self.bitblas_matmul = self._get_or_create_bitblas_operator(
             matmul_config, enable_tuning
         )
+        self._ensure_runnable_bitblas_operator(self.bitblas_matmul, matmul_config)
+
+    def _ensure_runnable_bitblas_operator(self, bitblas_matmul, config) -> None:
+        if getattr(bitblas_matmul, "lib", None) is not None:
+            return
+        if callable(getattr(bitblas_matmul, "torch_func", None)):
+            return
+        raise NotImplementedError(
+            "BitBLAS could not build a runnable matmul for "
+            f"A_dtype={config.A_dtype}, W_dtype={config.W_dtype}, out_dtype={config.out_dtype}, "
+            f"accum_dtype={config.accum_dtype}, group_size={config.group_size}."
+        )
 
     def _get_or_create_bitblas_operator(self, config, enable_tuning):
         from bitblas import Matmul
