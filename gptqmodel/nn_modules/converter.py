@@ -4,6 +4,20 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 
+def _resolve_text_decoder_config(config):
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        return text_config
+
+    get_text_config = getattr(config, "get_text_config", None)
+    if callable(get_text_config):
+        resolved = get_text_config()
+        if resolved is not None:
+            return resolved
+
+    return config
+
+
 def _convert_qwen_sparse_moe_layer(
     module,
     *,
@@ -31,10 +45,31 @@ def _convert_qwen_sparse_moe_layer(
             with torch.inference_mode():
                 gate_up_batch = original.gate_up_proj.detach()
                 down_batch = original.down_proj.detach()
+                self.to(device=gate_up_batch.device, dtype=gate_up_batch.dtype)
+                target_gate_shape = self[0].gate_proj.weight.shape
+                target_down_shape = self[0].down_proj.weight.shape
 
-                gate_batch = gate_up_batch[:, :, :intermediate_size].transpose(-2, -1).contiguous()
-                up_batch = gate_up_batch[:, :, intermediate_size:].transpose(-2, -1).contiguous()
-                down_batch = down_batch.contiguous()
+                if gate_up_batch.shape[-2:] == (target_gate_shape[1], 2 * target_gate_shape[0]):
+                    gate_batch = gate_up_batch[:, :, :intermediate_size].transpose(-2, -1).contiguous()
+                    up_batch = gate_up_batch[:, :, intermediate_size:].transpose(-2, -1).contiguous()
+                elif gate_up_batch.shape[-2:] == (2 * target_gate_shape[0], target_gate_shape[1]):
+                    gate_batch = gate_up_batch[:, :intermediate_size, :].contiguous()
+                    up_batch = gate_up_batch[:, intermediate_size:, :].contiguous()
+                else:
+                    raise ValueError(
+                        f"Unsupported Qwen fused expert layout: gate_up_proj shape {tuple(gate_up_batch.shape)} "
+                        f"cannot map to gate_proj shape {tuple(target_gate_shape)}."
+                    )
+
+                if down_batch.shape[-2:] == target_down_shape:
+                    down_batch = down_batch.contiguous()
+                elif down_batch.shape[-2:] == (target_down_shape[1], target_down_shape[0]):
+                    down_batch = down_batch.transpose(-2, -1).contiguous()
+                else:
+                    raise ValueError(
+                        f"Unsupported Qwen fused expert layout: down_proj shape {tuple(down_batch.shape)} "
+                        f"cannot map to down_proj shape {tuple(target_down_shape)}."
+                    )
 
                 for i in range(self.num_experts):
                     self[i].gate_proj.weight.data.copy_(gate_batch[i])
@@ -44,7 +79,7 @@ def _convert_qwen_sparse_moe_layer(
     class SequentialQwenSparseMoeBlock(nn.Module):
         def __init__(self, config, original):
             super().__init__()
-            self.hidden_dim = config.hidden_size
+            self.hidden_dim = getattr(config, "hidden_size", original.gate.weight.shape[-1])
             self.gate = original.gate
             self.experts = SequentialQwenExperts(config, original.experts)
 
@@ -66,7 +101,7 @@ def _convert_qwen_sparse_moe_layer(
 
                 expert_input = hidden_states_reshaped[token_indices]
                 expert_output = expert(expert_input)
-                expert_weight = routing_weights[token_indices, top_indices].unsqueeze(-1)
+                expert_weight = routing_weights[token_indices, top_indices].unsqueeze(-1).to(expert_output.dtype)
                 final_hidden_states.index_add_(0, token_indices, expert_output * expert_weight)
 
             if has_shared_expert:
@@ -206,9 +241,10 @@ def convert_qwen3_omni_moe_expert_converter(module, config):
         Qwen3OmniMoeThinkerTextSparseMoeBlock,
     )
 
+    thinker_config = getattr(config, "thinker_config", config)
     return _convert_qwen_sparse_moe_layer(
         module,
-        config=config.thinker_config,
+        config=_resolve_text_decoder_config(thinker_config),
         sparse_moe_cls=Qwen3OmniMoeThinkerTextSparseMoeBlock,
         expert_mlp_cls=Qwen3OmniMoeThinkerTextMLP,
         has_shared_expert=False,
