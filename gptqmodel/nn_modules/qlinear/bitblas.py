@@ -31,6 +31,7 @@ BITBLAS_OPTIMIZE_FEATURES: List[int] = [1, 16, 32, 64, 128, 256, 512, 1024]
 BITBLAS_SUPPORTED_GROUP_SIZES: List[int] = [-1, 32, 64, 128]
 BITBLAS_SUPPORTED_BITS: List[int] = [1, 2, 4, 8]
 BITBLAS_SUPPORTED_SYM: List[bool] = [False, True]
+BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS = frozenset({2, 4, 8})
 BITBLAS_DEFAULT_ZEROS_MODE = "quantized"
 BITBLAS_PROPAGATE_WEIGHTS = False
 BITBLAS_MAX_SUPPORTED_SM = 90
@@ -351,6 +352,41 @@ class BitblasQuantLinear(BaseQuantLinear):
     OPT_FEATURES = BITBLAS_OPTIMIZE_FEATURES
     TORCH_DTYPE = torch.float16
 
+    @classmethod
+    def _bf16_signed_weight_error(cls, bits: int, layer: Optional[str] = None) -> NotImplementedError:
+        location = f" for layer pattern `{layer}`" if layer is not None else ""
+        return NotImplementedError(
+            f"{cls.__name__} does not support `torch.bfloat16` with symmetric `{bits}`-bit GPTQ weights{location}. "
+            "This is blocked by an upstream BitBLAS CUDA codegen failure for signed low-bit dequantization. "
+            "Use `torch.float16`, asymmetric GPTQ/unsigned weights, or a different backend."
+        )
+
+    @classmethod
+    def _validate_bf16_bitblas_combo(
+        cls,
+        *,
+        bits: int,
+        sym: bool,
+        dtype: Optional[torch.dtype],
+        dynamic: Optional[dict] = None,
+    ) -> Tuple[bool, Optional[Exception]]:
+        if METHOD.GPTQ not in cls.SUPPORTS_METHODS or dtype != torch.bfloat16:
+            return True, None
+
+        if sym and bits in BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS:
+            return False, cls._bf16_signed_weight_error(bits)
+
+        if dynamic is None:
+            return True, None
+
+        for layer, overrides in dynamic.items():
+            layer_bits = overrides.get("bits", bits)
+            layer_sym = overrides.get("sym", sym)
+            if layer_sym and layer_bits in BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS:
+                return False, cls._bf16_signed_weight_error(layer_bits, layer=layer)
+
+        return True, None
+
     def _build_quant_config(
         self,
         *,
@@ -390,6 +426,10 @@ class BitblasQuantLinear(BaseQuantLinear):
     ) -> None:
         if dtype not in self.SUPPORTS_DTYPES:
             raise ValueError(f"{self.__class__.__name__} only supports dtypes {self.SUPPORTS_DTYPES}: actual dtype = {dtype}")
+
+        ok, err = self._validate_bf16_bitblas_combo(bits=bits, sym=sym, dtype=dtype)
+        if not ok:
+            raise err
 
         super().__init__(
             bits=bits,
@@ -448,6 +488,41 @@ class BitblasQuantLinear(BaseQuantLinear):
         except Exception as exc:  # pragma: no cover - import errors handled above
             return False, exc
         return True, None
+
+    @classmethod
+    def validate(
+        cls,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+        in_features: int = None,
+        out_features: int = None,
+        pack_dtype: torch.dtype = None,
+        dtype: Optional[torch.dtype] = None,
+        dynamic: Optional[dict] = None,
+        device: Optional[DEVICE] = None,
+        trainable: Optional[bool] = None,
+        adapter: Optional[Adapter] = None,
+    ) -> Tuple[bool, Optional[Exception]]:
+        ok, err = cls._validate_bf16_bitblas_combo(bits=bits, sym=sym, dtype=dtype, dynamic=dynamic)
+        if not ok:
+            return False, err
+
+        return super().validate(
+            bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            in_features=in_features,
+            out_features=out_features,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
 
     def _validate_parameters(self, in_features: int, out_features: int) -> None:
         if in_features % 16 != 0:

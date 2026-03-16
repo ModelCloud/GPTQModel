@@ -161,7 +161,7 @@ def test_bitblas_uses_bfloat16_configuration_when_requested(monkeypatch):
         bits=4,
         group_size=32,
         desc_act=False,
-        sym=True,
+        sym=False,
         in_features=32,
         out_features=32,
         pack_dtype=torch.int32,
@@ -175,6 +175,46 @@ def test_bitblas_uses_bfloat16_configuration_when_requested(monkeypatch):
     assert captured["config"].accum_dtype == "float32"
     assert layer.scales.dtype == torch.bfloat16
     assert layer.bias.dtype == torch.bfloat16
+
+
+def test_bitblas_validate_rejects_unsupported_bf16_signed_gptq():
+    valid, err = bitblas_module.BitblasQuantLinear.validate(
+        bits=4,
+        group_size=128,
+        desc_act=True,
+        sym=True,
+        in_features=3072,
+        out_features=1024,
+        pack_dtype=torch.int32,
+        dtype=torch.bfloat16,
+    )
+
+    assert valid is False
+    assert isinstance(err, NotImplementedError)
+    assert "signed low-bit dequantization" in str(err)
+
+
+def test_bitblas_constructor_rejects_unsupported_bf16_signed_gptq(monkeypatch):
+    monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
+    monkeypatch.setattr(
+        bitblas_module,
+        "import_bitblas",
+        lambda: pytest.fail("unsupported bf16 signed GPTQ should be rejected before BitBLAS import"),
+    )
+
+    with pytest.raises(NotImplementedError, match="signed low-bit dequantization"):
+        bitblas_module.BitblasQuantLinear(
+            bits=4,
+            group_size=128,
+            desc_act=True,
+            sym=True,
+            in_features=3072,
+            out_features=1024,
+            pack_dtype=torch.int32,
+            dtype=torch.bfloat16,
+            bias=False,
+            enable_tuning=False,
+        )
 
 
 def test_create_quant_module_propagates_dtype_to_quant_linear():
@@ -241,7 +281,7 @@ def test_bitblas_rejects_unrunnable_operator(monkeypatch):
             bits=4,
             group_size=32,
             desc_act=False,
-            sym=True,
+            sym=False,
             in_features=32,
             out_features=32,
             pack_dtype=torch.int32,
@@ -282,7 +322,7 @@ def test_make_quant_falls_back_when_bitblas_operator_is_unrunnable(monkeypatch):
         bits=4,
         group_size=32,
         desc_act=False,
-        sym=True,
+        sym=False,
         format=FORMAT.GPTQ,
         quant_method=METHOD.GPTQ,
         pack_dtype=torch.int32,
