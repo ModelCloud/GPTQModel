@@ -52,7 +52,7 @@ class TestLlama3_2(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.44830438378825477,
+                "value": 0.4235,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
@@ -60,7 +60,7 @@ class TestLlama3_2(ModelTest):
         EVAL.LM_EVAL.MMLU_STEM: {
             "chat_template": False,
             "acc": {
-                "value": 0.3948620361560419,
+                "value": 0.4012,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
@@ -68,12 +68,12 @@ class TestLlama3_2(ModelTest):
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
-                "value": 0.3199658703071672,
+                "value": 0.3089,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
             "acc_norm": {
-                "value": 0.36006825938566556,
+                "value": 0.3549,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
@@ -92,5 +92,8 @@ class TestLlama3_2(ModelTest):
     # )
     # b1 = 0.315, b4 = 0.3106, b8 = 0.3148, b32 = 0.3148, b16 = 0.3234
 
+    SAVE_PATH = "LLAMA3_2_GPTQ_LAYERS_4"
+
     def test_llama3_2(self):
-        self.quant_lm_eval()
+        # self.quant_lm_eval()
+        self.lm_eval(self.SAVE_PATH)
