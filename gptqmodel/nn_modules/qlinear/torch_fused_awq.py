@@ -233,7 +233,6 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             scales=self.scales,
             bits=self.bits,
             group_size=self.group_size,
-            sym=self.sym,
         ).to(device=device, dtype=dtype)
 
     def transform(self, dtype, device):
