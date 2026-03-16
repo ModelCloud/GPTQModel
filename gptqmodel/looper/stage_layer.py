@@ -42,7 +42,7 @@ def _find_last_quantized_layer_index(
     layers_prefix: Optional[str],
     layer_count: int,
 ) -> Optional[int]:
-    """Return the last transformer layer index that still has quantization work."""
+    """Return the highest layer index whose tracked modules are not all dynamically skipped."""
     if looper.gptq_model.quantize_config.lm_head or not layers_prefix:
         return None
 
@@ -83,6 +83,9 @@ def run_layer_stage(
     logger=None,
 ) -> None:
     """Execute the main per-layer quantization loop."""
+    # Trailing layers whose tracked modules are all dynamically excluded never
+    # need another forward or finalize pass, so the loop can stop once the
+    # final eligible layer has been processed.
     last_quantized_layer_index = _find_last_quantized_layer_index(
         looper,
         layer_modules=layer_modules,
@@ -103,6 +106,8 @@ def run_layer_stage(
             and last_quantized_layer_index is not None
             and layer_index > last_quantized_layer_index
         ):
+            # The remaining layers are fully skipped by dynamic config, so
+            # avoid entering another layer-level quantization cycle.
             log.debug(
                 "StageLayer: early stop at layer=%s, last_quantized_layer=%s",
                 layer_index,
