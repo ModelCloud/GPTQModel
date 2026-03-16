@@ -349,6 +349,21 @@ class BitblasQuantLinear(BaseQuantLinear):
     OPT_FEATURES = BITBLAS_OPTIMIZE_FEATURES
     TORCH_DTYPE = torch.float16
 
+    def _build_quant_config(
+        self,
+        *,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+    ) -> BitblasQuantizationConfig:
+        return BitblasQuantizationConfig(
+            weight_bits=bits,
+            group_size=group_size,
+            desc_act=desc_act,
+            is_sym=sym,
+        )
+
     def __init__(
         self,
         bits: int,
@@ -388,11 +403,11 @@ class BitblasQuantLinear(BaseQuantLinear):
         if not BITBLAS_AVAILABLE:
             raise ImportError(BITBLAS_INSTALL_HINT)
 
-        self.quant_config = BitblasQuantizationConfig(
-            weight_bits=bits,
+        self.quant_config = self._build_quant_config(
+            bits=bits,
             group_size=group_size,
             desc_act=desc_act,
-            is_sym=sym,
+            sym=sym,
         )
         self.enable_tuning = enable_tuning
         self.layout = layout

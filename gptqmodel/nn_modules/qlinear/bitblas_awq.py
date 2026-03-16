@@ -12,7 +12,6 @@ from torch import nn
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
 from ...utils.backend import BACKEND
@@ -69,54 +68,44 @@ class AWQBitBlasKernel(BitblasQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ) -> None:
-        del fast_decoding
-        del register_buffers
-
-        BaseQuantLinear.__init__(
-            self,
+        super().__init__(
             bits=bits,
             group_size=group_size,
-            sym=sym,
             desc_act=desc_act,
+            sym=sym,
             in_features=in_features,
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.BITBLAS_AWQ),
             adapter=adapter,
-            register_buffers=False,
+            enable_tuning=enable_tuning,
+            fast_decoding=fast_decoding,
+            propagate_b=propagate_b,
+            opt_features=opt_features,
+            layout=layout,
+            register_buffers=register_buffers,
+            backend=kwargs.pop("backend", BACKEND.BITBLAS_AWQ),
             **kwargs,
         )
 
-        if not BITBLAS_AVAILABLE:
-            raise ImportError(BITBLAS_INSTALL_HINT)
+    def _build_quant_config(
+        self,
+        *,
+        bits: int,
+        group_size: int,
+        desc_act: bool,
+        sym: bool,
+    ) -> BitblasQuantizationConfig:
+        del sym
 
         # AWQ stores unsigned weight codes plus zero-points, even for symmetric checkpoints.
-        self.quant_config = BitblasQuantizationConfig(
+        return BitblasQuantizationConfig(
             weight_bits=bits,
             group_size=group_size,
             desc_act=desc_act,
             is_sym=False,
             quant_method="awq",
         )
-        self.enable_tuning = enable_tuning
-        self.layout = layout
-        self.opt_features = list(opt_features) if isinstance(opt_features, list) else [opt_features]
-        self.propagate_b = propagate_b
-
-        import_bitblas()
-
-        self._validate_parameters(in_features, out_features)
-        self._configure_bitblas_matmul(
-            in_features,
-            out_features,
-            self.TORCH_DTYPE,
-            enable_tuning,
-            False,
-            layout,
-            bits,
-        )
-        self._initialize_buffers(in_features, out_features, bias)
 
     @torch.inference_mode()
     def pack(
