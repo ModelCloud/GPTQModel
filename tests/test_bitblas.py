@@ -217,6 +217,40 @@ def test_bitblas_constructor_rejects_unsupported_bf16_signed_gptq(monkeypatch):
         )
 
 
+def test_bitblas_validate_rejects_non_divisible_in_features():
+    valid, err = bitblas_module.BitblasQuantLinear.validate(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=False,
+        in_features=30,
+        out_features=32,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert valid is False
+    assert isinstance(err, NotImplementedError)
+    assert "must be divisible by [16]" in str(err)
+
+
+def test_bitblas_validate_rejects_non_divisible_out_features():
+    valid, err = bitblas_module.BitblasQuantLinear.validate(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=False,
+        in_features=32,
+        out_features=30,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert valid is False
+    assert isinstance(err, NotImplementedError)
+    assert "must be divisible by [16]" in str(err)
+
+
 def test_create_quant_module_propagates_dtype_to_quant_linear():
     """Quantized checkpoint loads must instantiate the selected kernel with the requested dtype."""
 

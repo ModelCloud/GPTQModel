@@ -535,10 +535,14 @@ class BitblasQuantLinear(BaseQuantLinear):
         # the hard upstream packing constraint we confirmed is K/in_features divisible by 8 / bits
         # for quant-compressed weights. We keep the stricter gate here until the relaxed shapes are
         # regression-tested across the full load/repack/forward path.
-        if in_features % 16 != 0:
-            raise ValueError("`in_features` must be divisible by 16 for BitBLAS")
-        if out_features % 16 != 0:
-            raise ValueError("`out_features` must be divisible by 16 for BitBLAS")
+        if any(in_features % divisor != 0 for divisor in self.SUPPORTS_IN_FEATURES_DIVISIBLE_BY):
+            raise ValueError(
+                f"`in_features` must be divisible by {self.SUPPORTS_IN_FEATURES_DIVISIBLE_BY} for BitBLAS"
+            )
+        if any(out_features % divisor != 0 for divisor in self.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY):
+            raise ValueError(
+                f"`out_features` must be divisible by {self.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY} for BitBLAS"
+            )
         if self.group_size not in (-1, in_features) and in_features % self.group_size != 0:
             raise ValueError("`in_features` must be divisible by `group_size`.")
 
