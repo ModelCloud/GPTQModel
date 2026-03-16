@@ -92,8 +92,5 @@ class TestLlama3_2(ModelTest):
     # )
     # b1 = 0.315, b4 = 0.3106, b8 = 0.3148, b32 = 0.3148, b16 = 0.3234
 
-    SAVE_PATH = "LLAMA3_2_GPTQ_LAYERS_4"
-
     def test_llama3_2(self):
-        # self.quant_lm_eval()
-        self.lm_eval(self.SAVE_PATH)
+        self.quant_lm_eval()
