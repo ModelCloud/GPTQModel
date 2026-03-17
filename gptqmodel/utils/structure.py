@@ -617,6 +617,81 @@ def _module_all_meta(mod: nn.Module) -> bool:
 def _is_leaf(mod: nn.Module) -> bool:
     return next(mod.named_children(), None) is None
 
+def _sync_direct_meta_tensors_from_turtle(
+    shell_sub: nn.Module,
+    turtle_sub: nn.Module,
+    *,
+    param_cache: Dict[tuple[int, torch.dtype, bool], nn.Parameter],
+    buffer_cache: Dict[tuple[int, torch.dtype], torch.Tensor],
+) -> int:
+    """Materialize direct meta params/buffers from turtle without replacing children."""
+    synced = 0
+
+    shell_params = dict(shell_sub.named_parameters(recurse=False))
+    turtle_params = dict(turtle_sub.named_parameters(recurse=False))
+
+    with torch.inference_mode():
+        for name, shell_param in shell_params.items():
+            if not _is_meta_tensor(shell_param):
+                continue
+
+            turtle_param = turtle_params.get(name)
+            if turtle_param is None or shell_param.shape != turtle_param.shape:
+                continue
+
+            # Avoid silently converting custom Parameter subclasses into plain nn.Parameter.
+            if turtle_param.__class__ is not nn.Parameter:
+                continue
+
+            cache_key = (id(turtle_param), shell_param.dtype, shell_param.requires_grad)
+            new_param = param_cache.get(cache_key)
+            if new_param is None:
+                source_param = turtle_param.detach()
+                if source_param.dtype != shell_param.dtype:
+                    source_param = source_param.to(dtype=shell_param.dtype)
+
+                # Keep the shell module structure intact and only replace the missing leaf tensor.
+                new_param = nn.Parameter(
+                    source_param.clone(),
+                    requires_grad=shell_param.requires_grad,
+                )
+                # Reuse clones when multiple module paths share the same turtle tensor.
+                param_cache[cache_key] = new_param
+
+            shell_sub.register_parameter(name, new_param)
+            synced += 1
+
+        shell_buffers = dict(shell_sub.named_buffers(recurse=False))
+        turtle_buffers = dict(turtle_sub.named_buffers(recurse=False))
+
+        for name, shell_buffer in list(shell_buffers.items()):
+            if not _is_meta_tensor(shell_buffer):
+                continue
+
+            turtle_buffer = turtle_buffers.get(name)
+            if turtle_buffer is None or shell_buffer.shape != turtle_buffer.shape:
+                continue
+
+            persistent = True
+            if hasattr(turtle_sub, "_non_persistent_buffers_set"):
+                persistent = name not in turtle_sub._non_persistent_buffers_set
+
+            cache_key = (id(turtle_buffer), shell_buffer.dtype)
+            new_buffer = buffer_cache.get(cache_key)
+            if new_buffer is None:
+                source_buffer = turtle_buffer.detach()
+                if source_buffer.dtype != shell_buffer.dtype:
+                    source_buffer = source_buffer.to(dtype=shell_buffer.dtype)
+                # Reuse clones when shared buffers appear under multiple module paths.
+                new_buffer = source_buffer.clone()
+                buffer_cache[cache_key] = new_buffer
+
+            # Mirror turtle buffer persistence so save_pretrained sees the same state.
+            shell_sub.register_buffer(name, new_buffer, persistent=persistent)
+            synced += 1
+
+    return synced
+
 def alias_all_from_turtle_if_meta(
     shell_model: nn.Module,
     turtle_model: nn.Module,
@@ -626,8 +701,9 @@ def alias_all_from_turtle_if_meta(
     tie_after: bool = True,
 ) -> int:
     """
-    Replace (alias) leaf submodules in `shell_model` with the corresponding submodules
-    from `turtle_model` when the shell submodule's tensors are on meta.
+    Replace fully-meta leaf submodules in `shell_model` with the corresponding
+    submodules from `turtle_model`. Also materialize any remaining direct
+    params/buffers that are still on meta without replacing their children.
 
     Logs each swap via log.info().
     """
@@ -636,6 +712,8 @@ def alias_all_from_turtle_if_meta(
 
     turtle_map = dict(turtle_model.named_modules())
     swapped = 0
+    param_cache: Dict[tuple[int, torch.dtype, bool], nn.Parameter] = {}
+    buffer_cache: Dict[tuple[int, torch.dtype], torch.Tensor] = {}
 
     for qname, shell_sub in list(shell_model.named_modules()):
         if not qname:  # skip root
@@ -690,6 +768,26 @@ def alias_all_from_turtle_if_meta(
         swapped += 1
         log.info(f"Module:: Sync {qname} <- from turtle ({turtle_sub.__class__.__name__})")
 
+    direct_synced = 0
+    for qname, shell_sub in list(shell_model.named_modules()):
+        turtle_sub = turtle_map.get(qname, None)
+        if turtle_sub is None:
+            continue
+
+        if require_class_match and (shell_sub.__class__ is not turtle_sub.__class__):
+            continue
+
+        synced_here = _sync_direct_meta_tensors_from_turtle(
+            shell_sub,
+            turtle_sub,
+            param_cache=param_cache,
+            buffer_cache=buffer_cache,
+        )
+        if synced_here:
+            direct_synced += synced_here
+            label = qname or "<root>"
+            log.info(f"Module: Materialized {synced_here} direct tensor(s) for {label} from turtle")
+
     if tie_after and hasattr(shell_model, "tie_weights") and getattr(shell_model.config, "tie_word_embeddings", False):
         try:
             shell_model.tie_weights()
@@ -697,5 +795,5 @@ def alias_all_from_turtle_if_meta(
         except Exception as e:
             log.info(f"Module: tie_weights failed: {e}")
 
-    log.info(f"Module: Total synced modules: {swapped}")
+    log.info(f"Module: Total synced modules: {swapped}; direct tensors materialized: {direct_synced}")
     return swapped
