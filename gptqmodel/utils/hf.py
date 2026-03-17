@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import inspect
 import json
+import sys
 import warnings
 from functools import lru_cache
 from typing import Any, Optional
@@ -28,6 +30,7 @@ __all__ = [
     "no_init_weights",
     "normalize_hf_config_compat",
     "prepare_remote_code_compat",
+    "prepare_remote_model_init_compat",
     "has_native_transformers_causallm_support",
     "resolve_trust_remote_code",
     "load_tokenizer",
@@ -145,6 +148,11 @@ def _patch_transformers_remote_code_compat() -> None:
     except Exception:
         return
 
+    try:
+        from transformers import cache_utils
+    except Exception:
+        cache_utils = None
+
     if not hasattr(import_utils, "is_torch_fx_available"):
         # transformers 5.x removed `import_utils.is_torch_fx_available`, but
         # older remote model files still import it during module import.
@@ -152,6 +160,60 @@ def _patch_transformers_remote_code_compat() -> None:
             return hasattr(torch, "fx")
 
         import_utils.is_torch_fx_available = is_torch_fx_available
+
+    if cache_utils is not None and not hasattr(cache_utils, "SlidingWindowCache") and hasattr(cache_utils, "StaticCache"):
+        # transformers 5.x folds sliding-window behavior into StaticCache
+        # layers, but older remote code still imports the legacy symbol.
+        cache_utils.SlidingWindowCache = cache_utils.StaticCache
+
+    cache_base_cls = getattr(cache_utils, "Cache", None) if cache_utils is not None else None
+    if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length") and hasattr(cache_base_cls, "get_max_cache_shape"):
+        # Older remote decoders expect `get_max_length()`, while newer
+        # transformers renamed that API to `get_max_cache_shape()`.
+        def get_max_length(self, layer_idx: int = 0) -> Optional[int]:
+            max_length = self.get_max_cache_shape(layer_idx)
+            return None if max_length is None or max_length < 0 else max_length
+
+        cache_base_cls.get_max_length = get_max_length
+
+    if cache_base_cls is not None and not hasattr(cache_base_cls, "get_usable_length") and hasattr(cache_base_cls, "get_seq_length"):
+        # Recreate the pre-5.x cache eviction helper so remote attention code
+        # can compute usable KV length against the newer cache interface.
+        def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
+            max_length = self.get_max_length(layer_idx=layer_idx)
+            previous_seq_length = self.get_seq_length(layer_idx)
+            if max_length is not None and previous_seq_length + new_seq_length > max_length:
+                return max_length - new_seq_length
+            return previous_seq_length
+
+        cache_base_cls.get_usable_length = get_usable_length
+
+    dynamic_cache_cls = getattr(cache_utils, "DynamicCache", None) if cache_utils is not None else None
+    if dynamic_cache_cls is not None and not hasattr(dynamic_cache_cls, "to_legacy_cache"):
+        # Older remote generation code still serializes cache state as
+        # `Tuple[(key, value), ...]`; rebuild that view from layer storage.
+        def to_legacy_cache(self) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+            legacy_cache = ()
+            for layer in self.layers:
+                if not getattr(layer, "is_initialized", False):
+                    continue
+                legacy_cache += ((layer.keys, layer.values),)
+            return legacy_cache
+
+        dynamic_cache_cls.to_legacy_cache = to_legacy_cache
+
+    if dynamic_cache_cls is not None and not hasattr(dynamic_cache_cls, "from_legacy_cache"):
+        # Accept legacy tuple caches by replaying them into the current
+        # layer-based DynamicCache implementation.
+        @classmethod
+        def from_legacy_cache(cls, past_key_values: Optional[tuple[tuple[torch.Tensor, torch.Tensor], ...]] = None):
+            cache = cls()
+            if past_key_values is not None:
+                for layer_idx, (key_states, value_states) in enumerate(past_key_values):
+                    cache.update(key_states, value_states, layer_idx)
+            return cache
+
+        dynamic_cache_cls.from_legacy_cache = from_legacy_cache
 
     if not getattr(PreTrainedModel, "_gptqmodel_legacy_tied_weights_patch", False) and hasattr(PreTrainedModel, "get_expanded_tied_weights_keys"):
         original_get_expanded_tied_weights_keys = PreTrainedModel.get_expanded_tied_weights_keys
@@ -317,6 +379,152 @@ def prepare_remote_code_compat(config: Any) -> None:
     # Remote-code loads need both the transformers API shims and any config
     # field migrations applied before instantiation happens.
     normalize_hf_config_compat(config, trust_remote_code=True)
+
+
+def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: Any) -> None:
+    if not model_id_or_path or getattr(config, "model_type", None) != "phi4mm":
+        return
+
+    auto_map = getattr(config, "auto_map", None) or {}
+    class_ref = auto_map.get("AutoModelForCausalLM")
+    if not isinstance(class_ref, str):
+        return
+
+    try:
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+        model_cls = get_class_from_dynamic_module(class_ref, str(model_id_or_path))
+    except Exception as exc:
+        log.debug("HF: remote model init compat pre-import failed for `%s`: %s", model_id_or_path, exc)
+        return
+
+    module_root = model_cls.__module__.rsplit(".", maxsplit=1)[0]
+    speech_module = sys.modules.get(f"{module_root}.speech_conformer_encoder")
+    remote_module = sys.modules.get(model_cls.__module__)
+    outer_model_cls = model_cls if isinstance(model_cls, type) else None
+    input_mode_enum = getattr(remote_module, "InputMode", None) if remote_module is not None else None
+
+    if speech_module is not None and not getattr(speech_module, "_gptqmodel_scalar_tensor_meta_patch", False):
+        speech_torch = getattr(speech_module, "torch", None)
+        original_tensor = getattr(speech_torch, "tensor", None)
+        if speech_torch is not None and original_tensor is not None:
+            def _is_phi4mm_subsampling_scalar_init() -> bool:
+                for frame_info in inspect.stack(context=0):
+                    if frame_info.filename.endswith("speech_conformer_encoder.py") and frame_info.lineno == 1426:
+                        return True
+                return False
+
+            # Phi-4 MM remote audio init creates scalar tensors only to derive Python
+            # output sizes in NemoConvSubsampling; forcing just that scalar tensor onto
+            # CPU keeps meta init safe without perturbing other meta-only buffers.
+            def tensor_compat(data, *args, **kwargs):
+                current_device = getattr(torch.utils._device, "CURRENT_DEVICE", None)
+                if (
+                    kwargs.get("device") is None
+                    and current_device == torch.device("meta")
+                    and isinstance(data, (int, float, bool))
+                    and _is_phi4mm_subsampling_scalar_init()
+                ):
+                    kwargs = dict(kwargs)
+                    kwargs["device"] = "cpu"
+                return original_tensor(data, *args, **kwargs)
+
+            speech_torch.tensor = tensor_compat
+
+        positional_encoding_cls = getattr(speech_module, "AbsolutePositionalEncoding", None)
+        if positional_encoding_cls is not None and not getattr(positional_encoding_cls, "_gptqmodel_meta_extend_patch", False):
+            original_extend_pe = positional_encoding_cls.extend_pe
+
+            def _is_phi4mm_positional_seed_call() -> bool:
+                for frame_info in inspect.stack(context=0):
+                    if frame_info.filename.endswith("speech_conformer_encoder.py") and frame_info.lineno == 895:
+                        return True
+                return False
+
+            # The remote implementation seeds extend_pe() with a CPU scalar tensor.
+            # Under meta init, promote that seed tensor back to meta before the
+            # original method allocates its positional buffer.
+            def extend_pe_compat(self, x):
+                if isinstance(x, torch.Tensor) and x.device.type != "meta" and _is_phi4mm_positional_seed_call():
+                    x = x.to(device="meta")
+                return original_extend_pe(self, x)
+
+            positional_encoding_cls.extend_pe = extend_pe_compat
+            positional_encoding_cls._gptqmodel_meta_extend_patch = True
+
+        speech_module._gptqmodel_scalar_tensor_meta_patch = True
+
+    if (
+        outer_model_cls is not None
+        and hasattr(outer_model_cls, "forward")
+        and not getattr(outer_model_cls, "_gptqmodel_input_mode_patch", False)
+    ):
+        original_forward = outer_model_cls.forward
+
+        # Text-only callers like lm_eval do not pass `input_mode`; infer the
+        # correct Phi-4 MM mode from the provided modality tensors instead.
+        def forward_compat(self, *args, **kwargs):
+            if kwargs.get("input_mode") is None:
+                kwargs = dict(kwargs)
+                has_vision = any(
+                    kwargs.get(name) is not None
+                    for name in ("input_image_embeds", "image_sizes", "image_attention_mask")
+                )
+                has_audio = any(
+                    kwargs.get(name) is not None
+                    for name in ("input_audio_embeds", "audio_embed_sizes", "audio_attention_mask")
+                )
+
+                if has_vision and has_audio:
+                    kwargs["input_mode"] = input_mode_enum.VISION_SPEECH if input_mode_enum is not None else 3
+                elif has_vision:
+                    kwargs["input_mode"] = input_mode_enum.VISION if input_mode_enum is not None else 1
+                elif has_audio:
+                    kwargs["input_mode"] = input_mode_enum.SPEECH if input_mode_enum is not None else 2
+                else:
+                    kwargs["input_mode"] = input_mode_enum.LANGUAGE if input_mode_enum is not None else 0
+            return original_forward(self, *args, **kwargs)
+
+        outer_model_cls.forward = forward_compat
+        outer_model_cls._gptqmodel_input_mode_patch = True
+
+    inner_model_cls = getattr(remote_module, "Phi4MMModel", None) if remote_module is not None else None
+    if inner_model_cls is not None and not hasattr(inner_model_cls, "prepare_inputs_for_generation"):
+        # PEFT expects the inner model it wraps to expose this hook, even
+        # though Phi-4 MM only defines the full implementation on the outer
+        # CausalLM class.
+        def prepare_inputs_for_generation(self, input_ids=None, past_key_values=None, inputs_embeds=None, **kwargs):
+            model_inputs = dict(kwargs)
+            if inputs_embeds is not None and past_key_values is None:
+                model_inputs["inputs_embeds"] = inputs_embeds
+            else:
+                model_inputs["input_ids"] = input_ids
+            model_inputs["past_key_values"] = past_key_values
+            return model_inputs
+
+        inner_model_cls.prepare_inputs_for_generation = prepare_inputs_for_generation
+
+    try:
+        import importlib.util
+        import peft.import_utils as peft_import_utils
+        import peft.tuners.lora.awq as peft_awq
+    except Exception:
+        pass
+    else:
+        if not getattr(peft_awq, "_gptqmodel_awq_probe_patch", False):
+            # PEFT later imports `awq.modules.linear`, so the availability
+            # probe must require that concrete submodule instead of top-level
+            # namespace packages that are missing the actual runtime.
+            @lru_cache(maxsize=None)
+            def is_auto_awq_available() -> bool:
+                try:
+                    return importlib.util.find_spec("awq.modules.linear") is not None
+                except ModuleNotFoundError:
+                    return False
+
+            peft_import_utils.is_auto_awq_available = is_auto_awq_available
+            peft_awq.is_auto_awq_available = is_auto_awq_available
+            peft_awq._gptqmodel_awq_probe_patch = True
 
 
 def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):

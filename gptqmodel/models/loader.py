@@ -39,6 +39,7 @@ from ..utils.hf import (
     has_native_transformers_causallm_support,
     no_init_weights,
     normalize_hf_config_compat,
+    prepare_remote_model_init_compat,
     resolve_trust_remote_code,
 )
 from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
@@ -96,6 +97,13 @@ def compare_versions(installed_version, required_version, operator):
         return installed == required
     else:
         raise ValueError(f"Unsupported operator: {operator}")
+
+
+def _is_meta_shell_build_error(exc: Exception) -> bool:
+    # Some trust_remote_code model constructors call int()/item() on tensors
+    # during __init__, which breaks when the shell is built on the meta device.
+    message = str(exc)
+    return "cannot be called on meta tensors" in message and ".item()" in message
 
 
 def resolve_loader_config(model_cls, config: PretrainedConfig, *, trust_remote_code: bool):
@@ -165,6 +173,7 @@ def ModelLoader(cls):
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
 
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
+        prepare_remote_model_init_compat(model_local_path, config)
 
         atten_impl = model_init_kwargs.get("attn_implementation", None)
 
@@ -273,30 +282,52 @@ def ModelLoader(cls):
 
         if quantize_config.offload_to_disk:
             shell_config = copy.deepcopy(config)
-            model = build_shell_model(cls.loader, config=shell_config, **model_init_kwargs)
-            defuser.convert_model(model, cleanup_original=False)
-            model._model_init_kwargs = model_init_kwargs
-            print_module_tree(model=model)
-
-            # enable mmap with low_cpu_mem_usage
-            turtle_spinner = log.spinner(title="Turtle model loading...", interval=0.1)
             try:
-                turtle_model = cls.loader.from_pretrained(
-                    model_local_path,
-                    config=config,
-                    low_cpu_mem_usage=True,
-                    **model_init_kwargs,
-                )
-            finally:
-                turtle_spinner.close()
+                model = build_shell_model(cls.loader, config=shell_config, **model_init_kwargs)
+            except RuntimeError as exc:
+                if not _is_meta_shell_build_error(exc):
+                    raise
 
-            if getattr(turtle_model, "config", None) is config:
-                turtle_model.config = copy.deepcopy(config)
-            defuser.convert_model(turtle_model, cleanup_original=False)
-            # TODO FIX ME...temp store model_init args
-            turtle_model._model_init_kwargs = model_init_kwargs
-            # print("actual turtle model-----------")
-            # print_module_tree(model=turtle_model)
+                log.warn(
+                    "Loader: meta-device shell build failed for `%s`; falling back to direct CPU load without turtle_model: %s",
+                    model_local_path,
+                    exc,
+                )
+                print("loading model directly to CPU (meta shell unsupported; turtle_model disabled)-----------")
+                fallback_init_kwargs = model_init_kwargs.copy()
+                fallback_init_kwargs.pop("device_map", None)
+                fallback_init_kwargs["low_cpu_mem_usage"] = False
+                model = cls.loader.from_pretrained(model_local_path, config=config, **fallback_init_kwargs)
+                if getattr(model, "config", None) is config:
+                    model.config = copy.deepcopy(config)
+                defuser.convert_model(model, cleanup_original=False)
+                model._model_init_kwargs = fallback_init_kwargs
+                print_module_tree(model=model)
+                turtle_model = None
+            else:
+                defuser.convert_model(model, cleanup_original=False)
+                model._model_init_kwargs = model_init_kwargs
+                print_module_tree(model=model)
+
+                # enable mmap with low_cpu_mem_usage
+                turtle_spinner = log.spinner(title="Turtle model loading...", interval=0.1)
+                try:
+                    turtle_model = cls.loader.from_pretrained(
+                        model_local_path,
+                        config=config,
+                        low_cpu_mem_usage=True,
+                        **model_init_kwargs,
+                    )
+                finally:
+                    turtle_spinner.close()
+
+                if getattr(turtle_model, "config", None) is config:
+                    turtle_model.config = copy.deepcopy(config)
+                defuser.convert_model(turtle_model, cleanup_original=False)
+                # TODO FIX ME...temp store model_init args
+                turtle_model._model_init_kwargs = model_init_kwargs
+                # print("actual turtle model-----------")
+                # print_module_tree(model=turtle_model)
         else:
             print("loading model directly to CPU (not using meta device or turtle_model)-----------")
             model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
@@ -432,6 +463,7 @@ def ModelLoader(cls):
         )
 
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
+        prepare_remote_model_init_compat(model_local_path, config)
 
         if cls.require_dtype:
             dtype = cls.require_dtype
