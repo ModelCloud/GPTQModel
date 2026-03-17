@@ -242,7 +242,7 @@ def _patch_transformers_remote_code_compat() -> None:
             cache_mapping = getattr(generation_utils, "NEED_SETUP_CACHE_CLASSES_MAPPING", None)
             cache_implementation = getattr(generation_config, "cache_implementation", None)
             if not isinstance(cache_mapping, dict) or not isinstance(cache_implementation, str):
-                return original_prepare_cache_for_generation(
+                original_prepare_cache_for_generation(
                     self,
                     generation_config,
                     model_kwargs,
@@ -250,10 +250,11 @@ def _patch_transformers_remote_code_compat() -> None:
                     batch_size,
                     max_cache_length,
                 )
+                return None
 
             custom_cache_cls = cache_mapping.get(cache_implementation)
             if custom_cache_cls is None:
-                return original_prepare_cache_for_generation(
+                original_prepare_cache_for_generation(
                     self,
                     generation_config,
                     model_kwargs,
@@ -261,6 +262,7 @@ def _patch_transformers_remote_code_compat() -> None:
                     batch_size,
                     max_cache_length,
                 )
+                return None
 
             is_linear_attn_cache = "mamba" in self.__class__.__name__.lower()
             cache_name = "past_key_values" if not is_linear_attn_cache else "cache_params"
@@ -320,6 +322,8 @@ def _patch_transformers_remote_code_compat() -> None:
                     model_kwargs["past_key_values"],
                     dynamic_cache_cls(config=text_config),
                 )
+
+            return None
 
         generation_mixin_cls._prepare_cache_for_generation = _prepare_cache_for_generation_compat
         generation_mixin_cls._gptqmodel_custom_cache_impl_patch = True
