@@ -388,7 +388,7 @@ def create_quant_module(
     device: DEVICE,
     lm_head_name: str,
     pack_dtype: torch.dtype,
-    format: FORMAT,
+    format: FORMAT = FORMAT.GPTQ,
     backend: BACKEND = BACKEND.AUTO,
     register_buffers: bool = True,
     adapter: Optional[Adapter] = None,
