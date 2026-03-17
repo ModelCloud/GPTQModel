@@ -1,4 +1,5 @@
 import sys
+from enum import Enum
 from types import SimpleNamespace
 
 import torch
@@ -56,6 +57,58 @@ def test_normalize_hf_config_compat_restores_sliding_window_cache_alias(monkeypa
     normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
 
     assert cache_utils.SlidingWindowCache is cache_utils.StaticCache
+
+
+def test_normalize_hf_config_compat_restores_legacy_cache_length_helpers(monkeypatch):
+    monkeypatch.delattr(cache_utils.Cache, "get_max_length", raising=False)
+    monkeypatch.delattr(cache_utils.Cache, "get_usable_length", raising=False)
+
+    class DummyLayer:
+        def __init__(self, seq_length, max_cache_shape):
+            self._seq_length = seq_length
+            self._max_cache_shape = max_cache_shape
+
+        def get_seq_length(self):
+            return self._seq_length
+
+        def get_max_cache_shape(self):
+            return self._max_cache_shape
+
+    class DummyCache(cache_utils.Cache):
+        def __init__(self, seq_length, max_cache_shape):
+            self.layers = [DummyLayer(seq_length, max_cache_shape)]
+
+    normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
+
+    limited_cache = DummyCache(seq_length=8, max_cache_shape=10)
+    dynamic_cache = DummyCache(seq_length=8, max_cache_shape=-1)
+
+    assert limited_cache.get_max_length() == 10
+    assert limited_cache.get_usable_length(4) == 6
+    assert dynamic_cache.get_max_length() is None
+    assert dynamic_cache.get_usable_length(4) == 8
+
+
+def test_normalize_hf_config_compat_restores_legacy_dynamic_cache_converters(monkeypatch):
+    monkeypatch.delattr(cache_utils.DynamicCache, "to_legacy_cache", raising=False)
+    monkeypatch.delattr(cache_utils.DynamicCache, "from_legacy_cache", raising=False)
+
+    normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
+
+    key_states = torch.randn(1, 2, 3, 4)
+    value_states = torch.randn(1, 2, 3, 4)
+
+    cache = cache_utils.DynamicCache()
+    cache.update(key_states, value_states, 0)
+    legacy_cache = cache.to_legacy_cache()
+    restored_cache = cache_utils.DynamicCache.from_legacy_cache(legacy_cache)
+
+    assert len(legacy_cache) == 1
+    assert torch.equal(legacy_cache[0][0], key_states)
+    assert torch.equal(legacy_cache[0][1], value_states)
+    assert restored_cache.get_seq_length(0) == 3
+    assert torch.equal(restored_cache.layers[0].keys, key_states)
+    assert torch.equal(restored_cache.layers[0].values, value_states)
 
 
 def test_prepare_remote_model_init_compat_patches_phi4_scalar_tensors(monkeypatch):
@@ -195,6 +248,71 @@ def test_prepare_remote_model_init_compat_adds_phi4_inner_prepare_inputs_hook(mo
 
     assert model_inputs["input_ids"] == "ids"
     assert model_inputs["past_key_values"] == "cache"
+
+
+def test_prepare_remote_model_init_compat_defaults_phi4_forward_input_mode(monkeypatch):
+    class InputMode(Enum):
+        LANGUAGE = 0
+        VISION = 1
+        SPEECH = 2
+        VISION_SPEECH = 3
+
+    class Phi4MMForCausalLM:
+        def forward(self, *args, **kwargs):
+            return kwargs["input_mode"]
+
+    remote_module_name = "transformers_modules.fake_phi4_forward.modeling_phi4mm"
+    speech_module_name = "transformers_modules.fake_phi4_forward.speech_conformer_encoder"
+    remote_module = SimpleNamespace(InputMode=InputMode, Phi4MMForCausalLM=Phi4MMForCausalLM)
+    speech_module = SimpleNamespace(torch=SimpleNamespace(tensor=lambda data, *args, **kwargs: (data, kwargs)))
+
+    Phi4MMForCausalLM.__module__ = remote_module_name
+    monkeypatch.setitem(sys.modules, remote_module_name, remote_module)
+    monkeypatch.setitem(sys.modules, speech_module_name, speech_module)
+    monkeypatch.setattr(
+        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+        lambda class_ref, model_id_or_path, **kwargs: Phi4MMForCausalLM,
+    )
+
+    config = SimpleNamespace(
+        model_type="phi4mm",
+        auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
+    )
+
+    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+
+    model = Phi4MMForCausalLM()
+
+    assert model.forward(input_ids="ids") is InputMode.LANGUAGE
+    assert model.forward(input_audio_embeds="audio") is InputMode.SPEECH
+    assert model.forward(input_image_embeds="image") is InputMode.VISION
+
+
+def test_prepare_remote_model_init_compat_skips_input_mode_patch_without_forward(monkeypatch):
+    class Phi4MMForCausalLM:
+        pass
+
+    remote_module_name = "transformers_modules.fake_phi4_no_forward.modeling_phi4mm"
+    speech_module_name = "transformers_modules.fake_phi4_no_forward.speech_conformer_encoder"
+    remote_module = SimpleNamespace(Phi4MMForCausalLM=Phi4MMForCausalLM)
+    speech_module = SimpleNamespace(torch=SimpleNamespace(tensor=lambda data, *args, **kwargs: (data, kwargs)))
+
+    Phi4MMForCausalLM.__module__ = remote_module_name
+    monkeypatch.setitem(sys.modules, remote_module_name, remote_module)
+    monkeypatch.setitem(sys.modules, speech_module_name, speech_module)
+    monkeypatch.setattr(
+        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+        lambda class_ref, model_id_or_path, **kwargs: Phi4MMForCausalLM,
+    )
+
+    config = SimpleNamespace(
+        model_type="phi4mm",
+        auto_map={"AutoModelForCausalLM": "modeling_phi4mm.Phi4MMForCausalLM"},
+    )
+
+    prepare_remote_model_init_compat("/tmp/phi4mm", config)
+
+    assert not hasattr(Phi4MMForCausalLM, "_gptqmodel_input_mode_patch")
 
 
 def test_resolve_trust_remote_code_overrides_when_native_support_exists(monkeypatch, capsys):
