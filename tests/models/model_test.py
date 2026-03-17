@@ -42,7 +42,14 @@ import unittest  # noqa: E402
 from collections.abc import Iterable, Mapping  # noqa: E402
 
 import torch.cuda  # noqa: E402
-from datasets import load_dataset  # noqa: E402
+
+try:  # noqa: E402
+    from datasets import load_dataset as hf_load_dataset  # noqa: E402
+except Exception as exc:  # pragma: no cover - depends on test environment
+    hf_load_dataset = None
+    DATASETS_IMPORT_ERROR = exc
+else:
+    DATASETS_IMPORT_ERROR = None
 
 
 try:
@@ -975,11 +982,15 @@ class ModelTest(unittest.TestCase):
 
     @classmethod
     def load_dataset(cls, tokenizer=None, rows: int = 0):
-        try:
-            dataset = load_dataset(path="/monster/data/model/dataset/nm-calibration", name="LLM", split="train")
-        except Exception as exc:  # pragma: no cover - exercised in fallbacks
-            log.warning("load_dataset failed; falling back to local parquet: %s", exc)
+        if hf_load_dataset is None:
+            log.warning("datasets.load_dataset unavailable; falling back to local parquet: %s", DATASETS_IMPORT_ERROR)
             dataset = cls._load_calibration_parquet()
+        else:
+            try:
+                dataset = hf_load_dataset(path="/monster/data/model/dataset/nm-calibration", name="LLM", split="train")
+            except Exception as exc:  # pragma: no cover - exercised in fallbacks
+                log.warning("load_dataset failed; falling back to local parquet: %s", exc)
+                dataset = cls._load_calibration_parquet()
 
         if rows > 0:
             return dataset.select(range(min(rows, len(dataset))))
