@@ -72,7 +72,6 @@ env:
   CUDA_VISIBLE_DEVICES: 0
   TORCH_CUDA_ARCH_LIST: '8.6 8.9 9.0 12.0'
   PYTORCH_ALLOC_CONF: 'expandable_segments:True'
-  MAX_JOBS: 4 # compile concurrency
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.249
   UV_INDEX_URL: http://10.0.14.249/simple
@@ -104,7 +103,7 @@ permissions:
 
 jobs:
   check-vm:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
       run_id: ${{ steps.get_ip.outputs.run_id }}
@@ -120,7 +119,7 @@ jobs:
           echo "exclusive-gpu: ${{ github.event.inputs['exclusive-gpu'] }}"
           echo "selected server: ${{ github.event.inputs.server }}"
 
-      - name: Select server
+      - name: Set server
         id: get_ip
         run: |
           echo "ip=$RUNNER" >> "$GITHUB_OUTPUT"
@@ -141,7 +140,7 @@ jobs:
           echo "max-parallel=$max_p"
 
   list-test-files:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     outputs:
       torch-files: ${{ steps.files.outputs.torch-files }}
       model-files: ${{ steps.files.outputs.model-files }}
@@ -228,7 +227,9 @@ jobs:
           echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
           echo UV_CACHE_DIR=$UV_CACHE_DIR
           echo VENV_ROOT=$VENV_ROOT
-          ls /root -ahl
+
+          echo "MAX_JOBS=$(nproc)" >> $GITHUB_ENV
+          echo "MAX_JOBS=$(nproc)"
 
       - name: Activate uv env
         run: |

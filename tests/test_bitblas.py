@@ -9,10 +9,10 @@ import torch.nn as nn
 from parameterized import parameterized
 from tabulate import tabulate
 
-from gptqmodel import BACKEND, GPTQModel
 import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
 import gptqmodel.utils.bitblas as bitblas_utils
 import gptqmodel.utils.model as model_utils
+from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear, marlin_import_exception
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear
@@ -585,7 +585,7 @@ def test_bitblas_forward_pass2():
 
     # Load a dummy model (1.0 GB) to test if there are errors while converting to bitblas
     # Take a few minutes for compiling (1st run) and repacking (each time)
-    GPTQModel.load("/monster/ci/models/Qwen3-1.7B-w2g64-gptq_v2", trust_remote_code=True, backend=BACKEND('bitblas'))
+    GPTQModel.load("/monster/data/model/Qwen3-1.7B-w2g64-gptq_v2", trust_remote_code=True, backend=BACKEND('bitblas'))
 
 
 ########### test_bitblas_quant.py ##########
