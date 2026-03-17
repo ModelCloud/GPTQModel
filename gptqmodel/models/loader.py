@@ -172,6 +172,8 @@ def ModelLoader(cls):
 
         config = AutoConfig.from_pretrained(model_local_path, **model_init_kwargs)
 
+        defuser.replace_fused_blocks(config.model_type)
+
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         prepare_remote_model_init_compat(model_local_path, config)
 
@@ -461,6 +463,8 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             **cached_file_kwargs,
         )
+
+        defuser.replace_fused_blocks(config.model_type)
 
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         prepare_remote_model_init_compat(model_local_path, config)
