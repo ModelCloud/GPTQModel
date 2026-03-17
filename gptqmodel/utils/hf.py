@@ -153,6 +153,11 @@ def _patch_transformers_remote_code_compat() -> None:
     except Exception:
         cache_utils = None
 
+    try:
+        from transformers.generation import utils as generation_utils
+    except Exception:
+        generation_utils = None
+
     if not hasattr(import_utils, "is_torch_fx_available"):
         # transformers 5.x removed `import_utils.is_torch_fx_available`, but
         # older remote model files still import it during module import.
@@ -214,6 +219,110 @@ def _patch_transformers_remote_code_compat() -> None:
             return cache
 
         dynamic_cache_cls.from_legacy_cache = from_legacy_cache
+
+    if generation_utils is not None and not hasattr(generation_utils, "NEED_SETUP_CACHE_CLASSES_MAPPING"):
+        # Older remote generation code registers custom cache builders through
+        # this module-global dict during import.
+        generation_utils.NEED_SETUP_CACHE_CLASSES_MAPPING = {}
+
+    generation_mixin_cls = getattr(generation_utils, "GenerationMixin", None) if generation_utils is not None else None
+    if generation_mixin_cls is not None and not getattr(generation_mixin_cls, "_gptqmodel_custom_cache_impl_patch", False):
+        original_prepare_cache_for_generation = generation_mixin_cls._prepare_cache_for_generation
+
+        # transformers 5.x removed the custom cache registry path used by some
+        # trust_remote_code models, so recreate just enough of that setup here.
+        def _prepare_cache_for_generation_compat(
+            self,
+            generation_config: GenerationConfig,
+            model_kwargs: dict,
+            generation_mode,
+            batch_size: int,
+            max_cache_length: int,
+        ) -> None:
+            cache_mapping = getattr(generation_utils, "NEED_SETUP_CACHE_CLASSES_MAPPING", None)
+            cache_implementation = getattr(generation_config, "cache_implementation", None)
+            if not isinstance(cache_mapping, dict) or not isinstance(cache_implementation, str):
+                return original_prepare_cache_for_generation(
+                    self,
+                    generation_config,
+                    model_kwargs,
+                    generation_mode,
+                    batch_size,
+                    max_cache_length,
+                )
+
+            custom_cache_cls = cache_mapping.get(cache_implementation)
+            if custom_cache_cls is None:
+                return original_prepare_cache_for_generation(
+                    self,
+                    generation_config,
+                    model_kwargs,
+                    generation_mode,
+                    batch_size,
+                    max_cache_length,
+                )
+
+            is_linear_attn_cache = "mamba" in self.__class__.__name__.lower()
+            cache_name = "past_key_values" if not is_linear_attn_cache else "cache_params"
+
+            user_defined_cache = model_kwargs.get(cache_name)
+            if user_defined_cache is not None:
+                if generation_config.cache_implementation is not None:
+                    raise ValueError(
+                        f"Passing both `cache_implementation` (used to initialize certain caches) and `{cache_name}` "
+                        "(`Cache` object) is unsupported. Please use only one of the two."
+                    )
+                if isinstance(user_defined_cache, tuple):
+                    raise ValueError(
+                        "Passing a tuple of `past_key_values` is not supported anymore. Please use a `Cache` instance."
+                    )
+                return
+
+            if generation_config.use_cache is False:
+                return
+
+            cache_config = generation_config.cache_config
+            if cache_config is None:
+                cache_kwargs = {}
+            elif isinstance(cache_config, dict):
+                cache_kwargs = dict(cache_config)
+            elif hasattr(cache_config, "to_dict"):
+                cache_kwargs = dict(cache_config.to_dict())
+            else:
+                cache_kwargs = dict(cache_config)
+
+            text_config = self.config.get_text_config(decoder=True) if hasattr(self.config, "get_text_config") else self.config
+            full_batch_size = max(generation_config.num_beams, generation_config.num_return_sequences) * batch_size
+            cache_kwargs.setdefault("config", text_config)
+            cache_kwargs.setdefault("batch_size", full_batch_size)
+            cache_kwargs.setdefault("max_batch_size", full_batch_size)
+            cache_kwargs.setdefault("max_cache_len", max_cache_length)
+
+            model_dtype = getattr(self, "dtype", None) or getattr(self.config, "torch_dtype", None)
+            if model_dtype is not None:
+                cache_kwargs.setdefault("dtype", model_dtype)
+
+            model_device = getattr(self, "device", None)
+            if model_device is not None:
+                cache_kwargs.setdefault("device", model_device)
+
+            model_kwargs["past_key_values"] = custom_cache_cls(**cache_kwargs)
+
+            encoder_decoder_cache_cls = getattr(cache_utils, "EncoderDecoderCache", None) if cache_utils is not None else None
+            if (
+                getattr(self.config, "is_encoder_decoder", False)
+                and "past_key_values" in model_kwargs
+                and encoder_decoder_cache_cls is not None
+                and not isinstance(model_kwargs["past_key_values"], encoder_decoder_cache_cls)
+                and dynamic_cache_cls is not None
+            ):
+                model_kwargs["past_key_values"] = encoder_decoder_cache_cls(
+                    model_kwargs["past_key_values"],
+                    dynamic_cache_cls(config=text_config),
+                )
+
+        generation_mixin_cls._prepare_cache_for_generation = _prepare_cache_for_generation_compat
+        generation_mixin_cls._gptqmodel_custom_cache_impl_patch = True
 
     if not getattr(PreTrainedModel, "_gptqmodel_legacy_tied_weights_patch", False) and hasattr(PreTrainedModel, "get_expanded_tied_weights_keys"):
         original_get_expanded_tied_weights_keys = PreTrainedModel.get_expanded_tied_weights_keys
