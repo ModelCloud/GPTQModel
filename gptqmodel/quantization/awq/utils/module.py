@@ -3,14 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import importlib
-
 import torch.nn as nn
+
+from ....utils._extension_loader import load_extension_module
 
 
 def try_import(module_name):
     try:
-        module = importlib.import_module(module_name)
+        module = load_extension_module(module_name)
         return module, ""
     except Exception as ex:
         return None, str(ex)
