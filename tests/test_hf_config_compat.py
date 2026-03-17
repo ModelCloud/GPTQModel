@@ -3,10 +3,12 @@ from enum import Enum
 from types import SimpleNamespace
 
 import torch
-from transformers import GPTNeoXConfig, LlamaConfig
+import transformers.generation.utils as generation_utils
+from transformers import GPTNeoXConfig, GenerationConfig, LlamaConfig
 
 from gptqmodel.utils import hf as hf_utils
 from transformers import cache_utils
+from transformers.generation.configuration_utils import GenerationMode
 
 from gptqmodel.utils.hf import (
     normalize_hf_config_compat,
@@ -109,6 +111,69 @@ def test_normalize_hf_config_compat_restores_legacy_dynamic_cache_converters(mon
     assert restored_cache.get_seq_length(0) == 3
     assert torch.equal(restored_cache.layers[0].keys, key_states)
     assert torch.equal(restored_cache.layers[0].values, value_states)
+
+
+def test_normalize_hf_config_compat_restores_generation_cache_mapping_alias(monkeypatch):
+    monkeypatch.delattr(generation_utils, "NEED_SETUP_CACHE_CLASSES_MAPPING", raising=False)
+
+    normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
+
+    namespace = {}
+    exec("from transformers.generation.utils import NEED_SETUP_CACHE_CLASSES_MAPPING", namespace)
+
+    assert namespace["NEED_SETUP_CACHE_CLASSES_MAPPING"] is generation_utils.NEED_SETUP_CACHE_CLASSES_MAPPING
+    assert isinstance(generation_utils.NEED_SETUP_CACHE_CLASSES_MAPPING, dict)
+
+
+def test_normalize_hf_config_compat_supports_legacy_custom_generation_cache_mapping():
+    class DummyCustomCache:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class DummyConfig:
+        is_encoder_decoder = False
+        torch_dtype = torch.float16
+
+        def get_text_config(self, decoder=True):
+            assert decoder is True
+            return self
+
+    class DummyModel(generation_utils.GenerationMixin):
+        _is_stateful = False
+
+        def __init__(self):
+            self.config = DummyConfig()
+            self.dtype = torch.float16
+            self.device = torch.device("cpu")
+
+    normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
+
+    original_mapping = dict(generation_utils.NEED_SETUP_CACHE_CLASSES_MAPPING)
+    generation_utils.NEED_SETUP_CACHE_CLASSES_MAPPING["variable"] = DummyCustomCache
+    try:
+        model = DummyModel()
+        generation_config = GenerationConfig(use_cache=True, num_beams=2, num_return_sequences=1)
+        generation_config.cache_implementation = "variable"
+        model_kwargs = {}
+
+        model._prepare_cache_for_generation(
+            generation_config,
+            model_kwargs,
+            GenerationMode.GREEDY_SEARCH,
+            batch_size=3,
+            max_cache_length=17,
+        )
+    finally:
+        generation_utils.NEED_SETUP_CACHE_CLASSES_MAPPING.clear()
+        generation_utils.NEED_SETUP_CACHE_CLASSES_MAPPING.update(original_mapping)
+
+    assert isinstance(model_kwargs["past_key_values"], DummyCustomCache)
+    assert model_kwargs["past_key_values"].kwargs["config"] is model.config
+    assert model_kwargs["past_key_values"].kwargs["batch_size"] == 6
+    assert model_kwargs["past_key_values"].kwargs["max_batch_size"] == 6
+    assert model_kwargs["past_key_values"].kwargs["max_cache_len"] == 17
+    assert model_kwargs["past_key_values"].kwargs["dtype"] == torch.float16
+    assert model_kwargs["past_key_values"].kwargs["device"] == torch.device("cpu")
 
 
 def test_prepare_remote_model_init_compat_patches_phi4_scalar_tensors(monkeypatch):
