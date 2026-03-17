@@ -1,5 +1,6 @@
 import torch
 
+from models import model_test as model_test_module
 from models.model_test import ModelTest
 
 
@@ -116,3 +117,29 @@ def test_generate_stable_with_limit_for_prepared_inputs_batch_decodes_suffix():
             "clean_up_tokenization_spaces": False,
         }
     ]
+
+
+def test_load_dataset_falls_back_when_datasets_import_failed(monkeypatch):
+    fallback_dataset = ModelTest._LocalCalibrationDataset([{"text": "a"}, {"text": "b"}])
+
+    monkeypatch.setattr(model_test_module, "hf_load_dataset", None)
+    monkeypatch.setattr(model_test_module, "DATASETS_IMPORT_ERROR", SyntaxError("source code string cannot contain null bytes"))
+    monkeypatch.setattr(ModelTest, "_load_calibration_parquet", staticmethod(lambda: fallback_dataset))
+
+    dataset = ModelTest.load_dataset(rows=1)
+
+    assert list(dataset) == [{"text": "a"}]
+
+
+def test_load_dataset_falls_back_when_hf_loader_raises(monkeypatch):
+    fallback_dataset = ModelTest._LocalCalibrationDataset([{"text": "x"}, {"text": "y"}])
+
+    def _broken_load_dataset(*args, **kwargs):
+        raise RuntimeError("broken datasets install")
+
+    monkeypatch.setattr(model_test_module, "hf_load_dataset", _broken_load_dataset)
+    monkeypatch.setattr(ModelTest, "_load_calibration_parquet", staticmethod(lambda: fallback_dataset))
+
+    dataset = ModelTest.load_dataset(rows=5)
+
+    assert list(dataset) == [{"text": "x"}, {"text": "y"}]
