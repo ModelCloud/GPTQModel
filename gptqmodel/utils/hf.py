@@ -509,7 +509,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
         import peft.import_utils as peft_import_utils
         import peft.tuners.lora.awq as peft_awq
     except Exception:
-        peft_awq = None
+        pass
     else:
         if not getattr(peft_awq, "_gptqmodel_awq_probe_patch", False):
             # PEFT later imports `awq.modules.linear`, so the availability
