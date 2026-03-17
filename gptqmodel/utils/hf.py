@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import inspect
 import json
+import sys
 import warnings
 from functools import lru_cache
 from typing import Any, Optional
@@ -28,6 +30,7 @@ __all__ = [
     "no_init_weights",
     "normalize_hf_config_compat",
     "prepare_remote_code_compat",
+    "prepare_remote_model_init_compat",
     "has_native_transformers_causallm_support",
     "resolve_trust_remote_code",
     "load_tokenizer",
@@ -145,6 +148,11 @@ def _patch_transformers_remote_code_compat() -> None:
     except Exception:
         return
 
+    try:
+        from transformers import cache_utils
+    except Exception:
+        cache_utils = None
+
     if not hasattr(import_utils, "is_torch_fx_available"):
         # transformers 5.x removed `import_utils.is_torch_fx_available`, but
         # older remote model files still import it during module import.
@@ -152,6 +160,11 @@ def _patch_transformers_remote_code_compat() -> None:
             return hasattr(torch, "fx")
 
         import_utils.is_torch_fx_available = is_torch_fx_available
+
+    if cache_utils is not None and not hasattr(cache_utils, "SlidingWindowCache") and hasattr(cache_utils, "StaticCache"):
+        # transformers 5.x folds sliding-window behavior into StaticCache
+        # layers, but older remote code still imports the legacy symbol.
+        cache_utils.SlidingWindowCache = cache_utils.StaticCache
 
     if not getattr(PreTrainedModel, "_gptqmodel_legacy_tied_weights_patch", False) and hasattr(PreTrainedModel, "get_expanded_tied_weights_keys"):
         original_get_expanded_tied_weights_keys = PreTrainedModel.get_expanded_tied_weights_keys
@@ -317,6 +330,119 @@ def prepare_remote_code_compat(config: Any) -> None:
     # Remote-code loads need both the transformers API shims and any config
     # field migrations applied before instantiation happens.
     normalize_hf_config_compat(config, trust_remote_code=True)
+
+
+def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: Any) -> None:
+    if not model_id_or_path or getattr(config, "model_type", None) != "phi4mm":
+        return
+
+    auto_map = getattr(config, "auto_map", None) or {}
+    class_ref = auto_map.get("AutoModelForCausalLM")
+    if not isinstance(class_ref, str):
+        return
+
+    try:
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+        model_cls = get_class_from_dynamic_module(class_ref, str(model_id_or_path))
+    except Exception as exc:
+        log.debug("HF: remote model init compat pre-import failed for `%s`: %s", model_id_or_path, exc)
+        return
+
+    module_root = model_cls.__module__.rsplit(".", maxsplit=1)[0]
+    speech_module = sys.modules.get(f"{module_root}.speech_conformer_encoder")
+    if speech_module is None or getattr(speech_module, "_gptqmodel_scalar_tensor_meta_patch", False):
+        return
+
+    speech_torch = getattr(speech_module, "torch", None)
+    original_tensor = getattr(speech_torch, "tensor", None)
+    if speech_torch is None or original_tensor is None:
+        return
+
+    def _is_phi4mm_subsampling_scalar_init() -> bool:
+        for frame_info in inspect.stack(context=0):
+            if frame_info.filename.endswith("speech_conformer_encoder.py") and frame_info.lineno == 1426:
+                return True
+        return False
+
+    # Phi-4 MM remote audio init creates scalar tensors only to derive Python
+    # output sizes in NemoConvSubsampling; forcing just that scalar tensor onto
+    # CPU keeps meta init safe without perturbing other meta-only buffers.
+    def tensor_compat(data, *args, **kwargs):
+        current_device = getattr(torch.utils._device, "CURRENT_DEVICE", None)
+        if (
+            kwargs.get("device") is None
+            and current_device == torch.device("meta")
+            and isinstance(data, (int, float, bool))
+            and _is_phi4mm_subsampling_scalar_init()
+        ):
+            kwargs = dict(kwargs)
+            kwargs["device"] = "cpu"
+        return original_tensor(data, *args, **kwargs)
+
+    speech_torch.tensor = tensor_compat
+
+    positional_encoding_cls = getattr(speech_module, "AbsolutePositionalEncoding", None)
+    if positional_encoding_cls is not None and not getattr(positional_encoding_cls, "_gptqmodel_meta_extend_patch", False):
+        original_extend_pe = positional_encoding_cls.extend_pe
+
+        def _is_phi4mm_positional_seed_call() -> bool:
+            for frame_info in inspect.stack(context=0):
+                if frame_info.filename.endswith("speech_conformer_encoder.py") and frame_info.lineno == 895:
+                    return True
+            return False
+
+        # The remote implementation seeds extend_pe() with a CPU scalar tensor.
+        # Under meta init, promote that seed tensor back to meta before the
+        # original method allocates its positional buffer.
+        def extend_pe_compat(self, x):
+            if isinstance(x, torch.Tensor) and x.device.type != "meta" and _is_phi4mm_positional_seed_call():
+                x = x.to(device="meta")
+            return original_extend_pe(self, x)
+
+        positional_encoding_cls.extend_pe = extend_pe_compat
+        positional_encoding_cls._gptqmodel_meta_extend_patch = True
+
+    remote_module = sys.modules.get(model_cls.__module__)
+    inner_model_cls = getattr(remote_module, "Phi4MMModel", None) if remote_module is not None else None
+    if inner_model_cls is not None and not hasattr(inner_model_cls, "prepare_inputs_for_generation"):
+        # PEFT expects the inner model it wraps to expose this hook, even
+        # though Phi-4 MM only defines the full implementation on the outer
+        # CausalLM class.
+        def prepare_inputs_for_generation(self, input_ids=None, past_key_values=None, inputs_embeds=None, **kwargs):
+            model_inputs = dict(kwargs)
+            if inputs_embeds is not None and past_key_values is None:
+                model_inputs["inputs_embeds"] = inputs_embeds
+            else:
+                model_inputs["input_ids"] = input_ids
+            model_inputs["past_key_values"] = past_key_values
+            return model_inputs
+
+        inner_model_cls.prepare_inputs_for_generation = prepare_inputs_for_generation
+
+    try:
+        import importlib.util
+        import peft.import_utils as peft_import_utils
+        import peft.tuners.lora.awq as peft_awq
+    except Exception:
+        peft_awq = None
+    else:
+        if not getattr(peft_awq, "_gptqmodel_awq_probe_patch", False):
+            # PEFT later imports `awq.modules.linear`, so the availability
+            # probe must require that concrete submodule instead of top-level
+            # namespace packages that are missing the actual runtime.
+            @lru_cache(maxsize=None)
+            def is_auto_awq_available() -> bool:
+                try:
+                    return importlib.util.find_spec("awq.modules.linear") is not None
+                except ModuleNotFoundError:
+                    return False
+
+            peft_import_utils.is_auto_awq_available = is_auto_awq_available
+            peft_awq.is_auto_awq_available = is_auto_awq_available
+            peft_awq._gptqmodel_awq_probe_patch = True
+
+    speech_module._gptqmodel_scalar_tensor_meta_patch = True
 
 
 def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
