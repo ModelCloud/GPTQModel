@@ -29,6 +29,8 @@ class _StubTokenizer:
 
 
 class _ChatStubTokenizer(_StubTokenizer):
+    chat_template = "{{ messages }}"
+
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
         # Mirror the HF chat-template path closely enough to verify precedence.
         assert tokenize is False
@@ -36,6 +38,23 @@ class _ChatStubTokenizer(_StubTokenizer):
         if add_generation_prompt:
             rendered += "<assistant>"
         return rendered
+
+
+class _MissingChatTemplateTokenizer(_StubTokenizer):
+    chat_template = None
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+        raise AssertionError("apply_chat_template should not be used when no chat template is configured")
+
+
+class _RaisingGetChatTemplateTokenizer(_StubTokenizer):
+    chat_template = None
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+        raise AssertionError("apply_chat_template should not be used when get_chat_template raises")
+
+    def get_chat_template(self, chat_template=None, tools=None):
+        raise ValueError("tokenizer.chat_template is not set")
 
 
 def _make_qmodel() -> BaseQModel:
@@ -171,3 +190,51 @@ def test_prepare_dataset_prefers_apply_chat_template_for_messages():
 
     assert batches[0]["input_ids"].tolist() == expected_ids
     assert batches[0]["input_ids"].tolist() != raw_text_ids
+
+
+def test_prepare_dataset_falls_back_to_text_when_chat_template_is_missing():
+    qmodel = _make_qmodel()
+    qmodel.tokenizer = _MissingChatTemplateTokenizer()
+    dataset = [
+        {
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "world"},
+            ],
+            "text": "raw-fallback",
+        }
+    ]
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_sort=None,
+        batch_size=1,
+        calibration_data_min_length=0,
+    )
+
+    expected_ids = qmodel.tokenizer(dataset[0]["text"], return_tensors="pt")["input_ids"].tolist()
+    assert batches[0]["input_ids"].tolist() == expected_ids
+
+
+def test_prepare_dataset_falls_back_to_text_when_get_chat_template_raises():
+    qmodel = _make_qmodel()
+    qmodel.tokenizer = _RaisingGetChatTemplateTokenizer()
+    dataset = [
+        {
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "world"},
+            ],
+            "text": "raw-fallback",
+        }
+    ]
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_sort=None,
+        batch_size=1,
+        calibration_data_min_length=0,
+    )
+
+    expected_ids = qmodel.tokenizer(dataset[0]["text"], return_tensors="pt")["input_ids"].tolist()
+    assert batches[0]["input_ids"].tolist() == expected_ids

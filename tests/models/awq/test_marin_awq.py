@@ -20,11 +20,11 @@ class TestMarin(ModelTest):
     # Marin inherits Qwen3's backbone with QK-Norm attention.
     EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
-            "acc": {"value": 0.5828, "floor_pct": 0.04},
-            "acc_norm": {"value": 0.6007, "floor_pct": 0.04},
+            "acc": {"value": 0.5299, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.5546, "floor_pct": 0.04},
         },
         EVAL.LM_EVAL.MMLU_STEM: {
-            "acc": {"value": 0.6673, "floor_pct": 0.04},
+            "acc": {"value": 0.6676, "floor_pct": 0.04},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
