@@ -23,6 +23,13 @@ class TestMarin(ModelTest):
             "acc": {"value": 0.5299, "floor_pct": 0.04},
             "acc_norm": {"value": 0.5546, "floor_pct": 0.04},
         },
+        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+            "chat_template": False,
+            "exact_match,flexible-extract": {
+                "value": 0.6716294458229942,
+                "floor_pct": 0.04,
+            },
+        },
         EVAL.LM_EVAL.MMLU_STEM: {
             "acc": {"value": 0.6676, "floor_pct": 0.04},
         },
