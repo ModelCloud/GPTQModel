@@ -171,6 +171,12 @@ def _patch_transformers_remote_code_compat() -> None:
         # layers, but older remote code still imports the legacy symbol.
         cache_utils.SlidingWindowCache = cache_utils.StaticCache
 
+    if cache_utils is not None and not hasattr(cache_utils, "HybridCache") and hasattr(cache_utils, "StaticCache"):
+        # transformers 5.x also collapsed the legacy HybridCache entrypoint
+        # into StaticCache, which already instantiates hybrid/sliding layers
+        # based on the model config.
+        cache_utils.HybridCache = cache_utils.StaticCache
+
     cache_base_cls = getattr(cache_utils, "Cache", None) if cache_utils is not None else None
     if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length") and hasattr(cache_base_cls, "get_max_cache_shape"):
         # Older remote decoders expect `get_max_length()`, while newer
@@ -359,6 +365,11 @@ def _patch_transformers_remote_code_compat() -> None:
         PreTrainedModel.get_expanded_tied_weights_keys = get_expanded_tied_weights_keys
         PreTrainedModel._gptqmodel_legacy_tied_weights_patch = True
 
+    if not hasattr(PreTrainedModel, "is_parallelizable"):
+        # Older remote-code model wrappers read this legacy base-class flag
+        # during init, but newer transformers dropped the default attribute.
+        PreTrainedModel.is_parallelizable = False
+
     if not getattr(PreTrainedModel, "_gptqmodel_missing_all_tied_weights_patch", False):
         original_getattr = PreTrainedModel.__getattr__
 
@@ -495,7 +506,7 @@ def prepare_remote_code_compat(config: Any) -> None:
 
 
 def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: Any) -> None:
-    if not model_id_or_path or getattr(config, "model_type", None) != "phi4mm":
+    if not model_id_or_path:
         return
 
     auto_map = getattr(config, "auto_map", None) or {}
@@ -514,8 +525,52 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
     module_root = model_cls.__module__.rsplit(".", maxsplit=1)[0]
     speech_module = sys.modules.get(f"{module_root}.speech_conformer_encoder")
     remote_module = sys.modules.get(model_cls.__module__)
+    ovis_config_module = sys.modules.get(f"{module_root}.configuration_ovis")
     outer_model_cls = model_cls if isinstance(model_cls, type) else None
     input_mode_enum = getattr(remote_module, "InputMode", None) if remote_module is not None else None
+
+    if (
+        outer_model_cls is not None
+        and hasattr(outer_model_cls, "tie_weights")
+        and not getattr(outer_model_cls, "_gptqmodel_tie_weights_kwargs_patch", False)
+    ):
+        try:
+            tie_weights_sig = inspect.signature(outer_model_cls.tie_weights)
+        except (TypeError, ValueError):
+            tie_weights_sig = None
+
+        if tie_weights_sig is not None:
+            tie_weight_params = tie_weights_sig.parameters.values()
+            accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in tie_weight_params)
+            supports_missing_keys = "missing_keys" in tie_weights_sig.parameters
+            supports_recompute_mapping = "recompute_mapping" in tie_weights_sig.parameters
+
+            if not accepts_kwargs and (not supports_missing_keys or not supports_recompute_mapping):
+                original_tie_weights = outer_model_cls.tie_weights
+
+                # transformers 5.x passes `missing_keys=` and `recompute_mapping=`
+                # into tie_weights(); older remote-code models still declare
+                # `tie_weights(self)` and only need the original no-arg behavior.
+                def tie_weights_compat(self, *args, **kwargs):
+                    return original_tie_weights(self)
+
+                outer_model_cls.tie_weights = tie_weights_compat
+                outer_model_cls._gptqmodel_tie_weights_kwargs_patch = True
+
+    if getattr(config, "model_type", None) == "ovis" and ovis_config_module is not None:
+        formatter_cls = getattr(ovis_config_module, "Llama3ConversationFormatter", None)
+        if formatter_cls is not None and not getattr(formatter_cls, "_gptqmodel_tokenizer_backend_patch", False):
+            support_tokenizer_types = list(getattr(formatter_cls, "support_tokenizer_types", None) or [])
+            if "TokenizersBackend" not in support_tokenizer_types:
+                # Current transformers/tokenicer fast-tokenizer backend exposes
+                # `TokenizersBackend` instead of the older
+                # `PreTrainedTokenizerFast` class name expected by Ovis remote code.
+                support_tokenizer_types.append("TokenizersBackend")
+                formatter_cls.support_tokenizer_types = support_tokenizer_types
+            formatter_cls._gptqmodel_tokenizer_backend_patch = True
+
+    if getattr(config, "model_type", None) != "phi4mm":
+        return
 
     if speech_module is not None and not getattr(speech_module, "_gptqmodel_scalar_tensor_meta_patch", False):
         speech_torch = getattr(speech_module, "torch", None)
