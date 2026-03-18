@@ -352,11 +352,16 @@ jobs:
         if: ${{ github.event.inputs.artifact_id == '' && !cancelled() && failure() }}
         continue-on-error: true
         run: |
+          ls -ahl dist
+          
           log_dir=/opt/dist/${{ github.run_id }}/logs
           log_file=$log_dir/build.log
           grep -nE "ptxas fatal|nvcc fatal|error:|fatal error|ninja: build stopped" $log_file | head -n 50 || true
 
-          ls -ahl dist
+          if grep -qE "bitblas_.*invalid ELF header" $log_file; then
+            echo "Detected invalid ELF header, cleaning bitblas cache..."
+            rm -rf ~/.cache/bitblas_*/nvidia
+          fi
 
       - name: Upload wheel to github artifact
         if: github.event.inputs.artifact_id == '' && !cancelled()
