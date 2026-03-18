@@ -171,6 +171,12 @@ def _patch_transformers_remote_code_compat() -> None:
         # layers, but older remote code still imports the legacy symbol.
         cache_utils.SlidingWindowCache = cache_utils.StaticCache
 
+    if cache_utils is not None and not hasattr(cache_utils, "HybridCache") and hasattr(cache_utils, "StaticCache"):
+        # transformers 5.x also collapsed the legacy HybridCache entrypoint
+        # into StaticCache, which already instantiates hybrid/sliding layers
+        # based on the model config.
+        cache_utils.HybridCache = cache_utils.StaticCache
+
     cache_base_cls = getattr(cache_utils, "Cache", None) if cache_utils is not None else None
     if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length") and hasattr(cache_base_cls, "get_max_cache_shape"):
         # Older remote decoders expect `get_max_length()`, while newer
@@ -358,6 +364,11 @@ def _patch_transformers_remote_code_compat() -> None:
 
         PreTrainedModel.get_expanded_tied_weights_keys = get_expanded_tied_weights_keys
         PreTrainedModel._gptqmodel_legacy_tied_weights_patch = True
+
+    if not hasattr(PreTrainedModel, "is_parallelizable"):
+        # Older remote-code model wrappers read this legacy base-class flag
+        # during init, but newer transformers dropped the default attribute.
+        PreTrainedModel.is_parallelizable = False
 
     if not getattr(PreTrainedModel, "_gptqmodel_missing_all_tied_weights_patch", False):
         original_getattr = PreTrainedModel.__getattr__

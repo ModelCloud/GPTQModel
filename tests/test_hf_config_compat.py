@@ -3,6 +3,7 @@ from enum import Enum
 from types import SimpleNamespace
 
 import torch
+import transformers
 import transformers.generation.utils as generation_utils
 from transformers import GPTNeoXConfig, GenerationConfig, LlamaConfig
 
@@ -59,6 +60,22 @@ def test_normalize_hf_config_compat_restores_sliding_window_cache_alias(monkeypa
     normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
 
     assert cache_utils.SlidingWindowCache is cache_utils.StaticCache
+
+
+def test_normalize_hf_config_compat_restores_hybrid_cache_alias(monkeypatch):
+    monkeypatch.delattr(cache_utils, "HybridCache", raising=False)
+
+    normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
+
+    assert cache_utils.HybridCache is cache_utils.StaticCache
+
+
+def test_normalize_hf_config_compat_restores_is_parallelizable_default(monkeypatch):
+    monkeypatch.delattr(transformers.PreTrainedModel, "is_parallelizable", raising=False)
+
+    normalize_hf_config_compat(SimpleNamespace(), trust_remote_code=True)
+
+    assert transformers.PreTrainedModel.is_parallelizable is False
 
 
 def test_normalize_hf_config_compat_restores_legacy_cache_length_helpers(monkeypatch):
