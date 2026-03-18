@@ -17,7 +17,7 @@ from packaging import version
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear, GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils import BACKEND
 from ...utils.env import env_flag
@@ -360,7 +360,9 @@ class BitblasQuantizationConfig:
         return not self.is_sym and self.zeros_mode == "quantized"
 
 
-class BitblasQuantLinear(GPTQQuantLinear):
+# BitBLAS repacks incoming GPTQ/AWQ tensors into its own operator layout, so the
+# destination module only needs grouped quantization state, not GPTQ qzero-format state.
+class BitblasQuantLinear(GroupedQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.BITBLAS]
     SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30, FORMAT.GPTQ_V2: 30}
     SUPPORTS_BITS = BITBLAS_SUPPORTED_BITS

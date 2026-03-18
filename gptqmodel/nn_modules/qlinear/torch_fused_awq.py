@@ -18,13 +18,14 @@ from ...quantization.awq.utils.packing_utils import (
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.torch import TORCH_HAS_FUSED_OPS
+from . import AWQuantLinear
 from .torch_fused import Int4PackedOp, TorchFusedQuantLinear, pack_scales_and_zeros
 
 
 log = setup_logger()
 
 
-class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
+class TorchFusedAwqQuantLinear(AWQuantLinear):
     """Torch fused AWQ variant based on GPTQ fused kernels via CPU int4 packing."""
 
     QUANT_TYPE = "torch_fused_awq"
@@ -47,7 +48,7 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
     SUPPORTS_PLATFORM = TorchFusedQuantLinear.SUPPORTS_PLATFORM
     SUPPORTS_PACK_DTYPES = TorchFusedQuantLinear.SUPPORTS_PACK_DTYPES
     SUPPORTS_ADAPTERS = TorchFusedQuantLinear.SUPPORTS_ADAPTERS
-    REQUIRES_FORMAT_V2 = TorchFusedQuantLinear.REQUIRES_FORMAT_V2
+    REQUIRES_FORMAT_V2 = False
 
     SUPPORTS_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
@@ -78,9 +79,10 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
             adapter=adapter,
             # Skip base buffer init, we need to manually init buffers for awq
             register_buffers=False,
-            enable_wf_unsqueeze=kwargs.pop("enable_wf_unsqueeze", False),
             **kwargs,
         )
+
+        self.linear_mode = None
 
         # Create awq buffers
         if register_buffers:
@@ -113,6 +115,13 @@ class TorchFusedAwqQuantLinear(TorchFusedQuantLinear):
 
     def post_init(self):
         super().post_init()
+        self.optimize()
+
+    def optimize(self):
+        if self.optimized:
+            return
+
+        super().optimize()
 
     def prepare_awq_fused_tensors(self, need_zeros: bool = True):
         self.scales.to(torch.float16).contiguous()
