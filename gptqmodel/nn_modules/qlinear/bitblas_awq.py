@@ -20,13 +20,13 @@ from .bitblas import (
     BITBLAS_INSTALL_HINT,
     BITBLAS_OPTIMIZE_FEATURES,
     BITBLAS_PROPAGATE_WEIGHTS,
-    BitblasQuantLinear,
+    BitblasBaseQuantLinear,
     BitblasQuantizationConfig,
     import_bitblas,
 )
 
 
-class AWQBitBlasKernel(BitblasQuantLinear):
+class AWQBitBlasKernel(BitblasBaseQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.BITBLAS_AWQ]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 0, FORMAT.BITBLAS: 30}
@@ -129,11 +129,12 @@ class AWQBitBlasKernel(BitblasQuantLinear):
 
         weight = linear.weight.detach().contiguous()
         group_idx = torch.arange(self.in_features, device=weight.device, dtype=torch.int64) // self.group_size
+        maxq = (1 << self.bits) - 1
 
         # Broadcast per-group affine parameters across K so we can recover the stored AWQ integer codes.
         scale_zeros = (zeros * scales).index_select(0, group_idx).t()
         scales_by_input = scales.index_select(0, group_idx).t()
-        intweight = torch.round((weight + scale_zeros) / scales_by_input).clamp_(0, self.maxq).to(torch.int8)
+        intweight = torch.round((weight + scale_zeros) / scales_by_input).clamp_(0, maxq).to(torch.int8)
 
         self._load_bitblas_quant_state(
             intweight_out_in=intweight,

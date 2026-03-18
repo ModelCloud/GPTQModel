@@ -500,30 +500,6 @@ class GroupedQuantLinear(BaseQuantLinear):
         self.requested_group_size = group_size
         self.desc_act = desc_act
         self.sym = sym
-        self.pack_dtype = pack_dtype
-        self.maxq = 2 ** self.bits - 1
-
-        if self.pack_dtype == t.int8:
-            self.pack_dtype_bits = 8
-            self.pack_np_dtype = np.int8
-            self.pack_np_math_dtype = np.uint8
-        elif self.pack_dtype == t.int16:
-            self.pack_dtype_bits = 16
-            self.pack_np_dtype = np.int16
-            self.pack_np_math_dtype = np.uint16
-        elif self.pack_dtype == t.int32:
-            self.pack_dtype_bits = 32
-            self.pack_np_dtype = np.int32
-            self.pack_np_math_dtype = np.uint32
-        elif self.pack_dtype == t.int64:
-            self.pack_dtype_bits = 64
-            self.pack_np_dtype = np.int64
-            self.pack_np_math_dtype = np.uint64
-        else:
-            raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
-
-        # pack_factor is only meaningful for 2/4/8-bit packed layouts.
-        self.pack_factor = self.pack_dtype_bits // self.bits
 
     def smooth_block_size(self) -> int:
         return -1 if self.requested_group_size == -1 else self.group_size
@@ -594,6 +570,37 @@ class GroupedQuantLinear(BaseQuantLinear):
         return True, None
 
 
+class PackedGroupedQuantLinear(GroupedQuantLinear):
+    def __init__(self, *args, pack_dtype: t.dtype, **kwargs):
+        super().__init__(*args, pack_dtype=pack_dtype, **kwargs)
+
+        # Packed GPTQ/AWQ layouts need explicit storage-word metadata.
+        self.pack_dtype = pack_dtype
+        self.maxq = 2 ** self.bits - 1
+
+        if self.pack_dtype == t.int8:
+            self.pack_dtype_bits = 8
+            self.pack_np_dtype = np.int8
+            self.pack_np_math_dtype = np.uint8
+        elif self.pack_dtype == t.int16:
+            self.pack_dtype_bits = 16
+            self.pack_np_dtype = np.int16
+            self.pack_np_math_dtype = np.uint16
+        elif self.pack_dtype == t.int32:
+            self.pack_dtype_bits = 32
+            self.pack_np_dtype = np.int32
+            self.pack_np_math_dtype = np.uint32
+        elif self.pack_dtype == t.int64:
+            self.pack_dtype_bits = 64
+            self.pack_np_dtype = np.int64
+            self.pack_np_math_dtype = np.uint64
+        else:
+            raise ValueError(f"Unsupported pack_dtype: {self.pack_dtype}")
+
+        # pack_factor is only meaningful for packed low-bit code storage.
+        self.pack_factor = self.pack_dtype_bits // self.bits
+
+
 class WeightOnlyQuantLinear(BaseQuantLinear):
     def __init__(self,
                  bits: int,
@@ -626,7 +633,7 @@ class WeightOnlyQuantLinear(BaseQuantLinear):
         )
 
 
-class GPTQQuantLinear(GroupedQuantLinear):
+class GPTQQuantLinear(PackedGroupedQuantLinear):
     def __init__(self,
                  bits: int,
                  group_size: int,
@@ -1400,7 +1407,7 @@ class PackableQuantLinear(GPTQQuantLinear):
 
             # print("self qw", self.qweight, self.scales, self.qzeros)
 
-class AWQuantLinear(GroupedQuantLinear):
+class AWQuantLinear(PackedGroupedQuantLinear):
     def __init__(self,
                  bias: bool = False,
                  register_buffers: bool = False,

@@ -360,70 +360,10 @@ class BitblasQuantizationConfig:
         return not self.is_sym and self.zeros_mode == "quantized"
 
 
-# BitBLAS repacks incoming GPTQ/AWQ tensors into its own operator layout, so the
-# destination module only needs grouped quantization state, not GPTQ qzero-format state.
-class BitblasQuantLinear(GroupedQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.BITBLAS]
-    SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30, FORMAT.GPTQ_V2: 30}
-    SUPPORTS_BITS = BITBLAS_SUPPORTED_BITS
-    SUPPORTS_GROUP_SIZE = BITBLAS_SUPPORTED_GROUP_SIZES
-    # BitBLAS' public matmul API does not expose GPTQ activation-order metadata (`g_idx` /
-    # permutation tensors). Keep desc_act disabled until upstream adds a supported act-order path.
-    SUPPORTS_DESC_ACT = [False]
-    SUPPORTS_SYM = BITBLAS_SUPPORTED_SYM
-    SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = False
-    SUPPORTS_AUTO_PADDING = False
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [16]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]
-
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
-    SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
-    SUPPORTS_PACK_DTYPES = [torch.int32]
-    SUPPORTS_ADAPTERS = [Lora]
-
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
-
-    QUANT_TYPE = "gptq_bitblas"
-    SUPPORTS_METHODS = [METHOD.GPTQ]
-
+class BitblasBaseQuantLinear(GroupedQuantLinear):
     OPT_FEATURES = BITBLAS_OPTIMIZE_FEATURES
     TORCH_DTYPE = torch.float16
 
-    @classmethod
-    def _bf16_signed_weight_error(cls, bits: int, layer: Optional[str] = None) -> NotImplementedError:
-        location = f" for layer pattern `{layer}`" if layer is not None else ""
-        return NotImplementedError(
-            f"{cls.__name__} does not support `torch.bfloat16` with symmetric `{bits}`-bit GPTQ weights{location}. "
-            "This is blocked by an upstream BitBLAS CUDA codegen failure for signed low-bit dequantization. "
-            "Use `torch.float16`, asymmetric GPTQ/unsigned weights, or a different backend."
-        )
-
-    @classmethod
-    def _validate_bf16_bitblas_combo(
-        cls,
-        *,
-        bits: int,
-        sym: bool,
-        dtype: Optional[torch.dtype],
-        dynamic: Optional[dict] = None,
-    ) -> Tuple[bool, Optional[Exception]]:
-        if METHOD.GPTQ not in cls.SUPPORTS_METHODS or dtype != torch.bfloat16:
-            return True, None
-
-        if sym and bits in BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS:
-            return False, cls._bf16_signed_weight_error(bits)
-
-        if dynamic is None:
-            return True, None
-
-        for layer, overrides in dynamic.items():
-            layer_bits = overrides.get("bits", bits)
-            layer_sym = overrides.get("sym", sym)
-            if layer_sym and layer_bits in BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS:
-                return False, cls._bf16_signed_weight_error(layer_bits, layer=layer)
-
-        return True, None
     def _build_quant_config(
         self,
         *,
@@ -440,6 +380,18 @@ class BitblasQuantLinear(GroupedQuantLinear):
             is_sym=sym,
             torch_dtype=dtype,
         )
+
+    @classmethod
+    def _validate_kernel_combo(
+        cls,
+        *,
+        bits: int,
+        sym: bool,
+        dtype: Optional[torch.dtype],
+        dynamic: Optional[dict] = None,
+    ) -> Tuple[bool, Optional[Exception]]:
+        del bits, sym, dtype, dynamic
+        return True, None
 
     def __init__(
         self,
@@ -464,7 +416,7 @@ class BitblasQuantLinear(GroupedQuantLinear):
         if dtype not in self.SUPPORTS_DTYPES:
             raise ValueError(f"{self.__class__.__name__} only supports dtypes {self.SUPPORTS_DTYPES}: actual dtype = {dtype}")
 
-        ok, err = self._validate_bf16_bitblas_combo(bits=bits, sym=sym, dtype=dtype)
+        ok, err = self.__class__._validate_kernel_combo(bits=bits, sym=sym, dtype=dtype)
         if not ok:
             raise err
 
@@ -542,7 +494,7 @@ class BitblasQuantLinear(GroupedQuantLinear):
         trainable: Optional[bool] = None,
         adapter: Optional[Adapter] = None,
     ) -> Tuple[bool, Optional[Exception]]:
-        ok, err = cls._validate_bf16_bitblas_combo(bits=bits, sym=sym, dtype=dtype, dynamic=dynamic)
+        ok, err = cls._validate_kernel_combo(bits=bits, sym=sym, dtype=dtype, dynamic=dynamic)
         if not ok:
             return False, err
 
@@ -783,6 +735,69 @@ class BitblasQuantLinear(GroupedQuantLinear):
             out = out.to(dtype=input_dtype)
 
         return out
+
+
+# BitBLAS repacks incoming GPTQ/AWQ tensors into its own operator layout, so the
+# destination module only needs grouped quantization state, not GPTQ qzero-format state.
+class BitblasQuantLinear(BitblasBaseQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.BITBLAS]
+    SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30, FORMAT.GPTQ_V2: 30}
+    SUPPORTS_BITS = BITBLAS_SUPPORTED_BITS
+    SUPPORTS_GROUP_SIZE = BITBLAS_SUPPORTED_GROUP_SIZES
+    # BitBLAS' public matmul API does not expose GPTQ activation-order metadata (`g_idx` /
+    # permutation tensors). Keep desc_act disabled until upstream adds a supported act-order path.
+    SUPPORTS_DESC_ACT = [False]
+    SUPPORTS_SYM = BITBLAS_SUPPORTED_SYM
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [16]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]
+
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = [Lora]
+
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    QUANT_TYPE = "gptq_bitblas"
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+
+    @classmethod
+    def _bf16_signed_weight_error(cls, bits: int, layer: Optional[str] = None) -> NotImplementedError:
+        location = f" for layer pattern `{layer}`" if layer is not None else ""
+        return NotImplementedError(
+            f"{cls.__name__} does not support `torch.bfloat16` with symmetric `{bits}`-bit GPTQ weights{location}. "
+            "This is blocked by an upstream BitBLAS CUDA codegen failure for signed low-bit dequantization. "
+            "Use `torch.float16`, asymmetric GPTQ/unsigned weights, or a different backend."
+        )
+
+    @classmethod
+    def _validate_kernel_combo(
+        cls,
+        *,
+        bits: int,
+        sym: bool,
+        dtype: Optional[torch.dtype],
+        dynamic: Optional[dict] = None,
+    ) -> Tuple[bool, Optional[Exception]]:
+        if dtype != torch.bfloat16:
+            return True, None
+
+        if sym and bits in BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS:
+            return False, cls._bf16_signed_weight_error(bits)
+
+        if dynamic is None:
+            return True, None
+
+        for layer, overrides in dynamic.items():
+            layer_bits = overrides.get("bits", bits)
+            layer_sym = overrides.get("sym", sym)
+            if layer_sym and layer_bits in BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS:
+                return False, cls._bf16_signed_weight_error(layer_bits, layer=layer)
+
+        return True, None
 
     def repack_from_gptq(self, gptq_module: BaseQuantLinear) -> None:
         bits = self.bits
