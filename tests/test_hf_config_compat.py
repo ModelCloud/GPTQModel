@@ -1,4 +1,5 @@
 import sys
+from types import ModuleType
 from enum import Enum
 from types import SimpleNamespace
 
@@ -228,6 +229,61 @@ def test_prepare_remote_model_init_compat_patches_phi4_scalar_tensors(monkeypatc
 
     assert calls == [(80, "cpu")]
     assert getattr(speech_module, "_gptqmodel_scalar_tensor_meta_patch", False) is True
+
+
+def test_prepare_remote_model_init_compat_wraps_legacy_tie_weights_signature(monkeypatch):
+    calls = []
+
+    class DummyRemoteModel:
+        __module__ = "transformers_modules.fake_ovis.modeling_ovis"
+
+        def tie_weights(self):
+            calls.append("tied")
+
+    monkeypatch.setattr(
+        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+        lambda class_ref, model_id_or_path, **kwargs: DummyRemoteModel,
+    )
+
+    config = SimpleNamespace(
+        model_type="ovis",
+        auto_map={"AutoModelForCausalLM": "modeling_ovis.Ovis"},
+    )
+
+    prepare_remote_model_init_compat("/tmp/ovis", config)
+
+    DummyRemoteModel().tie_weights(missing_keys={"lm_head.weight"}, recompute_mapping=False)
+
+    assert calls == ["tied"]
+    assert getattr(DummyRemoteModel, "_gptqmodel_tie_weights_kwargs_patch", False) is True
+
+
+def test_prepare_remote_model_init_compat_accepts_tokenizers_backend_for_ovis(monkeypatch):
+    class DummyRemoteModel:
+        __module__ = "transformers_modules.fake_ovis.modeling_ovis"
+
+    config_module = ModuleType("transformers_modules.fake_ovis.configuration_ovis")
+
+    class Llama3ConversationFormatter:
+        support_tokenizer_types = ["PreTrainedTokenizerFast"]
+
+    config_module.Llama3ConversationFormatter = Llama3ConversationFormatter
+    monkeypatch.setitem(sys.modules, config_module.__name__, config_module)
+    monkeypatch.setitem(sys.modules, "transformers_modules.fake_ovis.modeling_ovis", ModuleType("transformers_modules.fake_ovis.modeling_ovis"))
+    monkeypatch.setattr(
+        "transformers.dynamic_module_utils.get_class_from_dynamic_module",
+        lambda class_ref, model_id_or_path, **kwargs: DummyRemoteModel,
+    )
+
+    config = SimpleNamespace(
+        model_type="ovis",
+        auto_map={"AutoModelForCausalLM": "modeling_ovis.Ovis"},
+    )
+
+    prepare_remote_model_init_compat("/tmp/ovis", config)
+
+    assert "TokenizersBackend" in Llama3ConversationFormatter.support_tokenizer_types
+    assert getattr(Llama3ConversationFormatter, "_gptqmodel_tokenizer_backend_patch", False) is True
 
 
 def test_prepare_remote_model_init_compat_promotes_phi4_positional_seed_to_meta(monkeypatch):
