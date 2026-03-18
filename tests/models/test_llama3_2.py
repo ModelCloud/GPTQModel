@@ -9,14 +9,14 @@ from model_test import ModelTest
 from gptqmodel.utils.eval import EVAL
 
 
-# gpu9/a100
+# Scores below were captured on gpu6/4090 in fast mode.
 # | Metric                                             |   MARLIN |
 # |----------------------------------------------------|----------|
-# | arc_challenge :: acc,none                          |   0.3089 |
-# | arc_challenge :: acc_norm,none                     |   0.3481 |
-# | gsm8k_platinum_cot :: exact_match,flexible-extract |   0.3143 |
-# | gsm8k_platinum_cot :: exact_match,strict-match     |   0.1315 |
-# | mmlu_stem :: acc,none                              |   0.399  |
+# | arc_challenge :: acc,none                          |   0.3166 |
+# | arc_challenge :: acc_norm,none                     |   0.3430 |
+# | gsm8k_platinum_cot :: exact_match,flexible-extract |   0.4624 |
+# | gsm8k_platinum_cot :: exact_match,strict-match     |   0.4326 |
+# | mmlu_stem :: acc,none                              |   0.3942 |
 class TestLlama3_2(ModelTest):
     # DELETE_QUANTIZED_MODEL = False
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
@@ -53,7 +53,7 @@ class TestLlama3_2(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.4235,
+                "value": 0.4624,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
@@ -61,7 +61,7 @@ class TestLlama3_2(ModelTest):
         EVAL.LM_EVAL.MMLU_STEM: {
             "chat_template": False,
             "acc": {
-                "value": 0.4012,
+                "value": 0.3942,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
@@ -69,12 +69,12 @@ class TestLlama3_2(ModelTest):
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
-                "value": 0.3089,
+                "value": 0.3166,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
             "acc_norm": {
-                "value": 0.3549,
+                "value": 0.3430,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
