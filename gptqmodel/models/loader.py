@@ -42,7 +42,12 @@ from ..utils.hf import (
     prepare_remote_model_init_compat,
     resolve_trust_remote_code,
 )
-from ..utils.importer import auto_select_device, normalize_device_device_map, select_quant_linear
+from ..utils.importer import (
+    auto_select_device,
+    get_kernel_for_backend,
+    normalize_device_device_map,
+    select_quant_linear,
+)
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
 from ..utils.machete import _validate_machete_device_support
@@ -104,6 +109,27 @@ def _is_meta_shell_build_error(exc: Exception) -> bool:
     # during __init__, which breaks when the shell is built on the meta device.
     message = str(exc)
     return "cannot be called on meta tensors" in message and ".item()" in message
+
+
+def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
+    if qcfg.quant_method != METHOD.AWQ:
+        return dtype
+    if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
+        return dtype
+    if not isinstance(dtype, torch.dtype):
+        return dtype
+
+    try:
+        qlinear = get_kernel_for_backend(backend, qcfg.quant_method, qcfg.format)
+    except ValueError:
+        return dtype
+
+    supported_dtypes = getattr(qlinear, "SUPPORTS_DTYPES", None) or []
+    if dtype in supported_dtypes or torch.float16 not in supported_dtypes:
+        return dtype
+
+    log.info(f"Loading Quantized Model: Auto fix `dtype` to `torch.float16` for `{qlinear.__name__}`")
+    return torch.float16
 
 
 def resolve_loader_config(model_cls, config: PretrainedConfig, *, trust_remote_code: bool):
@@ -491,6 +517,8 @@ def ModelLoader(cls):
             # EXLLAMA_EORA only supports torch.float16
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
+
+        dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
 
         # inject adapter into qcfg
         if adapter is not None:
