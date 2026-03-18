@@ -12,7 +12,7 @@ from gptqmodel.utils.backend import BACKEND
 class _AutotuneTestKernel(BaseQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.TORCH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 4}
+    SUPPORTS_FORMATS = {}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [4]
     SUPPORTS_DESC_ACT = [False]
@@ -34,16 +34,18 @@ class _AutotuneTestKernel(BaseQuantLinear):
         self.autotune_calls = 0
         super().__init__(
             bits=4,
-            group_size=4,
-            desc_act=False,
-            sym=True,
             in_features=4,
             out_features=4,
             bias=False,
-            pack_dtype=torch.int32,
             backend=BACKEND.TORCH,
             adapter=None,
             register_buffers=False,
+            validate_kwargs={
+                "group_size": 4,
+                "desc_act": False,
+                "sym": True,
+                "pack_dtype": torch.int32,
+            },
         )
 
     def _autotune(self, x: torch.Tensor):

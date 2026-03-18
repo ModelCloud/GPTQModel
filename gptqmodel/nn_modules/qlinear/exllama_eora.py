@@ -22,7 +22,7 @@ from torch.nn import Parameter
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear
+from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -56,7 +56,7 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
     gptqmodel_exllama_eora.gptq_shuffle(q_weight, q_perm, bit)
 
 
-class ExllamaEoraQuantLinear(BaseQuantLinear):
+class ExllamaEoraQuantLinear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.EXLLAMA_EORA]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 0}

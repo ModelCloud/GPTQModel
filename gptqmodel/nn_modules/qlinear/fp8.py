@@ -20,7 +20,7 @@ from ...quantization.config import (
     _normalize_fp8_weight_scale_method,
 )
 from ...utils.backend import BACKEND
-from . import BaseQuantLinear
+from . import WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
 
 
@@ -102,14 +102,11 @@ def quantize_fp8_weight(
     return quantized.contiguous(), scale_inv.to(torch.float32).contiguous()
 
 
-class TorchFP8QuantLinear(BaseQuantLinear):
+class TorchFP8QuantLinear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.TORCH]
     SUPPORTS_METHODS = [METHOD.FP8]
     SUPPORTS_FORMATS = {FORMAT.FP8: 15}
     SUPPORTS_BITS = [8]
-    SUPPORTS_GROUP_SIZE = [-1]
-    SUPPORTS_DESC_ACT = [False]
-    SUPPORTS_SYM = [True]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False
@@ -162,22 +159,15 @@ class TorchFP8QuantLinear(BaseQuantLinear):
 
         super().__init__(
             bits=bits,
-            group_size=group_size,
-            desc_act=desc_act,
-            sym=sym,
             in_features=in_features,
             out_features=out_features,
             bias=bias,
-            pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.TORCH),
             adapter=adapter,
             register_buffers=False,
+            pack_dtype=pack_dtype,
             **kwargs,
         )
-
-        self.group_size = -1
-        self.desc_act = False
-        self.sym = True
 
         if register_buffers:
             self._allocate_buffers(bias=bias)
@@ -187,6 +177,11 @@ class TorchFP8QuantLinear(BaseQuantLinear):
         if not (hasattr(torch, "float8_e4m3fn") or hasattr(torch, "float8_e5m2")):
             return False, RuntimeError("TorchFP8QuantLinear requires a PyTorch build with FP8 dtypes.")
         return True, None
+
+    def smooth_block_size(self) -> int:
+        if self.weight_scale_method == "block" and self.weight_block_size is not None:
+            return self.weight_block_size[1]
+        return -1
 
     def _scale_shape(self) -> tuple[int, ...]:
         if self.weight_scale_method == "tensor":
@@ -288,7 +283,7 @@ class TorchFP8QuantLinear(BaseQuantLinear):
         weight = _apply_optional_smoother(
             weight,
             smooth=smooth,
-            group_size=self.group_size,
+            group_size=self.smooth_block_size(),
         )
         qweight, weight_scale_inv = quantize_fp8_weight(
             weight,

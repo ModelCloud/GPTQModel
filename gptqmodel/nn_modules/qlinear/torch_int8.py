@@ -13,7 +13,7 @@ from transformers import PreTrainedModel
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear
+from ...nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 
@@ -84,7 +84,7 @@ class Int8PackedModule(torch.nn.Module):
         return torch.ops.aten._weight_int8pack_mm(x, self.int8_weight_nk, self.int8_channel_scale)
 
 
-class TorchInt8QuantLinear(BaseQuantLinear):
+class TorchInt8QuantLinear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.TORCH_INT8]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     # Keep auto-selection unchanged; this kernel is enabled via explicit backend selection.

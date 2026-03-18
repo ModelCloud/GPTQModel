@@ -13,7 +13,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import CPU, DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear
+from ...nn_modules.qlinear import GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -49,7 +49,7 @@ def mul(
     gptqmodel_qqq_kernels.qqq_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par)
 
 
-class QQQQuantLinear(BaseQuantLinear):
+class QQQQuantLinear(GroupedQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.QQQ]
     SUPPORTS_METHODS = [METHOD.QQQ]
     SUPPORTS_FORMATS = {FORMAT.QQQ: 100}

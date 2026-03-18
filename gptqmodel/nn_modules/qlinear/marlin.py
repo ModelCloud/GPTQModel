@@ -23,7 +23,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear
+from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -48,7 +48,7 @@ from ...utils.rocm import IS_ROCM
 log = setup_logger()
 
 
-class MarlinQuantLinear(BaseQuantLinear):
+class MarlinQuantLinear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.MARLIN, BACKEND.MARLIN_FP16]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 90, FORMAT.MARLIN: 90}

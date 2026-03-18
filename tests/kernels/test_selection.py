@@ -67,7 +67,17 @@ def _pick_group_size(cls):
     for candidate in group_sizes:
         if candidate != -1:
             return candidate
-    return group_sizes[0] if group_sizes else 128
+    return group_sizes[0] if group_sizes else -1
+
+
+def _pick_desc_act(cls):
+    values = list(getattr(cls, "SUPPORTS_DESC_ACT", []))
+    return values[0] if values else False
+
+
+def _pick_sym(cls):
+    values = list(getattr(cls, "SUPPORTS_SYM", []))
+    return values[0] if values else True
 
 
 def _pick_bits(cls):
@@ -109,8 +119,8 @@ def test_select_quant_linear_smoke(kernel_cls, method, fmt):
     if bits is None:
         pytest.skip(f"No selector-compatible bit-width available for {kernel_cls.__name__}.")
     group_size = _pick_group_size(kernel_cls)
-    desc_act = kernel_cls.SUPPORTS_DESC_ACT[0]
-    sym = kernel_cls.SUPPORTS_SYM[0]
+    desc_act = _pick_desc_act(kernel_cls)
+    sym = _pick_sym(kernel_cls)
 
     qlinear_cls = select_quant_linear(
         bits=bits,

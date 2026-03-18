@@ -20,7 +20,7 @@ from ...quantization.config import Fallback, FallbackStrategy, FORMAT, GGUFBits,
 from ...quantization.fallback_smooth import smooth_block
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
-from . import BaseQuantLinear
+from . import WeightOnlyQuantLinear
 
 
 try:
@@ -416,14 +416,11 @@ def _dequantize_q6_k_numpy(qweight: np.ndarray) -> np.ndarray:
     return (d * q).reshape(rows, -1)
 
 
-class GGUFTorchQuantLinear(BaseQuantLinear):
+class GGUFTorchQuantLinear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TORCH]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 15}
     SUPPORTS_BITS = [4, 5, 6, 8]
-    SUPPORTS_GROUP_SIZE = [-1]
-    SUPPORTS_DESC_ACT = [False]
-    SUPPORTS_SYM = [True]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True
@@ -486,20 +483,16 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
 
         super().__init__(
             bits=int(bits_spec),
-            group_size=group_size,
-            sym=sym,
-            desc_act=desc_act,
             in_features=in_features,
             out_features=out_features,
             bias=bias,
-            pack_dtype=pack_dtype,
             backend=kwargs.pop("backend", BACKEND.GGUF_TORCH),
             adapter=adapter,
             register_buffers=False,
+            pack_dtype=pack_dtype,
             **kwargs,
         )
 
-        self.group_size = -1
         self.bits = bits_spec
 
         if register_buffers:
@@ -507,6 +500,9 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
 
     def _bytes_per_row(self) -> int:
         return (self.padded_in_features // self.gguf_block_size) * self.gguf_type_size
+
+    def smooth_block_size(self) -> int:
+        return self.gguf_block_size
 
     def _allocate_buffers(self, *, bias: bool) -> None:
         bytes_per_row = self._bytes_per_row()
@@ -560,7 +556,7 @@ class GGUFTorchQuantLinear(BaseQuantLinear):
         weight = _apply_optional_smoother(
             weight,
             smooth=smooth,
-            group_size=self.group_size,
+            group_size=self.smooth_block_size(),
         )
         if weight.shape[1] != self.padded_in_features:
             weight = torch.nn.functional.pad(weight, (0, self.padded_in_features - weight.shape[1]))

@@ -11,7 +11,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear
+from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.exllamav2 import ScratchSpace
@@ -30,7 +30,7 @@ def _torch_device(idx):
         return "cpu"
     return f"cuda:{idx}"
 
-class ExllamaV2QuantLinear(BaseQuantLinear):
+class ExllamaV2QuantLinear(GPTQQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.EXLLAMA_V2]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 80, FORMAT.GPTQ_V2: 80}
