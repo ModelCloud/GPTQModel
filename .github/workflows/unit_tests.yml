@@ -37,7 +37,7 @@ on:
       max-parallel:
         description: 'Parallel jobs'
         required: false
-        default: '6'
+        default: '7'
       model-test-mode:
         description: 'Model compat test mode'
         type: choice
@@ -192,13 +192,13 @@ jobs:
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
+      - run: git config --system --add safe.directory $GITHUB_WORKSPACE
 
       - name: Fetch PR by number
         if: ${{ github.event.inputs.pr_number != 0 }}
         run: |
           PR_NUMBER=${{ github.event.inputs.pr_number }}
           echo "pr number $PR_NUMBER"
-          git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
@@ -287,7 +287,7 @@ jobs:
 
           build_once() {
             echo "::group::compile logs"
-            python setup.py bdist_wheel 2>&1 | tee $log_file
+            python -m build -w --no-isolation -v 2>&1 | tee $log_file
             echo "::endgroup::"
           }
 
