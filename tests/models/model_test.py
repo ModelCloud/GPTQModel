@@ -148,6 +148,7 @@ class ModelTest(unittest.TestCase):
     INFERENCE_RESULT_KEYWORDS = ["paris"]
     GENERATE_EVAL_SIZE_MIN = 128
     GENERATE_EVAL_SIZE_MAX = 128
+    APPLY_CHAT_TEMPLATE = False
 
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
 
@@ -601,7 +602,14 @@ class ModelTest(unittest.TestCase):
             prompt = item["prompt"]
             keywords = item["keywords"]
             try:
-                response = self.generate_stable_with_limit(model, tokenizer, prompt)
+                inputs, decode_start_idx = self._prepare_generic_inference_inputs(tokenizer, prompt)
+                response = self.generate_stable_with_limit(
+                    model,
+                    tokenizer,
+                    prompt,
+                    inputs=inputs,
+                    decode_start_idx=decode_start_idx,
+                )
                 normalized = response.lower()
                 matched = any(keyword.lower() in normalized for keyword in keywords)
                 results.append(
@@ -632,6 +640,24 @@ class ModelTest(unittest.TestCase):
                     }
                 )
         return results
+
+    def _prepare_generic_inference_inputs(self, tokenizer, prompt):
+        # Some chat-tuned checkpoints only produce stable continuations when the
+        # sanity prompts are wrapped with the tokenizer's chat template.
+        if not self.APPLY_CHAT_TEMPLATE or not hasattr(tokenizer, "apply_chat_template"):
+            return None, None
+
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt},
+        ]
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        inputs = tokenizer([text], return_tensors="pt")
+        return inputs, inputs.input_ids.shape[1]
 
     def run_eval_tasks(self, model, backend, trust_remote_code=False):
         previous_backend = self.LOAD_BACKEND

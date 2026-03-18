@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import json
+import os
 import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -246,6 +247,18 @@ class LoopProcessor:
                 for column in self._log_column_labels
             ]
             self._log_columns.info(*row_values)
+
+            # Emit a plain-text summary when debugging quantization quality in test runs.
+            if os.getenv("GPTQMODEL_LOG_QUANT_STATS", "0") not in ("", "0", "false", "False"):
+                log.info(
+                    "Quant stat: method=%s layer=%s module=%s samples=%s loss=%s time=%s",
+                    stat.get(PROCESS_LOG_NAME, ""),
+                    stat.get(PROCESS_LOG_LAYER, ""),
+                    stat.get(PROCESS_LOG_MODULE, ""),
+                    stat.get(QUANT_LOG_NSAMPLES, ""),
+                    stat.get(QUANT_LOG_LOSS, ""),
+                    stat.get(PROCESS_LOG_TIME, ""),
+                )
 
         self.log_save_async(stat)
 
