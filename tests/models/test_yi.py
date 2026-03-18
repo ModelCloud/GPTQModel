@@ -18,6 +18,7 @@ class TestYi(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = 0.2781569965870307
     TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 4
+    APPLY_CHAT_TEMPLATE = True
     EVAL_TASKS_SLOW = {
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
