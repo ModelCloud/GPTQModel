@@ -28,6 +28,16 @@ class _StubTokenizer:
         return value if value > 0 else 1
 
 
+class _ChatStubTokenizer(_StubTokenizer):
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+        # Mirror the HF chat-template path closely enough to verify precedence.
+        assert tokenize is False
+        rendered = "".join(f"<{item['role']}>{item['content']}" for item in messages)
+        if add_generation_prompt:
+            rendered += "<assistant>"
+        return rendered
+
+
 def _make_qmodel() -> BaseQModel:
     model = BaseQModel.__new__(BaseQModel)
     model.tokenizer = _StubTokenizer()
@@ -133,3 +143,31 @@ def test_prepare_dataset_normalizes_rank_4_attention_mask():
     assert len(batches) == 1
     assert batches[0]["input_ids"].tolist() == [[1, 2, 3, 0, 0]]
     assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1, 0, 0]]
+
+
+def test_prepare_dataset_prefers_apply_chat_template_for_messages():
+    qmodel = _make_qmodel()
+    qmodel.tokenizer = _ChatStubTokenizer()
+    dataset = [
+        {
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "world"},
+            ],
+            "text": "raw-fallback",
+        }
+    ]
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_sort=None,
+        batch_size=1,
+        calibration_data_min_length=0,
+    )
+
+    templated = qmodel.tokenizer.apply_chat_template(dataset[0]["messages"], tokenize=False, add_generation_prompt=False)
+    expected_ids = qmodel.tokenizer(templated, return_tensors="pt")["input_ids"].tolist()
+    raw_text_ids = qmodel.tokenizer(dataset[0]["text"], return_tensors="pt")["input_ids"].tolist()
+
+    assert batches[0]["input_ids"].tolist() == expected_ids
+    assert batches[0]["input_ids"].tolist() != raw_text_ids
