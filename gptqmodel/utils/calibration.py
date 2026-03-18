@@ -416,7 +416,7 @@ def prepare_calibration_dataset(
     if message_text_fallback_examples > 0:
         log.warn(
             "Calibration: fell back to raw `text` for %s `messages` examples because the tokenizer has no message "
-            "template helper.",
+            "template configured.",
             message_text_fallback_examples,
         )
 
