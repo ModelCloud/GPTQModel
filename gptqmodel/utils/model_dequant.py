@@ -387,6 +387,9 @@ def detect_format(model_path: Path, config: dict) -> str:
     if format_name in {"float8_e4m3fn", "float8_e5m2"}:
         LOG.debug("Detected FP8 format via config format=%s", format_name)
         return "fp8"
+    if format_name in {"fp4", "nf4", "int8"}:
+        LOG.debug("Detected bitsandbytes format via config format=%s", format_name)
+        return "bitsandbytes"
     if method == "fp8":
         LOG.debug("Detected FP8 format via method=%s", method)
         return "fp8"
@@ -537,7 +540,13 @@ def convert_bitsandbytes_shard(
     tensors: Dict[str, torch.Tensor] = {}
     keys = list(reader.keys())
     key_set = set(keys)
-    bnb_quant_type = str(quant_cfg.get("bnb_quant_type") or "fp4").strip().lower()
+    bnb_quant_type = str(
+        quant_cfg.get("format")
+        or quant_cfg.get("bnb_quant_type")
+        or "fp4"
+    ).strip().lower()
+    if bnb_quant_type == "bitsandbytes":
+        bnb_quant_type = "fp4"
 
     skipped_suffixes = (
         ".weight_absmax",

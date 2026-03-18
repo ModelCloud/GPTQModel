@@ -200,7 +200,7 @@ def test_quantize_config_dispatches_bitsandbytes_constructor():
 
     assert isinstance(cfg, BitsAndBytesConfig)
     assert cfg.quant_method == METHOD.BITSANDBYTES
-    assert cfg.format == FORMAT.BITSANDBYTES
+    assert cfg.format == "int8"
     assert cfg.bits == 8
     assert cfg.uses_weight_only_lifecycle() is True
 
@@ -209,18 +209,17 @@ def test_quantize_config_dispatches_bitsandbytes_from_weight_only_method():
     cfg = QuantizeConfig(
         bits=4,
         weight_only=WeightOnlyConfig(method="bitsandbytes", smooth=SmoothMAD(k=1.25)),
-        bnb_quant_type="nf4",
-        bnb_block_size=128,
-        bnb_compress_statistics=False,
+        format="nf4",
+        block_size=128,
+        compress_statistics=False,
     )
 
     assert isinstance(cfg, BitsAndBytesConfig)
     assert cfg.quant_method == METHOD.BITSANDBYTES
-    assert cfg.format == FORMAT.BITSANDBYTES
+    assert cfg.format == "nf4"
     assert cfg.bits == 4
-    assert cfg.bnb_quant_type == "nf4"
-    assert cfg.bnb_block_size == 128
-    assert cfg.bnb_compress_statistics is False
+    assert cfg.block_size == 128
+    assert cfg.compress_statistics is False
     assert cfg.smooth is not None
 
 

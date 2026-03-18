@@ -42,9 +42,9 @@ def _build_kernel(bits: int, linear: nn.Linear) -> BitsAndBytesQuantLinear:
     if bits == 4:
         kwargs.update(
             {
-                "bnb_quant_type": "nf4",
-                "bnb_block_size": 128,
-                "bnb_compress_statistics": False,
+                "format": "nf4",
+                "block_size": 128,
+                "compress_statistics": False,
             }
         )
 
@@ -112,9 +112,9 @@ def test_bitsandbytes_state_dict_round_trip(bits: int):
     if bits == 4:
         reload_kwargs.update(
             {
-                "bnb_quant_type": "nf4",
-                "bnb_block_size": 128,
-                "bnb_compress_statistics": False,
+                "format": "nf4",
+                "block_size": 128,
+                "compress_statistics": False,
             }
         )
 
@@ -153,9 +153,9 @@ def test_detect_and_dequantize_bitsandbytes_checkpoint(tmp_path, bits: int):
 
     quant_cfg = BitsAndBytesConfig(
         bits=bits,
-        bnb_quant_type="nf4" if bits == 4 else "fp4",
-        bnb_block_size=128 if bits == 4 else 64,
-        bnb_compress_statistics=False if bits == 4 else True,
+        format="nf4" if bits == 4 else "int8",
+        block_size=128 if bits == 4 else 64,
+        compress_statistics=False if bits == 4 else True,
     )
     config_payload = {"quantization_config": quant_cfg.to_dict()}
     (model_dir / "config.json").write_text(json.dumps(config_payload), encoding="utf-8")
