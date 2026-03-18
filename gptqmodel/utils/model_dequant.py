@@ -134,6 +134,18 @@ def _get_compressed_tensors_dependencies() -> dict:
     }
 
 
+def _get_bitsandbytes_dependencies():
+    try:
+        import bitsandbytes as bnb
+    except ImportError as exc:  # pragma: no cover - exercised when dependency missing
+        raise RuntimeError(
+            "Support for bitsandbytes quantized checkpoints requires the "
+            "'bitsandbytes' package. Install it with 'pip install bitsandbytes>=0.49.3'."
+        ) from exc
+
+    return bnb
+
+
 def _discover_compressed_tensors_module_schemes(
     model_path: Path,
     quant_config,
@@ -355,6 +367,11 @@ def detect_format(model_path: Path, config: dict) -> str:
         if any(k.endswith(".weight_scale_inv") for k in keys):
             LOG.debug("Detected FP8 format via '.weight_scale_inv' metadata in shard '%s'", files[0])
             return "fp8"
+        if any(k == "weight_quant_state" or k.endswith(".weight_quant_state") for k in keys) or any(
+            k == "weight_scb" or k.endswith(".weight_scb") for k in keys
+        ):
+            LOG.debug("Detected bitsandbytes format via explicit state tensors in shard '%s'", files[0])
+            return "bitsandbytes"
         if any(k.endswith(".trellis") for k in keys):
             LOG.debug("Detected EXL3 format via '.trellis' metadata in shard '%s'", files[0])
             return "exl3"
@@ -373,6 +390,9 @@ def detect_format(model_path: Path, config: dict) -> str:
     if method == "fp8":
         LOG.debug("Detected FP8 format via method=%s", method)
         return "fp8"
+    if method == "bitsandbytes":
+        LOG.debug("Detected bitsandbytes format via method=%s", method)
+        return "bitsandbytes"
     if method in ("gptq", "gptqmodel"):
         LOG.debug("Detected GPTQ format via method=%s", method)
         return "gptq"
@@ -503,6 +523,68 @@ def convert_nvfp4_shard(reader, target_dtype: torch.dtype) -> Dict[str, torch.Te
             continue
         else:
             tensors[key] = finalize_for_save(tensor, target_dtype)
+    return tensors
+
+
+def convert_bitsandbytes_shard(
+    reader,
+    target_dtype: torch.dtype,
+    *,
+    quant_cfg: dict,
+) -> Dict[str, torch.Tensor]:
+    bnb = _get_bitsandbytes_dependencies()
+
+    tensors: Dict[str, torch.Tensor] = {}
+    keys = list(reader.keys())
+    key_set = set(keys)
+    bnb_quant_type = str(quant_cfg.get("bnb_quant_type") or "fp4").strip().lower()
+
+    skipped_suffixes = (
+        ".weight_absmax",
+        ".weight_quant_map",
+        ".weight_nested_absmax",
+        ".weight_nested_quant_map",
+        ".weight_quant_state",
+        ".weight_scb",
+    )
+
+    for key in keys:
+        tensor = reader.get_tensor(key)
+
+        if key.endswith(".weight") and (key[:-len(".weight")] + ".weight_quant_state") in key_set:
+            prefix = key[:-len(".weight")]
+            payload = {
+                "absmax": reader.get_tensor(prefix + ".weight_absmax"),
+                "quant_map": reader.get_tensor(prefix + ".weight_quant_map"),
+                f"quant_state.bitsandbytes__{bnb_quant_type}": reader.get_tensor(prefix + ".weight_quant_state"),
+            }
+            if prefix + ".weight_nested_absmax" in key_set:
+                payload["nested_absmax"] = reader.get_tensor(prefix + ".weight_nested_absmax")
+            if prefix + ".weight_nested_quant_map" in key_set:
+                payload["nested_quant_map"] = reader.get_tensor(prefix + ".weight_nested_quant_map")
+
+            quant_state = bnb.functional.QuantState.from_dict(payload, device=tensor.device)
+            deq = bnb.functional.dequantize_4bit(tensor, quant_state=quant_state)
+            tensors[key] = finalize_for_save(deq, target_dtype)
+            LOG.debug("Dequantized bitsandbytes 4-bit module '%s' to dtype %s", prefix, target_dtype)
+            continue
+
+        if key.endswith(".weight") and (key[:-len(".weight")] + ".weight_scb") in key_set:
+            prefix = key[:-len(".weight")]
+            deq = bnb.functional.int8_vectorwise_dequant(
+                tensor,
+                reader.get_tensor(prefix + ".weight_scb"),
+            )
+            tensors[key] = finalize_for_save(deq, target_dtype)
+            LOG.debug("Dequantized bitsandbytes 8-bit module '%s' to dtype %s", prefix, target_dtype)
+            continue
+
+        if key.endswith(skipped_suffixes):
+            LOG.debug("Dropping auxiliary bitsandbytes tensor '%s' after dequantization", key)
+            continue
+
+        tensors[key] = finalize_for_save(tensor, target_dtype)
+
     return tensors
 
 
@@ -770,6 +852,13 @@ def dequantize_model(
                         target_dtype,
                         block_shape=block_shape,
                         scale_semantics=fp8_scale_semantics,
+                    )
+            elif fmt == "bitsandbytes":
+                with safe_open(path, framework="pt", device=open_device) as reader:
+                    tensors = convert_bitsandbytes_shard(
+                        reader,
+                        target_dtype,
+                        quant_cfg=quant_cfg,
                     )
             elif fmt == "nvfp4":
                 with safe_open(path, framework="pt", device=open_device) as reader:

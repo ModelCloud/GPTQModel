@@ -74,6 +74,7 @@ class FORMAT(str, Enum):
     GPTQ_V2 = "gptq_v2"
     GGUF = "gguf"
     FP8 = "fp8"
+    BITSANDBYTES = "bitsandbytes"
     MARLIN = "marlin"
     BITBLAS = "bitblas"
     QQQ = "qqq"
@@ -90,6 +91,7 @@ class METHOD(str, Enum):
     GPTQ = "gptq"
     GGUF = "gguf"
     FP8 = "fp8"
+    BITSANDBYTES = "bitsandbytes"
     QQQ = "qqq"
     AWQ = "awq"
     EXL3 = "exl3"
@@ -123,6 +125,7 @@ class WeightOnlyMethod(str, Enum):
     RTN = "rtn"
     GGUF = "gguf"
     FP8 = "fp8"
+    BITSANDBYTES = "bitsandbytes"
     NVFP4 = "nvfp4"
 
 
@@ -507,6 +510,8 @@ def resolve_quant_format(
         return FORMAT.GGUF
     if method == METHOD.FP8:
         return FORMAT.FP8
+    if method == METHOD.BITSANDBYTES:
+        return FORMAT.BITSANDBYTES
     if method == METHOD.EXL3:
         return FORMAT.EXL3
 
@@ -577,6 +582,8 @@ _FP8_FMT_ALIASES = {
 }
 _FP8_WEIGHT_SCALE_METHODS = {"tensor", "row", "block"}
 _FP8_SCALE_SEMANTICS = {"inverse"}
+_BITSANDBYTES_QUANT_TYPES = {"fp4", "nf4"}
+_BITSANDBYTES_BLOCK_SIZES = {32, 64, 128, 256, 512, 1024, 2048, 4096}
 
 
 def _looks_like_fp8_fmt(value: Any) -> bool:
@@ -642,6 +649,26 @@ def _normalize_fp8_scale_semantics(value: Optional[str]) -> str:
         supported = ", ".join(sorted(_FP8_SCALE_SEMANTICS))
         raise ValueError(
             f"FP8Config: `weight_scale_semantics` must be one of {{{supported}}}, got `{value}`."
+        )
+    return normalized
+
+
+def _normalize_bitsandbytes_quant_type(value: Optional[str]) -> str:
+    normalized = "fp4" if value is None else str(value).strip().lower()
+    if normalized not in _BITSANDBYTES_QUANT_TYPES:
+        supported = ", ".join(sorted(_BITSANDBYTES_QUANT_TYPES))
+        raise ValueError(
+            f"BitsAndBytesConfig: `bnb_quant_type` must be one of {{{supported}}}, got `{value}`."
+        )
+    return normalized
+
+
+def _normalize_bitsandbytes_block_size(value: Optional[int]) -> int:
+    normalized = 64 if value is None else int(value)
+    if normalized not in _BITSANDBYTES_BLOCK_SIZES:
+        supported = ", ".join(str(item) for item in sorted(_BITSANDBYTES_BLOCK_SIZES))
+        raise ValueError(
+            f"BitsAndBytesConfig: `bnb_block_size` must be one of {{{supported}}}, got `{value}`."
         )
     return normalized
 
@@ -1046,6 +1073,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.FP8: {
         FORMAT.FP8,
     },
+    METHOD.BITSANDBYTES: {
+        FORMAT.BITSANDBYTES,
+    },
     METHOD.EXL3: {
         FORMAT.EXL3,
     },
@@ -1084,6 +1114,9 @@ QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 FP8_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.FP8,
 )
+BITSANDBYTES_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.BITSANDBYTES,
+)
 EXL3_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.EXL3,
 )
@@ -1103,6 +1136,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GPTQ: METHOD.GPTQ,
     FORMAT.GPTQ_V2: METHOD.GPTQ,
     FORMAT.FP8: METHOD.FP8,
+    FORMAT.BITSANDBYTES: METHOD.BITSANDBYTES,
     FORMAT.EXL3: METHOD.EXL3,
     FORMAT.GGUF: METHOD.GGUF,
     FORMAT.BITBLAS: METHOD.GPTQ,
@@ -1333,6 +1367,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.GPTQ
         if value == FORMAT.FP8:
             return METHOD.FP8
+        if value == FORMAT.BITSANDBYTES:
+            return METHOD.BITSANDBYTES
         if value == FORMAT.EXL3:
             return METHOD.EXL3
         try:
@@ -1639,6 +1675,22 @@ def _normalize_fp8_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def _normalize_bitsandbytes_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(payload)
+    weight_only = normalized.pop("weight_only", None)
+
+    if "smoother" not in normalized and "smooth" not in normalized:
+        normalized["smoother"] = _extract_weight_only_smooth(weight_only)
+
+    if "bnb_quant_type" in normalized:
+        normalized["bnb_quant_type"] = _normalize_bitsandbytes_quant_type(normalized["bnb_quant_type"])
+    if "bnb_block_size" in normalized:
+        normalized["bnb_block_size"] = _normalize_bitsandbytes_block_size(normalized["bnb_block_size"])
+    if "bnb_compress_statistics" in normalized:
+        normalized["bnb_compress_statistics"] = bool(normalized["bnb_compress_statistics"])
+    return normalized
+
+
 def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional[METHOD] = None) -> METHOD:
     if format_value == FORMAT.MARLIN:
         if fallback_method is None:
@@ -1660,6 +1712,8 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         expected_method = METHOD.AWQ
     elif target_cls is FP8Config:
         expected_method = METHOD.FP8
+    elif target_cls is BitsAndBytesConfig:
+        expected_method = METHOD.BITSANDBYTES
     elif target_cls is EXL3QuantizeConfig:
         expected_method = METHOD.EXL3
         format_value = normalized.get(FORMAT_FIELD_CODE)
@@ -1726,6 +1780,8 @@ def _prepare_target_quantize_config_kwargs(target_cls, payload: Dict[str, Any]) 
         normalized = _normalize_gguf_kwargs(normalized)
     elif target_cls is FP8Config:
         normalized = _normalize_fp8_kwargs(normalized)
+    elif target_cls is BitsAndBytesConfig:
+        normalized = _normalize_bitsandbytes_kwargs(normalized)
     return _filter_quantize_config_payload_for_target_cls(target_cls, normalized)
 
 
@@ -2196,7 +2252,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                 f"QuantizeConfig: `{FORMAT_FIELD_CODE}` is missing from the quantization configuration and is automatically inferred to {normalized[FORMAT_FIELD_CODE]}"
             )
 
-        if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS}:
+        if normalized[FORMAT_FIELD_CODE] in {FORMAT.BITBLAS, FORMAT.BITSANDBYTES}:
             normalized["desc_act"] = False
 
         if "sym" not in normalized and target_cls not in {GGUFConfig, FP8Config, EXL3QuantizeConfig}:
@@ -2621,6 +2677,103 @@ FP8QuantizeConfig = FP8Config
 
 
 @dataclass
+class BitsAndBytesConfig(PreFilterQuantizeConfig):
+    bits: int = field(default=4, metadata={"choices": [4, 8]})
+    method: METHOD = field(default=METHOD.BITSANDBYTES)
+    format: FORMAT = field(default=FORMAT.BITSANDBYTES)
+    group_size: int = field(default=-1)
+    desc_act: Optional[bool] = field(default=False)
+    sym: bool = field(default=True)
+    bnb_quant_type: str = field(default="fp4")
+    bnb_block_size: int = field(default=64)
+    bnb_compress_statistics: bool = field(default=True)
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.BITSANDBYTES,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return BITSANDBYTES_EXPORT_FORMATS
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def __post_init__(self):
+        self._normalize_prefilter_state()
+        super(PreFilterQuantizeConfig, self).__post_init__()
+
+        if self.bits not in {4, 8}:
+            raise ValueError("BitsAndBytesConfig: `bits` must be `4` or `8`.")
+        if self.method != METHOD.BITSANDBYTES:
+            raise ValueError("BitsAndBytesConfig: `method` must be `bitsandbytes`.")
+        if self.format != FORMAT.BITSANDBYTES:
+            raise ValueError("BitsAndBytesConfig: `format` must be `bitsandbytes`.")
+
+        self.group_size = -1
+        self.desc_act = False
+        self.sym = True
+
+        self.bnb_quant_type = _normalize_bitsandbytes_quant_type(self.bnb_quant_type)
+        self.bnb_block_size = _normalize_bitsandbytes_block_size(self.bnb_block_size)
+        self.bnb_compress_statistics = bool(self.bnb_compress_statistics)
+
+        if self.dynamic is not None:
+            self.dynamic = {
+                **{k: v for k, v in self.dynamic.items() if k.startswith('-')},
+                **{k: v for k, v in self.dynamic.items() if not k.startswith('-')},
+            }
+            for layer, layer_dict in self.dynamic.items():
+                self._normalize_dynamic_layer_config(
+                    layer,
+                    layer_dict,
+                    valid_bit_widths=[4, 8],
+                    checkpoint_format=FORMAT.BITSANDBYTES,
+                )
+
+    def _normalize_dynamic_layer_config(
+        self,
+        layer_name: str,
+        layer_dict: Dict[str, Any],
+        *,
+        valid_bit_widths: List[int],
+        checkpoint_format: FORMAT,
+    ) -> None:
+        del valid_bit_widths, checkpoint_format
+        if "bits" in layer_dict and int(layer_dict["bits"]) not in {4, 8}:
+            raise ValueError(f"BitsAndBytesConfig: layer `{layer_name}` only supports 4-bit or 8-bit weights.")
+        if "group_size" in layer_dict and layer_dict["group_size"] not in (-1, None):
+            raise ValueError("BitsAndBytesConfig: `group_size` is not used; keep it at `-1`.")
+        if "desc_act" in layer_dict and bool(layer_dict["desc_act"]):
+            raise ValueError("BitsAndBytesConfig: `desc_act` is not supported.")
+        if "sym" in layer_dict and layer_dict["sym"] is not True:
+            raise ValueError("BitsAndBytesConfig: `sym` must stay `True`.")
+        if "bnb_quant_type" in layer_dict:
+            layer_dict["bnb_quant_type"] = _normalize_bitsandbytes_quant_type(layer_dict["bnb_quant_type"])
+        if "bnb_block_size" in layer_dict:
+            layer_dict["bnb_block_size"] = _normalize_bitsandbytes_block_size(layer_dict["bnb_block_size"])
+        if "bnb_compress_statistics" in layer_dict:
+            layer_dict["bnb_compress_statistics"] = bool(layer_dict["bnb_compress_statistics"])
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {
+            "bnb_quant_type": self.bnb_quant_type,
+            "bnb_block_size": self.bnb_block_size,
+            "bnb_compress_statistics": self.bnb_compress_statistics,
+        }
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out[FORMAT_FIELD_CODE] = self.format
+        out["bnb_quant_type"] = self.bnb_quant_type
+        out["bnb_block_size"] = self.bnb_block_size
+        out["bnb_compress_statistics"] = self.bnb_compress_statistics
+
+    def uses_weight_only_lifecycle(self) -> bool:
+        return True
+
+
+BitsAndBytesQuantizeConfig = BitsAndBytesConfig
+
+
+@dataclass
 class EXL3QuantizeConfig(BaseQuantizeConfig):
     bits: float = field(default=3.0)
     method: METHOD = field(default=METHOD.EXL3)
@@ -2910,9 +3063,9 @@ GGUFQuantizeConfig = GGUFConfig
 
 
 def clone_weight_only_config_for_module(
-    qcfg: Union[RTNQuantizeConfig, GGUFConfig, FP8Config],
+    qcfg: Union[RTNQuantizeConfig, GGUFConfig, FP8Config, BitsAndBytesConfig],
     module_full_name: str,
-) -> Optional[Union[RTNQuantizeConfig, GGUFConfig, FP8Config]]:
+) -> Optional[Union[RTNQuantizeConfig, GGUFConfig, FP8Config, BitsAndBytesConfig]]:
     if qcfg.dynamic_get(layer_name=module_full_name) is False:
         return None
 
@@ -2958,6 +3111,32 @@ def clone_weight_only_config_for_module(
                     module_full_name,
                     "weight_scale_semantics",
                     qcfg_clone.weight_scale_semantics,
+                )
+            )
+        elif isinstance(qcfg_clone, BitsAndBytesConfig):
+            qcfg_clone.bits = _normalize_quant_bits(
+                qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits),
+                format_value=FORMAT.BITSANDBYTES,
+            )
+            qcfg_clone.bnb_quant_type = _normalize_bitsandbytes_quant_type(
+                qcfg.dynamic_get(
+                    module_full_name,
+                    "bnb_quant_type",
+                    qcfg_clone.bnb_quant_type,
+                )
+            )
+            qcfg_clone.bnb_block_size = _normalize_bitsandbytes_block_size(
+                qcfg.dynamic_get(
+                    module_full_name,
+                    "bnb_block_size",
+                    qcfg_clone.bnb_block_size,
+                )
+            )
+            qcfg_clone.bnb_compress_statistics = bool(
+                qcfg.dynamic_get(
+                    module_full_name,
+                    "bnb_compress_statistics",
+                    qcfg_clone.bnb_compress_statistics,
                 )
             )
         else:
@@ -3013,9 +3192,16 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
 
     weight_only_method = _peek_weight_only_method(weight_only)
     fp8_storage_fmt = payload.get(FORMAT_FIELD_CODE, payload.get("fmt"))
-    if weight_only is not None and weight_only_method not in {None, WeightOnlyMethod.RTN, WeightOnlyMethod.GGUF, WeightOnlyMethod.FP8}:
+    if weight_only is not None and weight_only_method not in {
+        None,
+        WeightOnlyMethod.RTN,
+        WeightOnlyMethod.GGUF,
+        WeightOnlyMethod.FP8,
+        WeightOnlyMethod.BITSANDBYTES,
+    }:
         raise ValueError(
-            "QuantizeConfig: unsupported weight-only config. Weight-only export currently supports `rtn`, `gguf`, and `fp8`."
+            "QuantizeConfig: unsupported weight-only config. Weight-only export currently supports "
+            "`rtn`, `gguf`, `fp8`, and `bitsandbytes`."
         )
     if (
         format_value == FORMAT.GGUF
@@ -3026,12 +3212,16 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return GGUFConfig
     if weight_only_method == WeightOnlyMethod.FP8:
         return FP8Config
+    if weight_only_method == WeightOnlyMethod.BITSANDBYTES:
+        return BitsAndBytesConfig
     if weight_only_method == WeightOnlyMethod.RTN:
         return RTNQuantizeConfig
     if weight_only is not None:
         return RTNQuantizeConfig
     if method == METHOD.FP8 or format_value == FORMAT.FP8 or _looks_like_fp8_fmt(fp8_storage_fmt):
         return FP8Config
+    if method == METHOD.BITSANDBYTES or format_value == FORMAT.BITSANDBYTES:
+        return BitsAndBytesConfig
     if method == METHOD.EXL3 or format_value == FORMAT.EXL3:
         return EXL3QuantizeConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
@@ -3055,6 +3245,7 @@ def _known_quantize_config_field_names() -> set[str]:
         AWQQuantizeConfig,
         QQQQuantizeConfig,
         FP8Config,
+        BitsAndBytesConfig,
         EXL3QuantizeConfig,
         RTNQuantizeConfig,
         GGUFConfig,

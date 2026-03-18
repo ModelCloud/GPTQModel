@@ -6,6 +6,7 @@ import pytest
 from gptqmodel.quantization.config import (
     AWQQuantizeConfig,
     BaseQuantizeConfig,
+    BitsAndBytesConfig,
     FP8Config,
     FORMAT,
     GGUFConfig,
@@ -188,6 +189,38 @@ def test_quantize_config_dispatches_fp8_from_weight_only_method():
     assert cfg.format == "float8_e4m3fn"
     assert cfg.weight_scale_method == "block"
     assert cfg.weight_block_size == [128, 128]
+    assert cfg.smooth is not None
+
+
+def test_quantize_config_dispatches_bitsandbytes_constructor():
+    cfg = QuantizeConfig(
+        quant_method=METHOD.BITSANDBYTES,
+        bits=8,
+    )
+
+    assert isinstance(cfg, BitsAndBytesConfig)
+    assert cfg.quant_method == METHOD.BITSANDBYTES
+    assert cfg.format == FORMAT.BITSANDBYTES
+    assert cfg.bits == 8
+    assert cfg.uses_weight_only_lifecycle() is True
+
+
+def test_quantize_config_dispatches_bitsandbytes_from_weight_only_method():
+    cfg = QuantizeConfig(
+        bits=4,
+        weight_only=WeightOnlyConfig(method="bitsandbytes", smooth=SmoothMAD(k=1.25)),
+        bnb_quant_type="nf4",
+        bnb_block_size=128,
+        bnb_compress_statistics=False,
+    )
+
+    assert isinstance(cfg, BitsAndBytesConfig)
+    assert cfg.quant_method == METHOD.BITSANDBYTES
+    assert cfg.format == FORMAT.BITSANDBYTES
+    assert cfg.bits == 4
+    assert cfg.bnb_quant_type == "nf4"
+    assert cfg.bnb_block_size == 128
+    assert cfg.bnb_compress_statistics is False
     assert cfg.smooth is not None
 
 

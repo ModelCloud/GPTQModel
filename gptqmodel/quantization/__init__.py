@@ -7,6 +7,8 @@ from .config import (
                      AWQQuantizeConfig,
                      BaseComplexBits,
                      BasePreFilterConfig,
+                     BitsAndBytesConfig,
+                     BitsAndBytesQuantizeConfig,
                      FORMAT,
                      FORMAT_FIELD_CHECKPOINT,
                      FORMAT_FIELD_CODE,

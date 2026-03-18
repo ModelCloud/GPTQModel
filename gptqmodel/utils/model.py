@@ -51,6 +51,8 @@ from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import (
     FORMAT_FIELD_CODE,
     METHOD,
+    _normalize_bitsandbytes_block_size,
+    _normalize_bitsandbytes_quant_type,
     _normalize_fp8_fmt,
     _normalize_fp8_scale_semantics,
     _normalize_fp8_weight_block_size,
@@ -483,6 +485,19 @@ def create_quant_module(
                     )
                 if "weight_block_size" in overrides:
                     tmp_init_kwargs["weight_block_size"] = normalized_block_size
+            elif format == FORMAT.BITSANDBYTES:
+                if "bnb_quant_type" in overrides:
+                    tmp_init_kwargs["bnb_quant_type"] = _normalize_bitsandbytes_quant_type(
+                        overrides["bnb_quant_type"]
+                    )
+                if "bnb_block_size" in overrides:
+                    tmp_init_kwargs["bnb_block_size"] = _normalize_bitsandbytes_block_size(
+                        overrides["bnb_block_size"]
+                    )
+                if "bnb_compress_statistics" in overrides:
+                    tmp_init_kwargs["bnb_compress_statistics"] = bool(
+                        overrides["bnb_compress_statistics"]
+                    )
 
     validate_bits = quant_bits_width(tmp_bits)
     constructor_bits = tmp_bits if getattr(linear_cls, "QUANT_TYPE", None) == "gguf" else validate_bits

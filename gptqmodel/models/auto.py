@@ -285,6 +285,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.GPTQ,
         METHOD.GGUF,
         METHOD.FP8,
+        METHOD.BITSANDBYTES,
         METHOD.AWQ,
         METHOD.QQQ,
         METHOD.EXL3,
@@ -296,6 +297,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.GPTQ,
         METHOD.GGUF,
         METHOD.FP8,
+        METHOD.BITSANDBYTES,
         METHOD.AWQ,
         METHOD.QQQ,
         METHOD.EXL3,
@@ -748,7 +750,13 @@ class GPTQModel:
         gptq_config = config.quantization_config
 
         method = gptq_config.get("method", gptq_config.get("quant_method", ""))
-        backend = BACKEND.GGUF_TORCH if str(method).lower() == METHOD.GGUF.value else BACKEND.TORCH
+        normalized_method = str(method).lower()
+        if normalized_method == METHOD.GGUF.value:
+            backend = BACKEND.GGUF_TORCH
+        elif normalized_method == METHOD.BITSANDBYTES.value:
+            backend = BACKEND.BITSANDBYTES
+        else:
+            backend = BACKEND.TORCH
 
         # load gptq model
         gptq_model = GPTQModel.load(model_id_or_path, backend=backend)

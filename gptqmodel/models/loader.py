@@ -526,6 +526,10 @@ def ModelLoader(cls):
                     raise ValueError("EXL3 CUDA loading requires CUDA/HIP.")
                 if device not in (DEVICE.CUDA, DEVICE.ROCM):
                     raise ValueError("EXL3 CUDA loading requires a CUDA/HIP device.")
+        elif format_code == FORMAT.BITSANDBYTES:
+            if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES):
+                raise TypeError("FORMAT.BITSANDBYTES requires BACKEND.AUTO or BACKEND.BITSANDBYTES.")
+            backend = BACKEND.BITSANDBYTES
 
         if export_quant_method == METHOD.AWQ and format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
             # GEMV_FAST and LLM_AWQ only supports torch.float16

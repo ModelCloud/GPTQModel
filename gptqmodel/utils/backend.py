@@ -15,6 +15,7 @@ class BACKEND(str, Enum):
     TORCH_INT8 = "torch_int8" # optimized CPU int8 fused kernel
     TORCH = "torch" # GOOD: about 80% of triton
     TRITON = "triton" # VERY GOOD: all-around kernel
+    BITSANDBYTES = "bitsandbytes" # bitsandbytes 4-bit/8-bit kernel with optional CPU/CUDA support
     EXLLAMA_V2 = "exllama_v2" # FASTER: optimized for batching > 1
     EXLLAMA_V3 = "exllama_v3"
     EXLLAMA_EORA = "exllama_eora"

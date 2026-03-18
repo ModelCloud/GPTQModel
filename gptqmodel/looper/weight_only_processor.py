@@ -27,6 +27,7 @@ from ..models.writer import (
 )
 from ..quantization.config import (
     BaseQuantizeConfig,
+    BitsAndBytesConfig,
     FP8Config,
     GGUFQuantizeConfig,
     METHOD,
@@ -51,7 +52,7 @@ class WeightOnlyProcessor(LoopProcessor):
     def __init__(
         self,
         tokenizer,
-        qcfg: RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config,
+        qcfg: RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig,
     ):
         super().__init__(
             tokenizer=tokenizer,
@@ -68,8 +69,8 @@ class WeightOnlyProcessor(LoopProcessor):
         self.lock = threading.Lock()
 
     @staticmethod
-    def _uses_direct_pack(qcfg: RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config) -> bool:
-        return qcfg.method in {METHOD.GGUF, METHOD.FP8}
+    def _uses_direct_pack(qcfg: RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig) -> bool:
+        return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES}
 
     def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
         with self.lock:
@@ -95,7 +96,10 @@ class WeightOnlyProcessor(LoopProcessor):
             "original_columns": columns,
         }
 
-    def quantize_module(self, module: NamedModule) -> Optional[RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config]:
+    def quantize_module(
+        self,
+        module: NamedModule,
+    ) -> Optional[RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig]:
         qcfg_clone = clone_weight_only_config_for_module(self.qcfg, module.full_name)
         if qcfg_clone is None:
             return None
@@ -149,7 +153,7 @@ class WeightOnlyProcessor(LoopProcessor):
         module: NamedModule,
         model: BaseQModel,
         *,
-        qcfg: Optional[RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config] = None,
+        qcfg: Optional[RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig] = None,
         **kwargs,
     ):
         active_qcfg = qcfg or self.qcfg
@@ -258,6 +262,8 @@ class WeightOnlyProcessor(LoopProcessor):
             return "weight_only_gguf"
         if self.qcfg.method == METHOD.FP8:
             return "weight_only_fp8"
+        if self.qcfg.method == METHOD.BITSANDBYTES:
+            return "weight_only_bitsandbytes"
         return "weight_only_rtn"
 
 __all__ = ["WeightOnlyProcessor"]

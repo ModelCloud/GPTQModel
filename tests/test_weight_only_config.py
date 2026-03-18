@@ -5,6 +5,7 @@ import pytest
 
 from gptqmodel.quantization.config import (
     BaseQuantizeConfig,
+    BitsAndBytesConfig,
     GGUFConfig,
     GGUFBits,
     GPTQQuantizeConfig,
@@ -136,6 +137,57 @@ def test_gguf_quantize_config_hides_non_gguf_constructor_args():
 
     with pytest.raises(TypeError):
         GGUFConfig(bits=4, format="q_k_m", desc_act=True)
+
+
+def test_bitsandbytes_quantize_config_round_trip_4bit():
+    cfg = BitsAndBytesConfig(
+        bits=4,
+        bnb_quant_type="nf4",
+        bnb_block_size=128,
+        bnb_compress_statistics=False,
+        smoother=SmoothMAD(k=1.2),
+    )
+
+    assert cfg.quant_method == METHOD.BITSANDBYTES
+    assert cfg.format == "bitsandbytes"
+    assert cfg.bits == 4
+    assert cfg.bnb_quant_type == "nf4"
+    assert cfg.bnb_block_size == 128
+    assert cfg.bnb_compress_statistics is False
+    assert cfg.uses_weight_only_lifecycle() is True
+
+    payload = cfg.to_dict()
+    assert payload["method"] == "bitsandbytes"
+    assert payload["quant_method"] == "bitsandbytes"
+    assert payload["format"] == "bitsandbytes"
+    assert payload["checkpoint_format"] == "bitsandbytes"
+    assert payload["bnb_quant_type"] == "nf4"
+    assert payload["bnb_block_size"] == 128
+    assert payload["bnb_compress_statistics"] is False
+
+    reloaded = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(reloaded, BitsAndBytesConfig)
+    assert reloaded.bits == 4
+    assert reloaded.bnb_quant_type == "nf4"
+    assert reloaded.bnb_block_size == 128
+    assert reloaded.bnb_compress_statistics is False
+    assert isinstance(reloaded.smooth, SmoothMAD)
+
+
+def test_bitsandbytes_quantize_config_round_trip_8bit():
+    cfg = BitsAndBytesConfig(bits=8)
+
+    assert cfg.quant_method == METHOD.BITSANDBYTES
+    assert cfg.format == "bitsandbytes"
+    assert cfg.bits == 8
+    assert cfg.uses_weight_only_lifecycle() is True
+
+    payload = cfg.to_dict()
+    reloaded = QuantizeConfig.from_quant_config(payload)
+
+    assert isinstance(reloaded, BitsAndBytesConfig)
+    assert reloaded.bits == 8
+    assert reloaded.quant_method == METHOD.BITSANDBYTES
 
 
 def test_gguf_quantize_config_registers_smoother_prefilter():
