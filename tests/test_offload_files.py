@@ -15,6 +15,7 @@ from torch import nn
 
 from gptqmodel.utils.model import get_state_dict_for_save, move_to, streaming_state_dict_to_shards
 from gptqmodel.utils.offload import offload_to_disk, undo_offload_to_disk
+from gptqmodel.utils.structure import alias_all_from_turtle_if_meta
 
 
 class _LinearWithBuffers(nn.Module):
@@ -30,6 +31,52 @@ class _LinearWithBuffers(nn.Module):
 
 def _clone_state_dict(module: nn.Module) -> dict[str, torch.Tensor]:
     return {k: v.detach().clone() for k, v in module.state_dict().items()}
+
+
+class _HybridBlock(nn.Module):
+    def __init__(self, width: int):
+        super().__init__()
+        self.inner = nn.Linear(width, width, bias=False)
+        self.dt_bias = nn.Parameter(torch.randn(width))
+        self.register_buffer("dt_scale", torch.linspace(0.0, 1.0, width))
+
+
+class _HybridWrapper(nn.Module):
+    def __init__(self, width: int):
+        super().__init__()
+        self.block = _HybridBlock(width)
+
+
+class _SharedDirectBlock(nn.Module):
+    def __init__(self, width: int, shared_bias: nn.Parameter):
+        super().__init__()
+        self.inner = nn.Linear(width, width, bias=False)
+        self.dt_bias = shared_bias
+
+
+class _SharedDirectWrapper(nn.Module):
+    def __init__(self, width: int):
+        super().__init__()
+        shared_bias = nn.Parameter(torch.randn(width))
+        self.left = _SharedDirectBlock(width, shared_bias)
+        self.right = _SharedDirectBlock(width, shared_bias)
+
+
+class _CustomParameter(nn.Parameter):
+    pass
+
+
+class _CustomParamBlock(nn.Module):
+    def __init__(self, width: int):
+        super().__init__()
+        self.inner = nn.Linear(width, width, bias=False)
+        self.dt_bias = _CustomParameter(torch.randn(width))
+
+
+class _CustomParamWrapper(nn.Module):
+    def __init__(self, width: int):
+        super().__init__()
+        self.block = _CustomParamBlock(width)
 
 
 def test_offload_to_disk_writes_single_dat_file(tmp_path):
@@ -81,6 +128,105 @@ def test_offload_to_disk_writes_single_dat_file(tmp_path):
     undo_offload_to_disk(model.linear, delete_offload_folders=False)
     for name, tensor in model.linear.state_dict().items():
         torch.testing.assert_close(tensor, original_state[name])
+
+
+def test_alias_all_from_turtle_restores_direct_meta_tensors_with_offloaded_children(tmp_path):
+    turtle_model = _HybridWrapper(width=64)
+    shell_model = _HybridWrapper(width=64)
+    shell_model.load_state_dict(turtle_model.state_dict())
+
+    original_state = _clone_state_dict(turtle_model)
+    offload_root = tmp_path / "offload_root"
+    offload_to_disk(module=shell_model.block.inner, model=shell_model, disk_path=str(offload_root))
+
+    shell_model.block.dt_bias = nn.Parameter(
+        torch.empty_like(shell_model.block.dt_bias, device="meta"),
+        requires_grad=shell_model.block.dt_bias.requires_grad,
+    )
+    shell_model.block.register_buffer(
+        "dt_scale",
+        torch.empty_like(shell_model.block.dt_scale, device="meta"),
+        persistent=True,
+    )
+
+    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=turtle_model)
+
+    state_dict = get_state_dict_for_save(shell_model, offload_root=str(offload_root))
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    expected_files, _, _ = streaming_state_dict_to_shards(
+        state_dict,
+        save_dir=str(save_dir),
+        model_base_name="model",
+        single_file_name="model.safetensors",
+        metadata={},
+        max_shard_size=None,
+    )
+
+    shard_path = save_dir / expected_files[0]
+    with safe_open(str(shard_path), framework="pt", device="cpu") as handler:
+        for name, tensor in original_state.items():
+            saved = handler.get_tensor(name)
+            torch.testing.assert_close(saved, tensor)
+
+
+def test_alias_all_from_turtle_preserves_shell_dtype_for_direct_meta_tensors(tmp_path):
+    turtle_model = _HybridWrapper(width=64)
+    shell_model = _HybridWrapper(width=64)
+    shell_model.load_state_dict(turtle_model.state_dict())
+
+    offload_root = tmp_path / "offload_root"
+    offload_to_disk(module=shell_model.block.inner, model=shell_model, disk_path=str(offload_root))
+
+    shell_model.block.dt_bias = nn.Parameter(
+        torch.empty(shell_model.block.dt_bias.shape, dtype=torch.float16, device="meta"),
+        requires_grad=shell_model.block.dt_bias.requires_grad,
+    )
+    shell_model.block.register_buffer(
+        "dt_scale",
+        torch.empty(shell_model.block.dt_scale.shape, dtype=torch.float16, device="meta"),
+        persistent=True,
+    )
+
+    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=turtle_model)
+
+    assert shell_model.block.dt_bias.dtype == torch.float16
+    assert shell_model.block.dt_scale.dtype == torch.float16
+    torch.testing.assert_close(shell_model.block.dt_bias, turtle_model.block.dt_bias.to(torch.float16))
+    torch.testing.assert_close(shell_model.block.dt_scale, turtle_model.block.dt_scale.to(torch.float16))
+
+
+def test_alias_all_from_turtle_preserves_tied_non_leaf_direct_parameters(tmp_path):
+    turtle_model = _SharedDirectWrapper(width=64)
+    shell_model = _SharedDirectWrapper(width=64)
+    shell_model.load_state_dict(turtle_model.state_dict())
+
+    offload_root = tmp_path / "offload_root"
+    offload_to_disk(module=shell_model.left.inner, model=shell_model, disk_path=str(offload_root))
+    offload_to_disk(module=shell_model.right.inner, model=shell_model, disk_path=str(offload_root))
+
+    shell_model.left.dt_bias = nn.Parameter(torch.empty_like(shell_model.left.dt_bias, device="meta"))
+    shell_model.right.dt_bias = nn.Parameter(torch.empty_like(shell_model.right.dt_bias, device="meta"))
+
+    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=turtle_model)
+
+    assert shell_model.left.dt_bias is shell_model.right.dt_bias
+
+    state_dict = get_state_dict_for_save(shell_model, offload_root=str(offload_root))
+    tied_keys = [name for name in state_dict if name.endswith("dt_bias")]
+    assert len(tied_keys) == 1
+
+
+def test_alias_all_from_turtle_skips_custom_parameter_subclasses():
+    turtle_model = _CustomParamWrapper(width=16)
+    shell_model = _CustomParamWrapper(width=16)
+    shell_model.load_state_dict(turtle_model.state_dict())
+
+    shell_model.block.dt_bias = nn.Parameter(torch.empty_like(shell_model.block.dt_bias, device="meta"))
+
+    alias_all_from_turtle_if_meta(shell_model=shell_model, turtle_model=turtle_model)
+
+    assert shell_model.block.dt_bias.device.type == "meta"
 
 
 def test_streaming_state_dict_pads_safetensors_header_to_8_bytes(tmp_path):

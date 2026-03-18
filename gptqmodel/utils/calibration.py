@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import random
 from typing import Any, Dict, List, Optional, Sequence, Union
 
@@ -93,9 +94,55 @@ def prepare_calibration_dataset(
     if len(raw_examples) == 0:
         raise ValueError("Quantize: calibration dataset is empty.")
 
+    message_examples = 0
+    message_template_name = None
+    message_text_fallback_examples = 0
+
     def _require_tokenizer(reason: str) -> None:
         if tokenizer is None:
             raise ValueError(f"tokenizer must be provided when {reason}.")
+
+    message_apply_fn = None
+    message_apply_name = None
+    message_template_checked = False
+
+    def _get_message_template():
+        # Prefer the model's native chat formatter when calibration rows carry
+        # `messages`, but only when the tokenizer has an actual template to use.
+        # Some HF tokenizers expose `apply_chat_template()` while leaving
+        # `chat_template=None`, which raises at runtime.
+        nonlocal message_apply_fn, message_apply_name, message_template_checked
+        if message_template_checked:
+            return message_apply_fn, message_apply_name
+
+        message_template_checked = True
+
+        if tokenizer is None:
+            return None, None
+
+        apply_fn = getattr(tokenizer, "apply_template", None)
+        if callable(apply_fn):
+            message_apply_fn = apply_fn
+            message_apply_name = "apply_template"
+            return message_apply_fn, message_apply_name
+
+        apply_chat_fn = getattr(tokenizer, "apply_chat_template", None)
+        if callable(apply_chat_fn):
+            chat_template = getattr(tokenizer, "chat_template", None)
+            if chat_template is None:
+                get_chat_template = getattr(tokenizer, "get_chat_template", None)
+                if callable(get_chat_template):
+                    try:
+                        chat_template = get_chat_template(None, None)
+                    except Exception:
+                        chat_template = None
+
+            if chat_template is not None:
+                message_apply_fn = apply_chat_fn
+                message_apply_name = "apply_chat_template"
+                return message_apply_fn, message_apply_name
+
+        return None, None
 
     def _to_2d_long_tensor(value: Any, name: str, idx: int) -> torch.Tensor:
         try:
@@ -178,17 +225,26 @@ def prepare_calibration_dataset(
         return _pack_ids(input_ids, attention_mask, idx)
 
     def _tokenize_messages_value(messages_value: Any, idx: int) -> Dict[str, torch.Tensor]:
+        nonlocal message_examples, message_template_name
         _require_tokenizer("calibration data uses the `messages` feature")
-        apply_fn = getattr(tokenizer, "apply_template", None)
+        apply_fn, template_name = _get_message_template()
         if apply_fn is None:
-            raise ValueError("tokenizer must expose `apply_template` to handle `messages` calibration data.")
+            raise ValueError(
+                "tokenizer must expose `apply_template` or `apply_chat_template` to handle `messages` calibration data."
+            )
         try:
-            templated = apply_fn(messages_value, tokenize=False)
+            if template_name == "apply_chat_template":
+                templated = apply_fn(messages_value, tokenize=False, add_generation_prompt=False)
+            else:
+                templated = apply_fn(messages_value, tokenize=False)
         except TypeError:
             templated = apply_fn(messages_value)
 
         if templated is None:
             raise ValueError(f"tokenizer.apply_template returned None for calibration item {idx}.")
+
+        message_examples += 1
+        message_template_name = template_name
 
         if hasattr(templated, "get"):
             ids_value = templated.get("input_ids")
@@ -220,13 +276,15 @@ def prepare_calibration_dataset(
     for idx, example in enumerate(raw_examples):
         if isinstance(example, dict):
             if "messages" in example:
-                apply_fn = getattr(tokenizer, "apply_template", None) if tokenizer else None
+                apply_fn, _ = _get_message_template()
                 if apply_fn is None:
                     if "text" in example:
+                        message_text_fallback_examples += 1
                         processed_examples.append(_tokenize_text_value(example["text"], idx))
                         continue
                     raise ValueError(
-                        "tokenizer must expose `apply_template` or calibration data must provide `text` when using `messages`."
+                        "tokenizer must expose `apply_template` or `apply_chat_template`, or calibration data must "
+                        "provide `text` when using `messages`."
                     )
                 processed_examples.append(_tokenize_messages_value(example["messages"], idx))
                 continue
@@ -356,6 +414,19 @@ def prepare_calibration_dataset(
             f"Use quantize(calibration_data_min_length={calibration_data_min_length}) to set a custom minimum length."
         )
 
+    if message_examples > 0 and message_template_name is not None:
+        log.info(
+            "Calibration: tokenized %s `messages` examples via tokenizer.%s",
+            message_examples,
+            message_template_name,
+        )
+    if message_text_fallback_examples > 0:
+        log.warn(
+            "Calibration: fell back to raw `text` for %s `messages` examples because the tokenizer has no message "
+            "template configured.",
+            message_text_fallback_examples,
+        )
+
     if trimmed_row_count > 0:
         log.info(
             "Quantize: trimmed %s calibration rows above %s=%s (longest original length=%s)",
@@ -464,6 +535,25 @@ def prepare_calibration_dataset(
     else:
         log.info("Calibration: Native order")
         sorted_dataset = new_calibration_dataset
+
+    preview_count = max(0, int(os.getenv("GPTQMODEL_LOG_CALIBRATION_SAMPLES", "0") or 0))
+    if preview_count > 0:
+        # Preview the exact token rows that will be batched for quantization.
+        for idx, example in enumerate(sorted_dataset[:preview_count], start=1):
+            row_ids = example["input_ids"][0]
+            preview = ""
+            if tokenizer is not None:
+                try:
+                    preview = tokenizer.decode(row_ids[:128], skip_special_tokens=False).replace("\n", " ")
+                except Exception:
+                    preview = ""
+            log.info(
+                "Calibration sample %s/%s: tokens=%s preview=%r",
+                idx,
+                min(preview_count, len(sorted_dataset)),
+                len(row_ids),
+                preview[:240],
+            )
 
     if support_batch_quantize:
         pad_token_id = getattr(tokenizer, "pad_token_id", 0) if tokenizer is not None else 0

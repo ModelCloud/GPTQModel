@@ -1,7 +1,8 @@
-import random
+import secrets
 import string
 
 
 def get_random_string(length: int = 8) -> str:
     """Generate a random string of fixed length with lowercase English letters."""
-    return ''.join(random.choices(string.ascii_lowercase, k=length))
+    alphabet = string.ascii_lowercase
+    return ''.join(secrets.choice(alphabet) for _ in range(length))

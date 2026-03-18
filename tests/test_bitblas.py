@@ -245,6 +245,75 @@ def test_bitblas_repack_from_symmetric_gptq_remaps_signed_codes(monkeypatch):
     assert captured["bias"] is None
 
 
+def test_bitblas_repack_from_gptq_v2_symmetric_codes_does_not_remap(monkeypatch):
+    class _DummyMatmul:
+        lib = object()
+        weight_transform = None
+
+        @staticmethod
+        def retrieve_weight_shape():
+            return (1, 1)
+
+    monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
+    monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
+    monkeypatch.setattr(
+        bitblas_module.BitblasQuantLinear,
+        "_get_or_create_bitblas_operator",
+        lambda self, config, enable_tuning: _DummyMatmul(),
+    )
+
+    bits = 4
+    group_size = 32
+    in_features = 32
+    out_features = 32
+
+    linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
+    gptq_linear = TorchQuantLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=torch.int32,
+        bias=False,
+    )
+    gptq_linear.pack_block(linear, scales.T, zeros.T, g_idx=g_idx.to(torch.int32))
+    model_utils.convert_gptq_v1_to_v2_format_module(gptq_linear, bits=bits, pack_dtype=torch.int32)
+
+    captured = {}
+    layer = bitblas_module.BitblasQuantLinear(
+        bits=bits,
+        group_size=group_size,
+        desc_act=False,
+        sym=True,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=torch.int32,
+        bias=False,
+        enable_tuning=False,
+    )
+
+    def _capture_quant_state(*, intweight_out_in, scales_out_group, intzeros_group_out=None, bias=None):
+        captured["intweight"] = intweight_out_in.clone()
+        captured["scales"] = scales_out_group.clone()
+        captured["intzeros"] = intzeros_group_out
+        captured["bias"] = bias
+
+    layer._load_bitblas_quant_state = _capture_quant_state
+    layer.repack_from_gptq(gptq_linear)
+
+    packed_weight = gptq_linear.qweight.detach().T.contiguous().view(layer.quant_config.torch_storage_dtype)
+    unpacked_codes = bitblas_module.unpack_gptq_qweight(packed_weight, bits).contiguous()
+    remapped = bitblas_module.remap_gptq_symmetric_codes_to_bitblas(unpacked_codes, bits)
+
+    torch.testing.assert_close(captured["intweight"], unpacked_codes)
+    assert not torch.equal(captured["intweight"], remapped)
+    torch.testing.assert_close(captured["scales"], gptq_linear.scales.detach().T.contiguous())
+    assert captured["intzeros"] is None
+    assert captured["bias"] is None
+
+
 def test_bitblas_validate_rejects_unsupported_bf16_signed_gptq():
     valid, err = bitblas_module.BitblasQuantLinear.validate(
         bits=4,

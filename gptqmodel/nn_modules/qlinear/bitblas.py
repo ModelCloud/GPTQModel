@@ -289,13 +289,33 @@ def unpack_gptq_qweight(qweight: torch.Tensor, bits: int) -> torch.Tensor:
 
 
 def remap_gptq_symmetric_codes_to_bitblas(qweight_codes: torch.Tensor, bits: int) -> torch.Tensor:
-    # GPTQ symmetric weights are packed as two's-complement bitfields. BitBLAS' signed intN
-    # dequant path instead interprets stored codes as a biased range and reconstructs values as
-    # `code - 2^(bits-1)`. Flip the sign bit so GPTQ's two's-complement layout lands on the
-    # code range BitBLAS actually decodes.
+    # Some in-memory TorchQuantLinear symmetric pack paths still encode qweight as GPTQ-style
+    # two's-complement nibbles while leaving qzeros packed as all zeros. BitBLAS' signed intN path
+    # expects the corresponding biased code range instead, so flip the sign bit for that narrow
+    # producer case before loading the quant state.
     sign_bit = 1 << (bits - 1)
     remapped = torch.bitwise_xor(qweight_codes.to(torch.int16), sign_bit)
     return remapped.to(torch.int8).contiguous()
+
+
+def _should_remap_symmetric_gptq_codes(gptq_module: BaseQuantLinear) -> bool:
+    qzeros = getattr(gptq_module, "qzeros", None)
+    if qzeros is None or qzeros.numel() == 0:
+        return False
+
+    qzero_format = getattr(gptq_module, "qzero_format", None)
+    if callable(qzero_format):
+        format_id = qzero_format()
+        if format_id == 2:
+            return False
+        if format_id != 1:
+            return False
+
+    # The remap is only needed for the pre-v2 TorchQuantLinear symmetric pack path. That producer
+    # keeps qzeros packed as all zeros while storing qweight in GPTQ's two's-complement nibble
+    # layout. GPTQModel converts external checkpoints to qzero_format=2 before BitBLAS repacking,
+    # and those tensors must be left untouched.
+    return qzeros.count_nonzero().item() == 0
 
 
 def _num_groups(group_size: int, in_features: int) -> int:
@@ -768,7 +788,7 @@ class BitblasQuantLinear(BaseQuantLinear):
             gptq_module.qweight.detach().T.contiguous().view(self.quant_config.torch_storage_dtype)
         )
         intweight = unpack_gptq_qweight(packed_weight, bits).contiguous()
-        if self.quant_config.is_sym:
+        if self.quant_config.is_sym and _should_remap_symmetric_gptq_codes(gptq_module):
             intweight = remap_gptq_symmetric_codes_to_bitblas(intweight, bits)
 
         intzeros = None

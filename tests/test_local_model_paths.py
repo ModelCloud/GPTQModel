@@ -127,3 +127,84 @@ def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
     assert instance.turtle_model.config._experts_implementation == "linear_loop"
     assert instance.turtle_model.config is not base_config
     assert instance.turtle_model is not None
+
+
+def test_model_loader_falls_back_when_meta_shell_build_hits_meta_tensor_item(monkeypatch):
+    class FakeConfig:
+        def __init__(self):
+            self._experts_implementation = None
+            self.sub_configs = {}
+            self.torch_dtype = None
+
+        def to_dict(self):
+            return {"max_position_embeddings": 128}
+
+    class FakeModel:
+        def __init__(self, config):
+            self.config = config
+            self.seqlen = None
+
+        def eval(self):
+            return self
+
+    base_config = FakeConfig()
+    load_calls = []
+
+    def fake_build_shell_model(_loader, config, **_kwargs):
+        raise RuntimeError("Tensor.item() cannot be called on meta tensors")
+
+    def fake_convert_model(model, cleanup_original=False):
+        assert cleanup_original is False
+        model.config._experts_implementation = "linear_loop"
+        return model
+
+    class FakeInnerLoader:
+        @staticmethod
+        def from_pretrained(_path, config=None, **kwargs):
+            load_calls.append(kwargs)
+            return FakeModel(config)
+
+    @loader.ModelLoader
+    class DummyQModel:
+        loader = FakeInnerLoader
+        require_dtype = None
+        require_fast_init = False
+        require_trust_remote_code = False
+        require_pkgs = []
+        supports_desc_act = [True, False]
+        support_offload_to_disk = True
+        config_class = None
+
+        @staticmethod
+        def before_model_load(*_args, **_kwargs):
+            return None
+
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.turtle_model = kwargs.get("turtle_model")
+            self.quantize_config = kwargs.get("quantize_config")
+            self.config = model.config
+
+    monkeypatch.setattr(loader, "check_versions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader, "get_model_local_path", lambda *_args, **_kwargs: "/tmp/fake-model")
+    monkeypatch.setattr(loader, "auto_select_device", lambda *_args, **_kwargs: torch.device("cpu"))
+    monkeypatch.setattr(loader, "auto_dtype", lambda *_args, **_kwargs: torch.float16)
+    monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: base_config)
+    monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("gptqmodel.utils.hf.build_shell_model", fake_build_shell_model)
+    monkeypatch.setattr(loader.defuser, "convert_model", fake_convert_model)
+
+    instance = DummyQModel.from_pretrained(
+        "/tmp/fake-model",
+        quantize_config=QuantizeConfig(offload_to_disk=True),
+        trust_remote_code=False,
+    )
+
+    assert len(load_calls) == 1
+    assert "device_map" not in load_calls[0]
+    assert load_calls[0]["low_cpu_mem_usage"] is False
+    assert instance.turtle_model is None
+    assert instance.quantize_config.offload_to_disk is True
+    assert instance.model.config._experts_implementation == "linear_loop"
+    assert instance.model.config is not base_config

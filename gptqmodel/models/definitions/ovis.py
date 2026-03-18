@@ -148,7 +148,9 @@ class OvisQModel(BaseQModel):
 
         return calib_data
 
-    def generate(self, inputs, **kwargs):
+    def generate(self, inputs=None, **kwargs):
         """shortcut for model.generate"""
+        if inputs is None:
+            inputs = kwargs.pop("input_ids", None)
         with torch.inference_mode(), torch.amp.autocast(device_type=self.device.type):
             return self.model.generate(inputs, **kwargs)

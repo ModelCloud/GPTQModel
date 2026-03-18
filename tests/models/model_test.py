@@ -42,7 +42,14 @@ import unittest  # noqa: E402
 from collections.abc import Iterable, Mapping  # noqa: E402
 
 import torch.cuda  # noqa: E402
-from datasets import load_dataset  # noqa: E402
+
+try:  # noqa: E402
+    from datasets import load_dataset as hf_load_dataset  # noqa: E402
+except Exception as exc:  # pragma: no cover - depends on test environment
+    hf_load_dataset = None
+    DATASETS_IMPORT_ERROR = exc
+else:
+    DATASETS_IMPORT_ERROR = None
 
 
 try:
@@ -149,6 +156,7 @@ class ModelTest(unittest.TestCase):
     INFERENCE_RESULT_KEYWORDS = ["paris"]
     GENERATE_EVAL_SIZE_MIN = 128
     GENERATE_EVAL_SIZE_MAX = 128
+    APPLY_CHAT_TEMPLATE = False
 
     LM_HEAD_LOSS_MAX_DELTA_PERCENT = 0.1  # ±10%
 
@@ -599,7 +607,14 @@ class ModelTest(unittest.TestCase):
             prompt = item["prompt"]
             keywords = item["keywords"]
             try:
-                response = self.generate_stable_with_limit(model, tokenizer, prompt)
+                inputs, decode_start_idx = self._prepare_generic_inference_inputs(tokenizer, prompt)
+                response = self.generate_stable_with_limit(
+                    model,
+                    tokenizer,
+                    prompt,
+                    inputs=inputs,
+                    decode_start_idx=decode_start_idx,
+                )
                 normalized = response.lower()
                 matched = any(keyword.lower() in normalized for keyword in keywords)
                 results.append(
@@ -630,6 +645,24 @@ class ModelTest(unittest.TestCase):
                     }
                 )
         return results
+
+    def _prepare_generic_inference_inputs(self, tokenizer, prompt):
+        # Some chat-tuned checkpoints only produce stable continuations when the
+        # sanity prompts are wrapped with the tokenizer's chat template.
+        if not self.APPLY_CHAT_TEMPLATE or not hasattr(tokenizer, "apply_chat_template"):
+            return None, None
+
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt},
+        ]
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        inputs = tokenizer([text], return_tensors="pt")
+        return inputs, inputs.input_ids.shape[1]
 
     def run_eval_tasks(self, model, backend, trust_remote_code=False):
         previous_backend = self.LOAD_BACKEND
@@ -991,11 +1024,15 @@ class ModelTest(unittest.TestCase):
 
     @classmethod
     def load_dataset(cls, tokenizer=None, rows: int = 0):
-        try:
-            dataset = load_dataset(path="/monster/data/model/dataset/nm-calibration", name="LLM", split="train")
-        except Exception as exc:  # pragma: no cover - exercised in fallbacks
-            log.warning("load_dataset failed; falling back to local parquet: %s", exc)
+        if hf_load_dataset is None:
+            log.warning("datasets.load_dataset unavailable; falling back to local parquet: %s", DATASETS_IMPORT_ERROR)
             dataset = cls._load_calibration_parquet()
+        else:
+            try:
+                dataset = hf_load_dataset(path="/monster/data/model/dataset/nm-calibration", name="LLM", split="train")
+            except Exception as exc:  # pragma: no cover - exercised in fallbacks
+                log.warning("load_dataset failed; falling back to local parquet: %s", exc)
+                dataset = cls._load_calibration_parquet()
 
         if rows > 0:
             return dataset.select(range(min(rows, len(dataset))))

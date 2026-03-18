@@ -26,10 +26,6 @@ on:
         description: 'PR Number'
         required: false
         type: number
-      test_names:
-        description: 'Input Test(s) to Run (default all)'
-        required: false
-        default: ''
       test_regex:
         description: 'Regex to filter test files'
         required: false
@@ -41,7 +37,7 @@ on:
       max-parallel:
         description: 'Parallel jobs'
         required: false
-        default: '6'
+        default: '7'
       model-test-mode:
         description: 'Model compat test mode'
         type: choice
@@ -50,15 +46,6 @@ on:
         options:
           - 'fast'
           - 'slow'
-      model-gpu-count:
-        description: 'Deprecated: model compat jobs are pinned to 1 visible GPU'
-        required: false
-        default: '1'
-      exclusive-gpu:
-        description: 'One Test Per GPU'
-        type: boolean
-        required: false
-        default: true
       server:
         description: 'Wheel Build Server'
         type: choice
@@ -95,7 +82,7 @@ env:
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 concurrency:
-  group: ${{ github.event.inputs.ref || github.ref }}-workflow-unit-tests-${{ github.event.inputs.test_names }}
+  group: ${{ github.event.inputs.ref || github.ref }}-workflow-unit-tests #-${{ github.event.inputs.test_names }}
   cancel-in-progress: true
 
 permissions:
@@ -115,8 +102,6 @@ jobs:
           echo "repo: ${{ env.repo }}"
           echo "ref: ${{ env.ref }}"
           echo "artifact_id: ${{ github.event.inputs.artifact_id }}"
-          echo "test_names: ${{ github.event.inputs.test_names }}"
-          echo "exclusive-gpu: ${{ github.event.inputs['exclusive-gpu'] }}"
           echo "selected server: ${{ github.event.inputs.server }}"
 
       - name: Set server
@@ -167,7 +152,6 @@ jobs:
         run: |
           test_files=$(python3 .github/scripts/list_test_files.py \
           --ignored-test-files "$IGNORED_TEST_FILES" \
-          --test-names "${{ github.event.inputs.test_names }}" \
           --test-regex "${{ github.event.inputs.test_regex }}")
 
           IFS='|' read -r torch_test_files model_test_files mlx_files <<< "$test_files"
@@ -208,13 +192,13 @@ jobs:
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
+      - run: git config --system --add safe.directory $GITHUB_WORKSPACE
 
       - name: Fetch PR by number
         if: ${{ github.event.inputs.pr_number != 0 }}
         run: |
           PR_NUMBER=${{ github.event.inputs.pr_number }}
           echo "pr number $PR_NUMBER"
-          git config --global --add safe.directory $(pwd)
           git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
           git checkout pr-${PR_NUMBER}
 
@@ -303,7 +287,7 @@ jobs:
 
           build_once() {
             echo "::group::compile logs"
-            python setup.py bdist_wheel 2>&1 | tee $log_file
+            python -m build -w --no-isolation -v 2>&1 | tee $log_file
             echo "::endgroup::"
           }
 
@@ -352,11 +336,16 @@ jobs:
         if: ${{ github.event.inputs.artifact_id == '' && !cancelled() && failure() }}
         continue-on-error: true
         run: |
+          ls -ahl dist
+          
           log_dir=/opt/dist/${{ github.run_id }}/logs
           log_file=$log_dir/build.log
           grep -nE "ptxas fatal|nvcc fatal|error:|fatal error|ninja: build stopped" $log_file | head -n 50 || true
 
-          ls -ahl dist
+          if grep -qE "bitblas_.*invalid ELF header" $log_file; then
+            echo "Detected invalid ELF header, cleaning bitblas cache..."
+            rm -rf ~/.cache/bitblas_*/nvidia
+          fi
 
       - name: Upload wheel to github artifact
         if: github.event.inputs.artifact_id == '' && !cancelled()
@@ -568,7 +557,6 @@ jobs:
           RUN_ID="${{ github.run_id }}"
           TEST="${{ matrix.test_script }}"
           RUNNER="${RUNNER_NAME:-unknown}"
-          EXCLUSIVE="${{ github.event.inputs['exclusive-gpu'] }}"
 
           SLEEP_SEC=5
           TIMEOUT_SEC=18000   # Max wait time: 300 minutes
@@ -579,7 +567,6 @@ jobs:
 
           test_q=$(urlencode "$TEST")
           runner_q=$(urlencode "$RUNNER")
-          exclusive_q=$(urlencode "$EXCLUSIVE")
 
           count=1
           if [[ "${{ matrix.test_script }}" == *test_multi_gpu_inference* ]]; then
@@ -590,12 +577,12 @@ jobs:
           gpu_id=""
 
           echo "Requesting GPU from allocator"
-          echo "run_id=$RUN_ID test=$TEST runner=$RUNNER exclusive=$EXCLUSIVE"
+          echo "run_id=$RUN_ID test=$TEST runner=$RUNNER"
 
           while true; do
             # Refresh timestamp every request to avoid cache or duplicated requests
             ts_ms=$(date +%s%3N)
-            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&exclusive=$exclusive_q&count=$count"
+            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&count=$count"
             echo "requesting GPU with: $url"
 
             # Call allocator
@@ -654,7 +641,6 @@ jobs:
 
 
       - name: Run tests
-        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
         run: |
           if [[ "${{ matrix.test_script }}" == *ipex* ]]; then
             export CUDA_VISIBLE_DEVICES=""
@@ -666,7 +652,7 @@ jobs:
           fi
 
           start_monitor() {
-            keep_alive_url="http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&exclusive=${{ github.event.inputs['exclusive-gpu'] }}&gpu=${CUDA_VISIBLE_DEVICES}"
+            keep_alive_url="http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&gpu=${CUDA_VISIBLE_DEVICES}"
             echo "start to keep alive... ${keep_alive_url}"
             while true; do
               resp=$(curl -fsSL $keep_alive_url 2>/dev/null || echo "")
@@ -717,7 +703,7 @@ jobs:
           curl "http://$XEON5/gpu/logVram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Check log
-        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() && failure() }}
+        if: ${{ !cancelled() &&  failure() }}
         continue-on-error: true
         run: |
           log_dir=/opt/dist/${{ github.run_id }}/logs
@@ -883,7 +869,6 @@ jobs:
           RUN_ID="${{ github.run_id }}"
           TEST="${{ matrix.test_script }}"
           RUNNER="${RUNNER_NAME:-unknown}"
-          EXCLUSIVE="${{ github.event.inputs['exclusive-gpu'] }}"
 
           SLEEP_SEC=5
           TIMEOUT_SEC=18000
@@ -892,18 +877,17 @@ jobs:
 
           test_q=$(urlencode "$TEST")
           runner_q=$(urlencode "$RUNNER")
-          exclusive_q=$(urlencode "$EXCLUSIVE")
 
           count="1"
           start_s=$(date +%s)
           gpu_id=""
 
           echo "Requesting GPU from allocator"
-          echo "run_id=$RUN_ID test=$TEST runner=$RUNNER exclusive=$EXCLUSIVE count=$count"
+          echo "run_id=$RUN_ID test=$TEST runner=$RUNNER count=$count"
 
           while true; do
             ts_ms=$(date +%s%3N)
-            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&exclusive=$exclusive_q&count=$count"
+            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&count=$count"
             echo "requesting GPU with: $url"
 
             resp="$(
@@ -954,14 +938,13 @@ jobs:
           curl -fsSL "$BASE_URL/gpu/status" || true
 
       - name: Run tests
-        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() }}
         run: |
           export GPTQMODEL_MODEL_TEST_MODE="${MODEL_TEST_MODE}"
           echo "GPTQMODEL_MODEL_TEST_MODE=$GPTQMODEL_MODEL_TEST_MODE"
           echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
           start_monitor() {
-            keep_alive_url="http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&exclusive=${{ github.event.inputs['exclusive-gpu'] }}&gpu=${CUDA_VISIBLE_DEVICES}"
+            keep_alive_url="http://$XEON5/gpu/keepalive?runid=${{ github.run_id }}&test=${{ matrix.test_script }}&runner=${RUNNER_NAME}&timestamp=$(date +%s)&gpu=${CUDA_VISIBLE_DEVICES}"
             echo "start to keep alive... ${keep_alive_url}"
             while true; do
               resp=$(curl -fsSL $keep_alive_url 2>/dev/null || echo "")
@@ -1012,7 +995,7 @@ jobs:
           curl "http://$XEON5/gpu/logVram?runid=${{ github.run_id }}&gpu=${{ env.CUDA_VISIBLE_DEVICES }}&range=$execution_time&unit=second&test=${{ matrix.test_script }}"
 
       - name: Check log
-        if: ${{ (!github.event.inputs.test_names || contains(github.event.inputs.test_names, matrix.test_script)) && !cancelled() && failure() }}
+        if: ${{ !cancelled() && failure() }}
         continue-on-error: true
         run: |
           log_dir=/opt/dist/${{ github.run_id }}/logs

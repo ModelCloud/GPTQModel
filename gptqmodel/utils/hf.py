@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import inspect
 import json
+import sys
 import warnings
 from functools import lru_cache
 from typing import Any, Optional
@@ -28,6 +30,7 @@ __all__ = [
     "no_init_weights",
     "normalize_hf_config_compat",
     "prepare_remote_code_compat",
+    "prepare_remote_model_init_compat",
     "has_native_transformers_causallm_support",
     "resolve_trust_remote_code",
     "load_tokenizer",
@@ -162,6 +165,16 @@ def _patch_transformers_remote_code_compat() -> None:
     except Exception:
         return
 
+    try:
+        from transformers import cache_utils
+    except Exception:
+        cache_utils = None
+
+    try:
+        from transformers.generation import utils as generation_utils
+    except Exception:
+        generation_utils = None
+
     if not hasattr(import_utils, "is_torch_fx_available"):
         # transformers 5.x removed `import_utils.is_torch_fx_available`, but
         # older remote model files still import it during module import.
@@ -169,6 +182,174 @@ def _patch_transformers_remote_code_compat() -> None:
             return hasattr(torch, "fx")
 
         import_utils.is_torch_fx_available = is_torch_fx_available
+
+    if cache_utils is not None and not hasattr(cache_utils, "SlidingWindowCache") and hasattr(cache_utils, "StaticCache"):
+        # transformers 5.x folds sliding-window behavior into StaticCache
+        # layers, but older remote code still imports the legacy symbol.
+        cache_utils.SlidingWindowCache = cache_utils.StaticCache
+
+    if cache_utils is not None and not hasattr(cache_utils, "HybridCache") and hasattr(cache_utils, "StaticCache"):
+        # transformers 5.x also collapsed the legacy HybridCache entrypoint
+        # into StaticCache, which already instantiates hybrid/sliding layers
+        # based on the model config.
+        cache_utils.HybridCache = cache_utils.StaticCache
+
+    cache_base_cls = getattr(cache_utils, "Cache", None) if cache_utils is not None else None
+    if cache_base_cls is not None and not hasattr(cache_base_cls, "get_max_length") and hasattr(cache_base_cls, "get_max_cache_shape"):
+        # Older remote decoders expect `get_max_length()`, while newer
+        # transformers renamed that API to `get_max_cache_shape()`.
+        def get_max_length(self, layer_idx: int = 0) -> Optional[int]:
+            max_length = self.get_max_cache_shape(layer_idx)
+            return None if max_length is None or max_length < 0 else max_length
+
+        cache_base_cls.get_max_length = get_max_length
+
+    if cache_base_cls is not None and not hasattr(cache_base_cls, "get_usable_length") and hasattr(cache_base_cls, "get_seq_length"):
+        # Recreate the pre-5.x cache eviction helper so remote attention code
+        # can compute usable KV length against the newer cache interface.
+        def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = 0) -> int:
+            max_length = self.get_max_length(layer_idx=layer_idx)
+            previous_seq_length = self.get_seq_length(layer_idx)
+            if max_length is not None and previous_seq_length + new_seq_length > max_length:
+                return max_length - new_seq_length
+            return previous_seq_length
+
+        cache_base_cls.get_usable_length = get_usable_length
+
+    dynamic_cache_cls = getattr(cache_utils, "DynamicCache", None) if cache_utils is not None else None
+    if dynamic_cache_cls is not None and not hasattr(dynamic_cache_cls, "to_legacy_cache"):
+        # Older remote generation code still serializes cache state as
+        # `Tuple[(key, value), ...]`; rebuild that view from layer storage.
+        def to_legacy_cache(self) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+            legacy_cache = ()
+            for layer in self.layers:
+                if not getattr(layer, "is_initialized", False):
+                    continue
+                legacy_cache += ((layer.keys, layer.values),)
+            return legacy_cache
+
+        dynamic_cache_cls.to_legacy_cache = to_legacy_cache
+
+    if dynamic_cache_cls is not None and not hasattr(dynamic_cache_cls, "from_legacy_cache"):
+        # Accept legacy tuple caches by replaying them into the current
+        # layer-based DynamicCache implementation.
+        @classmethod
+        def from_legacy_cache(cls, past_key_values: Optional[tuple[tuple[torch.Tensor, torch.Tensor], ...]] = None):
+            cache = cls()
+            if past_key_values is not None:
+                for layer_idx, (key_states, value_states) in enumerate(past_key_values):
+                    cache.update(key_states, value_states, layer_idx)
+            return cache
+
+        dynamic_cache_cls.from_legacy_cache = from_legacy_cache
+
+    if generation_utils is not None and not hasattr(generation_utils, "NEED_SETUP_CACHE_CLASSES_MAPPING"):
+        # Older remote generation code registers custom cache builders through
+        # this module-global dict during import.
+        generation_utils.NEED_SETUP_CACHE_CLASSES_MAPPING = {}
+
+    generation_mixin_cls = getattr(generation_utils, "GenerationMixin", None) if generation_utils is not None else None
+    if generation_mixin_cls is not None and not getattr(generation_mixin_cls, "_gptqmodel_custom_cache_impl_patch", False):
+        original_prepare_cache_for_generation = generation_mixin_cls._prepare_cache_for_generation
+
+        # transformers 5.x removed the custom cache registry path used by some
+        # trust_remote_code models, so recreate just enough of that setup here.
+        def _prepare_cache_for_generation_compat(
+            self,
+            generation_config: GenerationConfig,
+            model_kwargs: dict,
+            generation_mode,
+            batch_size: int,
+            max_cache_length: int,
+        ) -> None:
+            cache_mapping = getattr(generation_utils, "NEED_SETUP_CACHE_CLASSES_MAPPING", None)
+            cache_implementation = getattr(generation_config, "cache_implementation", None)
+            if not isinstance(cache_mapping, dict) or not isinstance(cache_implementation, str):
+                original_prepare_cache_for_generation(
+                    self,
+                    generation_config,
+                    model_kwargs,
+                    generation_mode,
+                    batch_size,
+                    max_cache_length,
+                )
+                return None
+
+            custom_cache_cls = cache_mapping.get(cache_implementation)
+            if custom_cache_cls is None:
+                original_prepare_cache_for_generation(
+                    self,
+                    generation_config,
+                    model_kwargs,
+                    generation_mode,
+                    batch_size,
+                    max_cache_length,
+                )
+                return None
+
+            is_linear_attn_cache = "mamba" in self.__class__.__name__.lower()
+            cache_name = "past_key_values" if not is_linear_attn_cache else "cache_params"
+
+            user_defined_cache = model_kwargs.get(cache_name)
+            if user_defined_cache is not None:
+                if generation_config.cache_implementation is not None:
+                    raise ValueError(
+                        f"Passing both `cache_implementation` (used to initialize certain caches) and `{cache_name}` "
+                        "(`Cache` object) is unsupported. Please use only one of the two."
+                    )
+                if isinstance(user_defined_cache, tuple):
+                    raise ValueError(
+                        "Passing a tuple of `past_key_values` is not supported anymore. Please use a `Cache` instance."
+                    )
+                return
+
+            if generation_config.use_cache is False:
+                return
+
+            cache_config = generation_config.cache_config
+            if cache_config is None:
+                cache_kwargs = {}
+            elif isinstance(cache_config, dict):
+                cache_kwargs = dict(cache_config)
+            elif hasattr(cache_config, "to_dict"):
+                cache_kwargs = dict(cache_config.to_dict())
+            else:
+                cache_kwargs = dict(cache_config)
+
+            text_config = self.config.get_text_config(decoder=True) if hasattr(self.config, "get_text_config") else self.config
+            full_batch_size = max(generation_config.num_beams, generation_config.num_return_sequences) * batch_size
+            cache_kwargs.setdefault("config", text_config)
+            cache_kwargs.setdefault("batch_size", full_batch_size)
+            cache_kwargs.setdefault("max_batch_size", full_batch_size)
+            cache_kwargs.setdefault("max_cache_len", max_cache_length)
+
+            model_dtype = getattr(self, "dtype", None) or getattr(self.config, "torch_dtype", None)
+            if model_dtype is not None:
+                cache_kwargs.setdefault("dtype", model_dtype)
+
+            model_device = getattr(self, "device", None)
+            if model_device is not None:
+                cache_kwargs.setdefault("device", model_device)
+
+            model_kwargs["past_key_values"] = custom_cache_cls(**cache_kwargs)
+
+            encoder_decoder_cache_cls = getattr(cache_utils, "EncoderDecoderCache", None) if cache_utils is not None else None
+            if (
+                getattr(self.config, "is_encoder_decoder", False)
+                and "past_key_values" in model_kwargs
+                and encoder_decoder_cache_cls is not None
+                and not isinstance(model_kwargs["past_key_values"], encoder_decoder_cache_cls)
+                and dynamic_cache_cls is not None
+            ):
+                model_kwargs["past_key_values"] = encoder_decoder_cache_cls(
+                    model_kwargs["past_key_values"],
+                    dynamic_cache_cls(config=text_config),
+                )
+
+            return None
+
+        generation_mixin_cls._prepare_cache_for_generation = _prepare_cache_for_generation_compat
+        generation_mixin_cls._gptqmodel_custom_cache_impl_patch = True
 
     if not getattr(PreTrainedModel, "_gptqmodel_legacy_tied_weights_patch", False) and hasattr(PreTrainedModel, "get_expanded_tied_weights_keys"):
         original_get_expanded_tied_weights_keys = PreTrainedModel.get_expanded_tied_weights_keys
@@ -202,6 +383,11 @@ def _patch_transformers_remote_code_compat() -> None:
 
         PreTrainedModel.get_expanded_tied_weights_keys = get_expanded_tied_weights_keys
         PreTrainedModel._gptqmodel_legacy_tied_weights_patch = True
+
+    if not hasattr(PreTrainedModel, "is_parallelizable"):
+        # Older remote-code model wrappers read this legacy base-class flag
+        # during init, but newer transformers dropped the default attribute.
+        PreTrainedModel.is_parallelizable = False
 
     if not getattr(PreTrainedModel, "_gptqmodel_missing_all_tied_weights_patch", False):
         original_getattr = PreTrainedModel.__getattr__
@@ -336,6 +522,196 @@ def prepare_remote_code_compat(config: Any) -> None:
     # Remote-code loads need both the transformers API shims and any config
     # field migrations applied before instantiation happens.
     normalize_hf_config_compat(config, trust_remote_code=True)
+
+
+def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: Any) -> None:
+    if not model_id_or_path:
+        return
+
+    auto_map = getattr(config, "auto_map", None) or {}
+    class_ref = auto_map.get("AutoModelForCausalLM")
+    if not isinstance(class_ref, str):
+        return
+
+    try:
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+        model_cls = get_class_from_dynamic_module(class_ref, str(model_id_or_path))
+    except Exception as exc:
+        log.debug("HF: remote model init compat pre-import failed for `%s`: %s", model_id_or_path, exc)
+        return
+
+    module_root = model_cls.__module__.rsplit(".", maxsplit=1)[0]
+    speech_module = sys.modules.get(f"{module_root}.speech_conformer_encoder")
+    remote_module = sys.modules.get(model_cls.__module__)
+    ovis_config_module = sys.modules.get(f"{module_root}.configuration_ovis")
+    outer_model_cls = model_cls if isinstance(model_cls, type) else None
+    input_mode_enum = getattr(remote_module, "InputMode", None) if remote_module is not None else None
+
+    if (
+        outer_model_cls is not None
+        and hasattr(outer_model_cls, "tie_weights")
+        and not getattr(outer_model_cls, "_gptqmodel_tie_weights_kwargs_patch", False)
+    ):
+        try:
+            tie_weights_sig = inspect.signature(outer_model_cls.tie_weights)
+        except (TypeError, ValueError):
+            tie_weights_sig = None
+
+        if tie_weights_sig is not None:
+            tie_weight_params = tie_weights_sig.parameters.values()
+            accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in tie_weight_params)
+            supports_missing_keys = "missing_keys" in tie_weights_sig.parameters
+            supports_recompute_mapping = "recompute_mapping" in tie_weights_sig.parameters
+
+            if not accepts_kwargs and (not supports_missing_keys or not supports_recompute_mapping):
+                original_tie_weights = outer_model_cls.tie_weights
+
+                # transformers 5.x passes `missing_keys=` and `recompute_mapping=`
+                # into tie_weights(); older remote-code models still declare
+                # `tie_weights(self)` and only need the original no-arg behavior.
+                def tie_weights_compat(self, *args, **kwargs):
+                    return original_tie_weights(self)
+
+                outer_model_cls.tie_weights = tie_weights_compat
+                outer_model_cls._gptqmodel_tie_weights_kwargs_patch = True
+
+    if getattr(config, "model_type", None) == "ovis" and ovis_config_module is not None:
+        formatter_cls = getattr(ovis_config_module, "Llama3ConversationFormatter", None)
+        if formatter_cls is not None and not getattr(formatter_cls, "_gptqmodel_tokenizer_backend_patch", False):
+            support_tokenizer_types = list(getattr(formatter_cls, "support_tokenizer_types", None) or [])
+            if "TokenizersBackend" not in support_tokenizer_types:
+                # Current transformers/tokenicer fast-tokenizer backend exposes
+                # `TokenizersBackend` instead of the older
+                # `PreTrainedTokenizerFast` class name expected by Ovis remote code.
+                support_tokenizer_types.append("TokenizersBackend")
+                formatter_cls.support_tokenizer_types = support_tokenizer_types
+            formatter_cls._gptqmodel_tokenizer_backend_patch = True
+
+    if getattr(config, "model_type", None) != "phi4mm":
+        return
+
+    if speech_module is not None and not getattr(speech_module, "_gptqmodel_scalar_tensor_meta_patch", False):
+        speech_torch = getattr(speech_module, "torch", None)
+        original_tensor = getattr(speech_torch, "tensor", None)
+        if speech_torch is not None and original_tensor is not None:
+            def _is_phi4mm_subsampling_scalar_init() -> bool:
+                for frame_info in inspect.stack(context=0):
+                    if frame_info.filename.endswith("speech_conformer_encoder.py") and frame_info.lineno == 1426:
+                        return True
+                return False
+
+            # Phi-4 MM remote audio init creates scalar tensors only to derive Python
+            # output sizes in NemoConvSubsampling; forcing just that scalar tensor onto
+            # CPU keeps meta init safe without perturbing other meta-only buffers.
+            def tensor_compat(data, *args, **kwargs):
+                current_device = getattr(torch.utils._device, "CURRENT_DEVICE", None)
+                if (
+                    kwargs.get("device") is None
+                    and current_device == torch.device("meta")
+                    and isinstance(data, (int, float, bool))
+                    and _is_phi4mm_subsampling_scalar_init()
+                ):
+                    kwargs = dict(kwargs)
+                    kwargs["device"] = "cpu"
+                return original_tensor(data, *args, **kwargs)
+
+            speech_torch.tensor = tensor_compat
+
+        positional_encoding_cls = getattr(speech_module, "AbsolutePositionalEncoding", None)
+        if positional_encoding_cls is not None and not getattr(positional_encoding_cls, "_gptqmodel_meta_extend_patch", False):
+            original_extend_pe = positional_encoding_cls.extend_pe
+
+            def _is_phi4mm_positional_seed_call() -> bool:
+                for frame_info in inspect.stack(context=0):
+                    if frame_info.filename.endswith("speech_conformer_encoder.py") and frame_info.lineno == 895:
+                        return True
+                return False
+
+            # The remote implementation seeds extend_pe() with a CPU scalar tensor.
+            # Under meta init, promote that seed tensor back to meta before the
+            # original method allocates its positional buffer.
+            def extend_pe_compat(self, x):
+                if isinstance(x, torch.Tensor) and x.device.type != "meta" and _is_phi4mm_positional_seed_call():
+                    x = x.to(device="meta")
+                return original_extend_pe(self, x)
+
+            positional_encoding_cls.extend_pe = extend_pe_compat
+            positional_encoding_cls._gptqmodel_meta_extend_patch = True
+
+        speech_module._gptqmodel_scalar_tensor_meta_patch = True
+
+    if (
+        outer_model_cls is not None
+        and hasattr(outer_model_cls, "forward")
+        and not getattr(outer_model_cls, "_gptqmodel_input_mode_patch", False)
+    ):
+        original_forward = outer_model_cls.forward
+
+        # Text-only callers like lm_eval do not pass `input_mode`; infer the
+        # correct Phi-4 MM mode from the provided modality tensors instead.
+        def forward_compat(self, *args, **kwargs):
+            if kwargs.get("input_mode") is None:
+                kwargs = dict(kwargs)
+                has_vision = any(
+                    kwargs.get(name) is not None
+                    for name in ("input_image_embeds", "image_sizes", "image_attention_mask")
+                )
+                has_audio = any(
+                    kwargs.get(name) is not None
+                    for name in ("input_audio_embeds", "audio_embed_sizes", "audio_attention_mask")
+                )
+
+                if has_vision and has_audio:
+                    kwargs["input_mode"] = input_mode_enum.VISION_SPEECH if input_mode_enum is not None else 3
+                elif has_vision:
+                    kwargs["input_mode"] = input_mode_enum.VISION if input_mode_enum is not None else 1
+                elif has_audio:
+                    kwargs["input_mode"] = input_mode_enum.SPEECH if input_mode_enum is not None else 2
+                else:
+                    kwargs["input_mode"] = input_mode_enum.LANGUAGE if input_mode_enum is not None else 0
+            return original_forward(self, *args, **kwargs)
+
+        outer_model_cls.forward = forward_compat
+        outer_model_cls._gptqmodel_input_mode_patch = True
+
+    inner_model_cls = getattr(remote_module, "Phi4MMModel", None) if remote_module is not None else None
+    if inner_model_cls is not None and not hasattr(inner_model_cls, "prepare_inputs_for_generation"):
+        # PEFT expects the inner model it wraps to expose this hook, even
+        # though Phi-4 MM only defines the full implementation on the outer
+        # CausalLM class.
+        def prepare_inputs_for_generation(self, input_ids=None, past_key_values=None, inputs_embeds=None, **kwargs):
+            model_inputs = dict(kwargs)
+            if inputs_embeds is not None and past_key_values is None:
+                model_inputs["inputs_embeds"] = inputs_embeds
+            else:
+                model_inputs["input_ids"] = input_ids
+            model_inputs["past_key_values"] = past_key_values
+            return model_inputs
+
+        inner_model_cls.prepare_inputs_for_generation = prepare_inputs_for_generation
+
+    try:
+        import importlib.util
+        import peft.import_utils as peft_import_utils
+        import peft.tuners.lora.awq as peft_awq
+    except Exception:
+        pass
+    else:
+        if not getattr(peft_awq, "_gptqmodel_awq_probe_patch", False):
+            # PEFT later imports `awq.modules.linear`, so the availability
+            # probe must require that concrete submodule instead of top-level
+            # namespace packages that are missing the actual runtime.
+            @lru_cache(maxsize=None)
+            def is_auto_awq_available() -> bool:
+                try:
+                    return importlib.util.find_spec("awq.modules.linear") is not None
+                except ModuleNotFoundError:
+                    return False
+
+            peft_import_utils.is_auto_awq_available = is_auto_awq_available
+            peft_awq.is_auto_awq_available = is_auto_awq_available
+            peft_awq._gptqmodel_awq_probe_patch = True
 
 
 def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
