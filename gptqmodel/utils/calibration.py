@@ -102,18 +102,45 @@ def prepare_calibration_dataset(
         if tokenizer is None:
             raise ValueError(f"tokenizer must be provided when {reason}.")
 
+    message_apply_fn = None
+    message_apply_name = None
+    message_template_checked = False
+
     def _get_message_template():
-        # Prefer the model's native chat formatter when calibration rows carry `messages`.
+        # Prefer the model's native chat formatter when calibration rows carry
+        # `messages`, but only when the tokenizer has an actual template to use.
+        # Some HF tokenizers expose `apply_chat_template()` while leaving
+        # `chat_template=None`, which raises at runtime.
+        nonlocal message_apply_fn, message_apply_name, message_template_checked
+        if message_template_checked:
+            return message_apply_fn, message_apply_name
+
+        message_template_checked = True
+
         if tokenizer is None:
             return None, None
 
         apply_fn = getattr(tokenizer, "apply_template", None)
         if callable(apply_fn):
-            return apply_fn, "apply_template"
+            message_apply_fn = apply_fn
+            message_apply_name = "apply_template"
+            return message_apply_fn, message_apply_name
 
         apply_chat_fn = getattr(tokenizer, "apply_chat_template", None)
         if callable(apply_chat_fn):
-            return apply_chat_fn, "apply_chat_template"
+            chat_template = getattr(tokenizer, "chat_template", None)
+            if chat_template is None:
+                get_chat_template = getattr(tokenizer, "get_chat_template", None)
+                if callable(get_chat_template):
+                    try:
+                        chat_template = get_chat_template(None, None)
+                    except Exception:
+                        chat_template = None
+
+            if chat_template is not None:
+                message_apply_fn = apply_chat_fn
+                message_apply_name = "apply_chat_template"
+                return message_apply_fn, message_apply_name
 
         return None, None
 
