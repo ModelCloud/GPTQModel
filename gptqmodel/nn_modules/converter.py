@@ -223,20 +223,8 @@ def convert_llama4_expert_converter(module, config):
 
     return module
 
-def convert_glm4v_mlp_converter(module, config):
-    import transformers.models.glm4v.modeling_glm4v as glm4v_modeling
-
-    from ..models.definitions.glm4v import Glm4vTextMLPNew
-
-    for name, sub_module in module.named_modules():
-        if isinstance(sub_module, glm4v_modeling.Glm4vTextMLP):
-            new_module = Glm4vTextMLPNew(config=config.get_text_config(), ori_mlp=sub_module)
-            setattr(module, name, new_module)
-    return module
-
 MODULE_CONVERTER_MAP = {
     "llama4": convert_llama4_expert_converter,
     "gpt_oss": convert_gpt_oss_expert_converter,
-    "glm4v": convert_glm4v_mlp_converter,
     # qwen2_moe/qwen3_moe/qwen3_next/qwen3_omni_moe are handled by Defuser>=0.0.10 during model load.
 }
