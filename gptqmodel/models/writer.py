@@ -41,7 +41,12 @@ from ..quantization.config import (
 )
 from ..utils.backend import BACKEND
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
-from ..utils.hf import prepare_remote_code_compat, sanitize_generation_config_file, suspend_hf_weight_init
+from ..utils.hf import (
+    prepare_remote_code_compat,
+    sanitize_generation_config_file,
+    sanitize_model_config,
+    suspend_hf_weight_init,
+)
 from ..utils.logger import setup_logger
 from ..utils.model import (
     copy_py_files,
@@ -217,7 +222,9 @@ def ModelWriter(cls):
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.
+        sanitize_model_config(self.model.config)
         config = copy.deepcopy(self.model.config)
+
         quantize_config = copy.deepcopy(self.quantize_config)
 
         if not self.quantized:

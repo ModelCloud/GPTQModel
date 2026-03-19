@@ -7,6 +7,7 @@ import os
 
 
 # isort: off
+from ._banner import get_startup_banner  # noqa: E402
 from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noqa: E402
 # isort: on
 
@@ -97,7 +98,7 @@ def exllama_set_max_input_length(model, max_input_length: int):
 
 
 from .models import GPTQModel, get_best_device
-from .models.auto import ASCII_LOGO
+from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import (
     AWQQuantizeConfig,
     BaseQuantizeConfig,
@@ -111,9 +112,18 @@ from .quantization import (
 )
 from .utils import BACKEND
 from .version import __version__
+import torch
 
 
-setup_logger().info("\n%s", ASCII_LOGO)
+setup_logger().info(
+    "\n%s",
+    get_startup_banner(
+        ASCII_LOGO,
+        gptqmodel_version=__version__,
+        transformers_version=TRANSFORMERS_VERSION,
+        torch_version=torch.__version__,
+    ),
+)
 
 
 if ensure_modelscope_available():
