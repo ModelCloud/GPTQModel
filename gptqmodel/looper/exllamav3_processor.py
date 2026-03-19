@@ -55,6 +55,8 @@ def clone_exllamav3_config_for_module(
     qcfg: EXL3QuantizeConfig,
     module_full_name: str,
 ) -> Optional[EXL3QuantizeConfig]:
+    """Clones and applies per-module EXL3 dynamic overrides, or skips the module."""
+
     if qcfg.dynamic_get(layer_name=module_full_name) == False:
         return None
 
@@ -81,6 +83,8 @@ def clone_exllamav3_config_for_module(
 
 
 class EXL3Processor(LoopProcessor):
+    """Captures activations and repacks modules into ExLlamaV3 format."""
+
     def __init__(
         self,
         tokenizer,
@@ -94,6 +98,8 @@ class EXL3Processor(LoopProcessor):
         calibration_concat_separator: Optional[str] = None,
         lm_head_name: str = "lm_head",
     ):
+        """Initializes EXL3 processing and tracks the lm_head naming convention."""
+
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
@@ -113,9 +119,13 @@ class EXL3Processor(LoopProcessor):
         self._stats_lock = threading.Lock()
 
     def set_calibration_dataset(self, calibration_dataset):
+        """Rejects dataset replacement because EXL3 capture is fixed at construction."""
+
         raise NotImplementedError("EXL3Processor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
+        """Builds the capture task and effective EXL3 config for one module."""
+
         del fallback, kwargs
 
         module_qcfg = clone_exllamav3_config_for_module(self.qcfg, module.full_name)
@@ -141,10 +151,16 @@ class EXL3Processor(LoopProcessor):
         }
 
     def is_skipped(self, module: NamedModule) -> bool:
+        """Reports whether preprocessing omitted this module from EXL3 work."""
+
         return self.tasks.get(module.name, False) is False
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        """Returns the forward hook that feeds captured batches into the EXL3 task."""
+
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+            """Records one activation batch for the EXL3 capture task."""
+
             capture = self.tasks[name]["capture"]
             batch_idx = self.current_batch_index()
             capture.add_batch(inp[0].data, out.data, batch_index=batch_idx)
@@ -153,11 +169,15 @@ class EXL3Processor(LoopProcessor):
         return tmp
 
     def _is_lm_head(self, module: NamedModule) -> bool:
+        """Returns whether the named module corresponds to the model lm_head."""
+
         if module.full_name == self.lm_head_name:
             return True
         return module.full_name.endswith(f".{self.lm_head_name}")
 
     def _target_bits(self, module: NamedModule, module_qcfg: EXL3QuantizeConfig) -> int:
+        """Chooses lm_head-specific bitwidth overrides when configured."""
+
         if self._is_lm_head(module) and module_qcfg.head_bits is not None:
             return max(1, int(module_qcfg.head_bits))
         return max(1, module_qcfg.runtime_bits)
@@ -168,6 +188,8 @@ class EXL3Processor(LoopProcessor):
         module_qcfg: EXL3QuantizeConfig,
         device: torch.device,
     ) -> Dict[str, object]:
+        """Builds the argument bundle passed into the EXL3 quantizer."""
+
         quant_args: Dict[str, object] = {
             "K": self._target_bits(module, module_qcfg),
             "devices": [device],
@@ -184,10 +206,14 @@ class EXL3Processor(LoopProcessor):
         return quant_args
 
     def _quant_input_weight(self, capture: GPTQ, device: torch.device) -> torch.Tensor:
+        """Exports the captured dense weight matrix in EXL3 quantizer layout."""
+
         normalized = capture.clone_module(copy=True, device=device)
         return normalized.t().contiguous().to(torch.float32)
 
     def _restore_module_weight(self, module: NamedModule, quantized_weight: torch.Tensor) -> torch.Tensor:
+        """Reshapes the EXL3 output weight back into the wrapped module layout."""
+
         target = module.module if isinstance(module, NamedModule) else module
 
         if isinstance(target, transformers.Conv1D):
@@ -207,6 +233,8 @@ class EXL3Processor(LoopProcessor):
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
     ):
+        """Runs EXL3 quantization for one module and stages its packed tensors."""
+
         del subset, previous_subset, subset_index, subset_total
 
         base_title = f"Quantizing {module.name} in layer"
@@ -310,6 +338,8 @@ class EXL3Processor(LoopProcessor):
         del input_weight, restored_weight, weight_q, out_tensors, stream_payload
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
+        """Builds and installs the ExLlamaV3 module from the staged tensors."""
+
         del kwargs
 
         module.stream_sync()
@@ -336,6 +366,8 @@ class EXL3Processor(LoopProcessor):
             module.unregister_parameter("bias")
 
     def finalize(self, model: BaseQModel, **kwargs):
+        """Marks the model as EXL3-quantized and runs shared finalization logic."""
+
         model.quantized = True
         model.quantize_config.method = METHOD.EXL3
         model.quantize_config.format = FORMAT.EXL3
@@ -343,12 +375,16 @@ class EXL3Processor(LoopProcessor):
         super().finalize(model=model, **kwargs)
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
+        """Ensures EXL3 received calibration data before the quantization loop starts."""
+
         del processor_index
         if self.calibration_dataset is None:
             raise ValueError("EXL3Processor's calibration_dataset must be provided.")
         return True
 
     def name(self) -> str:
+        """Returns the processor label used in logs and lifecycle reporting."""
+
         return "exl3"
 
 

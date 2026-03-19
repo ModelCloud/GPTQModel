@@ -35,6 +35,8 @@ def clone_gptq_config_for_module(
     *,
     fallback=None,
 ) -> Optional[QuantizeConfig]:
+    """Clones and applies per-module GPTQ dynamic overrides, or skips the module."""
+
     # entire module is skipped
     if qcfg.dynamic_get(layer_name=module_full_name) == False:
         return None
@@ -82,6 +84,8 @@ def clone_gptq_config_for_module(
     return qcfg_clone
 
 class GPTQProcessor(LoopProcessor):
+    """Captures activations and quantizes modules with GPTQ or GPTAQ."""
+
     def __init__(
         self,
         tokenizer,
@@ -95,6 +99,7 @@ class GPTQProcessor(LoopProcessor):
         calculate_w_wq_diff: bool = False,
         calibration_concat_separator: Optional[str] = None,
     ):
+        """Initializes GPTQ processing and optional weight-delta tracking."""
 
         super().__init__(
             tokenizer=tokenizer,
@@ -114,9 +119,13 @@ class GPTQProcessor(LoopProcessor):
         self.avg_losses = []
 
     def set_calibration_dataset(self, calibration_dataset):
+        """Rejects dataset replacement because GPTQ capture is fixed at construction."""
+
         raise NotImplementedError("GPTQProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
+        """Builds the per-module GPTQ/GPTAQ task after applying dynamic overrides."""
+
         qcfg_clone = clone_gptq_config_for_module(
             self.qcfg,
             module.full_name,
@@ -141,6 +150,8 @@ class GPTQProcessor(LoopProcessor):
         self.tasks[module.name] = tmp
 
     def is_skipped(self, module: NamedModule) -> bool:
+        """Reports whether preprocessing omitted this module from GPTQ work."""
+
         # gptq has no dynamic method of full override (removal)
         t = self.tasks.get(module.name, False)
         if t == False:
@@ -149,7 +160,11 @@ class GPTQProcessor(LoopProcessor):
             return False
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        """Returns the forward hook that feeds captured batches into the GPTQ task."""
+
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+            """Records one activation batch for GPTQ Hessian/statistics accumulation."""
+
             g = self.tasks[name]  # noqa: F821
             batch_idx = self.current_batch_index()
             g.add_batch(inp[0].data, out.data, batch_index=batch_idx)  # noqa: F821
@@ -165,6 +180,8 @@ class GPTQProcessor(LoopProcessor):
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
     ):
+        """Runs GPTQ quantization for one module and stores pack-ready tensors."""
+
         # Reset peak memory stats
         #torch.cuda.reset_peak_memory_stats()
         base_title = f"Quantizing {module.name} in layer"
@@ -335,6 +352,8 @@ class GPTQProcessor(LoopProcessor):
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
+        """Creates the quantized module and packs the saved GPTQ tensors into it."""
+
         # generate complete, safe to move to cpu
         # module.weight.data = move_to(module.state.pop("wq"), device=CPU) # large weights is slow to init on cpu
 
@@ -433,6 +452,8 @@ class GPTQProcessor(LoopProcessor):
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
+        """Marks the model as GPTQ-quantized and runs shared finalization logic."""
+
         # print("finalize")
         # print_module_tree(model.model)
 
@@ -443,15 +464,21 @@ class GPTQProcessor(LoopProcessor):
         super().finalize(model=model, **kwargs)
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
+        """Ensures GPTQ received calibration data before the quantization loop starts."""
+
         if self.calibration_dataset is None:
             raise ValueError("GPTQProcessor's calibration_dataset must be provided.")
         else:
             return True
 
     def name(self) -> str:
+        """Returns `gptaq` when GPTAQ overrides are active, otherwise `gptq`."""
+
         # TODO fix me..this hacks inherited base class logic, why not override name in gptaq?
         qcfg = self.qcfg_dynamic if self.qcfg_dynamic is not None else self.qcfg
         return "gptaq" if qcfg.gptaq is not None else "gptq"
 
     def has_captured_input_ids(self, name: str) -> bool:
+        """Reports whether the module saw at least one captured forward batch."""
+
         return self.tasks[name].fwd_counter > 0
