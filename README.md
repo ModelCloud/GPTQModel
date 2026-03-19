@@ -20,6 +20,7 @@
 </p>
 
 ## Latest News
+* 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
 * 03/09/2026 [main]: ✨Qwen 3.5 MoE model support added. New HF Kernel support added for AWQ. 
 HF Kernel for both gptq/awq are now used by default for cpu devices for best performance. New INT8 kernel ported from Intel for gptq. 
 * 02/28/2026 [main]: ✨Qwen 3.5 model support added. 
@@ -27,6 +28,10 @@ HF Kernel for both gptq/awq are now used by default for cpu devices for best per
 `AWQ` `qcfg.zero_point` property has been merged with a unified `sym` symmetry property; `zero_point=True` is now `sym=False`.
 Fixed `AWQ` `sym=True` packing/inference and quantization compatibility with some Qwen3 models. Exaone 4.0 support.
 
+
+<details>
+
+<summary>Archived News</summary>
 * 12/31/2025 5.7.0-dev: ✨New `FailSafe` config and `FailSafeStrategy`, auto-enabled by default, to address uneven routing of MoE experts resulting in quantization issues for some MoE modules. `Smooth` operations are introduced to `FailSafeStrategy` to reduce the impact of outliers in `FailSafe` quantization using `RTN` by default. Different `FailSafeStrategy` and `Smoothers` can be selected. `Threshold` to activate `FailSafe` can also be customized. 
 New Voxtral and Glm-4v model support, plus audio dataset calibration for Qwen2-Omni. `AWQ` compatibility fix for `GLM 4.5-Air`.
 
@@ -35,9 +40,6 @@ New Voxtral and Glm-4v model support, plus audio dataset calibration for Qwen2-O
 * 11/9/2025 [5.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.4.0): ✨New Intel CPU and XPU hardware-optimized AWQ `TorchFusedAWQ` kernel. Torch Fused kernels now compatible with `torch.compile`. Fixed AWQ MoE model compatibility and reduced VRAM usage.
 * 11/3/2025 [5.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.2.0): ✨Minimax M2 support with [ModelCloud BF16 M2 Model](https://huggingface.co/ModelCloud/MiniMax-M2-BF16). New `VramStrategy.Balanced` quantization property for reduced memory usage for large MoE on multi-3090 (24GB) devices. ✨Marin model. New AWQ Torch reference kernel. Fixed AWQ Marlin kernel for bf16. Fixed GLM 4.5/4.6 MoE missing `mtp` layers on model save (HF bug). Modular refactor. 🎉AWQ support out of beta with full feature support including multi-GPU quant and MoE VRAM saving. ✨Brumby (attention free) model support. ✨IBM Granite Nano support. New `calibration_concat_separator` config option.
 
-<details>
-
-<summary>Archived News</summary>
 * 10/24/2025 [5.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.0.0): 🎉 Data-parallel quant support for `MoE` models on multi-GPU using `nogil` Python. `offload_to_disk` support enabled by 
 default to massively reduce `CPU` RAM usage. New `Intel` and `AMD` CPU hardware-accelerated `TorchFused` kernel. Packing stage is now 4x faster and now inlined with quantization. `VRAM` pressure for large models reduced during quantization.
 `act_group_aware` is  16k+ times faster and now the default when `desc_act=False` for higher quality recovery without inference penalty of `desc_act=True`. New beta quality `AWQ` support with full `gemm`, 
