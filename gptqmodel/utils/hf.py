@@ -481,6 +481,24 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
     config.rope_scaling = rope_scaling
 
 
+def deci_init_compat(config):
+    if config.model_type == "deci":
+        from transformers.models.auto import modeling_auto
+        orig_register = modeling_auto.AutoModelForCausalLM.register
+
+        def patched_register(cls, config_class, model_class, exist_ok=False):
+            # DeciLMForCausalLM inherits from LlamaForCausalLM, but does not override
+            # `config_class` (thus still pointing to LlamaConfig). However, the model's
+            # config.json declares its AutoConfig as DeciLMConfig. This leads to a mismatch
+            # during AutoModel registration (model_class.config_class != config_class),
+            # causing a ValueError. We patch this inconsistency at runtime.
+            if hasattr(model_class, "config_class"):
+                model_class.config_class = config_class
+            return orig_register(config_class, model_class, exist_ok=exist_ok)
+
+        modeling_auto.AutoModelForCausalLM.register = classmethod(patched_register)
+
+
 def normalize_hf_config_compat(config: Any, *, trust_remote_code: bool = False) -> None:
     # Some transformers 5.x model classes now read `config.rope_parameters`
     # directly during `from_config()`, but older local configs may only carry
@@ -508,6 +526,8 @@ def prepare_remote_code_compat(config: Any) -> None:
 def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: Any) -> None:
     if not model_id_or_path:
         return
+
+    deci_init_compat(config)
 
     auto_map = getattr(config, "auto_map", None) or {}
     class_ref = auto_map.get("AutoModelForCausalLM")
@@ -790,6 +810,13 @@ def autofix_hf_generation_config(cfg: GenerationConfig):
         if errors > 0:
             cfg.do_sample = True
             log.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
+
+
+def sanitize_model_config(config):
+    if config.model_type == "chatglm" and hasattr(config, "max_length"):
+        # max_length can only be stored in generation_config.
+        # see _normalize_chatglm_remote_code_config_compat()
+        del config.attribute_map["max_length"]
 
 
 def sanitize_generation_config_file(path: str) -> bool:
