@@ -287,7 +287,7 @@ jobs:
 
           build_once() {
             echo "::group::compile logs"
-            python -m build -w --no-isolation -v 2>&1 | tee $log_file
+            python setup.py bdist_wheel 2>&1 | tee $log_file
             echo "::endgroup::"
           }
 
