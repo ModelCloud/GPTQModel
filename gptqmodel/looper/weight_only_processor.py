@@ -54,6 +54,8 @@ class WeightOnlyProcessor(LoopProcessor):
         tokenizer,
         qcfg: RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig,
     ):
+        """Initializes a weight-only processor for RTN, GGUF, FP8, or BitsAndBytes."""
+
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
@@ -70,9 +72,13 @@ class WeightOnlyProcessor(LoopProcessor):
 
     @staticmethod
     def _uses_direct_pack(qcfg: RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig) -> bool:
+        """Returns whether the method packs directly from the original dense weights."""
+
         return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES}
 
     def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
+        """Backfills the logged loss field after late dequant-error measurement."""
+
         with self.lock:
             for entry in reversed(self.log):
                 if entry.get(PROCESS_LOG_LAYER) == module.layer_index and entry.get(PROCESS_LOG_MODULE) == module.name:
@@ -80,6 +86,8 @@ class WeightOnlyProcessor(LoopProcessor):
                     return
 
     def _annotate_tp_padding(self, module: NamedModule, qcfg: BaseQuantizeConfig) -> None:
+        """Records tensor-parallel padding metadata needed by downstream packing."""
+
         target_multiple = math.lcm(*self._TP_TARGETS)
         if qcfg.group_size > 0:
             target_multiple = math.lcm(target_multiple, qcfg.group_size)
@@ -100,6 +108,8 @@ class WeightOnlyProcessor(LoopProcessor):
         self,
         module: NamedModule,
     ) -> Optional[RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig]:
+        """Clones per-module config, quantizes weights, and logs the result."""
+
         qcfg_clone = clone_weight_only_config_for_module(self.qcfg, module.full_name)
         if qcfg_clone is None:
             return None
@@ -156,6 +166,8 @@ class WeightOnlyProcessor(LoopProcessor):
         qcfg: Optional[RTNQuantizeConfig | GGUFQuantizeConfig | FP8Config | BitsAndBytesConfig] = None,
         **kwargs,
     ):
+        """Creates and packs the final quantized module into the model graph."""
+
         active_qcfg = qcfg or self.qcfg
         if not self._uses_direct_pack(active_qcfg):
             module.stream_sync()
@@ -254,10 +266,14 @@ class WeightOnlyProcessor(LoopProcessor):
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
+        """Marks the model quantized and runs shared processor finalization."""
+
         model.quantized = True
         super().finalize(model=model, **kwargs)
 
     def name(self) -> str:
+        """Returns the method-specific processor label used in logs."""
+
         if self.qcfg.method == METHOD.GGUF:
             return "weight_only_gguf"
         if self.qcfg.method == METHOD.FP8:

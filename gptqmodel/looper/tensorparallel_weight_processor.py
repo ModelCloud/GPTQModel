@@ -33,6 +33,8 @@ class TensorParallelWeightProcessor(LoopProcessor):
     _TP_TARGETS = (2, 4, 8)
 
     def __init__(self, *args, **kwargs):
+        """Initializes padding targets derived from tensor-parallel shard sizes."""
+
         kwargs = dict(kwargs)
         kwargs.pop("calculate_w_wq_diff", None)
         kwargs.setdefault("require_fwd", False)
@@ -48,14 +50,22 @@ class TensorParallelWeightProcessor(LoopProcessor):
             self._target_multiple = math.lcm(self._target_multiple, self.qcfg.group_size)
 
     def preprocess(self, module: NamedModule):  # pragma: no cover - simple hook
+        """Per-module setup hook retained for interface symmetry."""
+
         # The processor operates on every eligible module; no setup required.
         pass
 
     def is_skipped(self, module: NamedModule) -> bool:  # pragma: no cover - always active
+        """Reports that tensor-parallel padding analysis always runs."""
+
         return False
 
     def pre_process_fwd_hook(self, name: str):  # pragma: no cover - no hook data needed
+        """Returns a no-op hook because this processor does not inspect activations."""
+
         def _noop(module, inputs, output):
+            """Ignores forward data because padding is computed from weights only."""
+
             return None
 
         return _noop
@@ -69,6 +79,8 @@ class TensorParallelWeightProcessor(LoopProcessor):
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
     ):
+        """Computes and records the column padding required for TP-safe packing."""
+
         target = module.module if isinstance(module, NamedModule) else module
         weight = getattr(target, "weight", None)
         if weight is None:
@@ -91,14 +103,20 @@ class TensorParallelWeightProcessor(LoopProcessor):
         )
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
+        """Reports that no calibration dataset is required for this processor."""
+
         # This processor works on weights and does not need a dataset.
         # Return False to inherit the cache from the previous processor.
         return False
 
     def name(self) -> str:
+        """Returns the processor label used in logs and lifecycle reporting."""
+
         return "tp-pre-pad"
 
     def _compute_padding(self, module: torch.nn.Module, named: NamedModule) -> Dict[str, int]:
+        """Calculates the zero-padding needed to satisfy all TP shard multiples."""
+
         rows, columns = get_number_of_rows_and_cols(named)
         pad_cols = (self._target_multiple - (columns % self._target_multiple)) % self._target_multiple
 

@@ -11,13 +11,19 @@ from .awq_processor import AWQProcessor
 
 
 class ParoQuantProcessor(AWQProcessor):
+    """AWQ-derived processor that packs modules with ParoQuant-specific buffers."""
+
     def _select_qlinear_kernel_for_format(self, format_value: FORMAT):
+        """Validates the requested format and returns the ParoQuant kernel class."""
+
         fmt = FORMAT(format_value) if not isinstance(format_value, FORMAT) else format_value
         if fmt != FORMAT.PAROQUANT:
             raise ValueError(f"METHOD.PAROQUANT does not support this FORMAT: {format_value}")
         return ParoQuantQuantLinear
 
     def _resolve_qlinear_kernel(self, module_name=None):
+        """Resolves the effective ParoQuant kernel after dynamic format overrides."""
+
         format_override = self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
         target_format = resolve_quant_format(format_override or self.qcfg.format, self.qcfg.method)
         if target_format != FORMAT.PAROQUANT:
@@ -25,6 +31,8 @@ class ParoQuantProcessor(AWQProcessor):
         return ParoQuantQuantLinear
 
     def pack_module(self, module):
+        """Runs standard AWQ packing and then installs identity rotation buffers."""
+
         super().pack_module(module)
 
         qmodule = get_module_by_name(self.gptq_model.model, module.full_name)
@@ -49,10 +57,14 @@ class ParoQuantProcessor(AWQProcessor):
         qmodule.post_init()
 
     def finalize(self, model, **kwargs):
+        """Marks the model as ParoQuant-quantized before delegating shared finalization."""
+
         model.quantized = True
         model.quantize_config.method = METHOD.PAROQUANT
         super(AWQProcessor, self).finalize(model=model, **kwargs)
 
     @classmethod
     def name(cls) -> str:
+        """Returns the processor label used in logs and lifecycle reporting."""
+
         return "paroquant"
