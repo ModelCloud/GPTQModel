@@ -22,6 +22,7 @@ Flags semantics:
 Notes:
 - Detects shared submodules and avoids re-printing them.
 - Collapsing is generic: any numeric-indexed ModuleList whose qualified name matches `experts-regex`.
+- Large layer stacks are capped to the first 4 children by default.
 """
 
 from typing import Dict, Iterable, Optional, Set, Tuple
@@ -212,6 +213,8 @@ def print_module_tree(
     collapse_experts: bool = True,
     experts_regex: str = r"(^|\.)experts($|\.)",
     experts_show: int = 1,
+    layers_regex: str = r"(^|\.)((model_)?layers|layer|h|blocks|block)($|\.)",
+    layers_show: Optional[int] = 4,
 ):
     """
     Pretty-print a module tree with sizes, devices, dtypes, and optional param/buffer details.
@@ -358,23 +361,45 @@ def print_module_tree(
     # Setup + utilities
     # ------------------------------------------------------------------
     _ = re.compile(filter_regex) if filter_regex else None  # reserved for future
-    experts_name_re = re.compile(experts_regex) if collapse_experts else None
+    experts_path_re = re.compile(experts_regex)
+    layers_name_re = re.compile(layers_regex) if layers_show is not None else None
     seen: Set[int] = set()
 
     total_p = sum(p.numel() for p in model.parameters())
     total_b = sum(b.numel() for b in model.buffers())  # fixed loop variable
 
-    def should_collapse(qual_name: str, container: nn.Module) -> bool:
-        if not experts_name_re:
-            return False
-        if not experts_name_re.search(qual_name):
-            return False
+    def numeric_children(container: nn.Module):
         if not isinstance(container, (nn.ModuleList, nn.Sequential)):
-            return False
-        names = [n for n, _ in container.named_children()]
-        if not names:
-            return False
-        return all(n.isdigit() for n in names) and len(names) > max(0, experts_show)
+            return None
+        children = list(container.named_children())
+        if not children:
+            return None
+        if not all(name.isdigit() for name, _ in children):
+            return None
+        return children
+
+    def collapse_spec(qual_name: str, container: nn.Module):
+        children = numeric_children(container)
+        if children is None:
+            return None
+
+        total_children = len(children)
+        if experts_path_re.search(qual_name):
+            if not collapse_experts:
+                return None
+
+            show_count = max(0, experts_show)
+            if total_children > show_count:
+                return children, show_count, "expert"
+            return None
+
+        if layers_name_re is None or not layers_name_re.search(qual_name):
+            return None
+
+        show_count = max(0, layers_show)
+        if total_children > show_count:
+            return children, show_count, "layer"
+        return None
 
     def _format_line(prefix: str, trunk: str, qual_name: str, mod: nn.Module,
                      show_counts: bool, depth: int) -> str:
@@ -416,50 +441,28 @@ def print_module_tree(
         elif show_params or show_buffers:
             print_params_with_colors(param_indent, mod, include_buffers=show_buffers)
 
+        collapse = collapse_spec(name, mod)
+        if collapse is not None:
+            children, show_count, item_label = collapse
+            shown_children = children[:max(0, min(show_count, len(children)))]
+            for i, (child_name, child) in enumerate(shown_children):
+                child_is_last = (i == len(shown_children) - 1) and (len(shown_children) == len(children))
+                rec(child, f"{name}.{child_name}", depth + 1, indent, child_is_last)
+
+            if len(shown_children) < len(children) and len(children) > 0:
+                p_one, b_one = _param_summary(children[0][1], recurse=True)
+                collapsed = (
+                    f"• … collapsed (repeats {len(shown_children)}..{len(children)-1}, "
+                    f"per-{item_label} P={human_count(p_one)} B={human_count(b_one)})"
+                )
+                print(_maybe(indent + collapsed, DIM, color=color))
+            return
+
         children = list(mod.named_children())
         n = len(children)
         for i, (child_name, child) in enumerate(children):
             last = (i == n - 1)
-            child_prefix = prefix + ("   " if is_last else "│  ")
-            display_name = f"{name}.{child_name}" if name else child_name
-
-            if should_collapse(display_name, child):
-                line2 = _format_line(child_prefix, "└─ " if last else "├─ ",
-                                     display_name, child, True, depth+1)
-                annot2 = colorize_annotation(_annotate(child, color=color))
-                print(line2 + " " + annot2)
-
-                sub_children = list(child.named_children())
-                total_k = len(sub_children)
-                k_show = max(0, min(experts_show, total_k))
-
-                for j, (sub_name, sub_mod) in enumerate(sub_children[:k_show]):
-                    sub_last = (j == k_show - 1) and (k_show == total_k)
-                    sub_prefix = child_prefix + ("   " if last else "│  ")
-                    sub_trunk = "└─ " if sub_last else "├─ "
-                    line3 = _format_line(sub_prefix, sub_trunk,
-                                         f"{display_name}.{sub_name}",
-                                         sub_mod, True, depth+2)
-                    annot3 = colorize_annotation(_annotate(sub_mod, color=color))
-                    print(line3 + " " + annot3)
-                    rec(
-                        sub_mod,
-                        f"{display_name}.{sub_name}",
-                        depth + 2,
-                        child_prefix + ("   " if last else "│  "),
-                        sub_last,
-                    )
-
-                if k_show < total_k and total_k > 0:
-                    p_one, b_one = _param_summary(sub_children[0][1], recurse=True)
-                    collapsed = (
-                        f"• … collapsed (repeats {k_show}..{total_k-1}, "
-                        f"per-expert P={human_count(p_one)} B={human_count(b_one)})"
-                    )
-                    print(_maybe(child_prefix + ("   " if last else "│  ") + collapsed, DIM, color=color))
-                continue
-
-            rec(child, display_name, depth + 1, child_prefix, last)
+            rec(child, f"{name}.{child_name}" if name else child_name, depth + 1, indent, last)
 
     # ------------------------------------------------------------------
     # Root print + recursion
