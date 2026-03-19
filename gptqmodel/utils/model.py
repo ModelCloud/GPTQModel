@@ -488,7 +488,10 @@ def create_quant_module(
             elif format == FORMAT.BITSANDBYTES:
                 raw_format = overrides.get(FORMAT_FIELD_CODE, overrides.get("bnb_quant_type"))
                 if raw_format is not None:
-                    tmp_init_kwargs["format"] = _normalize_bitsandbytes_format(raw_format, bits=validate_bits)
+                    tmp_init_kwargs["format"] = _normalize_bitsandbytes_format(
+                        raw_format,
+                        bits=quant_bits_width(tmp_bits),
+                    )
                 if "block_size" in overrides or "bnb_block_size" in overrides:
                     tmp_init_kwargs["block_size"] = _normalize_bitsandbytes_block_size(
                         overrides.get("block_size", overrides.get("bnb_block_size"))

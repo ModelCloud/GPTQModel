@@ -11,6 +11,7 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+import gptqmodel.utils.model as model_utils
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.bitsandbytes import BITSANDBYTES_AVAILABLE, BitsAndBytesQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
@@ -71,6 +72,52 @@ def test_bitsandbytes_kernel_selection():
             pack_dtype=torch.int32,
         )
         assert selected is BitsAndBytesQuantLinear
+
+
+def test_create_quant_module_uses_dynamic_bits_for_bitsandbytes_format_normalization():
+    seen = {}
+
+    class _DummyBitsAndBytesLinear(nn.Module):
+        @classmethod
+        def validate(cls, **kwargs):
+            seen["validate_bits"] = kwargs.get("bits")
+            return True, None
+
+        def __init__(self, **kwargs):
+            super().__init__()
+            seen["init_bits"] = kwargs.get("bits")
+            seen["format"] = kwargs.get("format")
+            self.bias = None
+
+    module = nn.Module()
+    module.proj = nn.Linear(32, 32, bias=False)
+
+    model_utils.create_quant_module(
+        name="proj",
+        linear_cls=_DummyBitsAndBytesLinear,
+        bits=4,
+        desc_act=False,
+        dynamic={
+            r"proj": {
+                "bits": 8,
+                "bnb_quant_type": "int8",
+            }
+        },
+        group_size=-1,
+        module=module,
+        submodule=module.proj,
+        sym=True,
+        device=None,
+        lm_head_name="lm_head",
+        pack_dtype=torch.int32,
+        format=FORMAT.BITSANDBYTES,
+        backend=BACKEND.BITSANDBYTES,
+    )
+
+    assert seen["validate_bits"] == 8
+    assert seen["init_bits"] == 8
+    assert seen["format"] == "int8"
+    assert isinstance(module.proj, _DummyBitsAndBytesLinear)
 
 
 @pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
