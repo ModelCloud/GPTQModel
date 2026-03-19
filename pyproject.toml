@@ -32,9 +32,6 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 
-[project.scripts]
-gptqmodel = "gptqmodel.cli.gptqmodel:main"
-
 [project.urls]
 Homepage = "https://github.com/ModelCloud/GPTQModel"
 
