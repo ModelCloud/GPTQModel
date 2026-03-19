@@ -5,7 +5,9 @@
 #include <map>
 
 #include "../util.h"
+#include "exl3_devctx.cuh"
 #include "exl3_kernel_map.cuh"
+#include "exl3_kernel_map_packed.cuh"
 #include "comp_units/exl3_comp_unit_1.cuh"
 #include "comp_units/exl3_comp_unit_2.cuh"
 #include "comp_units/exl3_comp_unit_3.cuh"
@@ -15,9 +17,14 @@
 #include "comp_units/exl3_comp_unit_7.cuh"
 #include "comp_units/exl3_comp_unit_8.cuh"
 
-#include "exl3_kernel_map_samples.cuh"
-
 namespace {
+
+struct TPackedTable
+{
+    const int* n_axis;
+    int n_count;
+    const uint16_t* payload;
+};
 
 std::map<uint64_t, TResult> tuning_cache = {};
 TResult forced_result;
@@ -25,6 +32,72 @@ TResult forced_result;
 int exl3_gemm_tilesize_k[] = {EXL3_GEMM_TILESIZE_K};
 int exl3_gemm_tilesize_n[] = {EXL3_GEMM_TILESIZE_N};
 int exl3_gemm_blockdim[] = {EXL3_GEMM_BLOCKDIM};
+
+constexpr TPackedTable packed_table_128 = {
+    exl3_packed::n_axis_128,
+    exl3_packed::n_axis_len_128,
+    exl3_packed::samples_128
+};
+
+constexpr TPackedTable packed_table_256 = {
+    exl3_packed::n_axis_256,
+    exl3_packed::n_axis_len_256,
+    exl3_packed::samples_256
+};
+
+constexpr TPackedTable packed_table_512 = {
+    exl3_packed::n_axis_512,
+    exl3_packed::n_axis_len_512,
+    exl3_packed::samples_512
+};
+
+int map_cc_to_index(int cc)
+{
+    switch (cc)
+    {
+        case CC_AMPERE: return 0;
+        case CC_ADA: return 1;
+        case CC_HOPPER: return 2;
+        default: return -1;
+    }
+}
+
+int nearest_axis_index(const int* axis, int axis_len, int value)
+{
+    int best_idx = 0;
+    int64_t best_dist = axis[0] > value ? axis[0] - (int64_t) value : (int64_t) value - axis[0];
+
+    for (int idx = 1; idx < axis_len; ++idx)
+    {
+        int64_t dist = axis[idx] > value ? axis[idx] - (int64_t) value : (int64_t) value - axis[idx];
+        if (dist < best_dist)
+        {
+            best_dist = dist;
+            best_idx = idx;
+        }
+    }
+
+    return best_idx;
+}
+
+const TPackedTable& select_packed_table(int size_n)
+{
+    bool mod512 = (size_n % 512 == 0);
+    bool mod256 = (size_n % 256 == 0);
+    bool mod128 = (size_n % 128 == 0);
+    TORCH_CHECK(mod128, "size_n must be a multiple of 128");
+
+    if (mod512) return packed_table_512;
+    if (mod256) return packed_table_256;
+    return packed_table_128;
+}
+
+uint16_t lookup_packed_sample(const TPackedTable& table, int cc_idx, int bits, int k_idx, int n_idx)
+{
+    int flat_idx =
+        ((((cc_idx * exl3_packed::bit_count) + (bits - 1)) * exl3_packed::k_axis_len) + k_idx) * table.n_count + n_idx;
+    return table.payload[flat_idx];
+}
 
 fp_exl3_gemm_kernel get_gemm_kernel_ptr(int K, int shape_idx, bool c_fp32, int cb)
 {
@@ -100,41 +173,28 @@ TResult* select_exl3_gemm_kernel_tuned
     auto lookup = tuning_cache.find(key);
     if (lookup == tuning_cache.end())
     {
-        bool mod512 = (size_n % 512 == 0);
-        bool mod256 = (size_n % 256 == 0);
-        bool mod128 = (size_n % 128 == 0);
-        TORCH_CHECK(mod128, "size_n must be a multiple of 128");
+        TORCH_CHECK(K >= 1 && K <= exl3_packed::bit_count, "Failed to find valid kernel for shape");
+        int cc_idx = map_cc_to_index(cc);
+        TORCH_CHECK(cc_idx >= 0, "Failed to find valid kernel for shape");
 
-        TSample* cand = mod512 ? samples_512 : (mod256 ? samples_256 : samples_128);
-        TSample* best = nullptr;
-        int64_t best_dist = 1ll << 62;
+        const TPackedTable& table = select_packed_table(size_n);
+        int k_idx = nearest_axis_index(exl3_packed::k_axis, exl3_packed::k_axis_len, size_k);
+        int n_idx = nearest_axis_index(table.n_axis, table.n_count, size_n);
+        uint16_t packed = lookup_packed_sample(table, cc_idx, K, k_idx, n_idx);
+        int shape_idx = packed >> 8;
+        int tuned_num_sms = packed & 0xff;
+        TORCH_CHECK(shape_idx, "Failed to find valid kernel for shape");
 
-        for (; cand->K; cand++)
-        {
-            if (cand->K != K) continue;
-            if (cand->cc != cc) continue;
-
-            int64_t distk = (int64_t) (size_k - cand->k);
-            int64_t distn = (int64_t) (size_n - cand->n);
-            int64_t dist = distk * distk + distn * distn;
-            if (dist < best_dist)
-            {
-                best_dist = dist;
-                best = cand;
-            }
-        }
-        TORCH_CHECK(best, "Failed to find valid kernel for shape");
-
-        int tilesize_k = exl3_gemm_tilesize_k[best->shape_idx];
-        int tilesize_n = exl3_gemm_tilesize_n[best->shape_idx];
+        int tilesize_k = exl3_gemm_tilesize_k[shape_idx];
+        int tilesize_n = exl3_gemm_tilesize_n[shape_idx];
         int max_slices = size_k / tilesize_k * size_n / tilesize_n;
-        int num_sms = MAX(MIN(max_slices, best->num_sms), 1);
+        int num_sms = MAX(MIN(max_slices, tuned_num_sms), 1);
 
         tuning_cache[key] = TResult {
-            get_gemm_kernel_ptr(K, best->shape_idx, c_fp32, cb),
-            best->shape_idx,
+            get_gemm_kernel_ptr(K, shape_idx, c_fp32, cb),
+            shape_idx,
             num_sms,
-            exl3_gemm_blockdim[best->shape_idx]
+            exl3_gemm_blockdim[shape_idx]
         };
     }
 

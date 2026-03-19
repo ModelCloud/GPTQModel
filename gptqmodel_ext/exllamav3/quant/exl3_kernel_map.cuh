@@ -59,16 +59,6 @@ typedef void (*fp_exl3_gemm_kernel) (EXL3_GEMM_ARGS);
         EXL3_GEMM_KERNEL_INSTANCES(K, false, 2) \
     };
 
-struct TSample {
-    int cc;
-    int K;
-    int m;
-    int k;
-    int n;
-    int shape_idx;
-    int num_sms;
-};
-
 struct TResult
 {
     fp_exl3_gemm_kernel kernel;
