@@ -12,9 +12,14 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
+from ...utils.env import env_flag
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 from ...utils.torch import HAS_XPU
+
+
+# Shared runtime default: prefer accuracy first unless the user explicitly opts out.
+FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
 
 class AwqGemmTritonFn(torch.autograd.Function):
@@ -53,7 +58,7 @@ class AwqGemmTritonFn(torch.autograd.Function):
                 scales,
                 qzeros,
                 split_k_iters=8,
-                fp32_accum=True,
+                fp32_accum=FP32_ACCUM,
                 output_dtype=x.dtype,
             )
 

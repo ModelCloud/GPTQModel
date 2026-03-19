@@ -30,7 +30,20 @@ __device__ __forceinline__ int make_divisible(int c, int divisor){
   return (c + divisor - 1) / divisor;
 }
 
-__global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, int split_k_iters, half* __restrict__ A, int* __restrict__ B, half* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, half* __restrict__ C) 
+template <typename output_t>
+__device__ __forceinline__ void store_accum_value(output_t* ptr, float value)
+{
+  *ptr = static_cast<output_t>(value);
+}
+
+template <>
+__device__ __forceinline__ void store_accum_value<half>(half* ptr, float value)
+{
+  *ptr = __float2half(value);
+}
+
+template <typename output_t>
+__global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, int split_k_iters, half* __restrict__ A, int* __restrict__ B, half* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, output_t* __restrict__ C) 
 {
   static constexpr uint32_t ZERO = 0x0;
   float C_warp[32];
@@ -86,7 +99,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
                             + (((int)blockIdx_y) % j_factors1) * (128) 
                             + (((int)threadIdx.x) % (128 / 8)) * 8;
 
-  half* C_ptr = C 
+  output_t* C_ptr = C 
               + static_cast<long long>(blockIdx_z) * M * OC        // blockIdz.x -> split_k dim
               + (((int)blockIdx_y) % j_factors1) * 128
               + ((int)threadIdx.y) * 64
@@ -247,14 +260,15 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n128k32(int G, i
       int row_offset = (((int)blockIdx_y) / j_factors1) * 16 + ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;
       if (row_offset < M)
       {
-        *(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2) = __float2half(C_warp[(ax1_0_1 * 8) + local_id]);
+        store_accum_value(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
       }
     }
   }
 }
 
 
-__global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, int split_k_iters, half* __restrict__ A, int* __restrict__ B, half* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, half* __restrict__ C) 
+template <typename output_t>
+__global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, int split_k_iters, half* __restrict__ A, int* __restrict__ B, half* __restrict__ scaling_factors, int* __restrict__ zeros, int M, int IC, int OC, output_t* __restrict__ C) 
 {
   static constexpr uint32_t ZERO = 0x0;
   float C_warp[32];
@@ -314,7 +328,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, in
                             + (((int)blockIdx_y) % j_factors1) * (64) 
                             + (((int)threadIdx.x) % (64 / 8)) * 8;
 
-  half* C_ptr = C 
+  output_t* C_ptr = C 
               + static_cast<long long>(blockIdx_z) * M * OC        // blockIdz.x -> split_k dim
               + (((int)blockIdx_y) % j_factors1) * 64
               + ((int)threadIdx.y) * 32
@@ -478,7 +492,7 @@ __global__ void __launch_bounds__(64) gemm_forward_4bit_cuda_m16n64k32(int G, in
       int row_offset = (((int)blockIdx_y) / j_factors1) * 16 + ((int)threadIdx.x) / 4 + (local_id % 4) / 2 * 8;
       if (row_offset < M)
       {
-        *(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2) = __float2half(C_warp[(ax1_0_1 * 8) + local_id]);
+        store_accum_value(C_ptr + ax1_0_1 * 16 + row_offset * OC + (local_id / 4) * 8 + local_id % 2, C_warp[(ax1_0_1 * 8) + local_id]);
       }
     }
   }
@@ -1235,8 +1249,14 @@ torch::Tensor gemm_forward_cuda(
     torch::Tensor _kernel,
     torch::Tensor _scaling_factors,
     torch::Tensor _zeros,
-    int split_k_iters)
+    int split_k_iters,
+    bool fp32_accum)
 {
+    if (fp32_accum)
+    {
+        return gemm_forward_cuda_fp32_reduce(_in_feats, _kernel, _scaling_factors, _zeros, split_k_iters);
+    }
+
     int num_in_feats = _in_feats.size(0);
     int num_in_channels = _in_feats.size(1);
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
@@ -1270,7 +1290,7 @@ torch::Tensor gemm_forward_cuda(
         // threadIdx.x: 32
         // threadIdx.y: i_factors[2] * j_factors[2]
         dim3 threads_per_block(32, 2);
-        gemm_forward_4bit_cuda_m16n128k32<<<num_blocks, threads_per_block, 0, stream>>>(
+        gemm_forward_4bit_cuda_m16n128k32<half><<<num_blocks, threads_per_block, 0, stream>>>(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
     else if (num_out_channels % 64 == 0)
@@ -1281,8 +1301,62 @@ torch::Tensor gemm_forward_cuda(
         // threadIdx.x: 32
         // threadIdx.y: i_factors[2] * j_factors[2]
         dim3 threads_per_block(32, 2);
-        gemm_forward_4bit_cuda_m16n64k32<<<num_blocks, threads_per_block, 0, stream>>>(
+        gemm_forward_4bit_cuda_m16n64k32<half><<<num_blocks, threads_per_block, 0, stream>>>(
             group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
     return _out_feats.sum(0);
+}
+
+torch::Tensor gemm_forward_cuda_fp32_reduce(
+    torch::Tensor _in_feats,
+    torch::Tensor _kernel,
+    torch::Tensor _scaling_factors,
+    torch::Tensor _zeros,
+    int split_k_iters)
+{
+    int num_in_feats = _in_feats.size(0);
+    int num_in_channels = _in_feats.size(1);
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
+
+    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(_in_feats.device());
+    at::Tensor _out_feats = torch::empty({split_k_iters, num_in_feats, _kernel.size(1) * 8}, options);
+    int num_out_feats = _out_feats.size(-2);
+    int num_out_channels = _out_feats.size(-1);
+
+    auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
+    auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
+    auto out_feats = reinterpret_cast<float*>(_out_feats.data_ptr<float>());
+    auto scaling_factors = reinterpret_cast<half*>(_scaling_factors.data_ptr<at::Half>());
+    auto zeros = reinterpret_cast<int*>(_zeros.data_ptr<int>());
+    int group_size = num_in_channels / _scaling_factors.size(0);
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    if (num_out_channels % 64 != 0)
+        throw std::invalid_argument("OC is not multiple of cta_N = 64");
+    if (num_out_channels % 8 != 0)
+        throw std::invalid_argument("OC is not multiple of pack_num = 8");
+    if (group_size % 32 != 0)
+          throw std::invalid_argument("Group size should be a multiple of 32");
+    if (num_out_channels % group_size != 0)
+        throw std::invalid_argument("OC is not multiple of Group size");
+
+    if (num_out_channels % 128 == 0)
+    {
+        int j_factors1 = num_out_channels / 128 / 1;
+        dim3 num_blocks((num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
+        dim3 threads_per_block(32, 2);
+        gemm_forward_4bit_cuda_m16n128k32<float><<<num_blocks, threads_per_block, 0, stream>>>(
+            group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
+    }
+    else if (num_out_channels % 64 == 0)
+    {
+        int j_factors1 = num_out_channels / 64 / 1;
+        dim3 num_blocks(1 * (num_out_feats + 16 - 1) / 16 * j_factors1 * split_k_iters);
+
+        dim3 threads_per_block(32, 2);
+        gemm_forward_4bit_cuda_m16n64k32<float><<<num_blocks, threads_per_block, 0, stream>>>(
+            group_size, split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
+    }
+
+    return _out_feats.sum(0).to(_in_feats.dtype());
 }

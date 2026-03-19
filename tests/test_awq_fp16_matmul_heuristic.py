@@ -55,8 +55,17 @@ def _patch_backend(monkeypatch, backend: str, calls):
             calls["dequant"] += 1
             return torch.ones(qweight.shape[0], qweight.shape[1] * 8, dtype=torch.float16)
 
-        def gemm_forward_cuda(self, input, qweight, scales, qzeros, _split_k_iters):
+        def gemm_forward_cuda_fp32_reduce(self, input, qweight, scales, qzeros, _split_k_iters):
             calls["gemm"] += 1
+            calls["gemm_api"] = "fp32_reduce"
+            calls["gemm_kwargs"] = {"fp32_accum": True}
+            out_features = qweight.shape[1] * 8
+            return torch.ones(input.shape[0], out_features, device=input.device, dtype=input.dtype)
+
+        def gemm_forward_cuda(self, input, qweight, scales, qzeros, _split_k_iters, fp32_accum=False):
+            calls["gemm"] += 1
+            calls["gemm_api"] = "fp32_accum" if fp32_accum else "legacy"
+            calls["gemm_kwargs"] = {"fp32_accum": fp32_accum}
             out_features = qweight.shape[1] * 8
             return torch.ones(input.shape[0], out_features, device=input.device, dtype=input.dtype)
 
@@ -112,6 +121,29 @@ def test_fp16_matmul_heuristic_prefers_fused_gemm_for_small_matrices(monkeypatch
     if backend == "triton":
         assert calls["gemm_kwargs"]["fp32_accum"] is True
         assert calls["gemm_kwargs"]["output_dtype"] == torch.float16
+    else:
+        assert calls["gemm_kwargs"]["fp32_accum"] is True
+        assert calls["gemm_api"] == "fp32_accum"
+
+
+def test_awq_ext_fp32_accum_can_be_disabled(monkeypatch):
+    calls = {"dequant": 0, "gemm": 0}
+    fn = _patch_backend(monkeypatch, "ext", calls)
+
+    group_size = 32
+    out_features = 8
+    qweight, scales, qzeros = _fake_quant_tensors(in_features=32, out_features=out_features, group_size=group_size)
+    x = torch.ones((1, 1, qweight.shape[0]), dtype=torch.float16)
+
+    out = fn.apply(
+        x, qweight, qzeros, scales, 4, group_size, None, out_features, "cuda", False,
+    )
+
+    assert calls["dequant"] == 0
+    assert calls["gemm"] == 1
+    assert calls["gemm_kwargs"]["fp32_accum"] is False
+    assert calls["gemm_api"] == "legacy"
+    assert out.shape == (1, 1, out_features)
 
 
 def _available_bench_backends():
@@ -192,7 +224,7 @@ def test_fp16_matmul_heuristic_benchmark(case_name, batch, seq, in_features, out
         with torch.inference_mode():
             x2d = x.reshape(-1, x.shape[-1])
             if backend == "awq_ext":
-                return gemm_awq.awq_ext.gemm_forward_cuda(x2d, qweight, scales, qzeros, 8)
+                return gemm_awq.awq_ext.gemm_forward_cuda(x2d, qweight, scales, qzeros, 8, True)
             try:
                 return awq_gemm_triton(x2d, qweight, scales, qzeros, split_k_iters=8)
             except AttributeError as err:

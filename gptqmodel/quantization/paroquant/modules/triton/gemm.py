@@ -20,8 +20,12 @@ import torch
 import triton
 import triton.language as tl
 
+from gptqmodel.utils.env import env_flag
+
 
 PAROQUANT_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
+# Shared runtime default: fp32 accumulation trades a little speed for lower numerical drift.
+FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
 
 def get_same_device_cm(t):
@@ -274,7 +278,7 @@ def _paroquant_gemm_triton(
     block_size_k: int,
     num_warps: int,
     num_stages: int,
-    fp32_accum: bool = True,
+    fp32_accum: bool = FP32_ACCUM,
 ) -> torch.Tensor:
     M, N, K, group_size = _validate_shapes(input, qweight, scales, qzeros)
 
@@ -321,7 +325,7 @@ def paroquant_gemm_triton_decode(
         block_size_k=32,
         num_warps=4,
         num_stages=2,
-        fp32_accum=True,
+        fp32_accum=FP32_ACCUM,
     )
 
 
@@ -341,7 +345,7 @@ def paroquant_gemm_triton_prefill(
         block_size_k=32,
         num_warps=8,
         num_stages=4,
-        fp32_accum=True,
+        fp32_accum=FP32_ACCUM,
     )
 
 

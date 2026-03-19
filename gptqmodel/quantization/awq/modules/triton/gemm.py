@@ -18,8 +18,12 @@ import torch
 import triton
 import triton.language as tl
 
+from gptqmodel.utils.env import env_flag
+
 
 AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
+# Shared runtime default: fp32 accumulation trades a little speed for lower numerical drift.
+FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
 def get_same_device_cm(t):
     if t.device.type == 'xpu':
@@ -317,7 +321,7 @@ def awq_gemm_triton(
     block_size_m: int = 32,
     block_size_n: int = 32,
     block_size_k: int = 32,
-    fp32_accum: bool = True,
+    fp32_accum: bool = FP32_ACCUM,
     output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     M, K = input.shape

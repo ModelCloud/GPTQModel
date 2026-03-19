@@ -16,9 +16,31 @@ from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.utils import get_best_device
 from ...utils.backend import BACKEND
+from ...utils.env import env_flag
 
 
 awq_ext, msg = try_import("gptqmodel_awq_kernels")
+# Shared runtime default: prefer accuracy first unless the user explicitly opts out.
+FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
+
+
+def _awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool = FP32_ACCUM):
+    if awq_ext is None:
+        raise ValueError(msg or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
+
+    try:
+        # Newer CUDA wheels expose fp32 accumulation directly on the main GEMM entrypoint.
+        return awq_ext.gemm_forward_cuda(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
+    except TypeError:
+        pass
+
+    if fp32_accum:
+        # Keep older wheels working until they are rebuilt with the unified fp32_accum API.
+        fp32_reduce_kernel = getattr(awq_ext, "gemm_forward_cuda_fp32_reduce", None)
+        if fp32_reduce_kernel is not None:
+            return fp32_reduce_kernel(input, qweight, scales, qzeros, split_k_iters)
+
+    return awq_ext.gemm_forward_cuda(input, qweight, scales, qzeros, split_k_iters)
 
 
 class AwqGemmFn(torch.autograd.Function):
@@ -34,6 +56,7 @@ class AwqGemmFn(torch.autograd.Function):
         bias=None,
         out_features=0,
         prefer_backend=None,
+        fp32_accum=FP32_ACCUM,
     ):
         if awq_ext is None:
             raise ValueError(msg or "CUDA AWQ extension not available for AwqGEMMQuantLinear")
@@ -52,8 +75,13 @@ class AwqGemmFn(torch.autograd.Function):
             out = awq_ext.dequantize_weights_cuda(qweight, scales, qzeros, 0, 0, 0, False)
             out = torch.matmul(x, out)
         else:
-            out = awq_ext.gemm_forward_cuda(
-                x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, 8
+            out = _awq_cuda_gemm_forward(
+                x.reshape(-1, x.shape[-1]),
+                qweight,
+                scales,
+                qzeros,
+                8,
+                fp32_accum=fp32_accum,
             )
 
         out = out + bias if bias is not None else out
@@ -80,7 +108,7 @@ class AwqGemmFn(torch.autograd.Function):
             batch_size = grad_output.shape[0]
             grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
 
-        return grad_input, None, None, None, None, None, None, None, None
+        return grad_input, None, None, None, None, None, None, None, None, None
 
 
 class AwqGEMMQuantLinear(AWQuantLinear):
@@ -128,6 +156,7 @@ class AwqGEMMQuantLinear(AWQuantLinear):
         pack_dtype: torch.dtype = torch.int32,
         adapter: Adapter = None,
         register_buffers: bool = False,
+        fp32_accum: bool = FP32_ACCUM,
         **kwargs,
     ):
 
@@ -144,6 +173,7 @@ class AwqGEMMQuantLinear(AWQuantLinear):
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs)
+        self.fp32_accum = bool(fp32_accum)
 
     def post_init(self):
         # awq only accepts float16
@@ -171,6 +201,7 @@ class AwqGEMMQuantLinear(AWQuantLinear):
                 self.bias,
                 self.out_features,
                 "cuda",
+                self.fp32_accum,
             )
 
         if input_dtype != torch.float16:

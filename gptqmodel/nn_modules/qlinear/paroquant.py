@@ -14,6 +14,7 @@ from ...quantization.awq.utils.module import try_import
 from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.paroquant import apply_paroquant_rotation, is_identity_rotation
+from .gemm_awq import FP32_ACCUM, _awq_cuda_gemm_forward
 from .torch_awq import AwqTorchQuantLinear
 
 
@@ -56,11 +57,13 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         adapter: Adapter = None,
         register_buffers: bool = False,
         krot: int = 8,
+        fp32_accum: bool = FP32_ACCUM,
         **kwargs,
     ):
         self.krot = int(krot)
         if self.krot <= 0:
             raise ValueError(f"ParoQuantQuantLinear: `krot` must be positive, got {krot}.")
+        self.fp32_accum = bool(fp32_accum)
 
         super().__init__(
             bits=bits,
@@ -110,7 +113,8 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
     def extra_repr(self) -> str:
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
-            f"bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}, krot={self.krot}"
+            f"bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}, "
+            f"krot={self.krot}, fp32_accum={self.fp32_accum}"
         )
 
     def _rotate_inputs(self, x_flat: torch.Tensor) -> torch.Tensor:
@@ -145,12 +149,13 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
             return None
 
         kernel_input = x_flat if x_flat.dtype == torch.float16 else x_flat.to(torch.float16)
-        out = awq_ext.gemm_forward_cuda(
+        out = _awq_cuda_gemm_forward(
             kernel_input.reshape(-1, kernel_input.shape[-1]),
             self.qweight,
             self.scales,
             self.qzeros,
             8,
+            fp32_accum=self.fp32_accum,
         )
         if self.bias is not None:
             out = out + self.bias
