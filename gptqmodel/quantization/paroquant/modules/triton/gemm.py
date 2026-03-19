@@ -274,7 +274,7 @@ def _paroquant_gemm_triton(
     block_size_k: int,
     num_warps: int,
     num_stages: int,
-    use_fp32_accum: bool = True,
+    fp32_accum: bool = True,
 ) -> torch.Tensor:
     M, N, K, group_size = _validate_shapes(input, qweight, scales, qzeros)
 
@@ -297,7 +297,7 @@ def _paroquant_gemm_triton(
             BLOCK_SIZE_M=block_size_m,
             BLOCK_SIZE_N=block_size_n,
             BLOCK_SIZE_K=block_size_k,
-            USE_FP32_ACCUM=use_fp32_accum,
+            USE_FP32_ACCUM=fp32_accum,
             num_warps=num_warps,
             num_stages=num_stages,
         )
@@ -321,7 +321,7 @@ def paroquant_gemm_triton_decode(
         block_size_k=32,
         num_warps=4,
         num_stages=2,
-        use_fp32_accum=True,
+        fp32_accum=True,
     )
 
 
@@ -341,7 +341,7 @@ def paroquant_gemm_triton_prefill(
         block_size_k=32,
         num_warps=8,
         num_stages=4,
-        use_fp32_accum=True,
+        fp32_accum=True,
     )
 
 

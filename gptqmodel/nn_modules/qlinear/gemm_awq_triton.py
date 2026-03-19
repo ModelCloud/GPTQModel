@@ -48,7 +48,13 @@ class AwqGemmTritonFn(torch.autograd.Function):
             out = torch.matmul(x, out.to(x.dtype))
         else:
             out = awq_gemm_triton(
-                x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, split_k_iters=8,
+                x.reshape(-1, x.shape[-1]),
+                qweight,
+                scales,
+                qzeros,
+                split_k_iters=8,
+                fp32_accum=True,
+                output_dtype=x.dtype,
             )
 
         out = out + bias if bias is not None else out

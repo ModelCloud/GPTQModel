@@ -30,6 +30,7 @@ def _patch_backend(monkeypatch, backend: str, calls):
 
         def fake_gemm(input, qweight, scales, qzeros, split_k_iters, **_):
             calls["gemm"] += 1
+            calls["gemm_kwargs"] = _
             out_features = qweight.shape[1] * 8
             return torch.ones(input.shape[0], out_features, device=input.device, dtype=input.dtype)
 
@@ -83,7 +84,8 @@ def test_fp16_matmul_heuristic_prefers_dequant_for_large_matrices(monkeypatch, b
         x, qweight, qzeros, scales, 4, group_size, None, out_features,
     )
 
-    assert calls == {"dequant": 1, "gemm": 0}
+    assert calls["dequant"] == 1
+    assert calls["gemm"] == 0
     assert out.shape == (33, 32, out_features)
 
 
@@ -104,8 +106,12 @@ def test_fp16_matmul_heuristic_prefers_fused_gemm_for_small_matrices(monkeypatch
         x, qweight, qzeros, scales, 4, group_size, None, out_features,
     )
 
-    assert calls == {"dequant": 0, "gemm": 1}
+    assert calls["dequant"] == 0
+    assert calls["gemm"] == 1
     assert out.shape == (1, 1, out_features)
+    if backend == "triton":
+        assert calls["gemm_kwargs"]["fp32_accum"] is True
+        assert calls["gemm_kwargs"]["output_dtype"] == torch.float16
 
 
 def _available_bench_backends():
