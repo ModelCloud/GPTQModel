@@ -69,6 +69,8 @@ ADAPTER_FIELD = "adapter"
 
 # saved formats
 class FORMAT(str, Enum):
+    """Checkpoint and runtime tensor layout identifiers."""
+
     GPTQ = "gptq"
     # v2 format fixed sym = False quantization
     GPTQ_V2 = "gptq_v2"
@@ -89,6 +91,8 @@ class FORMAT(str, Enum):
 
 # quant methods
 class METHOD(str, Enum):
+    """Supported quantization algorithms exposed by config payloads."""
+
     GPTQ = "gptq"
     GGUF = "gguf"
     FP8 = "fp8"
@@ -100,6 +104,8 @@ class METHOD(str, Enum):
 
 
 class VramStrategy(str, Enum):
+    """Strategies for assigning quantization work across available VRAM."""
+
     EXCLUSIVE = "exclusive"
     BALANCED = "balanced"
 
@@ -124,6 +130,8 @@ class FallbackStrategy(str, Enum):
 
 
 class WeightOnlyMethod(str, Enum):
+    """Weight-only quantization backends available to fallback flows."""
+
     RTN = "rtn"
     GGUF = "gguf"
     FP8 = "fp8"
@@ -132,6 +140,8 @@ class WeightOnlyMethod(str, Enum):
 
 
 class PreFilterCode(str, Enum):
+    """Identifiers for pre-filter passes that run before quantization."""
+
     SMOOTHER = "smoother"
 
 
@@ -167,24 +177,36 @@ _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS = {
 
 @total_ordering
 class BaseComplexBits(ABC):
+    """Comparable bit-spec base class for non-scalar bit encodings."""
+
     @classmethod
     @abstractmethod
     def from_string(cls, value: str) -> "BaseComplexBits":
+        """Parse a serialized bit specification into an instance."""
+
         raise NotImplementedError
 
     @abstractmethod
     def to_string(self) -> str:
+        """Serialize the bit specification into its canonical string form."""
+
         raise NotImplementedError
 
     @property
     def width(self) -> int:
+        """Return the integer width represented by this bit encoding."""
+
         return self.bits
 
     @property
     def name(self) -> str:
+        """Return the canonical string name for this bit encoding."""
+
         return self.to_string()
 
     def _coerce_bits(self, other: Any) -> Any:
+        """Convert compatible operands into raw bit widths for arithmetic."""
+
         if isinstance(other, BaseComplexBits):
             return other.bits
         if isinstance(other, int):
@@ -194,21 +216,33 @@ class BaseComplexBits(ABC):
         return NotImplemented
 
     def __str__(self) -> str:
+        """Render the canonical string form for logging and serialization."""
+
         return self.to_string()
 
     def __hash__(self) -> int:
+        """Hash bit encodings by their integer width."""
+
         return hash(self.bits)
 
     def __int__(self) -> int:
+        """Expose the bit width as an integer."""
+
         return self.bits
 
     def __index__(self) -> int:
+        """Allow the bit width to participate in index-style conversions."""
+
         return self.bits
 
     def __float__(self) -> float:
+        """Expose the bit width as a float."""
+
         return float(self.bits)
 
     def __eq__(self, other: Any) -> bool:
+        """Compare complex bit encodings against strings, ints, or peers."""
+
         if isinstance(other, BaseComplexBits):
             return self.to_string() == other.to_string()
         if isinstance(other, int):
@@ -221,84 +255,114 @@ class BaseComplexBits(ABC):
         return False
 
     def __lt__(self, other: Any) -> bool:
+        """Order bit encodings by their effective width."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return self.bits < coerced
 
     def __add__(self, other: Any) -> int:
+        """Add the effective bit width to another scalar-like operand."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return self.bits + coerced
 
     def __radd__(self, other: Any) -> int:
+        """Support right-hand addition with scalar-like operands."""
+
         return self.__add__(other)
 
     def __sub__(self, other: Any) -> int:
+        """Subtract another scalar-like operand from this bit width."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return self.bits - coerced
 
     def __rsub__(self, other: Any) -> int:
+        """Support right-hand subtraction against this bit width."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return coerced - self.bits
 
     def __mul__(self, other: Any) -> int:
+        """Multiply the bit width by another scalar-like operand."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return self.bits * coerced
 
     def __rmul__(self, other: Any) -> int:
+        """Support right-hand multiplication with scalar-like operands."""
+
         return self.__mul__(other)
 
     def __floordiv__(self, other: Any) -> int:
+        """Floor-divide the bit width by another scalar-like operand."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return self.bits // coerced
 
     def __rfloordiv__(self, other: Any) -> int:
+        """Support right-hand floor division against this bit width."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return coerced // self.bits
 
     def __truediv__(self, other: Any) -> float:
+        """True-divide the bit width by another scalar-like operand."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return self.bits / coerced
 
     def __rtruediv__(self, other: Any) -> float:
+        """Support right-hand true division against this bit width."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return coerced / self.bits
 
     def __mod__(self, other: Any) -> int:
+        """Take the modulo of the bit width with another scalar-like operand."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return self.bits % coerced
 
     def __rmod__(self, other: Any) -> int:
+        """Support right-hand modulo against this bit width."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return coerced % self.bits
 
     def __pow__(self, other: Any) -> int:
+        """Raise the bit width to another scalar-like operand."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
         return self.bits ** coerced
 
     def __rpow__(self, other: Any) -> int:
+        """Support right-hand exponentiation against this bit width."""
+
         coerced = self._coerce_bits(other)
         if coerced is NotImplemented:
             return NotImplemented
@@ -307,12 +371,16 @@ class BaseComplexBits(ABC):
 
 @dataclass(frozen=True, eq=False)
 class GGUFBits(BaseComplexBits):
+    """Structured GGUF bit specification with version and variant tags."""
+
     bits: int
     version: str
     variant: str
     quality: Optional[str] = None
 
     def __post_init__(self):
+        """Validate the GGUF bit-spec components after construction."""
+
         if self.bits <= 0:
             raise ValueError("GGUFBits: `bits` must be a positive integer.")
         if self.version not in {"q", "iq"}:
@@ -324,6 +392,8 @@ class GGUFBits(BaseComplexBits):
 
     @classmethod
     def from_string(cls, value: str) -> "GGUFBits":
+        """Parse a GGUF alias such as ``q4_k_m`` into a typed bit spec."""
+
         normalized = str(value).strip().lower().replace("-", "_")
         info = _GGUF_BITS_ALIAS_INFO.get(normalized)
         if info is None:
@@ -337,6 +407,8 @@ class GGUFBits(BaseComplexBits):
         )
 
     def to_string(self) -> str:
+        """Serialize this GGUF bit spec back to its alias form."""
+
         alias = f"{self.version}{self.bits}_{self.variant}"
         if self.quality is not None:
             alias = f"{alias}_{self.quality}"
@@ -344,15 +416,23 @@ class GGUFBits(BaseComplexBits):
 
     @classmethod
     def from_alias(cls, value: str) -> "GGUFBits":
+        """Backward-compatible alias parser for GGUF bit specs."""
+
         return cls.from_string(value)
 
     def serialize(self) -> str:
+        """Return the canonical serialized form used in config payloads."""
+
         return self.to_string()
 
     def __repr__(self) -> str:
+        """Return a debug-friendly constructor-style representation."""
+
         return f"GGUFBits({self.to_string()!r})"
 
     def to_public_format(self) -> str:
+        """Return the GGUF public subtype string without the width prefix."""
+
         public_format = f"{self.version}_{self.variant}"
         if self.quality is not None:
             public_format = f"{public_format}_{self.quality}"
@@ -367,10 +447,14 @@ _GGUF_PUBLIC_FORMAT_RE = re.compile(r"^(q|iq)_(0|k)(?:_(xs|s|m|l))?$")
 
 
 def _gguf_public_format_from_bits(bits: GGUFBits) -> str:
+    """Project a full GGUF bit spec into its public subtype token."""
+
     return bits.to_public_format()
 
 
 def _normalize_gguf_public_format(value: Any) -> Optional[str]:
+    """Normalize GGUF subtype aliases into their public format string."""
+
     if value is None:
         return None
 
@@ -394,6 +478,8 @@ def _normalize_gguf_public_format(value: Any) -> Optional[str]:
 
 
 def _default_gguf_public_format(bits: int) -> str:
+    """Return the default GGUF subtype for a supported bit width."""
+
     alias = _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH.get(bits)
     if alias is None:
         raise ValueError(f"GGUFConfig: no default GGUF format exists for `{bits}`-bit quantization.")
@@ -401,6 +487,8 @@ def _default_gguf_public_format(bits: int) -> str:
 
 
 def _gguf_bits_from_components(bits: int, public_format: str) -> GGUFBits:
+    """Build a validated ``GGUFBits`` object from width and subtype parts."""
+
     match = _GGUF_PUBLIC_FORMAT_RE.fullmatch(public_format)
     if match is None:
         raise ValueError(
@@ -420,6 +508,8 @@ def _normalize_gguf_config_spec(
     bits: Union[int, str, GGUFBits],
     format_value: Optional[Union[str, FORMAT, GGUFBits]],
 ) -> Tuple[int, str, GGUFBits]:
+    """Resolve GGUF bits and format inputs into a consistent typed triple."""
+
     bits_spec_from_bits: Optional[GGUFBits] = None
     normalized_bits = bits
 
@@ -459,6 +549,8 @@ def _normalize_gguf_config_spec(
 
 
 def _normalize_quant_bits(bits: Union[int, float, str, GGUFBits], format_value: Optional[Union[str, FORMAT]] = None) -> Union[int, GGUFBits]:
+    """Normalize generic bit fields into ints or structured GGUF specs."""
+
     if isinstance(format_value, str):
         format_value = _normalize_format(format_value)
 
@@ -502,6 +594,8 @@ def resolve_quant_format(
     method: Optional[Union[str, METHOD]] = None,
     quant_method: Optional[Union[str, METHOD]] = None,
 ) -> FORMAT:
+    """Infer the effective quantization format from method and format hints."""
+
     if method is None:
         method = quant_method
 
@@ -540,6 +634,8 @@ def resolve_quant_format(
 
 
 def _looks_like_gguf_bits(bits: Any) -> bool:
+    """Return ``True`` when a value resembles a GGUF alias or bit spec."""
+
     if isinstance(bits, GGUFBits):
         return True
     if not isinstance(bits, str):
@@ -549,6 +645,8 @@ def _looks_like_gguf_bits(bits: Any) -> bool:
 
 
 def quant_bits_width(bits: Union[int, str, GGUFBits]) -> int:
+    """Return the integer width represented by a quant bits field."""
+
     if isinstance(bits, float):
         if bits <= 0:
             raise ValueError("QuantizeConfig: EXL3 bits per weight must be greater than 0.")
@@ -558,6 +656,8 @@ def quant_bits_width(bits: Union[int, str, GGUFBits]) -> int:
 
 
 def serialize_quant_bits(bits: Union[int, str, GGUFBits]) -> Union[int, str]:
+    """Serialize a quant bits field for JSON-compatible output payloads."""
+
     if isinstance(bits, float):
         return float(bits)
     normalized = _normalize_quant_bits(bits)
@@ -565,6 +665,8 @@ def serialize_quant_bits(bits: Union[int, str, GGUFBits]) -> Union[int, str]:
 
 
 def _normalize_exl3_bits(bits: Union[int, float, str]) -> float:
+    """Normalize EXL3 fractional bits-per-weight values."""
+
     if isinstance(bits, str):
         bits = float(bits.strip())
     elif isinstance(bits, int):
@@ -595,6 +697,8 @@ _BITSANDBYTES_BLOCK_SIZES = {32, 64, 128, 256, 512, 1024, 2048, 4096}
 
 
 def _looks_like_fp8_fmt(value: Any) -> bool:
+    """Return ``True`` when a value matches a supported FP8 format alias."""
+
     if value is None:
         return False
     normalized = str(value).strip().lower()
@@ -602,6 +706,8 @@ def _looks_like_fp8_fmt(value: Any) -> bool:
 
 
 def _normalize_fp8_fmt(value: Optional[str]) -> str:
+    """Resolve FP8 format aliases to the canonical PyTorch dtype name."""
+
     if isinstance(value, FORMAT):
         if value != FORMAT.FP8:
             raise ValueError(f"FP8Config: unsupported `format` `{value}`.")
@@ -620,6 +726,8 @@ def _normalize_fp8_fmt(value: Optional[str]) -> str:
 
 
 def _normalize_fp8_weight_block_size(value: Optional[Union[List[int], Tuple[int, int]]]) -> Optional[Tuple[int, int]]:
+    """Validate and normalize FP8 block-scale dimensions."""
+
     if value is None:
         return None
     if not isinstance(value, (list, tuple)) or len(value) != 2:
@@ -635,6 +743,8 @@ def _normalize_fp8_weight_scale_method(
     *,
     weight_block_size: Optional[Tuple[int, int]],
 ) -> str:
+    """Resolve the FP8 weight scaling strategy from config inputs."""
+
     normalized = "block" if weight_block_size is not None and value is None else (value or "row")
     normalized = str(normalized).strip().lower()
     if normalized not in _FP8_WEIGHT_SCALE_METHODS:
@@ -652,6 +762,8 @@ def _normalize_fp8_weight_scale_method(
 
 
 def _normalize_fp8_scale_semantics(value: Optional[str]) -> str:
+    """Normalize FP8 scale semantics to the supported enum-like string."""
+
     normalized = "inverse" if value is None else str(value).strip().lower()
     if normalized not in _FP8_SCALE_SEMANTICS:
         supported = ", ".join(sorted(_FP8_SCALE_SEMANTICS))
@@ -662,6 +774,8 @@ def _normalize_fp8_scale_semantics(value: Optional[str]) -> str:
 
 
 def _looks_like_bitsandbytes_format(value: Any) -> bool:
+    """Return ``True`` when a value matches a bitsandbytes format alias."""
+
     if value is None:
         return False
     normalized = str(value).strip().lower().replace("-", "_")
@@ -669,6 +783,8 @@ def _looks_like_bitsandbytes_format(value: Any) -> bool:
 
 
 def _normalize_bitsandbytes_format(value: Optional[str], *, bits: Optional[int] = None) -> str:
+    """Normalize bitsandbytes format aliases for the requested bit width."""
+
     default_format = "int8" if bits == 8 else "fp4"
     normalized = default_format if value is None else str(value).strip().lower().replace("-", "_")
     if normalized in {"", FORMAT.BITSANDBYTES.value}:
@@ -690,10 +806,14 @@ def _normalize_bitsandbytes_format(value: Optional[str], *, bits: Optional[int] 
 
 
 def _normalize_bitsandbytes_quant_type(value: Optional[str]) -> str:
+    """Normalize the legacy 4-bit bitsandbytes quant type field."""
+
     return _normalize_bitsandbytes_format(value, bits=4)
 
 
 def _normalize_bitsandbytes_block_size(value: Optional[int]) -> int:
+    """Validate and normalize the bitsandbytes block size setting."""
+
     normalized = 64 if value is None else int(value)
     if normalized not in _BITSANDBYTES_BLOCK_SIZES:
         supported = ", ".join(str(item) for item in sorted(_BITSANDBYTES_BLOCK_SIZES))
@@ -704,6 +824,8 @@ def _normalize_bitsandbytes_block_size(value: Optional[int]) -> int:
 
 @dataclass
 class SmoothMethod:
+    """Base smoother descriptor shared by all smoothing strategies."""
+
     name: str
     # Apply the smoother only when group size >= this threshold.
     group_size_threshold: int = 128
@@ -724,6 +846,8 @@ class SmoothPercentile(SmoothMethod):
     percentile: float = 99.0
 
     def __init__(self, percentile: float = 99.0, group_size_threshold: int = 128):
+        """Configure percentile clipping with an optional group-size floor."""
+
         super().__init__(name="percentile", group_size_threshold=group_size_threshold)
         self.percentile = percentile
 
@@ -744,6 +868,8 @@ class SmoothPercentileAsymmetric(SmoothMethod):
     high: float = 99.5
 
     def __init__(self, low: float = 0.5, high: float = 99.5, group_size_threshold: int = 128):
+        """Configure asymmetric percentile clipping bounds."""
+
         super().__init__(name="percentile_asym", group_size_threshold=group_size_threshold)
         self.low = low
         self.high = high
@@ -764,6 +890,8 @@ class SmoothMAD(SmoothMethod):
     k: float = 2.75
 
     def __init__(self, k: float = 2.75, group_size_threshold: int = 128):
+        """Configure MAD-based clipping width and activation threshold."""
+
         super().__init__(name="mad", group_size_threshold=group_size_threshold)
         self.k = k
 
@@ -785,6 +913,8 @@ class SmoothMSE(SmoothMethod):
     maxshrink: float = 0.8
 
     def __init__(self, steps: int = 32, maxshrink: float = 0.8, group_size_threshold: int = 128):
+        """Configure search granularity for MSE-based shrinking."""
+
         super().__init__(name="mse", group_size_threshold=group_size_threshold)
         self.steps = steps
         self.maxshrink = maxshrink
@@ -805,6 +935,8 @@ class SmoothOutlier(SmoothMethod):
     pct: float = 1.0
 
     def __init__(self, pct: float = 1.0, group_size_threshold: int = 128):
+        """Configure top-percent outlier clipping behavior."""
+
         super().__init__(name="outlier", group_size_threshold=group_size_threshold)
         self.pct = pct
 
@@ -824,6 +956,8 @@ class SmoothSoftNorm(SmoothMethod):
     k: float = 3.0
 
     def __init__(self, k: float = 3.0, group_size_threshold: int = 128):
+        """Configure z-score clipping strength for soft normalization."""
+
         super().__init__(name="softnorm", group_size_threshold=group_size_threshold)
         self.k = k
 
@@ -845,6 +979,8 @@ class SmoothLog(SmoothMethod):
     mu: float = 8.0
 
     def __init__(self, percentile: float = 99.0, mu: float = 8.0, group_size_threshold: int = 128):
+        """Configure log-domain smoothing with percentile and companding strength."""
+
         super().__init__(name="log", group_size_threshold=group_size_threshold)
         self.percentile = percentile
         self.mu = mu
@@ -865,17 +1001,23 @@ class SmoothRowCol(SmoothMethod):
     axis: str = "row"
 
     def __init__(self, axis: str = "row", group_size_threshold: int = 128):
+        """Configure RMS normalization over rows or columns."""
+
         super().__init__(name="rowcol", group_size_threshold=group_size_threshold)
         self.axis = axis
 
 
 class GcMode(str, Enum):
+    """Policies for when staged garbage collection should run."""
+
     INTERVAL = "interval"
     ON_STAGE_END = "on_stage_end"
 
 
 @dataclass
 class Fallback:
+    """Low-sample fallback strategy for modules with weak calibration coverage."""
+
     strategy: FallbackStrategy = FallbackStrategy.RTN # enable fallback by default due to moe routing behavior breaking calibration based quantization
 
     # int/float = if captured module fwd tokens is less than value, trigger strategy
@@ -889,11 +1031,15 @@ class Fallback:
 
 @dataclass
 class WeightOnlyConfig:
+    """Configuration for weight-only fallback quantization flows."""
+
     method: WeightOnlyMethod = WeightOnlyMethod.RTN
     # Whole-model RTN is noticeably more stable without a smoother by default.
     smooth: Optional[SmoothMethod] = None
 
     def __post_init__(self):
+        """Normalize the weight-only method and optional smoother settings."""
+
         if isinstance(self.method, str):
             try:
                 self.method = WeightOnlyMethod(self.method.lower())
@@ -911,21 +1057,31 @@ class WeightOnlyConfig:
 
 @dataclass
 class BasePreFilterConfig:
+    """Base payload for pre-filter stages emitted into config JSON."""
+
     code: str
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize the pre-filter config into a minimal dictionary."""
+
         return {"code": self.code}
 
 
 @dataclass
 class SmootherConfig(BasePreFilterConfig):
+    """Serialized wrapper for a configured smoothing pre-filter."""
+
     smooth: Optional[SmoothMethod] = None
     code: str = field(default=PreFilterCode.SMOOTHER.value, init=False)
 
     def __post_init__(self):
+        """Normalize the smoother payload into a typed smoother instance."""
+
         self.smooth = _parse_smooth_method(self.smooth)
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize the smoother config, including the smoother payload."""
+
         payload = super().to_dict()
         payload["smooth"] = _serialize_smooth_method(self.smooth)
         return payload
@@ -933,6 +1089,8 @@ class SmootherConfig(BasePreFilterConfig):
 
 @dataclass
 class HessianConfig:
+    """Controls for chunked Hessian accumulation during GPTQ calibration."""
+
     # Hessian accumulation controls (GPTQ only)
     chunk_size: Optional[int] = field(default=None, metadata={"help": "Maximum rows per Hessian chunk"})
     chunk_bytes: Optional[int] = field(default=None, metadata={"help": "Memory budget (in bytes) for Hessian chunk staging"})
@@ -942,6 +1100,8 @@ class HessianConfig:
     )
 
     def __post_init__(self):
+        """Validate Hessian chunking and staging dtype settings."""
+
         if self.chunk_size is not None:
             if not isinstance(self.chunk_size, int):
                 raise ValueError("HessianConfig: `chunk_size` must be an integer or None.")
