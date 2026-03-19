@@ -192,15 +192,6 @@ jobs:
         with:
           repository: ${{ env.repo }}
           ref: ${{ env.ref }}
-      - run: git config --system --add safe.directory $GITHUB_WORKSPACE
-
-      - name: Fetch PR by number
-        if: ${{ github.event.inputs.pr_number != 0 }}
-        run: |
-          PR_NUMBER=${{ github.event.inputs.pr_number }}
-          echo "pr number $PR_NUMBER"
-          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
-          git checkout pr-${PR_NUMBER}
 
       - name: Print env
         run: |
@@ -214,6 +205,16 @@ jobs:
 
           echo "MAX_JOBS=$(nproc)" >> $GITHUB_ENV
           echo "MAX_JOBS=$(nproc)"
+
+          git config --system --add safe.directory $GITHUB_WORKSPACE
+
+      - name: Fetch PR by number
+        if: ${{ github.event.inputs.pr_number != 0 }}
+        run: |
+          PR_NUMBER=${{ github.event.inputs.pr_number }}
+          echo "pr number $PR_NUMBER"
+          git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+          git checkout pr-${PR_NUMBER}
 
       - name: Activate uv env
         run: |
