@@ -11,7 +11,6 @@ import threading
 from functools import lru_cache
 
 import torch
-import torch.nn.functional as F
 
 from ....ext import exllamav3_ext as ext
 from ....util.progress import ProgressBar
@@ -782,15 +781,6 @@ def regularize(
 ):
     force_out_scales = quant_args["apply_out_scales"]
 
-    # dist_ref = torch.empty((512,), dtype = torch.float, device = weight.device)
-    # dist_r = torch.empty_like(dist_ref)
-    def jsd(h1, h2):
-        m = (h1 + h2) / 2
-        eps = 1e-12
-        js = F.kl_div((h1 + eps).log(), m, reduction = "sum") + \
-             F.kl_div((h2 + eps).log(), m, reduction = "sum")
-        return js / 2
-
     # From experiments, it seems the deciding factor in when scaling output channels is beneficial is when
     # the input to the linear layer is very irregular. After some testing, set the cutoff at 15% of the RMS sum
     # on 2% of the channels
@@ -1010,6 +1000,9 @@ def quantize_exl3(
                         partial = torch.einsum("ik,ij,jk->", A, B_block, A_j_block)
                         total += partial.item()
                     return total
+                E = None
+                W = None
+                Hd = None
                 E = weight_r - weight_q  # may run on CPU
                 W = weight_r
                 Hd = H.to(device)
@@ -1023,10 +1016,7 @@ def quantize_exl3(
                 Hd = None
                 proxy_err = num / max(den, 1e-8)
             except torch.OutOfMemoryError:
-                weight_r = None
-                E = None
-                W = None
-                Hd = None
+                del weight_r, E, W, Hd
                 proxy_err = -1.0
         else:
             proxy_err = 0.0

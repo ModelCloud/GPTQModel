@@ -108,6 +108,7 @@ class ExllamaV3Linear(nn.Module):
             try:
                 self._inner.unload()
             except Exception:
+                # `_drop_inner` runs during teardown and `_apply`; cleanup must stay best-effort.
                 pass
         self._inner = None
         self._inner_signature = None

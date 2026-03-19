@@ -5,7 +5,6 @@
 # -- do not touch
 import copy
 import os
-import re
 import sys
 
 
@@ -75,7 +74,6 @@ from gptqmodel.quantization.config import (  # noqa: E402
     Fallback,
     FP8Config,
     GGUFConfig,
-    GGUFQuantizeConfig,
     GPTAQConfig,
     HessianConfig,
     MoEConfig,
