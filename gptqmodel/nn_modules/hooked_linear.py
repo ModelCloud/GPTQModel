@@ -250,7 +250,8 @@ def _replace_module(module, child, name, level: int = 0, debug: bool = False) ->
     if debug:
         log.info(f"{level_indent} Hook: {instance_type.__name__}: {name}")
 
-    if isinstance(child, torch.nn.Linear):
+    # Replace nn.Linear with HookedLinear, except PhimoeTopKRouter which returns a tuple in forward()
+    if isinstance(child, torch.nn.Linear) and child.__class__.__name__ != "PhimoeTopKRouter":
         setattr(module, name, HookedLinear.from_linear(child))
     elif isinstance(child, transformers.Conv1D):
         setattr(module, name, HookedTransformerConv1D.from_conv1d(child))
