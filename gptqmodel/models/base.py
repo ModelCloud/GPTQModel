@@ -699,7 +699,12 @@ class BaseQModel(nn.Module):
         if preferred_backend in (None, BACKEND.AUTO):
             if export_quant_method == METHOD.AWQ:
                 if format_code == FORMAT.GEMM:
-                    preferred_backend = BACKEND.GEMM
+                    # Weight-only RTN->AWQ export should stay on the portable torch kernel.
+                    preferred_backend = (
+                        BACKEND.TORCH_AWQ
+                        if self.quantize_config.uses_weight_only_lifecycle()
+                        else BACKEND.GEMM
+                    )
                 elif format_code == FORMAT.BITBLAS:
                     preferred_backend = BACKEND.BITBLAS_AWQ
                 elif format_code == FORMAT.GEMV:

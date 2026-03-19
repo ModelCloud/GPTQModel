@@ -7,10 +7,12 @@ import inspect
 import json
 import sys
 import warnings
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Optional
 
 import torch
+import transformers
 from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM, GenerationConfig, PreTrainedModel
 
@@ -28,6 +30,7 @@ from ..utils.logger import setup_logger
 
 __all__ = [
     "no_init_weights",
+    "suspend_hf_weight_init",
     "normalize_hf_config_compat",
     "prepare_remote_code_compat",
     "prepare_remote_model_init_compat",
@@ -38,6 +41,39 @@ __all__ = [
 
 log = setup_logger()
 _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
+
+
+@contextmanager
+def suspend_hf_weight_init():
+    """Disable HF/torch parameter init temporarily and always restore globals."""
+
+    def _skip_init(*args, **kwargs):
+        return None
+
+    original_kaiming_uniform = torch.nn.init.kaiming_uniform_
+    original_uniform = torch.nn.init.uniform_
+    original_normal = torch.nn.init.normal_
+
+    modeling_utils = transformers.modeling_utils
+    had_init_flag = hasattr(modeling_utils, "_init_weights")
+    original_init_flag = getattr(modeling_utils, "_init_weights", None)
+
+    torch.nn.init.kaiming_uniform_ = _skip_init
+    torch.nn.init.uniform_ = _skip_init
+    torch.nn.init.normal_ = _skip_init
+    modeling_utils._init_weights = False
+
+    try:
+        with no_init_weights():
+            yield
+    finally:
+        torch.nn.init.kaiming_uniform_ = original_kaiming_uniform
+        torch.nn.init.uniform_ = original_uniform
+        torch.nn.init.normal_ = original_normal
+        if had_init_flag:
+            modeling_utils._init_weights = original_init_flag
+        elif hasattr(modeling_utils, "_init_weights"):
+            delattr(modeling_utils, "_init_weights")
 
 
 @lru_cache(maxsize=None)

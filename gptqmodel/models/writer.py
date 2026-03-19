@@ -20,7 +20,6 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
-from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
@@ -42,7 +41,7 @@ from ..quantization.config import (
 )
 from ..utils.backend import BACKEND
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
-from ..utils.hf import no_init_weights, prepare_remote_code_compat, sanitize_generation_config_file
+from ..utils.hf import prepare_remote_code_compat, sanitize_generation_config_file, suspend_hf_weight_init
 from ..utils.logger import setup_logger
 from ..utils.model import (
     copy_py_files,
@@ -537,15 +536,7 @@ def ModelWriter(cls):
         )
         prepare_remote_code_compat(config)
 
-        def skip(*args, **kwargs):
-            pass
-
-        torch.nn.init.kaiming_uniform_ = skip
-        torch.nn.init.uniform_ = skip
-        torch.nn.init.normal_ = skip
-        transformers.modeling_utils._init_weights = False
-        init_contexts = [no_init_weights()]
-        with ContextManagers(init_contexts):
+        with suspend_hf_weight_init():
             model = cls.loader.from_config(
                 config, dtype=torch.float16
             )

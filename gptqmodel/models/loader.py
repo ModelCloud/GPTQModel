@@ -28,7 +28,6 @@ import defuser
 from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
-from transformers.utils.generic import ContextManagers
 
 from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
@@ -40,10 +39,10 @@ from ..utils.backend import BACKEND
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     has_native_transformers_causallm_support,
-    no_init_weights,
     normalize_hf_config_compat,
     prepare_remote_model_init_compat,
     resolve_trust_remote_code,
+    suspend_hf_weight_init,
 )
 from ..utils.importer import (
     auto_select_device,
@@ -658,18 +657,7 @@ def ModelLoader(cls):
         model_save_name = resolved_archive_file  # In case a model is sharded, this would be `model.safetensors.index.json` which may later break.
 
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
-        def skip(*args, **kwargs):
-            pass
-
-        torch.nn.init.kaiming_uniform_ = skip
-        torch.nn.init.uniform_ = skip
-        torch.nn.init.normal_ = skip
-
-        transformers.modeling_utils._init_weights = False
-
-        init_contexts = [no_init_weights()]
-
-        with (ContextManagers(init_contexts)):
+        with suspend_hf_weight_init():
             cls.before_model_load(cls, load_quantized_model=True)
 
             if config.architectures:
