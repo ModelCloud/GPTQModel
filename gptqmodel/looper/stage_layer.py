@@ -431,6 +431,8 @@ def run_layer_stage(
 
                 @torch.inference_mode()
                 def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
+                    """Runs processor finalization and optional disk offload for one module."""
+
                     resolved_label = module_label or getattr(module, "full_name", getattr(module, "name", ""))
                     start = time.perf_counter() if region_timer is not None else None
                     try:
@@ -546,6 +548,8 @@ def run_layer_stage(
                     finalize_count_local,
                     layer_idx_for_callback,
                 ):
+                    """Consumes finalize futures, updating progress and surfacing errors."""
+
                     completed_local = 0
                     try:
                         for future in as_completed(futures):

@@ -33,6 +33,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 @dataclass
 class SubsetForwardContext:
+    """Carries forward-pass placement decisions needed for replay/finalization."""
+
     subset: Dict[str, NamedModule]
     forward_device_map: Dict[str, torch.device]
     subset_forward_serial: bool
@@ -42,6 +44,8 @@ class SubsetForwardContext:
 
 @dataclass
 class SubsetStageResult:
+    """Returns processed modules plus the updated layer input cache for a subset."""
+
     processed_subset: Dict[str, NamedModule]
     layer_inputs: List[List[torch.Tensor]]
     forward_context: Optional[SubsetForwardContext]
@@ -325,6 +329,8 @@ def _run_single_subset_pass(
         subset_idx: int,
         subset_total_count: int,
     ):
+        """Runs `processor.process()` for one module on the device worker pool."""
+
         module_label = getattr(nm, "full_name", getattr(nm, "name", repr(nm)))
         proc_name = proc.name() if hasattr(proc, "name") else type(proc).__name__
         module_ref = nm.module if isinstance(nm, NamedModule) else nm
@@ -449,6 +455,8 @@ def run_subset_stage(
     is_awq_processor = processor_name_lower.startswith("awq")
 
     def emit_subset_event(stage: str) -> None:
+        """Emits a normalized subset lifecycle callback when one is registered."""
+
         if subset_event_cb is None:
             return
         subset_event_cb(

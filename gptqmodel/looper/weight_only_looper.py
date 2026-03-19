@@ -37,6 +37,8 @@ class WeightOnlyLooper:
     """Run the simplified per-layer lifecycle for weight-only quantization."""
 
     def __init__(self, model: BaseQModel, processor: WeightOnlyProcessor):
+        """Initializes the looper with the model being quantized and its processor."""
+
         self.gptq_model = model
         self.processor = processor
 
