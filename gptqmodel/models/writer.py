@@ -215,8 +215,8 @@ def ModelWriter(cls):
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.
+        sanitize_model_config(self.model.config)
         config = copy.deepcopy(self.model.config)
-        sanitize_model_config(config)
 
         quantize_config = copy.deepcopy(self.quantize_config)
 
