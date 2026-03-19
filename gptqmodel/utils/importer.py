@@ -287,6 +287,9 @@ def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> 
     assert backend is None or isinstance(backend, BACKEND)
 
     if device is None:
+        # Backend-specific kernels should default to a compatible device class.
+        if backend in (BACKEND.TORCH_FUSED, BACKEND.TORCH_FUSED_AWQ):
+            return DEVICE.XPU if HAS_XPU else DEVICE.CPU
         if HAS_CUDA:
             device = DEVICE.CUDA
         elif HAS_XPU:

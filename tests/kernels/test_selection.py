@@ -17,7 +17,8 @@ from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.importer import AUTO_BACKEND_KERNEL_MAPPING, select_quant_linear
+from gptqmodel.utils import importer
+from gptqmodel.utils.importer import AUTO_BACKEND_KERNEL_MAPPING, auto_select_device, select_quant_linear
 from gptqmodel.utils.rocm import IS_ROCM
 from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
@@ -337,6 +338,15 @@ def test_explicit_gguf_triton_backend_selects_triton_kernel(monkeypatch):
     )
 
     assert qlinear_cls is GGUFTritonKernel
+
+
+def test_torch_fused_auto_device_prefers_xpu_or_cpu(monkeypatch):
+    monkeypatch.setattr(importer, "HAS_CUDA", True)
+    monkeypatch.setattr(importer, "HAS_XPU", False)
+    monkeypatch.setattr(importer, "HAS_MPS", False)
+
+    assert auto_select_device(None, BACKEND.TORCH_FUSED) is DEVICE.CPU
+    assert auto_select_device(None, BACKEND.TORCH_FUSED_AWQ) is DEVICE.CPU
 
 
 def test_gguf_does_not_accept_generic_torch_backend():

@@ -22,6 +22,8 @@ class TestsTorchFused(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM = 0.31
     TORCH_DTYPE = torch.float16
     LOAD_BACKEND = BACKEND.TORCH_FUSED
+    # Torch-fused compat tests run on CPU, so flash-attn CUDA kernels are not valid here.
+    USE_FLASH_ATTN = False
     DELETE_QUANTIZED_MODEL = False
     USE_VLLM = False
 
