@@ -72,6 +72,8 @@ if TYPE_CHECKING:  # pragma: no cover - type hints only
 
 
 class FinalizeProgressInfo(NamedTuple):
+    """Progress payload for processor finalization reporting."""
+
     module_label: Optional[str]
     process_name: str
     layer_idx: Optional[int]
@@ -82,6 +84,8 @@ class StopMainLoop(Exception):
 
 
 def io_write_performance() -> Optional[float]:
+    """Estimate and cache sustained disk write throughput in MB/s."""
+
     global _IO_WRITE_SPEED_MB
     if _IO_WRITE_SPEED_MB is not None:
         return _IO_WRITE_SPEED_MB
@@ -101,6 +105,8 @@ class ModuleLooper():
     reuse the same worker threads.
     """
     def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
+        """Initialize loop state, device policy, and callback wiring."""
+
         self.processors = processors
         self.gptq_model = model
 
@@ -203,6 +209,8 @@ class ModuleLooper():
         """
 
         def __init__(self, model, moe_routing_override: int):
+            """Capture the model and temporary top-k override to apply."""
+
             # Model containing MoE routing modules
             self.model = model
             # Target top-k value for per-token expert routing
@@ -211,12 +219,16 @@ class ModuleLooper():
             self._state: MoETopKState | None = None
 
         def __enter__(self):
+            """Apply the temporary routing override before the forward pass."""
+
             # Apply routing override if specified
             if self.moe_routing_override:
                 self._state = set_moe_topk(self.model, self.moe_routing_override)
             return self
 
         def __exit__(self, exc_type, exc, tb):
+            """Restore the original routing state when leaving the context."""
+
             # Restore original routing configuration
             if self.moe_routing_override:
                 restore_moe_topk(self._state)
@@ -226,6 +238,8 @@ class ModuleLooper():
         """Context manager for MoE lifecycle hooks integration."""
 
         def __init__(self, module_looper, module, processor, current_subset):
+            """Capture the replica state needed to patch the MoE block."""
+
             self.module_looper = module_looper
             self.module = module
             self.processor = processor
@@ -248,6 +262,8 @@ class ModuleLooper():
                     moe_block_prefix = hooks._extract_moe_block_prefix(self.current_subset, self.moe_block)
 
                     def moe_forward_wrapper(hidden_states, **kwargs):
+                        """Route the replica forward through the all-experts hook."""
+
                         return hooks.forward_to_all_experts(
                             moe_block=self.moe_block,
                             hidden_states=hidden_states,
@@ -282,6 +298,8 @@ class ModuleLooper():
         self._subset_callback = callback
 
     def register_dangling_thread(self, watcher: threading.Thread) -> None:
+        """Track a watcher thread that should be joined before exit."""
+
         with self._dangling_threads_lock:
             if self._dangling_threads:
                 self._dangling_threads = [
@@ -290,6 +308,8 @@ class ModuleLooper():
             self._dangling_threads.append(watcher)
 
     def wait_dangling_threads(self) -> None:
+        """Join any still-running watcher threads and clear the registry."""
+
         with self._dangling_threads_lock:
             threads = list(self._dangling_threads)
             self._dangling_threads.clear()
@@ -298,6 +318,8 @@ class ModuleLooper():
             thread.join()
 
     def _resolve_layer_callback(self):
+        """Resolve the active layer-complete callback using legacy fallbacks."""
+
         for candidate in (
             getattr(self, "_layer_callback", None),
             getattr(self, "layer_callback", None),
@@ -310,6 +332,8 @@ class ModuleLooper():
         return None
 
     def _resolve_subset_callback(self):
+        """Resolve the active subset callback from looper or model state."""
+
         for candidate in (
             getattr(self, "_subset_callback", None),
             getattr(self, "subset_callback", None),
@@ -320,6 +344,8 @@ class ModuleLooper():
         return None
 
     def callbackup(self, layer_idx: int, submodule_finalized: bool):
+        """Invoke the layer callback and normalize stop-loop responses."""
+
         callback = self._resolve_layer_callback()
         if callback is None:
             return None
@@ -350,6 +376,8 @@ class ModuleLooper():
         module_names: List[str],
         processor: str,
     ) -> None:
+        """Emit a subset event immediately and surface callback failures."""
+
         self._emit_subset_event(
             stage=stage,
             layer_idx=layer_idx,
@@ -361,12 +389,16 @@ class ModuleLooper():
         )
 
     def _request_loop_stop(self, exc: Optional[BaseException]) -> None:
+        """Record the first stop reason and signal loop shutdown."""
+
         with self.lock:
             if self._loop_stop_exc is None and exc is not None:
                 self._loop_stop_exc = exc
         self._loop_stop_event.set()
 
     def _check_loop_stop(self) -> bool:
+        """Drain outstanding work and re-raise any recorded stop signal."""
+
         if not self._loop_stop_event.is_set():
             return False
         if not self._loop_stop_waited:
@@ -387,6 +419,8 @@ class ModuleLooper():
         processor: str,
         raise_in_place: bool,
     ) -> None:
+        """Forward a subset lifecycle event to the configured callback."""
+
         callback = self._resolve_subset_callback()
         if callback is None:
             return
@@ -437,6 +471,8 @@ class ModuleLooper():
         *,
         raise_in_place: bool,
     ) -> None:
+        """Notify listeners that a layer finished and handle stop requests."""
+
         try:
             self.callbackup(layer_idx=layer_idx, submodule_finalized=submodule_finalized)
         except StopMainLoop:
@@ -455,6 +491,8 @@ class ModuleLooper():
     # Processors capture activations through hooks that need thread-local state
     # so masks survive the roundtrip to worker threads.
     def _processor_mask_tls(self, processor: LoopProcessor) -> threading.local:
+        """Get or create thread-local storage for the active keep mask."""
+
         tls = getattr(processor, "_mask_tls", None)
         if tls is None:
             tls = threading.local()
@@ -478,14 +516,20 @@ class ModuleLooper():
         return getattr(tls, "value", False) if tls else False
 
     def _set_processor_mask(self, processor: LoopProcessor, mask):
+        """Store the active sequence mask for the current worker thread."""
+
         tls = self._processor_mask_tls(processor)
         tls.value = mask
 
     def _get_processor_mask(self, processor: LoopProcessor):
+        """Return the sequence mask bound to the current worker thread."""
+
         tls = getattr(processor, "_mask_tls", None)
         return getattr(tls, "value", None) if tls else None
 
     def _safe_len(self, sequence) -> Optional[int]:
+        """Return ``len(sequence)`` when the object exposes a safe length."""
+
         if sequence is None:
             return None
         try:
@@ -494,6 +538,8 @@ class ModuleLooper():
             return None
 
     def _coerce_to_int(self, value) -> Optional[int]:
+        """Best-effort conversion for scalar-like values used in counters."""
+
         if value is None:
             return None
         if isinstance(value, bool):
@@ -522,6 +568,8 @@ class ModuleLooper():
             return None
 
     def _resolve_batch_total(self, raw_count, fallback_sequence) -> int:
+        """Resolve a non-negative batch count from explicit or inferred input."""
+
         count = self._coerce_to_int(raw_count)
         fallback_len = self._safe_len(fallback_sequence)
         fallback = self._coerce_to_int(fallback_len)
@@ -540,6 +588,8 @@ class ModuleLooper():
         return 0
 
     def _batch_row_count(self, batch_inputs: Optional[List[torch.Tensor]]) -> int:
+        """Infer how many rows a cached batch contributes to progress."""
+
         if not batch_inputs:
             return 0
 
@@ -558,6 +608,8 @@ class ModuleLooper():
         return 0
 
     def _collect_row_counts(self, layer_inputs: Optional[List[List[torch.Tensor]]]) -> List[int]:
+        """Collect per-batch row counts for progress tracking."""
+
         if not layer_inputs:
             return []
 
@@ -568,6 +620,8 @@ class ModuleLooper():
         return counts
 
     def _extract_moe_group_key(self, module_name: Optional[str]) -> Optional[str]:
+        """Collapse expert module names into a stable MoE routing group key."""
+
         if not module_name:
             return None
 
@@ -589,6 +643,8 @@ class ModuleLooper():
         return None
 
     def _is_attention_module_name(self, module_name: str) -> bool:
+        """Heuristically detect attention modules from their qualified name."""
+
         if not module_name:
             return False
 
@@ -642,6 +698,8 @@ class ModuleLooper():
         named_module: NamedModule,
         fallback_device: torch.device,
     ) -> torch.device:
+        """Pick and memoize the quantization device for one named module."""
+
         key = getattr(named_module, "full_name", None) or named_module.name
         with self._quant_device_lock:
             cached = self._module_device_map.get(key)
@@ -667,6 +725,8 @@ class ModuleLooper():
         *,
         fallback_modules: Optional[Dict[str, torch.nn.Module]] = None,
     ) -> Dict[str, torch.device]:
+        """Move selected modules to temporary forward devices and record prior placement."""
+
         previous: Dict[str, torch.device] = {}
         if not device_map:
             return previous
@@ -707,6 +767,8 @@ class ModuleLooper():
         *,
         fallback_modules: Optional[Dict[str, torch.nn.Module]] = None,
     ) -> None:
+        """Restore module placements saved by ``_apply_forward_device_overrides``."""
+
         if not previous_devices:
             return
 
@@ -732,6 +794,8 @@ class ModuleLooper():
         named_module: NamedModule,
         target_device: torch.device,
     ) -> None:
+        """Move processor-owned task state alongside the module it quantizes."""
+
         task_map = getattr(processor, "tasks", None)
         if not task_map:
             return
@@ -779,6 +843,8 @@ class ModuleLooper():
         named_module: NamedModule,
         fallback_device: torch.device,
     ) -> torch.device:
+        """Place a named module and its processor task on the chosen device."""
+
         target_device = self._assign_quant_device_for_module(
             named_module,
             fallback_device=fallback_device,
@@ -1093,6 +1159,8 @@ class ModuleLooper():
                 progress_pb.subtitle(f"{stage_label}: staging on {device_label}").draw()
 
         def _replica_progress(idx: int, total: int, device: torch.device, step: str) -> None:
+            """Update replica staging progress while module clones are prepared."""
+
             nonlocal replica_completed
             device_label = str(device)
             if replica_pb is not None:
@@ -1285,7 +1353,11 @@ class ModuleLooper():
         return ordered_outputs
 
     def _masked_hook_wrapper(self, processor: LoopProcessor, inner_hook, hook_source: str):
+        """Wrap a forward hook so it sees masked activations for the current batch."""
+
         def hook(module, inputs, output):
+            """Apply the thread-local keep mask before delegating to ``inner_hook``."""
+
             # Thread-safe check if hooks are paused (TLS-based, per-thread)
             if self._get_processor_hooks_paused(processor):
                 return
@@ -1343,6 +1415,8 @@ class ModuleLooper():
         Respects hooks_paused state to avoid double-counting during intermediate calculations.
         """
         def pre_hook(module, inputs, output):
+            """Apply the current keep mask before invoking the wrapped pre-hook."""
+
             # Thread-safe check if hooks are paused (TLS-based, per-thread)
             if self._get_processor_hooks_paused(processor):
                 return
@@ -1382,6 +1456,8 @@ class ModuleLooper():
         return pre_hook
 
     def cache_inputs(self, layers, calibration_data, use_cache):
+        """Capture and cache per-layer calibration inputs for later replay."""
+
         capture_stage = StageInputsCapture(self, logger=log)
         return capture_stage.cache_inputs(
             layers=layers,
@@ -1390,12 +1466,16 @@ class ModuleLooper():
         )
 
     def loop(self, fallback=None, **kwargs):
+        """Run the quantization loop under the pause/resume and TF32 guards."""
+
         with tf32_high_precision_guard():
             with self.pause_controller.lifecycle():
                 return self._loop_impl(fallback=fallback, **kwargs)
 
     @torch.inference_mode()
     def _loop_impl(self, fallback=None, **kwargs):
+        """Execute the full layer-by-layer quantization workflow."""
+
         if fallback is None:
             fallback = getattr(self.gptq_model.quantize_config, "fallback", None)
 
@@ -1587,6 +1667,8 @@ class ModuleLooper():
         return total_log
 
     def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fallback, layer_module=None) -> Dict[str, NamedModule]:
+        """Build the named-module subset a processor will quantize for one layer."""
+
         subset = {}
         capture_only_flags: Dict[str, bool] = {}
         for n in names:
