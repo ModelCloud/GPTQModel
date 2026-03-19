@@ -120,6 +120,83 @@ jobs:
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
       matrix:
         include:
+          # pytorch 2.10
+          # cuda 130
+          - cuda: 130
+            torch: 2.10.0
+            python: 314
+          - cuda: 130
+            torch: 2.10.0
+            python: 314t
+          - cuda: 130
+            torch: 2.10.0
+            python: 313
+          - cuda: 130
+            torch: 2.10.0
+            python: 312
+          - cuda: 130
+            torch: 2.10.0
+            python: 311
+          - cuda: 130
+            torch: 2.10.0
+            python: 310
+          # cuda 129
+          - cuda: 129
+            torch: 2.10.0
+            python: 314
+          - cuda: 129
+            torch: 2.10.0
+            python: 314t
+          - cuda: 129
+            torch: 2.10.0
+            python: 313
+          - cuda: 129
+            torch: 2.10.0
+            python: 312
+          - cuda: 129
+            torch: 2.10.0
+            python: 311
+          - cuda: 129
+            torch: 2.10.0
+            python: 310
+          # cuda 128
+          - cuda: 128
+            torch: 2.10.0
+            python: 314
+          - cuda: 128
+            torch: 2.10.0
+            python: 314t
+          - cuda: 128
+            torch: 2.10.0
+            python: 313
+          - cuda: 128
+            torch: 2.10.0
+            python: 312
+          - cuda: 128
+            torch: 2.10.0
+            python: 311
+          - cuda: 128
+            torch: 2.10.0
+            python: 310
+          # cuda 126
+          - cuda: 126
+            torch: 2.10.0
+            python: 314
+          - cuda: 126
+            torch: 2.10.0
+            python: 314t
+          - cuda: 126
+            torch: 2.10.0
+            python: 313
+          - cuda: 126
+            torch: 2.10.0
+            python: 312
+          - cuda: 126
+            torch: 2.10.0
+            python: 311
+          - cuda: 126
+            torch: 2.10.0
+            python: 310
           # pytorch 2.9
           # cuda 13
           - cuda: 130
@@ -187,27 +264,6 @@ jobs:
           - cuda: 126
             torch: 2.9.0
             python: 310
-          # not support yet, maybe later
-          # pytorch 2.8
-          # cuda 13
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 314
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 313t
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 313
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 312
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 311
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 310
           # cuda 128
           - cuda: 128
             torch: 2.8.0
