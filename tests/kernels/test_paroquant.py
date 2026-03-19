@@ -5,11 +5,12 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
+from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonQuantLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.importer import select_quant_linear
+from gptqmodel.utils.importer import get_kernel_for_backend, select_quant_linear
 from gptqmodel.utils.paroquant import apply_paroquant_rotation_reference, build_identity_rotation_buffers
 
 
@@ -169,3 +170,95 @@ def test_paroquant_backend_selection():
         pack_dtype=torch.int32,
     )
     assert qlinear_cls is ParoQuantQuantLinear
+
+
+def test_paroquant_triton_backend_mapping():
+    assert (
+        get_kernel_for_backend(BACKEND.PAROQUANT_TRITON, METHOD.PAROQUANT, FORMAT.PAROQUANT)
+        is ParoQuantTritonQuantLinear
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant Triton kernel parity test")
+def test_paroquant_triton_matches_existing_cuda_kernel():
+    pytest.importorskip("triton")
+
+    bits = 4
+    in_features = 128
+    out_features = 128
+    group_size = 128
+    qweight, qzeros, scales, bias = _make_packed_buffers(bits, in_features, out_features, group_size)
+
+    baseline = ParoQuantQuantLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        register_buffers=True,
+        krot=8,
+    ).cuda()
+    candidate = ParoQuantTritonQuantLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        register_buffers=True,
+        krot=8,
+    ).cuda()
+
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=8,
+        device="cuda",
+        dtype=torch.float16,
+    )
+    theta.uniform_(-0.2, 0.2)
+    channel_scales.uniform_(0.75, 1.25)
+
+    for module in (baseline, candidate):
+        module.qweight.copy_(qweight.cuda())
+        module.qzeros.copy_(qzeros.cuda())
+        module.scales.copy_(scales.cuda())
+        module.bias.copy_(bias.cuda())
+        module.pairs.copy_(pairs)
+        module.theta.copy_(theta)
+        module.channel_scales.copy_(channel_scales)
+        module.post_init()
+        module.eval()
+
+    x = torch.randn(2, 8, in_features, device="cuda", dtype=torch.float16)
+    with torch.inference_mode():
+        rotated = apply_paroquant_rotation_reference(
+            x,
+            baseline.pairs,
+            baseline.theta,
+            scales=baseline.channel_scales,
+            group_size=group_size,
+        )
+        dense_weight = dequantize_gemm(
+            qweight=baseline.qweight,
+            qzeros=baseline.qzeros,
+            scales=baseline.scales,
+            bits=bits,
+            group_size=group_size,
+        ).to(dtype=x.dtype)
+        dense_reference = torch.matmul(rotated.reshape(-1, in_features), dense_weight).reshape(2, 8, out_features)
+        dense_reference = dense_reference + baseline.bias
+
+        baseline_out = baseline(x)
+        candidate_out = candidate(x)
+
+    baseline_max_abs = (baseline_out - dense_reference).abs().max().item()
+    baseline_mean_abs = (baseline_out - dense_reference).abs().mean().item()
+    candidate_max_abs = (candidate_out - dense_reference).abs().max().item()
+    candidate_mean_abs = (candidate_out - dense_reference).abs().mean().item()
+
+    assert candidate_max_abs <= baseline_max_abs + 0.1
+    assert candidate_mean_abs <= baseline_mean_abs + 0.02

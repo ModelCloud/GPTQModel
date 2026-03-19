@@ -145,7 +145,7 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 ## What is GPT-QModel?
 GPT-QModel is a production-ready LLM model compression/quantization toolkit with hw-accelerated inference support for both CPU/GPU via HF Transformers, vLLM, and SGLang.
 
-GPT-QModel currently supports GPTQ, AWQ, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRa, and GAR, with more quantization methods and enhancements planned. 
+GPT-QModel currently supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRa, and GAR, with more quantization methods and enhancements planned. 
 
 ## Quantization Support
 
@@ -155,6 +155,7 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 |---------------------------|------------|---|---|---|---------------|
 | GPTQ                      | ✅          | ✅ | ✅ | ✅ | ✅             | 
 | AWQ                       | ✅          | ✅ | ✅ | ✅ | ✅             |
+| ParoQuant                 | ✅          | x | x | x | ✅             |
 | GGUF                      | ✅          | x | x | x | x             |
 | FP8                       | ✅          | x | x | x | x             |
 | Exllama V3 / EXL3         | ✅          | x | x | x | x             |
@@ -164,12 +165,12 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 | Rotation                  | ✅          | x | x | x | x             |  
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 
-`GGUF`, `FP8`, and `EXL3` are currently native GPT-QModel quantization/runtime paths. `vLLM` and `SGLang` integration currently targets `GPTQ` and `AWQ`.
+`GGUF`, `FP8`, `EXL3`, and `ParoQuant` are currently native GPT-QModel quantization/runtime paths. `vLLM` and `SGLang` integration currently targets `GPTQ` and `AWQ`.
 
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
-* ✨ GPTQ, AWQ, QQQ, GGUF, FP8, and EXL3 quantization support.
+* ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, and EXL3 quantization support.
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
@@ -305,7 +306,7 @@ model.save(quant_path)
 
 #### Other Quantization Formats
 
-`GPTQ`, `AWQ`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
+`GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
 
 ##### GGUF Example: Llama 3.2 1B Instruct
 

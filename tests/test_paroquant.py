@@ -51,6 +51,15 @@ def test_paroquant_kernel_mapping_uses_paroquant_backend():
     )
 
 
+def test_paroquant_kernel_mapping_uses_paroquant_triton_backend():
+    from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonQuantLinear
+
+    assert (
+        get_kernel_for_backend(BACKEND.PAROQUANT_TRITON, METHOD.PAROQUANT, FORMAT.PAROQUANT)
+        is ParoQuantTritonQuantLinear
+    )
+
+
 def test_paroquant_identity_rotation_buffers_preserve_input():
     x = torch.randn(3, 128, dtype=torch.float16)
     pairs, theta, channel_scales = build_identity_rotation_buffers(

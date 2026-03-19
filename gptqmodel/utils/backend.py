@@ -38,6 +38,7 @@ class BACKEND(str, Enum):
     TORCH_AWQ = "torch_awq"
     BITBLAS_AWQ = "bitblas_awq"  # BitBLAS variant for AWQ-packed checkpoints
     PAROQUANT = "paroquant"  # ParoQuant-compatible rotated INT4 kernel
+    PAROQUANT_TRITON = "paroquant_triton"  # Triton ParoQuant rotated INT4 kernel
 
     # external
     GGUF_TORCH = "gguf_torch" # GGUF module-level inference via native torch kernel
