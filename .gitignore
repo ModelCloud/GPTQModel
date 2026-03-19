@@ -167,6 +167,7 @@ debug
 
 # .vscode
 .vscode/
+/.codex/
 
 example.py
 
