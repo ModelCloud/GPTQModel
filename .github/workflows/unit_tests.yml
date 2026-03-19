@@ -203,8 +203,7 @@ jobs:
           echo UV_CACHE_DIR=$UV_CACHE_DIR
           echo VENV_ROOT=$VENV_ROOT
 
-          echo "MAX_JOBS=$(nproc)" >> $GITHUB_ENV
-          echo "MAX_JOBS=$(nproc)"
+          echo "MAX_JOBS=$MAX_JOBS"
 
           git config --system --add safe.directory $GITHUB_WORKSPACE
 
