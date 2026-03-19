@@ -158,11 +158,14 @@ def run_layer_stage(
             # order so their caches and side effects line up with the pipeline.
             processor.log_call_count = 0  # reset
             processor.collect_memory_info(layer_index)
+            # Read the replay policy once per processor so the layer stage uses
+            # one execution config instead of a group of unrelated flags.
+            execution_config = processor.execution_config
 
             modules = [[looper.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
             # for NativeProcessor we process one time forward on all grouped module subsets
-            if processor.fwd_all_modules_in_single_pass:
+            if execution_config.fwd_all_modules_in_single_pass:
                 # merge all subsets into one
                 modules = [sum(modules, [])]
 
@@ -263,7 +266,7 @@ def run_layer_stage(
             preserve_devices = bool(forward_device_map)
 
             # second forward after process()
-            if not is_last_module and processor.fwd_after_process and subset_context is not None:
+            if not is_last_module and execution_config.fwd_after_process and subset_context is not None:
                 replay_batch_count = looper._resolve_batch_total(
                     getattr(processor, "num_batches", None),
                     layer_inputs,
@@ -391,7 +394,7 @@ def run_layer_stage(
                 if region_timer is not None:
                     region_timer.flush()
 
-            if processor.fwd_after_process:
+            if execution_config.fwd_after_process:
                 processor.clear_cache_data()
                 processor.receive_layer_inputs(layer_outputs)
                 layer_inputs = processor.inputs_cache.layer_inputs

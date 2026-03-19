@@ -6,6 +6,7 @@ import torch
 
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
 from gptqmodel.looper.stage_layer import run_layer_stage
 from gptqmodel.looper.stage_subset import SubsetForwardContext, SubsetStageResult
@@ -213,11 +214,13 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             return None
 
     class DummyProcessor:
-        fwd_all_modules_in_single_pass = False
-        fwd_after_process = False
-
         def __init__(self):
             tensor = torch.zeros(1, 1, 1)
+            self.execution_config = ExecutionConfig(
+                require_fwd=True,
+                fwd_after_process=False,
+                fwd_all_modules_in_single_pass=False,
+            )
             self.inputs_cache = types.SimpleNamespace(
                 layer_inputs=[[tensor]],
                 layer_input_kwargs=[{}],
@@ -409,11 +412,13 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             return None
 
     class DummyProcessor:
-        fwd_all_modules_in_single_pass = False
-        fwd_after_process = False
-
         def __init__(self):
             tensor = torch.zeros(1, 1, 1)
+            self.execution_config = ExecutionConfig(
+                require_fwd=True,
+                fwd_after_process=False,
+                fwd_all_modules_in_single_pass=False,
+            )
             self.inputs_cache = types.SimpleNamespace(
                 layer_inputs=[[tensor]],
                 layer_input_kwargs=[{}],

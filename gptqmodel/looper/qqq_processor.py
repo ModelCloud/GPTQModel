@@ -9,7 +9,7 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
@@ -51,7 +51,7 @@ class QQQProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            require_fwd=require_fwd,
+            execution_config=ExecutionConfig(require_fwd=require_fwd),
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff

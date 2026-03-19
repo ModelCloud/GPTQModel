@@ -11,7 +11,7 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
@@ -110,9 +110,11 @@ class GPTQProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            require_fwd=require_fwd,
-            fwd_after_process=True,
-            subset_forward_early_stop=True,
+            execution_config=ExecutionConfig(
+                require_fwd=require_fwd,
+                fwd_after_process=True,
+                subset_forward_early_stop=True,
+            ),
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff

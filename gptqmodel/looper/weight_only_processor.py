@@ -10,7 +10,7 @@ from typing import Optional
 
 import torch
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
@@ -65,8 +65,10 @@ class WeightOnlyProcessor(LoopProcessor):
             calibration_sort=None,
             calibration_concat_separator=None,
             batch_size=1,
-            require_fwd=False,
-            fwd_after_process=False,
+            execution_config=ExecutionConfig(
+                require_fwd=False,
+                fwd_after_process=False,
+            ),
         )
         self.lock = threading.Lock()
 

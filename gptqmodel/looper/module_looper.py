@@ -1189,8 +1189,11 @@ class ModuleLooper():
             region_timer.flush()
 
         is_awq_quantize = any(isinstance(proc, AWQProcessor) for proc in self.processors)
+        # Capture-only layer groups are driven by processor execution config,
+        # not by ad-hoc processor attributes.
         requires_activation_capture = any(
-            getattr(proc, "enable_activation_capture", False) for proc in self.processors
+            getattr(getattr(proc, "execution_config", None), "enable_activation_capture", False)
+            for proc in self.processors
         )
         layer_modules = self.gptq_model.simple_layer_modules(
             model_config=self.gptq_model.model.config,

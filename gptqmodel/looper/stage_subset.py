@@ -86,10 +86,11 @@ def _run_single_subset_pass(
     execute_forward: bool = True,
 ) -> Tuple[Dict[str, NamedModule], Optional[List[List[torch.Tensor]]]]:
     """Execute forward and quantization for a specific subset/chunk."""
-    
+
     handle = []
     subset_size = len(subset)
-    
+    execution_config = processor.execution_config
+
     # Determine MoE block name for hook selection
     moe_block_name = None
     if looper.gptq_model and hasattr(looper.gptq_model, 'moe_lifecycle_hooks'):
@@ -125,7 +126,10 @@ def _run_single_subset_pass(
                     subset[name].forward_hook = looper._masked_pre_hook_wrapper(processor, original_hook, hook_source)
                 else:
                     subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
-                enable_stop = processor.fwd_after_process or getattr(processor, "subset_forward_early_stop", False)
+                enable_stop = (
+                    execution_config.fwd_after_process
+                    or execution_config.subset_forward_early_stop
+                )
                 if is_last and enable_stop:
                     subset[name].forward_hook_last = True
             else:
@@ -159,7 +163,7 @@ def _run_single_subset_pass(
                 len(subset),
             )
 
-    need_outputs = not processor.fwd_after_process
+    need_outputs = not execution_config.fwd_after_process
     fwd_start = None
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
     if execute_forward:
@@ -449,6 +453,9 @@ def run_subset_stage(
 ) -> SubsetStageResult:
     """Process a single subset of modules within the layer quantization loop."""
     logger = log or setup_logger()
+    # Keep replay policy together so the subset stage reads one execution
+    # config instead of coordinating multiple independent processor flags.
+    execution_config = processor.execution_config
 
     processor_name = processor.name() if hasattr(processor, "name") else type(processor).__name__
     processor_name_lower = processor_name.lower()
@@ -575,7 +582,7 @@ def run_subset_stage(
     forward_total_rows = 1
     forward_row_counts = []
     batch_count = 0
-    if processor.require_fwd:
+    if execution_config.require_fwd:
         batch_count = looper._resolve_batch_total(
             getattr(processor, "num_batches", None),
             layer_inputs,
@@ -630,7 +637,7 @@ def run_subset_stage(
         previous_processed_subset=previous_processed_subset,
     )
 
-    if batching_enabled and processor.require_fwd:
+    if batching_enabled and execution_config.require_fwd:
         # Simply sort all module names and chunk them by batch_size
         # This processes exactly batch_size MODULES per batch, not batch_size experts
         sorted_module_names = sorted(subset.keys())
@@ -674,10 +681,10 @@ def run_subset_stage(
         # Close MOE chunks progress bar
         moe_chunk_pb.close()
 
-        # If processor.fwd_after_process is False, stage_layer won't run replay.
+        # If fwd_after_process is False, stage_layer will not run replay.
         # But we haven't collected proper full outputs yet (we ignored them or they were partial).
         # So we MUST run a replay here to get valid layer_inputs for the next layer.
-        if not processor.fwd_after_process:
+        if not execution_config.fwd_after_process:
              # Final Replay to collect layer outputs
              _, new_layer_inputs = _run_single_subset_pass(
                  **common_args,
@@ -689,7 +696,7 @@ def run_subset_stage(
              if new_layer_inputs is not None:
                  layer_inputs = new_layer_inputs
     
-    elif processor.require_fwd:
+    elif execution_config.require_fwd:
         # Single pass
         processed_results, new_layer_inputs = _run_single_subset_pass(
             **common_args,

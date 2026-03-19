@@ -14,7 +14,7 @@ import torch
 
 from ..quantization.gptq import get_number_of_rows_and_cols
 from ..utils.logger import setup_logger
-from .loop_processor import LoopProcessor
+from .loop_processor import ExecutionConfig, LoopProcessor
 from .named_module import NamedModule
 
 log = setup_logger()
@@ -37,8 +37,13 @@ class TensorParallelWeightProcessor(LoopProcessor):
 
         kwargs = dict(kwargs)
         kwargs.pop("calculate_w_wq_diff", None)
-        kwargs.setdefault("require_fwd", False)
-        kwargs.setdefault("fwd_after_process", False)
+        kwargs.setdefault(
+            "execution_config",
+            ExecutionConfig(
+                require_fwd=False,
+                fwd_after_process=False,
+            ),
+        )
         super().__init__(*args, **kwargs)
         qcfg_from_kwargs = kwargs.pop("qcfg", None)
         if qcfg_from_kwargs is not None:

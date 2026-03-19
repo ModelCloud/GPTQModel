@@ -12,7 +12,7 @@ from torch.nn import Module
 
 from ..adapter.adapter import Lora
 from ..eora.eora import eora_compute_lora, eora_process_input, merge_eora_segments
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
@@ -53,7 +53,7 @@ class EoraProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            require_fwd=require_fwd,
+            execution_config=ExecutionConfig(require_fwd=require_fwd),
         )
 
         # Track per-module segment accumulators keyed by device so we can merge

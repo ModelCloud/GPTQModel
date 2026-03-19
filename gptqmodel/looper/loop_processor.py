@@ -5,6 +5,7 @@
 import json
 import os
 import threading
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -50,6 +51,35 @@ DEFAULT_LOG_COLUMNS: List[str] = [
     "dynamic",
 ]
 
+
+@dataclass
+class ExecutionConfig:
+    """Describe how a processor participates in forward replay and activation capture.
+
+    Processor defaults:
+
+    +--------------+------+------------------+---------------------------+----------------+--------------------+
+    | Processor     | fwd? | after_process?   | single_pass_all_modules?  | early_stop?    | activation_capture?|
+    +--------------+------+------------------+---------------------------+----------------+--------------------+
+    | GPTQ          | yes  | yes              | no                        | yes            | no                 |
+    | AWQ           | yes  | yes              | no                        | yes            | yes                |
+    | Native        | yes  | no               | yes                       | no             | no                 |
+    | WeightOnly    | no   | no               | no/default                | no/default     | no                 |
+    +--------------+------+------------------+---------------------------+----------------+--------------------+
+    """
+
+    # Whether the processor needs forward replay at all.
+    require_fwd: bool = True
+    # Whether the next layer consumes outputs after process() instead of before it.
+    fwd_after_process: bool = True
+    # Whether layer modules are replayed in one combined pass instead of per subset.
+    fwd_all_modules_in_single_pass: bool = False
+    # Whether a subset forward can stop as soon as the last subset hook fires.
+    subset_forward_early_stop: bool = False
+    # Whether capture-only modules/hooks (for example ':?') should be enabled.
+    enable_activation_capture: bool = False
+
+
 # LoopProcessor is a singleton(), not per module instance
 class LoopProcessor:
     """Base lifecycle coordinator shared by all quantization processors."""
@@ -63,11 +93,7 @@ class LoopProcessor:
             calibration_sort: Optional[str] = None,
             calibration_concat_separator: Optional[str] = None,
             batch_size: int = 1,
-            require_fwd: bool = True,
-            fwd_after_process: bool = True,
-            fwd_all_modules_in_single_pass: bool = False,
-            subset_forward_early_stop: bool = False,
-            enable_activation_capture_flag: bool = False,
+            execution_config: Optional[ExecutionConfig] = None,
     ):
         """Initializes shared processor state, logging, and calibration bookkeeping."""
 
@@ -82,24 +108,9 @@ class LoopProcessor:
         self.qcfg = qcfg
         self.qcfg_dynamic = None # cloned and dynamic filtered
 
-        # TODO FIX ME: dequantize processor sets this to False but it is nver acted on!
-        # if processor require fwd generate and hooks, set this to true
-        # looper should bypass generate + hooks if this is false
-        self.require_fwd = require_fwd # default True
-
-        # after process(), do we need to forward again? paired with require_fwd == True
-        # if true, forward output is captured post process() and saved for next loop as input
-        # if false, forward output before process() call is saved for next loop as input
-        self.fwd_after_process = fwd_after_process # default True
-
-        # native processor does not need to forward N times due to module depend segmentation
-        # if true, fwd is repeated based on module dep sub-groups
-        # if false, sub-module groups are merged as one and fwd happens in one pass
-        self.fwd_all_modules_in_single_pass = fwd_all_modules_in_single_pass # default False
-        # when True, stop the layer forward immediately after the final module in a subset fires
-        self.subset_forward_early_stop = subset_forward_early_stop
-        # enable capture-only hooks (e.g. ':?') for processors that require activations
-        self.enable_activation_capture = enable_activation_capture_flag
+        # Keep lifecycle and replay policy in one object so the stages consume
+        # one execution mode instead of a scattered set of booleans.
+        self.execution_config = execution_config or ExecutionConfig()
 
         self.inputs_cache: InputCache = InputCache(None, None, None, None)
         self.tasks = {}

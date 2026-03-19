@@ -7,7 +7,7 @@ from typing import Dict, Optional
 
 import torch
 
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..nn_modules.qlinear.torch import TorchQuantLinear
@@ -21,9 +21,18 @@ class DequantizeProcessor(LoopProcessor):
     def __init__(self, quantized_modules: Dict[str, TorchQuantLinear]):
         """Initializes the processor with the quantized modules to dequantize."""
 
-        super().__init__(tokenizer=None, qcfg=None, calibration=None, calibration_concat_size=None,
-                         prepare_dataset_func=None, batch_size=1,
-                         require_fwd=False)
+        super().__init__(
+            tokenizer=None,
+            qcfg=None,
+            calibration=None,
+            calibration_concat_size=None,
+            prepare_dataset_func=None,
+            batch_size=1,
+            execution_config=ExecutionConfig(
+                require_fwd=False,
+                fwd_after_process=False,
+            ),
+        )
 
         self.quantized_modules = quantized_modules
 
