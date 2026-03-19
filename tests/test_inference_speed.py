@@ -27,7 +27,6 @@ GPU: 4090
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TRITON, 296),
 (InferenceSpeed.NATIVE_MODEL_ID, BACKEND.TORCH, 295),
 (InferenceSpeed.BITBLAS_NATIVE_MODEL_ID, BACKEND.BITBLAS, 1474),
-(InferenceSpeed.NATIVE_MODEL_ID, BACKEND.IPEX, 48),
 '''
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]

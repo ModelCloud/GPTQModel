@@ -123,7 +123,7 @@ class TestQuantAndEORA(ModelTest):
             del model
             torch_empty_cache()
 
-            for backend in [BACKEND.MARLIN]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+            for backend in [BACKEND.MARLIN]:  # BACKEND.TORCH_FUSED, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
                 base_bench = self.bench(path=tmpdir, backend=backend, adapter=None)  # inference using qweights only
                 eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora)  # inference using eora (lora)
 
@@ -265,7 +265,7 @@ class TestTransformers(ModelTest):
             del model
             torch_empty_cache()
 
-            for backend in [BACKEND.MARLIN]:  # BACKEND.IPEX, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
+            for backend in [BACKEND.MARLIN]:  # BACKEND.TORCH_FUSED, BACKEND.BITBLAS, BACKEND.EXLLAMA_V2V BACKEND.MARLIN
                 eora_bench = self.bench(path=tmpdir, backend=backend, adapter=eora)  # inference using eora (lora)
                 base_bench = self.bench(path=tmpdir, backend=backend, adapter=None)  # inference using qweights only
 

@@ -50,7 +50,7 @@ class Test(ModelTest):
         # BACKEND.TRITON,
         # BACKEND.EXLLAMA_V2,
         BACKEND.MARLIN,
-        # # (BACKEND.IPEX), <-- not tested yet
+        # # (BACKEND.TORCH_FUSED), <-- not tested yet
         # # (BACKEND.BITBLAS, <-- not tested yet
     ])
     def test_load(self, backend: BACKEND):

@@ -7,8 +7,9 @@ import importlib.util
 import os
 
 
-# TODO: find how ipex registered it jit interpreter
-# if intel_extension_for_pytorch was installed, @torch.jit.script in transformers/models/gpt_bigcode/modeling_gpt_bigcode.py will try to use ipex as torchScript interpreter.
+# TODO: find how intel_extension_for_pytorch registers its TorchScript interpreter.
+# If intel_extension_for_pytorch is installed, @torch.jit.script in transformers/models/gpt_bigcode/modeling_gpt_bigcode.py
+# will try to use that interpreter.
 # However, in quantization, tensor were on gpu, which will throw RuntimeError: itensor_view_from_dense expects CPU tensor input
 if importlib.util.find_spec("intel_extension_for_pytorch"):
     os.environ["PYTORCH_JIT"] = "False"

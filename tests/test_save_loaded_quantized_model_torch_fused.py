@@ -13,23 +13,17 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
 from models.model_test import ModelTest  # noqa: E402
-from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-from gptqmodel import BACKEND, GPTQModel, get_best_device  # noqa: E402
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 
 
 MODEL_ID = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 
-class TestSave(unittest.TestCase):
-    @parameterized.expand(
-        [
-            (BACKEND.TORCH_FUSED),
-        ]
-    )
-    def test_save(self, backend: BACKEND):
+class TestSaveTorchFused(unittest.TestCase):
+    def test_save(self):
         prompt = "I am in Paris and"
-        device = get_best_device(backend)
+        backend = BACKEND.TORCH_FUSED
         tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
         # origin model produce correct output
@@ -58,7 +52,7 @@ class TestSave(unittest.TestCase):
                 skip_special_tokens=False,
             )
 
-            print("origin_model_predicted_text",origin_model_predicted_text)
-            print("new_model_predicted_text",new_model_predicted_text)
+            print("origin_model_predicted_text", origin_model_predicted_text)
+            print("new_model_predicted_text", new_model_predicted_text)
 
             self.assertEqual(origin_model_predicted_text[:20], new_model_predicted_text[:20])
