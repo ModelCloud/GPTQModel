@@ -58,7 +58,38 @@ class TestLlama3_2_awq(ModelTest):
             },
         },
     }
-    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
+    # Fast-mode regression scores captured on CUDA_VISIBLE_DEVICES=6 (RTX 4090).
+    EVAL_TASKS_FAST = {
+        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+            "chat_template": True,
+            "exact_match,flexible-extract": {
+                "value": 0.4532671629445823,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+        EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "chat_template": True,
+            "acc": {
+                "value": 0.31313993174061433,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+            "acc_norm": {
+                "value": 0.35665529010238906,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+        EVAL.LM_EVAL.MMLU_STEM: {
+            "chat_template": False,
+            "acc": {
+                "value": 0.3910561370123692,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+            },
+        },
+    }
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ
     SYM = True
