@@ -19,13 +19,13 @@ from gptqmodel import BACKEND
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.eval import EVAL
 
-
-# | Metric                         |   MARLIN |
+# Slow-mode regression scores captured on CUDA_VISIBLE_DEVICES=6 (RTX 4090).
+# | Metric                         | AWQ GEMM |
 # |--------------------------------|----------|
-# | arc_challenge :: acc,none      |   0.3166 |
-# | arc_challenge :: acc_norm,none |   0.3464 |
-# | mmlu_stem :: acc,none          |   0.3784 |
-# | gsm8k_plat :: exact,flexible   |   0.3391 |
+# | arc_challenge :: acc,none      |   0.3140 |
+# | arc_challenge :: acc_norm,none |   0.3541 |
+# | mmlu_stem :: acc,none          |   0.3841 |
+# | gsm8k_plat :: exact,flexible   |   0.3499 |
 class TestLlama3_2_awq(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
@@ -35,25 +35,25 @@ class TestLlama3_2_awq(ModelTest):
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
             "exact_match,flexible-extract": {
-                "value": 0.3391232423490488,
+                "value": 0.34987593052109184,
                 "floor_pct": 0.04,
             },
         },
         EVAL.LM_EVAL.ARC_CHALLENGE: {
             "chat_template": True,
             "acc": {
-                "value": 0.3166,
+                "value": 0.31399317406143346,
                 "floor_pct": 0.04,
             },
             "acc_norm": {
-                "value": 0.3464,
+                "value": 0.35409556313993173,
                 "floor_pct": 0.04,
             },
         },
         EVAL.LM_EVAL.MMLU_STEM: {
             "chat_template": False,
             "acc": {
-                "value": 0.3783698065334602,
+                "value": 0.3840786552489692,
                 "floor_pct": 0.04,
             },
         },
