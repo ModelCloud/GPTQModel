@@ -114,7 +114,7 @@ def _is_meta_shell_build_error(exc: Exception) -> bool:
 
 
 def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
-    if qcfg.quant_method != METHOD.AWQ:
+    if qcfg.quant_method not in (METHOD.AWQ, METHOD.PAROQUANT):
         return dtype
     if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
         return dtype
@@ -933,7 +933,7 @@ def ModelLoader(cls):
 
         load_checkpoint_in_model = True
         # compat: runtime convert checkpoint gptq(v1) to gptq_v2 format
-        if format_code in [FORMAT.GPTQ, FORMAT.GEMM]:
+        if format_code in [FORMAT.GPTQ, FORMAT.GEMM, FORMAT.PAROQUANT]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,

@@ -685,6 +685,8 @@ class ModelTest(unittest.TestCase):
     def _torch_backend(self) -> BACKEND:
         if self.METHOD == METHOD.AWQ:
             return BACKEND.TORCH_AWQ
+        if self.METHOD == METHOD.PAROQUANT:
+            return BACKEND.PAROQUANT
         if self.METHOD == METHOD.GGUF:
             return BACKEND.GGUF_TORCH
         return BACKEND.TORCH
@@ -705,6 +707,8 @@ class ModelTest(unittest.TestCase):
         elif format_family == FORMAT.FP8:
             compare_backends = (torch_backend,)
         elif format_family == FORMAT.EXL3:
+            compare_backends = (self.LOAD_BACKEND,)
+        elif format_family == FORMAT.PAROQUANT:
             compare_backends = (self.LOAD_BACKEND,)
         elif format_family == FORMAT.GPTQ:
             if self.LOAD_BACKEND == BACKEND.MARLIN:

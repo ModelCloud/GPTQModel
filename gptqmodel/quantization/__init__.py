@@ -19,6 +19,7 @@ from .config import (
                      GGUFQuantizeConfig,
                      GGUFBits,
                      GPTQQuantizeConfig,
+                     ParoQuantQuantizeConfig,
                      METHOD,
                      METHOD_FIELD_CODE,
                      PreFilterCode,

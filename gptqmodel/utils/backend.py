@@ -37,6 +37,7 @@ class BACKEND(str, Enum):
     HF_KERNEL_AWQ = "hf_kernel_awq"  # AWQ variant of HF kernel
     TORCH_AWQ = "torch_awq"
     BITBLAS_AWQ = "bitblas_awq"  # BitBLAS variant for AWQ-packed checkpoints
+    PAROQUANT = "paroquant"  # ParoQuant-compatible rotated INT4 kernel
 
     # external
     GGUF_TORCH = "gguf_torch" # GGUF module-level inference via native torch kernel

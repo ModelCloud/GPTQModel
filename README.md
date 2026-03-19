@@ -537,6 +537,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 
 * GPTQ: IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
 * AWQ: main-authors: Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song
+* ParoQuant: Z-Lab, main-authors: Yesheng Liang, Haisheng Chen, Zihan Zhang, Song Han, and Zhijian Liu, ICLR 2026.
 * EoRA: Nvidia, main-author: Shih-Yang Liu, arXiv preprint arXiv:2410.21271.
 * GAR: Intel, main-author: T Gafni, A Karnieli, Y Hanani, [Paper](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
 * GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
@@ -571,6 +572,14 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song},
   journal={arXiv},
   year={2023}
+}
+
+# ParoQuant
+@inproceedings{liang2026paroquant,
+  title     = {{ParoQuant: Pairwise Rotation Quantization for Efficient Reasoning LLM Inference}},
+  author    = {Liang, Yesheng and Chen, Haisheng and Zhang, Zihan and Han, Song and Liu, Zhijian},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2026}
 }
 
 # GGUF / llama.cpp

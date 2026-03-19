@@ -84,6 +84,7 @@ class FORMAT(str, Enum):
     GEMV = "gemv"
     GEMV_FAST = "gemv_fast"
     LLM_AWQ = "llm-awq"
+    PAROQUANT = "paroquant"
 
 
 # quant methods
@@ -95,6 +96,7 @@ class METHOD(str, Enum):
     QQQ = "qqq"
     AWQ = "awq"
     EXL3 = "exl3"
+    PAROQUANT = "paroquant"
 
 
 class VramStrategy(str, Enum):
@@ -514,6 +516,8 @@ def resolve_quant_format(
         return FORMAT.BITSANDBYTES
     if method == METHOD.EXL3:
         return FORMAT.EXL3
+    if method == METHOD.PAROQUANT:
+        return FORMAT.PAROQUANT
 
     if isinstance(format_value, FORMAT):
         return format_value
@@ -1119,6 +1123,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.BITBLAS,
         FORMAT.LLM_AWQ,
     },
+    METHOD.PAROQUANT: {
+        FORMAT.PAROQUANT,
+    },
 }
 
 GPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
@@ -1134,6 +1141,9 @@ AWQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.MARLIN,
     FORMAT.BITBLAS,
     FORMAT.LLM_AWQ,
+)
+PAROQUANT_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.PAROQUANT,
 )
 QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.QQQ,
@@ -1171,6 +1181,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GEMV: METHOD.AWQ,
     FORMAT.GEMV_FAST: METHOD.AWQ,
     FORMAT.LLM_AWQ: METHOD.AWQ,
+    FORMAT.PAROQUANT: METHOD.PAROQUANT,
     FORMAT.QQQ: METHOD.QQQ,
 }
 
@@ -1401,6 +1412,8 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
             return METHOD.BITSANDBYTES
         if value == FORMAT.EXL3:
             return METHOD.EXL3
+        if value == FORMAT.PAROQUANT:
+            return METHOD.PAROQUANT
         try:
             return METHOD(value)
         except ValueError as exc:
@@ -1765,6 +1778,19 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.EXL3:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.EXL3}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.EXL3
+    elif target_cls is ParoQuantQuantizeConfig:
+        expected_method = METHOD.PAROQUANT
+        format_value = normalized.get(FORMAT_FIELD_CODE)
+        normalized_format = None
+        if format_value is not None:
+            try:
+                normalized_format = _normalize_format(format_value)
+                normalized[FORMAT_FIELD_CODE] = normalized_format
+            except ValueError:
+                normalized_format = None
+        if normalized_format is not None and normalized_format != FORMAT.PAROQUANT:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.PAROQUANT}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.PAROQUANT
     elif target_cls is GGUFConfig:
         expected_method = METHOD.GGUF
     elif target_cls is QQQQuantizeConfig:
@@ -2601,6 +2627,40 @@ class AWQQuantizeConfig(QuantizeConfig):
 
 
 @dataclass
+class ParoQuantQuantizeConfig(QuantizeConfig):
+    method: METHOD = field(default=METHOD.PAROQUANT)
+    format: FORMAT = field(default=FORMAT.PAROQUANT)
+    krot: int = field(default=8)
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.PAROQUANT,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return PAROQUANT_EXPORT_FORMATS
+
+    def __post_init__(self):
+        self.method = _normalize_quant_method(self.method)
+        self.format = _normalize_format(self.format)
+        if self.format != FORMAT.PAROQUANT:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.PAROQUANT}`")
+            self.format = FORMAT.PAROQUANT
+        super().__post_init__()
+        self.krot = int(self.krot)
+        if self.krot <= 0:
+            raise ValueError("ParoQuantQuantizeConfig: `krot` must be a positive integer.")
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {
+            "krot": self.krot,
+        }
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["zero_point"] = not self.sym
+        out["krot"] = self.krot
+        out[FORMAT_FIELD_CODE] = self.format
+
+
+@dataclass
 class QQQQuantizeConfig(GPTQQuantizeConfig):
     method: METHOD = field(default=METHOD.QQQ)
     format: FORMAT = field(default=FORMAT.QQQ)
@@ -3321,6 +3381,8 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return BitsAndBytesConfig
     if method == METHOD.EXL3 or format_value == FORMAT.EXL3:
         return EXL3QuantizeConfig
+    if method == METHOD.PAROQUANT or format_value == FORMAT.PAROQUANT:
+        return ParoQuantQuantizeConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
         return QQQQuantizeConfig
     if method == METHOD.AWQ:

@@ -287,6 +287,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.FP8,
         METHOD.BITSANDBYTES,
         METHOD.AWQ,
+        METHOD.PAROQUANT,
         METHOD.QQQ,
         METHOD.EXL3,
     ):
@@ -299,6 +300,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.FP8,
         METHOD.BITSANDBYTES,
         METHOD.AWQ,
+        METHOD.PAROQUANT,
         METHOD.QQQ,
         METHOD.EXL3,
     ):
