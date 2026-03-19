@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Layer execution stage extracted from ModuleLooper."""
+"""Layer-level execution stage for quantization and forward replay."""
 
 from __future__ import annotations
 
@@ -180,14 +180,14 @@ def run_layer_stage(
             subsets = []
             for names in modules:
                 subset = looper.create_named_modules(
-                    module=module,
-                    full=full,
-                    is_lm_head_module=is_lm_head_module,
-                    layer_index=layer_index,
-                    layers_prefix=layers_prefix,
-                    names=names,
-                    processor=processor,
-                    fallback=fallback,
+                    module,
+                    full,
+                    is_lm_head_module,
+                    layer_index,
+                    layers_prefix,
+                    names,
+                    processor,
+                    fallback,
                     layer_module=module,
                 )
                 # Skip empty subsets caused by per-layer structure differences or dynamic config exclusions;

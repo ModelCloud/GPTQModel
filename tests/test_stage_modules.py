@@ -504,7 +504,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             pass
 
         def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor,
-                                 failsafe, layer_module=None) -> Dict[str, NamedModule]:
+                                 fallback, layer_module=None) -> Dict[str, NamedModule]:
             self.named_module_layers.append(layer_index)
             return {
                 "self_attn.q_proj": NamedModule(
@@ -526,7 +526,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
         layers=[torch.nn.Linear(64, 64) for _ in range(3)],
         layer_modules=[["foo"]],
         layers_prefix="model.layers",
-        failsafe=True,
+        fallback=True,
         shared_kv_cache_dict={},
         pb=pb,
         layer_count=3,

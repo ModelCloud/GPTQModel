@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Subset-level processing stage extracted from ModuleLooper."""
+"""Subset-level forward replay and quantization stage."""
 
 from __future__ import annotations
 
