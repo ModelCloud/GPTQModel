@@ -590,9 +590,6 @@ EXLLAMAV3_SOURCES = [
 BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
 BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
 
-# Optional kernels and not build by default. Enable compile with env flags
-BUILD_EORA = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EORA", "0"))
-
 if BUILD_CUDA_EXT == "1":
     # Import torch's cpp_extension only if we're truly building GPU extensions
     try:
@@ -725,7 +722,7 @@ if BUILD_CUDA_EXT == "1":
 
             extra_compile_args["nvcc"] = _hipify_compile_flags(extra_compile_args["nvcc"])
 
-        # Extensions (gate marlin/qqq/eora/exllamav2 on CUDA sm_80+ and non-ROCm)
+        # Extensions (gate marlin/qqq/exllamav2 on CUDA sm_80+ and non-ROCm)
         if sys.platform != "win32":
             if not ROCM_VERSION and HAS_CUDA_V8:
                 if BUILD_MARLIN:
@@ -813,18 +810,6 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if BUILD_EORA:
-                    extensions += [
-                        cpp_ext.CUDAExtension(
-                            "gptqmodel_exllama_eora",
-                            [
-                                "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
-                                "gptqmodel_ext/exllama_eora/eora/pybind.cu",
-                            ],
-                            extra_link_args=extra_link_args,
-                            extra_compile_args=extra_compile_args,
-                        )
-                    ]
                 if BUILD_EXLLAMA_V2:
                     extensions += [
                         cpp_ext.CUDAExtension(

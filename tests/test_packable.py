@@ -13,7 +13,6 @@ from parameterized import parameterized
 from safetensors.torch import load_file
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
@@ -26,7 +25,6 @@ log = LogBar.shared()
 
 class TestPackable(unittest.TestCase):
     QLINEAR_DICT = {
-        BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
         BACKEND.EXLLAMA_V2: ExllamaV2QuantLinear,
         BACKEND.TRITON: TritonV2QuantLinear,
         BACKEND.TORCH: TorchQuantLinear,
@@ -51,7 +49,6 @@ class TestPackable(unittest.TestCase):
 
     @parameterized.expand(
         [
-            (BACKEND.EXLLAMA_EORA, {"qweight": False, "qzeros": True, "scales": True, "g_idx": False}),
             (BACKEND.EXLLAMA_V2, {"qweight": False, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TRITON, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.TORCH, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),

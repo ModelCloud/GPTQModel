@@ -535,11 +535,6 @@ def ModelLoader(cls):
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
 
-        if backend == BACKEND.EXLLAMA_EORA:
-            # EXLLAMA_EORA only supports torch.float16
-            log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
-            dtype = torch.float16
-
         dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
 
         # inject adapter into qcfg

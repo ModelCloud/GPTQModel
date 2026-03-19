@@ -33,7 +33,6 @@ from transformers import PretrainedConfig
 from transformers.pytorch_utils import id_tensor_storage
 from transformers.utils.hub import cached_file
 
-from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 
 from ..adapter.adapter import Adapter
@@ -597,7 +596,7 @@ def hf_convert_gptq_v1_to_v2_format(
 ) -> Tuple[nn.Module, bool]:
     if checkpoint_format == "gptq":
         # skip v1 to v2 conversion for kernels that can only operate on sym=True (gptq_v1)
-        if qlinear_kernel in [MarlinQuantLinear, ExllamaEoraQuantLinear]:
+        if qlinear_kernel is MarlinQuantLinear:
             return model, False
 
         cfg = QuantizeConfig(bits=bits)

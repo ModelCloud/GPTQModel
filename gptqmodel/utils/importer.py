@@ -301,11 +301,6 @@ def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> 
     return device
 
 
-def _is_missing_exllama_eora_kernel(err: Optional[Exception]) -> bool:
-    """Return True when EXLLAMA_EORA failed only because its optional extension is missing."""
-    return err is not None and "gptqmodel_exllama_eora" in str(err)
-
-
 # public/stable api exposed to transformer/optimum
 def hf_select_quant_linear(
         bits: int,
@@ -536,27 +531,6 @@ def select_quant_linear(
 
     log.info(f"{'Packing ' if pack else ''}Kernel: selected: `{qlinear.__name__}`")
     if not validate:
-        if backend == BACKEND.EXLLAMA_EORA and _is_missing_exllama_eora_kernel(err):
-            log.warn.once(
-                "Kernel: EXLLAMA_EORA extension unavailable; falling back to EXLLAMA_V2."
-            )
-            return select_quant_linear(
-                bits=bits,
-                group_size=group_size,
-                desc_act=desc_act,
-                sym=sym,
-                device=device,
-                backend=BACKEND.EXLLAMA_V2,
-                format=format,
-                quant_method=quant_method,
-                pack=pack,
-                allow_marlin=allow_marlin,
-                dynamic=dynamic,
-                pack_dtype=pack_dtype,
-                dtype=dtype,
-                multi_select=multi_select,
-                adapter=adapter,
-            )
         raise ValueError(err)
 
     if pack:

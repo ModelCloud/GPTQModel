@@ -18,7 +18,6 @@ class BACKEND(str, Enum):
     BITSANDBYTES = "bitsandbytes" # bitsandbytes 4-bit/8-bit kernel with optional CPU/CUDA support
     EXLLAMA_V2 = "exllama_v2" # FASTER: optimized for batching > 1
     EXLLAMA_V3 = "exllama_v3"
-    EXLLAMA_EORA = "exllama_eora"
     MACHETE = "machete" # CUTLASS-based kernel optimized for Hopper (SM90+)
     MARLIN = "marlin" # FASTEST: marlin reduce ops in fp32 (higher precision -> more accurate, slightly slower)
     MARLIN_FP16 = "marlin_fp16" # FASTEST and then some: marlin reduce ops in fp16 (lower precision -> less accurate, slightly faster)
