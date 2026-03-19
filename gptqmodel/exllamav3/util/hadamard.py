@@ -1,14 +1,20 @@
 from __future__ import annotations
-import torch
-import os, glob
+
+import glob
+import math
+import os
 from functools import lru_cache
+
+import torch
+
 from ..ext import exllamav3_ext as ext
 
-had_dict: dict[int: torch.Tensor] | None = {}
-primes: set[int]
+had_dict: dict[int, torch.Tensor] = {}
+primes: set[int] = set()
+prime_limit = 1
 
 def load_constants():
-    global had_dict, primes
+    global had_dict
 
     module_dir = os.path.dirname(os.path.abspath(__file__))
     had_dir = os.path.join(module_dir, "hadamard_data")
@@ -26,10 +32,24 @@ def load_constants():
             tensor = torch.tensor(matrix, dtype = torch.float16)
             had_dict[dim] = tensor
 
-    prime_path = os.path.join(had_dir, "primes.txt")
-    with open(prime_path, "r") as f:
-        lines = f.readlines()
-        primes = set([int(line) for line in lines if line.strip()])
+def ensure_primes(limit: int):
+    global prime_limit, primes
+
+    if limit <= prime_limit:
+        return
+
+    # Rebuild the cache when the requested Hadamard order needs a larger prime range.
+    sieve = bytearray(b"\x01") * (limit + 1)
+    sieve[:2] = b"\x00\x00"
+    max_factor = math.isqrt(limit)
+    for candidate in range(2, max_factor + 1):
+        if not sieve[candidate]:
+            continue
+        start = candidate * candidate
+        sieve[start:limit + 1:candidate] = b"\x00" * (((limit - start) // candidate) + 1)
+
+    primes = {value for value, is_prime in enumerate(sieve) if is_prime}
+    prime_limit = limit
 
 def sylvester(h: torch.Tensor):
     d = h.shape[0]
@@ -106,7 +126,7 @@ def paley2(n: int):
 
 @lru_cache(maxsize = 100)
 def get_hadamard(n: int):
-    global had_dict, primes
+    global had_dict
 
     if not had_dict:
         load_constants()
@@ -119,6 +139,9 @@ def get_hadamard(n: int):
         if s is not None:
             s = sylvester(s)
             return s
+
+    if n % 4 == 0:
+        ensure_primes(max(n - 1, (n // 2) - 1))
 
     # Paley construction
     if n % 4 == 0 and (n - 1) % 4 == 3 and (n - 1) in primes:
