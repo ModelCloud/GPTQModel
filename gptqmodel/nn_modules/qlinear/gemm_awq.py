@@ -112,7 +112,7 @@ class AwqGemmFn(torch.autograd.Function):
 
 
 class AwqGEMMQuantLinear(AWQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.GEMM]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMM]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 60}
     SUPPORTS_BITS = [4]
@@ -169,7 +169,7 @@ class AwqGEMMQuantLinear(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.GEMM),
+            backend=kwargs.pop("backend", BACKEND.AWQ_GEMM),
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs)

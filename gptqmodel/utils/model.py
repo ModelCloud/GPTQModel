@@ -62,7 +62,7 @@ from ..quantization.config import (
     resolve_quant_format,
 )
 from . import has_gil_disabled
-from .backend import BACKEND
+from .backend import BACKEND, normalize_backend
 from .ctx import ctx
 from .device import get_device
 from .importer import select_quant_linear
@@ -310,14 +310,15 @@ def make_quant(
     pack_dtype = qcfg.pack_dtype
     init_kwargs = qcfg.quant_linear_init_kwargs()
 
-    # BitBLAS-native checkpoints can load directly. Other formats need a compatible preload kernel first.
-    if not pack and backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
-        if format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
-            backend = BACKEND.TORCH
-        elif qcfg.quant_method == METHOD.AWQ and format == FORMAT.GEMM:
-            backend = BACKEND.TORCH_AWQ
-
     export_quant_method = qcfg.export_quant_method()
+    backend = normalize_backend(backend, quant_method=export_quant_method)
+
+    # BitBLAS-native checkpoints can load directly. Other formats need a compatible preload kernel first.
+    if not pack and backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
+        if format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+            backend = BACKEND.GPTQ_TORCH
+        elif qcfg.quant_method == METHOD.AWQ and format == FORMAT.GEMM:
+            backend = BACKEND.AWQ_TORCH
 
     # returns multiple validated kernels
     quant_linear_candidates = select_quant_linear(

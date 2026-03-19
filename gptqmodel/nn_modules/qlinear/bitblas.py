@@ -429,7 +429,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.BITBLAS),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_BITBLAS),
             adapter=adapter,
             register_buffers=False,
             **kwargs,
@@ -740,7 +740,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 # BitBLAS repacks incoming GPTQ/AWQ tensors into its own operator layout, so the
 # destination module only needs grouped quantization state, not GPTQ qzero-format state.
 class BitblasQuantLinear(BitblasBaseQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.BITBLAS]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_BITBLAS]
     SUPPORTS_FORMATS = {FORMAT.BITBLAS: 30, FORMAT.GPTQ: 30, FORMAT.GPTQ_V2: 30}
     SUPPORTS_BITS = BITBLAS_SUPPORTED_BITS
     SUPPORTS_GROUP_SIZE = BITBLAS_SUPPORTED_GROUP_SIZES

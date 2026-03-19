@@ -22,7 +22,7 @@ awq_ext, awq_import_error = try_import("gptqmodel_awq_kernels")
 
 
 class ParoQuantQuantLinear(AwqTorchQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.PAROQUANT]
+    SUPPORTS_BACKENDS = [BACKEND.PAROQUANT_CUDA]
     SUPPORTS_METHODS = [METHOD.PAROQUANT]
     SUPPORTS_FORMATS = {FORMAT.PAROQUANT: 55}
     SUPPORTS_BITS = [4]
@@ -76,7 +76,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
             pack_dtype=pack_dtype,
             adapter=adapter,
             register_buffers=register_buffers,
-            backend=kwargs.pop("backend", BACKEND.PAROQUANT),
+            backend=kwargs.pop("backend", BACKEND.PAROQUANT_CUDA),
             **kwargs,
         )
         self._register_rotation_buffers()

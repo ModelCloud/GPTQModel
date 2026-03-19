@@ -30,7 +30,7 @@ class TorchFusedAwqQuantLinear(AWQuantLinear):
 
     QUANT_TYPE = "torch_fused_awq"
 
-    SUPPORTS_BACKENDS = [BACKEND.TORCH_FUSED_AWQ]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH_FUSED]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 20}
 
@@ -66,7 +66,7 @@ class TorchFusedAwqQuantLinear(AWQuantLinear):
         register_buffers: bool = True,
         **kwargs,
     ):
-        kwargs.setdefault("backend", BACKEND.TORCH_FUSED_AWQ)
+        kwargs.setdefault("backend", BACKEND.AWQ_TORCH_FUSED)
         super().__init__(
             bits=bits,
             group_size=group_size,

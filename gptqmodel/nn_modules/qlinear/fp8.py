@@ -103,7 +103,7 @@ def quantize_fp8_weight(
 
 
 class TorchFP8QuantLinear(WeightOnlyQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.TORCH]
+    SUPPORTS_BACKENDS = [BACKEND.FP8_TORCH]
     SUPPORTS_METHODS = [METHOD.FP8]
     SUPPORTS_FORMATS = {FORMAT.FP8: 15}
     SUPPORTS_BITS = [8]
@@ -162,7 +162,7 @@ class TorchFP8QuantLinear(WeightOnlyQuantLinear):
             in_features=in_features,
             out_features=out_features,
             bias=bias,
-            backend=kwargs.pop("backend", BACKEND.TORCH),
+            backend=kwargs.pop("backend", BACKEND.FP8_TORCH),
             adapter=adapter,
             register_buffers=False,
             pack_dtype=pack_dtype,

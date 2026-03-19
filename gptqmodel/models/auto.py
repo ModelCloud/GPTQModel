@@ -63,6 +63,7 @@ from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from ..quantization import METHOD, QUANT_CONFIG_FILENAME  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
+from ..utils.backend import normalize_backend  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
 from ..utils.hf import resolve_trust_remote_code  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
@@ -377,8 +378,7 @@ class GPTQModel:
         if isinstance(quantize_config, Dict):
             quantize_config = QuantizeConfig(**quantize_config)
 
-        if isinstance(backend, str):
-            backend = BACKEND(backend)
+        backend = normalize_backend(backend)
 
         is_gptqmodel_quantized = False
         treat_as_local_path = isinstance(model_id_or_path, str) and (
@@ -489,8 +489,7 @@ class GPTQModel:
         print(f"from_quantized: adapter: {adapter}")
         model_definition = check_and_get_model_definition(model_id_or_path, trust_remote_code)
 
-        if isinstance(backend, str):
-            backend = BACKEND(backend)
+        backend = normalize_backend(backend)
 
         return model_definition.from_quantized(
             model_id_or_path=model_id_or_path,
@@ -757,8 +756,16 @@ class GPTQModel:
             backend = BACKEND.GGUF_TORCH
         elif normalized_method == METHOD.BITSANDBYTES.value:
             backend = BACKEND.BITSANDBYTES
+        elif normalized_method == METHOD.AWQ.value:
+            backend = BACKEND.AWQ_TORCH
+        elif normalized_method == METHOD.PAROQUANT.value:
+            backend = BACKEND.PAROQUANT_CUDA
+        elif normalized_method == METHOD.FP8.value:
+            backend = BACKEND.FP8_TORCH
+        elif normalized_method == METHOD.EXL3.value:
+            backend = BACKEND.EXL3_TORCH
         else:
-            backend = BACKEND.TORCH
+            backend = BACKEND.GPTQ_TORCH
 
         # load gptq model
         gptq_model = GPTQModel.load(model_id_or_path, backend=backend)
@@ -845,7 +852,7 @@ class GPTQModel:
             log.info("Model: Quant Model Loading...")
             quantized_model = GPTQModel.load(
                 model_id_or_path=quantized_model_id_or_path,
-                backend=BACKEND.TORCH,
+                backend=BACKEND.GPTQ_TORCH,
                 device=CPU,
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
@@ -862,7 +869,7 @@ class GPTQModel:
             model = GPTQModel.load(
                 model_id_or_path=model_id_or_path,
                 quantize_config=qcfg,
-                backend=BACKEND.TORCH,
+                backend=BACKEND.GPTQ_TORCH,
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
                 device=CPU,

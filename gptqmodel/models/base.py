@@ -55,7 +55,7 @@ from ..quantization.config import (
 )
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.attn_mask import normalize_seq_mask
-from ..utils.backend import BACKEND
+from ..utils.backend import BACKEND, normalize_backend
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
 from ..utils.hf import autofix_hf_model_config
@@ -692,8 +692,7 @@ class BaseQModel(nn.Module):
             log.warn("Batch quantization is not supported for this model. Setting batch_size to 1.")
 
         requested_backend = backend
-        if isinstance(requested_backend, str):
-            requested_backend = BACKEND(requested_backend.lower())
+        requested_backend = normalize_backend(requested_backend, quant_method=export_quant_method)
 
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):
@@ -701,36 +700,36 @@ class BaseQModel(nn.Module):
                 if format_code == FORMAT.GEMM:
                     # Weight-only RTN->AWQ export should stay on the portable torch kernel.
                     preferred_backend = (
-                        BACKEND.TORCH_AWQ
+                        BACKEND.AWQ_TORCH
                         if self.quantize_config.uses_weight_only_lifecycle()
-                        else BACKEND.GEMM
+                        else BACKEND.AWQ_GEMM
                     )
                 elif format_code == FORMAT.BITBLAS:
-                    preferred_backend = BACKEND.BITBLAS_AWQ
+                    preferred_backend = BACKEND.AWQ_BITBLAS
                 elif format_code == FORMAT.GEMV:
-                    preferred_backend = BACKEND.GEMV
+                    preferred_backend = BACKEND.AWQ_GEMV
                 elif format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
-                    preferred_backend = BACKEND.GEMV_FAST
+                    preferred_backend = BACKEND.AWQ_GEMV_FAST
                 else:
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
             elif self.quantize_config.method == METHOD.QQQ:
                 preferred_backend = BACKEND.QQQ
             elif self.quantize_config.method == METHOD.PAROQUANT:
-                preferred_backend = BACKEND.PAROQUANT
+                preferred_backend = BACKEND.PAROQUANT_CUDA
             elif self.quantize_config.method == METHOD.EXL3:
-                preferred_backend = BACKEND.EXLLAMA_V3
+                preferred_backend = BACKEND.EXL3_EXLLAMA_V3
             elif self.quantize_config.method == METHOD.GGUF:
                 preferred_backend = BACKEND.AUTO
             elif self.quantize_config.method == METHOD.FP8:
-                preferred_backend = BACKEND.TORCH
+                preferred_backend = BACKEND.FP8_TORCH
             elif self.quantize_config.method == METHOD.BITSANDBYTES:
                 preferred_backend = BACKEND.BITSANDBYTES
             else:
-                preferred_backend = BACKEND.TORCH
+                preferred_backend = BACKEND.GPTQ_TORCH
 
         if self.quantize_config.method == METHOD.EXL3:
-            if preferred_backend not in (BACKEND.AUTO, BACKEND.EXLLAMA_V3):
-                raise ValueError("EXL3 quantization only supports BACKEND.AUTO or BACKEND.EXLLAMA_V3.")
+            if preferred_backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3):
+                raise ValueError("EXL3 quantization only supports BACKEND.AUTO or BACKEND.EXL3_EXLLAMA_V3.")
 
             if not torch.cuda.is_available():
                 raise ValueError("EXL3 quantization requires CUDA/HIP.")

@@ -31,7 +31,7 @@ def _torch_device(idx):
     return f"cuda:{idx}"
 
 class ExllamaV2QuantLinear(GPTQQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.EXLLAMA_V2]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_EXLLAMA_V2]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 80, FORMAT.GPTQ_V2: 80}
     SUPPORTS_BITS = [4]
@@ -95,7 +95,7 @@ class ExllamaV2QuantLinear(GPTQQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.EXLLAMA_V2),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_EXLLAMA_V2),
             adapter=adapter,
             register_buffers=register_buffers,
             register_buffers_in_features=in_features,

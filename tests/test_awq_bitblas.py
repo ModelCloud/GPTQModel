@@ -84,7 +84,7 @@ def test_awq_bitblas_selects_bitblas_awq_for_awq_gemm(monkeypatch):
         group_size=32,
         desc_act=False,
         sym=True,
-        backend=BACKEND.BITBLAS_AWQ,
+        backend=BACKEND.AWQ_BITBLAS,
         format=FORMAT.GEMM,
         quant_method=METHOD.AWQ,
         device=DEVICE.CUDA,
@@ -96,12 +96,12 @@ def test_awq_bitblas_selects_bitblas_awq_for_awq_gemm(monkeypatch):
 
 
 def test_awq_bitblas_kernel_mapping_uses_awq_backend():
-    assert get_kernel_for_backend(BACKEND.BITBLAS_AWQ, METHOD.AWQ, FORMAT.BITBLAS) is AWQBitBlasKernel
+    assert get_kernel_for_backend(BACKEND.AWQ_BITBLAS, METHOD.AWQ, FORMAT.BITBLAS) is AWQBitBlasKernel
 
 
 def test_awq_bitblas_kernel_mapping_rejects_gptq_bitblas_backend():
     with pytest.raises(ValueError, match="Unsupported backend"):
-        get_kernel_for_backend(BACKEND.BITBLAS, METHOD.AWQ, FORMAT.BITBLAS)
+        get_kernel_for_backend(BACKEND.GPTQ_BITBLAS, METHOD.AWQ, FORMAT.BITBLAS)
 
 
 def test_awq_bitblas_uses_unsigned_weights_and_qzeros(monkeypatch):

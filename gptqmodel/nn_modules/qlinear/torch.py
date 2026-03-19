@@ -98,7 +98,7 @@ class _LinearWeightMetadata:
 
 
 class TorchQuantLinear(PackableQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.TORCH]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20}
     SUPPORTS_BITS = [2, 3, 4, 8]
@@ -146,7 +146,7 @@ class TorchQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TORCH),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_TORCH),
             adapter=adapter,
             register_buffers=register_buffers,
             enable_wf_unsqueeze=kwargs.pop("enable_wf_unsqueeze", True),
@@ -702,7 +702,7 @@ def dequantize_model(model: PreTrainedModel):
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchQuantLinear):
             raise ValueError(
                 "Only models loaded using TorchQuantLinear are supported for dequantization. "
-                "Please load model using backend=BACKEND.TORCH."
+                "Please load model using backend=BACKEND.GPTQ_TORCH."
             )
 
         if isinstance(module, TorchQuantLinear):

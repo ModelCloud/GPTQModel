@@ -46,7 +46,7 @@ def test_paroquant_kernel_mapping_uses_paroquant_backend():
     from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 
     assert (
-        get_kernel_for_backend(BACKEND.PAROQUANT, METHOD.PAROQUANT, FORMAT.PAROQUANT)
+        get_kernel_for_backend(BACKEND.PAROQUANT_CUDA, METHOD.PAROQUANT, FORMAT.PAROQUANT)
         is ParoQuantQuantLinear
     )
 

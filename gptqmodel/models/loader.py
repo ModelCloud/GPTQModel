@@ -35,7 +35,7 @@ from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear
 from ..quantization import QuantizeConfig
 from ..quantization.config import BaseQuantizeConfig, FORMAT, METHOD, MIN_VERSION_WITH_V2, resolve_quant_format
-from ..utils.backend import BACKEND
+from ..utils.backend import BACKEND, normalize_backend
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     has_native_transformers_causallm_support,
@@ -436,9 +436,8 @@ def ModelLoader(cls):
         normalized_device = device if requested_device_map is None else None  # let device_map dictate placement when present
         device = normalize_device_device_map(normalized_device, requested_device_map)
 
-        # TODO need to normalize backend and others in a unified api
-        if isinstance(backend, str):
-            backend = BACKEND(backend)
+        # Keep string inputs compatible while allowing canonical method-prefixed names.
+        backend = normalize_backend(backend)
         device = auto_select_device(device, backend)
 
         if backend == BACKEND.VLLM:
@@ -511,16 +510,17 @@ def ModelLoader(cls):
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
+        backend = normalize_backend(backend, quant_method=export_quant_method)
 
         if format_code == FORMAT.EXL3:
-            if backend not in (BACKEND.AUTO, BACKEND.EXLLAMA_V3, BACKEND.TORCH):
-                raise TypeError("FORMAT.EXL3 requires BACKEND.AUTO, BACKEND.EXLLAMA_V3, or BACKEND.TORCH.")
+            if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH):
+                raise TypeError("FORMAT.EXL3 requires BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, or BACKEND.EXL3_TORCH.")
             if backend == BACKEND.AUTO:
                 if torch.cuda.is_available() and device in (DEVICE.CUDA, DEVICE.ROCM):
-                    backend = BACKEND.EXLLAMA_V3
+                    backend = BACKEND.EXL3_EXLLAMA_V3
                 else:
-                    backend = BACKEND.TORCH
-            if backend == BACKEND.EXLLAMA_V3:
+                    backend = BACKEND.EXL3_TORCH
+            if backend == BACKEND.EXL3_EXLLAMA_V3:
                 if not torch.cuda.is_available():
                     raise ValueError("EXL3 CUDA loading requires CUDA/HIP.")
                 if device not in (DEVICE.CUDA, DEVICE.ROCM):
@@ -594,29 +594,36 @@ def ModelLoader(cls):
 
         if format_code == FORMAT.MARLIN:
             # format marlin requires marlin kernel
-            if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and backend != BACKEND.AUTO:
-                raise TypeError(f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.MARLIN: actual = `{backend}`.")
-            backend = BACKEND.MARLIN
+            expected_marlin_backends = [BACKEND.AWQ_MARLIN] if qcfg.quant_method == METHOD.AWQ else [
+                BACKEND.GPTQ_MARLIN,
+                BACKEND.GPTQ_MARLIN_FP16,
+            ]
+            expected_marlin_backend = expected_marlin_backends[0]
+            if backend not in expected_marlin_backends and backend != BACKEND.AUTO:
+                raise TypeError(
+                    f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.{expected_marlin_backend.name}: actual = `{backend}`."
+                )
+            backend = expected_marlin_backend
 
         # marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
         # check for marlin compat for cuda device only
-        # if backend not in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and device == DEVICE.CUDA:
+        # if backend not in [BACKEND.GPTQ_MARLIN, BACKEND.GPTQ_MARLIN_FP16, BACKEND.AWQ_MARLIN] and device == DEVICE.CUDA:
         #     unsupported = _validate_marlin_compatibility(qcfg)
         #     if unsupported is None and marlin_compatible:
         #         logger.info(
-        #             "Hint: Model is compatible with the Marlin kernel. Marlin is optimized for batched inference on Nvidia GPU: `model = GPTQModel.load(..., backend=BACKEND.MARLIN)`."
+        #             "Hint: Model is compatible with the Marlin kernel. Use the canonical Marlin BACKEND enum."
         #         )
 
         if format_code == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
-            expected_backend = BACKEND.BITBLAS_AWQ if qcfg.quant_method == METHOD.AWQ else BACKEND.BITBLAS
+            expected_backend = BACKEND.AWQ_BITBLAS if qcfg.quant_method == METHOD.AWQ else BACKEND.GPTQ_BITBLAS
             if backend != expected_backend and backend != BACKEND.AUTO:
                 raise TypeError(
                     f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.{expected_backend.name}: actual = `{backend}`."
                 )
             backend = expected_backend
 
-        if backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
+        if backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
@@ -705,7 +712,7 @@ def ModelLoader(cls):
                 if not isinstance(qcfg.tensor_storage, dict) or not qcfg.tensor_storage:
                     raise ValueError("EXL3 checkpoints require `quantization_config.tensor_storage` metadata.")
 
-                exl3_module_cls = ExllamaV3TorchLinear if backend == BACKEND.TORCH else ExllamaV3Linear
+                exl3_module_cls = ExllamaV3TorchLinear if backend == BACKEND.EXL3_TORCH else ExllamaV3Linear
                 replace_exllamav3_placeholders(
                     model=model,
                     module_names=list(qcfg.tensor_storage.keys()),
@@ -962,7 +969,7 @@ def ModelLoader(cls):
 
                     qcfg.runtime_format = FORMAT.GPTQ_V2
 
-        if backend == BACKEND.MACHETE:
+        if backend in (BACKEND.GPTQ_MACHETE, BACKEND.AWQ_MACHETE):
             if is_sharded:
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Machete is currently not supported."
@@ -972,7 +979,7 @@ def ModelLoader(cls):
                     f"Kernel: Machete kernel requires compute capability >= 9.0. Detected capability: {torch.cuda.get_device_capability()}"
                 )
 
-        if backend in [BACKEND.MARLIN, BACKEND.MARLIN_FP16] and (
+        if backend in [BACKEND.GPTQ_MARLIN, BACKEND.GPTQ_MARLIN_FP16, BACKEND.AWQ_MARLIN] and (
                 preload_qlinear_kernel == ExllamaV2QuantLinear or format_code == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
@@ -980,7 +987,8 @@ def ModelLoader(cls):
                 )
             if not _validate_marlin_device_support():
                 raise ValueError(
-                    f'Kernel: Marlin kernel does not support this gpu with compute capability of `{torch.cuda.get_device_capability()}`. Please do not use `back=BACKEND.MARLIN`.'
+                    f"Kernel: Marlin kernel does not support this gpu with compute capability of "
+                    f"`{torch.cuda.get_device_capability()}`. Please do not use this Marlin backend."
                 )
 
             # Validate the model can run in Marlin.
@@ -988,7 +996,7 @@ def ModelLoader(cls):
                 raise ValueError("Marlin kernel requires dtype=torch.float16.")
 
 
-        if backend in [BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
+        if backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
             from ..utils.bitblas import prepare_model_for_bitblas_load
 
             # Prepare model for bitblas load.
@@ -1007,7 +1015,15 @@ def ModelLoader(cls):
 
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
-        if load_checkpoint_in_model and backend not in [BACKEND.MACHETE, BACKEND.MARLIN, BACKEND.MARLIN_FP16, BACKEND.BITBLAS, BACKEND.BITBLAS_AWQ]:
+        if load_checkpoint_in_model and backend not in [
+            BACKEND.GPTQ_MACHETE,
+            BACKEND.AWQ_MACHETE,
+            BACKEND.GPTQ_MARLIN,
+            BACKEND.GPTQ_MARLIN_FP16,
+            BACKEND.AWQ_MARLIN,
+            BACKEND.GPTQ_BITBLAS,
+            BACKEND.AWQ_BITBLAS,
+        ]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
                 dtype=dtype,
@@ -1022,7 +1038,7 @@ def ModelLoader(cls):
         model = simple_dispatch_model(model, device_map)
 
         if format_code == FORMAT.EXL3:
-            qlinear_kernel = ExllamaV3TorchLinear if backend == BACKEND.TORCH else ExllamaV3Linear
+            qlinear_kernel = ExllamaV3TorchLinear if backend == BACKEND.EXL3_TORCH else ExllamaV3Linear
         else:
             qlinear_kernel = select_quant_linear(
                 bits=qcfg.runtime_bits,

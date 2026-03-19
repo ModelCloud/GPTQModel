@@ -85,7 +85,7 @@ class Int8PackedModule(torch.nn.Module):
 
 
 class TorchInt8QuantLinear(GPTQQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.TORCH_INT8]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH_INT8]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     # Keep auto-selection unchanged; this kernel is enabled via explicit backend selection.
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 0, FORMAT.GPTQ_V2: 0}
@@ -134,7 +134,7 @@ class TorchInt8QuantLinear(GPTQQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TORCH_INT8),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_TORCH_INT8),
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs,
@@ -318,8 +318,8 @@ def dequantize_model(model: PreTrainedModel):
         if isinstance(module, BaseQuantLinear) and not isinstance(module, supported_int8_qlinears):
             raise ValueError(
                 "Only models loaded using TorchInt8QuantLinear or TorchInt8AwqQuantLinear are supported "
-                "for dequantization. Please load model using backend=BACKEND.TORCH_INT8 or "
-                "backend=BACKEND.TORCH_INT8_AWQ"
+                "for dequantization. Please load model using backend=BACKEND.GPTQ_TORCH_INT8 or "
+                "backend=BACKEND.AWQ_TORCH_INT8"
             )
 
         if isinstance(module, supported_int8_qlinears):

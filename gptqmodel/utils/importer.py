@@ -20,6 +20,7 @@ from ..quantization.config import _normalize_quant_bits, quant_bits_width
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from . import BACKEND
+from .backend import normalize_backend
 from .rocm import IS_ROCM
 from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
@@ -76,6 +77,7 @@ def get_kernel_backends(cls: Type[BaseQuantLinear]) -> List[BACKEND]:
 
 
 def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) -> Type[BaseQuantLinear]:
+    backend = normalize_backend(backend, quant_method=quant_method)
     matches = []
     for cls in iter_quant_linear_kernels():
         if backend not in get_kernel_backends(cls):
@@ -288,7 +290,7 @@ def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> 
 
     if device is None:
         # Backend-specific kernels should default to a compatible device class.
-        if backend in (BACKEND.TORCH_FUSED, BACKEND.TORCH_FUSED_AWQ):
+        if backend in (BACKEND.GPTQ_TORCH_FUSED, BACKEND.AWQ_TORCH_FUSED, BACKEND.TORCH_FUSED, BACKEND.TORCH_FUSED_AWQ):
             return DEVICE.XPU if HAS_XPU else DEVICE.CPU
         if HAS_CUDA:
             device = DEVICE.CUDA
@@ -314,8 +316,7 @@ def hf_select_quant_linear(
         backend: Optional[Union[str, BACKEND]] = None,
 ) -> Type[BaseQuantLinear]:
     # convert hf string backend to backend.enum
-    if isinstance(backend, str):
-        backend = BACKEND(backend.lower())
+    backend = normalize_backend(backend, quant_method=METHOD.GPTQ)
 
     if device_map is not None:
         device = hf_normalize_device_device_map(None, device_map)
@@ -354,8 +355,7 @@ def hf_select_quant_linear_v2(
         backend: Optional[Union[str, BACKEND]] = None,
 ) -> Type[BaseQuantLinear]:
     # convert hf string backend to backend.enum
-    if isinstance(backend, str):
-        backend = BACKEND(backend.lower())
+    backend = normalize_backend(backend, quant_method=quant_method)
 
     def _normalize_enum(value, enum_cls, field: str):
         if isinstance(value, enum_cls):
@@ -443,8 +443,7 @@ def select_quant_linear(
         format = FORMAT(format.lower())
     if isinstance(quant_method, str):
         quant_method = METHOD(quant_method.lower())
-    if isinstance(backend, str):
-        backend = BACKEND(backend.lower())
+    backend = normalize_backend(backend, quant_method=quant_method)
 
     bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
 

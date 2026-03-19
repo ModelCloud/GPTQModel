@@ -18,7 +18,7 @@ log = setup_logger()
 
 
 class AwqTorchQuantLinear(AWQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.TORCH_AWQ]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 10}
     SUPPORTS_BITS = [4]
@@ -65,7 +65,7 @@ class AwqTorchQuantLinear(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TORCH_AWQ),
+            backend=kwargs.pop("backend", BACKEND.AWQ_TORCH),
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs,

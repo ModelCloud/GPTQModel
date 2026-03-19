@@ -49,7 +49,7 @@ log = setup_logger()
 
 
 class MarlinQuantLinear(GPTQQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.MARLIN, BACKEND.MARLIN_FP16]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN, BACKEND.GPTQ_MARLIN_FP16]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 90, FORMAT.MARLIN: 90}
     SUPPORTS_BITS = [4, 8]
@@ -114,13 +114,13 @@ class MarlinQuantLinear(GPTQQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.MARLIN),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_MARLIN),
             adapter=adapter,
             register_buffers=False, # do not register buffers in super()
             **kwargs)
 
         # toggle fp32 mode depending on MARLIN or MARLIN_FP16 backend
-        self.fp32 = True if self.backend in [BACKEND.MARLIN, BACKEND.AUTO] else False
+        self.fp32 = True if self.backend in [BACKEND.GPTQ_MARLIN, BACKEND.AUTO] else False
 
         if not self.fp32:
             log.warn.once(

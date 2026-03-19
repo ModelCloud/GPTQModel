@@ -35,7 +35,7 @@ log = setup_logger()
 
 
 class MacheteQuantLinear(GPTQQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.MACHETE]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MACHETE]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 100}
     SUPPORTS_BITS = [4, 8]
@@ -94,7 +94,7 @@ class MacheteQuantLinear(GPTQQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.MACHETE),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_MACHETE),
             adapter=adapter,
             register_buffers=False,
             **kwargs)

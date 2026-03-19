@@ -29,7 +29,7 @@ class HFKernelAwqLinear(AWQuantLinear):
 
     QUANT_TYPE = "hf_kernel_awq"
 
-    SUPPORTS_BACKENDS = [BACKEND.HF_KERNEL_AWQ]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_HF_KERNEL]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 110}
 
@@ -68,7 +68,7 @@ class HFKernelAwqLinear(AWQuantLinear):
         register_buffers: bool = True,
         **kwargs,
     ):
-        kwargs.setdefault("backend", BACKEND.HF_KERNEL_AWQ)
+        kwargs.setdefault("backend", BACKEND.AWQ_HF_KERNEL)
         super().__init__(
             bits=bits,
             group_size=group_size,

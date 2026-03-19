@@ -272,6 +272,23 @@ To use models from [ModelScope](https://www.modelscope.cn/) instead of HuggingFa
 export GPTQMODEL_USE_MODELSCOPE=True
 ```
 
+### FP32 accumulation toggle
+
+Some AWQ and ParoQuant CUDA/Triton kernels support an fp32 accumulation mode to reduce numerical drift during fused quantized matmul. This setting defaults to `True` because accuracy is prioritized over speed.
+
+```shell
+# default behavior: higher accuracy, slightly lower speed on some kernels
+export GPTQMODEL_FP32_ACCUM=1
+
+# optional speed-first mode for some kernels
+export GPTQMODEL_FP32_ACCUM=0
+```
+
+Notes:
+* This is a runtime toggle. It does not change model weights or saved checkpoints.
+* It mainly affects some fused AWQ and ParoQuant CUDA/Triton kernels. Dense/dequantize fallback paths are mostly unaffected.
+* `1` is recommended for regression testing and quality-sensitive evaluation. `0` may be useful when chasing a small latency win and the quality tradeoff is acceptable.
+
 ### OpenAI API compatible endpoint
 ```py
 # load model using above inference guide first
@@ -342,7 +359,7 @@ qcfg = QuantizeConfig(
 )
 
 model = GPTQModel.load(model_id, qcfg)
-model.quantize(calibration=None, backend=BACKEND.TORCH)
+model.quantize(calibration=None, backend=BACKEND.GPTQ_TORCH)
 model.save(quant_path)
 ```
 
@@ -370,7 +387,7 @@ qcfg = QuantizeConfig(
 )
 
 model = GPTQModel.load(model_id, qcfg)
-model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.EXLLAMA_V3)
+model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.EXL3_EXLLAMA_V3)
 model.save(quant_path)
 ```
 

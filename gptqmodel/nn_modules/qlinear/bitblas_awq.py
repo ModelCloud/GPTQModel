@@ -27,7 +27,7 @@ from .bitblas import (
 
 
 class AWQBitBlasKernel(BitblasBaseQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.BITBLAS_AWQ]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_BITBLAS]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 0, FORMAT.BITBLAS: 30}
     SUPPORTS_BITS = [4]
@@ -86,7 +86,7 @@ class AWQBitBlasKernel(BitblasBaseQuantLinear):
             opt_features=opt_features,
             layout=layout,
             register_buffers=register_buffers,
-            backend=kwargs.pop("backend", BACKEND.BITBLAS_AWQ),
+            backend=kwargs.pop("backend", BACKEND.AWQ_BITBLAS),
             **kwargs,
         )
 
