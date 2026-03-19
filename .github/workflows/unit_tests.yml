@@ -238,12 +238,12 @@ jobs:
           echo "== nvcc =="
           nvcc --version
 
+          echo "== torch =="
+          uv pip show torch || true
+
           echo "::group::pip list"
           uv pip list
           echo "::endgroup::"
-
-          echo "== torch =="
-          uv pip show torch || true
 
       - name: Compress dir
         run: |
@@ -347,6 +347,10 @@ jobs:
             echo "Detected invalid ELF header, cleaning bitblas cache..."
             rm -rf ~/.cache/bitblas_*/nvidia
           fi
+          
+          echo "::group::last 200 lines"
+            tail -n 200 $log_file
+          echo "::endgroup::"
 
       - name: Upload wheel to github artifact
         if: github.event.inputs.artifact_id == '' && !cancelled()
@@ -409,7 +413,6 @@ jobs:
           echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
           echo UV_CACHE_DIR=$UV_CACHE_DIR
           echo VENV_ROOT=$VENV_ROOT
-          ls /root -ahl
 
       - name: Activate uv env
         run: |
@@ -534,10 +537,6 @@ jobs:
           echo "== nvcc =="
           nvcc --version
 
-          echo "::group::pip list"
-          uv pip list
-          echo "::endgroup::"
-
           echo "== torch =="
           uv pip show torch || true
 
@@ -547,6 +546,10 @@ jobs:
 
           echo "== torch =="
           uv pip show torch
+
+          echo "::group::pip list"
+          uv pip list
+          echo "::endgroup::"
 
       - name: Find suitable GPU
         if: ${{ !contains(matrix.test_script, 'ipex') && !contains(matrix.test_script, 'xpu') && !cancelled() }}
@@ -711,6 +714,8 @@ jobs:
           log_file=$log_dir/${{ matrix.test_script }}.log
 
           grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
+          
+          tail -n 200 $log_file
           exit 1
 
       - name: Release GPU
@@ -729,8 +734,6 @@ jobs:
       - name: Clean cache
         if: always()
         run: |
-          # rm ~/.cache/evalplus/*pkl || true
-          # pip cache purge && uv cache clean
           rm -rf rm -rf ./* .[^.] .??*
 
   torch-models:
@@ -783,9 +786,6 @@ jobs:
           echo UV_PYTHON_CACHE_DIR=$UV_PYTHON_CACHE_DIR
           echo UV_CACHE_DIR=$UV_CACHE_DIR
           echo VENV_ROOT=$VENV_ROOT
-          echo MODEL_TEST_MODE=$MODEL_TEST_MODE
-          echo MODEL_TEST_GPU_COUNT=$MODEL_TEST_GPU_COUNT
-          ls /root -ahl
 
       - name: Activate uv env
         run: |
@@ -850,16 +850,16 @@ jobs:
           echo "== nvcc =="
           nvcc --version
 
-          echo "::group::pip list"
-          uv pip list
-          echo "::endgroup::"
-
           echo "::group::project files"
           ls -ahl
           echo "::endgroup::"
 
           echo "== torch =="
           uv pip show torch
+
+          echo "::group::pip list"
+          uv pip list
+          echo "::endgroup::"
 
       - name: Find suitable GPU
         if: ${{ !cancelled() }}
@@ -1003,6 +1003,7 @@ jobs:
           log_file=$log_dir/${{ matrix.test_script }}.log
 
           grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
+          tail -n 200 $log_file
           exit 1
 
       - name: Release GPU
