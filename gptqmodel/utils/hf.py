@@ -399,6 +399,11 @@ def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
     config.attribute_map = dict(getattr(config, "attribute_map", {}) or {})
     config.attribute_map["max_length"] = "seq_length"
 
+    if not hasattr(config, "use_cache"):
+        # transformers v5 removed `use_cache` from PretrainedConfig,
+        # but ChatGLM remote code still expects it. Add it back for compatibility.
+        config.use_cache = True
+
 
 def _normalize_rope_parameters_config_compat(config: Any) -> None:
     rope_parameters = getattr(config, "rope_parameters", None)
