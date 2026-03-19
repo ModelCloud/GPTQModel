@@ -812,6 +812,13 @@ def autofix_hf_generation_config(cfg: GenerationConfig):
             log.info("Model: Auto-Fixed `generation_config` by setting `do_sample=True`.")
 
 
+def sanitize_model_config(config):
+    if config.model_type == "chatglm" and hasattr(config, "max_length"):
+        # max_length can only be stored in generation_config.
+        # see _normalize_chatglm_remote_code_config_compat()
+        del config.attribute_map["max_length"]
+
+
 def sanitize_generation_config_file(path: str) -> bool:
     try:
         with open(path, "r", encoding="utf-8") as fp:
