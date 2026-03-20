@@ -3,7 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Subset-level forward replay and quantization stage."""
+"""Subset-level planning and execution for forward replay and quantization.
+
+This module is intentionally split into two responsibilities:
+- `build_subset_plan()` / `build_layer_subset_plans()` decide what should happen
+- `run_subset_stage()` / `_run_single_subset_pass()` execute that decision
+
+The goal is to keep planning branches out of the hot execution path so replay,
+MoE chunking, coverage handling, and device routing are easier to reason about.
+"""
 
 from __future__ import annotations
 
@@ -11,8 +19,8 @@ import logging
 import math
 import re
 import time
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
 
 import torch
 
@@ -31,15 +39,84 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from .module_looper import ModuleLooper
 
 
-@dataclass
-class SubsetForwardContext:
-    """Carries forward-pass placement decisions needed for replay/finalization."""
+ForwardMode = Literal["parallel", "serial"]
 
-    subset: Dict[str, NamedModule]
-    forward_device_map: Dict[str, torch.device]
-    subset_forward_serial: bool
-    subset_total: int
+
+@dataclass
+class CalibrationCoveragePolicy:
+    """Describe how calibration coverage gaps are handled for one subset.
+
+    Some quantizers need every module to observe routed calibration traffic.
+    When a MoE expert never fires, we either keep it alive because fallback is
+    enabled, or prune it from quantization and record a dynamic exclusion.
+    """
+
+    # Whether the processor should validate that calibration reached each module.
+    validate_input_coverage: bool
+    # Whether uncovered modules are allowed to remain because fallback can take over.
+    fallback_enabled: bool
+    # Whether uncovered modules are removed from the quantization worklist.
+    prune_uncovered_modules: bool
+    # Whether uncovered modules should be recorded in qcfg.dynamic.
+    record_dynamic_exclusions: bool
+
+
+@dataclass
+class SubsetPlan:
+    """Freeze all subset execution decisions before forward or quant work begins.
+
+    The plan answers:
+    - which modules belong to this subset
+    - whether forward runs at all
+    - whether the layer needs a post-process replay
+    - whether forward is serial or parallel
+    - how MoE groups are arranged for scheduling
+    - which modules are pinned to specific forward devices
+    - how uncovered calibration modules are handled
+    """
+
+    modules: Dict[str, NamedModule]
     subset_index: int
+    subset_total: int
+    execute_forward: bool
+    replay_after_process: bool
+    forward_mode: ForwardMode
+    batch_count: int
+    forward_row_counts: List[int]
+    forward_total_rows: int
+    moe_groups: Dict[str, List[str]]
+    forward_device_map: Dict[str, torch.device]
+    calibration_coverage_policy: CalibrationCoveragePolicy
+    module_chunks: List[Dict[str, NamedModule]]
+
+    @property
+    def subset_forward_serial(self) -> bool:
+        """Whether the forward executor should stay on one device."""
+
+        return self.forward_mode == "serial"
+
+    @property
+    def need_forward_outputs(self) -> bool:
+        """Whether this subset consumes forward outputs before process()."""
+
+        return self.execute_forward and not self.replay_after_process
+
+    @property
+    def batching_enabled(self) -> bool:
+        """Whether the subset will execute as multiple forward/quant chunks."""
+
+        return len(self.module_chunks) > 1
+
+    @property
+    def preserve_module_devices(self) -> bool:
+        """Whether per-module forward device overrides are active."""
+
+        return bool(self.forward_device_map)
+
+    def for_modules(self, modules: Dict[str, NamedModule]) -> "SubsetPlan":
+        """Reuse the same execution policy for one chunk or replay-only subset."""
+
+        return replace(self, modules=modules, module_chunks=[modules])
 
 
 @dataclass
@@ -48,14 +125,266 @@ class SubsetStageResult:
 
     processed_subset: Dict[str, NamedModule]
     layer_inputs: List[List[torch.Tensor]]
-    forward_context: Optional[SubsetForwardContext]
+    plan: Optional[SubsetPlan]
+
+
+def _resolve_subset_calibration_coverage_policy(
+    processor: LoopProcessor,
+    fallback,
+) -> CalibrationCoveragePolicy:
+    """Resolve how this subset handles modules that never receive calibration traffic."""
+
+    validate_input_coverage = isinstance(processor, (GPTQProcessor, QQQProcessor, AWQProcessor))
+    fallback_enabled = fallback is not None
+    prune_uncovered_modules = validate_input_coverage and not fallback_enabled
+
+    return CalibrationCoveragePolicy(
+        validate_input_coverage=validate_input_coverage,
+        fallback_enabled=fallback_enabled,
+        prune_uncovered_modules=prune_uncovered_modules,
+        record_dynamic_exclusions=prune_uncovered_modules,
+    )
+
+
+def _collect_subset_forward_progress(
+    looper: "ModuleLooper",
+    processor: LoopProcessor,
+    layer_inputs: List[List[torch.Tensor]],
+    *,
+    execute_forward: bool,
+) -> Tuple[int, List[int], int]:
+    """Normalize batch and row progress for the subset's forward execution."""
+
+    if not execute_forward:
+        return 0, [], 1
+
+    batch_count = looper._resolve_batch_total(
+        getattr(processor, "num_batches", None),
+        layer_inputs,
+    )
+    forward_row_counts = list(looper._collect_row_counts(layer_inputs))
+    if not forward_row_counts and batch_count > 0:
+        forward_row_counts = [1] * batch_count
+    if len(forward_row_counts) > batch_count:
+        forward_row_counts = forward_row_counts[:batch_count]
+
+    forward_total_rows = sum(forward_row_counts) if forward_row_counts else batch_count
+    forward_total_rows = max(forward_total_rows, 1)
+
+    if len(forward_row_counts) < batch_count:
+        forward_row_counts.extend([1] * (batch_count - len(forward_row_counts)))
+
+    return batch_count, forward_row_counts, forward_total_rows
+
+
+def build_subset_plan(
+    looper: "ModuleLooper",
+    *,
+    processor: LoopProcessor,
+    subset: Dict[str, NamedModule],
+    subset_index: int,
+    subset_total: int,
+    full,
+    fallback,
+    layer_inputs: List[List[torch.Tensor]],
+) -> SubsetPlan:
+    """Plan subset execution before any hooks, forwards, or quant work begin.
+
+    The returned plan is the single source of truth for:
+    - whether this subset runs forward at all
+    - whether replay happens later in the layer stage
+    - whether forward stays serial or can fan out
+    - whether modules are chunked for staged MoE execution
+    - how uncovered calibration modules are handled
+    """
+
+    execution_config = processor.execution_config
+    calibration_coverage_policy = _resolve_subset_calibration_coverage_policy(processor, fallback)
+
+    moe_groups: Dict[str, List[str]] = {}
+    forward_device_map: Dict[str, torch.device] = {}
+    subset_forward_serial = False
+
+    attention_subset = bool(subset) and all(
+        looper._is_attention_module_name(name) for name in subset
+    )
+    moe_group_key_by_name: Dict[str, Optional[str]] = {
+        name: looper._extract_moe_group_key(name)
+        for name in subset
+    }
+    moe_module_names = [
+        name for name, group_key in moe_group_key_by_name.items()
+        if group_key is not None
+    ]
+    is_moe_subset = len(moe_module_names) >= looper._moe_subset_threshold
+    moe_modules_set = set(moe_module_names)
+
+    if is_moe_subset:
+        combined_names: List[str] = list(subset.keys())
+        if full is not None:
+            for candidate in full.keys():
+                if candidate not in subset:
+                    combined_names.append(candidate)
+
+        for module_name in combined_names:
+            # Group experts across the full MoE family so device placement is
+            # consistent even when the current subset only contains one slice.
+            group_key = looper._extract_moe_group_key(module_name)
+            if group_key is None:
+                continue
+            moe_groups.setdefault(group_key, []).append(module_name)
+
+        for name, named_module in subset.items():
+            setattr(named_module, "moe_enabled", name in moe_modules_set)
+
+        if looper._vram_strategy == VramStrategy.BALANCED:
+            devices = [
+                dev for dev in looper._quant_devices
+                if dev is not None and getattr(dev, "type", None) != "cpu"
+            ]
+            if len(devices) > 1 and moe_groups:
+                assignable_group_keys: List[str] = []
+                for group_key, module_names in moe_groups.items():
+                    suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
+                    # Some MoE families route pairs like gate/up or w1/w3 together.
+                    if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
+                        assignable_group_keys.append(group_key)
+
+                if assignable_group_keys:
+                    groups_per_device = max(
+                        math.ceil(len(assignable_group_keys) / len(devices)), 1
+                    )
+                    for group_index, group_key in enumerate(assignable_group_keys):
+                        device_idx = min(group_index // groups_per_device, len(devices) - 1)
+                        target_device = devices[device_idx]
+                        for module_name in moe_groups[group_key]:
+                            forward_device_map[module_name] = target_device
+
+        # Balanced MoE subsets stay serial so replica fan-out does not fight the
+        # explicit per-expert device assignment planned above.
+        subset_forward_serial = looper._vram_strategy == VramStrategy.BALANCED
+        if subset_forward_serial:
+            active_group_count = len(moe_groups)
+            if active_group_count == 0:
+                subset_forward_serial = False
+            elif attention_subset and active_group_count <= looper._moe_subset_threshold:
+                subset_forward_serial = False
+    else:
+        for named_module in subset.values():
+            setattr(named_module, "moe_enabled", False)
+
+    auto_forward_data_parallel = getattr(
+        looper.gptq_model.quantize_config,
+        "auto_forward_data_parallel",
+        True,
+    )
+    subset_forward_serial = subset_forward_serial or not auto_forward_data_parallel
+
+    # Forward progress is normalized here so the executor and any later replay
+    # reuse the same batch and row accounting instead of recomputing it.
+    execute_forward = execution_config.require_fwd
+    batch_count, forward_row_counts, forward_total_rows = _collect_subset_forward_progress(
+        looper,
+        processor,
+        layer_inputs,
+        execute_forward=execute_forward,
+    )
+
+    # ExpertsRoutingBypass is the only routing mode that exposes a deterministic
+    # module chunk size for staged MoE execution.
+    moe_routing = looper.gptq_model.quantize_config.moe
+    batch_size = None
+    if moe_routing is not None and isinstance(moe_routing.routing, ExpertsRoutingBypass):
+        batch_size = moe_routing.routing.batch_size
+
+    module_chunks = [subset]
+    if is_moe_subset and batch_size is not None and batch_size > 0 and execute_forward:
+        sorted_module_names = sorted(subset.keys())
+        module_chunks = [
+            {name: subset[name] for name in sorted_module_names[start:start + batch_size]}
+            for start in range(0, len(sorted_module_names), batch_size)
+        ]
+
+    return SubsetPlan(
+        modules=subset,
+        subset_index=subset_index,
+        subset_total=subset_total,
+        execute_forward=execute_forward,
+        replay_after_process=execute_forward and execution_config.fwd_after_process,
+        forward_mode="serial" if subset_forward_serial else "parallel",
+        batch_count=batch_count,
+        forward_row_counts=forward_row_counts,
+        forward_total_rows=forward_total_rows,
+        moe_groups=moe_groups,
+        forward_device_map=forward_device_map,
+        calibration_coverage_policy=calibration_coverage_policy,
+        module_chunks=module_chunks,
+    )
+
+
+def build_layer_subset_plans(
+    looper: "ModuleLooper",
+    *,
+    processor: LoopProcessor,
+    module: torch.nn.Module,
+    layer_modules: List[List[str]],
+    layer_inputs: List[List[torch.Tensor]],
+    full,
+    is_lm_head_module: bool,
+    layer_index: int,
+    layers_prefix: Optional[str],
+    fallback,
+) -> List[SubsetPlan]:
+    """Build every subset plan for one processor before layer execution starts."""
+
+    execution_config = processor.execution_config
+    module_name_groups = [[looper.gptq_model.lm_head]] if is_lm_head_module else layer_modules
+
+    if execution_config.fwd_all_modules_in_single_pass:
+        # Native-style processors consume one merged replay over the whole layer.
+        # Build one plan up front so the layer stage does not keep re-deriving
+        # merged subset state while it is also coordinating execution.
+        module_name_groups = [sum(module_name_groups, [])]
+
+    subsets: List[Dict[str, NamedModule]] = []
+    for names in module_name_groups:
+        subset = looper.create_named_modules(
+            module,
+            full,
+            is_lm_head_module,
+            layer_index,
+            layers_prefix,
+            names,
+            processor,
+            fallback,
+            layer_module=module,
+        )
+        # Skip empty subsets caused by per-layer structure differences or dynamic
+        # exclusions so execution only sees real work.
+        if subset:
+            subsets.append(subset)
+
+    subset_total = len(subsets)
+    return [
+        build_subset_plan(
+            looper,
+            processor=processor,
+            subset=subset,
+            subset_index=index,
+            subset_total=subset_total,
+            full=full,
+            fallback=fallback,
+            layer_inputs=layer_inputs,
+        )
+        for index, subset in enumerate(subsets)
+    ]
 
 
 def _run_single_subset_pass(
     looper: 'ModuleLooper',
     processor: LoopProcessor,
     module: torch.nn.Module,
-    subset: Dict[str, NamedModule],
+    plan: SubsetPlan,
     layer_inputs: List[List[torch.Tensor]],
     layer_input_kwargs: List[Dict[str, torch.Tensor]],
     position_ids: List[torch.Tensor],
@@ -65,31 +394,40 @@ def _run_single_subset_pass(
     layer_descriptor: str,
     layer_title: str,
     layer_index: int,
-    subset_index: int,
-    subset_total: int,
     full,
     fallback,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
     pb,
     logger,
     is_awq_processor: bool,
-    forward_total_rows: int,
-    forward_row_counts: List[int],
-    batch_count: int,
-    forward_device_map: Dict[str, torch.device],
-    subset_forward_serial: bool,
     region_timer=None,
     previous_processed_subset: Optional[Dict[str, NamedModule]] = None,
     subset_event_cb: Optional[Callable[..., None]] = None,
     return_outputs: bool = False,
     disable_moe_hooks: bool = False,
-    execute_forward: bool = True,
+    execute_forward: Optional[bool] = None,
 ) -> Tuple[Dict[str, NamedModule], Optional[List[List[torch.Tensor]]]]:
-    """Execute forward and quantization for a specific subset/chunk."""
+    """Execute forward and quantization for a specific subset/chunk.
+
+    This function assumes planning is already done. Apart from the optional
+    `execute_forward` override used by replay-only and quant-only paths, it
+    should consume the plan rather than re-derive execution mode.
+    """
+
+    # Pull frequently used plan fields into locals so the execution flow below
+    # reads linearly without re-deriving policy from processor state.
+    subset = plan.modules
+    subset_index = plan.subset_index
+    subset_total = plan.subset_total
+    execution_config = processor.execution_config
+    calibration_coverage_policy = plan.calibration_coverage_policy
+    forward_row_counts = plan.forward_row_counts
+    batch_count = plan.batch_count
+    forward_device_map = plan.forward_device_map
+    execute_forward = plan.execute_forward if execute_forward is None else execute_forward
 
     handle = []
     subset_size = len(subset)
-    execution_config = processor.execution_config
 
     # Determine MoE block name for hook selection
     moe_block_name = None
@@ -163,7 +501,7 @@ def _run_single_subset_pass(
                 len(subset),
             )
 
-    need_outputs = not execution_config.fwd_after_process
+    need_outputs = execute_forward and plan.need_forward_outputs
     fwd_start = None
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
     if execute_forward:
@@ -178,16 +516,16 @@ def _run_single_subset_pass(
             f"batches={batch_count}"
         )
         forward_pb = (
-            logger.pb(range(forward_total_rows))
+            logger.pb(range(plan.forward_total_rows))
                .manual()
                .set(show_left_steps=False)
         )
         forward_pb.title(forward_msg).subtitle(
-            f"Row 0/{forward_total_rows}"
+            f"Row 0/{plan.forward_total_rows}"
         ).draw()
 
     previous_forward_devices: Dict[str, torch.device] = {}
-    preserve_devices = bool(forward_device_map)
+    preserve_devices = plan.preserve_module_devices
     if forward_device_map:
         previous_forward_devices = looper._apply_forward_device_overrides(
             subset,
@@ -198,7 +536,8 @@ def _run_single_subset_pass(
     forward_outputs = None
     if execute_forward:
         try:
-            # Set the current subset for MoE lifecycle hooks
+            # MoE lifecycle hooks need to know which subset is currently active.
+            # Replay-only passes can disable that when they only need outputs.
             if disable_moe_hooks:
                 looper._current_subset = None
             else:
@@ -220,8 +559,8 @@ def _run_single_subset_pass(
                 progress_title=forward_msg,
                 progress_stage="Forward",
                 progress_rows_per_batch=forward_row_counts,
-                progress_total_rows=forward_total_rows,
-                force_serial=subset_forward_serial,
+                progress_total_rows=plan.forward_total_rows,
+                force_serial=plan.subset_forward_serial,
                 preserve_module_devices=preserve_devices,
             )
         finally:
@@ -236,6 +575,8 @@ def _run_single_subset_pass(
     
     returned_outputs = None
     if execute_forward and need_outputs:
+        # For pre-process consumers, the next stage needs the forward outputs
+        # immediately rather than after the later layer replay step.
         processor.receive_layer_inputs(forward_outputs)
         if return_outputs:
              returned_outputs = processor.inputs_cache.layer_inputs
@@ -269,21 +610,23 @@ def _run_single_subset_pass(
         torch_sync()
         torch_empty_cache()
     moe_skip_modules = []
-    fallback_enabled = fallback is not None
-    if isinstance(processor, GPTQProcessor) or isinstance(processor, QQQProcessor) or isinstance(processor, AWQProcessor):
+    if calibration_coverage_policy.validate_input_coverage:
+        # Coverage validation is a policy decision captured by the plan.
+        # The executor only applies that policy; it does not decide when the
+        # processor should tolerate or prune never-invoked modules.
         for name in subset:
             # Skip MoE experts that never fired; they likely lacked calibration
             # traffic and would produce invalid statistics.
             if not processor.has_captured_input_ids(name):
                 # only log for moe if `fallback` is not enabled
-                if not fallback_enabled:
+                if not calibration_coverage_policy.fallback_enabled:
                     logger.error(
                         f"`{name}` was not invoked, if it is a MoE module, it may lack sufficient calibration data routed to it. "
                         f"Please enable and use `fallback` config option."
                     )
                 moe_skip_modules.append(name)
 
-        if not fallback_enabled:
+        if calibration_coverage_policy.prune_uncovered_modules:
             for name in moe_skip_modules:
                 skipped_module = subset.pop(name)
                 task_map = getattr(processor, "tasks", None)
@@ -292,9 +635,10 @@ def _run_single_subset_pass(
 
                 # No calibration data was routed to these MoE expert modules.
                 # We skip quantization them and record them in `qcfg.dynamic` as dynamically excluded modules.
-                if processor.qcfg.dynamic is None:
-                    processor.qcfg.dynamic = {}
-                processor.qcfg.dynamic[f"-:{re.escape(skipped_module.full_name)}"] = {}
+                if calibration_coverage_policy.record_dynamic_exclusions:
+                    if processor.qcfg.dynamic is None:
+                        processor.qcfg.dynamic = {}
+                    processor.qcfg.dynamic[f"-:{re.escape(skipped_module.full_name)}"] = {}
 
     quant_target_devices: Dict[str, torch.device] = {}
     for name, named_module in subset.items():
@@ -450,12 +794,16 @@ def run_subset_stage(
     region_timer=None,
     previous_processed_subset: Optional[Dict[str, NamedModule]] = None,
     subset_event_cb: Optional[Callable[..., None]] = None,
+    plan: Optional[SubsetPlan] = None,
 ) -> SubsetStageResult:
-    """Process a single subset of modules within the layer quantization loop."""
+    """Process one subset using a precomputed plan or build one on demand.
+
+    The stage has three execution shapes:
+    - chunked MoE execution driven by `plan.module_chunks`
+    - one forward + quant pass for normal subsets
+    - quant-only execution for processors that do not need forward replay
+    """
     logger = log or setup_logger()
-    # Keep replay policy together so the subset stage reads one execution
-    # config instead of coordinating multiple independent processor flags.
-    execution_config = processor.execution_config
 
     processor_name = processor.name() if hasattr(processor, "name") else type(processor).__name__
     processor_name_lower = processor_name.lower()
@@ -475,138 +823,45 @@ def run_subset_stage(
             processor=processor_name,
         )
 
+    if plan is None:
+        # Build the execution decisions once, then keep the rest of the stage
+        # focused on running that plan. This keeps planning branches out of the
+        # forward and quantization flow below.
+        plan = build_subset_plan(
+            looper,
+            processor=processor,
+            subset=subset,
+            subset_index=subset_index,
+            subset_total=subset_total,
+            full=full,
+            fallback=fallback,
+            layer_inputs=layer_inputs,
+        )
+
     if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
         if is_awq_processor:
             logger.debug(
                 "StageSubset[awq]: layer=%s subset=%s/%s modules=%s sample=%s",
                 layer_index,
-                subset_index + 1,
-                subset_total,
-                len(subset),
-                list(subset.keys())[:8],
+                plan.subset_index + 1,
+                plan.subset_total,
+                len(plan.modules),
+                list(plan.modules.keys())[:8],
             )
         else:
             logger.debug(
                 "StageSubset: layer=%s subset=%s/%s processor=%s created %s modules (sample=%s)",
                 layer_index,
-                subset_index + 1,
-                subset_total,
+                plan.subset_index + 1,
+                plan.subset_total,
                 processor_name,
-                len(subset),
-                list(subset.keys())[:8],
+                len(plan.modules),
+                list(plan.modules.keys())[:8],
             )
-
-    moe_group_keys_all: List[str] = []
-    forward_device_map: Dict[str, torch.device] = {}
-    subset_forward_serial = False
-
-    attention_subset = bool(subset) and all(
-        looper._is_attention_module_name(name) for name in subset
-    )
-
-    moe_group_key_by_name: Dict[str, Optional[str]] = {
-        name: looper._extract_moe_group_key(name)
-        for name in subset
-    }
-    moe_module_names = [
-        name for name, group_key in moe_group_key_by_name.items()
-        if group_key is not None
-    ]
-    moe_modules_set = set(moe_module_names)
-    is_moe_subset = len(moe_module_names) >= looper._moe_subset_threshold
-
-    if is_moe_subset:
-        expert_groups: Dict[str, List[str]] = {}
-        combined_names: List[str] = list(subset.keys())
-        if full is not None:
-            for candidate in full.keys():
-                if candidate not in subset:
-                    combined_names.append(candidate)
-
-        for sub_name in combined_names:
-            # Group every expert (including ones outside the current subset) so
-            # load balancing decisions can span the full MoE family.
-            group_key = looper._extract_moe_group_key(sub_name)
-            if group_key is None:
-                continue
-            expert_groups.setdefault(group_key, []).append(sub_name)
-
-        moe_group_keys_all = list(expert_groups.keys())
-
-        for name, named_module in subset.items():
-            setattr(named_module, "moe_enabled", name in moe_modules_set)
-
-        if looper._vram_strategy == VramStrategy.BALANCED:
-            devices = [
-                dev for dev in looper._quant_devices
-                if dev is not None and getattr(dev, "type", None) != "cpu"
-            ]
-            if len(devices) > 1 and expert_groups:
-                assignable_group_keys: List[str] = []
-                for group_key, module_names in expert_groups.items():
-                    suffixes = {name.rsplit(".", 1)[-1] for name in module_names}
-                    # TODO: Need to make this configuratble and not static string based. Some moe use wN naming.
-                    if {"gate_proj", "up_proj"}.issubset(suffixes) or {"w1", "w3"}.issubset(suffixes):
-                        assignable_group_keys.append(group_key)
-
-                if assignable_group_keys:
-                    groups_per_device = max(
-                        math.ceil(len(assignable_group_keys) / len(devices)), 1
-                    )
-                    for group_index, group_key in enumerate(assignable_group_keys):
-                        device_idx = min(group_index // groups_per_device, len(devices) - 1)
-                        target_device = devices[device_idx]
-                        for module_name in expert_groups[group_key]:
-                            forward_device_map[module_name] = target_device
-
-        subset_forward_serial = looper._vram_strategy == VramStrategy.BALANCED
-        if subset_forward_serial:
-            active_group_count = len(moe_group_keys_all)
-            if active_group_count == 0:
-                subset_forward_serial = False
-            elif attention_subset and active_group_count <= looper._moe_subset_threshold:
-                subset_forward_serial = False
-    else:
-        for named_module in subset.values():
-            setattr(named_module, "moe_enabled", False)
-
-    auto_forward_data_parallel = getattr(
-        looper.gptq_model.quantize_config,
-        "auto_forward_data_parallel",
-        True,
-    )
-    subset_forward_serial = subset_forward_serial or not auto_forward_data_parallel
-
-    # Prepare Loop Parameters
-
-    forward_total_rows = 1
-    forward_row_counts = []
-    batch_count = 0
-    if execution_config.require_fwd:
-        batch_count = looper._resolve_batch_total(
-            getattr(processor, "num_batches", None),
-            layer_inputs,
-        )
-        forward_row_counts = list(looper._collect_row_counts(layer_inputs))
-        if not forward_row_counts and batch_count > 0:
-            forward_row_counts = [1] * batch_count
-        if len(forward_row_counts) > batch_count:
-            forward_row_counts = forward_row_counts[:batch_count]
-        forward_total_rows = sum(forward_row_counts) if forward_row_counts else batch_count
-        forward_total_rows = max(forward_total_rows, 1)
-        if len(forward_row_counts) < batch_count:
-            forward_row_counts.extend([1] * (batch_count - len(forward_row_counts)))
-    
-    # Check for MoE batching
-    # batch_size is only available when using ExpertsRoutingBypass routing strategy
-    moe_routing = looper.gptq_model.quantize_config.moe
-    batch_size = None
-    if moe_routing is not None and isinstance(moe_routing.routing, ExpertsRoutingBypass):
-        batch_size = moe_routing.routing.batch_size
-    batching_enabled = is_moe_subset and batch_size is not None and batch_size > 0
-    
     processed_results = {}
 
+    # Keep the helper callsite compact while still passing the fully resolved
+    # execution context into every chunk or single-pass invocation.
     common_args = dict(
         looper=looper,
         processor=processor,
@@ -620,57 +875,47 @@ def run_subset_stage(
         layer_descriptor=layer_descriptor,
         layer_title=layer_title,
         layer_index=layer_index,
-        subset_index=subset_index,
-        subset_total=subset_total,
         full=full,
         fallback=fallback,
         shared_kv_cache_dict=shared_kv_cache_dict,
         pb=pb,
         logger=logger,
         is_awq_processor=is_awq_processor,
-        forward_total_rows=forward_total_rows,
-        forward_row_counts=forward_row_counts,
-        batch_count=batch_count,
-        forward_device_map=forward_device_map,
-        subset_forward_serial=subset_forward_serial,
         region_timer=region_timer,
         previous_processed_subset=previous_processed_subset,
     )
 
-    if batching_enabled and execution_config.require_fwd:
-        # Simply sort all module names and chunk them by batch_size
-        # This processes exactly batch_size MODULES per batch, not batch_size experts
-        sorted_module_names = sorted(subset.keys())
-
-        # Chunk module names directly by batch_size
-        module_chunks = [sorted_module_names[i:i + batch_size] for i in range(0, len(sorted_module_names), batch_size)]
-
+    # Once a plan exists, subset execution is just a dispatch over the plan's
+    # shape rather than another round of subset analysis.
+    if plan.batching_enabled:
         if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                f"MoE Expert Batching Enabled: Processing {len(sorted_module_names)} modules in {len(module_chunks)} batches "
-                f"(batch_size={batch_size} modules per batch)."
+                "MoE Expert Batching Enabled: Processing %s modules in %s batches.",
+                len(plan.modules),
+                len(plan.module_chunks),
             )
 
         # Create progress bar for MOE chunks
-        moe_chunk_pb = logger.pb(range(len(module_chunks))).manual()
+        moe_chunk_pb = logger.pb(range(len(plan.module_chunks))).manual()
         moe_chunk_pb.title(f"MoE Chunk")
 
         for chunk_idx in moe_chunk_pb:
-            chunk_keys = module_chunks[chunk_idx]
-            # Create subset for this chunk
-            chunk_subset = {k: subset[k] for k in chunk_keys}
+            chunk_plan = plan.for_modules(plan.module_chunks[chunk_idx])
 
-            moe_chunk_pb.subtitle(f"({len(chunk_subset)} modules)").draw()
+            moe_chunk_pb.subtitle(f"({len(chunk_plan.modules)} modules)").draw()
             if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"Processing MoE Chunk {chunk_idx+1}/{len(module_chunks)} ({len(chunk_subset)} modules)...")
+                logger.debug(
+                    "Processing MoE Chunk %s/%s (%s modules)...",
+                    chunk_idx + 1,
+                    len(plan.module_chunks),
+                    len(chunk_plan.modules),
+                )
 
-            # Run pass
             chunk_result, _ = _run_single_subset_pass(
                 **common_args,
-                subset=chunk_subset,
+                plan=chunk_plan,
                 subset_event_cb=None,
                 return_outputs=False,
-                execute_forward=True,
             )
             processed_results.update(chunk_result)
             
@@ -681,14 +926,15 @@ def run_subset_stage(
         # Close MOE chunks progress bar
         moe_chunk_pb.close()
 
-        # If fwd_after_process is False, stage_layer will not run replay.
-        # But we haven't collected proper full outputs yet (we ignored them or they were partial).
-        # So we MUST run a replay here to get valid layer_inputs for the next layer.
-        if not execution_config.fwd_after_process:
-             # Final Replay to collect layer outputs
+        # Chunked execution does not produce a single coherent next-layer input
+        # stream while chunks are being processed. When replay is not deferred
+        # to the layer stage, the subset stage must do one final replay here to
+        # rebuild the real layer outputs.
+        if not plan.replay_after_process:
+             replay_plan = plan.for_modules({})
              _, new_layer_inputs = _run_single_subset_pass(
                  **common_args,
-                 subset={},  # Empty subset prevents quantization/hooks
+                 plan=replay_plan,  # Empty modules prevent quant hooks during replay.
                  subset_event_cb=None,
                  return_outputs=True,
                  disable_moe_hooks=True,
@@ -696,11 +942,11 @@ def run_subset_stage(
              if new_layer_inputs is not None:
                  layer_inputs = new_layer_inputs
     
-    elif execution_config.require_fwd:
+    elif plan.execute_forward:
         # Single pass
         processed_results, new_layer_inputs = _run_single_subset_pass(
             **common_args,
-            subset=subset,
+            plan=plan,
             subset_event_cb=subset_event_cb,
             return_outputs=True,
         )
@@ -713,29 +959,21 @@ def run_subset_stage(
                 "StageSubset: processor=%s layer=%s subset=%s/%s skipping forward (require_fwd=False)",
                 processor_name,
                 layer_index,
-                subset_index + 1,
-                subset_total,
+                plan.subset_index + 1,
+                plan.subset_total,
             )
         emit_subset_event("forward_start")
         emit_subset_event("forward_end")
         processed_results, _ = _run_single_subset_pass(
             **common_args,
-            subset=subset,
+            plan=plan,
             subset_event_cb=subset_event_cb,
             return_outputs=False,
             execute_forward=False,
         )
 
-    context = SubsetForwardContext(
-        subset=subset,
-        forward_device_map=forward_device_map,
-        subset_forward_serial=subset_forward_serial,
-        subset_total=subset_total,
-        subset_index=subset_index,
-    )
-
     return SubsetStageResult(
         processed_subset=processed_results,
         layer_inputs=layer_inputs,
-        forward_context=context,
+        plan=plan,
     )
