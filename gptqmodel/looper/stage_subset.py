@@ -771,6 +771,7 @@ def _run_single_subset_pass(
 def run_subset_stage(
     looper: 'ModuleLooper',
     *,
+    plan: SubsetPlan,
     processor: LoopProcessor,
     module: torch.nn.Module,
     layer_inputs: List[List[torch.Tensor]],
@@ -782,10 +783,6 @@ def run_subset_stage(
     layer_descriptor: str,
     layer_title: str,
     layer_index: int,
-    layers_prefix: Optional[str],
-    subset: Dict[str, NamedModule],
-    subset_index: int,
-    subset_total: int,
     full,
     fallback: bool,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
@@ -794,9 +791,8 @@ def run_subset_stage(
     region_timer=None,
     previous_processed_subset: Optional[Dict[str, NamedModule]] = None,
     subset_event_cb: Optional[Callable[..., None]] = None,
-    plan: Optional[SubsetPlan] = None,
 ) -> SubsetStageResult:
-    """Process one subset using a precomputed plan or build one on demand.
+    """Process one subset using a precomputed plan.
 
     The stage has three execution shapes:
     - chunked MoE execution driven by `plan.module_chunks`
@@ -817,25 +813,10 @@ def run_subset_stage(
         subset_event_cb(
             stage=stage,
             layer_idx=layer_index,
-            subset_index=subset_index,
-            subset_total=subset_total,
-            module_names=list(subset.keys()),
+            subset_index=plan.subset_index,
+            subset_total=plan.subset_total,
+            module_names=list(plan.modules.keys()),
             processor=processor_name,
-        )
-
-    if plan is None:
-        # Build the execution decisions once, then keep the rest of the stage
-        # focused on running that plan. This keeps planning branches out of the
-        # forward and quantization flow below.
-        plan = build_subset_plan(
-            looper,
-            processor=processor,
-            subset=subset,
-            subset_index=subset_index,
-            subset_total=subset_total,
-            full=full,
-            fallback=fallback,
-            layer_inputs=layer_inputs,
         )
 
     if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):

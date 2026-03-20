@@ -222,6 +222,7 @@ def run_layer_stage(
                         )
                 subset_result = run_subset_stage(
                     looper=looper,
+                    plan=subset_plan,
                     processor=processor,
                     module=module,
                     layer_inputs=layer_inputs,
@@ -233,10 +234,6 @@ def run_layer_stage(
                     layer_descriptor=layer_descriptor,
                     layer_title=layer_title,
                     layer_index=layer_index,
-                    layers_prefix=layers_prefix,
-                    subset=subset_plan.modules,
-                    subset_index=subset_plan.subset_index,
-                    subset_total=subset_plan.subset_total,
                     full=full,
                     fallback=fallback,
                     shared_kv_cache_dict=shared_kv_cache_dict,
@@ -245,7 +242,6 @@ def run_layer_stage(
                     region_timer=region_timer,
                     previous_processed_subset=previous_subset_processed,
                     subset_event_cb=looper._subset_event_dispatch,
-                    plan=subset_plan,
                 )
 
                 layer_inputs = subset_result.layer_inputs

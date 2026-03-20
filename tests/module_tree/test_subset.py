@@ -25,7 +25,7 @@ from gptqmodel.looper.awq_processor import AWQProcessor, _AWQLayerState
 from gptqmodel.looper.loop_processor import ExecutionConfig, LoopProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.looper.stage_subset import run_subset_stage
+from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
 from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
@@ -329,8 +329,20 @@ def test_stage_subset_early_stop_and_callbacks():
         layer_module=mini_layer,
     )
 
+    subset_plan = build_subset_plan(
+        looper,
+        processor=processor,
+        subset=subset,
+        subset_index=0,
+        subset_total=2,
+        full=full_modules,
+        fallback=False,
+        layer_inputs=layer_inputs,
+    )
+
     run_subset_stage(
         looper=looper,
+        plan=subset_plan,
         processor=processor,
         module=mini_layer,
         layer_inputs=layer_inputs,
@@ -342,10 +354,6 @@ def test_stage_subset_early_stop_and_callbacks():
         layer_descriptor="layers.0",
         layer_title="subset-check",
         layer_index=0,
-        layers_prefix="layers",
-        subset=subset,
-        subset_index=0,
-        subset_total=2,
         full=full_modules,
         fallback=False,
         shared_kv_cache_dict=shared_kv_cache_dict,

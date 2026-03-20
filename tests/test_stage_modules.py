@@ -147,30 +147,11 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
     calls = []
 
     def fake_run_subset_stage(looper, **kwargs):
-        calls.append(kwargs["subset_index"])
+        calls.append(kwargs["plan"].subset_index)
         return SubsetStageResult(
             processed_subset={},
             layer_inputs=kwargs["layer_inputs"],
-            plan=SubsetPlan(
-                modules={},
-                subset_index=kwargs["subset_index"],
-                subset_total=kwargs["subset_total"],
-                execute_forward=True,
-                replay_after_process=False,
-                forward_mode="parallel",
-                batch_count=1,
-                forward_row_counts=[1],
-                forward_total_rows=1,
-                moe_groups={},
-                forward_device_map={},
-                calibration_coverage_policy=CalibrationCoveragePolicy(
-                    validate_input_coverage=False,
-                    fallback_enabled=True,
-                    prune_uncovered_modules=False,
-                    record_dynamic_exclusions=False,
-                ),
-                module_chunks=[{}],
-            ),
+            plan=kwargs["plan"],
         )
 
     monkeypatch.setattr("gptqmodel.looper.stage_layer.run_subset_stage", fake_run_subset_stage)
@@ -309,6 +290,18 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         def _check_loop_stop(self):
             return False
 
+        def _is_attention_module_name(self, _name):
+            return False
+
+        def _extract_moe_group_key(self, _name):
+            return None
+
+        def _resolve_batch_total(self, _num_batches, layer_inputs):
+            return len(layer_inputs)
+
+        def _collect_row_counts(self, layer_inputs):
+            return [1 for _ in layer_inputs]
+
         def _emit_layer_complete(self, *, layer_idx, submodule_finalized, raise_in_place):
             self._layer_events.append((layer_idx, submodule_finalized, raise_in_place))
 
@@ -360,26 +353,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
         return SubsetStageResult(
             processed_subset={},
             layer_inputs=kwargs["layer_inputs"],
-            plan=SubsetPlan(
-                modules={},
-                subset_index=kwargs["subset_index"],
-                subset_total=kwargs["subset_total"],
-                execute_forward=True,
-                replay_after_process=False,
-                forward_mode="parallel",
-                batch_count=1,
-                forward_row_counts=[1],
-                forward_total_rows=1,
-                moe_groups={},
-                forward_device_map={},
-                calibration_coverage_policy=CalibrationCoveragePolicy(
-                    validate_input_coverage=False,
-                    fallback_enabled=True,
-                    prune_uncovered_modules=False,
-                    record_dynamic_exclusions=False,
-                ),
-                module_chunks=[{}],
-            ),
+            plan=kwargs["plan"],
         )
 
     monkeypatch.setattr("gptqmodel.looper.stage_layer.run_subset_stage", fake_run_subset_stage)
@@ -524,6 +498,18 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
 
         def _check_loop_stop(self):
             return False
+
+        def _is_attention_module_name(self, _name):
+            return False
+
+        def _extract_moe_group_key(self, _name):
+            return None
+
+        def _resolve_batch_total(self, _num_batches, layer_inputs):
+            return len(layer_inputs)
+
+        def _collect_row_counts(self, layer_inputs):
+            return [1 for _ in layer_inputs]
 
         def _emit_layer_complete(self, *, layer_idx, submodule_finalized, raise_in_place):
             self._layer_events.append((layer_idx, submodule_finalized, raise_in_place))

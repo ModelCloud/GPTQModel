@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from gptqmodel.looper.loop_processor import ExecutionConfig
-from gptqmodel.looper.stage_subset import run_subset_stage
+from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
 from gptqmodel.quantization.config import (
     ExpertsRoutingBypass,
     ExpertsRoutingOverride,
@@ -59,8 +59,19 @@ class TestMoEExpertBatching(unittest.TestCase):
 
     def _run_subset_stage(self, subset):
         """Helper to run subset stage with given subset."""
+        plan = build_subset_plan(
+            self.looper,
+            processor=self.processor,
+            subset=subset,
+            subset_index=0,
+            subset_total=1,
+            full=self.full,
+            fallback=False,
+            layer_inputs=self.layer_inputs,
+        )
         run_subset_stage(
             looper=self.looper,
+            plan=plan,
             processor=self.processor,
             module=self.module,
             layer_inputs=self.layer_inputs,
@@ -72,10 +83,6 @@ class TestMoEExpertBatching(unittest.TestCase):
             layer_descriptor="layer.0",
             layer_title="title",
             layer_index=0,
-            layers_prefix="model.layers",
-            subset=subset,
-            subset_index=0,
-            subset_total=1,
             full=self.full,
             fallback=False,
             shared_kv_cache_dict=self.shared_kv_cache_dict,
