@@ -5,9 +5,10 @@
 
 import os
 
-
 # isort: off
+from ._banner import get_startup_banner  # noqa: E402
 from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noqa: E402
+
 # isort: on
 
 patch_safetensors_save_file()
@@ -59,25 +60,92 @@ DEBUG_ON = env_flag("DEBUG")
 from .utils.linalg_warmup import run_torch_linalg_warmup
 from .utils.threadx import DeviceThreadPool
 
+_DEVICE_THREAD_POOL = None
 
-DEVICE_THREAD_POOL = DeviceThreadPool(
-    inference_mode=True,
-    warmups={
-        "cuda": run_torch_linalg_warmup,
-        "xpu": run_torch_linalg_warmup,
-        "mps": run_torch_linalg_warmup,
-        "cpu": run_torch_linalg_warmup,
-    },
-    workers={
-        "cuda:per": 4,
-        "xpu:per": 1,
-        "mps": 8,
-        "cpu": min(12, max(1, (os.cpu_count() or 1) + 1 // 2)), # count + 1, fixed pool size > 1 check when count=3
-        "model_loader:cpu": 2,
-    },
-    empty_cache_every_n=512,
-)
 
+def _build_device_thread_pool():
+    return DeviceThreadPool(
+        inference_mode=True,
+        warmups={
+            "cuda": run_torch_linalg_warmup,
+            "xpu": run_torch_linalg_warmup,
+            "mps": run_torch_linalg_warmup,
+            "cpu": run_torch_linalg_warmup,
+        },
+        workers={
+            "cuda:per": 4,
+            "xpu:per": 1,
+            "mps": 8,
+            "cpu": min(12, max(1, (os.cpu_count() or 1) + 1 // 2)),  # count + 1, fixed pool size > 1 check when count=3
+            "model_loader:cpu": 2,
+        },
+        empty_cache_every_n=512,
+    )
+
+
+def get_device_thread_pool():
+    global _DEVICE_THREAD_POOL
+    if _DEVICE_THREAD_POOL is None:
+        _DEVICE_THREAD_POOL = _build_device_thread_pool()
+    return _DEVICE_THREAD_POOL
+
+
+class _LazyDeviceThreadPoolProxy:
+    def __init__(self):
+        object.__setattr__(self, "_overrides", {})
+
+    def __getattribute__(self, name):
+        if name in {
+            "_overrides",
+            "__class__",
+            "__dict__",
+            "__getattribute__",
+            "__setattr__",
+            "__delattr__",
+            "__repr__",
+            "__dir__",
+            "_get_pool",
+        }:
+            return object.__getattribute__(self, name)
+
+        overrides = object.__getattribute__(self, "_overrides")
+        if name in overrides:
+            return overrides[name]
+
+        return getattr(self._get_pool(), name)
+
+    def __setattr__(self, name, value):
+        if name == "_overrides":
+            object.__setattr__(self, name, value)
+            return
+        self._overrides[name] = value
+
+    def __delattr__(self, name):
+        overrides = self._overrides
+        if name in overrides:
+            del overrides[name]
+            return
+        delattr(self._get_pool(), name)
+
+    def __repr__(self):
+        pool = _DEVICE_THREAD_POOL
+        if pool is None:
+            return "<LazyDeviceThreadPoolProxy uninitialized>"
+        return repr(pool)
+
+    def __dir__(self):
+        attrs = set(self._overrides.keys())
+        pool = _DEVICE_THREAD_POOL
+        if pool is not None:
+            attrs.update(dir(pool))
+        return sorted(attrs)
+
+    @staticmethod
+    def _get_pool():
+        return get_device_thread_pool()
+
+
+DEVICE_THREAD_POOL = _LazyDeviceThreadPoolProxy()
 
 _patch_transformers_gptq_device_map_compat()
 
@@ -97,18 +165,26 @@ def exllama_set_max_input_length(model, max_input_length: int):
 
 
 from .models import GPTQModel, get_best_device
-from .models.auto import ASCII_LOGO
+from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import BaseQuantizeConfig, GPTAQConfig, QuantizeConfig
 from .utils import BACKEND
 from .version import __version__
+import torch
 
-
-setup_logger().info("\n%s", ASCII_LOGO)
-
+setup_logger().info(
+    "\n%s",
+    get_startup_banner(
+        ASCII_LOGO,
+        gptqmodel_version=__version__,
+        transformers_version=TRANSFORMERS_VERSION,
+        torch_version=torch.__version__,
+    ),
+)
 
 if ensure_modelscope_available():
     try:
         from modelscope.utils.hf_util.patcher import patch_hub
+
         patch_hub()
     except Exception as exc:
         raise ModuleNotFoundError(

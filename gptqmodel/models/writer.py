@@ -40,7 +40,8 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
 )
 from ..utils.backend import BACKEND
-from ..utils.hf import no_init_weights, prepare_remote_code_compat, sanitize_generation_config_file
+from ..utils.hf import no_init_weights, prepare_remote_code_compat, sanitize_generation_config_file, \
+    sanitize_model_config
 from ..utils.logger import setup_logger
 from ..utils.model import (
     copy_py_files,
@@ -214,7 +215,9 @@ def ModelWriter(cls):
         )
 
         # The config, quantize_config and model may be edited in place in save_quantized.
+        sanitize_model_config(self.model.config)
         config = copy.deepcopy(self.model.config)
+
         quantize_config = copy.deepcopy(self.quantize_config)
 
         if not self.quantized:

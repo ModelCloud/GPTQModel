@@ -62,6 +62,7 @@ env:
   RUNNER: 10.0.13.31
   XEON5: 10.0.14.249
   UV_INDEX_URL: http://10.0.14.249/simple
+  LOGBAR_ANIMATION: '0'
   CUDA_VERSION: 131
   UV_TORCH_BACKEND: cu130
   TORCH_VERSION: 2.10.0
@@ -424,11 +425,19 @@ jobs:
           which python
           which pip || true
 
-          echo "setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=${{ env.PYTHON_VERSION }}"
+          echo "--- setting env... cuda=${{ needs.check-vm.outputs.cuda_version }} torch=${{ env.TORCH_VERSION }} python=${{ env.PYTHON_VERSION }}"
           bash /opt/env/init_compiler_no_env.sh ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} ${{ env.PYTHON_VERSION }}
-          echo "installing required deps..."
+
+          echo ""
+          echo ""
+
+          echo "--- installing required deps..."
           python .github/scripts/install_deps.py ${{ matrix.test_script }}
-          echo "uninstalling required deps..."
+
+          echo ""
+          echo ""
+
+          echo "--- uninstalling required deps..."
           python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
 
       #      - name: Install requirements

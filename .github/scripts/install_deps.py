@@ -87,7 +87,7 @@ def pip_install(pkgs):
     if not pkgs:
         return
 
-    print("Installing deps:")
+    print("--- Installing deps:")
     for p in pkgs:
         print("  -", p)
 
@@ -109,7 +109,7 @@ def uv_install(pkgs):
 
     pkgs = [normalize_pkg_spec(p) for p in pkgs]
 
-    print("Installing deps with uv:")
+    print("--- Installing deps with uv:")
     for p in pkgs:
         print("  -", p)
 
@@ -131,6 +131,6 @@ if __name__ == "__main__":
 
     specific_pkgs, common_pkgs = collect_pkgs(test_path, deps)
 
-    uv_install(sorted(specific_pkgs))
+    uv_install(specific_pkgs)
 
-    uv_install(sorted(common_pkgs))
+    uv_install(common_pkgs)

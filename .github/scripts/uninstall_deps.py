@@ -42,7 +42,7 @@ def uv_uninstall(pkgs):
     if not pkgs:
         return
 
-    print("Uninstalling deps with uv:")
+    print("--- Uninstalling deps with uv:")
     for p in pkgs:
         print("  -", p)
 
@@ -51,7 +51,7 @@ def uv_uninstall(pkgs):
         try:
             subprocess.check_call(cmd, shell=False)
         except Exception as e:
-            print(f"Unnstall failed: {e}")
+            print(f"--- Unnstall failed: {e}")
 
 
 if __name__ == "__main__":
