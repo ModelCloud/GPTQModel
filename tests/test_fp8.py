@@ -7,7 +7,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from gptqmodel.quantization.config import FP8Config, FORMAT, METHOD, QuantizeConfig
+from gptqmodel.quantization.config import METHOD, FP8Config, QuantizeConfig
 from gptqmodel.utils.model_dequant import detect_format
 
 

@@ -12,9 +12,9 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
-from ...utils.env import env_flag
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
+from ...utils.env import env_flag
 from ...utils.torch import HAS_XPU
 
 

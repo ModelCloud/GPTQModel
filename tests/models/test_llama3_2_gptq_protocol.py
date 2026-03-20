@@ -2,13 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
-from gptqmodel.quantization import FORMAT, GPTQQuantizeConfig, METHOD
+from gptqmodel.quantization import FORMAT, METHOD, GPTQQuantizeConfig
 from gptqmodel.quantization.protocol import (
     Rule,
     Stage,

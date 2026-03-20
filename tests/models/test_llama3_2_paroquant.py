@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-
 from model_test import ModelTest
 
 from gptqmodel import BACKEND

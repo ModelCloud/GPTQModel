@@ -16,7 +16,15 @@ from torch.nn.modules.conv import _ConvNd
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...quantization.config import Fallback, FallbackStrategy, FORMAT, GGUFBits, METHOD, SmoothMethod, _normalize_quant_bits
+from ...quantization.config import (
+    FORMAT,
+    METHOD,
+    Fallback,
+    FallbackStrategy,
+    GGUFBits,
+    SmoothMethod,
+    _normalize_quant_bits,
+)
 from ...quantization.fallback_smooth import smooth_block
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger

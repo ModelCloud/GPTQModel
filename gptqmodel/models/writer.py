@@ -15,7 +15,6 @@ from typing import Any, Dict, Optional, Union
 
 import pcre as re
 import torch
-import transformers
 from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig, PreTrainedTokenizerFast, ProcessorMixin

@@ -786,6 +786,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
 
     try:
         import importlib.util
+
         import peft.import_utils as peft_import_utils
         import peft.tuners.lora.awq as peft_awq
     except Exception:

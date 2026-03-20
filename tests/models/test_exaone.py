@@ -5,8 +5,8 @@
 
 import unittest
 
-from transformers.cache_utils import DynamicCache
 from model_test import ModelTest
+from transformers.cache_utils import DynamicCache
 
 
 class TestExaone(ModelTest):

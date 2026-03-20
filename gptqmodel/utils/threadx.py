@@ -27,9 +27,9 @@ except Exception:  # pragma: no cover - defensive: optional dependency may be un
     Device = None
 
 from .. import DEBUG_ON
+from ..utils import torch as torch_utils
 from ..utils.ctx import ctx
 from ..utils.logger import setup_logger
-from ..utils import torch as torch_utils
 from ..utils.torch import torch_empty_cache_any
 
 
@@ -1753,10 +1753,10 @@ class DeviceThreadPool:
         Record 'done' counters as of a GC pass to require fresh progress
         before a subsequent pass is allowed.
         """
-        threshold = int(self._empty_cache_every_n)
+        int(self._empty_cache_every_n)
         per_done_physical = snap_after.get("per_done_physical") or {}
         per_done = snap_after.get("per_done") or {}
-        meta = snap_after.get("meta") or {}
+        snap_after.get("meta") or {}
         processed = snap_after.get("_gc_processed_devices")
         if processed is None:
             processed_iter = per_done_physical.keys()

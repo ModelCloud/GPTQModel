@@ -8,7 +8,7 @@ from unittest import mock
 
 import torch
 
-from gptqmodel.quantization import FORMAT, GGUFQuantizeConfig, METHOD, QuantizeConfig, RTNQuantizeConfig
+from gptqmodel.quantization import FORMAT, METHOD, GGUFQuantizeConfig, QuantizeConfig, RTNQuantizeConfig
 from gptqmodel.utils.model import pack_module
 
 

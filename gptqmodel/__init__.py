@@ -97,6 +97,8 @@ def exllama_set_max_input_length(model, max_input_length: int):
     )
 
 
+import torch
+
 from .models import GPTQModel, get_best_device
 from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import (
@@ -112,7 +114,6 @@ from .quantization import (
 )
 from .utils import BACKEND
 from .version import __version__
-import torch
 
 
 setup_logger().info(

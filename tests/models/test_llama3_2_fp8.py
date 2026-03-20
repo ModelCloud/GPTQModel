@@ -15,7 +15,7 @@ from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8QuantLinear
-from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization import METHOD
 from gptqmodel.quantization.config import WeightOnlyConfig
 from gptqmodel.utils.eval import EVAL
 

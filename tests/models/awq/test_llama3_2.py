@@ -19,6 +19,7 @@ from gptqmodel import BACKEND
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.eval import EVAL
 
+
 # Slow-mode regression scores captured on CUDA_VISIBLE_DEVICES=6 (RTX 4090).
 # | Metric                         | AWQ GEMM |
 # |--------------------------------|----------|

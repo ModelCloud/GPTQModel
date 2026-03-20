@@ -30,8 +30,8 @@ from torch import nn
 
 from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.looper.module_looper import ModuleLooper, StopMainLoop
-from gptqmodel.models.auto import _hide_unsupported_quantization_config_for_lm_eval
 from gptqmodel.models import loader
+from gptqmodel.models.auto import _hide_unsupported_quantization_config_for_lm_eval
 
 
 ############ test_model_dequant.py ############
@@ -47,6 +47,7 @@ from safetensors.torch import save_file
 
 from gptqmodel.quantization.dtype import dequantize_f8_e4m3
 from gptqmodel.utils.model_dequant import dequantize_model
+
 
 pytestmark = [pytest.mark.model, pytest.mark.slow, pytest.mark.gpu]
 

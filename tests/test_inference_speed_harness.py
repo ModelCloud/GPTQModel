@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
-
 import inference_speed as inference_speed_module
+import torch
 from inference_speed import InferenceSpeed
 
 

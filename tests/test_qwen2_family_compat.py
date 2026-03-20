@@ -5,12 +5,12 @@
 import types
 import warnings
 
+import torch
 from PIL import Image
 from tokenicer import Tokenicer
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
-import torch
 from torch import nn
 from transformers import PreTrainedTokenizerFast
 

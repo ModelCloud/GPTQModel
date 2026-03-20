@@ -18,9 +18,20 @@ import unittest  # noqa: E402
 import torch  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.quantization import FORMAT, FORMAT_FIELD_CHECKPOINT, FORMAT_FIELD_CODE, METHOD_FIELD_CODE, QuantizeConfig  # noqa: E402
-from gptqmodel.quantization.config import GGUFConfig, METHOD  # noqa: E402
-from gptqmodel.quantization.config import GPTAQConfig, HessianConfig, VramStrategy  # noqa: E402
+from gptqmodel.quantization import (  # noqa: E402
+    FORMAT,
+    FORMAT_FIELD_CHECKPOINT,
+    FORMAT_FIELD_CODE,
+    METHOD_FIELD_CODE,
+    QuantizeConfig,
+)
+from gptqmodel.quantization.config import (  # noqa: E402  # noqa: E402
+    METHOD,
+    GGUFConfig,
+    GPTAQConfig,
+    HessianConfig,
+    VramStrategy,
+)
 
 
 class TestSerialization(unittest.TestCase):

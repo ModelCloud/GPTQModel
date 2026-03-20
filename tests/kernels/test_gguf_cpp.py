@@ -6,12 +6,12 @@ from __future__ import annotations
 import pytest
 import torch
 
+from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel, _get_ggml_bridge
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import select_quant_linear
-from gptqmodel.models._const import DEVICE
 
 
 def _build_quant_modules(bits: str) -> tuple[GGUFTorchQuantLinear, GGUFCppKernel, GGUFCudaKernel]:

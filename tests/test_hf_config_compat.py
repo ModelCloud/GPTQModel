@@ -1,17 +1,14 @@
 import sys
-from types import ModuleType
 from enum import Enum
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import torch
 import transformers
 import transformers.generation.utils as generation_utils
-from transformers import GPTNeoXConfig, GenerationConfig, LlamaConfig
-
-from gptqmodel.utils import hf as hf_utils
-from transformers import cache_utils
+from transformers import GenerationConfig, GPTNeoXConfig, LlamaConfig, cache_utils
 from transformers.generation.configuration_utils import GenerationMode
 
+from gptqmodel.utils import hf as hf_utils
 from gptqmodel.utils.hf import (
     normalize_hf_config_compat,
     prepare_remote_model_init_compat,

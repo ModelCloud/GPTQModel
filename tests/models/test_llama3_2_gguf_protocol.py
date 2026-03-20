@@ -2,18 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
-from gptqmodel.quantization import GGUFConfig, METHOD
+from gptqmodel.quantization import METHOD, GGUFConfig
 from gptqmodel.quantization.protocol import (
     Rule,
     Stage,
+    compile_plan_to_quantize_config,
     compile_protocol,
     compile_protocol_yaml_text,
-    compile_plan_to_quantize_config,
 )
 from gptqmodel.utils.eval import EVAL
 

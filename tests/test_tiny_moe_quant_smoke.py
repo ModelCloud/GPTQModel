@@ -19,6 +19,7 @@ regression guard for the MoE lifecycle:
 import os
 from pathlib import Path
 
+
 # Keep the smoke test on CPU so it stays small and works on CPU-only runners.
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 

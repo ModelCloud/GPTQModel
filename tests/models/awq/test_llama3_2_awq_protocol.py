@@ -18,7 +18,7 @@ from model_test import ModelTest
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
-from gptqmodel.quantization import AWQQuantizeConfig, FORMAT, METHOD
+from gptqmodel.quantization import FORMAT, METHOD, AWQQuantizeConfig
 from gptqmodel.quantization.protocol import (
     Rule,
     Stage,

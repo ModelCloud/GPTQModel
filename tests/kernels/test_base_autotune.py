@@ -5,7 +5,7 @@ import torch
 
 from gptqmodel.models._const import DEVICE, PLATFORM
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
-from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization import METHOD
 from gptqmodel.utils.backend import BACKEND
 
 

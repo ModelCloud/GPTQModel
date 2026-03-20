@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
 

@@ -6,9 +6,8 @@
 import unittest
 from importlib.metadata import PackageNotFoundError, version
 
-from packaging.version import Version
-
 from model_test import ModelTest
+from packaging.version import Version
 
 from gptqmodel.utils.eval import EVAL
 

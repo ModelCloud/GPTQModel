@@ -18,6 +18,7 @@ from models.model_test import ModelTest  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.utils.sglang import SGLANG_AVAILABLE, SGLANG_INSTALL_HINT  # noqa: E402
 
+
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]

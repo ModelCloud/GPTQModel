@@ -42,12 +42,11 @@ from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.lookahead import configure_default_lookahead
 from ..nn_modules.qlinear.torch import TorchQuantLinear
-from ..quantization import QuantizeConfig
 from ..quantization.config import (
-    BaseQuantizeConfig,
     FORMAT,
     METHOD,
     QUANTIZE_BLACK_LIST,
+    BaseQuantizeConfig,
     GcMode,
     VramStrategy,
     dynamic_get,

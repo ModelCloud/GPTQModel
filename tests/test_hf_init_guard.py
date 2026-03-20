@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
 import torch
 import torch.nn as nn
 import transformers
-import pytest
 
 from gptqmodel.utils.hf import suspend_hf_weight_init
 

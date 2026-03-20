@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+
 if TYPE_CHECKING:
     from ..exllamav3.modules.quant.exl3 import LinearEXL3
 

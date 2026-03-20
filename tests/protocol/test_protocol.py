@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-from gptqmodel.quantization import AWQQuantizeConfig, FORMAT, GGUFConfig, GPTQQuantizeConfig, METHOD
+from gptqmodel.quantization import FORMAT, METHOD, AWQQuantizeConfig, GGUFConfig, GPTQQuantizeConfig
 from gptqmodel.quantization.protocol import (
     MatchSpec,
     Rule,

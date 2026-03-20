@@ -42,6 +42,7 @@ from collections.abc import Iterable, Mapping  # noqa: E402
 
 import torch.cuda  # noqa: E402
 
+
 try:  # noqa: E402
     from datasets import load_dataset as hf_load_dataset  # noqa: E402
 except Exception as exc:  # pragma: no cover - depends on test environment

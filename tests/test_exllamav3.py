@@ -9,7 +9,7 @@ from safetensors.torch import save_file
 
 from gptqmodel.nn_modules.exllamav3 import ExllamaV3Linear
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
-from gptqmodel.quantization.config import EXL3QuantizeConfig, FORMAT, METHOD, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, EXL3QuantizeConfig, QuantizeConfig
 from gptqmodel.utils.exllamav3 import build_exllamav3_tensor_storage, replace_exllamav3_placeholders
 from gptqmodel.utils.model_dequant import detect_format
 

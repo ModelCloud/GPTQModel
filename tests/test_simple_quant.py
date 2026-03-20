@@ -14,6 +14,7 @@ from gptqmodel import GPTAQConfig, GPTQModel, QuantizeConfig
 from gptqmodel.quantization import FORMAT
 from gptqmodel.utils.eval import EVAL
 
+
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 

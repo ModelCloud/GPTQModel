@@ -1,6 +1,6 @@
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 
 # Reduce logbar progress noise for pytest runs unless a caller explicitly

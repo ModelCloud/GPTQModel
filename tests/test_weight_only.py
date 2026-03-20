@@ -16,14 +16,14 @@ from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
-from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
+from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
 from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
 from gptqmodel.quantization.config import (
     FORMAT,
-    GGUFConfig,
-    GGUFBits,
     METHOD,
+    GGUFBits,
+    GGUFConfig,
     QuantizeConfig,
     RTNQuantizeConfig,
     SmoothMAD,
@@ -31,9 +31,11 @@ from gptqmodel.quantization.config import (
 )
 from gptqmodel.quantization.rtn import RTN
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.model import find_modules
-from gptqmodel.utils.model import convert_gptq_v1_to_v2_format_module
-from gptqmodel.utils.model import convert_gptq_v2_to_v1_format_module
+from gptqmodel.utils.model import (
+    convert_gptq_v1_to_v2_format_module,
+    convert_gptq_v2_to_v1_format_module,
+    find_modules,
+)
 
 
 class _TinyMLP(nn.Module):

@@ -32,6 +32,7 @@ from gptqmodel.adapter.adapter import Lora  # noqa: E402
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
+
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 

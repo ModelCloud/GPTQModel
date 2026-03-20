@@ -8,8 +8,8 @@
 import torch
 import torch.nn as nn
 
-from .config import BaseQuantizeConfig, _normalize_quant_bits, resolve_quant_format
 from ..utils.logger import setup_logger
+from .config import BaseQuantizeConfig, _normalize_quant_bits, resolve_quant_format
 
 
 log = setup_logger()

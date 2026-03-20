@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from .config import FORMAT, METHOD, GGUFConfig, GGUFBits, QuantizeConfig, SmoothMAD
+from .config import FORMAT, METHOD, GGUFBits, GGUFConfig, QuantizeConfig, SmoothMAD
 
 
 @dataclass(frozen=True)

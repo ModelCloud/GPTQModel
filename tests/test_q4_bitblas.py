@@ -20,6 +20,7 @@ from transformers import AutoTokenizer  # noqa: E402
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear.bitblas import BitBLASQuantLinear  # noqa: E402
 
+
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 

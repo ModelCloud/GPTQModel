@@ -16,13 +16,10 @@ from ...quantization import FORMAT, METHOD
 from ...quantization.awq.utils.packing_utils import reverse_awq_order, unpack_awq
 from ...utils.backend import BACKEND
 from .bitblas import (
-    BITBLAS_AVAILABLE,
-    BITBLAS_INSTALL_HINT,
     BITBLAS_OPTIMIZE_FEATURES,
     BITBLAS_PROPAGATE_WEIGHTS,
     BitblasBaseQuantLinear,
     BitblasQuantizationConfig,
-    import_bitblas,
 )
 
 

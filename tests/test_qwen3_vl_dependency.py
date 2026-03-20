@@ -7,8 +7,8 @@ import sys
 import types
 
 import pytest
-from PIL import Image
 import torch
+from PIL import Image
 from torch import nn
 
 from gptqmodel.models.definitions import base_qwen3_vl

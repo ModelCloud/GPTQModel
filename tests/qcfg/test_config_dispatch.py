@@ -4,15 +4,15 @@
 import pytest
 
 from gptqmodel.quantization.config import (
+    FORMAT,
+    METHOD,
     AWQQuantizeConfig,
     BaseQuantizeConfig,
     BitsAndBytesConfig,
     FP8Config,
-    FORMAT,
-    GGUFConfig,
     GGUFBits,
+    GGUFConfig,
     GPTQQuantizeConfig,
-    METHOD,
     QuantizeConfig,
     RTNQuantizeConfig,
     SmoothMAD,
