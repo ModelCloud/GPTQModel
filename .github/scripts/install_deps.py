@@ -131,6 +131,6 @@ if __name__ == "__main__":
 
     specific_pkgs, common_pkgs = collect_pkgs(test_path, deps)
 
-    uv_install(sorted(specific_pkgs))
+    uv_install(specific_pkgs)
 
-    uv_install(sorted(common_pkgs))
+    uv_install(common_pkgs)
