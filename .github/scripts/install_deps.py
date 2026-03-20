@@ -87,7 +87,7 @@ def pip_install(pkgs):
     if not pkgs:
         return
 
-    print("Installing deps:")
+    print("--- Installing deps:")
     for p in pkgs:
         print("  -", p)
 
@@ -109,7 +109,7 @@ def uv_install(pkgs):
 
     pkgs = [normalize_pkg_spec(p) for p in pkgs]
 
-    print("Installing deps with uv:")
+    print("--- Installing deps with uv:")
     for p in pkgs:
         print("  -", p)
 
