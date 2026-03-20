@@ -11,7 +11,7 @@ import json
 import os
 import shutil
 from os.path import isfile, join
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import pcre as re
 import torch
@@ -75,6 +75,134 @@ PROCESS_LOG_FWD_TIME = "fwd_time"
 PROCESS_USED_MEMORY = "(v)ram"
 
 EORA_DEFAULT_FILE = "eora.safetensors"
+
+SUPPORTED_SPLIT_BY = {None, "layer"}
+
+
+def _parse_split_by(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("split_by must be a string or None.")
+
+    normalized = value.strip().lower()
+    if normalized in ("", "none"):
+        return None
+    if normalized not in SUPPORTED_SPLIT_BY:
+        raise ValueError(f"Unsupported split_by value: {value}. Supported values: None, 'layer'.")
+    return normalized
+
+
+def _cleanup_saved_weight_files(
+    save_dir: str,
+    expected_files: List[str],
+    model_base_name: str,
+    model_save_name: str,
+) -> None:
+    expected = set(expected_files)
+    shard_pattern = re.compile(rf"{re.escape(model_base_name)}-\d{{5}}-of-\d{{5}}\.safetensors")
+
+    for filename in os.listdir(save_dir):
+        full_filename = join(save_dir, filename)
+        if not isfile(full_filename):
+            continue
+        if filename == model_save_name and filename not in expected:
+            os.remove(full_filename)
+            continue
+        if filename == model_save_name + ".index.json" and filename not in expected:
+            os.remove(full_filename)
+            continue
+        if shard_pattern.fullmatch(filename) and filename not in expected:
+            os.remove(full_filename)
+
+
+def _resolve_layer_split_group(tensor_name: str, layer_prefixes: List[str]) -> str:
+    for prefix in sorted((prefix for prefix in layer_prefixes if prefix), key=len, reverse=True):
+        expected_prefix = f"{prefix}."
+        if not tensor_name.startswith(expected_prefix):
+            continue
+        remainder = tensor_name[len(expected_prefix):]
+        layer_idx, dot, _ = remainder.partition(".")
+        if layer_idx.isdigit() and dot:
+            return f"{prefix}.{layer_idx}"
+
+    if "." in tensor_name:
+        return tensor_name.rsplit(".", 1)[0]
+    return ""
+
+
+def _normalize_split_group_dir_name(group_name: str) -> str:
+    if group_name.startswith("model."):
+        return group_name[len("model."):]
+    return group_name
+
+
+def _stream_state_dict_to_layer_dirs(
+    state_dict: Dict[str, Any],
+    save_dir: str,
+    model_base_name: str,
+    model_save_name: str,
+    metadata: Dict[str, str],
+    max_shard_size: Optional[int],
+    layer_prefixes: List[str],
+) -> tuple[List[str], Dict[str, str], int]:
+    grouped_state_dict: Dict[str, Dict[str, Any]] = {}
+    for tensor_name, tensor_source in state_dict.items():
+        group_name = _resolve_layer_split_group(tensor_name, layer_prefixes)
+        group_dir_name = _normalize_split_group_dir_name(group_name)
+        group = grouped_state_dict.setdefault(group_dir_name, {})
+        group[tensor_name] = tensor_source
+
+    expected_files: List[str] = []
+    tensor_to_filename: Dict[str, str] = {}
+    total_size = 0
+    root_expected_files: List[str] = []
+    cleanup_specs = {(model_base_name, model_save_name)}
+    if model_base_name != "model" or model_save_name != "model.safetensors":
+        cleanup_specs.add(("model", "model.safetensors"))
+
+    for group_dir_name, group_state_dict in grouped_state_dict.items():
+        group_dir = save_dir if not group_dir_name else join(save_dir, group_dir_name)
+        os.makedirs(group_dir, exist_ok=True)
+
+        group_expected_files, group_tensor_to_filename, group_total_size = streaming_state_dict_to_shards(
+            group_state_dict,
+            save_dir=group_dir,
+            model_base_name=model_base_name,
+            single_file_name=model_save_name,
+            metadata=metadata,
+            max_shard_size=max_shard_size,
+        )
+        total_size += group_total_size
+
+        for cleanup_base_name, cleanup_save_name in cleanup_specs:
+            _cleanup_saved_weight_files(
+                save_dir=group_dir,
+                expected_files=group_expected_files,
+                model_base_name=cleanup_base_name,
+                model_save_name=cleanup_save_name,
+            )
+
+        if not group_dir_name:
+            root_expected_files.extend(group_expected_files)
+
+        for filename in group_expected_files:
+            relative_filename = filename if not group_dir_name else f"{group_dir_name}/{filename}"
+            expected_files.append(relative_filename)
+
+        for tensor_name, filename in group_tensor_to_filename.items():
+            relative_filename = filename if not group_dir_name else f"{group_dir_name}/{filename}"
+            tensor_to_filename[tensor_name] = relative_filename
+
+    for cleanup_base_name, cleanup_save_name in cleanup_specs:
+        _cleanup_saved_weight_files(
+            save_dir=save_dir,
+            expected_files=root_expected_files,
+            model_base_name=cleanup_base_name,
+            model_save_name=cleanup_save_name,
+        )
+
+    return expected_files, tensor_to_filename, total_size
 
 def ModelWriter(cls):
     def save_pretrained(
@@ -142,6 +270,7 @@ def ModelWriter(cls):
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
             eora_path: Optional[str] = None,
+            split_by: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""
         os.makedirs(save_dir, exist_ok=True)
@@ -376,30 +505,37 @@ def ModelWriter(cls):
         max_shard_size_bytes = _parse_max_shard_size(max_shard_size)
         metadata_dict = _normalize_metadata(safetensors_metadata)
         metadata_dict["format"] = "pt"
+        split_by_mode = _parse_split_by(split_by)
 
-        expected_files, tensor_to_filename, total_size_bytes = streaming_state_dict_to_shards(
-            state_dict,
-            save_dir=save_dir,
-            model_base_name=model_base_name,
-            single_file_name=model_save_name,
-            metadata=metadata_dict,
-            max_shard_size=max_shard_size_bytes,
-        )
-
-        pattern = re.compile(rf"{re.escape(model_base_name)}-\d{{5}}-of-\d{{5}}\.safetensors")
-        for filename in os.listdir(save_dir):
-            full_filename = join(save_dir, filename)
-            if not isfile(full_filename):
-                continue
-            if filename == model_save_name and filename not in expected_files:
-                os.remove(full_filename)
-                continue
-            if pattern.fullmatch(filename) and filename not in expected_files:
-                os.remove(full_filename)
+        if split_by_mode == "layer":
+            expected_files, tensor_to_filename, total_size_bytes = _stream_state_dict_to_layer_dirs(
+                state_dict,
+                save_dir=save_dir,
+                model_base_name="layer",
+                model_save_name="layer.safetensors",
+                metadata=metadata_dict,
+                max_shard_size=max_shard_size_bytes,
+                layer_prefixes=self.extract_layers_node(),
+            )
+        else:
+            expected_files, tensor_to_filename, total_size_bytes = streaming_state_dict_to_shards(
+                state_dict,
+                save_dir=save_dir,
+                model_base_name=model_base_name,
+                single_file_name=model_save_name,
+                metadata=metadata_dict,
+                max_shard_size=max_shard_size_bytes,
+            )
+            _cleanup_saved_weight_files(
+                save_dir=save_dir,
+                expected_files=expected_files,
+                model_base_name=model_base_name,
+                model_save_name=model_save_name,
+            )
 
         total_size_mb = total_size_bytes / (1024 * 1024)
 
-        if len(expected_files) > 1:
+        if split_by_mode == "layer" or len(expected_files) > 1:
             index = {
                 "metadata": {"total_size": total_size_bytes},
                 "weight_map": tensor_to_filename,

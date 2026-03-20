@@ -1184,6 +1184,7 @@ class BaseQModel(nn.Module):
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
             eora_path: Optional[str] = None,
+            split_by: Optional[str] = None,
             **kwargs,
     ):
         timer = getattr(self, "quant_region_timer", None)
@@ -1199,7 +1200,8 @@ class BaseQModel(nn.Module):
                     safetensors_metadata=safetensors_metadata,
                     max_shard_size=max_shard_size,
                     meta_quantizer=meta_quantizer,
-                    eora_path=eora_path)
+                    eora_path=eora_path,
+                    split_by=split_by)
 
                 # overwrite quant_override_files
                 for name, value in self.quant_override_files.items():
