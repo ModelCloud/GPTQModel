@@ -171,16 +171,15 @@ from .utils import BACKEND
 from .version import __version__
 import torch
 
-if os.environ.get("GPTQMODEL_DISABLE_BANNER") != "1":
-    setup_logger().info(
-        "\n%s",
-        get_startup_banner(
-            ASCII_LOGO,
-            gptqmodel_version=__version__,
-            transformers_version=TRANSFORMERS_VERSION,
-            torch_version=torch.__version__,
-        ),
-    )
+setup_logger().info(
+    "\n%s",
+    get_startup_banner(
+        ASCII_LOGO,
+        gptqmodel_version=__version__,
+        transformers_version=TRANSFORMERS_VERSION,
+        torch_version=torch.__version__,
+    ),
+)
 
 if ensure_modelscope_available():
     try:
