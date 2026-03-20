@@ -61,7 +61,7 @@ class ParoQuantProcessor(AWQProcessor):
 
         model.quantized = True
         model.quantize_config.method = METHOD.PAROQUANT
-        super(AWQProcessor, self).finalize(model=model, **kwargs)
+        super().finalize(model=model, **kwargs)
 
     @classmethod
     def name(cls) -> str:
