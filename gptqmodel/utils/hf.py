@@ -224,6 +224,21 @@ def _patch_transformers_remote_code_compat() -> None:
         # layers, but older remote code still imports the legacy symbol.
         cache_utils.SlidingWindowCache = cache_utils.StaticCache
 
+    import transformers.utils.generic as generic
+    if not hasattr(generic, "check_model_inputs"):
+        # transformers 5.x removed `transformers.utils.generic.check_model_inputs`, but
+        # older remote model files still import it during module import.
+        def check_model_inputs(func=None, **kwargs):
+            def wrapper(fn):
+                def inner(self, *args, **kwargs):
+                    return fn(self, *args, **kwargs)
+
+                return inner
+
+            return wrapper(func) if func else wrapper
+
+        generic.check_model_inputs = check_model_inputs
+
     if cache_utils is not None and not hasattr(cache_utils, "HybridCache") and hasattr(cache_utils, "StaticCache"):
         # transformers 5.x also collapsed the legacy HybridCache entrypoint
         # into StaticCache, which already instantiates hybrid/sliding layers
@@ -515,7 +530,7 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
 # model files instantiate their architectures from the config object.
 def _normalize_remote_code_config_compat(config: Any) -> None:
     _normalize_chatglm_remote_code_config_compat(config)
-    if config.model_type.lower() == "dream":
+    if config.model_type.lower() == "dream" or config.model_type == "brumby":
         import transformers.modeling_rope_utils as rope_utils
         # dream remote models expect "default"
         if "default" not in rope_utils.ROPE_INIT_FUNCTIONS:
@@ -524,6 +539,14 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
         # transformers 5.x expects rope_parameters["factor"] for linear RoPE
         if getattr(config, "rope_parameters", None):
             config.rope_parameters.setdefault("factor", 1.0)
+
+    # BrumbyConfig remote config may not define pad_token_id.
+    # Ensure the attribute exists to avoid AttributeError in transformers 5.x.
+    if config.model_type == "brumby":
+        rope_scaling = getattr(config, "rope_scaling", None)
+        print("rrrr", rope_scaling)
+
+        config.pad_token_id = getattr(config, "pad_token_id", None)
 
     # transformers 5.x normalizes RoPE config to `rope_type`, but older
     # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.

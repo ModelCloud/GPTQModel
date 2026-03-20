@@ -36,6 +36,19 @@ class BrumbyQModel(BaseQModel):
         },
     ]
 
+    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+        cls = get_class_from_dynamic_module(
+            "modeling_brumby.BrumbyRotaryEmbedding",
+            model_local_path,
+        )
+        if not hasattr(cls, "compute_default_rope_parameters"):
+            from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+            def compute_default_rope_parameters(self, config):
+                return ROPE_INIT_FUNCTIONS["linear"](config)
+
+            cls.compute_default_rope_parameters = compute_default_rope_parameters
+
     def after_model_load(self, model, load_quantized_model=False):
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
             model.config.use_cache = False

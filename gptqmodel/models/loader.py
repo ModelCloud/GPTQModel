@@ -297,7 +297,7 @@ def ModelLoader(cls):
         model_init_kwargs["_fast_init"] = cls.require_fast_init
         #model_init_kwargs["low_cpu_mem_usage"] = True
 
-        cls.before_model_load(cls, load_quantized_model=False)
+        cls.before_model_load(cls, model_local_path=model_local_path, load_quantized_model=False)
         from ..utils.hf import build_shell_model
 
         # XIELUActivation will use some weights when activation init, so can't use init_empty_weights
@@ -660,7 +660,7 @@ def ModelLoader(cls):
 
         # == step2: convert model to gptq-model (replace Linear with QuantLinear) == #
         with suspend_hf_weight_init():
-            cls.before_model_load(cls, load_quantized_model=True)
+            cls.before_model_load(cls, model_local_path=model_local_path, load_quantized_model=True)
 
             if config.architectures:
                 model_class = getattr(transformers, config.architectures[0], None)

@@ -1308,7 +1308,7 @@ class BaseQModel(nn.Module):
         if self.server is not None:
             self.server.wait_until_ready(timeout=timeout, check_interval=check_interval)
 
-    def before_model_load(self, load_quantized_model):
+    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
         pass
 
     def after_model_load(self, model, load_quantized_model):
