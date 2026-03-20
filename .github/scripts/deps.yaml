@@ -75,6 +75,7 @@ tests:
     - peft
     - http://10.0.13.31/files/evalplus-0.4.0.dev44-py3-none-any.whl
     - http://10.0.13.31/files/vllm-0.17.2rc1.dev52+g86b7e3c95.d20260318.cu131-cp313-cp313-linux_x86_64.whl
+    - flashinfer-python==0.6.5
 
   test_evalplus.py:
     - http://10.0.13.31/files/evalplus-0.4.0.dev44-py3-none-any.whl
