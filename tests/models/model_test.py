@@ -148,6 +148,7 @@ class ModelTest(unittest.TestCase):
     WEIGHT_ONLY = None
 
     SAVE_PATH = None  # default is temp folder
+    SPLIT_BY: Optional[str] = "layer"
 
     USE_FLASH_ATTN = True
 
@@ -1292,7 +1293,7 @@ class ModelTest(unittest.TestCase):
                     os.makedirs(path, exist_ok=True)
                     self.clear_directory(path)
 
-                    model.save(path)
+                    model.save(path, split_by=self.SPLIT_BY)
                     self._print_post_quant_artifacts(path)
 
                     reuse_candidates = {}

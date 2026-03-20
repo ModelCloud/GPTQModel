@@ -136,19 +136,23 @@ def test_save_quantized_split_by_layer_writes_per_layer_dirs(tmp_path, monkeypat
     save_dir = tmp_path / "save"
     writer.save_quantized(save_dir=str(save_dir), split_by="layer", max_shard_size=None)
 
-    assert (save_dir / "layers.0" / "layer.safetensors").exists()
-    assert (save_dir / "layers.1" / "layer.safetensors").exists()
-    assert (save_dir / "embed_tokens" / "layer.safetensors").exists()
-    assert (save_dir / "norm" / "layer.safetensors").exists()
-    assert (save_dir / "lm_head" / "layer.safetensors").exists()
+    assert (save_dir / "model.layers.0" / "layer.safetensors").exists()
+    assert (save_dir / "model.layers.1" / "layer.safetensors").exists()
+    assert (save_dir / "model.embed_tokens.safetensors").exists()
+    assert (save_dir / "model.norm.safetensors").exists()
+    assert (save_dir / "lm_head.safetensors").exists()
+    assert not (save_dir / "model.embed_tokens").exists()
+    assert not (save_dir / "model.norm").exists()
+    assert not (save_dir / "lm_head").exists()
     assert not (save_dir / "model.safetensors").exists()
 
     index = json.loads((save_dir / "model.safetensors.index.json").read_text())
 
-    assert index["weight_map"]["model.layers.0.weight"] == "layers.0/layer.safetensors"
-    assert index["weight_map"]["model.layers.1.bias"] == "layers.1/layer.safetensors"
-    assert index["weight_map"]["model.embed_tokens.weight"] == "embed_tokens/layer.safetensors"
-    assert index["weight_map"]["lm_head.weight"] == "lm_head/layer.safetensors"
+    assert index["weight_map"]["model.layers.0.weight"] == "model.layers.0/layer.safetensors"
+    assert index["weight_map"]["model.layers.1.bias"] == "model.layers.1/layer.safetensors"
+    assert index["weight_map"]["model.embed_tokens.weight"] == "model.embed_tokens.safetensors"
+    assert index["weight_map"]["model.norm.weight"] == "model.norm.safetensors"
+    assert index["weight_map"]["lm_head.weight"] == "lm_head.safetensors"
 
 
 def test_save_quantized_split_by_layer_still_shards_large_layer(tmp_path, monkeypatch):
@@ -158,7 +162,7 @@ def test_save_quantized_split_by_layer_still_shards_large_layer(tmp_path, monkey
     save_dir = tmp_path / "save"
     writer.save_quantized(save_dir=str(save_dir), split_by="layer", max_shard_size=64)
 
-    layer0_dir = save_dir / "layers.0"
+    layer0_dir = save_dir / "model.layers.0"
     layer0_shards = sorted(path.name for path in layer0_dir.glob("*.safetensors"))
     assert layer0_shards == [
         "layer-00001-of-00002.safetensors",
@@ -169,8 +173,8 @@ def test_save_quantized_split_by_layer_still_shards_large_layer(tmp_path, monkey
     weight_file = index["weight_map"]["model.layers.0.weight"]
     bias_file = index["weight_map"]["model.layers.0.bias"]
 
-    assert weight_file.startswith("layers.0/layer-")
-    assert bias_file.startswith("layers.0/layer-")
+    assert weight_file.startswith("model.layers.0/layer-")
+    assert bias_file.startswith("model.layers.0/layer-")
     assert weight_file != bias_file
 
 

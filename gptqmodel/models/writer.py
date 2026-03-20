@@ -51,6 +51,7 @@ from ..utils.model import (
     copy_py_files,
     find_modules,
     get_model_files_size,
+    get_module_by_name,
     get_state_dict_for_save,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
@@ -116,7 +117,7 @@ def _cleanup_saved_weight_files(
             os.remove(full_filename)
 
 
-def _resolve_layer_split_group(tensor_name: str, layer_prefixes: List[str]) -> str:
+def _resolve_layer_split_group(tensor_name: str, layer_prefixes: List[str]) -> tuple[str, bool]:
     for prefix in sorted((prefix for prefix in layer_prefixes if prefix), key=len, reverse=True):
         expected_prefix = f"{prefix}."
         if not tensor_name.startswith(expected_prefix):
@@ -124,17 +125,44 @@ def _resolve_layer_split_group(tensor_name: str, layer_prefixes: List[str]) -> s
         remainder = tensor_name[len(expected_prefix):]
         layer_idx, dot, _ = remainder.partition(".")
         if layer_idx.isdigit() and dot:
-            return f"{prefix}.{layer_idx}"
+            return f"{prefix}.{layer_idx}", True
 
     if "." in tensor_name:
-        return tensor_name.rsplit(".", 1)[0]
-    return ""
+        return tensor_name.rsplit(".", 1)[0], False
+    return "", False
 
 
-def _normalize_split_group_dir_name(group_name: str) -> str:
-    if group_name.startswith("model."):
-        return group_name[len("model."):]
-    return group_name
+def _module_is_leaf(model, module_name: str) -> bool:
+    if not module_name:
+        return False
+    try:
+        module = get_module_by_name(model, module_name)
+    except Exception:
+        return False
+    return not any(True for _ in module.named_children())
+
+
+def _cleanup_legacy_leaf_group_dir(save_dir: str, group_name: str) -> None:
+    legacy_dir = join(save_dir, group_name)
+    if not os.path.isdir(legacy_dir):
+        return
+
+    for cleanup_base_name, cleanup_save_name in {
+        ("layer", "layer.safetensors"),
+        ("model", "model.safetensors"),
+    }:
+        _cleanup_saved_weight_files(
+            save_dir=legacy_dir,
+            expected_files=[],
+            model_base_name=cleanup_base_name,
+            model_save_name=cleanup_save_name,
+        )
+
+    try:
+        if not os.listdir(legacy_dir):
+            os.rmdir(legacy_dir)
+    except OSError:
+        pass
 
 
 def _stream_state_dict_to_layer_dirs(
@@ -145,13 +173,15 @@ def _stream_state_dict_to_layer_dirs(
     metadata: Dict[str, str],
     max_shard_size: Optional[int],
     layer_prefixes: List[str],
+    model,
 ) -> tuple[List[str], Dict[str, str], int]:
     grouped_state_dict: Dict[str, Dict[str, Any]] = {}
+    layer_groups: Dict[str, bool] = {}
     for tensor_name, tensor_source in state_dict.items():
-        group_name = _resolve_layer_split_group(tensor_name, layer_prefixes)
-        group_dir_name = _normalize_split_group_dir_name(group_name)
-        group = grouped_state_dict.setdefault(group_dir_name, {})
+        group_name, is_layer_group = _resolve_layer_split_group(tensor_name, layer_prefixes)
+        group = grouped_state_dict.setdefault(group_name, {})
         group[tensor_name] = tensor_source
+        layer_groups[group_name] = is_layer_group
 
     expected_files: List[str] = []
     tensor_to_filename: Dict[str, str] = {}
@@ -162,20 +192,41 @@ def _stream_state_dict_to_layer_dirs(
         cleanup_specs.add(("model", "model.safetensors"))
 
     for group_dir_name, group_state_dict in grouped_state_dict.items():
-        group_dir = save_dir if not group_dir_name else join(save_dir, group_dir_name)
+        is_layer_group = layer_groups.get(group_dir_name, False)
+        is_leaf_group = (not is_layer_group) and _module_is_leaf(model, group_dir_name)
+
+        if is_layer_group:
+            group_dir = join(save_dir, group_dir_name)
+            group_model_base_name = model_base_name
+            group_model_save_name = model_save_name
+            relative_prefix = f"{group_dir_name}/"
+            group_cleanup_specs = cleanup_specs
+        elif is_leaf_group and group_dir_name:
+            group_dir = save_dir
+            group_model_base_name = group_dir_name
+            group_model_save_name = f"{group_dir_name}.safetensors"
+            relative_prefix = ""
+            group_cleanup_specs = {(group_model_base_name, group_model_save_name)}
+        else:
+            group_dir = save_dir if not group_dir_name else join(save_dir, group_dir_name)
+            group_model_base_name = model_base_name
+            group_model_save_name = model_save_name
+            relative_prefix = "" if not group_dir_name else f"{group_dir_name}/"
+            group_cleanup_specs = cleanup_specs
+
         os.makedirs(group_dir, exist_ok=True)
 
         group_expected_files, group_tensor_to_filename, group_total_size = streaming_state_dict_to_shards(
             group_state_dict,
             save_dir=group_dir,
-            model_base_name=model_base_name,
-            single_file_name=model_save_name,
+            model_base_name=group_model_base_name,
+            single_file_name=group_model_save_name,
             metadata=metadata,
             max_shard_size=max_shard_size,
         )
         total_size += group_total_size
 
-        for cleanup_base_name, cleanup_save_name in cleanup_specs:
+        for cleanup_base_name, cleanup_save_name in group_cleanup_specs:
             _cleanup_saved_weight_files(
                 save_dir=group_dir,
                 expected_files=group_expected_files,
@@ -183,15 +234,25 @@ def _stream_state_dict_to_layer_dirs(
                 model_save_name=cleanup_save_name,
             )
 
-        if not group_dir_name:
+        if is_leaf_group and group_dir_name:
+            _cleanup_legacy_leaf_group_dir(save_dir=save_dir, group_name=group_dir_name)
+        elif group_dir_name:
+            _cleanup_saved_weight_files(
+                save_dir=save_dir,
+                expected_files=[],
+                model_base_name=group_dir_name,
+                model_save_name=f"{group_dir_name}.safetensors",
+            )
+
+        if not group_dir_name and not is_leaf_group:
             root_expected_files.extend(group_expected_files)
 
         for filename in group_expected_files:
-            relative_filename = filename if not group_dir_name else f"{group_dir_name}/{filename}"
+            relative_filename = f"{relative_prefix}{filename}" if relative_prefix else filename
             expected_files.append(relative_filename)
 
         for tensor_name, filename in group_tensor_to_filename.items():
-            relative_filename = filename if not group_dir_name else f"{group_dir_name}/{filename}"
+            relative_filename = f"{relative_prefix}{filename}" if relative_prefix else filename
             tensor_to_filename[tensor_name] = relative_filename
 
     for cleanup_base_name, cleanup_save_name in cleanup_specs:
@@ -516,6 +577,7 @@ def ModelWriter(cls):
                 metadata=metadata_dict,
                 max_shard_size=max_shard_size_bytes,
                 layer_prefixes=self.extract_layers_node(),
+                model=self.model,
             )
         else:
             expected_files, tensor_to_filename, total_size_bytes = streaming_state_dict_to_shards(
