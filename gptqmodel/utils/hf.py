@@ -515,6 +515,15 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
 # model files instantiate their architectures from the config object.
 def _normalize_remote_code_config_compat(config: Any) -> None:
     _normalize_chatglm_remote_code_config_compat(config)
+    if config.model_type.lower() == "dream":
+        import transformers.modeling_rope_utils as rope_utils
+        # dream remote models expect "default"
+        if "default" not in rope_utils.ROPE_INIT_FUNCTIONS:
+            rope_utils.ROPE_INIT_FUNCTIONS["default"] = rope_utils.ROPE_INIT_FUNCTIONS["linear"]
+
+        # transformers 5.x expects rope_parameters["factor"] for linear RoPE
+        if getattr(config, "rope_parameters", None):
+            config.rope_parameters.setdefault("factor", 1.0)
 
     # transformers 5.x normalizes RoPE config to `rope_type`, but older
     # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.
