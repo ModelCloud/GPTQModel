@@ -20,7 +20,6 @@ import torch
 
 from .pause_resume import _restore_terminal_settings_on_exit
 
-
 try:
     from device_smi import Device  # type: ignore
 except Exception:  # pragma: no cover - defensive: optional dependency may be unavailable
@@ -397,11 +396,6 @@ class _DeviceWorker:
         """
         self._apply_cpu_affinity()
         _activate_thread_device(self.device)
-        try:
-            self._run_warmup()
-        except BaseException as exc:
-            self._abort_process(exc)
-            return
         while not self._stop.is_set():
             is_task, fn, args, kwargs, fut = self._q.get()
             try:
@@ -409,6 +403,12 @@ class _DeviceWorker:
                     if DEBUG_ON: log.debug(f"{self.name}: received sentinel; exiting")
                     break
                 if DEBUG_ON: log.debug(f"{self.name}: task begin; qsize={self._q.qsize()}")
+
+                try:
+                    self._run_warmup()
+                except BaseException as exc:
+                    self._abort_process(exc)
+                    return
 
                 event = kwargs.pop("cuda_event", None)
                 override_inference = _pop_public_kwarg(
