@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
+
 from .backend import BACKEND
 from .logger import setup_logger
 from .python import gte_python_3_13_3, gte_python_3_14, has_gil_control, has_gil_disabled, log_gil_requirements_for
 from .threads import AsyncManager, SerialWorker
 from .vram import get_vram
-
 
 log = setup_logger()
 
@@ -16,7 +17,9 @@ ASYNC_BG_QUEUE = AsyncManager(threads=4)
 SERIAL_BG_QUEUE = SerialWorker()
 
 # TODO: datasets is not compatible with free threading
-if has_gil_disabled():
+if os.environ.get("GPTQMODEL_DISABLE_GIL_WARNING") == "1":
+    pass
+elif has_gil_disabled():
     log.info("Python GIL is disabled and GPTQModel will auto enable multi-gpu quant acceleration for MoE models plus multi-cpu accelerated packing.")
     from .perplexity import Perplexity
 else:
