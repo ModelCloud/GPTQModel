@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# ParoQuant runtime implementation adapted from the ParoQuant paper and public
+# project:
+# https://arxiv.org/html/2511.10645v2
+# https://github.com/z-lab/paroquant
+
+"""ParoQuant CUDA-backed quantized linear layer."""
 
 from __future__ import annotations
 
@@ -19,9 +26,12 @@ from .torch_awq import AwqTorchQuantLinear
 
 
 awq_ext, awq_import_error = try_import("gptqmodel_awq_kernels")
+# Optional AWQ GEMM extension reused after ParoQuant rotates the activations.
 
 
 class ParoQuantQuantLinear(AwqTorchQuantLinear):
+    """Run ParoQuant inference by rotating inputs and reusing AWQ packed GEMM."""
+
     SUPPORTS_BACKENDS = [BACKEND.PAROQUANT_CUDA]
     SUPPORTS_METHODS = [METHOD.PAROQUANT]
     SUPPORTS_FORMATS = {FORMAT.PAROQUANT: 55}
@@ -60,6 +70,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         fp32_accum: bool = FP32_ACCUM,
         **kwargs,
     ):
+        """Initialize AWQ buffers plus the extra ParoQuant rotation state."""
         self.krot = int(krot)
         if self.krot <= 0:
             raise ValueError(f"ParoQuantQuantLinear: `krot` must be positive, got {krot}.")
@@ -83,6 +94,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         self._rotation_identity = True
 
     def _register_rotation_buffers(self) -> None:
+        """Allocate the per-layer buffers that encode runtime rotations."""
         theta = torch.zeros((self.krot, self.in_features // 2), dtype=torch.float16)
         pairs = torch.zeros((self.krot, self.in_features), dtype=torch.int16)
         channel_scales = torch.ones((1, self.in_features), dtype=torch.float16)
@@ -103,14 +115,17 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
             self.channel_scales = channel_scales
 
     def post_init(self):
+        """Refresh cached runtime state after weights or rotation buffers change."""
         super().post_init()
         self._rotation_identity = is_identity_rotation(self.theta, self.channel_scales)
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        """ParoQuant relies on AWQ validation and needs no extra one-time checks here."""
         return True, None
 
     def extra_repr(self) -> str:
+        """Expose ParoQuant-specific fields in `repr(module)` for debugging."""
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
             f"bias={self.bias is not None}, bits={self.bits}, group_size={self.group_size}, "
@@ -118,6 +133,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         )
 
     def _rotate_inputs(self, x_flat: torch.Tensor) -> torch.Tensor:
+        """Apply the learned input transform before quantized matmul."""
         if self._rotation_identity:
             return x_flat
         return apply_paroquant_rotation(
@@ -129,6 +145,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         )
 
     def _forward_dense(self, x_flat: torch.Tensor) -> torch.Tensor:
+        """Fallback reference path: dequantize AWQ weights and run dense matmul."""
         weight = dequantize_gemm(
             qweight=self.qweight,
             qzeros=self.qzeros,
@@ -145,6 +162,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         return out
 
     def _forward_cuda_awq_kernel(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
+        """Fast path that feeds rotated activations into the AWQ CUDA GEMM kernel."""
         if awq_ext is None or x_flat.device.type != "cuda":
             return None
 
@@ -164,6 +182,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         return out
 
     def forward(self, x: torch.Tensor):
+        """Rotate inputs, run quantized matmul, then apply adapters in input space."""
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
         rotated = self._rotate_inputs(x_flat)

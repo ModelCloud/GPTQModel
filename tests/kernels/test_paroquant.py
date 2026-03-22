@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# ParoQuant kernel tests adapted from the ParoQuant paper and public project:
+# https://arxiv.org/html/2511.10645v2
+# https://github.com/z-lab/paroquant
+
+"""Kernel-focused tests for ParoQuant runtime behavior and backend parity."""
 
 import pytest
 import torch
@@ -15,6 +21,7 @@ from gptqmodel.utils.paroquant import apply_paroquant_rotation_reference, build_
 
 
 def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
+    """Pack unpacked integer weights into the AWQ bit layout used by the kernels."""
     pack_factor = 32 // bits
     order_map = [0, 2, 4, 6, 1, 3, 5, 7]
 
@@ -31,6 +38,7 @@ def _pack_awq_tensor(unpacked: torch.Tensor, bits: int) -> torch.Tensor:
 
 
 def _make_packed_buffers(bits: int, in_features: int, out_features: int, group_size: int):
+    """Build synthetic packed AWQ tensors for ParoQuant runtime tests."""
     groups = in_features // group_size
     int_weight = torch.randint(0, 2**bits, size=(in_features, out_features), dtype=torch.int32)
     zero_points = torch.randint(0, 2**bits, size=(groups, out_features), dtype=torch.int32)
@@ -59,7 +67,7 @@ def _upstream_transformers_contract_reference(
     group_size: int,
     out_features: int,
 ) -> torch.Tensor:
-    """Clean-room reference for upstream RotateQuantizedLinear.forward().
+    """Reference for upstream RotateQuantizedLinear.forward().
 
     Upstream ParoQuant applies per-projection rotation to the input and then
     feeds the rotated activations into the AWQ GEMM path. We reproduce that
@@ -88,6 +96,7 @@ def _upstream_transformers_contract_reference(
 
 
 def test_paroquant_identity_forward_matches_awq_torch():
+    """Guard that identity ParoQuant is behaviorally equivalent to plain AWQ."""
     bits = 4
     in_features = 128
     out_features = 64
@@ -143,6 +152,7 @@ def test_paroquant_identity_forward_matches_awq_torch():
 
 
 def test_paroquant_forward_matches_explicit_rotated_reference():
+    """Guard the dense reference contract for non-identity ParoQuant rotations."""
     bits = 4
     in_features = 128
     out_features = 64
@@ -201,6 +211,12 @@ def test_paroquant_forward_matches_explicit_rotated_reference():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant kernel accuracy test")
 def test_paroquant_cuda_matches_upstream_transformers_contract():
+    """Compare the internal CUDA kernel path to an upstream-style contract.
+
+    The official implementation rotates activations and then runs an AWQ-style
+    packed matmul. This test reproduces that contract without importing upstream
+    code and checks our fused CUDA path stays within a bounded numerical error.
+    """
     bits = 4
     in_features = 128
     out_features = 128
@@ -279,6 +295,7 @@ def test_paroquant_cuda_matches_upstream_transformers_contract():
 
 
 def test_paroquant_backend_selection():
+    """Guard user-facing backend selection for the default CUDA runtime."""
     qlinear_cls = select_quant_linear(
         bits=4,
         group_size=128,
@@ -294,6 +311,7 @@ def test_paroquant_backend_selection():
 
 
 def test_paroquant_triton_backend_mapping():
+    """Guard registry lookup for the Triton ParoQuant runtime class."""
     assert (
         get_kernel_for_backend(BACKEND.PAROQUANT_TRITON, METHOD.PAROQUANT, FORMAT.PAROQUANT)
         is ParoQuantTritonQuantLinear
@@ -302,6 +320,7 @@ def test_paroquant_triton_backend_mapping():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for ParoQuant Triton kernel parity test")
 def test_paroquant_triton_matches_existing_cuda_kernel():
+    """Guard Triton runtime accuracy against the established CUDA implementation."""
     pytest.importorskip("triton")
 
     bits = 4

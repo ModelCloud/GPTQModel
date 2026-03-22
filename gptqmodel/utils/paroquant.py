@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# ParoQuant rotation helpers adapted from the ParoQuant paper and public
+# project:
+# https://arxiv.org/html/2511.10645v2
+# https://github.com/z-lab/paroquant
+
+"""Utility helpers for ParoQuant rotations and extension loading."""
 
 from __future__ import annotations
 
@@ -21,6 +28,7 @@ _SUPPORTED_ROTATION_KERNEL_DTYPES = {
 
 
 def _normalize_group_size(group_size: int, in_features: int) -> int:
+    """Validate and normalize a ParoQuant group size."""
     normalized = in_features if group_size == -1 else int(group_size)
     if normalized <= 0:
         raise ValueError(f"ParoQuant: invalid group_size `{group_size}` for in_features={in_features}.")
@@ -41,6 +49,7 @@ def build_identity_rotation_buffers(
     device: Optional[torch.device | str] = None,
     dtype: torch.dtype = torch.float16,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build the identity rotation buffers used as the default runtime state."""
     normalized_group_size = _normalize_group_size(group_size, in_features)
     if krot <= 0:
         raise ValueError(f"ParoQuant: `krot` must be positive, got {krot}.")
@@ -65,6 +74,7 @@ def build_identity_rotation_buffers(
 
 
 def is_identity_rotation(theta: torch.Tensor, channel_scales: Optional[torch.Tensor]) -> bool:
+    """Check whether a ParoQuant rotation reduces to a no-op."""
     if theta is None:
         return True
     if torch.count_nonzero(theta).item() != 0:
@@ -81,6 +91,7 @@ def apply_paroquant_rotation_reference(
     scales: Optional[torch.Tensor] = None,
     group_size: int = 128,
 ) -> torch.Tensor:
+    """Pure PyTorch reference implementation of the ParoQuant input rotation."""
     orig_shape = x.shape
     if x.dim() < 2:
         raise ValueError(f"ParoQuant rotation expects rank >= 2, got shape {tuple(orig_shape)}.")
@@ -120,6 +131,7 @@ def apply_paroquant_rotation_reference(
 
 
 def _rotation_sources() -> list[str]:
+    """Return the native extension sources for the fused CUDA rotation op."""
     root = Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "paroquant"
     return [
         str(root / "pybind.cpp"),
@@ -129,6 +141,7 @@ def _rotation_sources() -> list[str]:
 
 @lru_cache(maxsize=1)
 def _load_rotation_extension() -> bool:
+    """JIT-build and load the optional fused CUDA rotation extension once."""
     if not torch.cuda.is_available():
         return False
 
@@ -173,6 +186,7 @@ def apply_paroquant_rotation(
     scales: Optional[torch.Tensor] = None,
     group_size: int = 128,
 ) -> torch.Tensor:
+    """Apply the fused rotation when available, else fall back to the reference path."""
     if x.device.type == "cuda":
         kernel_ready = (
             x.dtype in _SUPPORTED_ROTATION_KERNEL_DTYPES

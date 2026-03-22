@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# ParoQuant Triton runtime implementation adapted from the ParoQuant paper and
+# public project:
+# https://arxiv.org/html/2511.10645v2
+# https://github.com/z-lab/paroquant
+
+"""ParoQuant Triton-backed quantized linear layer."""
 
 from __future__ import annotations
 
@@ -22,6 +29,8 @@ from .paroquant import ParoQuantQuantLinear
 
 
 class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
+    """Use Triton fused kernels for ParoQuant prefill/decode execution."""
+
     SUPPORTS_BACKENDS = [BACKEND.PAROQUANT_TRITON]
     SUPPORTS_METHODS = ParoQuantQuantLinear.SUPPORTS_METHODS
     SUPPORTS_FORMATS = {FORMAT.PAROQUANT: 0}
@@ -48,6 +57,7 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        """Validate the Triton and CUDA runtime prerequisites once per process."""
         from packaging import version
         from triton import __version__ as triton_version
 
@@ -65,6 +75,7 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
         return True, None
 
     def __init__(self, *args, **kwargs):
+        """Initialize Triton autotune settings and the per-shape plan cache."""
         kwargs.setdefault("backend", BACKEND.PAROQUANT_TRITON)
         super().__init__(*args, **kwargs)
         self.paroquant_triton_autotune_enabled = self.PAROQUANT_TRITON_AUTOTUNE
@@ -75,20 +86,24 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
         self._plan_cache: dict[str, str] = {}
 
     def post_init(self):
+        """Normalize scale dtype before deferring to the shared ParoQuant setup."""
         if self.scales is not None:
             self.scales = self.scales.to(dtype=torch.float16)
         super().post_init()
 
     def clear_autotune(self):
+        """Drop cached plan decisions after major module state changes."""
         super().clear_autotune()
         self._plan_cache = {}
 
     @staticmethod
     def _sync_benchmark_device(device: torch.device) -> None:
+        """Synchronize CUDA timing measurements used by autotune."""
         if device.type == "cuda":
             torch.cuda.synchronize(device=device)
 
     def _classify_forward_kind(self, x: torch.Tensor, x_flat: torch.Tensor) -> str:
+        """Classify the workload as decode or prefill for plan selection."""
         if x.dim() >= 3 and x.shape[-2] == 1 and x_flat.shape[0] <= self.paroquant_triton_decode_max_rows:
             return "decode"
         if x_flat.shape[0] <= self.paroquant_triton_decode_max_rows:
@@ -96,6 +111,7 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
         return "prefill"
 
     def _forward_triton_dense(self, rotated: torch.Tensor) -> torch.Tensor:
+        """Dense fallback used when fused Triton plans are unavailable or slower."""
         weight = paroquant_dequantize_triton(self.qweight, self.scales, self.qzeros)
         if weight.dtype != rotated.dtype or weight.device != rotated.device:
             weight = weight.to(device=rotated.device, dtype=rotated.dtype)
@@ -106,18 +122,21 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
         return out
 
     def _forward_triton_decode(self, rotated: torch.Tensor) -> torch.Tensor:
+        """Run the fused Triton kernel optimized for small-row decode workloads."""
         out = paroquant_gemm_triton_decode(rotated, self.qweight, self.scales, self.qzeros)
         if self.bias is not None:
             out = out + self.bias
         return out
 
     def _forward_triton_prefill(self, rotated: torch.Tensor) -> torch.Tensor:
+        """Run the fused Triton kernel optimized for larger prefill batches."""
         out = paroquant_gemm_triton_prefill(rotated, self.qweight, self.scales, self.qzeros)
         if self.bias is not None:
             out = out + self.bias
         return out
 
     def _run_plan(self, plan: str, rotated: torch.Tensor) -> torch.Tensor:
+        """Dispatch one named execution plan."""
         if plan == "dense":
             return self._forward_triton_dense(rotated)
         if plan == "decode_fused":
@@ -127,11 +146,13 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
         raise ValueError(f"Unknown ParoQuant Triton plan: {plan}")
 
     def _candidate_plans(self, kind: str) -> list[str]:
+        """Return the execution plans worth benchmarking for a workload class."""
         if kind == "decode":
             return ["decode_fused", "dense", "prefill_fused"]
         return ["prefill_fused", "dense", "decode_fused"]
 
     def _benchmark_plan(self, plan: str, rotated: torch.Tensor) -> float:
+        """Measure mean latency for one candidate plan."""
         with torch.inference_mode():
             for _ in range(self.paroquant_triton_autotune_warmup):
                 self._run_plan(plan, rotated)
@@ -145,6 +166,7 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
         return (time.perf_counter() - start) / self.paroquant_triton_autotune_iters
 
     def _select_plan(self, kind: str, rotated: torch.Tensor) -> str:
+        """Pick the best plan, bounded by a bias toward the default fused path."""
         default_plan = "decode_fused" if kind == "decode" else "prefill_fused"
         if self.training or not self.paroquant_triton_autotune_enabled:
             return default_plan
@@ -168,6 +190,7 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
         return best_plan
 
     def forward(self, x: torch.Tensor):
+        """Rotate inputs, pick a Triton plan, and preserve adapter semantics."""
         original_shape = x.shape[:-1] + (self.out_features,)
         adapter_input = x.reshape(-1, x.shape[-1])
         input_dtype = x.dtype

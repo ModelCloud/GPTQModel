@@ -1,5 +1,19 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# ParoQuant processor implementation adapted from the ParoQuant paper and public
+# project:
+# https://arxiv.org/html/2511.10645v2
+# https://github.com/z-lab/paroquant
+
+"""ParoQuant looper integration.
+
+This processor keeps ParoQuant separate from the AWQ lifecycle:
+1. capture calibration activations for each module
+2. run ParoQuant's transformed-domain optimization per layer
+3. export packed runtime tensors plus learned rotation state
+4. replace the float modules with ParoQuant runtime kernels
+"""
 
 from __future__ import annotations
 
@@ -38,6 +52,8 @@ log = setup_logger()
 
 @dataclass
 class _ParoQuantLayerState:
+    """Per-layer bookkeeping for activation capture and deferred quantization."""
+
     modules: Dict[str, NamedModule] = field(default_factory=dict)
     subset_total: Optional[int] = None
     processed_subsets: Set[int] = field(default_factory=set)
@@ -64,6 +80,7 @@ class ParoQuantProcessor(LoopProcessor):
         calculate_w_wq_diff: bool = False,
         calibration_concat_separator: Optional[str] = None,
     ):
+        """Configure a looper that captures activations and quantizes after replay."""
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
@@ -92,15 +109,18 @@ class ParoQuantProcessor(LoopProcessor):
         self.fallback = qcfg.fallback
 
     def set_calibration_dataset(self, calibration_dataset):
+        """Reject runtime dataset swaps because capture state is tied to the processor."""
         raise NotImplementedError("ParoQuantProcessor's calibration_dataset cannot be modified")
 
     def _select_qlinear_kernel_for_format(self, format_value: FORMAT):
+        """Resolve the only supported runtime kernel class for ParoQuant."""
         fmt = FORMAT(format_value) if not isinstance(format_value, FORMAT) else format_value
         if fmt != FORMAT.PAROQUANT:
             raise ValueError(f"METHOD.PAROQUANT does not support this FORMAT: {format_value}")
         return ParoQuantQuantLinear
 
     def _resolve_qlinear_kernel(self, module_name: Optional[str] = None):
+        """Resolve per-module dynamic overrides while enforcing ParoQuant format."""
         format_override = self.qcfg.dynamic_get(module_name, "format", None) if module_name else None
         target_format = resolve_quant_format(format_override or self.qcfg.format, self.qcfg.method)
         if target_format != FORMAT.PAROQUANT:
@@ -108,6 +128,7 @@ class ParoQuantProcessor(LoopProcessor):
         return ParoQuantQuantLinear
 
     def _get_layer_state(self, layer_index: int) -> _ParoQuantLayerState:
+        """Fetch or create the shared state bucket for one transformer layer."""
         with self._layer_states_lock:
             state = self._layer_states.get(layer_index)
             if state is None:
@@ -116,6 +137,7 @@ class ParoQuantProcessor(LoopProcessor):
         return state
 
     def _record_input_feature(self, module_name: str, feature: torch.Tensor) -> None:
+        """Store one batch of calibration activations for a named module."""
         if feature.dim() <= 2:
             feature = feature.unsqueeze(0)
 
@@ -132,6 +154,7 @@ class ParoQuantProcessor(LoopProcessor):
             entry.setdefault("inputs", []).append(feature)
 
     def _layer_input_features(self, state: _ParoQuantLayerState) -> Dict[str, torch.Tensor]:
+        """Materialize concatenated calibration features for all modules in a layer."""
         features: Dict[str, torch.Tensor] = {}
         for name in list(state.modules):
             entry = self.tasks.get(name) or {}
@@ -147,6 +170,7 @@ class ParoQuantProcessor(LoopProcessor):
         return features
 
     def _module_quant_params(self, module_name: str) -> tuple[int, int, bool]:
+        """Read effective bit-width, group size, and symmetry for one module."""
         bits = int(self.qcfg.dynamic_get(module_name, "bits", self.qcfg.runtime_bits))
         group_size = int(self.qcfg.dynamic_get(module_name, "group_size", self.qcfg.group_size))
         sym = bool(self.qcfg.dynamic_get(module_name, "sym", self.qcfg.sym))
@@ -154,6 +178,7 @@ class ParoQuantProcessor(LoopProcessor):
 
     @staticmethod
     def _module_weight_matrix(module: NamedModule) -> torch.Tensor:
+        """Return the 2D weight matrix expected by the ParoQuant optimizer."""
         weight = module.weight.data
         if weight.dim() != 2:
             raise ValueError(
@@ -166,6 +191,7 @@ class ParoQuantProcessor(LoopProcessor):
         module: NamedModule,
         inputs: torch.Tensor,
     ) -> tuple[float, float]:
+        """Optimize one module and stash its packed runtime tensors in `module.state`."""
         bits, group_size, sym = self._module_quant_params(module.full_name)
         weight = self._module_weight_matrix(module)
         bias = module.bias.data if getattr(module, "bias", None) is not None else None
@@ -226,6 +252,7 @@ class ParoQuantProcessor(LoopProcessor):
         return result.train_loss, result.val_loss
 
     def _quantize_layer(self, layer_index: int, state: _ParoQuantLayerState) -> None:
+        """Quantize every captured module in a layer once all subsets are ready."""
         if state.quantized:
             return
 
@@ -272,6 +299,7 @@ class ParoQuantProcessor(LoopProcessor):
         state.subset_total = None
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
+        """Register a module for later activation capture and deferred quantization."""
         if self.qcfg.dynamic_get(layer_name=module.full_name) is False:
             return
 
@@ -289,9 +317,11 @@ class ParoQuantProcessor(LoopProcessor):
                 entry.setdefault("inputs", [])
 
     def is_skipped(self, module: NamedModule) -> bool:
+        """Report whether a module has been excluded from ParoQuant processing."""
         return self.tasks.get(module.name, False) is False
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        """Capture input activations during the calibration forward pass."""
         def hook(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             del module, out
             if not inp:
@@ -310,6 +340,7 @@ class ParoQuantProcessor(LoopProcessor):
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
     ):
+        """Mark subset progress and quantize once the whole layer is capture-complete."""
         del device, previous_subset
         layer_index = module.layer_index
         state = self._get_layer_state(layer_index)
@@ -334,9 +365,11 @@ class ParoQuantProcessor(LoopProcessor):
                 self._quantize_layer(layer_index, state)
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
+        """Pack one optimized float module into its ParoQuant runtime form."""
         self.pack_module(module, model=model)
 
     def pack_module(self, module: NamedModule, model: BaseQModel):
+        """Replace a float module with a packed ParoQuant quantized module."""
         module.stream_sync()
         with self.lock:
             module.state.pop("w_wq_diff", None)
@@ -413,11 +446,13 @@ class ParoQuantProcessor(LoopProcessor):
         qmodule.post_init()
 
     def finalize(self, model: BaseQModel, **kwargs):
+        """Mark the model as ParoQuant-quantized before shared finalization work."""
         model.quantized = True
         model.quantize_config.method = METHOD.PAROQUANT
         super().finalize(model=model, **kwargs)
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
+        """Require calibration data because ParoQuant always needs activation replay."""
         del processor_index
         if self.calibration_dataset is None:
             raise ValueError("ParoQuantProcessor's calibration_dataset must be provided.")
@@ -425,9 +460,11 @@ class ParoQuantProcessor(LoopProcessor):
 
     @classmethod
     def name(cls) -> str:
+        """Return the processor registry name."""
         return "paroquant"
 
     def has_captured_input_ids(self, name: str) -> bool:
+        """Report whether non-empty activation batches were captured for a module."""
         entry = self.tasks.get(name) or {}
         tensors: List[torch.Tensor] = entry.get("inputs", [])
         return tensors is not None and len(tensors) > 0 and all(t.numel() > 0 for t in tensors)

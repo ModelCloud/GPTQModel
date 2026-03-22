@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# ParoQuant test coverage adapted from the ParoQuant paper and public project:
+# https://arxiv.org/html/2511.10645v2
+# https://github.com/z-lab/paroquant
+
+"""Unit tests for ParoQuant config, optimizer, and lifecycle invariants."""
 
 import torch
 import torch.nn.functional as F
@@ -24,6 +30,7 @@ from gptqmodel.utils.paroquant import (
 
 
 def test_paroquant_quantize_config_dispatches_constructor():
+    """Guard that ParoQuant config fields survive direct construction."""
     cfg = QuantizeConfig(
         quant_method=METHOD.PAROQUANT,
         format=FORMAT.PAROQUANT,
@@ -39,6 +46,7 @@ def test_paroquant_quantize_config_dispatches_constructor():
 
 
 def test_paroquant_quantize_config_from_external_payload_round_trips():
+    """Guard import/export of ParoQuant metadata from serialized payloads."""
     cfg = QuantizeConfig.from_quant_config(
         {
             "quant_method": "paroquant",
@@ -76,6 +84,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
 
 
 def test_paroquant_kernel_mapping_uses_paroquant_backend():
+    """Guard backend dispatch so ParoQuant does not silently fall back to AWQ."""
     from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 
     assert (
@@ -85,6 +94,7 @@ def test_paroquant_kernel_mapping_uses_paroquant_backend():
 
 
 def test_paroquant_kernel_mapping_uses_paroquant_triton_backend():
+    """Guard Triton backend dispatch for ParoQuant-specific runtime modules."""
     from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonQuantLinear
 
     assert (
@@ -94,6 +104,7 @@ def test_paroquant_kernel_mapping_uses_paroquant_triton_backend():
 
 
 def test_paroquant_identity_rotation_buffers_preserve_input():
+    """Guard the identity buffer builder used by no-op and fallback paths."""
     x = torch.randn(3, 128, dtype=torch.float16)
     pairs, theta, channel_scales = build_identity_rotation_buffers(
         in_features=128,
@@ -114,10 +125,12 @@ def test_paroquant_identity_rotation_buffers_preserve_input():
 
 
 def test_paroquant_processor_is_not_awq_subclass():
+    """Guard the dedicated lifecycle split from AWQ requested by the user."""
     assert not issubclass(ParoQuantProcessor, AWQProcessor)
 
 
 def test_paroquant_quant_device_selection_forces_single_gpu():
+    """Guard against multi-GPU ParoQuant worker fan-out and sync hazards."""
     cuda_devices = [torch.device("cuda:0"), torch.device("cuda:1"), torch.device("cuda:2")]
     mixed_devices = [torch.device("cpu"), torch.device("cuda:3"), torch.device("cuda:4")]
 
@@ -127,6 +140,7 @@ def test_paroquant_quant_device_selection_forces_single_gpu():
 
 
 def test_paroquant_optimizer_improves_over_identity_quantization():
+    """Guard that learned rotations beat naive identity-domain quantization."""
     in_features = 128
     out_features = 12
     group_size = 128
@@ -193,6 +207,13 @@ def test_paroquant_optimizer_improves_over_identity_quantization():
 
 
 def test_paroquant_exported_runtime_state_matches_paper_contract():
+    """Guard that export tensors reproduce the pseudo-quantized optimization model.
+
+    This is the key paper-contract regression test. It checks that we optimize
+    in the transformed domain, inverse-map back to the input domain for replay,
+    and then export runtime tensors whose rotated-input execution matches the
+    pseudo-quantized layer exactly.
+    """
     in_features = 128
     out_features = 10
     group_size = 128

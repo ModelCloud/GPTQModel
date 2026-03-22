@@ -1,5 +1,19 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# ParoQuant optimization implementation adapted from the ParoQuant paper and
+# public project:
+# https://arxiv.org/html/2511.10645v2
+# https://github.com/z-lab/paroquant
+
+"""ParoQuant calibration-time optimization utilities.
+
+This module implements the paper's transformed-domain PTQ lifecycle in a
+direct way:
+1. learn channel scales and Givens-rotation angles on calibration activations
+2. initialize and optimize quantization parameters in the transformed domain
+3. export packed runtime tensors that reproduce the pseudo-quantized layer
+"""
 
 from __future__ import annotations
 
@@ -16,6 +30,7 @@ from ...utils.paroquant import build_identity_rotation_buffers
 
 
 def _round_ste(x: torch.Tensor) -> torch.Tensor:
+    """Apply a straight-through round so gradients flow through quantization."""
     return (x.round() - x).detach() + x
 
 
@@ -24,10 +39,12 @@ def _clamp_ste(
     min_value: float | int | None = None,
     max_value: float | int | None = None,
 ) -> torch.Tensor:
+    """Clamp with a straight-through estimator to stabilize learned qparams."""
     return (x.clamp(min_value, max_value) - x).detach() + x
 
 
 def _normalize_group_size(group_size: int, in_features: int) -> int:
+    """Validate and normalize a ParoQuant group size for a given hidden width."""
     normalized = in_features if group_size == -1 else int(group_size)
     if normalized <= 0:
         raise ValueError(f"ParoQuant optimization: invalid group_size `{group_size}` for in_features={in_features}.")
@@ -46,6 +63,7 @@ def _select_independent_pairs(
     num_rotations: int,
     num_pairs_each: int,
 ) -> list[list[tuple[int, int]]]:
+    """Choose non-overlapping channel pairs for each rotation step."""
     available = torch.ones(dim, dim, dtype=torch.bool)
     available.fill_diagonal_(False)
     rotations: list[list[tuple[int, int]]] = []
@@ -79,6 +97,7 @@ def _pad_rotation_group(
     *,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pad a sparse rotation schedule with dummy identity pairs."""
     half_group = group_size // 2
     pairs = torch.zeros((half_group, 2), dtype=torch.int16, device=device)
     mask = torch.zeros((half_group,), dtype=torch.bool, device=device)
@@ -125,6 +144,7 @@ def build_random_rotation_buffers(
     seed: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build randomized pair schedules and masks for ParoQuant angle learning."""
     normalized_group_size = _normalize_group_size(group_size, in_features)
     if krot <= 0:
         raise ValueError(f"ParoQuant optimization: `krot` must be positive, got {krot}.")
@@ -166,6 +186,7 @@ def build_random_rotation_buffers(
 
 
 def _sample_activation_rows(inputs: torch.Tensor, max_rows: int) -> torch.Tensor:
+    """Downsample calibration activations to a bounded replay set."""
     rows = inputs.reshape(-1, inputs.shape[-1])
     if rows.shape[0] <= max_rows:
         return rows
@@ -182,6 +203,7 @@ def _apply_rotation(
     scales: Optional[torch.Tensor],
     group_size: int,
 ) -> torch.Tensor:
+    """Apply the forward ParoQuant transform in the optimization domain."""
     if x.dim() != 2:
         raise ValueError(f"ParoQuant optimization expects a rank-2 tensor, got {tuple(x.shape)}.")
 
@@ -221,6 +243,7 @@ def _apply_inverse_rotation(
     *,
     group_size: int,
 ) -> torch.Tensor:
+    """Apply the inverse transform that maps export-domain weights back to input space."""
     if pairs.shape[0] == 0:
         return x
     return _apply_rotation(
@@ -233,6 +256,7 @@ def _apply_inverse_rotation(
 
 
 def _reshape_group_params(weight: torch.Tensor, group_size: int, values: torch.Tensor) -> torch.Tensor:
+    """Restore flat per-group quantizer values to the packed weight layout."""
     groups = weight.shape[1] // group_size
     return values.view(weight.shape[0], groups)
 
@@ -243,6 +267,7 @@ def _calc_affine_qparams(
     group_size: int,
     bits: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute affine quantizer parameters from transformed weights."""
     view = weight.reshape(-1, group_size)
     min_val = view.amin(dim=1, keepdim=True)
     max_val = view.amax(dim=1, keepdim=True)
@@ -253,6 +278,8 @@ def _calc_affine_qparams(
 
 
 class GroupLinearQuantizer(nn.Module):
+    """Learnable per-group quantizer matching ParoQuant's transformed-domain packing."""
+
     def __init__(
         self,
         weight: torch.Tensor,
@@ -261,6 +288,7 @@ class GroupLinearQuantizer(nn.Module):
         group_size: int,
         sym: bool,
     ) -> None:
+        """Initialize either symmetric or affine groupwise quantization parameters."""
         super().__init__()
         self.bits = int(bits)
         self.group_size = int(group_size)
@@ -278,6 +306,7 @@ class GroupLinearQuantizer(nn.Module):
             self.zero_point_float = nn.Parameter(zero_point_float)
 
     def forward(self, weight: torch.Tensor) -> torch.Tensor:
+        """Pseudo-quantize a transformed weight tensor with STE-enabled qparams."""
         return pseudo_quantize_dequant(
             weight,
             bits=self.bits,
@@ -289,12 +318,14 @@ class GroupLinearQuantizer(nn.Module):
         )
 
     def optim_params(self) -> list[nn.Parameter]:
+        """Return only the quantizer parameters that should receive optimizer updates."""
         params = [self.scale]
         if self.zero_point_float is not None:
             params.append(self.zero_point_float)
         return params
 
     def pack_params(self, weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert learned qparams into the runtime scale/zero-point tensors."""
         scales = _reshape_group_params(weight, self.group_size, self.scale.detach())
         if self.sym:
             zeros = torch.full_like(scales, 2 ** (self.bits - 1))
@@ -315,6 +346,7 @@ def pseudo_quantize_dequant(
     zero_point_float: Optional[torch.Tensor] = None,
     use_ste: bool,
 ) -> torch.Tensor:
+    """Reference pseudo-quantization path shared by optimization and export tests."""
     dtype = weight.dtype
     weight_view = weight.reshape(-1, group_size)
 
@@ -351,6 +383,8 @@ def pseudo_quantize_dequant(
 
 
 class _ParoQuantOptimLinear(nn.Module):
+    """Minimal layer wrapper used during ParoQuant calibration optimization."""
+
     def __init__(
         self,
         weight: torch.Tensor,
@@ -362,6 +396,7 @@ class _ParoQuantOptimLinear(nn.Module):
         pairs: torch.Tensor,
         theta_mask: torch.Tensor,
     ) -> None:
+        """Materialize a replayable linear layer in the original input domain."""
         super().__init__()
         self.bits = int(bits)
         self.group_size = int(group_size)
@@ -375,6 +410,7 @@ class _ParoQuantOptimLinear(nn.Module):
         self.quantizer: Optional[GroupLinearQuantizer] = None
 
     def transformed_weight(self) -> torch.Tensor:
+        """Project the learnable weight into ParoQuant's transformed domain."""
         scaled_weight = self.weight * self.channel_scales_opt.view(1, -1)
         return _apply_rotation(
             scaled_weight,
@@ -385,6 +421,7 @@ class _ParoQuantOptimLinear(nn.Module):
         )
 
     def quantized_transformed_weight(self) -> torch.Tensor:
+        """Pseudo-quantize the transformed weight using current learned qparams."""
         transformed = self.transformed_weight()
         if self.quantizer is None:
             return pseudo_quantize_dequant(
@@ -397,6 +434,7 @@ class _ParoQuantOptimLinear(nn.Module):
         return self.quantizer(transformed)
 
     def pseudo_weight(self) -> torch.Tensor:
+        """Map the transformed-domain quantized weight back to runtime input space."""
         quantized = self.quantized_transformed_weight()
         quantized = _apply_inverse_rotation(
             quantized,
@@ -408,13 +446,16 @@ class _ParoQuantOptimLinear(nn.Module):
         return quantized / channel_scales
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Replay calibration activations through the current pseudo-quantized layer."""
         return F.linear(x, self.pseudo_weight(), self.bias)
 
     def reset_masked_angles(self) -> None:
+        """Force dummy padded pairs to stay at zero angle during optimization."""
         with torch.no_grad():
             self.theta.masked_fill_(self.theta_mask, 0)
 
     def init_quantizer(self) -> None:
+        """Bootstrap the transformed-domain quantizer from the current rotated weight."""
         transformed = self.transformed_weight().detach()
         self.quantizer = GroupLinearQuantizer(
             transformed,
@@ -424,6 +465,7 @@ class _ParoQuantOptimLinear(nn.Module):
         )
 
     def export_pack_state(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Export runtime tensors that should match the pseudo-quantized layer exactly."""
         transformed = self.transformed_weight().detach()
         if self.quantizer is None:
             quantizer = GroupLinearQuantizer(
@@ -463,6 +505,8 @@ class _ParoQuantOptimLinear(nn.Module):
 
 @dataclass
 class ParoQuantOptimizationResult:
+    """All tensors and diagnostics produced by one ParoQuant layer optimization run."""
+
     pseudo_weight: torch.Tensor
     pack_weight: torch.Tensor
     q_scales: torch.Tensor
@@ -476,11 +520,13 @@ class ParoQuantOptimizationResult:
 
 
 def _chunk_rows(rows: torch.Tensor, batch_size: int) -> Iterable[torch.Tensor]:
+    """Yield contiguous mini-batches from flattened calibration activations."""
     for start in range(0, rows.shape[0], batch_size):
         yield rows[start:start + batch_size]
 
 
 def _evaluate_model(model: _ParoQuantOptimLinear, inputs: torch.Tensor, targets: torch.Tensor) -> float:
+    """Measure replay error for early stopping and stage selection."""
     if inputs.numel() == 0:
         return 0.0
     with torch.no_grad():
@@ -499,6 +545,7 @@ def _run_stage(
     epochs: int,
     batch_size: int,
 ) -> tuple[float, float]:
+    """Run one optimization stage with validation-based best-state selection."""
     normalized_groups = []
     for param_group in param_groups:
         params = [param for param in param_group.get("params", []) if param.requires_grad]
@@ -568,6 +615,7 @@ def _identity_result(
     sym: bool,
     krot: int,
 ) -> ParoQuantOptimizationResult:
+    """Return the no-optimization fallback used when calibration activations are missing."""
     del bias
     pairs, theta, channel_scales = build_identity_rotation_buffers(
         in_features=weight.shape[1],
@@ -626,6 +674,7 @@ def optimize_paroquant_linear(
     quantizer_lr: float,
     seed: int,
 ) -> ParoQuantOptimizationResult:
+    """Optimize one linear layer following the paper's two-stage PTQ schedule."""
     if weight.dim() != 2:
         raise ValueError(f"ParoQuant optimization expects rank-2 weights, got {tuple(weight.shape)}.")
 
