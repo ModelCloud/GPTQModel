@@ -173,7 +173,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
             out = self._forward_dense(rotated)
 
         if self.adapter:
-            out = self.adapter.apply(x=rotated, out=out)
+            out = self.adapter.apply(x=x_flat, out=out)
 
         return out.reshape(original_shape)
 

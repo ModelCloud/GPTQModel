@@ -30,6 +30,7 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.awq_processor import AWQProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
+from ..looper.paroquant_processor import ParoQuantProcessor
 from ..looper.qqq_processor import QQQProcessor
 from ..utils.device import get_device, get_device_new
 from ..utils.logger import log_time_block, setup_logger
@@ -201,9 +202,10 @@ def run_layer_stage(
                 # Process the layer in smaller subsets so attention groups or
                 # MoE experts can be quantized independently within a layer.
                 if DEBUG_ON and log.isEnabledFor(logging.DEBUG):
-                    if isinstance(processor, AWQProcessor):
+                    if isinstance(processor, (AWQProcessor, ParoQuantProcessor)):
                         log.debug(
-                            "StageLayer[awq]: layer=%s subset=%s/%s size=%s names=%s",
+                            "StageLayer[%s]: layer=%s subset=%s/%s size=%s names=%s",
+                            processor.name(),
                             layer_index,
                             subset_plan.subset_index + 1,
                             subset_plan.subset_total,
@@ -437,7 +439,7 @@ def run_layer_stage(
                             process.submodule_finalize(module, looper.gptq_model)
 
                         # Disk offload (lifecycle TODO note preserved)
-                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
+                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoQuantProcessor)):
                             quant_config = getattr(looper.gptq_model, "quantize_config", None)
                             if quant_config and getattr(quant_config, "offload_to_disk", False):
                                 offload_path = getattr(quant_config, "offload_to_disk_path", None)

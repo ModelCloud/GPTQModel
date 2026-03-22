@@ -35,7 +35,7 @@ from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
-from ..quantization.config import VramStrategy
+from ..quantization.config import METHOD, VramStrategy
 from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
@@ -56,6 +56,7 @@ from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_pr
 from .. import DEVICE_THREAD_POOL
 from .awq_processor import AWQProcessor
 from .forward_executor import ForwardExecutor
+from .paroquant_processor import ParoQuantProcessor
 from .qqq_processor import QQQProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
@@ -75,6 +76,24 @@ class FinalizeProgressInfo(NamedTuple):
     module_label: Optional[str]
     process_name: str
     layer_idx: Optional[int]
+
+
+def _restrict_quant_devices_for_method(method: Any, quant_devices: List[torch.device]) -> List[torch.device]:
+    """Apply method-specific device constraints for quantization workers."""
+
+    try:
+        normalized_method = METHOD(method) if method is not None else None
+    except (TypeError, ValueError):
+        normalized_method = None
+
+    if normalized_method != METHOD.PAROQUANT or not quant_devices:
+        return quant_devices
+
+    non_cpu_devices = [device for device in quant_devices if getattr(device, "type", None) != "cpu"]
+    if non_cpu_devices:
+        return [non_cpu_devices[0]]
+
+    return quant_devices[:1]
 
 
 class StopMainLoop(Exception):
@@ -159,6 +178,19 @@ class ModuleLooper():
                     "compute_device_filter returned empty device list. "
                     "Using all devices for quantization."
                 )
+
+        restricted_quant_devices = _restrict_quant_devices_for_method(
+            getattr(self.gptq_model.quantize_config, "method", None),
+            quant_devices,
+        )
+        if restricted_quant_devices != quant_devices:
+            log.warn(
+                "ModuleLooper: METHOD.PAROQUANT forcing single-device quantization on `%s`; "
+                "ignoring additional devices %s to avoid multi-GPU sync issues.",
+                restricted_quant_devices[0],
+                [str(device) for device in quant_devices if device != restricted_quant_devices[0]],
+            )
+            quant_devices = restricted_quant_devices
 
         self._quant_devices = quant_devices
         self._quant_device_rr = 0
@@ -1188,7 +1220,7 @@ class ModuleLooper():
         if region_timer is not None:
             region_timer.flush()
 
-        is_awq_quantize = any(isinstance(proc, AWQProcessor) for proc in self.processors)
+        is_awq_quantize = any(isinstance(proc, (AWQProcessor, ParoQuantProcessor)) for proc in self.processors)
         # Capture-only layer groups are driven by processor execution config,
         # not by ad-hoc processor attributes.
         requires_activation_capture = any(

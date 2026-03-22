@@ -2464,6 +2464,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "true_sequential": "true_sequential",
             "damp_percent": "damp_percent",
             "damp_auto_increment": "damp_auto_increment",
+            "opt_rotation_epochs": "opt_rotation_epochs",
+            "opt_finetune_epochs": "opt_finetune_epochs",
+            "opt_train_samples": "opt_train_samples",
+            "opt_validation_samples": "opt_validation_samples",
+            "opt_batch_size": "opt_batch_size",
+            "opt_rotation_lr": "opt_rotation_lr",
+            "opt_weight_lr": "opt_weight_lr",
+            "opt_quantizer_lr": "opt_quantizer_lr",
+            "opt_pair_ratio": "opt_pair_ratio",
+            "opt_seed": "opt_seed",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -2791,6 +2801,16 @@ class ParoQuantQuantizeConfig(QuantizeConfig):
     method: METHOD = field(default=METHOD.PAROQUANT)
     format: FORMAT = field(default=FORMAT.PAROQUANT)
     krot: int = field(default=8)
+    opt_rotation_epochs: int = field(default=10)
+    opt_finetune_epochs: int = field(default=10)
+    opt_train_samples: int = field(default=2048)
+    opt_validation_samples: int = field(default=64)
+    opt_batch_size: int = field(default=16)
+    opt_rotation_lr: float = field(default=0.05)
+    opt_weight_lr: float = field(default=1e-5)
+    opt_quantizer_lr: float = field(default=1e-6)
+    opt_pair_ratio: float = field(default=0.5)
+    opt_seed: int = field(default=0)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.PAROQUANT,)
@@ -2808,11 +2828,43 @@ class ParoQuantQuantizeConfig(QuantizeConfig):
         self.krot = int(self.krot)
         if self.krot <= 0:
             raise ValueError("ParoQuantQuantizeConfig: `krot` must be a positive integer.")
+        self.opt_rotation_epochs = int(self.opt_rotation_epochs)
+        self.opt_finetune_epochs = int(self.opt_finetune_epochs)
+        self.opt_train_samples = int(self.opt_train_samples)
+        self.opt_validation_samples = int(self.opt_validation_samples)
+        self.opt_batch_size = int(self.opt_batch_size)
+        self.opt_rotation_lr = float(self.opt_rotation_lr)
+        self.opt_weight_lr = float(self.opt_weight_lr)
+        self.opt_quantizer_lr = float(self.opt_quantizer_lr)
+        self.opt_pair_ratio = float(self.opt_pair_ratio)
+        self.opt_seed = int(self.opt_seed)
+        if self.opt_rotation_epochs < 0 or self.opt_finetune_epochs < 0:
+            raise ValueError("ParoQuantQuantizeConfig: optimization epochs must be non-negative.")
+        if self.opt_train_samples <= 0 or self.opt_validation_samples <= 0:
+            raise ValueError("ParoQuantQuantizeConfig: optimization sample counts must be positive.")
+        if self.opt_batch_size <= 0:
+            raise ValueError("ParoQuantQuantizeConfig: `opt_batch_size` must be positive.")
+        if self.opt_rotation_lr <= 0 or self.opt_weight_lr <= 0 or self.opt_quantizer_lr <= 0:
+            raise ValueError("ParoQuantQuantizeConfig: optimization learning rates must be positive.")
+        if not (0.0 < self.opt_pair_ratio <= 0.5):
+            raise ValueError("ParoQuantQuantizeConfig: `opt_pair_ratio` must be in the interval (0, 0.5].")
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
             "krot": self.krot,
         }
+
+    def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
+        meta_payload["opt_rotation_epochs"] = self.opt_rotation_epochs
+        meta_payload["opt_finetune_epochs"] = self.opt_finetune_epochs
+        meta_payload["opt_train_samples"] = self.opt_train_samples
+        meta_payload["opt_validation_samples"] = self.opt_validation_samples
+        meta_payload["opt_batch_size"] = self.opt_batch_size
+        meta_payload["opt_rotation_lr"] = self.opt_rotation_lr
+        meta_payload["opt_weight_lr"] = self.opt_weight_lr
+        meta_payload["opt_quantizer_lr"] = self.opt_quantizer_lr
+        meta_payload["opt_pair_ratio"] = self.opt_pair_ratio
+        meta_payload["opt_seed"] = self.opt_seed
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym
@@ -3562,6 +3614,7 @@ def _known_quantize_config_field_names() -> set[str]:
         QuantizeConfig,
         GPTQQuantizeConfig,
         AWQQuantizeConfig,
+        ParoQuantQuantizeConfig,
         QQQQuantizeConfig,
         FP8Config,
         BitsAndBytesConfig,

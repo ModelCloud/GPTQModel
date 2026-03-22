@@ -169,6 +169,7 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
 
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
+        adapter_input = x.reshape(-1, x.shape[-1])
         input_dtype = x.dtype
         x_work = x if input_dtype == torch.float16 else x.to(torch.float16)
         x_flat = x_work.reshape(-1, x_work.shape[-1])
@@ -181,7 +182,7 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
             out = out.to(dtype=input_dtype)
 
         if self.adapter:
-            out = self.adapter.apply(x=rotated, out=out)
+            out = self.adapter.apply(x=adapter_input, out=out)
 
         return out.reshape(original_shape)
 

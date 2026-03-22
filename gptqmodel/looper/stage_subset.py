@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
 import torch
 
 from .awq_processor import AWQProcessor
+from .paroquant_processor import ParoQuantProcessor
 from .qqq_processor import QQQProcessor
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
@@ -134,7 +135,7 @@ def _resolve_subset_calibration_coverage_policy(
 ) -> CalibrationCoveragePolicy:
     """Resolve how this subset handles modules that never receive calibration traffic."""
 
-    validate_input_coverage = isinstance(processor, (GPTQProcessor, QQQProcessor, AWQProcessor))
+    validate_input_coverage = isinstance(processor, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoQuantProcessor))
     fallback_enabled = fallback is not None
     prune_uncovered_modules = validate_input_coverage and not fallback_enabled
 
