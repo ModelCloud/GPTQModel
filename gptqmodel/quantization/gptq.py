@@ -21,11 +21,11 @@ from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..quantization.config import FailSafeStrategy, SmoothMSE
+from ..quantization.config import FallbackStrategy, SmoothMSE
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.torch import torch_sync
-from .failsafe_smooth import mse_optimal_quant, smooth_block
+from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gar import compose_final_perm, compute_global_perm, compute_local_perms, invert_perm
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -199,7 +199,7 @@ class GPTQ:
         # fwd counter
         self.fwd_counter = 0
 
-        self.failsafe = self.qcfg.failsafe
+        self.fallback = self.qcfg.fallback
         self.expected_nsamples: Optional[float] = None
 
         self.H: Optional[torch.Tensor] = None
@@ -618,13 +618,13 @@ class GPTQ:
         return torch.zeros((self.columns, self.columns), dtype=torch.float32,
                            device=self._select_hessian_target_device(target_device))
 
-    def _failsafe_quantize(self, strategy: FailSafeStrategy, blocksize: int):
+    def _fallback_quantize(self, strategy: FallbackStrategy, blocksize: int):
         """Apply a lightweight quantization fallback using the requested strategy."""
         maxq = 2 ** self.qcfg.bits - 1
         sigma = 3.0
         effective_group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
         start_time = time.time()
-        smooth_method = getattr(self.failsafe, "smooth", None)
+        smooth_method = getattr(self.fallback, "smooth", None)
         mse_steps = 32
         mse_maxshrink = 0.8
         if isinstance(smooth_method, SmoothMSE):
@@ -652,10 +652,10 @@ class GPTQ:
             else:
                 block_mod, scale_factor = smooth_block(
                     block,
-                    self.failsafe,
+                    self.fallback,
                     group_size=effective_group_size,
                 )
-                if strategy == FailSafeStrategy.MIDPOINT:
+                if strategy == FallbackStrategy.MIDPOINT:
                     w_min = block_mod.min(dim=1, keepdim=True).values
                     w_max = block_mod.max(dim=1, keepdim=True).values
                     mid = (w_max + w_min) / 2.0
@@ -666,7 +666,7 @@ class GPTQ:
                     zero = torch.round(zero_mid - (mid / scale))
                     zero = torch.clamp(zero, 0, maxq)
                     dequant = (q - zero) * scale
-                elif strategy == FailSafeStrategy.MEAN:
+                elif strategy == FallbackStrategy.MEAN:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     max_dev = torch.max((block_mod - mean).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
@@ -677,7 +677,7 @@ class GPTQ:
                     zero = torch.round(zero_mid - (mean / scale))
                     zero = torch.clamp(zero, 0, maxq)
                     dequant = (q - zero) * scale
-                elif strategy == FailSafeStrategy.MEDIAN:
+                elif strategy == FallbackStrategy.MEDIAN:
                     median = block_mod.median(dim=1, keepdim=True).values
                     max_dev = torch.max((block_mod - median).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
@@ -688,7 +688,7 @@ class GPTQ:
                     zero = torch.round(zero_mid - (median / scale))
                     zero = torch.clamp(zero, 0, maxq)
                     dequant = (q - zero) * scale
-                elif strategy == FailSafeStrategy.STDCLIP:
+                elif strategy == FallbackStrategy.STDCLIP:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     std = block_mod.std(dim=1, keepdim=True, unbiased=False)
                     std = torch.clamp(std, min=1e-8)
@@ -700,13 +700,13 @@ class GPTQ:
                     q = torch.round(block_mod / scale + zero)
                     q = torch.clamp(q, 0, maxq)
                     dequant = (q - zero) * scale
-                elif strategy == FailSafeStrategy.RTN:
+                elif strategy == FallbackStrategy.RTN:
                     self.quantizer.find_params(block_mod, weight=True)
                     dequant = self.quantizer.quantize(block_mod)
                     scale = self.quantizer.scale
                     zero = self.quantizer.zero
                 else:
-                    raise ValueError(f"Unsupported failsafe strategy: {strategy}")
+                    raise ValueError(f"Unsupported fallback strategy: {strategy}")
 
                 if scale_factor is not None:
                     scale = scale * scale_factor
@@ -748,7 +748,7 @@ class GPTQ:
         Q = Q.to(device=self.module.weight.data.device, non_blocking=False)
         mean_abs_err = (Q - self.module.weight.data).abs().mean().item()
         duration = time.time() - start_time
-        avg_loss = f"failsafe({strategy.value}): {mean_abs_err:.7f}"
+        avg_loss = f"fallback({strategy.value}): {mean_abs_err:.7f}"
         damp = 0.0
 
         self.H = None
@@ -886,28 +886,28 @@ class GPTQ:
         start = time.time()
 
         target_device = getattr(self.module, "target_device", None)
-        from ..utils.failsafe import resolve_failsafe_strategy, resolve_threshold, should_use_failsafe
+        from ..utils.fallback import resolve_fallback_strategy, resolve_threshold, should_use_fallback
 
-        resolved_strategy = resolve_failsafe_strategy(self.failsafe)
-        fallback_requested = should_use_failsafe(
-            self.failsafe,
+        resolved_strategy = resolve_fallback_strategy(self.fallback)
+        fallback_requested = should_use_fallback(
+            self.fallback,
             float(self.nsamples),
             self.expected_nsamples,
         )
-        threshold_raw, is_percent = resolve_threshold(self.failsafe, self.expected_nsamples)
-        failsafe_configured = threshold_raw is not None
+        threshold_raw, is_percent = resolve_threshold(self.fallback, self.expected_nsamples)
+        fallback_configured = threshold_raw is not None
 
         if fallback_requested:
             use_hessian = False
-            threshold_text = str(getattr(self.failsafe, "threshold", None))
+            threshold_text = str(getattr(self.fallback, "threshold", None))
             threshold_info = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
             log.warn(
                 f"Quantization: Module `{self.name}` -> "
-                f"Using `{resolved_strategy.value}` failsafe quantization (observed {self.nsamples} samples, threshold={threshold_text}{threshold_info}, max_total={self.expected_nsamples})."
+                f"Using `{resolved_strategy.value}` fallback quantization (observed {self.nsamples} samples, threshold={threshold_text}{threshold_info}, max_total={self.expected_nsamples})."
             )
             self.H = self.create_H(target_device=target_device)
 
-            return self._failsafe_quantize(resolved_strategy, blocksize)
+            return self._fallback_quantize(resolved_strategy, blocksize)
         else:
             use_hessian = True
             self.finalize_hessian(target_device=target_device)
@@ -1157,20 +1157,20 @@ class GPTQ:
 
                 if math.isnan(avg_loss):
                     print("Losses sum item:", torch.sum(Losses).item())
-                    if failsafe_configured:
+                    if fallback_configured:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
                         self.qcfg.mock_quantization = True
                         return self.quantize(blocksize=blocksize)
                     else:
-                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable failsafe=True")
+                        raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable fallback=True")
             else:
-                if failsafe_configured:
+                if fallback_configured:
                     log.warn(f"Quantization: Module `{self.name}` -> using fail safe mode. Please check if calibration data is sufficient.")
                 else:
                     log.warn(f"Quantization: `{self.name}` is not activated due to model inference logic (MoE)")
-                avg_loss = f"{resolved_strategy.value} failsafe" if failsafe_configured else 999999999
+                avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999
         else:
-            avg_loss = f"{resolved_strategy.value} failsafe" if failsafe_configured else 999999999
+            avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999
 
         del Losses
         del self.H

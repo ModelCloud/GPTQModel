@@ -29,6 +29,7 @@ import pytest  # noqa: E402
 
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 
+
 pytestmark = [pytest.mark.cpu, pytest.mark.gpu]
 
 

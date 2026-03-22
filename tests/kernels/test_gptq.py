@@ -178,15 +178,26 @@ class TestKernelOutput(unittest.TestCase):
         for name, module in modules.items():
             if name == self.target:
                 data = self.data[dtype]
+                module_device = self._module_device(module)
                 if data.x:
+                    warmup = data.x[0]
+                    if module_device is not None and warmup.device != module_device:
+                        warmup = warmup.to(module_device)
                     self._synchronize(DEVICE)
-                    module(data.x[0])
+                    module(warmup)
                     self._synchronize(DEVICE)
                 for i in log.pb(self.random_input_sample_size).title("Forward Pass on Random Input"):
-                    assert data.x[i].dtype == dtype
+                    sample = data.x[i]
+                    assert sample.dtype == dtype
+
+                    # Direct layer calls bypass accelerate's cross-device routing,
+                    # so align the synthetic input with the module's local device.
+                    if module_device is not None and sample.device != module_device:
+                        sample = sample.to(module_device)
+
                     self._synchronize(DEVICE)
                     started = time.perf_counter()
-                    result.append(module(data.x[i]))
+                    result.append(module(sample).detach().to(device="cpu", dtype=torch.float32))
                     self._synchronize(DEVICE)
                     total_s += time.perf_counter() - started
                 break
@@ -198,6 +209,16 @@ class TestKernelOutput(unittest.TestCase):
         total_ms = total_s * 1000.0
         mean_ms = total_ms / len(result) if result else 0.0
         return ForwardResult(outputs=result, total_ms=total_ms, mean_ms=mean_ms)
+
+    @staticmethod
+    def _module_device(module):
+        for tensor in module.parameters(recurse=False):
+            if tensor is not None and not tensor.is_meta:
+                return tensor.device
+        for tensor in module.buffers(recurse=False):
+            if tensor is not None and not tensor.is_meta:
+                return tensor.device
+        return None
 
     def _summarize_results(
         self,

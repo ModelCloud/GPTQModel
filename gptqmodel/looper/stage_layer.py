@@ -3,7 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Layer execution stage extracted from ModuleLooper."""
+"""Layer-level orchestration for subset execution, replay, and finalization.
+
+For each processor and layer, this stage:
+- builds all subset plans up front
+- executes subsets using those plans
+- replays forward once when the processor needs post-process outputs
+- finalizes processed modules after the processor pipeline completes
+"""
 
 from __future__ import annotations
 
@@ -23,13 +30,14 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.awq_processor import AWQProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
+from ..looper.paroquant_processor import ParoQuantProcessor
 from ..looper.qqq_processor import QQQProcessor
 from ..utils.device import get_device, get_device_new
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import find_modules, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
-from .stage_subset import SubsetForwardContext, run_subset_stage
+from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from .module_looper import ModuleLooper
@@ -74,7 +82,7 @@ def run_layer_stage(
     layers: List[torch.nn.Module],
     layer_modules: List[List[str]],
     layers_prefix: Optional[str],
-    failsafe,
+    fallback,
     shared_kv_cache_dict: Dict[int, torch.Tensor],
     pb,
     layer_count: int,
@@ -158,13 +166,9 @@ def run_layer_stage(
             # order so their caches and side effects line up with the pipeline.
             processor.log_call_count = 0  # reset
             processor.collect_memory_info(layer_index)
-
-            modules = [[looper.gptq_model.lm_head]] if is_lm_head_module else layer_modules
-
-            # for NativeProcessor we process one time forward on all grouped module subsets
-            if processor.fwd_all_modules_in_single_pass:
-                # merge all subsets into one
-                modules = [sum(modules, [])]
+            # Read the replay policy once per processor so the layer stage uses
+            # one execution config instead of a group of unrelated flags.
+            execution_config = processor.execution_config
 
             layer_inputs = processor.inputs_cache.layer_inputs
             if is_lm_head_module and layer_inputs:
@@ -174,53 +178,53 @@ def run_layer_stage(
             attention_masks = processor.inputs_cache.attention_masks
 
             processed_subset: Dict[str, NamedModule] = {}
-            last_subset_context: Optional[SubsetForwardContext] = None
+            last_subset_plan: Optional[SubsetPlan] = None
             previous_subset_processed: Optional[Dict[str, NamedModule]] = None
 
-            subsets = []
-            for names in modules:
-                subset = looper.create_named_modules(
-                    module=module,
-                    full=full,
-                    is_lm_head_module=is_lm_head_module,
-                    layer_index=layer_index,
-                    layers_prefix=layers_prefix,
-                    names=names,
-                    processor=processor,
-                    failsafe=failsafe,
-                    layer_module=module,
-                )
-                # Skip empty subsets caused by per-layer structure differences or dynamic config exclusions;
-                # otherwise awq_processor may fail to quantize
-                if subset:
-                    subsets.append(subset)
+            # Freeze all subset-level execution decisions before the processor
+            # starts running this layer. The rest of the layer stage can then
+            # iterate plans instead of repeatedly re-deriving replay, batching,
+            # and device-routing state inside the execution loop.
+            subset_plans = build_layer_subset_plans(
+                looper,
+                processor=processor,
+                module=module,
+                layer_modules=layer_modules,
+                layer_inputs=layer_inputs,
+                full=full,
+                is_lm_head_module=is_lm_head_module,
+                layer_index=layer_index,
+                layers_prefix=layers_prefix,
+                fallback=fallback,
+            )
 
-            subset_total = len(subsets)
-            for index, subset in enumerate(subsets):
+            for subset_plan in subset_plans:
                 # Process the layer in smaller subsets so attention groups or
                 # MoE experts can be quantized independently within a layer.
                 if DEBUG_ON and log.isEnabledFor(logging.DEBUG):
-                    if isinstance(processor, AWQProcessor):
+                    if isinstance(processor, (AWQProcessor, ParoQuantProcessor)):
                         log.debug(
-                            "StageLayer[awq]: layer=%s subset=%s/%s size=%s names=%s",
+                            "StageLayer[%s]: layer=%s subset=%s/%s size=%s names=%s",
+                            processor.name(),
                             layer_index,
-                            index + 1,
-                            subset_total,
-                            len(subset),
-                            subset[:5],
+                            subset_plan.subset_index + 1,
+                            subset_plan.subset_total,
+                            len(subset_plan.modules),
+                            list(subset_plan.modules.keys())[:5],
                         )
                     else:
                         log.debug(
                             "StageLayer: layer=%s subset=%s/%s processor=%s size=%s names=%s",
                             layer_index,
-                            index + 1,
-                            subset_total,
+                            subset_plan.subset_index + 1,
+                            subset_plan.subset_total,
                             processor.name(),
-                            len(subset),
-                            subset[:8],
+                            len(subset_plan.modules),
+                            list(subset_plan.modules.keys())[:8],
                         )
                 subset_result = run_subset_stage(
                     looper=looper,
+                    plan=subset_plan,
                     processor=processor,
                     module=module,
                     layer_inputs=layer_inputs,
@@ -232,12 +236,8 @@ def run_layer_stage(
                     layer_descriptor=layer_descriptor,
                     layer_title=layer_title,
                     layer_index=layer_index,
-                    layers_prefix=layers_prefix,
-                    subset=subset,
-                    subset_index=index,
-                    subset_total=subset_total,
                     full=full,
-                    failsafe=failsafe,
+                    fallback=fallback,
                     shared_kv_cache_dict=shared_kv_cache_dict,
                     pb=pb,
                     log=log,
@@ -249,34 +249,26 @@ def run_layer_stage(
                 layer_inputs = subset_result.layer_inputs
                 processed_subset.update(subset_result.processed_subset)
                 previous_subset_processed = subset_result.processed_subset
-                if subset_result.forward_context is not None:
-                    last_subset_context = subset_result.forward_context
+                if subset_result.plan is not None:
+                    # The most recent subset plan defines the replay contract
+                    # for the outputs that flow into the next layer.
+                    last_subset_plan = subset_result.plan
 
             is_last_module = layer_index == len(pb) - 1
             layer_outputs: List[List[torch.Tensor]] = []
-            subset_context = last_subset_context
-            forward_device_map = subset_context.forward_device_map if subset_context else {}
-            subset_forward_serial = subset_context.subset_forward_serial if subset_context else False
-            subset_reference_total = subset_context.subset_total if subset_context else subset_total
-            subset_reference_index = subset_context.subset_index if subset_context else max(subset_total - 1, 0)
-            subset_for_overrides = subset_context.subset if subset_context else {}
-            preserve_devices = bool(forward_device_map)
+            replay_plan = last_subset_plan
 
-            # second forward after process()
-            if not is_last_module and processor.fwd_after_process and subset_context is not None:
-                replay_batch_count = looper._resolve_batch_total(
-                    getattr(processor, "num_batches", None),
-                    layer_inputs,
-                )
-                replay_row_counts = list(looper._collect_row_counts(layer_inputs))
-                if not replay_row_counts and replay_batch_count > 0:
-                    replay_row_counts = [1] * replay_batch_count
-                if len(replay_row_counts) > replay_batch_count:
-                    replay_row_counts = replay_row_counts[:replay_batch_count]
-                replay_total_rows = sum(replay_row_counts) if replay_row_counts else replay_batch_count
-                replay_total_rows = max(replay_total_rows, 1)
-                if len(replay_row_counts) < replay_batch_count:
-                    replay_row_counts.extend([1] * (replay_batch_count - len(replay_row_counts)))
+            # Some processors consume outputs only after `process()` updates the
+            # current layer. In that case, replay the layer once using the
+            # metadata already computed by the final subset plan.
+            if not is_last_module and replay_plan is not None and replay_plan.replay_after_process:
+                # Reuse the last subset plan's replay metadata directly so the
+                # layer stage does not need to reconstruct batch counts,
+                # row-count progress, or forward device overrides after the
+                # subset stage has already decided them.
+                replay_batch_count = replay_plan.batch_count
+                replay_row_counts = replay_plan.forward_row_counts
+                replay_total_rows = replay_plan.forward_total_rows
                 replay_msg = (
                     "Forward replay "
                     f"(layer=`{layer_descriptor}`, batches={replay_batch_count}, rows={replay_total_rows})"
@@ -295,13 +287,16 @@ def run_layer_stage(
                 #timed_gc_collect(1)
 
                 replay_start = time.perf_counter()
-                replay_source = f"{layer_descriptor}:subset{subset_reference_index + 1}/{subset_reference_total}"
+                replay_source = (
+                    f"{layer_descriptor}:subset"
+                    f"{replay_plan.subset_index + 1}/{replay_plan.subset_total}"
+                )
 
                 replay_prev_devices: Dict[str, torch.device] = {}
-                if forward_device_map:
+                if replay_plan.forward_device_map:
                     replay_prev_devices = looper._apply_forward_device_overrides(
-                        subset_for_overrides,
-                        forward_device_map,
+                        replay_plan.modules,
+                        replay_plan.forward_device_map,
                         fallback_modules=full,
                     )
 
@@ -348,13 +343,13 @@ def run_layer_stage(
                         progress_stage="Forward replay",
                         progress_rows_per_batch=replay_row_counts,
                         progress_total_rows=replay_total_rows,
-                        force_serial=subset_forward_serial,
-                        preserve_module_devices=preserve_devices,
+                        force_serial=replay_plan.subset_forward_serial,
+                        preserve_module_devices=replay_plan.preserve_module_devices,
                     )
                 finally:
-                    if forward_device_map:
+                    if replay_plan.forward_device_map:
                         looper._restore_forward_device_overrides(
-                            subset_for_overrides,
+                            replay_plan.modules,
                             replay_prev_devices,
                             fallback_modules=full,
                         )
@@ -391,7 +386,7 @@ def run_layer_stage(
                 if region_timer is not None:
                     region_timer.flush()
 
-            if processor.fwd_after_process:
+            if execution_config.fwd_after_process:
                 processor.clear_cache_data()
                 processor.receive_layer_inputs(layer_outputs)
                 layer_inputs = processor.inputs_cache.layer_inputs
@@ -431,6 +426,8 @@ def run_layer_stage(
 
                 @torch.inference_mode()
                 def _finalize_on_worker(process, module, idx, total, module_label, layer_idx):
+                    """Runs processor finalization and optional disk offload for one module."""
+
                     resolved_label = module_label or getattr(module, "full_name", getattr(module, "name", ""))
                     start = time.perf_counter() if region_timer is not None else None
                     try:
@@ -442,7 +439,7 @@ def run_layer_stage(
                             process.submodule_finalize(module, looper.gptq_model)
 
                         # Disk offload (lifecycle TODO note preserved)
-                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor)):
+                        if isinstance(process, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoQuantProcessor)):
                             quant_config = getattr(looper.gptq_model, "quantize_config", None)
                             if quant_config and getattr(quant_config, "offload_to_disk", False):
                                 offload_path = getattr(quant_config, "offload_to_disk_path", None)
@@ -546,6 +543,8 @@ def run_layer_stage(
                     finalize_count_local,
                     layer_idx_for_callback,
                 ):
+                    """Consumes finalize futures, updating progress and surfacing errors."""
+
                     completed_local = 0
                     try:
                         for future in as_completed(futures):

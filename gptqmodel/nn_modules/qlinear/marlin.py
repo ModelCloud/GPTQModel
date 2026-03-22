@@ -23,7 +23,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear
+from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -48,8 +48,8 @@ from ...utils.rocm import IS_ROCM
 log = setup_logger()
 
 
-class MarlinQuantLinear(BaseQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.MARLIN, BACKEND.MARLIN_FP16]
+class MarlinQuantLinear(GPTQQuantLinear):
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN, BACKEND.GPTQ_MARLIN_FP16]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 90, FORMAT.MARLIN: 90}
     SUPPORTS_BITS = [4, 8]
@@ -114,13 +114,13 @@ class MarlinQuantLinear(BaseQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.MARLIN),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_MARLIN),
             adapter=adapter,
             register_buffers=False, # do not register buffers in super()
             **kwargs)
 
         # toggle fp32 mode depending on MARLIN or MARLIN_FP16 backend
-        self.fp32 = True if self.backend in [BACKEND.MARLIN, BACKEND.AUTO] else False
+        self.fp32 = True if self.backend in [BACKEND.GPTQ_MARLIN, BACKEND.AUTO] else False
 
         if not self.fp32:
             log.warn.once(

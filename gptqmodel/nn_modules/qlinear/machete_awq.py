@@ -31,7 +31,7 @@ log = setup_logger()
 
 
 class AwqMacheteQuantLinear(AWQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.MACHETE]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_MACHETE]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 100, FORMAT.MARLIN: 100}
     SUPPORTS_BITS = [4, 8]
@@ -91,7 +91,7 @@ class AwqMacheteQuantLinear(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.MACHETE),
+            backend=kwargs.pop("backend", BACKEND.AWQ_MACHETE),
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs)

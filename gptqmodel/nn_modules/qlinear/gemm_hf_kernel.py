@@ -23,7 +23,7 @@ from ...utils.logger import setup_logger
 log = setup_logger()
 
 class HFKernelLinear(PackableQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.HF_KERNEL]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_HF_KERNEL]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 110, FORMAT.GPTQ_V2: 110}
     SUPPORTS_BITS = [4]
@@ -122,7 +122,7 @@ class HFKernelLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.HF_KERNEL),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_HF_KERNEL),
             adapter=adapter,
             register_buffers=register_buffers,
             enable_wf_unsqueeze=kwargs.pop("enable_wf_unsqueeze", True),
@@ -346,7 +346,7 @@ def dequantize_model(model: PreTrainedModel):
         if isinstance(module, BaseQuantLinear) and not isinstance(module, HFKernelLinear):
             raise ValueError(
                 "Only models loaded using HFKernelLinear are supported for dequantization. "
-                "Please load model using backend=BACKEND.HF_KERNEL"
+                "Please load model using backend=BACKEND.GPTQ_HF_KERNEL"
             )
 
         if isinstance(module, HFKernelLinear):

@@ -8,7 +8,7 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import LoopProcessor
+from ..looper.loop_processor import ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..quantization.config import QuantizeConfig
@@ -21,6 +21,8 @@ NATIVE_INPUTS_STATE_KEY = "native_inp"
 
 # v2 requires that we also need to capture/store non-quantized inputs
 class NativeProcessor(LoopProcessor):
+    """Caches raw module inputs for later native or GPTAQ-style processing."""
+
     def __init__(
         self,
         tokenizer,
@@ -33,6 +35,7 @@ class NativeProcessor(LoopProcessor):
         require_fwd: bool = True,
         calibration_concat_separator: Optional[str] = None,
     ):
+        """Initializes the processor and enables single-pass input capture."""
 
         super().__init__(
             tokenizer=tokenizer,
@@ -43,25 +46,37 @@ class NativeProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            require_fwd=require_fwd,
-            fwd_after_process=False,
-            fwd_all_modules_in_single_pass=True,
+            execution_config=ExecutionConfig(
+                require_fwd=require_fwd,
+                fwd_after_process=False,
+                fwd_all_modules_in_single_pass=True,
+            ),
         )
 
         self.native_inp_caches = {}
 
     def set_calibration_dataset(self, calibration_dataset):
+        """Rejects dataset replacement because capture setup is fixed at construction."""
+
         raise NotImplementedError("NativeProcessor's calibration_dataset cannot be modified")
 
     def preprocess(self, module: NamedModule):
+        """Allocates the per-module cache used by the forward hook."""
+
         self.native_inp_caches[module.name] = []
 
     def is_skipped(self, module: NamedModule) -> bool:
+        """Reports that native input capture currently runs for every eligible module."""
+
         # TODO: Add skipping certain modules
         return False
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        """Builds the forward hook that captures detached native inputs for a module."""
+
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+            """Copies the module input to the configured GPTAQ staging device."""
+
             # gptq is mutable.
             inp = inp[0].detach()
 
@@ -92,19 +107,29 @@ class NativeProcessor(LoopProcessor):
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
     ):
+        """Moves the captured input list into module state for downstream use."""
+
         module.state[NATIVE_INPUTS_STATE_KEY] = self.native_inp_caches.pop(module.name)
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
+        """Clears cached native inputs after module finalization."""
+
         module.state.pop(NATIVE_INPUTS_STATE_KEY, None)
 
     def finalize(self, model: BaseQModel, **kwargs):
+        """Releases processor-level caches once the full loop has completed."""
+
         del self.native_inp_caches
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
+        """Ensures a calibration dataset was provided before running capture."""
+
         if self.calibration_dataset is None:
             raise ValueError("NativeProcessor's calibration_dataset must be provided.")
         else:
             return True
 
     def name(self) -> str:
+        """Returns the processor label used in logs and lifecycle reporting."""
+
         return "native"

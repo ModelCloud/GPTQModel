@@ -5,10 +5,9 @@
 
 import unittest
 
-from packaging.version import Version
-from model_test import ModelTest
-
 import transformers
+from model_test import ModelTest
+from packaging.version import Version
 
 from gptqmodel.utils.eval import EVAL
 

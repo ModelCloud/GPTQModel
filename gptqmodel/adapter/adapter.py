@@ -23,10 +23,14 @@ HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
 
 
 class AdapterCache():
+    """Caches loaded adapter configs and tensors by source path."""
+
     cache: Dict[str, Dict[str, Union[LoraConfig, torch.Tensor]]] = {}  # first level key is `path`, second level keys [ `config` = LoraConfig, `weights` = Dict[str, Tensors]
 
     @classmethod
     def get(cls, path: str) -> Optional[Tuple[LoraConfig, Dict[str, torch.Tensor]]]:
+        """Returns cached adapter config and weights for a path, if present."""
+
         data = cls.cache.get(path)
         if not data:
             return None
@@ -35,24 +39,36 @@ class AdapterCache():
 
     @classmethod
     def reset(cls):
+        """Clears the global adapter cache."""
+
         log.info("Adapter Cache: Resetting cache")
         cls.cache = {}
 
     @classmethod
     def add(cls, path: str, config: LoraConfig, weights: Dict[str, torch.Tensor]):
+        """Stores adapter config and weight tensors under the source path."""
+
         cls.cache[path] = {"config": config, "weights": weights}
 
     @classmethod
     def remove(cls, path):
+        """Drops cached adapter state for a path if it exists."""
+
         cls.cache.pop(path, None)
 
 
 class Adapter():
+    """Base interface for runtime adapters applied on top of quantized layers."""
+
     def __init__(self, rank: int = None, path: str = None):
+        """Initializes adapter identity and optional source location."""
+
         self.rank = rank # rank may be zero, when loading, and rank will be re-populated by loading saved LoraConfig file
         self.path = path.strip() if isinstance(path, str) else path
 
     def validate_path(self, local=False):
+        """Validates that the configured adapter path matches the expected source type."""
+
         if not self.path or not isinstance(self.path, str):
             raise ValueError("Adapter: `path` str is required.")
 
@@ -68,30 +84,44 @@ class Adapter():
 
     # override me
     def apply(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        """Applies the adapter contribution to a layer output tensor."""
+
         pass
 
     # override me
     def post_init(self, weight_key: str, device: torch.device, **kwargs):
+        """Loads or finalizes adapter tensors for a specific weight key."""
+
         pass
 
     # override me
     def optimize(self):
+        """Applies optional backend-specific optimizations after loading."""
+
         pass
 
     # override me
     @classmethod
     def name(cls) -> List[str]:
+        """Returns the serialized adapter type name."""
+
         pass
 
     # override me
     @classmethod
     def parameter_keys(cls) -> [str]: # name of tensors/parameters in attribute key name
+        """Lists tensor attribute names expected on the adapter instance."""
+
         pass
 
 
 @dataclass
 class Lora(Adapter):
+    """LoRA adapter implementation backed by A/B projection matrices."""
+
     def __init__(self, rank: int, path: str = None, lora_A: torch.Tensor = None, lora_B: torch.Tensor = None):
+        """Initializes the adapter with optional preloaded LoRA matrices."""
+
         super().__init__(rank, path)
 
         self.lora_A = lora_A
@@ -99,24 +129,35 @@ class Lora(Adapter):
 
     @classmethod
     def name(cls) -> str:
+        """Returns the canonical adapter type used in serialized configs."""
+
         return "lora"
 
     @classmethod
     def parameter_keys(cls) -> List[str]:
+        """Lists the tensor attributes that store the LoRA projection weights."""
+
         return ["lora_A", "lora_B"]
 
     def optimize(self, backend: str = "inductor", mode: str = None, fullgraph: bool = False):
+        """Reserved hook for compiling the adapter path when enabled."""
+
         pass
         #logger.info("Adapter: optimize (compile)")
         #self.apply = torch_compile(self.apply, backend=backend, mode=mode, fullgraph=fullgraph)
 
     def apply(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        """Adds the LoRA update to the kernel output, reshaping batched outputs when needed."""
+
         # original code
         # out = out + ((x @ self.lora_A) @ self.lora_B)
 
         # native quantized model/eora is float16 for gptq but for training, we may load the model as bfloat16 for accuracy
-        if x.dtype != self.lora_A.dtype:
-            log.info.once(f"Adapter: Lora A/B auto changed from `{self.lora_A.dtype}` to `{x.dtype}` to match forward input dtype.")
+        if x.dtype != self.lora_A.dtype or x.device != self.lora_A.device:
+            log.info.once(
+                f"Adapter: Lora A/B auto changed from `{self.lora_A.dtype}` on `{self.lora_A.device}` "
+                f"to `{x.dtype}` on `{x.device}` to match forward input."
+            )
             self.lora_A = self.lora_A.to(device=x.device, dtype=x.dtype)
             self.lora_B = self.lora_B.to(device=x.device, dtype=x.dtype)
 
@@ -133,6 +174,8 @@ class Lora(Adapter):
             return out.add_((x @ self.lora_A) @ self.lora_B)
 
     def post_init(self, weight_key: str, device:torch.device, lora_A: torch.Tensor=None, lora_B: torch.Tensor=None):
+        """Loads, caches, and materializes LoRA tensors for the target module."""
+
         # self.register_buffer("lora_A", lora_A)
         # self.register_buffer("lora_B", lora_B)
 
@@ -219,6 +262,8 @@ class Lora(Adapter):
         #print(f"Adapter: lora_B {lora_B.shape}: `{lora_B}`")
 
     def dynamic_rank_override(self, lora_cfg: LoraConfig, weight_key: str) -> bool:
+        """Overrides the adapter rank when the config defines a matching rank pattern."""
+
         assert lora_cfg.rank_pattern is not None and weight_key is not None
         if lora_cfg.rank_pattern:
             for k, v in lora_cfg.rank_pattern.items():
@@ -236,6 +281,8 @@ class Lora(Adapter):
 
 
     def to_dict(self):
+        """Serializes the minimal adapter descriptor used by GPTQModel."""
+
         return {
             "name": self.name(),
             "path": self.path,
@@ -246,6 +293,8 @@ ADAPTER_MAPPING = {Lora.name(): Lora}
 
 # accept both Adapter cls instance or Dict()
 def normalize_adapter(adapter:  Union[Dict, Adapter]):
+    """Normalizes serialized adapter metadata into a concrete adapter instance."""
+
     if adapter is None:
         return None
 

@@ -1,5 +1,6 @@
-import string
 import random
+import string
+
 import pytest
 
 from gptqmodel.utils.random_str import get_random_string

@@ -7,10 +7,10 @@ import argparse
 import math
 import time
 
+import pytest
 import torch
 from models.model_test import ModelTest
 
-import pytest
 
 pytestmark = pytest.mark.gpu
 

@@ -20,6 +20,7 @@
 </p>
 
 ## Latest News
+* 03/22/2026 [6.0-dev `main`]: ✨New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`. `main` is currently undergoing a major refactor and api is unstable.
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
 * 03/09/2026 [main]: ✨Qwen 3.5 MoE model support added. New HF Kernel support added for AWQ. 
 HF Kernel for both gptq/awq are now used by default for cpu devices for best performance. New INT8 kernel ported from Intel for gptq. 
@@ -27,7 +28,6 @@ HF Kernel for both gptq/awq are now used by default for cpu devices for best per
 * 02/09/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): ✨New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
 `AWQ` `qcfg.zero_point` property has been merged with a unified `sym` symmetry property; `zero_point=True` is now `sym=False`.
 Fixed `AWQ` `sym=True` packing/inference and quantization compatibility with some Qwen3 models. Exaone 4.0 support.
-
 
 <details>
 
@@ -147,7 +147,7 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 ## What is GPT-QModel?
 GPT-QModel is a production-ready LLM model compression/quantization toolkit with hw-accelerated inference support for both CPU/GPU via HF Transformers, vLLM, and SGLang.
 
-GPT-QModel currently supports GPTQ, AWQ, QQQ, GPTAQ, EoRa, GAR, with more quantization methods and enhancements planned. 
+GPT-QModel currently supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRa, and GAR, with more quantization methods and enhancements planned. 
 
 ## Quantization Support
 
@@ -157,16 +157,39 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 |---------------------------|------------|---|---|---|---------------|
 | GPTQ                      | ✅          | ✅ | ✅ | ✅ | ✅             | 
 | AWQ                       | ✅          | ✅ | ✅ | ✅ | ✅             |
+| ParoQuant                 | ✅          | x | x | x | ✅             |
+| GGUF                      | ✅          | x | x | x | x             |
+| FP8                       | ✅          | x | x | x | x             |
+| Exllama V3 / EXL3         | ✅          | x | x | x | x             |
 | EoRA                      | ✅          | ✅ | ✅ | ✅ | x             | 
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
 | QQQ                       | ✅          | x | x | x | x             | 
 | Rotation                  | ✅          | x | x | x | x             |  
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 
+`GGUF`, `FP8`, `EXL3`, and `ParoQuant` are currently native GPT-QModel quantization/runtime paths. `vLLM` and `SGLang` integration currently targets `GPTQ` and `AWQ`.
+
+### Quant Method / Format / Backend Matrix
+
+Canonical backend names are shown below. Legacy aliases such as `BACKEND.TORCH`, `BACKEND.MARLIN`, `BACKEND.GEMM`, and `BACKEND.PAROQUANT` are still accepted and normalized to the matching canonical backend for the selected quant method.
+
+| Quant Method | Formats | Backends / Kernels |
+| --- | --- | --- |
+| `METHOD.GPTQ` | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GPTQ`: `BACKEND.GPTQ_HF_KERNEL`, `BACKEND.GPTQ_MACHETE`, `BACKEND.GPTQ_MARLIN_FP16`, `BACKEND.GPTQ_MARLIN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.GPTQ_V2`: `BACKEND.GPTQ_HF_KERNEL`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.MARLIN`: `BACKEND.GPTQ_MARLIN_FP16`, `BACKEND.GPTQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.GPTQ_BITBLAS` |
+| `METHOD.AWQ` | `FORMAT.GEMM`, `FORMAT.GEMV`, `FORMAT.GEMV_FAST`, `FORMAT.LLM_AWQ`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GEMM`: `BACKEND.AWQ_HF_KERNEL`, `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`, `BACKEND.AWQ_EXLLAMA_V2`, `BACKEND.AWQ_GEMM`, `BACKEND.AWQ_GEMM_TRITON`, `BACKEND.AWQ_TORCH_FUSED`, `BACKEND.AWQ_TORCH`, `BACKEND.AWQ_TORCH_INT8`, `BACKEND.AWQ_BITBLAS`<br>`FORMAT.GEMV`: `BACKEND.AWQ_GEMV`<br>`FORMAT.GEMV_FAST`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.LLM_AWQ`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.MARLIN`: `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.AWQ_BITBLAS` |
+| `METHOD.PAROQUANT` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
+| `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ` |
+| `METHOD.GGUF` | `FORMAT.GGUF` | `BACKEND.GGUF_TRITON`, `BACKEND.GGUF_CPP_CUDA`, `BACKEND.GGUF_CPP_CPU`, `BACKEND.GGUF_TORCH` |
+| `METHOD.FP8` | `FORMAT.FP8` | `BACKEND.FP8_TORCH` |
+| `METHOD.BITSANDBYTES` | `FORMAT.BITSANDBYTES` | `BACKEND.BITSANDBYTES` |
+| `METHOD.EXL3` | `FORMAT.EXL3` | `BACKEND.EXL3_EXLLAMA_V3`, `BACKEND.EXL3_TORCH` |
+
+`BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime/export backends and are not part of the native kernel matrix above.
+
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
-* ✨ GPTQ, AWQ, and QQQ quantization format with hardware-accelerated inference kernels. 
+* ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, and EXL3 quantization support.
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
@@ -178,6 +201,15 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 * ✨ `lm_head` module quant inference support for further VRAM reduction.
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) optimized tile based inference.
 * 💯 CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
+
+## Who's Using GPT-QModel?
+
+Selected public references where teams or companies explicitly mention `GPTQModel` in documentation, integration notes, or quantized model usage. This is not an exhaustive customer list.
+
+* <img src="https://cdn.simpleicons.org/huggingface/FFD21E" alt="Hugging Face logo" height="14"> Hugging Face
+* <img src="https://cdn.simpleicons.org/intel/0071C5" alt="Intel logo" height="14"> Intel
+* <img src="https://cdn.simpleicons.org/nvidia/76B900" alt="NVIDIA logo" height="14"> NVIDIA
+* <img src="https://cdn.simpleicons.org/alibabacloud/FF6A00" alt="Alibaba Cloud logo" height="14"> Alibaba Cloud
 
 
 ## Quality: GPTQ 4bit can match native BF16:
@@ -259,6 +291,23 @@ To use models from [ModelScope](https://www.modelscope.cn/) instead of HuggingFa
 export GPTQMODEL_USE_MODELSCOPE=True
 ```
 
+### FP32 accumulation toggle
+
+Some AWQ and ParoQuant CUDA/Triton kernels support an fp32 accumulation mode to reduce numerical drift during fused quantized matmul. This setting defaults to `True` because accuracy is prioritized over speed.
+
+```shell
+# default behavior: higher accuracy, slightly lower speed on some kernels
+export GPTQMODEL_FP32_ACCUM=1
+
+# optional speed-first mode for some kernels
+export GPTQMODEL_FP32_ACCUM=0
+```
+
+Notes:
+* This is a runtime toggle. It does not change model weights or saved checkpoints.
+* It mainly affects some fused AWQ and ParoQuant CUDA/Triton kernels. Dense/dequantize fallback paths are mostly unaffected.
+* `1` is recommended for regression testing and quality-sensitive evaluation. `0` may be useful when chasing a small latency win and the quality tradeoff is acceptable.
+
 ### OpenAI API compatible endpoint
 ```py
 # load model using above inference guide first
@@ -288,6 +337,76 @@ model = GPTQModel.load(model_id, quant_config)
 # increase `batch_size` to match GPU/VRAM specs to speed up quantization
 model.quantize(calibration_dataset, batch_size=1)
 
+model.save(quant_path)
+```
+
+#### Other Quantization Formats
+
+`GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
+
+##### GGUF Example: Llama 3.2 1B Instruct
+
+```py
+from gptqmodel import BACKEND, GGUFConfig, GPTQModel
+
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
+quant_path = "Llama-3.2-1B-Instruct-GGUF-Q4_K_M"
+
+qcfg = GGUFConfig(
+    bits=4,
+    format="q_k_m",
+)
+
+model = GPTQModel.load(model_id, qcfg)
+model.quantize(calibration=None, backend=BACKEND.GGUF_TORCH)
+model.save(quant_path)
+```
+
+##### FP8 Example: Llama 3.2 1B Instruct
+
+```py
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
+quant_path = "Llama-3.2-1B-Instruct-FP8-E4M3"
+
+qcfg = QuantizeConfig(
+    method="fp8",
+    format="float8_e4m3fn",  # or "float8_e5m2"
+    bits=8,
+    weight_scale_method="row",
+)
+
+model = GPTQModel.load(model_id, qcfg)
+model.quantize(calibration=None, backend=BACKEND.GPTQ_TORCH)
+model.save(quant_path)
+```
+
+##### Exllama V3 / EXL3 Example: Llama 3.2 1B Instruct
+
+```py
+from datasets import load_dataset
+from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
+
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
+quant_path = "Llama-3.2-1B-Instruct-EXL3"
+
+calibration_dataset = load_dataset(
+    "allenai/c4",
+    data_files="en/c4-train.00001-of-01024.json.gz",
+    split="train",
+).select(range(1024))["text"]
+
+qcfg = QuantizeConfig(
+    method="exl3",
+    format="exl3",
+    bits=4.0,        # target average bits-per-weight
+    head_bits=6.0,   # optional higher bitrate for attention heads / sensitive tensors
+    codebook="mcg",  # one of: mcg, mul1, 3inst
+)
+
+model = GPTQModel.load(model_id, qcfg)
+model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.EXL3_EXLLAMA_V3)
 model.save(quant_path)
 ```
 
@@ -455,6 +574,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 
 * GPTQ: IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
 * AWQ: main-authors: Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song
+* ParoQuant: Z-Lab, main-authors: Yesheng Liang, Haisheng Chen, Song Han, and Zhijian Liu. [Official implementation](https://github.com/z-lab/paroquant), [Paper](https://openreview.net/forum?id=1USeVjsKau)
 * EoRA: Nvidia, main-author: Shih-Yang Liu, arXiv preprint arXiv:2410.21271.
 * GAR: Intel, main-author: T Gafni, A Karnieli, Y Hanani, [Paper](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
 * GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
@@ -489,6 +609,25 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song},
   journal={arXiv},
   year={2023}
+}
+
+# ParoQuant
+@inproceedings{liang2026paroquant,
+  title     = {{ParoQuant: Pairwise Rotation Quantization for Efficient Reasoning LLM Inference}},
+  author    = {Liang, Yesheng and Chen, Haisheng and Han, Song and Liu, Zhijian},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2026}
+}
+
+# GGUF / llama.cpp
+@misc{ggerganov2023gguf,
+  author = {Georgi Gerganov and ggml-org contributors},
+  title = {llama.cpp and the GGUF model format},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/ggml-org/llama.cpp}},
+  note = {Canonical GGUF implementation and format reference; see also \url{https://github.com/ggml-org/llama.cpp/wiki/dev-notes}},
+  year = {2023}
 }
 
 # EoRA
@@ -529,6 +668,17 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
       author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
       journal={arXiv preprint arXiv:2406.09904},
       year={2024}
+}
+
+# ExLlama V3 / EXL3
+@misc{turboderp2026exllamav3,
+  author = {turboderp and exllamav3 contributors},
+  title = {ExLlamaV3 and the EXL3 quantization format},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/turboderp-org/exllamav3}},
+  note = {Project repository and EXL3 format documentation: \url{https://github.com/turboderp-org/exllamav3/blob/master/doc/exl3.md}},
+  year = {2026}
 }
 ```
 

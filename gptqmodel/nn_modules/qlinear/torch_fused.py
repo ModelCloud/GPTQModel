@@ -52,7 +52,7 @@ class Int4PackedOp(torch.nn.Module):
 
 
 class TorchFusedQuantLinear(PackableQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.TORCH_FUSED]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH_FUSED]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 50, FORMAT.GPTQ_V2: 50}
     SUPPORTS_BITS = [4]
@@ -99,7 +99,7 @@ class TorchFusedQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TORCH),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_TORCH_FUSED),
             adapter=adapter,
             register_buffers=register_buffers,
             enable_wf_unsqueeze=kwargs.pop("enable_wf_unsqueeze", True),
@@ -304,7 +304,7 @@ def dequantize_model(model: PreTrainedModel):
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchFusedQuantLinear):
             raise ValueError(
                 "Only models loaded using TorchFusedQuantLinear are supported for dequantization. "
-                "Please load model using backend=BACKEND.TORCH_FUSED"
+                "Please load model using backend=BACKEND.GPTQ_TORCH_FUSED"
             )
 
         if isinstance(module, TorchFusedQuantLinear):

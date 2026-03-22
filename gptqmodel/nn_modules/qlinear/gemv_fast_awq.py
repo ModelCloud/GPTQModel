@@ -64,7 +64,7 @@ def pack_intweight(unpacked_qweight, interleave, kstride):
 
 
 class AwqGEMVFastQuantLinear(AWQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.GEMV_FAST]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMV_FAST]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMV_FAST: 30}
     SUPPORTS_BITS = [4]
@@ -103,7 +103,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
             register_buffers: bool = False,
             **kwargs,
     ):
-        backend = kwargs.pop("backend", BACKEND.GEMV_FAST)
+        backend = kwargs.pop("backend", BACKEND.AWQ_GEMV_FAST)
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -255,7 +255,7 @@ class AwqGEMVFastQuantLinear(AWQuantLinear):
 
 
 class LLMAwqQuantLinear(AwqGEMVFastQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.GEMV_FAST]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMV_FAST]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.LLM_AWQ: 100}
     SUPPORTS_BITS = [4]

@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+from typing import Optional, Tuple
 
 import torch
 
@@ -16,18 +17,19 @@ from ...quantization.awq.utils.packing_utils import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from . import AWQuantLinear
 from .gemm_hf_kernel import HFKernelLinear
 
 
 log = setup_logger()
 
 
-class HFKernelAwqLinear(HFKernelLinear):
+class HFKernelAwqLinear(AWQuantLinear):
     """AWQ variant of HFKernelLinear — uses kernels-community gemm_int4 with AWQ weights."""
 
     QUANT_TYPE = "hf_kernel_awq"
 
-    SUPPORTS_BACKENDS = [BACKEND.HF_KERNEL_AWQ]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_HF_KERNEL]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 110}
 
@@ -45,9 +47,12 @@ class HFKernelAwqLinear(HFKernelLinear):
     SUPPORTS_PLATFORM = HFKernelLinear.SUPPORTS_PLATFORM
     SUPPORTS_PACK_DTYPES = HFKernelLinear.SUPPORTS_PACK_DTYPES
     SUPPORTS_ADAPTERS = HFKernelLinear.SUPPORTS_ADAPTERS
-    REQUIRES_FORMAT_V2 = HFKernelLinear.REQUIRES_FORMAT_V2
+    REQUIRES_FORMAT_V2 = False
 
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+
+    gemm_int4_forward_kernel = None
+    KERNEL_REPO_ID = HFKernelLinear.KERNEL_REPO_ID
 
     def __init__(
         self,
@@ -63,7 +68,7 @@ class HFKernelAwqLinear(HFKernelLinear):
         register_buffers: bool = True,
         **kwargs,
     ):
-        kwargs.setdefault("backend", BACKEND.HF_KERNEL_AWQ)
+        kwargs.setdefault("backend", BACKEND.AWQ_HF_KERNEL)
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -76,9 +81,10 @@ class HFKernelAwqLinear(HFKernelLinear):
             adapter=adapter,
             # Skip base buffer init, we need to manually init buffers for awq
             register_buffers=False,
-            enable_wf_unsqueeze=kwargs.pop("enable_wf_unsqueeze", False),
             **kwargs,
         )
+
+        self.linear_mode = None
 
         # Create awq buffers
         if register_buffers:
@@ -107,8 +113,56 @@ class HFKernelAwqLinear(HFKernelLinear):
             else:
                 self.bias = None
 
+    @classmethod
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        if not HFKernelLinear._is_torch_release():
+            msg = (
+                f"HFKernelAwqLinear requires a release version of torch, "
+                f"but found `{torch.__version__}`. "
+                f"Please install a stable release (e.g. `pip install torch`)."
+            )
+            log.warning(msg)
+            return False, RuntimeError(msg)
+
+        try:
+            from kernels import get_kernel
+
+            repo_id = cls.KERNEL_REPO_ID
+            try:
+                cls.gemm_int4_forward_kernel = staticmethod(get_kernel(repo_id).gemm_int4_forward)
+                log.info("HFKernelAwqLinear: loaded CPU gemm_4bit kernel from `%s`.", repo_id)
+                return True, None
+            except Exception:
+                module, variant_name = HFKernelLinear._load_cpu_kernel_variant(repo_id)
+                cls.gemm_int4_forward_kernel = staticmethod(module.gemm_int4_forward)
+                log.info(
+                    "HFKernelAwqLinear: loaded CPU gemm_4bit kernel from `%s` variant `%s`.",
+                    repo_id,
+                    variant_name,
+                )
+                return True, None
+        except Exception as exc:  # pragma: no cover - best effort fallback
+            cls.gemm_int4_forward_kernel = None
+            log.warning(
+                "Failed to load CPU gemm_4bit kernel from `%s`: %s. "
+                "Please make sure `pip install -U kernels` is installed.",
+                cls.KERNEL_REPO_ID,
+                str(exc),
+            )
+            return False, exc
+
     def post_init(self):
         super().post_init()
+        self.optimize()
+
+    def optimize(self):
+        if self.optimized:
+            return
+
+        super().optimize()
+
+    def convert_weight_packed_zp(self, block_n: int = 32):
+        return HFKernelLinear.convert_weight_packed_zp(self, block_n=block_n)
 
     def transform_cpu(self):
         # Unpack AWQ weights directly to integer form

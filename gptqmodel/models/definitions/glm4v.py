@@ -4,6 +4,7 @@ from transformers import AutoModelForImageTextToText
 
 from ..base import BaseQModel
 
+
 class Glm4vGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
 

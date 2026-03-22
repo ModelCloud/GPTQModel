@@ -11,9 +11,9 @@ import tempfile
 import unittest
 
 from datasets import load_dataset
+from models.model_test import ModelTest
 from parameterized import parameterized
 from transformers import AutoTokenizer
-from models.model_test import ModelTest
 
 from gptqmodel.nn_modules.qlinear.qqq import QQQQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME

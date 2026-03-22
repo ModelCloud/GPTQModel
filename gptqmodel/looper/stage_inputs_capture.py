@@ -30,6 +30,8 @@ class StageInputsCapture:
     """Capture layer inputs so processors can reuse cached activations."""
 
     def __init__(self, looper: ModuleLooper, logger=None) -> None:
+        """Binds the capture stage to a looper instance and logger."""
+
         self.looper = looper
         self.gptq_model = looper.gptq_model
         self.logger = logger or setup_logger()
@@ -40,6 +42,8 @@ class StageInputsCapture:
         calibration_data: Iterable[Dict[str, torch.Tensor]],
         use_cache: bool,
     ) -> InputCache:
+        """Runs a short forward over calibration data and caches first-layer inputs."""
+
         layer_inputs: List[List[torch.Tensor]] = []
         attention_masks: List[torch.Tensor | None] = []
         position_ids: List[torch.Tensor] = []
@@ -104,6 +108,8 @@ class StageInputsCapture:
             ).draw()
 
         def store_input_hook(module, args, kwargs):
+            """Captures the incoming batch for the first layer and aborts the forward."""
+
             layer_input: List[torch.Tensor] = []
             if kwargs.get("hidden_states") is not None:
                 layer_input.append(move_to(kwargs["hidden_states"], device=data_device))

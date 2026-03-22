@@ -14,7 +14,12 @@ from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
+from ...utils.env import env_flag
 from ...utils.torch import HAS_XPU
+
+
+# Shared runtime default: prefer accuracy first unless the user explicitly opts out.
+FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
 
 class AwqGemmTritonFn(torch.autograd.Function):
@@ -48,7 +53,13 @@ class AwqGemmTritonFn(torch.autograd.Function):
             out = torch.matmul(x, out.to(x.dtype))
         else:
             out = awq_gemm_triton(
-                x.reshape(-1, x.shape[-1]), qweight, scales, qzeros, split_k_iters=8,
+                x.reshape(-1, x.shape[-1]),
+                qweight,
+                scales,
+                qzeros,
+                split_k_iters=8,
+                fp32_accum=FP32_ACCUM,
+                output_dtype=x.dtype,
             )
 
         out = out + bias if bias is not None else out
@@ -75,7 +86,7 @@ class AwqGemmTritonFn(torch.autograd.Function):
 
 
 class AwqGEMMTritonQuantLinear(AWQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.GEMM_TRITON]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMM_TRITON]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 50}
     SUPPORTS_BITS = [4]
@@ -138,7 +149,7 @@ class AwqGEMMTritonQuantLinear(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TRITON),
+            backend=kwargs.pop("backend", BACKEND.AWQ_GEMM_TRITON),
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs)

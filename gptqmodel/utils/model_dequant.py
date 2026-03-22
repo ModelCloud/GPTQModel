@@ -18,11 +18,17 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from ..quantization.dtype import dequantize_f4_e2m1, dequantize_f8_e4m3
+from ..quantization.dtype import dequantize_f4_e2m1, dequantize_fp8
 from ..utils.logger import setup_logger
 
 
 LOG = logging.getLogger(__name__)
+
+_FLOAT8_DTYPES = tuple(
+    getattr(torch, name)
+    for name in ("float8_e4m3fn", "float8_e5m2")
+    if hasattr(torch, name)
+)
 
 if TYPE_CHECKING:
     from compressed_tensors.compressors.base import BaseCompressor
@@ -126,6 +132,18 @@ def _get_compressed_tensors_dependencies() -> dict:
         "AutoModelForCausalLM": AutoModelForCausalLM,
         "AutoModelForSeq2SeqLM": AutoModelForSeq2SeqLM,
     }
+
+
+def _get_bitsandbytes_dependencies():
+    try:
+        import bitsandbytes as bnb
+    except ImportError as exc:  # pragma: no cover - exercised when dependency missing
+        raise RuntimeError(
+            "Support for bitsandbytes quantized checkpoints requires the "
+            "'bitsandbytes' package. Install it with 'pip install bitsandbytes>=0.49.3'."
+        ) from exc
+
+    return bnb
 
 
 def _discover_compressed_tensors_module_schemes(
@@ -317,8 +335,8 @@ def infer_block_shape(weight_shape: Tuple[int, int], scale_tensor: torch.Tensor)
 
 def detect_format(model_path: Path, config: dict) -> str:
     quant_cfg = config.get("quantization_config", {}) or {}
-    method = (quant_cfg.get("quant_method") or "").lower()
-    fmt = (quant_cfg.get("fmt") or "").lower()
+    method = (quant_cfg.get("method") or quant_cfg.get("quant_method") or "").lower()
+    format_name = (quant_cfg.get("format") or "").lower()
 
     files, _ = list_safetensor_files(model_path)
     if not files:
@@ -330,7 +348,7 @@ def detect_format(model_path: Path, config: dict) -> str:
         for key in keys:
             if key.endswith(".weight"):
                 tensor = reader.get_tensor(key)
-                if tensor.dtype == torch.float8_e4m3fn:
+                if tensor.dtype in _FLOAT8_DTYPES:
                     LOG.debug("Detected FP8 weights via dtype on tensor '%s'", key)
                     return "fp8"
                 if tensor.dtype == torch.uint8 and (key + "_scale") in keys:
@@ -349,6 +367,14 @@ def detect_format(model_path: Path, config: dict) -> str:
         if any(k.endswith(".weight_scale_inv") for k in keys):
             LOG.debug("Detected FP8 format via '.weight_scale_inv' metadata in shard '%s'", files[0])
             return "fp8"
+        if any(k == "weight_quant_state" or k.endswith(".weight_quant_state") for k in keys) or any(
+            k == "weight_scb" or k.endswith(".weight_scb") for k in keys
+        ):
+            LOG.debug("Detected bitsandbytes format via explicit state tensors in shard '%s'", files[0])
+            return "bitsandbytes"
+        if any(k.endswith(".trellis") for k in keys):
+            LOG.debug("Detected EXL3 format via '.trellis' metadata in shard '%s'", files[0])
+            return "exl3"
         if any(k.endswith(".qweight") for k in keys):
             has_g = any(k.endswith(".g_idx") for k in keys)
             LOG.debug(
@@ -358,20 +384,32 @@ def detect_format(model_path: Path, config: dict) -> str:
             )
             return "gptq" if has_g else "awq"
 
-    if fmt == "float8_e4m3fn":
-        LOG.debug("Detected FP8 format via config fmt=%s", fmt)
+    if format_name in {"float8_e4m3fn", "float8_e5m2"}:
+        LOG.debug("Detected FP8 format via config format=%s", format_name)
         return "fp8"
+    if format_name in {"fp4", "nf4", "int8"}:
+        LOG.debug("Detected bitsandbytes format via config format=%s", format_name)
+        return "bitsandbytes"
+    if method == "fp8":
+        LOG.debug("Detected FP8 format via method=%s", method)
+        return "fp8"
+    if method == "bitsandbytes":
+        LOG.debug("Detected bitsandbytes format via method=%s", method)
+        return "bitsandbytes"
     if method in ("gptq", "gptqmodel"):
-        LOG.debug("Detected GPTQ format via quant_method=%s", method)
+        LOG.debug("Detected GPTQ format via method=%s", method)
         return "gptq"
     if method == "awq":
-        LOG.debug("Detected AWQ format via quant_method=%s", method)
+        LOG.debug("Detected AWQ format via method=%s", method)
         return "awq"
+    if method == "exl3":
+        LOG.debug("Detected EXL3 format via method=%s", method)
+        return "exl3"
     if method == "compressed-tensors":
         fmt_name = (quant_cfg.get("format") or "").lower()
         if fmt_name == "pack-quantized":
             LOG.debug(
-                "Detected compressed-tensors format via quant_method=%s and format=%s",
+                "Detected compressed-tensors format via method=%s and format=%s",
                 method,
                 fmt_name,
             )
@@ -409,11 +447,12 @@ def convert_fp8_shard(
     target_dtype: torch.dtype,
     *,
     block_shape: Optional[Tuple[int, int]],
+    scale_semantics: str = "heuristic",
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     for key in reader.keys():
         tensor = reader.get_tensor(key)
-        if key.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn:
+        if key.endswith(".weight") and tensor.dtype in _FLOAT8_DTYPES:
             scale_key = key + "_scale_inv"
             if scale_key not in reader.keys():
                 raise KeyError(f"Missing scale inverse tensor for {key}")
@@ -444,9 +483,15 @@ def convert_fp8_shard(
                     f"Tensor {key} shape {tensor.shape} incompatible with block size {effective_block}"
                 )
 
-            deq = dequantize_f8_e4m3(
+            scale_arg = None
+            scale_inv_arg = scale_inv
+            if scale_semantics == "inverse":
+                scale_arg = torch.reciprocal(scale_inv.to(torch.float32))
+                scale_inv_arg = None
+            deq = dequantize_fp8(
                 tensor,
-                scale_inv=scale_inv,
+                scale=scale_arg,
+                scale_inv=scale_inv_arg,
                 axis=None,
                 target_dtype=target_dtype,
             )
@@ -481,6 +526,74 @@ def convert_nvfp4_shard(reader, target_dtype: torch.dtype) -> Dict[str, torch.Te
             continue
         else:
             tensors[key] = finalize_for_save(tensor, target_dtype)
+    return tensors
+
+
+def convert_bitsandbytes_shard(
+    reader,
+    target_dtype: torch.dtype,
+    *,
+    quant_cfg: dict,
+) -> Dict[str, torch.Tensor]:
+    bnb = _get_bitsandbytes_dependencies()
+
+    tensors: Dict[str, torch.Tensor] = {}
+    keys = list(reader.keys())
+    key_set = set(keys)
+    bnb_quant_type = str(
+        quant_cfg.get("format")
+        or quant_cfg.get("bnb_quant_type")
+        or "fp4"
+    ).strip().lower()
+    if bnb_quant_type == "bitsandbytes":
+        bnb_quant_type = "fp4"
+
+    skipped_suffixes = (
+        ".weight_absmax",
+        ".weight_quant_map",
+        ".weight_nested_absmax",
+        ".weight_nested_quant_map",
+        ".weight_quant_state",
+        ".weight_scb",
+    )
+
+    for key in keys:
+        tensor = reader.get_tensor(key)
+
+        if key.endswith(".weight") and (key[:-len(".weight")] + ".weight_quant_state") in key_set:
+            prefix = key[:-len(".weight")]
+            payload = {
+                "absmax": reader.get_tensor(prefix + ".weight_absmax"),
+                "quant_map": reader.get_tensor(prefix + ".weight_quant_map"),
+                f"quant_state.bitsandbytes__{bnb_quant_type}": reader.get_tensor(prefix + ".weight_quant_state"),
+            }
+            if prefix + ".weight_nested_absmax" in key_set:
+                payload["nested_absmax"] = reader.get_tensor(prefix + ".weight_nested_absmax")
+            if prefix + ".weight_nested_quant_map" in key_set:
+                payload["nested_quant_map"] = reader.get_tensor(prefix + ".weight_nested_quant_map")
+
+            quant_state = bnb.functional.QuantState.from_dict(payload, device=tensor.device)
+            deq = bnb.functional.dequantize_4bit(tensor, quant_state=quant_state)
+            tensors[key] = finalize_for_save(deq, target_dtype)
+            LOG.debug("Dequantized bitsandbytes 4-bit module '%s' to dtype %s", prefix, target_dtype)
+            continue
+
+        if key.endswith(".weight") and (key[:-len(".weight")] + ".weight_scb") in key_set:
+            prefix = key[:-len(".weight")]
+            deq = bnb.functional.int8_vectorwise_dequant(
+                tensor,
+                reader.get_tensor(prefix + ".weight_scb"),
+            )
+            tensors[key] = finalize_for_save(deq, target_dtype)
+            LOG.debug("Dequantized bitsandbytes 8-bit module '%s' to dtype %s", prefix, target_dtype)
+            continue
+
+        if key.endswith(skipped_suffixes):
+            LOG.debug("Dropping auxiliary bitsandbytes tensor '%s' after dequantization", key)
+            continue
+
+        tensors[key] = finalize_for_save(tensor, target_dtype)
+
     return tensors
 
 
@@ -701,6 +814,7 @@ def dequantize_model(
     open_device = device_str or "cpu"
 
     block_shape = resolve_block_size(config) if fmt == "fp8" else None
+    fp8_scale_semantics = str(quant_cfg.get("weight_scale_semantics") or "heuristic").strip().lower()
 
     if block_shape is not None:
         LOG.debug("Configured FP8 block size %s found in quantization_config", block_shape)
@@ -742,7 +856,19 @@ def dequantize_model(
             LOG.debug("Processing shard '%s' for format %s on device %s", filename, fmt, open_device)
             if fmt == "fp8":
                 with safe_open(path, framework="pt", device=open_device) as reader:
-                    tensors = convert_fp8_shard(reader, target_dtype, block_shape=block_shape)
+                    tensors = convert_fp8_shard(
+                        reader,
+                        target_dtype,
+                        block_shape=block_shape,
+                        scale_semantics=fp8_scale_semantics,
+                    )
+            elif fmt == "bitsandbytes":
+                with safe_open(path, framework="pt", device=open_device) as reader:
+                    tensors = convert_bitsandbytes_shard(
+                        reader,
+                        target_dtype,
+                        quant_cfg=quant_cfg,
+                    )
             elif fmt == "nvfp4":
                 with safe_open(path, framework="pt", device=open_device) as reader:
                     tensors = convert_nvfp4_shard(reader, target_dtype)

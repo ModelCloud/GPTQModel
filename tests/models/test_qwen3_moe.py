@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from model_test import ModelTest
 
-from gptqmodel.quantization.config import ExpertsRoutingOverride, FailSafe, MoEConfig, VramStrategy
+from gptqmodel.quantization.config import ExpertsRoutingOverride, Fallback, MoEConfig, VramStrategy
 from gptqmodel.utils.eval import EVAL
 
 
@@ -12,14 +12,14 @@ from gptqmodel.utils.eval import EVAL
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.5094 |
 # | arc_challenge :: acc_norm,none |   0.5486 |
-# Qwen3-30B-A3B-MainBranch-FailSafe_Enable
+# Qwen3-30B-A3B-MainBranch-Fallback_Enable
 #
 # |    Tasks    |Version|Filter|n-shot| Metric |   |Value |   |Stderr|
 # |-------------|------:|------|-----:|--------|---|-----:|---|-----:|
 # |arc_challenge|      1|none  |     0|acc     |↑  |0.5307|±  |0.0146|
 # |             |       |none  |     0|acc_norm|↑  |0.5674|±  |0.0145|
 class TestQwen3Moe(ModelTest):
-    FAILSAFE = FailSafe()
+    FALLBACK = Fallback()
     # FORMAT = FORMAT.GEMM
     # METHOD = METHOD.AWQ
 

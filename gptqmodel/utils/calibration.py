@@ -154,6 +154,13 @@ def prepare_calibration_dataset(
             raise ValueError(f"Quantize: `{name}` for calibration item {idx} must be 1D or 2D, got scalar.")
         if tensor.ndim == 1:
             tensor = tensor.unsqueeze(0)
+        elif tensor.ndim > 2 and name == "attention_mask":
+            # Some tokenizers emit causal masks shaped like [B, 1, T, T] or [B, T, T].
+            # Collapse those higher-rank masks back to the token presence mask expected here.
+            tensor = tensor.ne(0)
+            for dim in range(tensor.ndim - 2, 0, -1):
+                tensor = tensor.any(dim=dim)
+            tensor = tensor.to(torch.long)
         elif tensor.ndim != 2:
             raise ValueError(
                 f"Quantize: `{name}` for calibration item {idx} must be rank 1 or 2, got rank {tensor.ndim}."

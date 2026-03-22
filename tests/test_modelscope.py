@@ -13,6 +13,7 @@ from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
 
+
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 

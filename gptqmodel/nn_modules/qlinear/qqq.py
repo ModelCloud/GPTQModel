@@ -13,7 +13,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import CPU, DEVICE, PLATFORM
-from ...nn_modules.qlinear import BaseQuantLinear
+from ...nn_modules.qlinear import GroupedQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
@@ -49,7 +49,7 @@ def mul(
     gptqmodel_qqq_kernels.qqq_gemm(A, B, C, D, s1, s2, s3, workspace, thread_k, thread_n, sms, max_par)
 
 
-class QQQQuantLinear(BaseQuantLinear):
+class QQQQuantLinear(GroupedQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.QQQ]
     SUPPORTS_METHODS = [METHOD.QQQ]
     SUPPORTS_FORMATS = {FORMAT.QQQ: 100}
@@ -115,6 +115,9 @@ class QQQQuantLinear(BaseQuantLinear):
             register_buffers=False,
             **kwargs)
 
+        # QQQ only needs the code range, not packed GPTQ/AWQ storage metadata.
+        self.maxq = (1 << self.bits) - 1
+
         # during quantization, we do are not loading tensors from disk so no need to preallocate buffers
         if register_buffers:
             self.register_buffer(
@@ -154,7 +157,6 @@ class QQQQuantLinear(BaseQuantLinear):
                 torch.zeros((self.max_par * 16 * 4, self.out_features), dtype=torch.int),
                 persistent=False,
             )
-            self.wf = torch.tensor(list(range(0, 32, 4)), dtype=torch.int32).unsqueeze(0)
             if bias:
                 self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
             else:

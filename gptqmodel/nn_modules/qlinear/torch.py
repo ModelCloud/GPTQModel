@@ -98,7 +98,7 @@ class _LinearWeightMetadata:
 
 
 class TorchQuantLinear(PackableQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.TORCH]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 20, FORMAT.GPTQ_V2: 20}
     SUPPORTS_BITS = [2, 3, 4, 8]
@@ -146,7 +146,7 @@ class TorchQuantLinear(PackableQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TORCH),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_TORCH),
             adapter=adapter,
             register_buffers=register_buffers,
             enable_wf_unsqueeze=kwargs.pop("enable_wf_unsqueeze", True),
@@ -300,13 +300,21 @@ class TorchQuantLinear(PackableQuantLinear):
 
     def _forward_eager(self, x: torch.Tensor, out_shape):
         num_itr = self.g_idx.shape[0] // x.shape[-1]
-        weights = self._consume_prefetched_weights(x.dtype)
+        weights = self._consume_prefetched_weights(x.dtype, device=x.device)
         if weights is None:
-            weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
+            weights = self.dequantize_weight(num_itr=num_itr)
+        if weights.device != x.device or weights.dtype != x.dtype:
+            # Quantized modules can be staged on a different accelerator than the
+            # caller tensor during multi-device kernel validation; matmul still
+            # needs both operands on the same device and dtype.
+            weights = weights.to(device=x.device, dtype=x.dtype)
         self._update_cached_weights(weights)
         out = torch.matmul(x, weights).reshape(out_shape)
         if self.bias is not None:
-            out.add_(self.bias)
+            bias = self.bias
+            if bias.device != out.device or bias.dtype != out.dtype:
+                bias = bias.to(device=out.device, dtype=out.dtype)
+            out.add_(bias)
 
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
@@ -390,13 +398,15 @@ class TorchQuantLinear(PackableQuantLinear):
             return
         self._cached_weights[weights.dtype] = weights.detach()
 
-    def _consume_prefetched_weights(self, dtype: torch.dtype):
+    def _consume_prefetched_weights(self, dtype: torch.dtype, device: torch.device = None):
         if not self._lookahead_enabled or self.training:
             return None
         tensor = self._prefetched_weights.pop(dtype, None)
         if tensor is None:
             return None
         event = self._prefetch_events.pop(dtype, None)
+        if device is not None and tensor.device != device:
+            return None
         if event is not None and HAS_CUDA and tensor.device.type == "cuda":
             torch.cuda.current_stream(device=tensor.device).wait_event(event)
         return tensor
@@ -692,7 +702,7 @@ def dequantize_model(model: PreTrainedModel):
         if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchQuantLinear):
             raise ValueError(
                 "Only models loaded using TorchQuantLinear are supported for dequantization. "
-                "Please load model using backend=BACKEND.TORCH."
+                "Please load model using backend=BACKEND.GPTQ_TORCH."
             )
 
         if isinstance(module, TorchQuantLinear):

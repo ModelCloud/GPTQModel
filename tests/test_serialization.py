@@ -18,8 +18,20 @@ import unittest  # noqa: E402
 import torch  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
-from gptqmodel.quantization import FORMAT, FORMAT_FIELD_CHECKPOINT, QuantizeConfig  # noqa: E402
-from gptqmodel.quantization.config import GPTAQConfig, HessianConfig, VramStrategy  # noqa: E402
+from gptqmodel.quantization import (  # noqa: E402
+    FORMAT,
+    FORMAT_FIELD_CHECKPOINT,
+    FORMAT_FIELD_CODE,
+    METHOD_FIELD_CODE,
+    QuantizeConfig,
+)
+from gptqmodel.quantization.config import (  # noqa: E402  # noqa: E402
+    METHOD,
+    GGUFConfig,
+    GPTAQConfig,
+    HessianConfig,
+    VramStrategy,
+)
 
 
 class TestSerialization(unittest.TestCase):
@@ -49,7 +61,23 @@ class TestSerialization(unittest.TestCase):
             with open(os.path.join(tmpdir, "quantize_config.json"), "r") as f:
                 quantize_config = json.load(f)
 
+            self.assertEqual(quantize_config[METHOD_FIELD_CODE], "gptq")
+            self.assertEqual(quantize_config["quant_method"], "gptq")
+            self.assertEqual(quantize_config[FORMAT_FIELD_CODE], "gptq")
             self.assertEqual(quantize_config[FORMAT_FIELD_CHECKPOINT], "gptq")
+
+    def test_legacy_checkpoint_format_load_normalizes_to_format(self):
+        cfg = QuantizeConfig.from_quant_config(
+            {
+                "bits": 4,
+                "checkpoint_format": "gguf",
+            }
+        )
+
+        self.assertIsInstance(cfg, GGUFConfig)
+        self.assertEqual(cfg.format, "q_0")
+        self.assertEqual(cfg.method, METHOD.GGUF)
+        self.assertEqual(cfg.quant_method, METHOD.GGUF)
 
     def test_quantize_config_meta_only_fields_serialization(self):
         cfg = QuantizeConfig(
@@ -72,7 +100,7 @@ class TestSerialization(unittest.TestCase):
         self.assertIsInstance(meta, dict)
 
         meta_only_fields = [
-            "failsafe",
+            "fallback",
             "gptaq",
             "offload_to_disk",
             "offload_to_disk_path",

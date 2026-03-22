@@ -6,8 +6,6 @@
 # -- do not touch
 import os
 
-from gptqmodel.nn_modules.qlinear.exllama_eora import ExllamaEoraQuantLinear
-
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
@@ -39,7 +37,6 @@ class TestBits(unittest.TestCase):
         BACKEND.TORCH: TorchQuantLinear,
         BACKEND.BITBLAS: BitBLASQuantLinear,
         BACKEND.MARLIN: MarlinQuantLinear,
-        BACKEND.EXLLAMA_EORA: ExllamaEoraQuantLinear,
     }
 
     QUANT_ARC_MAX_DELTA_FLOOR_PERCENT = 0.2

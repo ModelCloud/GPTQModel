@@ -212,6 +212,20 @@ def test_cached_forward_matches_baseline():
     assert module._cached_weights[x.dtype].device.type == device.type
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 CUDA devices")
+def test_cross_device_forward_moves_weights_to_input_device():
+    module = _make_module(torch.device("cuda:1"))
+    module.enable_weight_cache(True)
+    module.clear_weight_cache()
+
+    x = torch.randn(8, module.in_features, device=torch.device("cuda:0"), dtype=torch.float16)
+    out = module(x)
+
+    assert out.device == x.device
+    assert x.dtype in module._cached_weights
+    assert module._cached_weights[x.dtype].device == x.device
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda required for lookahead prefetch test")
 def test_lookahead_prefetch_single_step():
     device = torch.device("cuda")

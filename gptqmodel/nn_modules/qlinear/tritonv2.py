@@ -20,7 +20,7 @@ log = setup_logger()
 
 
 class TritonV2QuantLinear(TorchQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.TRITON]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TRITON]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 40, FORMAT.GPTQ_V2: 40}
     SUPPORTS_BITS = [2, 4, 8]
@@ -78,7 +78,7 @@ class TritonV2QuantLinear(TorchQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.TRITON),
+            backend=kwargs.pop("backend", BACKEND.GPTQ_TRITON),
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs)

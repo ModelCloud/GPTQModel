@@ -8,5 +8,7 @@ from enum import Enum
 
 
 class LinearMode(str, Enum):
+    """Selects whether wrapped linear modules run inference or training behavior."""
+
     INFERENCE = "inference"
     TRAIN = "train"

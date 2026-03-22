@@ -28,6 +28,15 @@ class _StubTokenizer:
         return value if value > 0 else 1
 
 
+class _CausalMaskTokenizer(_StubTokenizer):
+    def __call__(self, text, return_tensors="pt", add_special_tokens=True):
+        tokenized = super().__call__(text, return_tensors=return_tensors, add_special_tokens=add_special_tokens)
+        seq = tokenized["input_ids"].shape[1]
+        causal_mask = torch.tril(torch.ones((1, 1, seq, seq), dtype=torch.long))
+        tokenized["attention_mask"] = causal_mask
+        return tokenized
+
+
 class _ChatStubTokenizer(_StubTokenizer):
     chat_template = "{{ messages }}"
 
@@ -64,6 +73,12 @@ def _make_qmodel() -> BaseQModel:
     dummy_config = type("_Cfg", (), {"max_position_embeddings": 128})()
     dummy_model = type("_DummyModel", (), {"config": dummy_config})()
     model.model = dummy_model
+    return model
+
+
+def _make_qmodel_with_tokenizer(tokenizer) -> BaseQModel:
+    model = _make_qmodel()
+    model.tokenizer = tokenizer
     return model
 
 
@@ -140,6 +155,23 @@ def test_prepare_dataset_splits_long_row_across_blocks():
     assert first_mask == [[1, 1, 1, 1, 1]]
     assert second_ids == [[6, 0, 0, 0, 0]]
     assert second_mask == [[1, 0, 0, 0, 0]]
+
+
+def test_prepare_dataset_collapses_causal_attention_mask():
+    qmodel = _make_qmodel_with_tokenizer(_CausalMaskTokenizer())
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=["abc"],
+        calibration_dataset_concat_size=None,
+        calibration_dataset_sort=None,
+        batch_size=1,
+        calibration_data_min_length=0,
+        calibration_concat_separator=None,
+    )
+
+    assert len(batches) == 1
+    assert batches[0]["input_ids"].tolist() == [[97, 98, 99]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1]]
 
 
 def test_prepare_dataset_normalizes_rank_4_attention_mask():

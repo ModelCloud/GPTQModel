@@ -86,3 +86,41 @@ def test_stream_tensor_dict_to_cpu_cuda_background_release_preserves_events():
     with state_lock:
         assert not state.get("streaming_events"), "stream_sync should clear pending tickets"
         assert "tensor" not in state.get("streaming_event_map", {}), "event map entry should be removed after sync"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for mixed stream tests")
+def test_stream_tensor_dict_to_cpu_mixed_cuda_and_cpu_payload():
+    device = torch.device("cuda", 0)
+    torch.cuda.set_device(device)
+
+    payload = {
+        "cuda_tensor": torch.randn(8, 8, device=device, dtype=torch.float16),
+        "cpu_bias": torch.randn(8, dtype=torch.float32),
+    }
+    state: dict[str, object] = {}
+    state_lock = threading.RLock()
+    stored: dict[str, torch.Tensor] = {}
+
+    result = stream_tensor_dict_to_cpu(
+        payload,
+        store_callback=lambda items: stored.update(items),
+        state=state,
+        state_lock=state_lock,
+    )
+
+    assert result["cuda_tensor"].device.type == "cpu"
+    assert result["cuda_tensor"].is_pinned()
+    assert result["cpu_bias"].device.type == "cpu"
+    torch.testing.assert_close(result["cpu_bias"], payload["cpu_bias"])
+
+    with state_lock:
+        assert stored["cuda_tensor"] is result["cuda_tensor"]
+        assert stored["cpu_bias"] is result["cpu_bias"]
+        event_map = state.get("streaming_event_map", {})
+        assert "cuda_tensor" in event_map
+        assert "cpu_bias" not in event_map
+
+    stream_sync(state, state_lock)
+
+    torch.testing.assert_close(result["cuda_tensor"].cpu(), payload["cuda_tensor"].cpu())
+    torch.testing.assert_close(result["cpu_bias"], payload["cpu_bias"])

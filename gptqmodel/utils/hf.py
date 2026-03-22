@@ -7,10 +7,12 @@ import inspect
 import json
 import sys
 import warnings
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Optional
 
 import torch
+import transformers
 from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM, GenerationConfig, PreTrainedModel
 
@@ -28,6 +30,7 @@ from ..utils.logger import setup_logger
 
 __all__ = [
     "no_init_weights",
+    "suspend_hf_weight_init",
     "normalize_hf_config_compat",
     "prepare_remote_code_compat",
     "prepare_remote_model_init_compat",
@@ -38,6 +41,39 @@ __all__ = [
 
 log = setup_logger()
 _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
+
+
+@contextmanager
+def suspend_hf_weight_init():
+    """Disable HF/torch parameter init temporarily and always restore globals."""
+
+    def _skip_init(*args, **kwargs):
+        return None
+
+    original_kaiming_uniform = torch.nn.init.kaiming_uniform_
+    original_uniform = torch.nn.init.uniform_
+    original_normal = torch.nn.init.normal_
+
+    modeling_utils = transformers.modeling_utils
+    had_init_flag = hasattr(modeling_utils, "_init_weights")
+    original_init_flag = getattr(modeling_utils, "_init_weights", None)
+
+    torch.nn.init.kaiming_uniform_ = _skip_init
+    torch.nn.init.uniform_ = _skip_init
+    torch.nn.init.normal_ = _skip_init
+    modeling_utils._init_weights = False
+
+    try:
+        with no_init_weights():
+            yield
+    finally:
+        torch.nn.init.kaiming_uniform_ = original_kaiming_uniform
+        torch.nn.init.uniform_ = original_uniform
+        torch.nn.init.normal_ = original_normal
+        if had_init_flag:
+            modeling_utils._init_weights = original_init_flag
+        elif hasattr(modeling_utils, "_init_weights"):
+            delattr(modeling_utils, "_init_weights")
 
 
 @lru_cache(maxsize=None)
@@ -91,6 +127,33 @@ def has_native_transformers_causallm_support(model_id_or_path: Optional[str]) ->
     native_supported, _, _ = _detect_native_transformers_causallm_support(str(model_id_or_path))
     return native_supported
 
+def _resolve_input_embedding_weight_name(model: PreTrainedModel) -> Optional[str]:
+    get_input_embeddings = getattr(model, "get_input_embeddings", None)
+    if not callable(get_input_embeddings):
+        return None
+
+    try:
+        input_embeddings = get_input_embeddings()
+    except Exception:
+        return None
+
+    if input_embeddings is None:
+        return None
+
+    weight = getattr(input_embeddings, "weight", None)
+    if weight is None:
+        return None
+
+    for name, param in model.named_parameters(remove_duplicate=False):
+        if param is weight:
+            return name
+
+    for name, module in model.named_modules(remove_duplicate=False):
+        if module is input_embeddings:
+            return f"{name}.weight" if name else "weight"
+
+    return None
+
 
 # Older remote model files sometimes store `_tied_weights_keys` as a plain list
 # like `["lm_head.weight"]`. transformers 5.x now expects `{target: source}`,
@@ -99,20 +162,10 @@ def _resolve_legacy_tied_weights_mapping(model: PreTrainedModel, tied_mapping) -
     if not isinstance(tied_mapping, (list, tuple, set)):
         return {}
 
-    if not getattr(model.config, "tie_word_embeddings", False):
+    if not getattr(getattr(model, "config", None), "tie_word_embeddings", False):
         return {}
 
-    input_embeddings = model.get_input_embeddings()
-    input_weight = getattr(input_embeddings, "weight", None)
-    if input_weight is None:
-        return {}
-
-    source_name = None
-    for name, param in model.named_parameters(remove_duplicate=False):
-        if param is input_weight:
-            source_name = name
-            break
-
+    source_name = _resolve_input_embedding_weight_name(model)
     if source_name is None:
         return {}
 
@@ -170,6 +223,21 @@ def _patch_transformers_remote_code_compat() -> None:
         # transformers 5.x folds sliding-window behavior into StaticCache
         # layers, but older remote code still imports the legacy symbol.
         cache_utils.SlidingWindowCache = cache_utils.StaticCache
+
+    import transformers.utils.generic as generic
+    if not hasattr(generic, "check_model_inputs"):
+        # transformers 5.x removed `transformers.utils.generic.check_model_inputs`, but
+        # older remote model files still import it during module import.
+        def check_model_inputs(func=None, **kwargs):
+            def wrapper(fn):
+                def inner(self, *args, **kwargs):
+                    return fn(self, *args, **kwargs)
+
+                return inner
+
+            return wrapper(func) if func else wrapper
+
+        generic.check_model_inputs = check_model_inputs
 
     if cache_utils is not None and not hasattr(cache_utils, "HybridCache") and hasattr(cache_utils, "StaticCache"):
         # transformers 5.x also collapsed the legacy HybridCache entrypoint
@@ -357,10 +425,12 @@ def _patch_transformers_remote_code_compat() -> None:
                         expanded_tied_weights.update(submodel_tied_weights)
                 return expanded_tied_weights
 
-            if not getattr(self.config, "tie_word_embeddings", False):
+            if not getattr(getattr(self, "config", None), "tie_word_embeddings", False):
                 return {}
 
-            return _resolve_legacy_tied_weights_mapping(self, tied_mapping)
+            resolved_mapping = _resolve_legacy_tied_weights_mapping(self, tied_mapping)
+            self._tied_weights_keys = resolved_mapping
+            return resolved_mapping
 
         PreTrainedModel.get_expanded_tied_weights_keys = get_expanded_tied_weights_keys
         PreTrainedModel._gptqmodel_legacy_tied_weights_patch = True
@@ -460,6 +530,23 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
 # model files instantiate their architectures from the config object.
 def _normalize_remote_code_config_compat(config: Any) -> None:
     _normalize_chatglm_remote_code_config_compat(config)
+    if config.model_type.lower() == "dream" or config.model_type == "brumby":
+        import transformers.modeling_rope_utils as rope_utils
+        # dream remote models expect "default"
+        if "default" not in rope_utils.ROPE_INIT_FUNCTIONS:
+            rope_utils.ROPE_INIT_FUNCTIONS["default"] = rope_utils.ROPE_INIT_FUNCTIONS["linear"]
+
+        # transformers 5.x expects rope_parameters["factor"] for linear RoPE
+        if getattr(config, "rope_parameters", None):
+            config.rope_parameters.setdefault("factor", 1.0)
+
+    # BrumbyConfig remote config may not define pad_token_id.
+    # Ensure the attribute exists to avoid AttributeError in transformers 5.x.
+    if config.model_type == "brumby":
+        rope_scaling = getattr(config, "rope_scaling", None)
+        print("rrrr", rope_scaling)
+
+        config.pad_token_id = getattr(config, "pad_token_id", None)
 
     # transformers 5.x normalizes RoPE config to `rope_type`, but older
     # MiniCPM remote code still reads `rope_scaling["type"]` or expects `None`.
@@ -699,6 +786,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
 
     try:
         import importlib.util
+
         import peft.import_utils as peft_import_utils
         import peft.tuners.lora.awq as peft_awq
     except Exception:
@@ -730,6 +818,9 @@ def load_tokenizer(tokenizer_or_path, *, model_config: Any = None, **kwargs):
     )
     return Tokenicer.load(tokenizer_or_path, model_config=model_config, **kwargs)
 
+
+
+_patch_transformers_remote_code_compat()
 
 def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: bool = False) -> bool:
     changed = False

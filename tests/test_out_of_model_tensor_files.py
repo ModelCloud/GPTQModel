@@ -21,7 +21,9 @@ class _DummyKernel:
 
 
 class _DummyQuantizeConfig:
+    method = METHOD.GPTQ
     format = FORMAT.GPTQ
+    checkpoint_format = FORMAT.GPTQ
     quant_method = METHOD.GPTQ
     damp_percent = 0.0
     damp_auto_increment = 0.0
@@ -120,6 +122,8 @@ def test_out_of_model_tensor_files_are_copied_and_indexed(tmp_path, monkeypatch)
 
     monkeypatch.setattr("gptqmodel.models.writer.get_model_files_size", lambda _: 1)
     monkeypatch.setattr("gptqmodel.models.writer.alias_all_from_turtle_if_meta", lambda *args, **kwargs: None)
+    monkeypatch.setattr("gptqmodel.models.writer.sanitize_model_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("gptqmodel.models.writer.sanitize_generation_config_file", lambda *_args, **_kwargs: False)
 
     base_state_dict = {"model.weight": torch.zeros(1)}
 

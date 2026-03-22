@@ -89,7 +89,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
     def test_generation_desc_act_false(self):
         prompt = "I am in Paris and"
-        device = torch.device("cuda:0")
+        torch.device("cuda:0")
 
         reference_output = "<s> I am in Paris and I am in love with you.\n\nScene 2:\n\n(The stage is now dark, but the audience can see the characters walking around the stage.)\n\n(The stage is now lit up, but the audience can only see the characters' silhouettes.)\n\n("
 
@@ -111,7 +111,7 @@ class TestsQ4ExllamaV2(unittest.TestCase):
 
     def test_generation_desc_act_true(self):
         prompt = "The capital of France is"
-        device = torch.device("cuda:0")
+        torch.device("cuda:0")
 
         model_id = "/monster/data/model/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
         revision = "desc_act_true"

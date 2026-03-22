@@ -15,6 +15,7 @@ from packaging.version import Version
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
+
 if Version(setuptools.__version__) < Version("78.1.1"):
     raise RuntimeError(
         f"\033[31mYour setuptools version (`{setuptools.__version__}`) is too old and incompatible.\n"
@@ -563,11 +564,32 @@ def _env_enabled_any(names, default="1") -> bool:
 BUILD_MARLIN = _env_enabled_any(os.environ.get("GPTQMODEL_BUILD_MARLIN", "1"))
 BUILD_MACHETE = _env_enabled(os.environ.get("GPTQMODEL_BUILD_MACHETE", "0"))
 BUILD_EXLLAMA_V2 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V2", "1"))
+BUILD_EXLLAMA_V3 = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EXLLAMA_V3", "1"))
+
+EXLLAMAV3_SOURCES = [
+    "gptqmodel_ext/exllamav3/bindings.cpp",
+    "gptqmodel_ext/exllamav3/hadamard.cpp",
+    "gptqmodel_ext/exllamav3/hgemm.cu",
+    "gptqmodel_ext/exllamav3/libtorch/linear.cpp",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_1.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_2.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_3.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_4.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_5.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_6.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_7.cu",
+    "gptqmodel_ext/exllamav3/quant/comp_units/exl3_comp_unit_8.cu",
+    "gptqmodel_ext/exllamav3/quant/exl3_devctx.cu",
+    "gptqmodel_ext/exllamav3/quant/exl3_gemm.cu",
+    "gptqmodel_ext/exllamav3/quant/exl3_kernel_map.cu",
+    "gptqmodel_ext/exllamav3/quant/hadamard.cu",
+    "gptqmodel_ext/exllamav3/quant/pack.cu",
+    "gptqmodel_ext/exllamav3/quant/quantize.cu",
+    "gptqmodel_ext/exllamav3/quant/reconstruct.cu",
+    "gptqmodel_ext/exllamav3/quant/util.cu",
+]
 BUILD_QQQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_QQQ", "1"))
 BUILD_AWQ = _env_enabled(os.environ.get("GPTQMODEL_BUILD_AWQ", "1"))
-
-# Optional kernels and not build by default. Enable compile with env flags
-BUILD_EORA = _env_enabled(os.environ.get("GPTQMODEL_BUILD_EORA", "0"))
 
 if BUILD_CUDA_EXT == "1":
     # Import torch's cpp_extension only if we're truly building GPU extensions
@@ -701,7 +723,7 @@ if BUILD_CUDA_EXT == "1":
 
             extra_compile_args["nvcc"] = _hipify_compile_flags(extra_compile_args["nvcc"])
 
-        # Extensions (gate marlin/qqq/eora/exllamav2 on CUDA sm_80+ and non-ROCm)
+        # Extensions (gate marlin/qqq/exllamav2 on CUDA sm_80+ and non-ROCm)
         if sys.platform != "win32":
             if not ROCM_VERSION and HAS_CUDA_V8:
                 if BUILD_MARLIN:
@@ -789,18 +811,6 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
-                if BUILD_EORA:
-                    extensions += [
-                        cpp_ext.CUDAExtension(
-                            "gptqmodel_exllama_eora",
-                            [
-                                "gptqmodel_ext/exllama_eora/eora/q_gemm.cu",
-                                "gptqmodel_ext/exllama_eora/eora/pybind.cu",
-                            ],
-                            extra_link_args=extra_link_args,
-                            extra_compile_args=extra_compile_args,
-                        )
-                    ]
                 if BUILD_EXLLAMA_V2:
                     extensions += [
                         cpp_ext.CUDAExtension(
@@ -815,6 +825,16 @@ if BUILD_CUDA_EXT == "1":
                         )
                     ]
 
+                if BUILD_EXLLAMA_V3:
+                    extensions += [
+                        cpp_ext.CUDAExtension(
+                            "gptqmodel_exllamav3_kernels",
+                            EXLLAMAV3_SOURCES,
+                            extra_link_args=extra_link_args,
+                            extra_compile_args=extra_compile_args,
+                            include_dirs=[str(Path("gptqmodel_ext/exllamav3").resolve())],
+                        )
+                    ]
             if BUILD_AWQ:
                 if ROCM_VERSION:
                     print("Skipping AWQ kernels on ROCm: inline PTX is CUDA-only.")

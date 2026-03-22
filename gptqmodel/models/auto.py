@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 
 from ..utils.logger import setup_logger
 
@@ -60,13 +61,14 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
 from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
-from ..quantization import METHOD, QUANT_CONFIG_FILENAME  # noqa: E402
+from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
+from ..utils.backend import normalize_backend  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
 from ..utils.hf import resolve_trust_remote_code  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
-from .base import BaseQModel, QuantizeConfig  # noqa: E402
+from .base import BaseQModel  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
 from .definitions.apertus import ApertusQModel  # noqa: E402
 from .definitions.baichuan import BaiChuanQModel  # noqa: E402
@@ -282,20 +284,59 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
     quant_format = quantization_config.get("quant_format")
     if isinstance(quant_format, str) and quant_format.lower() in (
         METHOD.GPTQ,
+        METHOD.GGUF,
+        METHOD.FP8,
+        METHOD.BITSANDBYTES,
         METHOD.AWQ,
+        METHOD.PAROQUANT,
         METHOD.QQQ,
+        METHOD.EXL3,
     ):
         return True
 
-    quant_method = quantization_config.get("quant_method")
-    if isinstance(quant_method, str) and quant_method.lower() in (
+    method = quantization_config.get("method", quantization_config.get("quant_method"))
+    if isinstance(method, str) and method.lower() in (
         METHOD.GPTQ,
+        METHOD.GGUF,
+        METHOD.FP8,
+        METHOD.BITSANDBYTES,
         METHOD.AWQ,
+        METHOD.PAROQUANT,
         METHOD.QQQ,
+        METHOD.EXL3,
     ):
         return True
 
     return False
+
+
+@contextmanager
+def _hide_unsupported_quantization_config_for_lm_eval(model):
+    config = getattr(model, "config", None)
+    if config is None:
+        yield
+        return
+
+    quantization_config = getattr(config, "quantization_config", None)
+    if not isinstance(quantization_config, dict):
+        yield
+        return
+
+    try:
+        from transformers.quantizers import AutoQuantizationConfig
+
+        AutoQuantizationConfig.from_dict(dict(quantization_config))
+    except Exception:
+        pass
+    else:
+        yield
+        return
+
+    setattr(config, "quantization_config", None)
+    try:
+        yield
+    finally:
+        setattr(config, "quantization_config", quantization_config)
 
 
 def check_and_get_model_definition(model_dir, trust_remote_code=False):
@@ -337,8 +378,7 @@ class GPTQModel:
         if isinstance(quantize_config, Dict):
             quantize_config = QuantizeConfig(**quantize_config)
 
-        if isinstance(backend, str):
-            backend = BACKEND(backend)
+        backend = normalize_backend(backend)
 
         is_gptqmodel_quantized = False
         treat_as_local_path = isinstance(model_id_or_path, str) and (
@@ -449,8 +489,7 @@ class GPTQModel:
         print(f"from_quantized: adapter: {adapter}")
         model_definition = check_and_get_model_definition(model_id_or_path, trust_remote_code)
 
-        if isinstance(backend, str):
-            backend = BACKEND(backend)
+        backend = normalize_backend(backend)
 
         return model_definition.from_quantized(
             model_id_or_path=model_id_or_path,
@@ -519,11 +558,10 @@ class GPTQModel:
 
         if isinstance(model_or_id_or_path, str):
             load_backend = backend
-            if llm_backend == "vllm":
-                disallowed_keys = {"pretrained", "tokenizer", "gptqmodel", "trust_remote_code", "backend", "model_id_or_path"}
-                load_kwargs = {k: v for k, v in model_args.items() if k not in disallowed_keys}
-            else:
-                load_kwargs = model_args
+            # These keys are consumed by eval wrappers and should never leak
+            # into GPTQModel.load when callers reuse a shared model_args dict.
+            disallowed_keys = {"pretrained", "tokenizer", "gptqmodel", "trust_remote_code", "backend", "model_id_or_path"}
+            load_kwargs = {k: v for k, v in model_args.items() if k not in disallowed_keys}
 
             backend_name = load_backend.value if isinstance(load_backend, BACKEND) else str(load_backend)
             log.info(f"Eval: loading using backend = `{backend_name}`")
@@ -587,11 +625,12 @@ class GPTQModel:
                 raise ValueError(f"lm_eval import failed: {e}. Please install via `pip install gptqmodel[eval]`.") from e
 
             if llm_backend == "gptqmodel" and model is not None:
-                model_name = HFLM(
-                    pretrained=model,
-                    batch_size=batch_size,
-                    trust_remote_code=trust_remote_code,
-                )
+                with _hide_unsupported_quantization_config_for_lm_eval(model):
+                    model_name = HFLM(
+                        pretrained=model,
+                        batch_size=batch_size,
+                        trust_remote_code=trust_remote_code,
+                    )
 
             gen_kwargs = args.pop("gen_kwargs", None)
 
@@ -711,8 +750,25 @@ class GPTQModel:
 
         gptq_config = config.quantization_config
 
+        method = gptq_config.get("method", gptq_config.get("quant_method", ""))
+        normalized_method = str(method).lower()
+        if normalized_method == METHOD.GGUF.value:
+            backend = BACKEND.GGUF_TORCH
+        elif normalized_method == METHOD.BITSANDBYTES.value:
+            backend = BACKEND.BITSANDBYTES
+        elif normalized_method == METHOD.AWQ.value:
+            backend = BACKEND.AWQ_TORCH
+        elif normalized_method == METHOD.PAROQUANT.value:
+            backend = BACKEND.PAROQUANT_CUDA
+        elif normalized_method == METHOD.FP8.value:
+            backend = BACKEND.FP8_TORCH
+        elif normalized_method == METHOD.EXL3.value:
+            backend = BACKEND.EXL3_TORCH
+        else:
+            backend = BACKEND.GPTQ_TORCH
+
         # load gptq model
-        gptq_model = GPTQModel.load(model_id_or_path, backend=BACKEND.TORCH)
+        gptq_model = GPTQModel.load(model_id_or_path, backend=backend)
 
         if format == "mlx":
             try:
@@ -796,7 +852,7 @@ class GPTQModel:
             log.info("Model: Quant Model Loading...")
             quantized_model = GPTQModel.load(
                 model_id_or_path=quantized_model_id_or_path,
-                backend=BACKEND.TORCH,
+                backend=BACKEND.GPTQ_TORCH,
                 device=CPU,
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
@@ -813,7 +869,7 @@ class GPTQModel:
             model = GPTQModel.load(
                 model_id_or_path=model_id_or_path,
                 quantize_config=qcfg,
-                backend=BACKEND.TORCH,
+                backend=BACKEND.GPTQ_TORCH,
                 trust_remote_code=trust_remote_code,
                 dtype=dtype,
                 device=CPU,

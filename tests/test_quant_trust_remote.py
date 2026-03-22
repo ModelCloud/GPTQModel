@@ -19,6 +19,7 @@ from transformers import AutoTokenizer  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.quantization import FORMAT, QuantizeConfig  # noqa: E402
 
+
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 

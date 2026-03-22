@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from model_test import ModelTest
 from accelerate import init_empty_weights
+from model_test import ModelTest
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from gptqmodel.utils.hf import prepare_remote_code_compat

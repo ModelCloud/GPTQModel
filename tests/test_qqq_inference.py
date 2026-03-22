@@ -4,10 +4,10 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import pytest
-
 from models.model_test import ModelTest
+
 from gptqmodel import GPTQModel
-from gptqmodel.utils.eval import EVAL
+
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 

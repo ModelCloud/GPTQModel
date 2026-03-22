@@ -6,8 +6,8 @@ import os
 import unittest
 from importlib.metadata import PackageNotFoundError, version
 
-from packaging.version import Version
 from model_test import ModelTest
+from packaging.version import Version
 
 from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 from gptqmodel.utils.eval import EVAL

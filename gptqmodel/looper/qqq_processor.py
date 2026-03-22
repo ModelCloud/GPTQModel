@@ -9,14 +9,14 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..nn_modules.qlinear.qqq import QQQQuantLinear
-from ..quantization.config import METHOD, QuantizeConfig
-from ..utils.failsafe import normalize_failsafe
+from ..quantization.config import METHOD, QuantizeConfig, resolve_quant_format
+from ..utils.fallback import normalize_fallback
 from ..quantization.qqq import QQQ
 from ..utils.logger import setup_logger, log_time_block
 from ..utils.model import create_quant_module, find_modules, move_to, pack_module
@@ -25,6 +25,8 @@ from ..utils.torch import CPU
 log = setup_logger()
 
 class QQQProcessor(LoopProcessor):
+    """Captures activations and quantizes modules with the QQQ workflow."""
+
     def __init__(
         self,
         tokenizer,
@@ -38,6 +40,7 @@ class QQQProcessor(LoopProcessor):
         calculate_w_wq_diff: bool = False,
         calibration_concat_separator: Optional[str] = None,
     ):
+        """Initializes QQQ processing and optional weight-delta tracking."""
 
         super().__init__(
             tokenizer=tokenizer,
@@ -48,16 +51,20 @@ class QQQProcessor(LoopProcessor):
             calibration_concat_separator=calibration_concat_separator,
             prepare_dataset_func=prepare_dataset_func,
             batch_size=batch_size,
-            require_fwd=require_fwd,
+            execution_config=ExecutionConfig(require_fwd=require_fwd),
         )
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
 
     def set_calibration_dataset(self, calibration_dataset):
+        """Rejects dataset replacement because QQQ capture is fixed at construction."""
+
         raise NotImplementedError("QQQProcessor's calibration_dataset cannot be modified")
 
-    def preprocess(self, module: NamedModule, failsafe=None, **kwargs):
+    def preprocess(self, module: NamedModule, fallback=None, **kwargs):
+        """Builds the per-module QQQ task after applying dynamic overrides."""
+
         # entire module is skipped
         if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
             return
@@ -84,7 +91,7 @@ class QQQProcessor(LoopProcessor):
 
         tmp = QQQ(module=module, qcfg=qcfg_clone)
 
-        tmp.failsafe = normalize_failsafe(failsafe, qcfg_clone.failsafe)
+        tmp.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
         tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
         if self.qcfg.mse > 0.0:
@@ -105,6 +112,8 @@ class QQQProcessor(LoopProcessor):
         self.tasks[module.name] = tmp
 
     def is_skipped(self, module: NamedModule) -> bool:
+        """Reports whether preprocessing omitted this module from QQQ work."""
+
         # gptq has no dynamic method of full override (removal)
         t = self.tasks.get(module.name, False)
         if t == False:
@@ -113,7 +122,11 @@ class QQQProcessor(LoopProcessor):
             return False
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
+        """Returns the forward hook that feeds captured batches into the QQQ task."""
+
         def tmp(_, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+            """Records one activation batch for QQQ statistics accumulation."""
+
             # gptq is mutable.
             q = self.tasks[name]  # noqa: F821
             q.add_batch(inp[0].data, out.data)  # noqa: F821
@@ -128,6 +141,8 @@ class QQQProcessor(LoopProcessor):
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
     ):
+        """Runs QQQ quantization for one module and stores pack-ready tensors."""
+
         base_title = f"Quantizing {module.name} in layer"
         self._pause_controller.register_and_draw_progress_bar(self.pb, title=base_title, subtitle="")
         qqq = self.tasks
@@ -219,6 +234,8 @@ class QQQProcessor(LoopProcessor):
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
+        """Creates the quantized module and packs the saved QQQ tensors into it."""
+
         # generate complete, safe to move to cpu
         module.weight.data = move_to(module.weight.data, device=CPU) # large weights is slow to init on cpu
         module.state.pop("w", None) # no need for original weights now
@@ -245,7 +262,7 @@ class QQQProcessor(LoopProcessor):
             create_quant_module(
                 name=module.full_name,
                 linear_cls=QQQQuantLinear,
-                bits=self.qcfg.bits,
+                bits=self.qcfg.runtime_bits,
                 desc_act=self.qcfg.desc_act,
                 dynamic=self.qcfg.dynamic,
                 group_size=self.qcfg.group_size,
@@ -255,6 +272,7 @@ class QQQProcessor(LoopProcessor):
                 device=self.qcfg.device,
                 lm_head_name=model.lm_head,
                 pack_dtype=self.qcfg.pack_dtype,
+                format=resolve_quant_format(self.qcfg.format, self.qcfg.method),
                 register_buffers=False,
             )
 
@@ -289,14 +307,18 @@ class QQQProcessor(LoopProcessor):
         module.unregister_parameter("weight")
 
     def finalize(self, model: BaseQModel, **kwargs):
+        """Marks the model as QQQ-quantized and runs shared finalization logic."""
+
         # set quantized state
         model.quantized = True
 
-        model.quantize_config.quant_method = METHOD.QQQ
+        model.quantize_config.method = METHOD.QQQ
 
         super().finalize(model=model, **kwargs)
 
     def verify_calibration_dataset(self, processor_index: int) -> bool:
+        """Ensures QQQ received calibration data before the quantization loop starts."""
+
         if self.calibration_dataset is None:
             raise ValueError("GPTQProcessor's calibration_dataset must be provided.")
         else:
@@ -304,7 +326,11 @@ class QQQProcessor(LoopProcessor):
 
     @classmethod
     def name(cls) -> str:
+        """Returns the processor label used in logs and lifecycle reporting."""
+
         return "qqq"
 
     def has_captured_input_ids(self, name: str) -> bool:
+        """Reports whether the module saw at least one captured forward batch."""
+
         return self.tasks[name].fwd_counter > 0

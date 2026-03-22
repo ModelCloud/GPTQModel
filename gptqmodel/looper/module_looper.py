@@ -20,7 +20,6 @@ import threading
 import time
 import logging
 from concurrent.futures import as_completed
-from contextlib import nullcontext
 from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING, Any
 
 import torch
@@ -35,10 +34,9 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
-from ..nn_modules.hooked_linear import (STOP_FORWARD_EXCEPTION, HookedLinear,
-                                        StopForward, replace_module_with_hooked_legacy)
-from ..quantization.config import VramStrategy
-from ..utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
+from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
+from ..quantization.config import METHOD, VramStrategy
+from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.ctx import ctx
 from ..utils.device import get_device, get_device_new
 from ..utils.disk import estimate_disk_io_speed
@@ -52,12 +50,13 @@ from ..utils.looper_helpers import (
     rehome_module_to_device,
     select_forward_devices,
 )
-from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, nested_move_to, \
-    MoETopKState, set_moe_topk, restore_moe_topk
+from ..utils.model import find_modules, get_module, get_module_by_name_prefix, move_to, MoETopKState, set_moe_topk, restore_moe_topk
 from ..utils.offload import offload_to_disk
 from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
 from .. import DEVICE_THREAD_POOL
 from .awq_processor import AWQProcessor
+from .forward_executor import ForwardExecutor
+from .paroquant_processor import ParoQuantProcessor
 from .qqq_processor import QQQProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
@@ -72,9 +71,29 @@ if TYPE_CHECKING:  # pragma: no cover - type hints only
 
 
 class FinalizeProgressInfo(NamedTuple):
+    """Progress payload for processor finalization reporting."""
+
     module_label: Optional[str]
     process_name: str
     layer_idx: Optional[int]
+
+
+def _restrict_quant_devices_for_method(method: Any, quant_devices: List[torch.device]) -> List[torch.device]:
+    """Apply method-specific device constraints for quantization workers."""
+
+    try:
+        normalized_method = METHOD(method) if method is not None else None
+    except (TypeError, ValueError):
+        normalized_method = None
+
+    if normalized_method != METHOD.PAROQUANT or not quant_devices:
+        return quant_devices
+
+    non_cpu_devices = [device for device in quant_devices if getattr(device, "type", None) != "cpu"]
+    if non_cpu_devices:
+        return [non_cpu_devices[0]]
+
+    return quant_devices[:1]
 
 
 class StopMainLoop(Exception):
@@ -82,6 +101,8 @@ class StopMainLoop(Exception):
 
 
 def io_write_performance() -> Optional[float]:
+    """Estimate and cache sustained disk write throughput in MB/s."""
+
     global _IO_WRITE_SPEED_MB
     if _IO_WRITE_SPEED_MB is not None:
         return _IO_WRITE_SPEED_MB
@@ -101,6 +122,8 @@ class ModuleLooper():
     reuse the same worker threads.
     """
     def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
+        """Initialize loop state, device policy, and callback wiring."""
+
         self.processors = processors
         self.gptq_model = model
 
@@ -112,6 +135,7 @@ class ModuleLooper():
             processor._pause_controller = self.pause_controller
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
+        self._forward_executor = ForwardExecutor(self, logger=log)
         self._layer_callback = getattr(model, "layer_callback", None)
         self._loop_stop_event = threading.Event()
         self._loop_stop_exc: Optional[BaseException] = None
@@ -154,6 +178,19 @@ class ModuleLooper():
                     "compute_device_filter returned empty device list. "
                     "Using all devices for quantization."
                 )
+
+        restricted_quant_devices = _restrict_quant_devices_for_method(
+            getattr(self.gptq_model.quantize_config, "method", None),
+            quant_devices,
+        )
+        if restricted_quant_devices != quant_devices:
+            log.warn(
+                "ModuleLooper: METHOD.PAROQUANT forcing single-device quantization on `%s`; "
+                "ignoring additional devices %s to avoid multi-GPU sync issues.",
+                restricted_quant_devices[0],
+                [str(device) for device in quant_devices if device != restricted_quant_devices[0]],
+            )
+            quant_devices = restricted_quant_devices
 
         self._quant_devices = quant_devices
         self._quant_device_rr = 0
@@ -203,6 +240,8 @@ class ModuleLooper():
         """
 
         def __init__(self, model, moe_routing_override: int):
+            """Capture the model and temporary top-k override to apply."""
+
             # Model containing MoE routing modules
             self.model = model
             # Target top-k value for per-token expert routing
@@ -211,12 +250,16 @@ class ModuleLooper():
             self._state: MoETopKState | None = None
 
         def __enter__(self):
+            """Apply the temporary routing override before the forward pass."""
+
             # Apply routing override if specified
             if self.moe_routing_override:
                 self._state = set_moe_topk(self.model, self.moe_routing_override)
             return self
 
         def __exit__(self, exc_type, exc, tb):
+            """Restore the original routing state when leaving the context."""
+
             # Restore original routing configuration
             if self.moe_routing_override:
                 restore_moe_topk(self._state)
@@ -226,6 +269,8 @@ class ModuleLooper():
         """Context manager for MoE lifecycle hooks integration."""
 
         def __init__(self, module_looper, module, processor, current_subset):
+            """Capture the replica state needed to patch the MoE block."""
+
             self.module_looper = module_looper
             self.module = module
             self.processor = processor
@@ -248,6 +293,8 @@ class ModuleLooper():
                     moe_block_prefix = hooks._extract_moe_block_prefix(self.current_subset, self.moe_block)
 
                     def moe_forward_wrapper(hidden_states, **kwargs):
+                        """Route the replica forward through the all-experts hook."""
+
                         return hooks.forward_to_all_experts(
                             moe_block=self.moe_block,
                             hidden_states=hidden_states,
@@ -282,6 +329,8 @@ class ModuleLooper():
         self._subset_callback = callback
 
     def register_dangling_thread(self, watcher: threading.Thread) -> None:
+        """Track a watcher thread that should be joined before exit."""
+
         with self._dangling_threads_lock:
             if self._dangling_threads:
                 self._dangling_threads = [
@@ -290,6 +339,8 @@ class ModuleLooper():
             self._dangling_threads.append(watcher)
 
     def wait_dangling_threads(self) -> None:
+        """Join any still-running watcher threads and clear the registry."""
+
         with self._dangling_threads_lock:
             threads = list(self._dangling_threads)
             self._dangling_threads.clear()
@@ -298,6 +349,8 @@ class ModuleLooper():
             thread.join()
 
     def _resolve_layer_callback(self):
+        """Resolve the active layer-complete callback using legacy fallbacks."""
+
         for candidate in (
             getattr(self, "_layer_callback", None),
             getattr(self, "layer_callback", None),
@@ -310,6 +363,8 @@ class ModuleLooper():
         return None
 
     def _resolve_subset_callback(self):
+        """Resolve the active subset callback from looper or model state."""
+
         for candidate in (
             getattr(self, "_subset_callback", None),
             getattr(self, "subset_callback", None),
@@ -320,6 +375,8 @@ class ModuleLooper():
         return None
 
     def callbackup(self, layer_idx: int, submodule_finalized: bool):
+        """Invoke the layer callback and normalize stop-loop responses."""
+
         callback = self._resolve_layer_callback()
         if callback is None:
             return None
@@ -350,6 +407,8 @@ class ModuleLooper():
         module_names: List[str],
         processor: str,
     ) -> None:
+        """Emit a subset event immediately and surface callback failures."""
+
         self._emit_subset_event(
             stage=stage,
             layer_idx=layer_idx,
@@ -361,12 +420,16 @@ class ModuleLooper():
         )
 
     def _request_loop_stop(self, exc: Optional[BaseException]) -> None:
+        """Record the first stop reason and signal loop shutdown."""
+
         with self.lock:
             if self._loop_stop_exc is None and exc is not None:
                 self._loop_stop_exc = exc
         self._loop_stop_event.set()
 
     def _check_loop_stop(self) -> bool:
+        """Drain outstanding work and re-raise any recorded stop signal."""
+
         if not self._loop_stop_event.is_set():
             return False
         if not self._loop_stop_waited:
@@ -387,6 +450,8 @@ class ModuleLooper():
         processor: str,
         raise_in_place: bool,
     ) -> None:
+        """Forward a subset lifecycle event to the configured callback."""
+
         callback = self._resolve_subset_callback()
         if callback is None:
             return
@@ -437,6 +502,8 @@ class ModuleLooper():
         *,
         raise_in_place: bool,
     ) -> None:
+        """Notify listeners that a layer finished and handle stop requests."""
+
         try:
             self.callbackup(layer_idx=layer_idx, submodule_finalized=submodule_finalized)
         except StopMainLoop:
@@ -455,6 +522,8 @@ class ModuleLooper():
     # Processors capture activations through hooks that need thread-local state
     # so masks survive the roundtrip to worker threads.
     def _processor_mask_tls(self, processor: LoopProcessor) -> threading.local:
+        """Get or create thread-local storage for the active keep mask."""
+
         tls = getattr(processor, "_mask_tls", None)
         if tls is None:
             tls = threading.local()
@@ -478,14 +547,20 @@ class ModuleLooper():
         return getattr(tls, "value", False) if tls else False
 
     def _set_processor_mask(self, processor: LoopProcessor, mask):
+        """Store the active sequence mask for the current worker thread."""
+
         tls = self._processor_mask_tls(processor)
         tls.value = mask
 
     def _get_processor_mask(self, processor: LoopProcessor):
+        """Return the sequence mask bound to the current worker thread."""
+
         tls = getattr(processor, "_mask_tls", None)
         return getattr(tls, "value", None) if tls else None
 
     def _safe_len(self, sequence) -> Optional[int]:
+        """Return ``len(sequence)`` when the object exposes a safe length."""
+
         if sequence is None:
             return None
         try:
@@ -494,6 +569,8 @@ class ModuleLooper():
             return None
 
     def _coerce_to_int(self, value) -> Optional[int]:
+        """Best-effort conversion for scalar-like values used in counters."""
+
         if value is None:
             return None
         if isinstance(value, bool):
@@ -522,6 +599,8 @@ class ModuleLooper():
             return None
 
     def _resolve_batch_total(self, raw_count, fallback_sequence) -> int:
+        """Resolve a non-negative batch count from explicit or inferred input."""
+
         count = self._coerce_to_int(raw_count)
         fallback_len = self._safe_len(fallback_sequence)
         fallback = self._coerce_to_int(fallback_len)
@@ -540,6 +619,8 @@ class ModuleLooper():
         return 0
 
     def _batch_row_count(self, batch_inputs: Optional[List[torch.Tensor]]) -> int:
+        """Infer how many rows a cached batch contributes to progress."""
+
         if not batch_inputs:
             return 0
 
@@ -558,6 +639,8 @@ class ModuleLooper():
         return 0
 
     def _collect_row_counts(self, layer_inputs: Optional[List[List[torch.Tensor]]]) -> List[int]:
+        """Collect per-batch row counts for progress tracking."""
+
         if not layer_inputs:
             return []
 
@@ -568,6 +651,8 @@ class ModuleLooper():
         return counts
 
     def _extract_moe_group_key(self, module_name: Optional[str]) -> Optional[str]:
+        """Collapse expert module names into a stable MoE routing group key."""
+
         if not module_name:
             return None
 
@@ -589,6 +674,8 @@ class ModuleLooper():
         return None
 
     def _is_attention_module_name(self, module_name: str) -> bool:
+        """Heuristically detect attention modules from their qualified name."""
+
         if not module_name:
             return False
 
@@ -642,6 +729,8 @@ class ModuleLooper():
         named_module: NamedModule,
         fallback_device: torch.device,
     ) -> torch.device:
+        """Pick and memoize the quantization device for one named module."""
+
         key = getattr(named_module, "full_name", None) or named_module.name
         with self._quant_device_lock:
             cached = self._module_device_map.get(key)
@@ -667,6 +756,8 @@ class ModuleLooper():
         *,
         fallback_modules: Optional[Dict[str, torch.nn.Module]] = None,
     ) -> Dict[str, torch.device]:
+        """Move selected modules to temporary forward devices and record prior placement."""
+
         previous: Dict[str, torch.device] = {}
         if not device_map:
             return previous
@@ -707,6 +798,8 @@ class ModuleLooper():
         *,
         fallback_modules: Optional[Dict[str, torch.nn.Module]] = None,
     ) -> None:
+        """Restore module placements saved by ``_apply_forward_device_overrides``."""
+
         if not previous_devices:
             return
 
@@ -732,6 +825,8 @@ class ModuleLooper():
         named_module: NamedModule,
         target_device: torch.device,
     ) -> None:
+        """Move processor-owned task state alongside the module it quantizes."""
+
         task_map = getattr(processor, "tasks", None)
         if not task_map:
             return
@@ -779,6 +874,8 @@ class ModuleLooper():
         named_module: NamedModule,
         fallback_device: torch.device,
     ) -> torch.device:
+        """Place a named module and its processor task on the chosen device."""
+
         target_device = self._assign_quant_device_for_module(
             named_module,
             fallback_device=fallback_device,
@@ -817,64 +914,9 @@ class ModuleLooper():
         force_serial: bool = False,
         preserve_module_devices: bool = False,
     ) -> List[List[torch.Tensor]]:
-        """Dispatch the captured layer inputs through the module.
+        """Run cached batches through the module using serial or parallel execution."""
 
-        When multiple accelerators of the same type are available we clone the
-        module and execute batches in parallel, otherwise we fall back to a
-        single threaded path. The helper returns the ordered outputs that feed
-        the next processor stage when ``need_outputs`` is set.
-        """
-        if not force_serial:
-            quant_config = getattr(self.gptq_model, "quantize_config", None)
-            if quant_config is not None and not getattr(quant_config, "auto_forward_data_parallel", True):
-                force_serial = True
-        if force_serial:
-            return self._run_forward_batches_single(
-                module=module,
-                processor=processor,
-                layer_inputs=layer_inputs,
-                layer_input_kwargs=layer_input_kwargs,
-                position_ids=position_ids,
-                attention_masks=attention_masks,
-                cur_layer_device=cur_layer_device,
-                is_lm_head_module=is_lm_head_module,
-                shared_kv_cache_dict=shared_kv_cache_dict,
-                layer_index=layer_index,
-                need_outputs=need_outputs,
-                reuse_kv=reuse_kv,
-                progress_pb=progress_pb,
-                progress_title=progress_title,
-                progress_stage=progress_stage,
-                progress_rows_per_batch=progress_rows_per_batch,
-                progress_total_rows=progress_total_rows,
-                preserve_module_devices=preserve_module_devices,
-            )
-
-        devices = select_forward_devices(cur_layer_device)
-
-        if len(devices) <= 1:
-            return self._run_forward_batches_single(
-                module=module,
-                processor=processor,
-                layer_inputs=layer_inputs,
-                layer_input_kwargs=layer_input_kwargs,
-                position_ids=position_ids,
-                attention_masks=attention_masks,
-                cur_layer_device=cur_layer_device,
-                is_lm_head_module=is_lm_head_module,
-                shared_kv_cache_dict=shared_kv_cache_dict,
-                layer_index=layer_index,
-                need_outputs=need_outputs,
-                reuse_kv=reuse_kv,
-                progress_pb=progress_pb,
-                progress_title=progress_title,
-                progress_stage=progress_stage,
-                progress_rows_per_batch=progress_rows_per_batch,
-                progress_total_rows=progress_total_rows,
-                preserve_module_devices=preserve_module_devices,
-            )
-
-        return self._run_forward_batches_parallel(
+        return self._forward_executor.run(
             module=module,
             processor=processor,
             layer_inputs=layer_inputs,
@@ -887,12 +929,14 @@ class ModuleLooper():
             layer_index=layer_index,
             need_outputs=need_outputs,
             reuse_kv=reuse_kv,
-            devices=devices,
             progress_pb=progress_pb,
             progress_title=progress_title,
             progress_stage=progress_stage,
             progress_rows_per_batch=progress_rows_per_batch,
             progress_total_rows=progress_total_rows,
+            force_serial=force_serial,
+            preserve_module_devices=preserve_module_devices,
+            select_forward_devices_fn=select_forward_devices,
         )
 
     def _run_forward_batches_single(
@@ -917,124 +961,28 @@ class ModuleLooper():
         progress_total_rows: Optional[int] = None,
         preserve_module_devices: bool = False,
     ) -> List[List[torch.Tensor]]:
-        """Sequential fallback when only one forward device is in use."""
-        outputs: List[List[torch.Tensor]] = []
-        prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
-        total_batches = self._resolve_batch_total(processor.num_batches, layer_inputs)
-        batch_row_counts = progress_rows_per_batch or self._collect_row_counts(layer_inputs)
-        batch_row_counts = list(batch_row_counts)
-        if len(batch_row_counts) > total_batches:
-            batch_row_counts = batch_row_counts[:total_batches]
-        elif len(batch_row_counts) < total_batches:
-            batch_row_counts.extend([0] * (total_batches - len(batch_row_counts)))
-        total_rows = progress_total_rows if progress_total_rows is not None else sum(batch_row_counts)
-        if total_rows <= 0 and total_batches > 0:
-            total_rows = total_batches
-        total_rows = max(total_rows, 1)
-        processed_rows = 0
-        stage_label = progress_stage or "Forward"
+        """Run cached batches on a single device and return ordered outputs when requested."""
 
-        for batch_idx in range(total_batches):
-            processor._set_current_batch_index(batch_idx)
-            try:
-                exec_device = cur_layer_device
-                if preserve_module_devices:
-                    module_target = getattr(module, "target_device", None)
-                    if module_target is not None:
-                        exec_device = module_target
-
-                layer_input = [move_to(inp, device=exec_device) for inp in layer_inputs[batch_idx]]
-
-                raw_mask = attention_masks[batch_idx]
-                attn_tensor = raw_mask if raw_mask is None else move_to(raw_mask, device=exec_device)
-
-                keep_mask = None
-                if attn_tensor is not None:
-                    seq_len = layer_input[0].shape[1] if (len(layer_input) > 0 and layer_input[0].dim() >= 2) else None
-                    keep_mask = normalize_seq_mask(attn_tensor, seq_len=seq_len)
-
-                # Set mask using TLS (thread-safe)
-                self._set_processor_mask(processor, keep_mask)
-                additional_inputs: Dict[str, Optional[torch.Tensor]] = {}
-                if self.support_batch_quantize and attn_tensor is not None:
-                    additional_inputs["attention_mask"] = attn_tensor
-                else:
-                    additional_inputs["attention_mask"] = None
-
-                if position_ids:
-                    pos = position_ids[batch_idx]
-                    if pos is not None:
-                        additional_inputs["position_ids"] = move_to(pos, device=exec_device)
-
-                for key, value in layer_input_kwargs[batch_idx].items():
-                    # past_key_values will triggers the cache logic. we need disable cache when layer forward.
-                    if key in ["past_key_values", "past_key_value"]:
-                        continue
-                    additional_inputs[key] = nested_move_to(value, device=exec_device)
-
-                if reuse_kv and prev_kv is not None:
-                    additional_inputs["kv_last_layer"] = nested_move_to(prev_kv, device=exec_device)
-
-                # TODO: some models does not honor generate config.use_cache property so we are forced to hack this to false
-                additional_inputs["use_cache"] = False
-
-                if not preserve_module_devices:
-                    rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
-
-                # MoE lifecycle hooks integration - using context manager
-                with self.MoERoutingOverrideContext(module, self.moe_routing_override) if self.moe_routing_override else self.MoELifecycleContext(self, module, processor, self._current_subset) if self.moe_routing_bypass else nullcontext():
-                    module_output = None
-                    try:
-                        if is_lm_head_module:
-                            module_output = module(*layer_input)
-                        else:
-                            module_output = module(*layer_input, **additional_inputs)
-                    except StopForward:
-                        module_output = None
-                    finally:
-                        self._set_processor_mask(processor, None)
-
-                # Release intermediate tensors promptly after they are no longer needed
-                del layer_input
-                del attn_tensor
-                del keep_mask
-                del additional_inputs
-
-                if (
-                    reuse_kv
-                    and module_output is not None
-                    and isinstance(module_output, tuple)
-                    and len(module_output) > 0
-                    and shared_kv_cache_dict.get(layer_index) is None
-                ):
-                    shared_kv_cache_dict[layer_index] = module_output[-1]
-
-                if need_outputs and module_output is not None:
-                    primary = module_output[0] if isinstance(module_output, tuple) else module_output
-                    primary = move_to(primary, device=cur_layer_device)
-                    outputs.append([primary])
-
-                # Release module_output promptly after extracting what we need
-                if module_output is not None:
-                    del module_output
-
-                rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
-                if rows_for_batch <= 0:
-                    rows_for_batch = self._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
-                    rows_for_batch = max(rows_for_batch, 1)
-
-                processed_rows = min(processed_rows + rows_for_batch, total_rows)
-                if progress_pb is not None:
-                    if progress_title:
-                        progress_pb.title(progress_title)
-                    progress_pb.current_iter_step = processed_rows
-                    progress_pb.subtitle(
-                        f"{stage_label} rows {processed_rows}/{total_rows}"
-                    ).draw()
-            finally:
-                processor._set_current_batch_index(None)
-
-        return outputs
+        return self._forward_executor.run_single(
+            module=module,
+            processor=processor,
+            layer_inputs=layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            position_ids=position_ids,
+            attention_masks=attention_masks,
+            cur_layer_device=cur_layer_device,
+            is_lm_head_module=is_lm_head_module,
+            shared_kv_cache_dict=shared_kv_cache_dict,
+            layer_index=layer_index,
+            need_outputs=need_outputs,
+            reuse_kv=reuse_kv,
+            progress_pb=progress_pb,
+            progress_title=progress_title,
+            progress_stage=progress_stage,
+            progress_rows_per_batch=progress_rows_per_batch,
+            progress_total_rows=progress_total_rows,
+            preserve_module_devices=preserve_module_devices,
+        )
 
     def _run_forward_batches_parallel(
         self,
@@ -1058,234 +1006,38 @@ class ModuleLooper():
         progress_rows_per_batch: Optional[List[int]] = None,
         progress_total_rows: Optional[int] = None,
     ) -> List[List[torch.Tensor]]:
-        """Fan batches across device clones and preserve result ordering."""
-        effective_title = progress_title or (progress_stage or "Forward")
+        """Run cached batches across device replicas and preserve batch ordering in the result."""
 
-        total_batches = self._resolve_batch_total(processor.num_batches, layer_inputs)
-        batch_row_counts = progress_rows_per_batch or self._collect_row_counts(layer_inputs)
-        batch_row_counts = list(batch_row_counts)
-        if len(batch_row_counts) > total_batches:
-            batch_row_counts = batch_row_counts[:total_batches]
-        elif len(batch_row_counts) < total_batches:
-            batch_row_counts.extend([0] * (total_batches - len(batch_row_counts)))
-        total_rows = progress_total_rows if progress_total_rows is not None else sum(batch_row_counts)
-        if total_rows <= 0 and total_batches > 0:
-            total_rows = total_batches
-        total_rows = max(total_rows, 1)
-        stage_label = progress_stage or "Forward"
-
-        replica_pb: "ProgressBar" | None = None
-        replica_title = ""
-        replica_completed = 0
-
-        if progress_pb is not None:
-            progress_pb.title(effective_title)
-            if len(devices) > 1:
-                replica_title = f"{stage_label}: replicate to {len(devices)} devices"
-                replica_pb = (
-                    log.pb(range(len(devices)))
-                       .manual()
-                       .set(show_left_steps=False)
-                )
-                replica_pb.title(replica_title).subtitle("Staging module...").draw()
-            else:
-                device_label = str(devices[0]) if devices else "<device>"
-                progress_pb.subtitle(f"{stage_label}: staging on {device_label}").draw()
-
-        def _replica_progress(idx: int, total: int, device: torch.device, step: str) -> None:
-            nonlocal replica_completed
-            device_label = str(device)
-            if replica_pb is not None:
-                if step == "stage":
-                    replica_pb.title(replica_title).subtitle(f"Stage {device_label}").draw()
-                    return
-                if idx > replica_completed:
-                    replica_completed = idx
-                    replica_pb.title(replica_title).subtitle(
-                        f"{device_label} {idx}/{total}"
-                    ).next().draw()
-                else:
-                    replica_pb.title(replica_title).subtitle(
-                        f"{device_label} {idx}/{total}"
-                    ).draw()
-            elif progress_pb is not None:
-                stage_msg = (
-                    f"{stage_label}: staging on {device_label}"
-                    if step == "stage"
-                    else f"{stage_label}: {step} {idx}/{total} on {device_label}"
-                )
-                progress_pb.title(effective_title).subtitle(stage_msg).draw()
-
-        progress_cb = _replica_progress if progress_pb is not None else None
-
-        # Ensure any async replication/memcpy ops are complete before threads start fanning out.
-        torch_sync()
-
-        # Clone modules FIRST, then apply MoE lifecycle hooks to all replicas
-        try:
-            module_replicas = clone_module_for_devices(
-                module,
-                devices,
-                progress_callback=progress_cb,
-            )
-        finally:
-            if replica_pb is not None:
-                replica_pb.close()
-            if progress_pb is not None:
-                progress_pb.title(effective_title).subtitle(
-                    f"{stage_label} rows 0/{total_rows}"
-                ).draw()
-
-        # Apply MoE lifecycle hooks to ALL replicas (not just the original module)
-        moe_contexts = []
-        try:
-            for device, replica in module_replicas.items():
-                # Create and activate context for each replica
-                ctx = None
-                if self.moe_routing_override:
-                    ctx = self.MoERoutingOverrideContext(replica, self.moe_routing_override)
-                elif self._should_use_moe_lifecycle(module, processor):
-                    ctx = self.MoELifecycleContext(self, replica, processor, self._current_subset)
-
-                if ctx:
-                    ctx.__enter__()
-                    moe_contexts.append(ctx)
-
-            prev_kv = shared_kv_cache_dict.get(layer_index - 1) if reuse_kv else None
-
-            results: Dict[int, torch.Tensor | tuple | None] = {}
-
-            processed_rows = 0
-
-            # Apply compute device filter if provided to determine which devices to use for forward execution
-            if self.gptq_model.quantize_config.compute_device_filter is not None:
-                forward_devices = self.gptq_model.quantize_config.compute_device_filter(devices)
-                if len(forward_devices) < 1:
-                    log.warn(
-                        "compute_device_filter returned empty device list. "
-                        "Using all devices for forward execution."
-                    )
-                    forward_devices = devices
-            else:
-                # If no filter is provided, use all devices (default behavior)
-                forward_devices = devices
-
-            device_segments: Dict[torch.device, List[int]] = {}
-            segment_start = 0
-            num_devices = len(forward_devices)
-
-            for index, device in enumerate(forward_devices):
-                # Split the outstanding batches across forward_devices so that each accelerator
-                # receives a contiguous slice.
-                remaining_batches = max(total_batches - segment_start, 0)
-                remaining_devices = max(num_devices - index, 1)
-                segment_length = remaining_batches // remaining_devices
-                remainder = remaining_batches % remaining_devices
-                if remainder > 0:
-                    segment_length += 1
-
-                if segment_length <= 0:
-                    device_segments[device] = []
-                    continue
-
-                segment_end = min(segment_start + segment_length, total_batches)
-                device_segments[device] = list(range(segment_start, segment_end))
-                segment_start = segment_end
-
-            max_segment_length = 0
-            for indices in device_segments.values():
-                if len(indices) > max_segment_length:
-                    max_segment_length = len(indices)
-
-            for position in range(max_segment_length):
-                # Submit one batch per device
-                futures = []
-                for device in forward_devices:
-                    segment_indices = device_segments.get(device, [])
-                    if position >= len(segment_indices):
-                        continue
-                    batch_idx = segment_indices[position]
-                    replica = module_replicas[device]
-                    submitter = (
-                        DEVICE_THREAD_POOL.submit_serial
-                        if device.type in ("cuda", "xpu", "mps")
-                        else DEVICE_THREAD_POOL.submit
-                    )
-
-                    futures.append(
-                        submitter(
-                            device,
-                            forward_batch_worker,
-                            replica,
-                            processor,
-                            batch_idx,
-                            layer_inputs[batch_idx],
-                            layer_input_kwargs[batch_idx],
-                            attention_masks[batch_idx],
-                            position_ids[batch_idx] if position_ids else None,
-                            support_batch_quantize=self.support_batch_quantize,
-                            is_lm_head_module=is_lm_head_module,
-                            need_output=need_outputs,
-                            reuse_kv=reuse_kv,
-                            prev_kv=prev_kv,
-                        )
-                    )
-
-                for fut in futures:
-                    # Preserve the original batch order
-                    batch_idx, module_output, kv_next = fut.result()
-                    if need_outputs and module_output is not None:
-                        results[batch_idx] = module_output
-                    if reuse_kv and kv_next is not None and shared_kv_cache_dict.get(layer_index) is None:
-                        shared_kv_cache_dict[layer_index] = nested_move_to(kv_next, device=cur_layer_device)
-
-                    rows_for_batch = batch_row_counts[batch_idx] if batch_idx < len(batch_row_counts) else 0
-                    if rows_for_batch <= 0:
-                        rows_for_batch = self._batch_row_count(layer_inputs[batch_idx]) if layer_inputs and batch_idx < len(layer_inputs) else 1
-                        rows_for_batch = max(rows_for_batch, 1)
-
-                    processed_rows = min(processed_rows + rows_for_batch, total_rows)
-                    if progress_pb is not None:
-                        if progress_title:
-                            progress_pb.title(progress_title)
-                        progress_pb.current_iter_step = processed_rows
-                        progress_pb.subtitle(
-                            f"{stage_label} rows {processed_rows}/{total_rows}"
-                        ).draw()
-        finally:
-            # Clean up MoE lifecycle hooks from all replicas
-            for ctx in moe_contexts:
-                try:
-                    ctx.__exit__(None, None, None)
-                except Exception:
-                    pass
-            moe_contexts.clear()
-        
-        # ensure replicas release promptly and free GPU memory
-        for dev in list(module_replicas.keys()):
-            del module_replicas[dev]
-
-        if not need_outputs:
-            return []
-
-        ordered_outputs: List[List[torch.Tensor]] = []
-        for idx in range(total_batches):
-            # Rebuild the ordered list of batch outputs expected by the next
-            # stage.
-            module_output = results.get(idx)
-            if module_output is None:
-                raise RuntimeError("Forward batch returned no output; data-parallel execution produced empty result.")
-            if isinstance(module_output, tuple):
-                primary = module_output[0]
-            else:
-                primary = module_output
-            primary = move_to(primary, device=cur_layer_device)
-            ordered_outputs.append([primary])
-
-        return ordered_outputs
+        return self._forward_executor.run_parallel(
+            module=module,
+            processor=processor,
+            layer_inputs=layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            position_ids=position_ids,
+            attention_masks=attention_masks,
+            cur_layer_device=cur_layer_device,
+            is_lm_head_module=is_lm_head_module,
+            shared_kv_cache_dict=shared_kv_cache_dict,
+            layer_index=layer_index,
+            need_outputs=need_outputs,
+            reuse_kv=reuse_kv,
+            devices=devices,
+            progress_pb=progress_pb,
+            progress_title=progress_title,
+            progress_stage=progress_stage,
+            progress_rows_per_batch=progress_rows_per_batch,
+            progress_total_rows=progress_total_rows,
+            clone_module_for_devices_fn=clone_module_for_devices,
+            forward_batch_worker_fn=forward_batch_worker,
+            device_thread_pool=DEVICE_THREAD_POOL,
+        )
 
     def _masked_hook_wrapper(self, processor: LoopProcessor, inner_hook, hook_source: str):
+        """Wrap a forward hook so it sees masked activations for the current batch."""
+
         def hook(module, inputs, output):
+            """Apply the thread-local keep mask before delegating to ``inner_hook``."""
+
             # Thread-safe check if hooks are paused (TLS-based, per-thread)
             if self._get_processor_hooks_paused(processor):
                 return
@@ -1343,6 +1095,8 @@ class ModuleLooper():
         Respects hooks_paused state to avoid double-counting during intermediate calculations.
         """
         def pre_hook(module, inputs, output):
+            """Apply the current keep mask before invoking the wrapped pre-hook."""
+
             # Thread-safe check if hooks are paused (TLS-based, per-thread)
             if self._get_processor_hooks_paused(processor):
                 return
@@ -1382,6 +1136,8 @@ class ModuleLooper():
         return pre_hook
 
     def cache_inputs(self, layers, calibration_data, use_cache):
+        """Capture and cache per-layer calibration inputs for later replay."""
+
         capture_stage = StageInputsCapture(self, logger=log)
         return capture_stage.cache_inputs(
             layers=layers,
@@ -1389,15 +1145,19 @@ class ModuleLooper():
             use_cache=use_cache,
         )
 
-    def loop(self, failsafe=None, **kwargs):
+    def loop(self, fallback=None, **kwargs):
+        """Run the quantization loop under the pause/resume and TF32 guards."""
+
         with tf32_high_precision_guard():
             with self.pause_controller.lifecycle():
-                return self._loop_impl(failsafe=failsafe, **kwargs)
+                return self._loop_impl(fallback=fallback, **kwargs)
 
     @torch.inference_mode()
-    def _loop_impl(self, failsafe=None, **kwargs):
-        if failsafe is None:
-            failsafe = getattr(self.gptq_model.quantize_config, "failsafe", None)
+    def _loop_impl(self, fallback=None, **kwargs):
+        """Execute the full layer-by-layer quantization workflow."""
+
+        if fallback is None:
+            fallback = getattr(self.gptq_model.quantize_config, "fallback", None)
 
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
@@ -1428,7 +1188,7 @@ class ModuleLooper():
         for p_index, processor in enumerate(self.processors):
             if not processor.verify_calibration_dataset(p_index):
                 if isinstance(processor, EoraProcessor) or\
-                        (isinstance(processor, GPTQProcessor) and self.gptq_model.quantize_config.gptaq is not None):
+                        (isinstance(processor, GPTQProcessor) and getattr(self.gptq_model.quantize_config, "gptaq", None) is not None):
                     prev_processor = self.processors[p_index - 1]
                     processor.set_calibration_dataset(prev_processor.calibration_dataset)
                     # If calibration_dataset is None or Empty, the input_cache of the previous processor is used.
@@ -1460,9 +1220,12 @@ class ModuleLooper():
         if region_timer is not None:
             region_timer.flush()
 
-        is_awq_quantize = any(isinstance(proc, AWQProcessor) for proc in self.processors)
+        is_awq_quantize = any(isinstance(proc, (AWQProcessor, ParoQuantProcessor)) for proc in self.processors)
+        # Capture-only layer groups are driven by processor execution config,
+        # not by ad-hoc processor attributes.
         requires_activation_capture = any(
-            getattr(proc, "enable_activation_capture", False) for proc in self.processors
+            getattr(getattr(proc, "execution_config", None), "enable_activation_capture", False)
+            for proc in self.processors
         )
         layer_modules = self.gptq_model.simple_layer_modules(
             model_config=self.gptq_model.model.config,
@@ -1502,7 +1265,7 @@ class ModuleLooper():
             layers=layers,
             layer_modules=layer_modules,
             layers_prefix=layers_prefix,
-            failsafe=failsafe,
+            fallback=fallback,
             shared_kv_cache_dict=shared_kv_cache_dict,
             pb=pb,
             layer_count=layer_count,
@@ -1586,7 +1349,9 @@ class ModuleLooper():
 
         return total_log
 
-    def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, failsafe, layer_module=None) -> Dict[str, NamedModule]:
+    def create_named_modules(self, module, full, is_lm_head_module, layer_index, layers_prefix, names, processor, fallback, layer_module=None) -> Dict[str, NamedModule]:
+        """Build the named-module subset a processor will quantize for one layer."""
+
         subset = {}
         capture_only_flags: Dict[str, bool] = {}
         for n in names:
@@ -1628,7 +1393,7 @@ class ModuleLooper():
                 subset[name].state["capture_only"] = True
 
             if isinstance(processor, GPTQProcessor):
-                processor.preprocess(subset[name], failsafe=failsafe)
+                processor.preprocess(subset[name], fallback=fallback)
             else:
                 processor.preprocess(subset[name])
             # some modules are skipped

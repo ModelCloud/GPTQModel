@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch
-
 from defuser import convert_model
 from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeConfig, Qwen2MoeForCausalLM
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
@@ -14,6 +13,7 @@ from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import Qwen3Omni
 
 from gptqmodel.nn_modules.converter import MODULE_CONVERTER_MAP
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchQuantLinear
+
 
 def _make_tiny_moe_config(config_cls):
     return config_cls(

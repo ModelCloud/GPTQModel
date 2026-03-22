@@ -35,7 +35,7 @@ log = setup_logger()
 
 
 class AwqMarlinQuantLinear(AWQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.MARLIN]
+    SUPPORTS_BACKENDS = [BACKEND.AWQ_MARLIN]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 90, FORMAT.MARLIN: 90}
     SUPPORTS_BITS = [4, 8]
@@ -89,7 +89,7 @@ class AwqMarlinQuantLinear(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.MARLIN),
+            backend=kwargs.pop("backend", BACKEND.AWQ_MARLIN),
             adapter=adapter,
             register_buffers=False,
             **kwargs)

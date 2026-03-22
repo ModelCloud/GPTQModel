@@ -18,6 +18,7 @@ import pytest  # noqa: E402
 from gptqmodel import GPTQModel  # noqa: E402
 from gptqmodel.utils.eval import evalplus  # noqa: E402
 
+
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
 

@@ -16,9 +16,11 @@ from gptqmodel.adapter.adapter import Adapter
 from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..quantization import FORMAT, METHOD
+from ..quantization.config import _normalize_quant_bits, quant_bits_width
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from . import BACKEND
+from .backend import normalize_backend
 from .rocm import IS_ROCM
 from .torch import HAS_CUDA, HAS_MPS, HAS_XPU
 
@@ -30,6 +32,15 @@ ACCELERATE_OFFLOAD_TARGETS = {"disk", "meta"}
 
 message_logged = False
 log = setup_logger()
+
+
+def _supports_pack_api(cls: Type[BaseQuantLinear]) -> bool:
+    return (
+        issubclass(cls, PackableQuantLinear)
+        or (hasattr(cls, "pack") and callable(getattr(cls, "pack")))
+        or (hasattr(cls, "pack_block") and callable(getattr(cls, "pack_block")))
+    )
+
 
 def iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
     kernels = []
@@ -66,6 +77,7 @@ def get_kernel_backends(cls: Type[BaseQuantLinear]) -> List[BACKEND]:
 
 
 def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) -> Type[BaseQuantLinear]:
+    backend = normalize_backend(backend, quant_method=quant_method)
     matches = []
     for cls in iter_quant_linear_kernels():
         if backend not in get_kernel_backends(cls):
@@ -277,6 +289,9 @@ def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> 
     assert backend is None or isinstance(backend, BACKEND)
 
     if device is None:
+        # Backend-specific kernels should default to a compatible device class.
+        if backend in (BACKEND.GPTQ_TORCH_FUSED, BACKEND.AWQ_TORCH_FUSED, BACKEND.TORCH_FUSED, BACKEND.TORCH_FUSED_AWQ):
+            return DEVICE.XPU if HAS_XPU else DEVICE.CPU
         if HAS_CUDA:
             device = DEVICE.CUDA
         elif HAS_XPU:
@@ -286,11 +301,6 @@ def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> 
         else:
             device = DEVICE.CPU
     return device
-
-
-def _is_missing_exllama_eora_kernel(err: Optional[Exception]) -> bool:
-    """Return True when EXLLAMA_EORA failed only because its optional extension is missing."""
-    return err is not None and "gptqmodel_exllama_eora" in str(err)
 
 
 # public/stable api exposed to transformer/optimum
@@ -306,8 +316,7 @@ def hf_select_quant_linear(
         backend: Optional[Union[str, BACKEND]] = None,
 ) -> Type[BaseQuantLinear]:
     # convert hf string backend to backend.enum
-    if isinstance(backend, str):
-        backend = BACKEND(backend.lower())
+    backend = normalize_backend(backend, quant_method=METHOD.GPTQ)
 
     if device_map is not None:
         device = hf_normalize_device_device_map(None, device_map)
@@ -346,8 +355,7 @@ def hf_select_quant_linear_v2(
         backend: Optional[Union[str, BACKEND]] = None,
 ) -> Type[BaseQuantLinear]:
     # convert hf string backend to backend.enum
-    if isinstance(backend, str):
-        backend = BACKEND(backend.lower())
+    backend = normalize_backend(backend, quant_method=quant_method)
 
     def _normalize_enum(value, enum_cls, field: str):
         if isinstance(value, enum_cls):
@@ -415,7 +423,7 @@ def hf_select_quant_linear_v2(
 
 # auto select the correct/optimal QuantLinear class
 def select_quant_linear(
-        bits: int,
+        bits,
         group_size: int,
         desc_act: bool,
         sym: bool,
@@ -435,6 +443,9 @@ def select_quant_linear(
         format = FORMAT(format.lower())
     if isinstance(quant_method, str):
         quant_method = METHOD(quant_method.lower())
+    backend = normalize_backend(backend, quant_method=quant_method)
+
+    bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
 
     supported_formats = BACKEND_TO_METHOD_FORMAT_MAPPING.get(quant_method)
     if supported_formats is None:
@@ -473,10 +484,7 @@ def select_quant_linear(
                 log.info(f"skip {k} for {str(err)}")
             if validate:
                 if pack:
-                    check_pack_func = issubclass(cls, PackableQuantLinear) or (
-                        hasattr(cls, "pack_block") and callable(getattr(cls, "pack_block"))
-                    )
-                    if check_pack_func:
+                    if _supports_pack_api(cls):
                         #if not message_logged:
                         #    logger.info(f"Auto pick kernel based on compatibility: {cls}")
                         #    message_logged = True
@@ -522,30 +530,14 @@ def select_quant_linear(
 
     log.info(f"{'Packing ' if pack else ''}Kernel: selected: `{qlinear.__name__}`")
     if not validate:
-        if backend == BACKEND.EXLLAMA_EORA and _is_missing_exllama_eora_kernel(err):
-            log.warn.once(
-                "Kernel: EXLLAMA_EORA extension unavailable; falling back to EXLLAMA_V2."
-            )
-            return select_quant_linear(
-                bits=bits,
-                group_size=group_size,
-                desc_act=desc_act,
-                sym=sym,
-                device=device,
-                backend=BACKEND.EXLLAMA_V2,
-                format=format,
-                quant_method=quant_method,
-                pack=pack,
-                allow_marlin=allow_marlin,
-                dynamic=dynamic,
-                pack_dtype=pack_dtype,
-                dtype=dtype,
-                multi_select=multi_select,
-                adapter=adapter,
-            )
         raise ValueError(err)
-    else:
-        if multi_select:
-            return [qlinear]
-        else:
-            return qlinear
+
+    if pack:
+        if not _supports_pack_api(qlinear):
+            raise ValueError(
+                f"Selected backend `{backend}` with kernel `{qlinear.__name__}` cannot pack quantized weights for format `{format}`."
+            )
+
+    if multi_select:
+        return [qlinear]
+    return qlinear

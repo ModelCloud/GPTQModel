@@ -1,5 +1,4 @@
 import torch
-
 from models import model_test as model_test_module
 from models.model_test import ModelTest
 

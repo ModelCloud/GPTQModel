@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-
 from model_test import ModelTest
 
+from gptqmodel import BACKEND
 from gptqmodel.utils.eval import EVAL
 
 
@@ -25,6 +25,7 @@ class TestDeepseekV2Lite(ModelTest):
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
+    LOAD_BACKEND = BACKEND.AUTO
 
     def test_deepseekv2lite(self):
         self.quant_lm_eval()

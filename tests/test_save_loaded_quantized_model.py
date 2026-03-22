@@ -12,15 +12,16 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from parameterized import parameterized  # noqa: E402
 import pytest  # noqa: E402
 import torch  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
+from parameterized import parameterized  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, get_best_device  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.utils.importer import get_kernel_for_backend  # noqa: E402
+
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
