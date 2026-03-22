@@ -31,16 +31,37 @@ from ..utils.logger import setup_logger
 __all__ = [
     "no_init_weights",
     "suspend_hf_weight_init",
+    "get_hf_config_dtype",
     "normalize_hf_config_compat",
     "prepare_remote_code_compat",
     "prepare_remote_model_init_compat",
     "has_native_transformers_causallm_support",
     "resolve_trust_remote_code",
+    "set_hf_config_dtype",
     "load_tokenizer",
 ]
 
 log = setup_logger()
 _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
+
+
+def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
+    dtype = getattr(config, "dtype", None)
+    if dtype is not None:
+        return dtype
+    return getattr(config, "torch_dtype", None)
+
+
+def set_hf_config_dtype(config: Any, dtype: torch.dtype) -> None:
+    current_dtype = get_hf_config_dtype(config)
+    if current_dtype == dtype:
+        return
+
+    try:
+        setattr(config, "dtype", dtype)
+    except Exception:
+        if getattr(config, "torch_dtype", None) != dtype:
+            setattr(config, "torch_dtype", dtype)
 
 
 @contextmanager
@@ -374,7 +395,7 @@ def _patch_transformers_remote_code_compat() -> None:
             cache_kwargs.setdefault("max_batch_size", full_batch_size)
             cache_kwargs.setdefault("max_cache_len", max_cache_length)
 
-            model_dtype = getattr(self, "dtype", None) or getattr(self.config, "torch_dtype", None)
+            model_dtype = getattr(self, "dtype", None) or get_hf_config_dtype(self.config)
             if model_dtype is not None:
                 cache_kwargs.setdefault("dtype", model_dtype)
 
@@ -530,7 +551,10 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
 # model files instantiate their architectures from the config object.
 def _normalize_remote_code_config_compat(config: Any) -> None:
     _normalize_chatglm_remote_code_config_compat(config)
-    if config.model_type.lower() == "dream" or config.model_type == "brumby":
+    model_type = getattr(config, "model_type", None)
+    model_type_lower = model_type.lower() if isinstance(model_type, str) else None
+
+    if model_type_lower == "dream" or model_type == "brumby":
         import transformers.modeling_rope_utils as rope_utils
         # dream remote models expect "default"
         if "default" not in rope_utils.ROPE_INIT_FUNCTIONS:
@@ -542,9 +566,8 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
 
     # BrumbyConfig remote config may not define pad_token_id.
     # Ensure the attribute exists to avoid AttributeError in transformers 5.x.
-    if config.model_type == "brumby":
+    if model_type == "brumby":
         rope_scaling = getattr(config, "rope_scaling", None)
-        print("rrrr", rope_scaling)
 
         config.pad_token_id = getattr(config, "pad_token_id", None)
 

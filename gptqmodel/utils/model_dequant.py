@@ -178,7 +178,7 @@ def _discover_compressed_tensors_module_schemes(
                 model = loader.from_config(
                     config,
                     trust_remote_code=True,
-                    torch_dtype=torch.float32,
+                    dtype=torch.float32,
                 )
             except Exception as exc:  # pragma: no cover - depends on available loaders
                 loader_errors.append((loader.__name__, exc))
@@ -908,7 +908,8 @@ def dequantize_model(
 
     new_config = dict(config)
     new_config.pop("quantization_config", None)
-    new_config["torch_dtype"] = str(target_dtype).split(".")[-1]
+    new_config.pop("torch_dtype", None)
+    new_config["dtype"] = str(target_dtype).split(".")[-1]
     write_json(output_path / "config.json", new_config)
 
     skip_files = set(files) | {"config.json", "model.safetensors.index.json"}

@@ -159,7 +159,8 @@ def test_dequantize_model_fp8(tmp_path):
 
     updated_config = json.loads((output_dir / "config.json").read_text())
     assert "quantization_config" not in updated_config
-    assert updated_config.get("torch_dtype") == "bfloat16"
+    assert updated_config.get("dtype") == "bfloat16"
+    assert "torch_dtype" not in updated_config
 
     new_index = json.loads((output_dir / "model.safetensors.index.json").read_text())
     assert "linear.weight" in new_index["weight_map"]

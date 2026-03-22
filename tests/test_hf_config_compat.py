@@ -147,7 +147,7 @@ def test_normalize_hf_config_compat_supports_legacy_custom_generation_cache_mapp
 
     class DummyConfig:
         is_encoder_decoder = False
-        torch_dtype = torch.float16
+        dtype = torch.float16
 
         def get_text_config(self, decoder=True):
             assert decoder is True

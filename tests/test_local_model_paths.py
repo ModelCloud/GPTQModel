@@ -47,8 +47,9 @@ def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
     class FakeConfig:
         def __init__(self):
             self._experts_implementation = None
+            self.model_type = "llama"
             self.sub_configs = {}
-            self.torch_dtype = None
+            self.dtype = None
 
         def to_dict(self):
             return {"max_position_embeddings": 128}
@@ -133,8 +134,9 @@ def test_model_loader_falls_back_when_meta_shell_build_hits_meta_tensor_item(mon
     class FakeConfig:
         def __init__(self):
             self._experts_implementation = None
+            self.model_type = "llama"
             self.sub_configs = {}
-            self.torch_dtype = None
+            self.dtype = None
 
         def to_dict(self):
             return {"max_position_embeddings": 128}

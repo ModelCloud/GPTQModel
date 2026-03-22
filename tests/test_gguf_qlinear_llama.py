@@ -81,7 +81,7 @@ def _load_llama(dtype: torch.dtype):
     with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
         model = AutoModelForCausalLM.from_pretrained(
             str(MODEL_ID),
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map="cuda:0",
         ).eval()
         tokenizer = AutoTokenizer.from_pretrained(str(MODEL_ID), use_fast=True)
