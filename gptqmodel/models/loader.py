@@ -40,6 +40,7 @@ from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     get_hf_config_dtype,
     has_native_transformers_causallm_support,
+    normalize_torch_dtype_kwarg,
     normalize_hf_config_compat,
     prepare_remote_model_init_compat,
     resolve_trust_remote_code,
@@ -193,6 +194,12 @@ def ModelLoader(cls):
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
         torch._dynamo.disable()
+
+        dtype = normalize_torch_dtype_kwarg(
+            model_init_kwargs,
+            api_name=f"{cls.__name__}.from_pretrained",
+            explicit_dtype=dtype,
+        )
 
         tokenizer_trust_remote_code = model_init_kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs)
@@ -419,6 +426,11 @@ def ModelLoader(cls):
 
         import torch._dynamo
         torch._dynamo.reset()
+        dtype = normalize_torch_dtype_kwarg(
+            kwargs,
+            api_name=f"{cls.__name__}.from_quantized",
+            explicit_dtype=dtype,
+        )
         tokenizer_trust_remote_code = kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
         requested_device_map = device_map
         explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None

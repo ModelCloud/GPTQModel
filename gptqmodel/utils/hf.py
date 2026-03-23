@@ -32,6 +32,7 @@ __all__ = [
     "no_init_weights",
     "suspend_hf_weight_init",
     "get_hf_config_dtype",
+    "normalize_torch_dtype_kwarg",
     "normalize_hf_config_compat",
     "prepare_remote_code_compat",
     "prepare_remote_model_init_compat",
@@ -43,6 +44,7 @@ __all__ = [
 
 log = setup_logger()
 _TRUST_REMOTE_CODE_OVERRIDE_WARNED: set[tuple[str, str, str]] = set()
+_MISSING = object()
 
 
 def get_hf_config_dtype(config: Any) -> Optional[torch.dtype]:
@@ -62,6 +64,37 @@ def set_hf_config_dtype(config: Any, dtype: torch.dtype) -> None:
     except Exception:
         if getattr(config, "torch_dtype", None) != dtype:
             setattr(config, "torch_dtype", dtype)
+
+
+def normalize_torch_dtype_kwarg(
+    kwargs: dict[str, Any],
+    *,
+    api_name: str,
+    explicit_dtype: Any = _MISSING,
+) -> Any:
+    current_dtype = explicit_dtype
+    if explicit_dtype is _MISSING:
+        current_dtype = kwargs.pop("dtype", _MISSING)
+
+    torch_dtype = kwargs.pop("torch_dtype", _MISSING)
+    if torch_dtype is _MISSING:
+        if explicit_dtype is _MISSING and current_dtype is not _MISSING:
+            kwargs["dtype"] = current_dtype
+        return current_dtype
+
+    log.warn.once(f"{api_name}: `torch_dtype` is deprecated; use `dtype` instead.")
+
+    if current_dtype is _MISSING or current_dtype is None or current_dtype == "auto":
+        current_dtype = torch_dtype
+    elif current_dtype != torch_dtype:
+        raise ValueError(
+            f"{api_name}: received both `dtype` and deprecated `torch_dtype` with different values. "
+            "Please pass only `dtype`."
+        )
+
+    if explicit_dtype is _MISSING:
+        kwargs["dtype"] = current_dtype
+    return current_dtype
 
 
 @contextmanager
