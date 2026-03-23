@@ -416,6 +416,8 @@ jobs:
 
       - name: Activate uv env
         run: |
+          source /opt/uv/setup_uv_venv.sh unit_test_env
+
           config_json="$(python3 .github/scripts/parse_test_config.py \
             --group tests \
             --test-name "${{ matrix.test_script }}")"
