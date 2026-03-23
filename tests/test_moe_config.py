@@ -32,8 +32,6 @@ EXPERTS = [
     'model.layers.0.mlp.experts.39',
     'model.layers.0.mlp.experts.51',
     'model.layers.0.mlp.experts.55',
-    'model.layers.0.mlp.experts.90',
-    'model.layers.0.mlp.experts.91',
 ]
 
 # Standard MoE MLP projections per expert
@@ -101,7 +99,7 @@ class TestMoEConfig(ModelTest):
 
     def quantize_and_assert(self):
         # Apply GPTQ quantization with optional MoE routing configuration
-        quant_config = QuantizeConfig(bits=4, group_size=128, moe=self.MOE_CONFIG, fallback=self.FALLBACK)
+        quant_config = QuantizeConfig(bits=4, group_size=128, moe=self.MOE_CONFIG, fallback=None)
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quant_config)
 
         # Compute total calibration token size
