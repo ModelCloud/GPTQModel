@@ -1,0 +1,12 @@
+common:
+  py: 3.14 # common config
+  gpu: 1
+
+tests:
+  test_multi_gpu_inference: # per-test config
+    gpu: 5
+    py: 3.14t
+
+
+tests/models:
+  py: 3.13
