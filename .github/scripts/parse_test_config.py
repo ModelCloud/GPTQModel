@@ -28,11 +28,12 @@ def parse_test_config(
         if not isinstance(value, dict):
             result[key] = value
 
-    # Overlay per-test config when provided.
+    # Overlay per-test config when provided. Missing per-test entries are
+    # valid and should fall back to the group's shared config.
     if test_name is not None:
         test_config = group_data.get(test_name)
         if test_config is None:
-            raise KeyError(f"test not found in group {group}: {test_name}")
+            return result
         if not isinstance(test_config, dict):
             raise ValueError(f"test config must be a mapping: {test_name}")
         result.update(test_config)
