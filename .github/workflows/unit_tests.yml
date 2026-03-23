@@ -416,7 +416,17 @@ jobs:
 
       - name: Activate uv env
         run: |
-          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${{ env.PYTHON_VERSION }}_test_${{ matrix.test_script }}"
+          config_json="$(python3 .github/scripts/parse_test_config.py \
+            --group tests \
+            --test-name "${{ matrix.test_script }}")"
+
+          py="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["py"])')"
+          gpu="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["gpu"])')"
+
+          echo "PYTHON_VERSION=$py" >> "$GITHUB_ENV"
+          echo "MODEL_TEST_GPU_COUNT=$gpu" >> "$GITHUB_ENV"
+
+          env_name="cu${{ needs.check-vm.outputs.cuda_version }}_torch${{ env.TORCH_VERSION }}_py${py}_test_${{ matrix.test_script }}"
           /opt/uv/setup_uv_venv.sh $env_name
 
       - name: Setup uv env

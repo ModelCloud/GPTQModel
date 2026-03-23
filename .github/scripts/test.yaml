@@ -1,0 +1,12 @@
+tests:
+  py: 3.14 # common config
+  gpu: 1
+  test_multi_gpu_inference: # per-test config
+    gpu: 5
+    py: 3.13t
+
+
+tests/models: # common config
+  py: 3.13
+  test_act_group_aware: # per-test config
+    py: 3.13t
