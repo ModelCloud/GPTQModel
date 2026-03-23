@@ -231,6 +231,7 @@ def run_evalution_lm_eval(
     tokenizer: Any,
     apply_chat_template: bool,
     gen_kwargs: Any,
+    suite_kwargs: Optional[Dict[str, Any]] = None,
 ) -> dict[str, Any]:
     if llm_backend != "gptqmodel":
         raise ValueError("Evalution-backed framework=EVAL.LM_EVAL only supports llm_backend='gptqmodel'.")
@@ -259,6 +260,7 @@ def run_evalution_lm_eval(
                 apply_chat_template=apply_chat_template,
                 batch_size=suite_batch_size,
                 generation_settings=generation_settings,
+                suite_kwargs=suite_kwargs or {},
             )
             test_results.append(suite.evaluate(session))
 
@@ -362,6 +364,7 @@ def evaluate(
             gen_kwargs = "temperature=0.0,top_k=50"
 
         apply_chat_template = args.pop("apply_chat_template", False)
+        suite_kwargs = args.pop("suite_kwargs", None)
 
         return run_evalution_lm_eval(
             model_or_id_or_path=model_or_id_or_path,
@@ -375,6 +378,7 @@ def evaluate(
             tokenizer=tokenizer,
             apply_chat_template=apply_chat_template,
             gen_kwargs=gen_kwargs,
+            suite_kwargs=suite_kwargs,
         )
 
     from ..models.auto import GPTQModel
@@ -749,35 +753,51 @@ def _build_evalution_suite(
     apply_chat_template: bool,
     batch_size: int | None,
     generation_settings: Dict[str, Any],
+    suite_kwargs: Dict[str, Any],
 ):
     benchmarks = evalution.benchmarks
     task_name = _task_name(task)
     max_new_tokens = int(generation_settings.get("max_new_tokens", 256))
     do_sample = bool(generation_settings.get("do_sample", False))
     temperature = float(generation_settings.get("temperature", 0.0))
+    suite_options = dict(suite_kwargs or {})
 
     if task_name == EVAL.LM_EVAL.ARC_CHALLENGE.value:
+        kwargs = {
+            "apply_chat_template": apply_chat_template,
+            "batch_size": batch_size,
+        }
+        kwargs.update(suite_options)
         return _ArcChallengeLoglikelihoodSuite(
-            apply_chat_template=apply_chat_template,
-            batch_size=batch_size,
+            **kwargs,
         )
     if task_name == EVAL.LM_EVAL.ARC_EASY.value:
-        return benchmarks.arc_easy(batch_size=batch_size)
+        kwargs = {"batch_size": batch_size}
+        kwargs.update(suite_options)
+        return benchmarks.arc_easy(**kwargs)
     if task_name == EVAL.LM_EVAL.BOOLQ.value:
-        return benchmarks.boolq(batch_size=batch_size)
+        kwargs = {"batch_size": batch_size}
+        kwargs.update(suite_options)
+        return benchmarks.boolq(**kwargs)
     if task_name == EVAL.LM_EVAL.HELLASWAG.value:
-        return benchmarks.hellaswag(batch_size=batch_size)
+        kwargs = {"batch_size": batch_size}
+        kwargs.update(suite_options)
+        return benchmarks.hellaswag(**kwargs)
     if task_name == EVAL.LM_EVAL.OPENBOOKQA.value:
-        return benchmarks.openbookqa(batch_size=batch_size)
+        kwargs = {"batch_size": batch_size}
+        kwargs.update(suite_options)
+        return benchmarks.openbookqa(**kwargs)
     if task_name == EVAL.LM_EVAL.MMLU.value:
         kwargs = {"batch_size": batch_size}
         if _MMLU_LOCAL_DATASET.exists():
             kwargs["dataset_path"] = str(_MMLU_LOCAL_DATASET)
+        kwargs.update(suite_options)
         return benchmarks.mmlu(**kwargs)
     if task_name == EVAL.LM_EVAL.MMLU_STEM.value:
         kwargs = {"subsets": "stem", "batch_size": batch_size}
         if _MMLU_LOCAL_DATASET.exists():
             kwargs["dataset_path"] = str(_MMLU_LOCAL_DATASET)
+        kwargs.update(suite_options)
         return benchmarks.mmlu(**kwargs)
     if task_name == EVAL.LM_EVAL.GSM8K_COT.value:
         kwargs = {
@@ -791,16 +811,19 @@ def _build_evalution_suite(
         if _GSM8K_LOCAL_DATASET.exists():
             kwargs["dataset_path"] = str(_GSM8K_LOCAL_DATASET)
             kwargs["dataset_name"] = "main"
+        kwargs.update(suite_options)
         return benchmarks.gsm8k(**kwargs)
     if task_name == EVAL.LM_EVAL.GSM8K_PLATINUM_COT.value:
-        return benchmarks.gsm8k_platinum(
-            variant="cot",
-            apply_chat_template=apply_chat_template,
-            max_new_tokens=max_new_tokens,
-            batch_size=batch_size,
-            do_sample=do_sample,
-            temperature=temperature,
-        )
+        kwargs = {
+            "variant": "cot",
+            "apply_chat_template": apply_chat_template,
+            "max_new_tokens": max_new_tokens,
+            "batch_size": batch_size,
+            "do_sample": do_sample,
+            "temperature": temperature,
+        }
+        kwargs.update(suite_options)
+        return benchmarks.gsm8k_platinum(**kwargs)
     if task_name == EVAL.LM_EVAL.GPQA.value:
         raise ValueError("Evalution does not currently provide a GPQA suite.")
 

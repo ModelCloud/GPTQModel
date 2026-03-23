@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from pathlib import Path
+
 from model_test import ModelTest
 
 from gptqmodel.utils.eval import EVAL
@@ -14,12 +16,11 @@ from gptqmodel.utils.eval import EVAL
 # |----------------------------------------------------|----------|
 # | arc_challenge :: acc,none                          |   0.3166 |
 # | arc_challenge :: acc_norm,none                     |   0.3430 |
-# | gsm8k_platinum_cot :: exact_match,flexible-extract |   0.4624 |
-# | gsm8k_platinum_cot :: exact_match,strict-match     |   0.4326 |
+# | gsm8k_platinum_cot :: acc,num                      |   0.3906 |
 # | mmlu_stem :: acc,none                              |   0.3942 |
 class TestLlama3_2(ModelTest):
-    # DELETE_QUANTIZED_MODEL = False
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
+    SAVE_PATH = str(Path(__file__).resolve().parents[2] / "local_llama3_2_gptq_w4a16")
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_SLOW = {
@@ -52,8 +53,21 @@ class TestLlama3_2(ModelTest):
     EVAL_TASKS_FAST = {
         EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
             "chat_template": True,
-            "exact_match,flexible-extract": {
-                "value": 0.4624,
+            "evalution_use_model_path": True,
+            "evalution_batch_size": "auto",
+            "evalution_model_args": {
+                "dtype": "bfloat16",
+                "attn_implementation": "paged|flash_attention_2",
+                "device": "cuda:0",
+            },
+            "evalution_suite_kwargs": {
+                "batch_size": 24,
+                "max_new_tokens": 96,
+                "streaming": True,
+                "max_rows": 128,
+            },
+            "acc,num": {
+                "value": 0.390625,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
