@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-from transformers.models.qwen3_5 import Qwen3_5TextConfig
+from transformers import AutoModelForImageTextToText
 
 from . import LlamaQModel
 
@@ -14,12 +14,15 @@ class Qwen3_5QModel(LlamaQModel):
     non-quantized so the layer walker captures the complete structure.
     """
 
-    config_class = Qwen3_5TextConfig
+    loader = AutoModelForImageTextToText
+
+    require_load_processor = True
 
     layer_modules_strict = False
 
     module_tree = [
         "model",
+        "language_model",
         "layers",
         "#",
         {

@@ -7,11 +7,13 @@
 
 """Unit tests for ParoQuant config, optimizer, and lifecycle invariants."""
 
+import pytest
 import torch
 import torch.nn.functional as F
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
+from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.quantization.paroquant.optimization import (
@@ -139,6 +141,24 @@ def test_paroquant_quant_device_selection_forces_single_gpu():
     assert _restrict_quant_devices_for_method(METHOD.GPTQ, cuda_devices) == cuda_devices
 
 
+def test_paroquant_kernel_rejects_sym_false():
+    """Guard that runtime capability flags disable asymmetric ParoQuant."""
+    ok, err = ParoQuantQuantLinear.validate(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=128,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+    )
+
+    assert not ok
+    assert isinstance(err, NotImplementedError)
+    assert "actual sym = `False`" in str(err)
+
+
 def test_paroquant_optimizer_improves_over_identity_quantization():
     """Guard that learned rotations beat naive identity-domain quantization."""
     in_features = 128
@@ -177,7 +197,7 @@ def test_paroquant_optimizer_improves_over_identity_quantization():
         original_weight,
         bits=bits,
         group_size=group_size,
-        sym=False,
+        sym=True,
         use_ste=False,
     )
     baseline_loss = F.smooth_l1_loss(F.linear(inputs, baseline_weight), targets)
@@ -188,7 +208,7 @@ def test_paroquant_optimizer_improves_over_identity_quantization():
         inputs=inputs,
         bits=bits,
         group_size=group_size,
-        sym=False,
+        sym=True,
         krot=1,
         pair_ratio=pair_ratio,
         train_rows=192,
@@ -235,7 +255,7 @@ def test_paroquant_exported_runtime_state_matches_paper_contract():
         bias,
         bits=bits,
         group_size=group_size,
-        sym=False,
+        sym=True,
         pairs=pairs,
         theta_mask=theta_mask,
     )
@@ -250,11 +270,10 @@ def test_paroquant_exported_runtime_state_matches_paper_contract():
         model.transformed_weight().detach(),
         bits=bits,
         group_size=group_size,
-        sym=False,
+        sym=True,
     )
     with torch.no_grad():
         model.quantizer.scale.mul_(1.05)
-        model.quantizer.zero_point_float.add_(0.15)
 
     transformed = apply_paroquant_rotation_reference(
         model.weight.detach() * model.channel_scales_opt.detach().view(1, -1),
@@ -267,9 +286,9 @@ def test_paroquant_exported_runtime_state_matches_paper_contract():
         transformed,
         bits=bits,
         group_size=group_size,
-        sym=False,
+        sym=True,
         scale=model.quantizer.scale.detach(),
-        zero_point_float=model.quantizer.zero_point_float.detach(),
+        zero_point_float=None,
         use_ste=False,
     )
     expected_pseudo_weight = apply_paroquant_rotation_reference(

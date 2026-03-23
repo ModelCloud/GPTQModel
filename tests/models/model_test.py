@@ -82,7 +82,7 @@ from gptqmodel.quantization.config import (  # noqa: E402
     RTNQuantizeConfig,
     VramStrategy,
     WeightOnlyConfig,
-    resolve_quant_format,
+    resolve_quant_format, BitsAndBytesConfig,
 )
 from gptqmodel.utils.eval import (  # noqa: E402
     EVAL,
@@ -152,6 +152,9 @@ class ModelTest(unittest.TestCase):
     DYNAMIC = None
     HESSIAN_CHUNK_SIZE = None
     WEIGHT_ONLY = None
+    BNB_FORMAT = None
+    BNB_BLOCK_SIZE = None
+    BNB_COMPRESS_STATISTICS = None
 
     SAVE_PATH = None  # default is temp folder
     SPLIT_BY: Optional[str] = "layer"
@@ -728,6 +731,8 @@ class ModelTest(unittest.TestCase):
 
         if format_family == FORMAT.GGUF:
             compare_backends = (torch_backend,)
+        elif format_family == FORMAT.BITSANDBYTES:
+            compare_backends = (BACKEND.BITSANDBYTES,)
         elif format_family == FORMAT.FP8:
             compare_backends = (torch_backend,)
         elif format_family == FORMAT.EXL3:
@@ -1133,6 +1138,20 @@ class ModelTest(unittest.TestCase):
 
     def _build_quantize_config(self):
         format_family = resolve_quant_format(self.FORMAT, self.METHOD)
+
+        if self.METHOD == METHOD.BITSANDBYTES and self.WEIGHT_ONLY is None:
+            return BitsAndBytesConfig(
+                bits=self.BITS,
+                format=self.BNB_FORMAT,
+                block_size=self.BNB_BLOCK_SIZE,
+                compress_statistics=self.BNB_COMPRESS_STATISTICS,
+                adapter=self.EORA,
+                vram_strategy=self.VRAM_STRATEGY,
+                dynamic=self.DYNAMIC,
+                moe=self.MOE_CONFIG,
+                offload_to_disk=self.OFFLOAD_TO_DISK,
+            )
+
         if self.WEIGHT_ONLY is not None:
             if not isinstance(self.WEIGHT_ONLY, WeightOnlyConfig):
                 raise TypeError(f"`WEIGHT_ONLY` must be a WeightOnlyConfig, got {type(self.WEIGHT_ONLY).__name__}")

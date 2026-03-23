@@ -38,7 +38,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
-    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SYM = [True]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False

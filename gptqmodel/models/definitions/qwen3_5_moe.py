@@ -12,6 +12,8 @@ from ..base import BaseQModel
 class Qwen3_5_MoeQModel(BaseQModel):
     loader = AutoModelForImageTextToText
 
+    require_load_processor = True
+
     layer_modules_strict = False
 
     require_monkeypatch = False
