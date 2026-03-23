@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import re
+import pcre as re
 from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional

@@ -7,7 +7,7 @@ from __future__ import annotations
 import copy
 import json
 import os
-import re
+import pcre as re
 import threading
 import time
 from collections import defaultdict

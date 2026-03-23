@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import ctypes
 import os
-import re
+import pcre as re
 import sys
 from dataclasses import dataclass
 from pathlib import Path

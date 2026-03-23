@@ -5,7 +5,7 @@
 
 
 import platform
-import re
+import pcre as re
 from typing import Optional, Tuple
 
 import torch

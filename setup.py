@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import os
-import re
+import pcre as re
 import subprocess
 import sys
 import tarfile
@@ -92,7 +92,6 @@ def _detect_rocm_version():
         return v
     hip = _probe_cmd(["hipcc", "--version"])
     if hip:
-        import re
         m = re.search(r"\b([0-9]+\.[0-9]+)\b", hip)
         if m:
             return m.group(1)

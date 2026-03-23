@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
-import re
+import pcre as re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlopen

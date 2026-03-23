@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
-import re
+import pcre as re
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
