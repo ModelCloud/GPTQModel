@@ -23,11 +23,9 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 from typing import Optional  # noqa: E402
 
-from lm_eval.utils import make_table  # noqa: E402
-
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.utils.eval import EVAL, format_eval_result_table  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
@@ -98,14 +96,10 @@ if __name__ == '__main__':
     if args.eora_save_path:
         eora_bench = bench(path=args.quantized_model, backend=BACKEND.TORCH, adapter=eora, task=args.eval_task)  # inference using eora (lora)
         print('--------Eval EoRA Result---------')
-        print(make_table(eora_bench))
-        if "groups" in eora_bench:
-            print(make_table(eora_bench, "groups"))
+        print(format_eval_result_table(eora_bench))
 
     else:
         base_bench = bench(path=args.quantized_model, backend=BACKEND.TORCH, adapter=None, task=args.eval_task)  # inference using qweights only
 
         print('--------Eval Base Result---------')
-        print(make_table(base_bench))
-        if "groups" in base_bench:
-            print(make_table(base_bench, "groups"))
+        print(format_eval_result_table(base_bench))

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-FileCopyrightText: 2024-2025 gptqmodel contributors
 # SPDX-License-Identifier: Apache-2.0
-"""CLI helper to run lm-eval tasks against a GPTQModel checkpoint."""
+"""CLI helper to run Evalution-backed lm_eval-style tasks against a GPTQModel checkpoint."""
 
 import argparse
 import json
@@ -15,7 +15,7 @@ import gptqmodel
 from tabulate import tabulate
 from gptqmodel import GPTQModel
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.utils.eval import EVAL
+from gptqmodel.utils.eval import EVAL, get_eval_task_results
 
 
 if sys.platform == "darwin":
@@ -96,16 +96,15 @@ def _list_tasks() -> None:
 
 
 def _extract_metrics(results: Dict) -> Dict[str, Dict[str, float]]:
-    aggregated: Dict[str, Dict[str, float]] = {}
-    task_results = results.get("results", {})
-    for task_name, metrics in task_results.items():
-        filtered = {
+    aggregated = get_eval_task_results(results)
+    return {
+        task_name: {
             metric: value
             for metric, value in metrics.items()
             if metric != "alias" and "stderr" not in metric
         }
-        aggregated[task_name] = filtered
-    return aggregated
+        for task_name, metrics in aggregated.items()
+    }
 
 
 def _print_metrics_table(metrics: Dict[str, Dict[str, float]], table_format: str) -> None:

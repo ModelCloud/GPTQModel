@@ -84,7 +84,12 @@ from gptqmodel.quantization.config import (  # noqa: E402
     WeightOnlyConfig,
     resolve_quant_format,
 )
-from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.utils.eval import (  # noqa: E402
+    EVAL,
+    format_eval_result_table,
+    get_eval_task_results,
+    resolve_eval_metric_alias,
+)
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
@@ -1428,9 +1433,6 @@ class ModelTest(unittest.TestCase):
                 if extra_args:
                     model_args.update(extra_args)
 
-                from lm_eval.tasks import TaskManager
-                from lm_eval.utils import make_table
-
                 task_groups = EVAL.get_task_groups_from_tasks(task_names)
 
                 chat_template_lookup = getattr(self, "_task_chat_template", {}) or {}
@@ -1469,7 +1471,7 @@ class ModelTest(unittest.TestCase):
                     for apply_chat_template, grouped in grouped_tasks.items():
                         results = GPTQModel.eval(
                             model_or_id_or_path=eval_target,
-                            llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
+                            llm_backend="gptqmodel",
                             model_args=model_args,
                             output_path=tmp_dir,
                             backend=active_backend,
@@ -1480,18 +1482,16 @@ class ModelTest(unittest.TestCase):
                             batch_size=self.EVAL_BATCH_SIZE,
                             gen_kwargs="temperature=0.0,top_k=50",
                             random_seed=RAND_SEED,
-                            task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
                         )
 
                         print('--------Eval Result---------')
-                        print(make_table(results))
-                        if "groups" in results:
-                            print(make_table(results, "groups"))
+                        print(format_eval_result_table(results))
                         print('--------Eval Result End---------')
 
+                        result_metrics = get_eval_task_results(results)
                         for task_name in grouped:
                             normalized_task_name = self._normalize_task_identifier(task_name)
-                            metrics = results["results"].get(normalized_task_name, {})
+                            metrics = result_metrics.get(normalized_task_name, {})
                             filtered_metrics = {
                                 metric: value
                                 for metric, value in metrics.items()
@@ -1730,6 +1730,9 @@ class ModelTest(unittest.TestCase):
     def _resolve_metric_key(metric_name, metrics):
         if metric_name in metrics:
             return metric_name
+        alias = resolve_eval_metric_alias(metric_name, metrics)
+        if alias is not None:
+            return alias
         if metric_name is None:
             return None
         # if baseline uses canonical name without suffix, look for variants like acc,none

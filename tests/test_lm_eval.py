@@ -12,10 +12,10 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 
-from lm_eval.utils import make_table  # noqa: E402
+import pytest
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.utils.eval import EVAL, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
 
 class TestLmEval(unittest.TestCase):
@@ -40,18 +40,18 @@ class TestLmEval(unittest.TestCase):
             )
 
            print('--------lm_eval Eval Result---------')
-           print(make_table(results))
-           if "groups" in results:
-               print(make_table(results, "groups"))
+           print(format_eval_result_table(results))
            print('--------lm_eval Result End---------')
 
-           results['results'].get(self.task.value, {}).get('acc,none')
-           acc_norm_score = results['results'].get(self.task.value, {}).get('acc_norm,none')
+           metrics = get_eval_task_metrics(results, self.task)
+           acc_norm_score = metrics.get('accuracy,loglikelihood_norm')
 
            # self.assertGreaterEqual(acc_score, self.acc_score, "acc score does not match expected result")
            self.assertGreaterEqual(acc_norm_score, 0.3400, "acc_norm score does not match expected result")
 
     def test_eval_path(self):
+       pytest.importorskip("gptqmodel_exllamav2_kernels")
+
        with tempfile.TemporaryDirectory() as tmp_dir:
            results = GPTQModel.eval(
                 model_or_id_or_path=self.MODEL_ID,
@@ -64,13 +64,11 @@ class TestLmEval(unittest.TestCase):
             )
 
            print('--------lm_eval Eval Result---------')
-           print(make_table(results))
-           if "groups" in results:
-               print(make_table(results, "groups"))
+           print(format_eval_result_table(results))
            print('--------lm_eval Result End---------')
 
-           # acc_score = results['results'].get(self.task, {}).get('acc,none')
-           acc_norm_score = results['results'].get(self.task, {}).get('acc_norm,none')
+           metrics = get_eval_task_metrics(results, self.task)
+           acc_norm_score = metrics.get('accuracy,loglikelihood_norm')
 
            # self.assertGreaterEqual(acc_score, self.acc_score, "acc score does not match expected result")
            self.assertGreaterEqual(acc_norm_score, 0.3000, "acc_norm score does not match expected result")

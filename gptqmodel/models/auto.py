@@ -64,7 +64,7 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.backend import normalize_backend  # noqa: E402
-from ..utils.eval import EVAL  # noqa: E402
+from ..utils.eval import EVAL, run_evalution_lm_eval  # noqa: E402
 from ..utils.hf import normalize_torch_dtype_kwarg, resolve_trust_remote_code  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
@@ -564,6 +564,40 @@ class GPTQModel:
             if "gpu_memory_utilization" not in model_args:
                 model_args["gpu_memory_utilization"] = 0.90
 
+        if framework == EVAL.LM_EVAL:
+            for task in tasks:
+                if task not in EVAL.get_task_enums():
+                    raise ValueError(f"Eval.lm_eval supported `tasks`: `{EVAL.get_all_tasks_string()}`, actual = `{task}`")
+
+            gen_kwargs = args.pop("gen_kwargs", None)
+            if gen_kwargs is None:
+                gen_kwargs = "temperature=0.0,top_k=50"
+
+            apply_chat_template = args.pop("apply_chat_template", False)
+            if args:
+                log.info("Evalution: ignoring unsupported LM_EVAL kwargs: %s", sorted(args.keys()))
+
+            results = run_evalution_lm_eval(
+                model_or_id_or_path=model_or_id_or_path,
+                tasks=tasks,
+                batch_size=batch_size,
+                trust_remote_code=trust_remote_code,
+                output_path=output_path,
+                llm_backend=llm_backend,
+                backend=backend,
+                model_args=model_args,
+                tokenizer=tokenizer,
+                apply_chat_template=apply_chat_template,
+                gen_kwargs=gen_kwargs,
+            )
+
+            from ..utils.eval import format_eval_result_table
+
+            print('--------Evalution Eval Result---------')
+            print(format_eval_result_table(results))
+            print('--------Evalution Result End---------')
+            return results
+
         if isinstance(model_or_id_or_path, str):
             load_backend = backend
             # These keys are consumed by eval wrappers and should never leak
@@ -598,112 +632,7 @@ class GPTQModel:
         if llm_backend == "gptqmodel": # vllm loads tokenizer
             model_args["tokenizer"] = tokenizer
 
-        if framework == EVAL.LM_EVAL:
-            from lm_eval.utils import make_table  # hack: circular import
-
-            for task in tasks:
-                if task not in EVAL.get_task_enums():
-                    raise ValueError(f"Eval.lm_eval supported `tasks`: `{EVAL.get_all_tasks_string()}`, actual = `{task}`")
-
-            model_name = "hf" if llm_backend == "gptqmodel" else llm_backend
-
-            if llm_backend == "gptqmodel" and isinstance(model, BaseQModel) and model.quantized:
-                model_args["gptqmodel"] = True
-            model_args["pretrained"] = model_id_or_path
-
-            # TODO FIXME lm-eval latest broken imports
-            # lm_eval indirectly imports sglang, which expects newer Triton helpers.
-            # Provide shims so import succeeds on older triton/runtime builds.
-            try:
-                from triton.runtime import cache as triton_cache
-
-                if not hasattr(triton_cache, "default_cache_dir"):
-                    triton_cache.default_cache_dir = lambda: getattr(triton_cache.knobs.cache, "dir", None)
-                if not hasattr(triton_cache, "default_override_dir"):
-                    triton_cache.default_override_dir = lambda: getattr(triton_cache.knobs.cache, "override_dir", None)
-                if not hasattr(triton_cache, "default_dump_dir"):
-                    triton_cache.default_dump_dir = lambda: getattr(triton_cache.knobs.cache, "dump_dir", None)
-            except Exception as exc:
-                log.warning("Triton cache shim failed; lm_eval import may fail: %s", exc)
-
-            try:
-                from lm_eval import simple_evaluate
-                from lm_eval.models.huggingface import HFLM
-            except BaseException as e:
-                raise ValueError(f"lm_eval import failed: {e}. Please install via `pip install gptqmodel[eval]`.") from e
-
-            if llm_backend == "gptqmodel" and model is not None:
-                with _hide_unsupported_quantization_config_for_lm_eval(model):
-                    model_name = HFLM(
-                        pretrained=model,
-                        batch_size=batch_size,
-                        trust_remote_code=trust_remote_code,
-                    )
-
-            gen_kwargs = args.pop("gen_kwargs", None)
-
-            # use model.generation_config whenever possible
-            if gen_kwargs is None:
-                # TODO: move to utils
-                if hasattr(model, "generation_config") and isinstance(model.generation_config, GenerationConfig):
-                    gen_dict = {
-                        "do_sample": model.generation_config.do_sample,
-                        "temperature": model.generation_config.temperature,
-                        "top_k": model.generation_config.top_k,
-                        "top_p": model.generation_config.top_p,
-                        "min_p": model.generation_config.min_p,
-
-                    }
-                    gen_kwargs = ','.join(f"{key}={value}" for key, value in gen_dict.items() if value not in ["", {}, None, []])
-                else:
-                    gen_kwargs = "temperature=0.0,top_k=50" # default
-
-            log.info(f"LM-EVAL: `gen_kwargs` = `{gen_kwargs}`")
-
-            # lm-eval has very low scores if apply_chat_template is enabled
-            apply_chat_template = args.pop("apply_chat_template", False) # args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False)
-            log.info(f"LM-EVAL: `apply_chat_template` = `{apply_chat_template}`")
-
-            # TODO FIXME lm-eval latest broken imports
-            # lm_eval pretty prints task yaml paths using Path.relative_to; when custom tasks live outside the
-            # installed lm_eval package tree this raises ValueError. Monkeypatch to fall back to absolute paths.
-            from pathlib import Path
-            original_relative_to = Path.relative_to
-
-            def _relative_to_noerror(self, other, *extra_args, **kwargs):
-                try:
-                    return original_relative_to(self, other, *extra_args, **kwargs)
-                except ValueError:
-                    return self
-
-            Path.relative_to = _relative_to_noerror
-            try:
-                results = simple_evaluate(
-                    model=model_name,
-                    model_args=model_args,
-                    tasks=[task.value for task in tasks],
-                    batch_size=batch_size,
-                    apply_chat_template=apply_chat_template,
-                    gen_kwargs=gen_kwargs,
-                    random_seed=random_seed,
-                    numpy_random_seed=random_seed,
-                    torch_random_seed=random_seed,
-                    fewshot_random_seed=random_seed,
-                    **args,
-                )
-            finally:
-                Path.relative_to = original_relative_to
-
-            if results is None:
-                raise ValueError('lm_eval run fail, check your code!!!')
-
-            print('--------lm_eval Eval Result---------')
-            print(make_table(results))
-            if "groups" in results:
-                print(make_table(results, "groups"))
-            print('--------lm_eval Result End---------')
-            return results
-        elif framework == EVAL.EVALPLUS:
+        if framework == EVAL.EVALPLUS:
             for task in tasks:
                 if task not in EVAL.get_task_enums():
                     raise ValueError(f"evalplus support tasks: {EVAL.get_all_tasks_string()}")

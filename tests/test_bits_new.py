@@ -24,13 +24,12 @@ import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from tabulate import tabulate  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.utils.eval import EVAL, format_eval_result_table  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
@@ -178,9 +177,7 @@ class Test(ModelTest):
                 print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
 
                 print('--------Eval GPTQ Result---------')
-                print(make_table(base_bench))
-                if "groups" in base_bench:
-                    print(make_table(base_bench, "groups"))
+                print(format_eval_result_table(base_bench))
 
                 # print('--------Eval GPTQ + EoRA Result---------')
                 # print(make_table(eora_bench))

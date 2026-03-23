@@ -7,12 +7,11 @@ import tempfile
 
 import pytest
 from datasets import load_dataset
-from lm_eval.utils import make_table
 from logbar import LogBar
 
 from gptqmodel import GPTAQConfig, GPTQModel, QuantizeConfig
 from gptqmodel.quantization import FORMAT
-from gptqmodel.utils.eval import EVAL
+from gptqmodel.utils.eval import EVAL, format_eval_result_table, get_eval_task_metrics
 
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
@@ -90,11 +89,9 @@ def _run_simple_quant_eval():
             output_path=tmp_dir,
         )
 
-        print(make_table(results))
-        if "groups" in results:
-            print(make_table(results, "groups"))
+        print(format_eval_result_table(results))
 
-        metrics = results["results"].get("gsm8k_cot", {})
+        metrics = get_eval_task_metrics(results, EVAL.LM_EVAL.GSM8K_COT)
         filtered_metrics = {
             metric: value
             for metric, value in metrics.items()

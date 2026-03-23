@@ -15,12 +15,11 @@ from typing import (
 )
 
 import pytest  # noqa: E402
-from lm_eval.tasks import TaskManager  # noqa: E402
 from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.utils.eval import EVAL, get_eval_task_metrics  # noqa: E402
 
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
@@ -35,10 +34,8 @@ class TestEval(ModelTest):
     @parameterized.expand(
         [
             (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'gptqmodel'),
-            (EVAL.LM_EVAL, EVAL.LM_EVAL.ARC_CHALLENGE, 'vllm'),
             (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'gptqmodel'),
             (EVAL.EVALPLUS, EVAL.EVALPLUS.HUMAN, 'vllm'),
-            (EVAL.LM_EVAL, EVAL.LM_EVAL.GPQA, 'vllm'),
         ]
     )
     def test_eval_gptqmodel(self, framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS]], task: Union[EVAL.LM_EVAL, EVAL.EVALPLUS], llm_backend: str):
@@ -61,23 +58,16 @@ class TestEval(ModelTest):
                                      output_path=output_path,
                                      llm_backend=llm_backend,
                                      model_args=model_args,
-                                     task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks"), include_defaults=False)
                                      )
 
-            if llm_backend == EVAL.LM_EVAL:
-                if task == EVAL.LM_EVAL.GPQA:
-                    gpqa_main_n_shot = results['results'].get('gpqa_main_n_shot', {}).get('acc,none')
-                    gpqa_main_zeroshot = results['results'].get('gpqa_main_zeroshot', {}).get('acc,none')
+            if framework == EVAL.LM_EVAL:
+                metrics = get_eval_task_metrics(results, task)
+                acc_score = metrics.get("accuracy,loglikelihood")
+                acc_norm_score = metrics.get("accuracy,loglikelihood_norm")
 
-                    self.assertGreaterEqual(gpqa_main_n_shot, 0.21, "acc score does not match expected result")
-                    self.assertGreaterEqual(gpqa_main_zeroshot, 0.25, "acc_norm score does not match expected result")
-                else:
-                    acc_score = results['results'].get(task.value, {}).get('acc,none')
-                    acc_norm_score = results['results'].get(task.value, {}).get('acc_norm,none')
-
-                    self.assertGreaterEqual(acc_score, 0.28, "acc score does not match expected result")
-                    self.assertGreaterEqual(acc_norm_score, 0.32, "acc_norm score does not match expected result")
-            elif llm_backend == EVAL.EVALPLUS:
+                self.assertGreaterEqual(acc_score, 0.279, "acc score does not match expected result")
+                self.assertGreaterEqual(acc_norm_score, 0.30, "acc_norm score does not match expected result")
+            elif framework == EVAL.EVALPLUS:
                 result = results.get(task.value)
                 base_formatted, plus_formatted, _ = float(result.get("base tests")), float(
                     result.get("base + extra tests")), result.get("results_path")

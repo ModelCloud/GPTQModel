@@ -4,6 +4,8 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import pytest
+from transformers import AutoTokenizer
+from types import SimpleNamespace
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.utils.eval import EVAL
@@ -17,6 +19,17 @@ def test_eval_string_model_load_filters_eval_only_keys(monkeypatch):
         raise RuntimeError("sentinel-load-stop")
 
     monkeypatch.setattr(GPTQModel, "load", _fake_load)
+    monkeypatch.setattr(
+        AutoTokenizer,
+        "from_pretrained",
+        lambda *args, **kwargs: SimpleNamespace(
+            padding_side="left",
+            pad_token_id=0,
+            pad_token="</s>",
+            eos_token="</s>",
+            unk_token="<unk>",
+        ),
+    )
 
     model_args = {
         "backend": BACKEND.EXLLAMA_V3,

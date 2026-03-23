@@ -3,18 +3,47 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from __future__ import annotations
+
+import importlib
 import json
 import os
+import sys
+from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Type, Union
+
+from tabulate import tabulate
+
+from .backend import BACKEND
+from .evalplus import patch_evalplus
 
 
 try:
     from enum import EnumType
 except ImportError:
     EnumType = type(Enum)
-from typing import Dict, List, Optional, Type, Union
 
-from .evalplus import patch_evalplus
+
+_EVALUTION_ROOT = Path(os.environ.get("GPTQMODEL_EVALUTION_PATH", "/root/Evalution")).expanduser()
+_MMLU_LOCAL_DATASET = Path("/monster/data/model/dataset/hails-mmlu_no_train")
+_GSM8K_LOCAL_DATASET = Path("/monster/data/model/dataset/gsm8k")
+_ENGINE_OPTION_KEYS = {
+    "attn_implementation",
+    "device",
+    "device_map",
+    "dtype",
+    "padding_side",
+    "trust_remote_code",
+}
+_DROPPED_MODEL_ARG_KEYS = {
+    "backend",
+    "gptqmodel",
+    "model_id_or_path",
+    "pretrained",
+    "tokenizer",
+}
 
 
 class EVAL:
@@ -125,6 +154,613 @@ class EVAL:
             raise ValueError(f"Unknown tasks: {unknown_tasks}")
 
         return task_groups
+
+
+def import_evalution():
+    try:
+        return importlib.import_module("evalution")
+    except ModuleNotFoundError:
+        if _EVALUTION_ROOT.exists():
+            root = str(_EVALUTION_ROOT)
+            if root not in sys.path:
+                sys.path.insert(0, root)
+        try:
+            return importlib.import_module("evalution")
+        except ModuleNotFoundError as exc:
+            raise ValueError(
+                "Evalution is required for framework=EVAL.LM_EVAL. "
+                f"Expected a local checkout at `{_EVALUTION_ROOT}` or an installed `evalution` package."
+            ) from exc
+
+
+def format_eval_result_table(result: Mapping[str, Any]) -> str:
+    rows = []
+    for test in _result_tests(result):
+        metrics = test.get("metrics", {})
+        if not metrics:
+            rows.append([test.get("name", ""), "-", "-"])
+            continue
+        for metric_name, value in metrics.items():
+            rows.append([test.get("name", ""), metric_name, f"{float(value):.4f}"])
+
+    if not rows:
+        rows.append(["-", "-", "-"])
+    return tabulate(rows, headers=["Task", "Metric", "Value"], tablefmt="github")
+
+
+def get_eval_task_results(result: Mapping[str, Any]) -> dict[str, dict[str, float]]:
+    return {
+        str(test.get("name", "")): {
+            str(metric_name): float(metric_value)
+            for metric_name, metric_value in (test.get("metrics", {}) or {}).items()
+        }
+        for test in _result_tests(result)
+    }
+
+
+def get_eval_task_metrics(result: Mapping[str, Any], task: Any) -> dict[str, float]:
+    return get_eval_task_results(result).get(_task_name(task), {})
+
+
+def resolve_eval_metric_alias(metric_name: str, metrics: Mapping[str, Any]) -> str | None:
+    if metric_name in metrics:
+        return metric_name
+
+    aliases = {
+        "acc": "accuracy,loglikelihood",
+        "acc_norm": "accuracy,loglikelihood_norm",
+        "acc,none": "accuracy,loglikelihood",
+        "acc_norm,none": "accuracy,loglikelihood_norm",
+    }
+    alias = aliases.get(metric_name)
+    if alias and alias in metrics:
+        return alias
+    return None
+
+
+def run_evalution_lm_eval(
+    *,
+    model_or_id_or_path: Any,
+    tasks: list[Any],
+    batch_size: int | str,
+    trust_remote_code: bool,
+    output_path: Optional[str],
+    llm_backend: str,
+    backend: BACKEND | str | None,
+    model_args: Optional[Dict[str, Any]],
+    tokenizer: Any,
+    apply_chat_template: bool,
+    gen_kwargs: Any,
+) -> dict[str, Any]:
+    if llm_backend != "gptqmodel":
+        raise ValueError("Evalution-backed framework=EVAL.LM_EVAL only supports llm_backend='gptqmodel'.")
+
+    evalution = import_evalution()
+    engine_config, model_config, session = _build_evalution_runtime(
+        evalution=evalution,
+        model_or_id_or_path=model_or_id_or_path,
+        backend=backend,
+        batch_size=batch_size,
+        trust_remote_code=trust_remote_code,
+        model_args=model_args or {},
+        tokenizer=tokenizer,
+    )
+    suite_batch_size = _coerce_suite_batch_size(batch_size)
+    generation_settings = _parse_generation_settings(gen_kwargs)
+
+    try:
+        test_results = []
+        for index, task in enumerate(tasks):
+            if index:
+                session.gc()
+            suite = _build_evalution_suite(
+                evalution=evalution,
+                task=task,
+                apply_chat_template=apply_chat_template,
+                batch_size=suite_batch_size,
+                generation_settings=generation_settings,
+            )
+            test_results.append(suite.evaluate(session))
+
+        engine_payload = {}
+        if hasattr(engine_config, "to_dict"):
+            engine_payload = engine_config.to_dict()
+        try:
+            engine_payload["execution"] = session.describe_execution()
+        except Exception:
+            pass
+
+        result = evalution.RunResult(
+            model=model_config.to_dict(),
+            engine=engine_payload,
+            tests=test_results,
+        ).to_dict()
+    finally:
+        session.close()
+
+    _maybe_write_evalution_output(output_path, result)
+    return result
+
+
+@dataclass(slots=True)
+class _ArcChallengeLoglikelihoodSuite:
+    apply_chat_template: bool = False
+    batch_size: int | None = None
+    dataset_path: str = "allenai/ai2_arc"
+    dataset_name: str | None = "ARC-Challenge"
+    split: str = "test"
+    max_rows: int | None = None
+    cache_dir: str | None = None
+    streaming: bool = False
+
+    def dataset_loader(self) -> Any:
+        from datasets import load_dataset
+
+        return load_dataset
+
+    def task_name(self) -> str:
+        return "arc_challenge"
+
+    def continuation_for_choice(self, choice: str) -> str:
+        return choice if choice[:1].isspace() else f" {choice}"
+
+    def result_metadata(self) -> dict[str, Any]:
+        return {
+            "dataset_path": self.dataset_path,
+            "dataset_name": self.dataset_name,
+            "split": self.split,
+            "streaming": self.streaming,
+            "apply_chat_template": self.apply_chat_template,
+            "scoring_mode": "multiple_choice_loglikelihood",
+        }
+
+    def build_sample(self, doc: dict[str, Any], *, index: int) -> Any:
+        from evalution.suites.multiple_choice import MultipleChoiceSample
+        from evalution.suites.multiple_choice_utils import choice_index_from_labels, question_answer_prompt
+
+        labels = list(doc["choices"]["label"])
+        texts = list(doc["choices"]["text"])
+        return MultipleChoiceSample(
+            index=index,
+            prompt=question_answer_prompt(doc["question"]),
+            choices=texts,
+            gold_index=choice_index_from_labels(labels, doc["answerKey"]),
+            metadata={"id": doc["id"], "choice_labels": labels},
+        )
+
+    def evaluate(self, session: Any) -> Any:
+        from evalution.engines.base import LoglikelihoodRequest
+        from evalution.logbar import get_logger
+        from evalution.results import SampleResult, TestResult
+        from evalution.suites.data import doc_count, limit_docs, load_suite_dataset
+
+        task_name = self.task_name()
+        logger = get_logger()
+        loaded_docs, _dataset_load_wall_s = load_suite_dataset(
+            self.dataset_loader(),
+            task_name=task_name,
+            dataset_path=self.dataset_path,
+            dataset_name=self.dataset_name,
+            split=self.split,
+            cache_dir=self.cache_dir,
+            streaming=self.streaming,
+        )
+
+        docs = limit_docs(loaded_docs, self.max_rows)
+        if not isinstance(docs, list):
+            docs = list(docs)
+
+        total = doc_count(
+            docs,
+            loaded_docs=loaded_docs,
+            max_rows=self.max_rows,
+            split=self.split,
+        )
+        logger.info("%s: evaluating %d sample(s)", task_name, total)
+
+        samples = [self.build_sample(doc, index=index) for index, doc in enumerate(docs)]
+        rendered_prompts = [
+            _render_evalution_prompt(session, sample.prompt, apply_chat_template=self.apply_chat_template)
+            for sample in samples
+        ]
+
+        requests = []
+        request_to_choice = []
+        for sample, prompt in zip(samples, rendered_prompts, strict=True):
+            for choice_index, choice in enumerate(sample.choices):
+                requests.append(
+                    LoglikelihoodRequest(
+                        context=prompt,
+                        continuation=self.continuation_for_choice(choice),
+                    )
+                )
+                request_to_choice.append((sample.index, choice_index))
+
+        outputs = session.loglikelihood(requests, batch_size=self.batch_size)
+        logger.info("%s: executed %d/%d sample(s)", task_name, len(samples), total)
+
+        sample_choice_scores: dict[int, list[tuple[float, float, int]]] = {}
+        for (sample_index, choice_index), output in zip(request_to_choice, outputs, strict=True):
+            sample_choice_scores.setdefault(sample_index, []).append(
+                (
+                    output.logprob,
+                    output.logprob / max(output.token_count, 1),
+                    choice_index,
+                )
+            )
+
+        sample_results = []
+        raw_total = 0.0
+        norm_total = 0.0
+        for sample, prompt in zip(samples, rendered_prompts, strict=True):
+            choice_scores = sorted(sample_choice_scores[sample.index], key=lambda item: item[2])
+            raw_best = max(choice_scores, key=lambda item: item[0])[2]
+            norm_best = max(choice_scores, key=lambda item: item[1])[2]
+            raw_score = 1.0 if raw_best == sample.gold_index else 0.0
+            norm_score = 1.0 if norm_best == sample.gold_index else 0.0
+            raw_total += raw_score
+            norm_total += norm_score
+            sample_results.append(
+                SampleResult(
+                    index=sample.index,
+                    prompt=prompt,
+                    target=sample.choices[sample.gold_index],
+                    prediction=sample.choices[norm_best],
+                    extracted={
+                        "gold_index": str(sample.gold_index),
+                        "predicted_index": str(raw_best),
+                        "predicted_index_norm": str(norm_best),
+                    },
+                    scores={
+                        "accuracy,loglikelihood": raw_score,
+                        "accuracy,loglikelihood_norm": norm_score,
+                    },
+                    metadata={
+                        **sample.metadata,
+                        "choice_logprobs": [score for score, _norm, _index in choice_scores],
+                        "choice_logprobs_norm": [norm for _score, norm, _index in choice_scores],
+                    },
+                )
+            )
+
+        denominator = max(len(sample_results), 1)
+        metrics = {
+            "accuracy,loglikelihood": raw_total / denominator,
+            "accuracy,loglikelihood_norm": norm_total / denominator,
+        }
+        return TestResult(
+            name=task_name,
+            metrics=metrics,
+            samples=sample_results,
+            metadata=self.result_metadata(),
+        )
+
+
+def _result_tests(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    tests = result.get("tests")
+    return list(tests) if isinstance(tests, list) else []
+
+
+def _task_name(task: Any) -> str:
+    return getattr(task, "value", task)
+
+
+def _build_evalution_runtime(
+    *,
+    evalution: Any,
+    model_or_id_or_path: Any,
+    backend: BACKEND | str | None,
+    batch_size: int | str,
+    trust_remote_code: bool,
+    model_args: Dict[str, Any],
+    tokenizer: Any,
+):
+    from transformers import PreTrainedModel
+
+    try:
+        from peft import PeftModel
+    except Exception:  # pragma: no cover - optional dependency
+        PeftModel = ()
+
+    engine_options, load_kwargs = _split_evalution_model_args(model_args)
+    engine_dtype = _normalize_dtype_name(engine_options.get("dtype"))
+    engine_device = engine_options.get("device")
+    engine_device_map = engine_options.get("device_map")
+    engine_attn = engine_options.get("attn_implementation")
+    engine_padding_side = engine_options.get("padding_side", "left")
+
+    tokenizer_path = _resolve_tokenizer_path(tokenizer)
+
+    if isinstance(model_or_id_or_path, str):
+        engine = evalution.GPTQModel(
+            dtype=engine_dtype,
+            attn_implementation=engine_attn,
+            device=engine_device,
+            device_map=engine_device_map,
+            batch_size=batch_size,
+            trust_remote_code=trust_remote_code,
+            padding_side=engine_padding_side,
+            backend=_normalize_backend_name(backend),
+            gptqmodel_path=str(Path(__file__).resolve().parents[2]),
+        )
+        model_config = evalution.Model(
+            path=model_or_id_or_path,
+            tokenizer_path=tokenizer_path,
+            trust_remote_code=trust_remote_code,
+            model_kwargs=load_kwargs,
+        )
+        session = engine.build(model_config)
+        return engine, model_config, session
+
+    if isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)) or hasattr(model_or_id_or_path, "model"):
+        model_path = _resolve_model_path(model_or_id_or_path)
+        if model_path is None:
+            raise ValueError(
+                "Evalution-backed framework=EVAL.LM_EVAL requires a model path when evaluating a live model instance."
+            )
+
+        engine = evalution.TransformersCompat(
+            dtype=engine_dtype or _normalize_dtype_name(getattr(model_or_id_or_path, "dtype", None)),
+            attn_implementation=engine_attn,
+            device=engine_device,
+            device_map=engine_device_map,
+            batch_size=batch_size,
+            trust_remote_code=trust_remote_code,
+            padding_side=engine_padding_side,
+        )
+        engine.resolved_engine = "TransformersCompat"
+
+        model_config = evalution.Model(
+            path=model_path,
+            tokenizer_path=tokenizer_path,
+            trust_remote_code=trust_remote_code,
+            model_kwargs=load_kwargs,
+        )
+        session = _build_evalution_session_from_model(
+            evalution=evalution,
+            engine=engine,
+            model_config=model_config,
+            model=model_or_id_or_path,
+        )
+        return engine, model_config, session
+
+    raise ValueError(
+        f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`"
+    )
+
+
+def _build_evalution_session_from_model(*, evalution: Any, engine: Any, model_config: Any, model: Any):
+    from evalution.engines.transformers_common import _clone_prepare_tokenizer, _resolve_input_device
+    from evalution.engines.transformers_compat import TransformersCompatSession
+
+    inner_model = getattr(model, "model", model)
+    tokenizer = getattr(model, "tokenizer", None)
+    if tokenizer is None:
+        raise ValueError("Tokenizer must be attached to the loaded model instance for Evalution-backed evaluation.")
+
+    trust_remote_code = (
+        engine.trust_remote_code
+        if engine.trust_remote_code is not None
+        else model_config.trust_remote_code
+    )
+    requested_attn = (
+        getattr(getattr(inner_model, "config", None), "_attn_implementation", None)
+        or getattr(getattr(inner_model, "config", None), "attn_implementation", None)
+        or engine.attn_implementation
+    )
+    session = TransformersCompatSession(
+        config=engine,
+        model_config=model_config,
+        model=inner_model,
+        tokenizer=tokenizer,
+        prepare_tokenizer=_clone_prepare_tokenizer(
+            tokenizer=tokenizer,
+            model_config=model_config,
+            trust_remote_code=trust_remote_code,
+        ),
+        input_device=_resolve_input_device(inner_model, prefer=engine.device),
+        requested_attn_implementation=requested_attn,
+        effective_attn_implementation=requested_attn,
+        paged_attention_enabled=False,
+        generation_backend="generate_compat",
+    )
+    session._gptqmodel_wrapper = model
+    return session
+
+
+def _build_evalution_suite(
+    *,
+    evalution: Any,
+    task: Any,
+    apply_chat_template: bool,
+    batch_size: int | None,
+    generation_settings: Dict[str, Any],
+):
+    task_name = _task_name(task)
+    max_new_tokens = int(generation_settings.get("max_new_tokens", 256))
+    do_sample = bool(generation_settings.get("do_sample", False))
+    temperature = float(generation_settings.get("temperature", 0.0))
+
+    if task_name == EVAL.LM_EVAL.ARC_CHALLENGE.value:
+        return _ArcChallengeLoglikelihoodSuite(
+            apply_chat_template=apply_chat_template,
+            batch_size=batch_size,
+        )
+    if task_name == EVAL.LM_EVAL.ARC_EASY.value:
+        return evalution.arc_easy(batch_size=batch_size)
+    if task_name == EVAL.LM_EVAL.BOOLQ.value:
+        return evalution.boolq(batch_size=batch_size)
+    if task_name == EVAL.LM_EVAL.HELLASWAG.value:
+        return evalution.hellaswag(batch_size=batch_size)
+    if task_name == EVAL.LM_EVAL.OPENBOOKQA.value:
+        return evalution.openbookqa(batch_size=batch_size)
+    if task_name == EVAL.LM_EVAL.MMLU.value:
+        kwargs = {"batch_size": batch_size}
+        if _MMLU_LOCAL_DATASET.exists():
+            kwargs["dataset_path"] = str(_MMLU_LOCAL_DATASET)
+        return evalution.mmlu(**kwargs)
+    if task_name == EVAL.LM_EVAL.MMLU_STEM.value:
+        kwargs = {"subsets": "stem", "batch_size": batch_size}
+        if _MMLU_LOCAL_DATASET.exists():
+            kwargs["dataset_path"] = str(_MMLU_LOCAL_DATASET)
+        return evalution.mmlu(**kwargs)
+    if task_name == EVAL.LM_EVAL.GSM8K_COT.value:
+        kwargs = {
+            "variant": "cot",
+            "apply_chat_template": apply_chat_template,
+            "max_new_tokens": max_new_tokens,
+            "batch_size": batch_size,
+            "do_sample": do_sample,
+            "temperature": temperature,
+        }
+        if _GSM8K_LOCAL_DATASET.exists():
+            kwargs["dataset_path"] = str(_GSM8K_LOCAL_DATASET)
+            kwargs["dataset_name"] = "main"
+        return evalution.gsm8k(**kwargs)
+    if task_name == EVAL.LM_EVAL.GSM8K_PLATINUM_COT.value:
+        return evalution.gsm8k_platinum(
+            variant="cot",
+            apply_chat_template=apply_chat_template,
+            max_new_tokens=max_new_tokens,
+            batch_size=batch_size,
+            do_sample=do_sample,
+            temperature=temperature,
+        )
+    if task_name == EVAL.LM_EVAL.GPQA.value:
+        raise ValueError("Evalution does not currently provide a GPQA suite.")
+
+    raise ValueError(f"Unsupported Evalution task: `{task_name}`")
+
+
+def _split_evalution_model_args(model_args: Dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    engine_options = {}
+    load_kwargs = {}
+    for key, value in model_args.items():
+        if key in _DROPPED_MODEL_ARG_KEYS:
+            continue
+        if key in _ENGINE_OPTION_KEYS:
+            engine_options[key] = value
+        else:
+            load_kwargs[key] = value
+    return engine_options, load_kwargs
+
+
+def _parse_generation_settings(gen_kwargs: Any) -> Dict[str, Any]:
+    if not gen_kwargs:
+        return {}
+    if isinstance(gen_kwargs, Mapping):
+        return dict(gen_kwargs)
+
+    settings = {}
+    for item in str(gen_kwargs).split(","):
+        if "=" not in item:
+            continue
+        key, raw_value = item.split("=", 1)
+        settings[key.strip()] = _coerce_scalar(raw_value.strip())
+    return settings
+
+
+def _coerce_scalar(value: str) -> Any:
+    lowered = value.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"none", "null"}:
+        return None
+    try:
+        if any(ch in value for ch in (".", "e", "E")):
+            return float(value)
+        return int(value)
+    except ValueError:
+        return value
+
+
+def _coerce_suite_batch_size(batch_size: int | str) -> int | None:
+    if isinstance(batch_size, str):
+        normalized = batch_size.strip().lower()
+        if normalized == "auto":
+            return None
+        return int(normalized)
+    return int(batch_size)
+
+
+def _normalize_backend_name(backend: BACKEND | str | None) -> str:
+    if backend is None:
+        return BACKEND.AUTO.value
+    if isinstance(backend, BACKEND):
+        return backend.value
+    return str(backend)
+
+
+def _normalize_dtype_name(dtype: Any) -> str | None:
+    if dtype is None:
+        return None
+    if isinstance(dtype, str):
+        return dtype
+    try:
+        import torch
+
+        mapping = {
+            torch.float16: "float16",
+            torch.bfloat16: "bfloat16",
+            torch.float32: "float32",
+            torch.float64: "float64",
+        }
+        if dtype in mapping:
+            return mapping[dtype]
+    except Exception:
+        pass
+    return str(dtype)
+
+
+def _resolve_tokenizer_path(tokenizer: Any) -> str | None:
+    if tokenizer is None:
+        return None
+    if isinstance(tokenizer, str):
+        return tokenizer
+    return getattr(tokenizer, "name_or_path", None)
+
+
+def _resolve_model_path(model: Any) -> str | None:
+    model_path = getattr(model, "model_local_path", None)
+    if isinstance(model_path, str) and model_path.strip():
+        return model_path
+    config = getattr(model, "config", None)
+    name_or_path = getattr(config, "name_or_path", None)
+    if isinstance(name_or_path, str) and name_or_path.strip():
+        return name_or_path
+    return None
+
+
+def _render_evalution_prompt(session: Any, prompt: str, *, apply_chat_template: bool) -> str:
+    if not apply_chat_template:
+        return prompt
+
+    tokenizer = getattr(session, "prepare_tokenizer", None) or getattr(session, "tokenizer", None)
+    if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
+        return prompt
+
+    try:
+        rendered = tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    except Exception:
+        return prompt
+    return rendered if isinstance(rendered, str) and rendered.strip() else prompt
+
+
+def _maybe_write_evalution_output(output_path: Optional[str], result: Mapping[str, Any]) -> None:
+    if not output_path:
+        return
+
+    path = Path(output_path)
+    if path.suffix.lower() != ".json":
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(result, handle, indent=2, sort_keys=True)
 
 
 def evalplus(

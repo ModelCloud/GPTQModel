@@ -34,6 +34,9 @@ class _BaselineFallbackHarness(ModelTest):
         self._stub_native_results = native_results
         self.lm_eval_calls = 0
 
+    def _model_test_mode(self) -> str:
+        return self.MODEL_TEST_MODE_SLOW
+
     def lm_eval(self, *args, **kwargs):  # pragma: no cover - exercised via check_results
         self.lm_eval_calls += 1
         return self._stub_native_results
