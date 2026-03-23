@@ -65,6 +65,7 @@ from . import has_gil_disabled
 from .backend import BACKEND, normalize_backend
 from .ctx import ctx
 from .device import get_device
+from .hf import get_hf_config_dtype
 from .importer import select_quant_linear
 from .logger import log_time_block, setup_logger
 from .torch import HAS_CUDA, torch_empty_cache
@@ -1230,7 +1231,7 @@ def auto_dtype(config: PretrainedConfig,
     #     return torch.float16
 
     # get dtype from config
-    dtype = getattr(config, "dtype") if hasattr(config, "dtype") else getattr(config, "torch_dtype")
+    dtype = get_hf_config_dtype(config)
     if dtype and not isinstance(dtype, torch.dtype):
         raise ValueError(f"dtype in config must be a torch.dtype, but got {dtype}")
 

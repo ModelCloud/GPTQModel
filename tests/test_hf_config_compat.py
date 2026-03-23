@@ -2,6 +2,7 @@ import sys
 from enum import Enum
 from types import ModuleType, SimpleNamespace
 
+import pytest
 import torch
 import transformers
 import transformers.generation.utils as generation_utils
@@ -10,6 +11,7 @@ from transformers.generation.configuration_utils import GenerationMode
 
 from gptqmodel.utils import hf as hf_utils
 from gptqmodel.utils.hf import (
+    normalize_torch_dtype_kwarg,
     normalize_hf_config_compat,
     prepare_remote_model_init_compat,
     resolve_trust_remote_code,
@@ -33,6 +35,31 @@ def test_normalize_hf_config_compat_uses_gpt_neox_defaults():
     assert config.rope_parameters["rope_type"] == "default"
     assert config.rope_parameters["rope_theta"] == config.default_theta
     assert config.rope_parameters["partial_rotary_factor"] == 0.25
+
+
+def test_normalize_torch_dtype_kwarg_moves_alias_to_dtype():
+    kwargs = {"torch_dtype": torch.float16}
+
+    resolved = normalize_torch_dtype_kwarg(kwargs, api_name="test")
+
+    assert resolved is torch.float16
+    assert kwargs == {"dtype": torch.float16}
+
+
+def test_normalize_torch_dtype_kwarg_resolves_explicit_dtype_parameter():
+    kwargs = {"torch_dtype": torch.bfloat16}
+
+    resolved = normalize_torch_dtype_kwarg(kwargs, api_name="test", explicit_dtype="auto")
+
+    assert resolved is torch.bfloat16
+    assert kwargs == {}
+
+
+def test_normalize_torch_dtype_kwarg_rejects_conflicting_values():
+    kwargs = {"dtype": torch.float16, "torch_dtype": torch.bfloat16}
+
+    with pytest.raises(ValueError, match="both `dtype` and deprecated `torch_dtype`"):
+        normalize_torch_dtype_kwarg(kwargs, api_name="test")
 
 
 def test_normalize_hf_config_compat_drops_default_remote_rope_scaling_dict():
@@ -147,7 +174,7 @@ def test_normalize_hf_config_compat_supports_legacy_custom_generation_cache_mapp
 
     class DummyConfig:
         is_encoder_decoder = False
-        torch_dtype = torch.float16
+        dtype = torch.float16
 
         def get_text_config(self, decoder=True):
             assert decoder is True

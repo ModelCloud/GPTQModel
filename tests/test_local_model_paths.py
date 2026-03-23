@@ -43,12 +43,71 @@ def test_get_model_local_path_skips_snapshot_download_for_absolute_path(monkeypa
     assert loader.get_model_local_path(model_path) == model_path
 
 
+def test_gptqmodel_from_pretrained_forwards_dtype_kwarg(monkeypatch):
+    fake_config = SimpleNamespace(quantization_config=None)
+    sentinel = object()
+    captured = {}
+
+    class FakeModelDefinition:
+        @classmethod
+        def from_pretrained(cls, pretrained_model_id_or_path, quantize_config, **kwargs):
+            captured["path"] = pretrained_model_id_or_path
+            captured["quantize_config"] = quantize_config
+            captured["kwargs"] = kwargs
+            return sentinel
+
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+    monkeypatch.setattr(auto, "_is_supported_quantization_config", lambda config: False)
+    monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: FakeModelDefinition)
+
+    result = GPTQModel.from_pretrained(
+        "/tmp/fake-model",
+        quantize_config=None,
+        dtype=torch.float16,
+    )
+
+    assert result is sentinel
+    assert captured["path"] == "/tmp/fake-model"
+    assert captured["quantize_config"] is None
+    assert captured["kwargs"]["dtype"] is torch.float16
+    assert "torch_dtype" not in captured["kwargs"]
+
+
+def test_gptqmodel_from_quantized_forwards_dtype_kwarg(monkeypatch):
+    sentinel = object()
+    captured = {}
+
+    class FakeModelDefinition:
+        @classmethod
+        def from_quantized(cls, model_id_or_path, **kwargs):
+            captured["path"] = model_id_or_path
+            captured["kwargs"] = kwargs
+            return sentinel
+
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto, "normalize_adapter", lambda adapter: adapter)
+    monkeypatch.setattr(auto, "normalize_backend", lambda backend: backend)
+    monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: FakeModelDefinition)
+
+    result = GPTQModel.from_quantized(
+        "/tmp/fake-model",
+        dtype=torch.bfloat16,
+    )
+
+    assert result is sentinel
+    assert captured["path"] == "/tmp/fake-model"
+    assert captured["kwargs"]["dtype"] is torch.bfloat16
+    assert "torch_dtype" not in captured["kwargs"]
+
+
 def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
     class FakeConfig:
         def __init__(self):
             self._experts_implementation = None
+            self.model_type = "llama"
             self.sub_configs = {}
-            self.torch_dtype = None
+            self.dtype = None
 
         def to_dict(self):
             return {"max_position_embeddings": 128}
@@ -129,12 +188,75 @@ def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
     assert instance.turtle_model is not None
 
 
+def test_model_loader_from_pretrained_forwards_dtype_kwarg(monkeypatch):
+    class FakeConfig:
+        def __init__(self):
+            self._experts_implementation = None
+            self.model_type = "llama"
+            self.sub_configs = {}
+            self.dtype = None
+
+    class FakeModel:
+        def __init__(self, config):
+            self.config = config
+
+        def eval(self):
+            return self
+
+    load_calls = []
+
+    class FakeInnerLoader:
+        @staticmethod
+        def from_pretrained(_path, config=None, **kwargs):
+            load_calls.append(kwargs)
+            return FakeModel(config)
+
+    @loader.ModelLoader
+    class DummyQModel:
+        loader = FakeInnerLoader
+        require_dtype = None
+        require_fast_init = False
+        require_trust_remote_code = False
+        require_pkgs = []
+        supports_desc_act = [True, False]
+        support_offload_to_disk = False
+        config_class = None
+
+        @staticmethod
+        def before_model_load(*_args, **_kwargs):
+            return None
+
+        def __init__(self, model, **kwargs):
+            self.model = model
+            self.config = model.config
+            self.quantized = kwargs.get("quantized")
+
+    monkeypatch.setattr(loader, "check_versions", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader, "get_model_local_path", lambda *_args, **_kwargs: "/tmp/fake-model")
+    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: FakeConfig())
+    monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(loader, "print_module_tree", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader.defuser, "replace_fused_blocks", lambda *_args, **_kwargs: None)
+
+    instance = DummyQModel.from_pretrained(
+        "/tmp/fake-model",
+        quantize_config=None,
+        dtype=torch.float16,
+    )
+
+    assert instance.quantized is False
+    assert len(load_calls) == 1
+    assert load_calls[0]["dtype"] is torch.float16
+    assert "torch_dtype" not in load_calls[0]
+
+
 def test_model_loader_falls_back_when_meta_shell_build_hits_meta_tensor_item(monkeypatch):
     class FakeConfig:
         def __init__(self):
             self._experts_implementation = None
+            self.model_type = "llama"
             self.sub_configs = {}
-            self.torch_dtype = None
+            self.dtype = None
 
         def to_dict(self):
             return {"max_position_embeddings": 128}

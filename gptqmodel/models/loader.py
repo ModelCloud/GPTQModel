@@ -38,10 +38,13 @@ from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2, BaseQuant
 from ..utils.backend import BACKEND, normalize_backend
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
+    get_hf_config_dtype,
     has_native_transformers_causallm_support,
+    normalize_torch_dtype_kwarg,
     normalize_hf_config_compat,
     prepare_remote_model_init_compat,
     resolve_trust_remote_code,
+    set_hf_config_dtype,
     suspend_hf_weight_init,
 )
 from ..utils.importer import (
@@ -192,6 +195,12 @@ def ModelLoader(cls):
         import torch._dynamo
         torch._dynamo.disable()
 
+        dtype = normalize_torch_dtype_kwarg(
+            model_init_kwargs,
+            api_name=f"{cls.__name__}.from_pretrained",
+            explicit_dtype=dtype,
+        )
+
         tokenizer_trust_remote_code = model_init_kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs)
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
@@ -214,9 +223,9 @@ def ModelLoader(cls):
         if cls.require_dtype:
             dtype = cls.require_dtype
 
-        if isinstance(dtype, torch.dtype) and getattr(config, "torch_dtype", None) != dtype:
+        if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
             # Align config metadata with the dtype we will materialize weights in.
-            config.torch_dtype = dtype
+            set_hf_config_dtype(config, dtype)
 
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_id_or_path,
@@ -417,6 +426,11 @@ def ModelLoader(cls):
 
         import torch._dynamo
         torch._dynamo.reset()
+        dtype = normalize_torch_dtype_kwarg(
+            kwargs,
+            api_name=f"{cls.__name__}.from_quantized",
+            explicit_dtype=dtype,
+        )
         tokenizer_trust_remote_code = kwargs.pop("tokenizer_trust_remote_code", trust_remote_code)
         requested_device_map = device_map
         explicit_device_map = requested_device_map if isinstance(requested_device_map, dict) else None
@@ -503,9 +517,9 @@ def ModelLoader(cls):
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
             dtype = auto_dtype(config=config, device=device, quant_inference=True)
 
-        if isinstance(dtype, torch.dtype) and getattr(config, "torch_dtype", None) != dtype:
+        if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
             # Ensure flash attention kernels see an explicit dtype instead of relying on defaults.
-            config.torch_dtype = dtype
+            set_hf_config_dtype(config, dtype)
 
         qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs)
         export_quant_method = qcfg.export_quant_method()

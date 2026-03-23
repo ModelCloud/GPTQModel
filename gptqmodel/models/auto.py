@@ -65,7 +65,7 @@ from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa
 from ..utils import BACKEND  # noqa: E402
 from ..utils.backend import normalize_backend  # noqa: E402
 from ..utils.eval import EVAL  # noqa: E402
-from ..utils.hf import resolve_trust_remote_code  # noqa: E402
+from ..utils.hf import normalize_torch_dtype_kwarg, resolve_trust_remote_code  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
 from .base import BaseQModel  # noqa: E402
@@ -442,6 +442,10 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseQModel:
+        normalize_torch_dtype_kwarg(
+            model_init_kwargs,
+            api_name="GPTQModel.from_pretrained",
+        )
         requested_trust_remote_code = trust_remote_code
         tokenizer_trust_remote_code = model_init_kwargs.pop(
             "tokenizer_trust_remote_code",
@@ -480,6 +484,10 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **kwargs,
     ) -> BaseQModel:
+        normalize_torch_dtype_kwarg(
+            kwargs,
+            api_name="GPTQModel.from_quantized",
+        )
         requested_trust_remote_code = trust_remote_code
         tokenizer_trust_remote_code = kwargs.pop("tokenizer_trust_remote_code", requested_trust_remote_code)
         trust_remote_code = resolve_trust_remote_code(model_id_or_path, trust_remote_code=trust_remote_code)

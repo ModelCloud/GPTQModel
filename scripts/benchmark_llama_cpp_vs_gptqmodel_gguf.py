@@ -178,12 +178,12 @@ def _build_prompt(tokenizer: AutoTokenizer, target_tokens: int) -> tuple[str, in
 
 
 def _load_gptqmodel(model_dir: Path, *, device: str):
-    torch_dtype = torch.float16 if device == "cuda" else torch.float32
+    dtype = torch.float16 if device == "cuda" else torch.float32
     model = GPTQModel.from_quantized(
         model_id_or_path=str(model_dir),
         backend=BACKEND.GGUF_TORCH,
         device="cuda:0" if device == "cuda" else "cpu",
-        torch_dtype=torch_dtype,
+        dtype=dtype,
         trust_remote_code=False,
     )
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir), use_fast=True)
