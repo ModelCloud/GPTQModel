@@ -139,6 +139,25 @@ def _rotation_sources() -> list[str]:
     ]
 
 
+def _rotation_kernel_ready(
+    x: torch.Tensor,
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    scales: Optional[torch.Tensor],
+    group_size: int,
+) -> bool:
+    """Check whether the fused CUDA rotation kernel can service this call."""
+    return (
+        x.device.type == "cuda"
+        and x.dtype in _SUPPORTED_ROTATION_KERNEL_DTYPES
+        and pairs.device.type == "cuda"
+        and theta.device.type == "cuda"
+        and (scales is None or scales.device.type == "cuda")
+        and int(group_size) in {128}
+        and int(theta.shape[0]) in {1, 8}
+    )
+
+
 @lru_cache(maxsize=1)
 def _load_rotation_extension() -> bool:
     """JIT-build and load the optional fused CUDA rotation extension once."""
@@ -187,22 +206,109 @@ def apply_paroquant_rotation(
     group_size: int = 128,
 ) -> torch.Tensor:
     """Apply the fused rotation when available, else fall back to the reference path."""
-    if x.device.type == "cuda":
-        kernel_ready = (
-            x.dtype in _SUPPORTED_ROTATION_KERNEL_DTYPES
-            and pairs.device.type == "cuda"
-            and theta.device.type == "cuda"
-            and (scales is None or scales.device.type == "cuda")
-            and int(group_size) in {128}
-            and int(theta.shape[0]) in {1, 8}
+    if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _load_rotation_extension():
+        return torch.ops.gptqmodel_paroquant.rotate(x, pairs, theta, scales, int(group_size))
+    return apply_paroquant_rotation_reference(x, pairs, theta, scales=scales, group_size=group_size)
+
+
+class _ParoQuantRotateTensorFunc(torch.autograd.Function):
+    """Autograd wrapper around the fused ParoQuant CUDA rotation kernel."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        pairs: torch.Tensor,
+        theta: torch.Tensor,
+        scales: Optional[torch.Tensor] = None,
+        group_size: int = 128,
+    ) -> torch.Tensor:
+        scale_tensor = None if scales is None else scales.contiguous()
+        ctx.orig_shape = x.shape
+        ctx.orig_dtype = x.dtype
+        ctx.has_scale = scale_tensor is not None
+        ctx.group_size = int(group_size)
+
+        y = torch.ops.gptqmodel_paroquant.rotate(x, pairs, theta, scale_tensor, int(group_size))
+        saved = (x, pairs, theta, y, scale_tensor) if ctx.has_scale else (x, pairs, theta, y)
+        ctx.save_for_backward(*saved)
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_out: torch.Tensor):
+        x, pairs, theta, y = ctx.saved_tensors[:4]
+        scale_tensor = ctx.saved_tensors[4] if ctx.has_scale else None
+        group_size = ctx.group_size
+
+        _, hidden = pairs.shape
+        num_groups = hidden // group_size
+        half_group = group_size // 2
+        batch_rows = y.numel() // hidden
+        rotated = y.reshape(batch_rows, hidden)
+        grad = grad_out.reshape(batch_rows, hidden)
+        grad_theta = torch.zeros_like(theta)
+        offsets = (
+            torch.arange(num_groups, device=pairs.device, dtype=torch.long).unsqueeze(1) * group_size
         )
-        if kernel_ready and _load_rotation_extension():
-            return torch.ops.gptqmodel_paroquant.rotate(x, pairs, theta, scales, int(group_size))
+
+        for rot_idx in range(pairs.shape[0] - 1, -1, -1):
+            neg_theta = -theta[[rot_idx]]
+            pair_row = pairs[[rot_idx]]
+            rotated = torch.ops.gptqmodel_paroquant.rotate(rotated, pair_row, neg_theta, None, group_size)
+            grad = torch.ops.gptqmodel_paroquant.rotate(grad, pair_row, neg_theta, None, group_size)
+
+            pair_view = pair_row.reshape(num_groups, group_size)
+            idx_i = (pair_view[:, 0::2] + offsets).reshape(-1)
+            idx_j = (pair_view[:, 1::2] + offsets).reshape(-1)
+
+            xi = rotated[:, idx_i].reshape(batch_rows, num_groups, half_group)
+            xj = rotated[:, idx_j].reshape(batch_rows, num_groups, half_group)
+            grad_i = grad[:, idx_i].reshape(batch_rows, num_groups, half_group)
+            grad_j = grad[:, idx_j].reshape(batch_rows, num_groups, half_group)
+
+            theta_view = theta[rot_idx].reshape(num_groups, half_group)
+            sin_t = theta_view.sin()
+            cos_t = theta_view.cos()
+            grad_theta[rot_idx] = (
+                (
+                    (grad_i * xj - grad_j * xi).sum(0) * cos_t
+                    - (grad_i * xi + grad_j * xj).sum(0) * sin_t
+                )
+                .reshape(-1)
+                .to(theta.dtype)
+            )
+
+        if ctx.has_scale:
+            scale_flat = scale_tensor.reshape(-1)
+            grad_x = (grad * scale_flat.unsqueeze(0)).reshape(ctx.orig_shape).to(ctx.orig_dtype)
+            grad_scale = (x.reshape(batch_rows, hidden) * grad).sum(0).to(
+                dtype=scale_tensor.dtype,
+                device=scale_tensor.device,
+            )
+            grad_scale = grad_scale.reshape_as(scale_tensor)
+        else:
+            grad_x = grad.reshape(ctx.orig_shape).to(ctx.orig_dtype)
+            grad_scale = None
+
+        return grad_x, None, grad_theta, grad_scale, None
+
+
+def apply_paroquant_rotation_autograd(
+    x: torch.Tensor,
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    scales: Optional[torch.Tensor] = None,
+    group_size: int = 128,
+) -> torch.Tensor:
+    """Apply the fused rotation with custom backward support when available."""
+    if _rotation_kernel_ready(x, pairs, theta, scales, group_size) and _load_rotation_extension():
+        return _ParoQuantRotateTensorFunc.apply(x, pairs, theta, scales, int(group_size))
     return apply_paroquant_rotation_reference(x, pairs, theta, scales=scales, group_size=group_size)
 
 
 __all__ = [
     "apply_paroquant_rotation",
+    "apply_paroquant_rotation_autograd",
     "apply_paroquant_rotation_reference",
     "build_identity_rotation_buffers",
     "is_identity_rotation",
