@@ -7,7 +7,7 @@ from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.bitsandbytes import BITSANDBYTES_AVAILABLE, BitsAndBytesQuantLinear
-from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization import FORMAT, METHOD, BitsAndBytesConfig
 from gptqmodel.utils.eval import EVAL
 import torch
 
@@ -61,13 +61,16 @@ class TestLlama3_2_BitsAndBytes(ModelTest):
     }
 
     METHOD = METHOD.BITSANDBYTES
-    FORMAT = "fp4"
+    FORMAT = FORMAT.BITSANDBYTES
     BITS = 4
     GROUP_SIZE = -1
     LOAD_BACKEND = BACKEND.BITSANDBYTES
     QUANT_BACKEND = BACKEND.BITSANDBYTES
     KERNEL_QUANT = {BitsAndBytesQuantLinear}
     KERNEL_INFERENCE = {BitsAndBytesQuantLinear}
+    BNB_BLOCK_SIZE = 64
+    BNB_COMPRESS_STATISTICS = False
+
 
     def test_llama3_2_bitsandbytes(self):
         if not BITSANDBYTES_AVAILABLE:
