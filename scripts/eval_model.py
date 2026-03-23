@@ -15,7 +15,7 @@ import gptqmodel
 from tabulate import tabulate
 from gptqmodel import GPTQModel
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.utils.eval import EVAL, get_eval_task_results
+from gptqmodel.utils.eval import EVAL, evaluate, get_eval_task_results
 
 
 if sys.platform == "darwin":
@@ -173,7 +173,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="Extra model_args forwarded to GPTQModel.eval (repeatable).",
+        help="Extra model_args forwarded to the evaluation runner (repeatable).",
     )
     parser.add_argument(
         "--load-arg",
@@ -293,7 +293,7 @@ def main() -> None:
         if not grouped:
             continue
 
-        result = gptqmodel.GPTQModel.eval(
+        result = evaluate(
             model_or_id_or_path=model,
             tasks=grouped,
             framework=EVAL.LM_EVAL,

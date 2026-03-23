@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from gptqmodel import GPTQModel
-from gptqmodel.utils.eval import EVAL
+from gptqmodel.utils.eval import EVAL, evaluate
 
 
 # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -22,7 +22,7 @@ class TestMMLUPRO(unittest.TestCase):
 
     def test_mmlupro(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            result = GPTQModel.eval(
+            result = evaluate(
                 self.MODEL_ID,
                 framework=EVAL.MMLU_PRO,
                 tasks=EVAL.MMLU_PRO.MATH,

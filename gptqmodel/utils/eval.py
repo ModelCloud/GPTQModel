@@ -282,6 +282,180 @@ def run_evalution_lm_eval(
     return result
 
 
+def evaluate(
+    model_or_id_or_path: Any = None,
+    tokenizer: Any = None,
+    tasks: Any = None,
+    framework: Any = EVAL.LM_EVAL,
+    batch_size: int | str = 1,
+    trust_remote_code: bool = False,
+    output_path: Optional[str] = None,
+    llm_backend: str = "gptqmodel",
+    backend: BACKEND | str = BACKEND.AUTO,
+    random_seed: int = 1234,
+    model_args: Optional[Dict[str, Any]] = None,
+    ntrain: int = 1,
+    **args,
+):
+    import torch
+    from tokenicer import Tokenicer
+    from transformers import PreTrainedModel
+
+    from ..models.base import BaseQModel
+    from .hf import resolve_trust_remote_code
+
+    try:
+        from peft import PeftModel
+    except Exception:  # pragma: no cover - optional dependency
+        PeftModel = ()
+
+    if isinstance(model_or_id_or_path, str):
+        trust_remote_code = resolve_trust_remote_code(
+            model_or_id_or_path,
+            trust_remote_code=trust_remote_code,
+        )
+
+    if model_args is None:
+        model_args = {}
+    else:
+        model_args = dict(model_args)
+
+    if tasks is None:
+        if framework == EVAL.LM_EVAL:
+            tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
+        elif framework == EVAL.MMLU_PRO:
+            tasks = [EVAL.MMLU_PRO.MATH]
+        else:
+            tasks = [EVAL.EVALPLUS.HUMAN]
+    elif not isinstance(tasks, list):
+        tasks = [tasks]
+
+    if framework is None:
+        raise ValueError("Eval parameter: `framework` cannot be set to None")
+
+    if not isinstance(tasks, list):
+        raise ValueError("Eval parameter: `tasks` must be of List type")
+
+    if llm_backend not in ["gptqmodel", "vllm"]:
+        raise ValueError("Eval framework support llm_backend: [gptqmodel, vllm]")
+
+    if llm_backend == "vllm":
+        if "tensor_parallel_size" not in model_args:
+            try:
+                cuda_devices = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            except Exception:
+                cuda_devices = 0
+            if cuda_devices:
+                model_args["tensor_parallel_size"] = cuda_devices
+        if "gpu_memory_utilization" not in model_args:
+            model_args["gpu_memory_utilization"] = 0.90
+
+    if framework == EVAL.LM_EVAL:
+        for task in tasks:
+            if task not in EVAL.get_task_enums():
+                raise ValueError(
+                    f"Eval.lm_eval supported `tasks`: `{EVAL.get_all_tasks_string()}`, actual = `{task}`"
+                )
+
+        gen_kwargs = args.pop("gen_kwargs", None)
+        if gen_kwargs is None:
+            gen_kwargs = "temperature=0.0,top_k=50"
+
+        apply_chat_template = args.pop("apply_chat_template", False)
+
+        return run_evalution_lm_eval(
+            model_or_id_or_path=model_or_id_or_path,
+            tasks=tasks,
+            batch_size=batch_size,
+            trust_remote_code=trust_remote_code,
+            output_path=output_path,
+            llm_backend=llm_backend,
+            backend=backend,
+            model_args=model_args,
+            tokenizer=tokenizer,
+            apply_chat_template=apply_chat_template,
+            gen_kwargs=gen_kwargs,
+        )
+
+    from ..models.auto import GPTQModel
+
+    if isinstance(model_or_id_or_path, str):
+        load_backend = backend
+        disallowed_keys = {"pretrained", "tokenizer", "gptqmodel", "trust_remote_code", "backend", "model_id_or_path"}
+        load_kwargs = {k: v for k, v in model_args.items() if k not in disallowed_keys}
+        model = GPTQModel.load(
+            model_id_or_path=model_or_id_or_path,
+            backend=load_backend,
+            trust_remote_code=trust_remote_code,
+            **load_kwargs,
+        )
+        model_id_or_path = model_or_id_or_path
+    elif isinstance(model_or_id_or_path, BaseQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
+        model = model_or_id_or_path
+        model_id_or_path = model.config.name_or_path
+    else:
+        raise ValueError(
+            f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`"
+        )
+
+    if tokenizer is None:
+        if isinstance(model, BaseQModel):
+            tokenizer = model.tokenizer
+        elif isinstance(model, PreTrainedModel) or (isinstance(model_id_or_path, str) and model_id_or_path.strip()):
+            tokenizer = Tokenicer.load(model_id_or_path.strip())
+
+    if tokenizer is None:
+        raise ValueError(
+            "Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument."
+        )
+
+    if llm_backend == "gptqmodel":
+        model_args["tokenizer"] = tokenizer
+
+    if framework == EVAL.EVALPLUS:
+        for task in tasks:
+            if task not in EVAL.get_task_enums():
+                raise ValueError(f"evalplus support tasks: {EVAL.get_all_tasks_string()}")
+
+        results = {}
+        for task in tasks:
+            base_formatted, plus_formatted, result_path = evalplus(
+                model=model_id_or_path,
+                dataset=task.value,
+                batch=batch_size,
+                trust_remote_code=trust_remote_code,
+                output_file=output_path,
+                backend=llm_backend,
+            )
+            results[task.value] = {
+                "base tests": base_formatted,
+                "base + extra tests": plus_formatted,
+                "results_path": result_path,
+            }
+        return results
+
+    if framework == EVAL.MMLU_PRO:
+        for task in tasks:
+            if task not in EVAL.get_task_enums():
+                raise ValueError(f"eval support tasks: {EVAL.get_all_tasks_string()}")
+
+        from .mmlupro import mmlupro
+
+        selected_subjects = ",".join(_task_name(task) for task in tasks)
+        return mmlupro(
+            model,
+            tokenizer,
+            save_dir=output_path,
+            seed=random_seed,
+            selected_subjects=selected_subjects,
+            ntrain=ntrain,
+            batch_size=batch_size,
+            max_samples=args.pop("max_samples", None),
+        )
+
+    raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS, EVAL.MMLUPRO")
+
+
 @dataclass(slots=True)
 class _ArcChallengeLoglikelihoodSuite:
     apply_chat_template: bool = False

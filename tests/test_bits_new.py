@@ -29,7 +29,7 @@ from tabulate import tabulate  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL, format_eval_result_table  # noqa: E402
+from gptqmodel.utils.eval import EVAL, evaluate, format_eval_result_table  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
@@ -50,7 +50,7 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
     print(f"BACKEND: {backend}, Result: {result}")
     # assert "paris" in result.lower(), f"`paris` not found in `{result}`"
 
-    bench_result = GPTQModel.eval(
+    bench_result = evaluate(
         model_or_id_or_path=model,
         framework=EVAL.LM_EVAL,
         tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU_STEM],

@@ -22,7 +22,7 @@ from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa:
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
-from gptqmodel.utils.eval import EVAL, format_eval_result_table, get_eval_task_metrics  # noqa: E402
+from gptqmodel.utils.eval import EVAL, evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
@@ -101,7 +101,7 @@ class TestGroupSize(unittest.TestCase):
             device_map="auto",
             backend=inference_backend,
         )
-        results = GPTQModel.eval(
+        results = evaluate(
             model_or_id_or_path=model,
             output_path=tmp_dir,
             tasks=TASK_NAME,

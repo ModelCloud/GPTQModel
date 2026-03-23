@@ -86,6 +86,7 @@ from gptqmodel.quantization.config import (  # noqa: E402
 )
 from gptqmodel.utils.eval import (  # noqa: E402
     EVAL,
+    evaluate,
     format_eval_result_table,
     get_eval_task_results,
     resolve_eval_metric_alias,
@@ -1469,7 +1470,7 @@ class ModelTest(unittest.TestCase):
                         grouped_tasks.setdefault(apply_chat, []).append(task)
 
                     for apply_chat_template, grouped in grouped_tasks.items():
-                        results = GPTQModel.eval(
+                        results = evaluate(
                             model_or_id_or_path=eval_target,
                             llm_backend="gptqmodel",
                             model_args=model_args,

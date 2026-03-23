@@ -19,7 +19,7 @@ from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.utils.eval import EVAL, get_eval_task_metrics  # noqa: E402
+from gptqmodel.utils.eval import EVAL, evaluate, get_eval_task_metrics  # noqa: E402
 
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
@@ -51,14 +51,14 @@ class TestEval(ModelTest):
             if task == EVAL.LM_EVAL.GPQA:
                 model_args["gpu_memory_utilization"]=0.7
 
-            results = GPTQModel.eval(model_or_id_or_path=self.MODEL_ID,
-                                     framework=framework,
-                                     tasks=[task],
-                                     batch_size=1,
-                                     output_path=output_path,
-                                     llm_backend=llm_backend,
-                                     model_args=model_args,
-                                     )
+            results = evaluate(model_or_id_or_path=self.MODEL_ID,
+                               framework=framework,
+                               tasks=[task],
+                               batch_size=1,
+                               output_path=output_path,
+                               llm_backend=llm_backend,
+                               model_args=model_args,
+                               )
 
             if framework == EVAL.LM_EVAL:
                 metrics = get_eval_task_metrics(results, task)

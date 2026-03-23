@@ -15,7 +15,7 @@ import unittest  # noqa: E402
 import pytest
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.utils.eval import EVAL, format_eval_result_table, get_eval_task_metrics  # noqa: E402
+from gptqmodel.utils.eval import EVAL, evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
 
 class TestLmEval(unittest.TestCase):
@@ -32,7 +32,7 @@ class TestLmEval(unittest.TestCase):
 
     def test_eval_direct(self):
        with tempfile.TemporaryDirectory() as tmp_dir:
-           results = GPTQModel.eval(
+           results = evaluate(
                 model_or_id_or_path=self.MODEL_ID,
                 apply_chat_template=True,
                 output_path=tmp_dir,
@@ -53,7 +53,7 @@ class TestLmEval(unittest.TestCase):
        pytest.importorskip("gptqmodel_exllamav2_kernels")
 
        with tempfile.TemporaryDirectory() as tmp_dir:
-           results = GPTQModel.eval(
+           results = evaluate(
                 model_or_id_or_path=self.MODEL_ID,
                 backend = BACKEND.EXLLAMA_V2, # for path loading, can override backend
                 output_path=tmp_dir,
