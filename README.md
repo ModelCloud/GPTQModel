@@ -493,15 +493,15 @@ Below is a basic sample using Evalution's `GPTQModel` engine directly.
 
 ```py
 import evalution as eval
+import evalution.benchmarks as benchmarks
+import evalution.engines as engines
 
 run = (
-    eval.engine(
-        eval.GPTQModel(
-            backend="marlin",
-            device="cuda:0",
-            dtype="auto",
-            batch_size="auto",
-        )
+    engines.GPTQModel(
+        backend="marlin",
+        device="cuda:0",
+        dtype="auto",
+        batch_size="auto",
     )
     .model(
         eval.Model(
@@ -509,7 +509,7 @@ run = (
         )
     )
     .run(
-        eval.arc_challenge(
+        benchmarks.arc_challenge(
             apply_chat_template=True,
             batch_size=16,
         )

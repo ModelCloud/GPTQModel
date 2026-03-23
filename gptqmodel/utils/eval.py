@@ -489,8 +489,8 @@ class _ArcChallengeLoglikelihoodSuite:
         }
 
     def build_sample(self, doc: dict[str, Any], *, index: int) -> Any:
-        from evalution.suites.multiple_choice import MultipleChoiceSample
-        from evalution.suites.multiple_choice_utils import choice_index_from_labels, question_answer_prompt
+        from evalution.benchmarks.multiple_choice import MultipleChoiceSample
+        from evalution.benchmarks.multiple_choice_utils import choice_index_from_labels, question_answer_prompt
 
         labels = list(doc["choices"]["label"])
         texts = list(doc["choices"]["text"])
@@ -506,7 +506,7 @@ class _ArcChallengeLoglikelihoodSuite:
         from evalution.engines.base import LoglikelihoodRequest
         from evalution.logbar import get_logger
         from evalution.results import SampleResult, TestResult
-        from evalution.suites.data import doc_count, limit_docs, load_suite_dataset
+        from evalution.benchmarks.data import doc_count, limit_docs, load_suite_dataset
 
         task_name = self.task_name()
         logger = get_logger()
@@ -750,6 +750,7 @@ def _build_evalution_suite(
     batch_size: int | None,
     generation_settings: Dict[str, Any],
 ):
+    benchmarks = evalution.benchmarks
     task_name = _task_name(task)
     max_new_tokens = int(generation_settings.get("max_new_tokens", 256))
     do_sample = bool(generation_settings.get("do_sample", False))
@@ -761,23 +762,23 @@ def _build_evalution_suite(
             batch_size=batch_size,
         )
     if task_name == EVAL.LM_EVAL.ARC_EASY.value:
-        return evalution.arc_easy(batch_size=batch_size)
+        return benchmarks.arc_easy(batch_size=batch_size)
     if task_name == EVAL.LM_EVAL.BOOLQ.value:
-        return evalution.boolq(batch_size=batch_size)
+        return benchmarks.boolq(batch_size=batch_size)
     if task_name == EVAL.LM_EVAL.HELLASWAG.value:
-        return evalution.hellaswag(batch_size=batch_size)
+        return benchmarks.hellaswag(batch_size=batch_size)
     if task_name == EVAL.LM_EVAL.OPENBOOKQA.value:
-        return evalution.openbookqa(batch_size=batch_size)
+        return benchmarks.openbookqa(batch_size=batch_size)
     if task_name == EVAL.LM_EVAL.MMLU.value:
         kwargs = {"batch_size": batch_size}
         if _MMLU_LOCAL_DATASET.exists():
             kwargs["dataset_path"] = str(_MMLU_LOCAL_DATASET)
-        return evalution.mmlu(**kwargs)
+        return benchmarks.mmlu(**kwargs)
     if task_name == EVAL.LM_EVAL.MMLU_STEM.value:
         kwargs = {"subsets": "stem", "batch_size": batch_size}
         if _MMLU_LOCAL_DATASET.exists():
             kwargs["dataset_path"] = str(_MMLU_LOCAL_DATASET)
-        return evalution.mmlu(**kwargs)
+        return benchmarks.mmlu(**kwargs)
     if task_name == EVAL.LM_EVAL.GSM8K_COT.value:
         kwargs = {
             "variant": "cot",
@@ -790,9 +791,9 @@ def _build_evalution_suite(
         if _GSM8K_LOCAL_DATASET.exists():
             kwargs["dataset_path"] = str(_GSM8K_LOCAL_DATASET)
             kwargs["dataset_name"] = "main"
-        return evalution.gsm8k(**kwargs)
+        return benchmarks.gsm8k(**kwargs)
     if task_name == EVAL.LM_EVAL.GSM8K_PLATINUM_COT.value:
-        return evalution.gsm8k_platinum(
+        return benchmarks.gsm8k_platinum(
             variant="cot",
             apply_chat_template=apply_chat_template,
             max_new_tokens=max_new_tokens,
