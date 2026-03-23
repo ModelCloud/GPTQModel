@@ -26,7 +26,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from ...utils.paroquant import build_identity_rotation_buffers
+from ...utils.env import env_flag
+from ...utils.paroquant import apply_paroquant_rotation_autograd, build_identity_rotation_buffers
 
 
 def _round_ste(x: torch.Tensor) -> torch.Tensor:
@@ -55,6 +56,12 @@ def _normalize_group_size(group_size: int, in_features: int) -> int:
     if normalized % 2 != 0:
         raise ValueError(f"ParoQuant optimization: group_size ({normalized}) must be even.")
     return normalized
+
+
+def _require_paroquant_sym(sym: bool) -> None:
+    """Reject asymmetric ParoQuant configurations in this implementation."""
+    if sym is not True:
+        raise ValueError("ParoQuant optimization: `sym=False` is disabled; use `sym=True`.")
 
 
 def _select_independent_pairs(
@@ -207,6 +214,16 @@ def _apply_rotation(
     if x.dim() != 2:
         raise ValueError(f"ParoQuant optimization expects a rank-2 tensor, got {tuple(x.shape)}.")
 
+    if env_flag("GPTQMODEL_PAROQUANT_OPT_FUSED_ROTATION", default=True):
+        scale_tensor = None if scales is None else scales.view(1, -1)
+        return apply_paroquant_rotation_autograd(
+            x,
+            pairs,
+            theta,
+            scales=scale_tensor,
+            group_size=group_size,
+        )
+
     out = x
     if scales is not None:
         out = out * scales.view(1, -1)
@@ -290,6 +307,7 @@ class GroupLinearQuantizer(nn.Module):
     ) -> None:
         """Initialize either symmetric or affine groupwise quantization parameters."""
         super().__init__()
+        _require_paroquant_sym(sym)
         self.bits = int(bits)
         self.group_size = int(group_size)
         self.sym = bool(sym)
@@ -398,6 +416,7 @@ class _ParoQuantOptimLinear(nn.Module):
     ) -> None:
         """Materialize a replayable linear layer in the original input domain."""
         super().__init__()
+        _require_paroquant_sym(sym)
         self.bits = int(bits)
         self.group_size = int(group_size)
         self.sym = bool(sym)
@@ -675,6 +694,7 @@ def optimize_paroquant_linear(
     seed: int,
 ) -> ParoQuantOptimizationResult:
     """Optimize one linear layer following the paper's two-stage PTQ schedule."""
+    _require_paroquant_sym(sym)
     if weight.dim() != 2:
         raise ValueError(f"ParoQuant optimization expects rank-2 weights, got {tuple(weight.shape)}.")
 
