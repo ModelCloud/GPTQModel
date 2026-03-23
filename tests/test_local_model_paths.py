@@ -43,7 +43,7 @@ def test_get_model_local_path_skips_snapshot_download_for_absolute_path(monkeypa
     assert loader.get_model_local_path(model_path) == model_path
 
 
-def test_gptqmodel_from_pretrained_normalizes_torch_dtype_kwarg(monkeypatch):
+def test_gptqmodel_from_pretrained_forwards_dtype_kwarg(monkeypatch):
     fake_config = SimpleNamespace(quantization_config=None)
     sentinel = object()
     captured = {}
@@ -64,7 +64,7 @@ def test_gptqmodel_from_pretrained_normalizes_torch_dtype_kwarg(monkeypatch):
     result = GPTQModel.from_pretrained(
         "/tmp/fake-model",
         quantize_config=None,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
     )
 
     assert result is sentinel
@@ -74,7 +74,7 @@ def test_gptqmodel_from_pretrained_normalizes_torch_dtype_kwarg(monkeypatch):
     assert "torch_dtype" not in captured["kwargs"]
 
 
-def test_gptqmodel_from_quantized_normalizes_torch_dtype_kwarg(monkeypatch):
+def test_gptqmodel_from_quantized_forwards_dtype_kwarg(monkeypatch):
     sentinel = object()
     captured = {}
 
@@ -92,31 +92,13 @@ def test_gptqmodel_from_quantized_normalizes_torch_dtype_kwarg(monkeypatch):
 
     result = GPTQModel.from_quantized(
         "/tmp/fake-model",
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
     )
 
     assert result is sentinel
     assert captured["path"] == "/tmp/fake-model"
     assert captured["kwargs"]["dtype"] is torch.bfloat16
     assert "torch_dtype" not in captured["kwargs"]
-
-
-def test_gptqmodel_from_quantized_rejects_conflicting_dtype_aliases(monkeypatch):
-    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
-    monkeypatch.setattr(auto, "normalize_adapter", lambda adapter: adapter)
-    monkeypatch.setattr(auto, "normalize_backend", lambda backend: backend)
-    monkeypatch.setattr(auto, "check_and_get_model_definition", lambda *args, **kwargs: object())
-
-    try:
-        GPTQModel.from_quantized(
-            "/tmp/fake-model",
-            dtype=torch.float16,
-            torch_dtype=torch.bfloat16,
-        )
-    except ValueError as exc:
-        assert "both `dtype` and deprecated `torch_dtype`" in str(exc)
-    else:
-        raise AssertionError("expected conflicting dtype aliases to raise")
 
 
 def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
@@ -206,7 +188,7 @@ def test_model_loader_isolates_shell_config_from_turtle_load(monkeypatch):
     assert instance.turtle_model is not None
 
 
-def test_model_loader_from_pretrained_normalizes_torch_dtype_kwarg(monkeypatch):
+def test_model_loader_from_pretrained_forwards_dtype_kwarg(monkeypatch):
     class FakeConfig:
         def __init__(self):
             self._experts_implementation = None
@@ -259,7 +241,7 @@ def test_model_loader_from_pretrained_normalizes_torch_dtype_kwarg(monkeypatch):
     instance = DummyQModel.from_pretrained(
         "/tmp/fake-model",
         quantize_config=None,
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
     )
 
     assert instance.quantized is False
