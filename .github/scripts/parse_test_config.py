@@ -14,6 +14,16 @@ def parse_test_config(
     with yaml_path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
+    result: dict[str, Any] = {}
+
+    common_data = data.get("common") or {}
+    if not isinstance(common_data, dict):
+        raise ValueError("group must be a mapping: common")
+
+    for key, value in common_data.items():
+        if not isinstance(value, dict):
+            result[key] = value
+
     if group not in data:
         raise KeyError(f"group not found: {group}")
 
@@ -21,15 +31,13 @@ def parse_test_config(
     if not isinstance(group_data, dict):
         raise ValueError(f"group must be a mapping: {group}")
 
-    result: dict[str, Any] = {}
-
-    # Collect shared config first.
+    # Group-level shared config overrides common defaults.
     for key, value in group_data.items():
         if not isinstance(value, dict):
             result[key] = value
 
-    # Overlay per-test config when provided. Missing per-test entries are
-    # valid and should fall back to the group's shared config.
+    # Per-test config overrides group/common defaults. Missing per-test entries
+    # fall back to the merged defaults.
     if test_name is not None:
         test_config = group_data.get(test_name)
         if test_config is None:
