@@ -69,6 +69,19 @@ class TestLlama3_2_ExllamaV3(ModelTest):
     QUANT_BACKEND = BACKEND.EXLLAMA_V3
     LOAD_BACKEND = BACKEND.EXLLAMA_V3
     PIN_CUDA_DEVICE = 0
+    SAVE_PATH = "temp/llama3_2_EXLLAMA_V3"
 
     def test_llama3_2_exllamav3(self):
         self.quant_lm_eval()
+
+        module = self.model.model.model.layers[0].self_attn.q_proj
+        assert module.QUANT_TYPE == "exl3"
+        assert module.trellis.dtype == torch.int16
+        assert module.suh.dtype == torch.float16
+        assert module.svh.dtype == torch.float16
+        assert module.mcg.dtype == torch.int32
+
+        storage = module.tensor_storage_entry()
+        assert storage["quant_format"] == "exl3"
+        assert storage["bits_per_weight"] == 4
+        assert "model.layers.0.self_attn.q_proj.trellis" in storage["stored_tensors"]
