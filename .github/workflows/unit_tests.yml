@@ -426,7 +426,7 @@ jobs:
           gpu="$(printf '%s' "$config_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["gpu"])')"
 
           echo "PYTHON_VERSION=$py" >> "$GITHUB_ENV"
-          echo "MODEL_TEST_GPU_COUNT=$gpu" >> "$GITHUB_ENV"
+          echo "GPU_COUNT=$gpu" >> "$GITHUB_ENV"
           
           echo "using py=$py gpu=$gpu for test ${{ matrix.test_script }}"
 
@@ -596,11 +596,6 @@ jobs:
           test_q=$(urlencode "$TEST")
           runner_q=$(urlencode "$RUNNER")
 
-          count=1
-          if [[ "${{ matrix.test_script }}" == *test_multi_gpu_inference* ]]; then
-            count=5
-          fi
-
           start_s=$(date +%s)
           gpu_id=""
 
@@ -610,7 +605,7 @@ jobs:
           while true; do
             # Refresh timestamp every request to avoid cache or duplicated requests
             ts_ms=$(date +%s%3N)
-            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&count=$count"
+            url="$BASE_URL/gpu/get?runid=$RUN_ID&timestamp=$ts_ms&test=$test_q&runner=$runner_q&count=${{ env.GPU_COUNT }}"
             echo "requesting GPU with: $url"
 
             # Call allocator
