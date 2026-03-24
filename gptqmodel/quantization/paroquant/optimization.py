@@ -30,16 +30,34 @@ from torch import nn
 from ...utils.env import env_flag
 from ...utils.paroquant import apply_paroquant_rotation_autograd, build_identity_rotation_buffers
 
-_PAROQUANT_OPT_IMPLS: tuple[str, ...] = ("gptqmodel", "reference")
+_PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("gptqmodel", "reference")
+_PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
 
 
 def _normalize_opt_impl(name: str, *, field: str) -> str:
     normalized = str(name).strip().lower()
-    if normalized not in _PAROQUANT_OPT_IMPLS:
+    if normalized not in _PAROQUANT_STAGE_PAIR_IMPLS:
         raise ValueError(
-            f"ParoQuant optimization: `{field}` must be one of {_PAROQUANT_OPT_IMPLS}, got `{name}`."
+            f"ParoQuant optimization: `{field}` must be one of {_PAROQUANT_STAGE_PAIR_IMPLS}, got `{name}`."
         )
     return normalized
+
+
+def _normalize_quantizer_impl(name: str) -> str:
+    normalized = str(name).strip().lower()
+    if normalized not in _PAROQUANT_QUANTIZER_IMPLS:
+        raise ValueError(
+            "ParoQuant optimization: `quantizer_impl` must be one of "
+            f"{_PAROQUANT_QUANTIZER_IMPLS}, got `{name}`."
+        )
+    return normalized
+
+
+def _quantizer_sym_for_impl(sym: bool, quantizer_impl: str) -> bool:
+    impl = _normalize_quantizer_impl(quantizer_impl)
+    if impl == "reference":
+        return False
+    return bool(sym)
 
 
 def _round_ste(x: torch.Tensor) -> torch.Tensor:
@@ -477,7 +495,6 @@ class GroupLinearQuantizer(nn.Module):
     ) -> None:
         """Initialize either symmetric or affine groupwise quantization parameters."""
         super().__init__()
-        _require_paroquant_sym(sym)
         self.bits = int(bits)
         self.group_size = int(group_size)
         self.sym = bool(sym)
@@ -580,17 +597,16 @@ class _ParoQuantOptimLinear(nn.Module):
         *,
         bits: int,
         group_size: int,
-        sym: bool,
+        quantizer_sym: bool,
         pairs: torch.Tensor,
         theta_mask: torch.Tensor,
         fused_rotation: Optional[bool] = None,
     ) -> None:
         """Materialize a replayable linear layer in the original input domain."""
         super().__init__()
-        _require_paroquant_sym(sym)
         self.bits = int(bits)
         self.group_size = int(group_size)
-        self.sym = bool(sym)
+        self.quantizer_sym = bool(quantizer_sym)
         self.register_buffer("pairs", pairs)
         self.register_buffer("theta_mask", theta_mask)
         self.weight = nn.Parameter(weight.clone())
@@ -620,7 +636,7 @@ class _ParoQuantOptimLinear(nn.Module):
                 transformed,
                 bits=self.bits,
                 group_size=self.group_size,
-                sym=self.sym,
+                sym=self.quantizer_sym,
                 use_ste=True,
             )
         return self.quantizer(transformed)
@@ -654,7 +670,7 @@ class _ParoQuantOptimLinear(nn.Module):
             transformed,
             bits=self.bits,
             group_size=self.group_size,
-            sym=self.sym,
+            sym=self.quantizer_sym,
         )
 
     def export_pack_state(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -665,14 +681,14 @@ class _ParoQuantOptimLinear(nn.Module):
                 transformed,
                 bits=self.bits,
                 group_size=self.group_size,
-                sym=self.sym,
+                sym=self.quantizer_sym,
             )
             pack_scales, pack_zeros = quantizer.pack_params(transformed)
             quantized = pseudo_quantize_dequant(
                 transformed,
                 bits=self.bits,
                 group_size=self.group_size,
-                sym=self.sym,
+                sym=self.quantizer_sym,
                 scale=quantizer.scale.detach(),
                 zero_point_float=None if quantizer.zero_point_float is None else quantizer.zero_point_float.detach(),
                 use_ste=False,
@@ -683,7 +699,7 @@ class _ParoQuantOptimLinear(nn.Module):
                 transformed,
                 bits=self.bits,
                 group_size=self.group_size,
-                sym=self.sym,
+                sym=self.quantizer_sym,
                 scale=self.quantizer.scale.detach(),
                 zero_point_float=(
                     None if self.quantizer.zero_point_float is None else self.quantizer.zero_point_float.detach()
@@ -738,7 +754,7 @@ class _ParoQuantOptimLlamaMLPBlock(nn.Module):
         gate_group_size: int,
         up_group_size: int,
         down_group_size: int,
-        sym: bool,
+        quantizer_sym: bool,
         gate_pairs: torch.Tensor,
         gate_theta_mask: torch.Tensor,
         up_pairs: torch.Tensor,
@@ -750,14 +766,13 @@ class _ParoQuantOptimLlamaMLPBlock(nn.Module):
     ) -> None:
         """Materialize the three coupled linear layers that define a Llama MLP block."""
         super().__init__()
-        _require_paroquant_sym(sym)
 
         self.gate_proj = _ParoQuantOptimLinear(
             gate_weight,
             gate_bias,
             bits=bits,
             group_size=gate_group_size,
-            sym=sym,
+            quantizer_sym=quantizer_sym,
             pairs=gate_pairs,
             theta_mask=gate_theta_mask,
             fused_rotation=fused_rotation,
@@ -767,7 +782,7 @@ class _ParoQuantOptimLlamaMLPBlock(nn.Module):
             up_bias,
             bits=bits,
             group_size=up_group_size,
-            sym=sym,
+            quantizer_sym=quantizer_sym,
             pairs=up_pairs,
             theta_mask=up_theta_mask,
             fused_rotation=fused_rotation,
@@ -777,7 +792,7 @@ class _ParoQuantOptimLlamaMLPBlock(nn.Module):
             down_bias,
             bits=bits,
             group_size=down_group_size,
-            sym=sym,
+            quantizer_sym=quantizer_sym,
             pairs=down_pairs,
             theta_mask=down_theta_mask,
             fused_rotation=fused_rotation,
@@ -1042,7 +1057,7 @@ def _identity_result(
     bias: Optional[torch.Tensor],
     bits: int,
     group_size: int,
-    sym: bool,
+    quantizer_sym: bool,
     krot: int,
 ) -> ParoQuantOptimizationResult:
     """Return the no-optimization fallback used when calibration activations are missing."""
@@ -1058,14 +1073,14 @@ def _identity_result(
         weight,
         bits=bits,
         group_size=_normalize_group_size(group_size, weight.shape[1]),
-        sym=sym,
+        sym=quantizer_sym,
     )
     q_scales, q_zeros = quantizer.pack_params(weight)
     pack_weight = pseudo_quantize_dequant(
         weight,
         bits=bits,
         group_size=_normalize_group_size(group_size, weight.shape[1]),
-        sym=sym,
+        sym=quantizer_sym,
         scale=quantizer.scale.detach(),
         zero_point_float=None if quantizer.zero_point_float is None else quantizer.zero_point_float.detach(),
         use_ste=False,
@@ -1094,7 +1109,7 @@ def _identity_block_result(
     down_bias: Optional[torch.Tensor],
     bits: int,
     group_size: int,
-    sym: bool,
+    quantizer_sym: bool,
     krot: int,
 ) -> ParoQuantBlockOptimizationResult:
     """Return per-module identity fallbacks when block activations are missing."""
@@ -1105,7 +1120,7 @@ def _identity_block_result(
                 bias=gate_bias,
                 bits=bits,
                 group_size=_normalize_group_size(group_size, gate_weight.shape[1]),
-                sym=sym,
+                quantizer_sym=quantizer_sym,
                 krot=krot,
             ),
             "mlp.up_proj": _identity_result(
@@ -1113,7 +1128,7 @@ def _identity_block_result(
                 bias=up_bias,
                 bits=bits,
                 group_size=_normalize_group_size(group_size, up_weight.shape[1]),
-                sym=sym,
+                quantizer_sym=quantizer_sym,
                 krot=krot,
             ),
             "mlp.down_proj": _identity_result(
@@ -1121,7 +1136,7 @@ def _identity_block_result(
                 bias=down_bias,
                 bits=bits,
                 group_size=_normalize_group_size(group_size, down_weight.shape[1]),
-                sym=sym,
+                quantizer_sym=quantizer_sym,
                 krot=krot,
             ),
         },
@@ -1153,6 +1168,7 @@ def optimize_paroquant_linear(
     fused_rotation: Optional[bool] = None,
     stage_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
     pair_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
+    quantizer_impl: Literal["fast", "reference"] = "fast",
 ) -> ParoQuantOptimizationResult:
     """Optimize one linear layer following the paper's two-stage PTQ schedule."""
     _require_paroquant_sym(sym)
@@ -1160,6 +1176,7 @@ def optimize_paroquant_linear(
         raise ValueError(f"ParoQuant optimization expects rank-2 weights, got {tuple(weight.shape)}.")
 
     normalized_group_size = _normalize_group_size(group_size, weight.shape[1])
+    quantizer_sym = _quantizer_sym_for_impl(sym, quantizer_impl)
     rows = _sample_activation_rows(inputs, max_rows=max(1, int(train_rows) + int(val_rows)))
     if rows.numel() == 0:
         return _identity_result(
@@ -1167,7 +1184,7 @@ def optimize_paroquant_linear(
             bias=bias,
             bits=bits,
             group_size=normalized_group_size,
-            sym=sym,
+            quantizer_sym=quantizer_sym,
             krot=krot,
         )
 
@@ -1190,6 +1207,7 @@ def optimize_paroquant_linear(
 
     normalized_pair_impl = _normalize_opt_impl(pair_impl, field="pair_impl")
     normalized_stage_impl = _normalize_opt_impl(stage_impl, field="stage_impl")
+    _normalize_quantizer_impl(quantizer_impl)
     if normalized_pair_impl == "reference":
         pairs, theta_mask = build_random_rotation_buffers_reference(
             in_features=weight_opt.shape[1],
@@ -1213,7 +1231,7 @@ def optimize_paroquant_linear(
         bias_opt,
         bits=bits,
         group_size=normalized_group_size,
-        sym=sym,
+        quantizer_sym=quantizer_sym,
         pairs=pairs,
         theta_mask=theta_mask,
         fused_rotation=fused_rotation,
@@ -1286,6 +1304,7 @@ def optimize_paroquant_llama_mlp_block(
     fused_rotation: Optional[bool] = None,
     stage_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
     pair_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
+    quantizer_impl: Literal["fast", "reference"] = "fast",
 ) -> ParoQuantBlockOptimizationResult:
     """Optimize a Llama gated MLP jointly using the true block output loss."""
     _require_paroquant_sym(sym)
@@ -1309,6 +1328,7 @@ def optimize_paroquant_llama_mlp_block(
     gate_group_size = _normalize_group_size(group_size, gate_weight.shape[1])
     up_group_size = _normalize_group_size(group_size, up_weight.shape[1])
     down_group_size = _normalize_group_size(group_size, down_weight.shape[1])
+    quantizer_sym = _quantizer_sym_for_impl(sym, quantizer_impl)
 
     rows = _sample_activation_rows(inputs, max_rows=max(1, int(train_rows) + int(val_rows)))
     if rows.numel() == 0:
@@ -1321,7 +1341,7 @@ def optimize_paroquant_llama_mlp_block(
             down_bias=down_bias,
             bits=bits,
             group_size=group_size,
-            sym=sym,
+            quantizer_sym=quantizer_sym,
             krot=krot,
         )
 
@@ -1354,6 +1374,7 @@ def optimize_paroquant_llama_mlp_block(
 
     normalized_pair_impl = _normalize_opt_impl(pair_impl, field="pair_impl")
     normalized_stage_impl = _normalize_opt_impl(stage_impl, field="stage_impl")
+    _normalize_quantizer_impl(quantizer_impl)
     pair_builder = build_random_rotation_buffers_reference if normalized_pair_impl == "reference" else build_random_rotation_buffers
 
     gate_pairs, gate_theta_mask = pair_builder(
@@ -1392,7 +1413,7 @@ def optimize_paroquant_llama_mlp_block(
         gate_group_size=gate_group_size,
         up_group_size=up_group_size,
         down_group_size=down_group_size,
-        sym=sym,
+        quantizer_sym=quantizer_sym,
         gate_pairs=gate_pairs,
         gate_theta_mask=gate_theta_mask,
         up_pairs=up_pairs,

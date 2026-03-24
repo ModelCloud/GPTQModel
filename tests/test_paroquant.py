@@ -52,6 +52,7 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.quant_method == METHOD.PAROQUANT
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
+    assert cfg.opt_quantizer_impl == "fast"
     assert cfg.opt_enable_llama_mlp_block is False
     assert cfg.export_quant_method() == METHOD.PAROQUANT
 
@@ -77,6 +78,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_seed": 0,
                 "opt_fused_rotation": False,
                 "opt_enable_llama_mlp_block": True,
+                "opt_quantizer_impl": "fast",
             },
         }
     )
@@ -98,8 +100,10 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_seed == 0
     assert cfg.opt_fused_rotation is False
     assert cfg.opt_enable_llama_mlp_block is True
+    assert cfg.opt_quantizer_impl == "fast"
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
     assert cfg.to_dict()["meta"]["opt_enable_llama_mlp_block"] is True
+    assert cfg.to_dict()["meta"]["opt_quantizer_impl"] == "fast"
 
 
 def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch):
@@ -422,7 +426,7 @@ def test_paroquant_exported_runtime_state_matches_paper_contract():
         bias,
         bits=bits,
         group_size=group_size,
-        sym=True,
+        quantizer_sym=True,
         pairs=pairs,
         theta_mask=theta_mask,
     )
@@ -488,6 +492,45 @@ def test_paroquant_exported_runtime_state_matches_paper_contract():
         atol=1e-5,
         rtol=1e-5,
     )
+
+
+def test_paroquant_reference_quantizer_exports_affine_qzeros():
+    """Guard that reference optimizer mode uses affine qparams despite sym runtime config."""
+    torch.manual_seed(5)
+    weight = torch.randn(32, 128, dtype=torch.float32) * 0.25 + 0.1
+    inputs = torch.randn(96, 128, dtype=torch.float32)
+
+    result = optimize_paroquant_linear(
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        bits=4,
+        group_size=128,
+        sym=True,
+        krot=2,
+        pair_ratio=2.0 / 128.0,
+        train_rows=64,
+        val_rows=32,
+        batch_size=16,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=11,
+        stage_impl="reference",
+        pair_impl="reference",
+        quantizer_impl="reference",
+    )
+
+    midpoint = 2 ** (4 - 1)
+    assert not torch.all(result.q_zeros == midpoint)
+
+
+def test_paroquant_legacy_quantizer_impl_name_is_rejected():
+    """Guard that only the renamed public quantizer impl values are accepted."""
+    with pytest.raises(ValueError, match="opt_quantizer_impl"):
+        ParoQuantizeConfig(bits=4, group_size=128, opt_quantizer_impl="gptqmodel")
 
 
 def test_paroquant_llama_mlp_block_export_state_matches_joint_pseudo_weights():

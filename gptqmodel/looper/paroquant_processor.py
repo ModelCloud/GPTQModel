@@ -362,6 +362,7 @@ class ParoQuantProcessor(LoopProcessor):
                 fused_rotation=self.qcfg.opt_fused_rotation,
                 stage_impl=self.qcfg.opt_stage_impl,
                 pair_impl=self.qcfg.opt_pair_impl,
+                quantizer_impl=self.qcfg.opt_quantizer_impl,
             )
 
         for name, named_module in block_modules.items():
@@ -403,6 +404,7 @@ class ParoQuantProcessor(LoopProcessor):
                 fused_rotation=self.qcfg.opt_fused_rotation,
                 stage_impl=self.qcfg.opt_stage_impl,
                 pair_impl=self.qcfg.opt_pair_impl,
+                quantizer_impl=self.qcfg.opt_quantizer_impl,
             )
 
         self._apply_optimization_result(module, result, original_weight)

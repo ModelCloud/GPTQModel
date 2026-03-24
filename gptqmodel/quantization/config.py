@@ -2478,6 +2478,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_enable_llama_mlp_block": "opt_enable_llama_mlp_block",
             "opt_stage_impl": "opt_stage_impl",
             "opt_pair_impl": "opt_pair_impl",
+            "opt_quantizer_impl": "opt_quantizer_impl",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -2819,6 +2820,7 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_enable_llama_mlp_block: bool = field(default=False)
     opt_stage_impl: str = field(default="gptqmodel")
     opt_pair_impl: str = field(default="gptqmodel")
+    opt_quantizer_impl: str = field(default="fast")
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.PAROQUANT,)
@@ -2850,6 +2852,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_enable_llama_mlp_block = bool(self.opt_enable_llama_mlp_block)
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
+        self.opt_quantizer_impl = str(self.opt_quantizer_impl).strip().lower()
         if self.opt_rotation_epochs < 0 or self.opt_finetune_epochs < 0:
             raise ValueError("ParoQuantizeConfig: optimization epochs must be non-negative.")
         if self.opt_train_samples <= 0 or self.opt_validation_samples <= 0:
@@ -2864,6 +2867,8 @@ class ParoQuantizeConfig(QuantizeConfig):
             raise ValueError("ParoQuantizeConfig: `opt_stage_impl` must be one of {'gptqmodel', 'reference'}.")
         if self.opt_pair_impl not in {"gptqmodel", "reference"}:
             raise ValueError("ParoQuantizeConfig: `opt_pair_impl` must be one of {'gptqmodel', 'reference'}.")
+        if self.opt_quantizer_impl not in {"fast", "reference"}:
+            raise ValueError("ParoQuantizeConfig: `opt_quantizer_impl` must be one of {'fast', 'reference'}.")
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
@@ -2885,6 +2890,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_enable_llama_mlp_block"] = self.opt_enable_llama_mlp_block
         meta_payload["opt_stage_impl"] = self.opt_stage_impl
         meta_payload["opt_pair_impl"] = self.opt_pair_impl
+        meta_payload["opt_quantizer_impl"] = self.opt_quantizer_impl
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym
