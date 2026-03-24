@@ -8,6 +8,7 @@ import contextlib
 import threading
 
 import torch
+from .torch import TORCH_GTE_210
 
 
 _GLOBAL_WARMUP_LOCK = threading.Lock()
@@ -65,7 +66,7 @@ def run_torch_linalg_warmup(device: torch.device) -> None:
 
         if device.type == "cuda" and hasattr(torch.backends, "cuda"):
             preferred = getattr(torch.backends.cuda, "preferred_linalg_library", None)
-            if callable(preferred):
+            if callable(preferred) and not TORCH_GTE_210:
                 current = preferred()
                 # Core warmup already ran using the currently preferred backend above.
                 # Some installations fall back to MAGMA when the primary solver is unavailable,
