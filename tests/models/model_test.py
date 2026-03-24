@@ -1137,7 +1137,8 @@ class ModelTest(unittest.TestCase):
             elif self.METHOD == METHOD.PAROQUANT:
                 return ParoQuantQuantizeConfig(
                     bits=self.BITS,
-                    format=self.BNB_FORMAT,
+                    method=METHOD.PAROQUANT,
+                    format=FORMAT.PAROQUANT,
                     opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
                     opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
                     opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
