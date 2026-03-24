@@ -6,7 +6,7 @@ from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
-from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization import FORMAT, METHOD, ParoQuantQuantizeConfig
 
 
 class TestLlama3_2_ParoQuant(ModelTest):
@@ -96,6 +96,24 @@ class TestLlama3_2_ParoQuant(ModelTest):
     PAROQUANT_ROTATION_EPOCHS = 5
     PAROQUANT_FINETUNE_EPOCHS = 5
     PAROQUANT_TRAIN_SAMPLES = 512
+
+    def _build_quantize_config(self):
+        return ParoQuantQuantizeConfig(
+            bits=self.BITS,
+            method=METHOD.PAROQUANT,
+            format=FORMAT.PAROQUANT,
+            opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
+            opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
+            opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
+            opt_stage_impl="reference",
+            opt_pair_impl="fast",
+            opt_quantizer_impl="reference",
+            adapter=self.EORA,
+            vram_strategy=self.VRAM_STRATEGY,
+            dynamic=self.DYNAMIC,
+            moe=self.MOE_CONFIG,
+            offload_to_disk=self.OFFLOAD_TO_DISK,
+        )
 
     def test_llama3_2_paroquant(self):
         self.quant_lm_eval()

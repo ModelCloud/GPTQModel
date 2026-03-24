@@ -30,6 +30,7 @@ from torch import nn
 from ...utils.env import env_flag
 from ...utils.paroquant import apply_paroquant_rotation_autograd, build_identity_rotation_buffers
 
+
 _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
 
