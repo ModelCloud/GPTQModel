@@ -217,7 +217,7 @@ class Lora(Adapter):
         lora_A_weight_key = f"{weight_key}.lora_A.weight"
         lora_B_weight_key = f"{weight_key}.lora_B.weight"
 
-        
+
         pop_keys = []
         for k, v in lora_weights.items():
             if k.endswith(lora_A_weight_key):

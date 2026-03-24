@@ -1465,7 +1465,9 @@ class ModelTest(unittest.TestCase):
                     task_model_args = dict(model_args)
                     task_model_args.update(task_model_args_lookup.get(normalized_name, {}) or {})
                     task_suite_kwargs = dict(suite_kwargs_lookup.get(normalized_name, {}) or {})
-                    task_batch_size = eval_batch_size_lookup.get(normalized_name, self.EVAL_BATCH_SIZE)
+                    task_batch_size = eval_batch_size_lookup.get(normalized_name)
+                    if task_batch_size is None:
+                        task_batch_size = self.EVAL_BATCH_SIZE
                     use_model_path = bool(use_model_path_lookup.get(normalized_name, False))
 
                     if use_model_path and model_path:

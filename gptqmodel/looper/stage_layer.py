@@ -324,7 +324,7 @@ def run_layer_stage(
                     # Reset current subset for MoE lifecycle hooks as we do not need to collect activation at this stage,
                     # and need to collect only outputs produced by original forward
                     looper._current_subset = None
-                    
+
                     layer_outputs = looper._run_forward_batches(
                         module=module,
                         processor=processor,
@@ -623,6 +623,6 @@ def run_layer_stage(
         # Check for pause after completing each layer
         layer_info = f"layer {layer_index}" if not is_lm_head_module else "lm_head"
         looper.pause_controller.check_pause_point(f"after {layer_info}")
-            
+
         # Unregister progress bar when moving to next layer
         looper.pause_controller.unregister_progress_bar(pb)
