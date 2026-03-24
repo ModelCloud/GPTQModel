@@ -80,5 +80,9 @@ class TestLlama3_2_ParoQuant(ModelTest):
     KERNEL_QUANT = {ParoQuantQuantLinear}
     KERNEL_INFERENCE = {ParoQuantQuantLinear}
 
+    PAROQUANT_ROTATION_EPOCHS = 5
+    PAROQUANT_FINETUNE_EPOCHS = 5
+    PAROQUANT_TRAIN_SAMPLES = 512
+
     def test_llama3_2_paroquant(self):
         self.quant_lm_eval()

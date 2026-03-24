@@ -15,7 +15,6 @@ from packaging.version import Version
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
-
 if Version(setuptools.__version__) < Version("78.1.1"):
     raise RuntimeError(
         f"\033[31mYour setuptools version (`{setuptools.__version__}`) is too old and incompatible.\n"
@@ -328,7 +327,7 @@ def _detect_nvcc_version() -> str | None:
     return _nvcc_release_version()
 
 
-def get_version_tag() -> str:
+def get_cuda_tag() -> str:
     # TODO FIX ME: cpu wheels don't have torch version tags?
     if BUILD_CUDA_EXT != "1":
         return "cpu"
@@ -346,6 +345,14 @@ def get_version_tag() -> str:
     base = f"cu{CUDA_VERSION_COMPACT[:3]}"
     return f"{base}{torch_suffix}"
 
+
+def _get_git_commit():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"]
+        ).decode().strip()
+    except Exception:
+        return ""
 
 # ---------------------------
 # Env and versioning
@@ -424,6 +431,11 @@ if not TORCH_CUDA_ARCH_LIST and CUDA_ARCH_LIST:
 version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars["version"]
+
+if RELEASE_MODE == "1":
+    gptqmodel_version = f"{gptqmodel_version}+{get_cuda_tag()}"
+else:
+    gptqmodel_version = f"{gptqmodel_version}+{_get_git_commit()}"
 
 # -----------------------------
 # Prebuilt wheel download config
@@ -532,8 +544,6 @@ else:
             HAS_CUDA_V8 = False
             HAS_CUDA_V9 = False
 
-if RELEASE_MODE == "1":
-    gptqmodel_version = f"{gptqmodel_version}+{get_version_tag()}"
 
 include_dirs = ["gptqmodel_ext"]
 
@@ -911,9 +921,9 @@ class CachedWheelsCommand(_bdist_wheel):
         if FORCE_BUILD or xpu_avail:
             return super().run()
 
-        python_version = f"cp{sys.version_info.major}{sys.version_info.minor}{sys.abiflags}"
+        cpython_tag = f"cp{sys.version_info.major}{sys.version_info.minor}{sys.abiflags}"
 
-        wheel_filename = f"gptqmodel-{gptqmodel_version}+{get_version_tag()}-{python_version}-{python_version}-linux_x86_64.whl"
+        wheel_filename = f"gptqmodel-{gptqmodel_version}+{get_cuda_tag()}-{cpython_tag}-{cpython_tag}-linux_x86_64.whl"
 
         # Allow tag override via env; default to "v{gptqmodel_version}"
         tag_name = WHEEL_TAG if WHEEL_TAG else f"v{gptqmodel_version}"
@@ -930,7 +940,7 @@ class CachedWheelsCommand(_bdist_wheel):
             _download_with_progress(wheel_url, wheel_path, title="Downloading wheel")
             print("Raw wheel path", wheel_filename)
         except BaseException:
-            env_info = [f"python={python_version}", f"torch={TORCH_VERSION or 'unknown'}"]
+            env_info = [f"python={cpython_tag}", f"torch={TORCH_VERSION or 'unknown'}"]
             if CUDA_VERSION:
                 env_info.append(f"cuda={CUDA_VERSION}")
             if ROCM_VERSION:

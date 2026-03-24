@@ -6,7 +6,6 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Iterable
 
-
 TRITON_PACKAGE_CANDIDATES = (
     "triton",
     "triton-windows",
@@ -53,6 +52,16 @@ def build_startup_banner(
     return "\n".join([ascii_logo.rstrip("\n"), *formatted_rows])
 
 
+def _get_git_commit():
+    import subprocess
+    try:
+        hash = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"]
+        ).decode().strip()
+        return f"+{hash}"
+    except Exception:
+        return ""
+
 def get_startup_banner(
     ascii_logo: str,
     *,
@@ -62,7 +71,7 @@ def get_startup_banner(
 ) -> str:
     return build_startup_banner(
         ascii_logo,
-        gptqmodel_version=gptqmodel_version,
+        gptqmodel_version=f"{gptqmodel_version}{_get_git_commit()}",
         transformers_version=transformers_version,
         torch_version=torch_version,
         triton_version=resolve_installed_package_version(TRITON_PACKAGE_CANDIDATES),
