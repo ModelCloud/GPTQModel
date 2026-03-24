@@ -60,7 +60,7 @@ class TestLlama3_2(ModelTest):
             "evalution_suite_kwargs": {
                 "batch_size": 24,
                 "max_new_tokens": 96,
-                "streaming": True,
+                "stream": True,
                 "max_rows": 128,
             },
             "acc,num": {
