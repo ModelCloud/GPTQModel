@@ -191,12 +191,6 @@ def parse_args() -> argparse.Namespace:
         help="Allow loading models that require remote code execution.",
     )
     parser.add_argument(
-        "--random-seed",
-        type=int,
-        default=898,
-        help="Legacy seed compatibility flag forwarded into Evalution suite kwargs.",
-    )
-    parser.add_argument(
         "--output",
         type=str,
         default=str(DEFAULT_RESULTS_PATH),
@@ -262,7 +256,6 @@ def main() -> None:
             trust_remote_code=args.trust_remote_code,
             output_path=None,
             backend=backend,
-            random_seed=args.random_seed,
             model_args=model_args.copy(),
             gen_kwargs=args.gen_kwargs,
             apply_chat_template=apply_chat_template,

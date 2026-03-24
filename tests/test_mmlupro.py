@@ -26,8 +26,7 @@ class TestMMLUPRO(unittest.TestCase):
                 tasks="mmlu_pro:math",
                 output_path=f"{tmp_dir}/result.json",
                 batch_size=2,
-                ntrain=1,
-                max_samples=2,
+                suite_kwargs={"num_fewshot": 1, "max_rows": 2},
             )
             metrics = get_eval_task_metrics(result, "mmlu_pro:math")
             self.assertTrue(metrics)

@@ -130,7 +130,6 @@ class TestBits(unittest.TestCase):
             apply_chat_template=False,
             trust_remote_code=False,
             batch_size=4,
-            random_seed=RAND_SEED,
         )
         print('--------Eval Result---------')
         print(format_eval_result_table(results))

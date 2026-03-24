@@ -39,8 +39,7 @@ class TestEval(ModelTest):
                 batch_size=1,
                 output_path=f"{tmp_dir}/result.json",
                 apply_chat_template=apply_chat_template,
-                max_samples=2,
-                ntrain=1,
+                suite_kwargs={"max_rows": 2, "num_fewshot": 1},
             )
 
             metrics = get_eval_task_metrics(results, task)

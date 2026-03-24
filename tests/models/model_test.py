@@ -1467,7 +1467,6 @@ class ModelTest(unittest.TestCase):
                         trust_remote_code=trust_remote_code,
                         batch_size=task_batch_size,
                         gen_kwargs="temperature=0.0,top_k=50",
-                        random_seed=RAND_SEED,
                         suite_kwargs=task_suite_kwargs,
                     )
 

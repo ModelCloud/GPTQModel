@@ -141,11 +141,8 @@ def evaluate(
     llm_backend: str = "gptqmodel",
     backend: BACKEND | str | None = BACKEND.AUTO,
     model_args: Optional[Dict[str, Any]] = None,
-    framework: Any | None = None,
     **args,
 ):
-    del framework
-
     if llm_backend != "gptqmodel":
         raise ValueError("Evalution-backed evaluation only supports llm_backend='gptqmodel'.")
 
@@ -160,28 +157,8 @@ def evaluate(
     gen_kwargs = args.pop("gen_kwargs", None)
     apply_chat_template = bool(args.pop("apply_chat_template", False))
     suite_kwargs = dict(args.pop("suite_kwargs", {}) or {})
-    args.pop("task_manager", None)
-
-    legacy_max_samples = args.pop("max_samples", None)
-    if legacy_max_samples is not None:
-        suite_kwargs.setdefault("max_rows", legacy_max_samples)
-
-    legacy_num_fewshot = args.pop("ntrain", None)
-    if legacy_num_fewshot is None:
-        legacy_num_fewshot = args.pop("num_fewshot", None)
-    if legacy_num_fewshot is not None:
-        suite_kwargs.setdefault("num_fewshot", legacy_num_fewshot)
-
-    # Preserve legacy call compatibility for callers that still pass lm-eval style
-    # seed arguments. Evalution suite constructors are not uniform here, so do not
-    # forward seeds generically.
-    args.pop("random_seed", None)
-    args.pop("seed", None)
 
     if args:
-        # Evalution owns the actual suite/runtime behavior now. Drop legacy GPTQModel-local
-        # evaluation knobs only after the caller explicitly migrates them into model_args or
-        # suite_kwargs to keep this adapter narrow and predictable.
         unexpected = ", ".join(sorted(args.keys()))
         raise TypeError(f"Unsupported evaluation keyword arguments: {unexpected}")
 

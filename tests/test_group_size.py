@@ -109,7 +109,6 @@ class TestGroupSize(unittest.TestCase):
             trust_remote_code=False,
             batch_size=32,
             gen_kwargs="temperature=0.0,top_k=50",
-            random_seed=RAND_SEED,
         )
         print('--------Eval Result---------')
         print(format_eval_result_table(results))

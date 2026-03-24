@@ -85,7 +85,6 @@ def _run_simple_quant_eval():
             QUANT_SAVE_PATH,
             tasks=["gsm8k_cot"],  #, "gsm8k_platinum_cot"],
             apply_chat_template=True,
-            random_seed=898,
             output_path=tmp_dir,
         )
 
