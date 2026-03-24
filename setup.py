@@ -15,7 +15,6 @@ from packaging.version import Version
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
-
 if Version(setuptools.__version__) < Version("78.1.1"):
     raise RuntimeError(
         f"\033[31mYour setuptools version (`{setuptools.__version__}`) is too old and incompatible.\n"
@@ -348,6 +347,14 @@ def get_version_tag() -> str:
     return f"{base}{torch_suffix}"
 
 
+def _get_git_commit():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"]
+        ).decode().strip()
+    except Exception:
+        return ""
+
 # ---------------------------
 # Env and versioning
 # ---------------------------
@@ -535,6 +542,8 @@ else:
 
 if RELEASE_MODE == "1":
     gptqmodel_version = f"{gptqmodel_version}+{get_version_tag()}"
+else:
+    gptqmodel_version = f"{gptqmodel_version}+{_get_git_commit()}"
 
 include_dirs = ["gptqmodel_ext"]
 
