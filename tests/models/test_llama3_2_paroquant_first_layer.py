@@ -10,15 +10,16 @@ from gptqmodel.utils.paroquant_benchmark import run_paroquant_first_layer_case
 
 
 @pytest.mark.cuda
-def test_llama3_2_paroquant_first_layer_full_model():
+def test_llama3_2_paroquant_first_4_layers_full_model():
     if not torch.cuda.is_available():
-        pytest.skip("CUDA required for first-layer ParoQuant test")
+        pytest.skip("CUDA required for prefix-layer ParoQuant test")
 
     if os.environ.get("GPTQMODEL_RUN_PAROQUANT_FIRST_LAYER_TEST") != "1":
-        pytest.skip("Set GPTQMODEL_RUN_PAROQUANT_FIRST_LAYER_TEST=1 to run this full-model integration test.")
+        pytest.skip("Set GPTQMODEL_RUN_PAROQUANT_FIRST_LAYER_TEST=1 to run this prefix-layer integration test.")
 
     eval_max_rows = os.environ.get("GPTQMODEL_PAROQUANT_TEST_MAX_ROWS")
     result = run_paroquant_first_layer_case(
+        num_quant_layers=int(os.environ.get("GPTQMODEL_PAROQUANT_TEST_NUM_LAYERS", "4")),
         calibration_rows=int(os.environ.get("GPTQMODEL_PAROQUANT_TEST_CAL_ROWS", "32")),
         eval_batch_size=int(os.environ.get("GPTQMODEL_PAROQUANT_TEST_EVAL_BATCH", "32")),
         eval_max_rows=None if eval_max_rows in {None, ""} else int(eval_max_rows),
@@ -32,4 +33,5 @@ def test_llama3_2_paroquant_first_layer_full_model():
     )
 
     assert result["module_time_rows"], "expected per-module quantization timings"
+    assert result["num_quant_layers"] == int(os.environ.get("GPTQMODEL_PAROQUANT_TEST_NUM_LAYERS", "4"))
     assert "gsm8k_platinum_cot" in result["eval_metrics"], "expected gsm8k platinum metrics"

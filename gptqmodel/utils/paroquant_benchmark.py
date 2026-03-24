@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -82,21 +83,83 @@ def load_nm_calibration(rows: int) -> list[dict[str, Any]]:
     return list(dataset)
 
 
-def build_first_layer_only_dynamic(model) -> dict[str, dict[str, Any]]:
+def _layers_node_info(model) -> tuple[str, int]:
     layers_node = model.extract_layers_node()
     if isinstance(layers_node, (list, tuple)):
         if not layers_node:
-            raise ValueError("Model did not expose a layers node for first-layer-only ParoQuant benchmarking.")
+            raise ValueError("Model did not expose a layers node for ParoQuant benchmarking.")
         layers_node = layers_node[0]
     layers_node = str(layers_node).strip()
     if not layers_node:
         raise ValueError("Model layers node resolved to an empty string.")
     escaped_layers_node = layers_node.replace(".", r"\.")
     layer_count = len(getattr(model.model, "model", model.model).layers)
+    return escaped_layers_node, layer_count
+
+
+def build_prefix_layer_dynamic(model, num_quant_layers: int) -> dict[str, dict[str, Any]]:
+    escaped_layers_node, layer_count = _layers_node_info(model)
+    num_quant_layers = int(num_quant_layers)
+    if num_quant_layers <= 0:
+        raise ValueError("ParoQuant benchmark: `num_quant_layers` must be positive.")
+    if num_quant_layers > layer_count:
+        raise ValueError(
+            f"ParoQuant benchmark: `num_quant_layers` ({num_quant_layers}) exceeds model layer count ({layer_count})."
+        )
     return {
         f"-:^{escaped_layers_node}\\.{layer_idx}\\.": {}
-        for layer_idx in range(1, layer_count)
+        for layer_idx in range(num_quant_layers, layer_count)
     }
+
+
+def build_first_layer_only_dynamic(model) -> dict[str, dict[str, Any]]:
+    return build_prefix_layer_dynamic(model, num_quant_layers=1)
+
+
+def build_single_module_dynamic(model, *, layer_idx: int, module_name: str) -> dict[str, dict[str, Any]]:
+    return build_selected_modules_dynamic(model, layer_idx=layer_idx, module_names=[module_name])
+
+
+def build_selected_modules_dynamic(
+    model,
+    *,
+    layer_idx: int,
+    module_names: list[str] | tuple[str, ...],
+) -> dict[str, dict[str, Any]]:
+    escaped_layers_node, layer_count = _layers_node_info(model)
+    layer_idx = int(layer_idx)
+    if layer_idx < 0 or layer_idx >= layer_count:
+        raise ValueError(f"ParoQuant benchmark: `layer_idx` ({layer_idx}) is outside [0, {layer_count - 1}].")
+
+    layers = getattr(model.model, "model", model.model).layers
+    layer = layers[layer_idx]
+    normalized_module_names: list[str] = []
+    escaped_module_names: list[str] = []
+    for module_name in module_names:
+        current = layer
+        parts = [part for part in str(module_name).strip().split(".") if part]
+        if not parts:
+            raise ValueError("ParoQuant benchmark: `module_names` must contain non-empty relative module paths.")
+        for part in parts:
+            if not hasattr(current, part):
+                raise ValueError(f"ParoQuant benchmark: layer {layer_idx} does not expose module path `{module_name}`.")
+            current = getattr(current, part)
+        normalized_module_name = ".".join(parts)
+        normalized_module_names.append(normalized_module_name)
+        escaped_module_names.append(normalized_module_name.replace(".", r"\."))
+
+    if not escaped_module_names:
+        raise ValueError("ParoQuant benchmark: at least one module must be selected.")
+
+    selected_pattern = "|".join(sorted(set(escaped_module_names)))
+    dynamic: dict[str, dict[str, Any]] = {}
+    for idx in range(layer_count):
+        if idx == layer_idx:
+            # Quantize only the selected leaf modules inside the target layer.
+            dynamic[f"-:^{escaped_layers_node}\\.{idx}\\.(?!(?:{selected_pattern})$)"] = {}
+        else:
+            dynamic[f"-:^{escaped_layers_node}\\.{idx}\\."] = {}
+    return dynamic
 
 
 def make_paroquant_config(
@@ -158,24 +221,15 @@ def _suite_kwargs(max_rows: Optional[int]) -> dict[str, Any] | None:
     return {"max_rows": int(max_rows)}
 
 
-def run_fp16_eval(
+def _run_evalution_path_eval(
     *,
-    model_path: str = _DEFAULT_MODEL,
-    eval_batch_size: int = 64,
-    eval_max_rows: Optional[int] = None,
-) -> dict[str, Any]:
-    model = GPTQModel.load(
-        model_path,
-        trust_remote_code=False,
-        dtype=torch.float16,
-        device_map=_single_gpu_device_map(),
-    )
-    _prepare_eval_tokenizer(model)
-
+    model_or_id_or_path: Any,
+    eval_batch_size: int,
+    eval_max_rows: Optional[int],
+) -> tuple[dict[str, Any], float]:
     wall_start = time.perf_counter()
     eval_result = evaluate(
-        model_or_id_or_path=model,
-        tokenizer=model.tokenizer,
+        model_or_id_or_path=model_or_id_or_path,
         tasks=[EVAL.LM_EVAL.GSM8K_PLATINUM_COT],
         framework=EVAL.LM_EVAL,
         batch_size=eval_batch_size,
@@ -183,10 +237,22 @@ def run_fp16_eval(
         apply_chat_template=True,
         suite_kwargs=_suite_kwargs(eval_max_rows),
     )
-    wall_s = time.perf_counter() - wall_start
+    return eval_result, time.perf_counter() - wall_start
+
+
+def run_fp16_eval(
+    *,
+    model_path: str = _DEFAULT_MODEL,
+    eval_batch_size: int = 64,
+    eval_max_rows: Optional[int] = None,
+) -> dict[str, Any]:
+    eval_result, wall_s = _run_evalution_path_eval(
+        model_or_id_or_path=model_path,
+        eval_batch_size=eval_batch_size,
+        eval_max_rows=eval_max_rows,
+    )
     metrics = get_eval_task_results(eval_result)
     formatted = format_eval_result_table(eval_result)
-    _cleanup_model(model)
     return {
         "mode": "fp16",
         "eval_wall_s": wall_s,
@@ -410,37 +476,29 @@ def _module_time_rows(quant_logs: dict[str, list[dict[str, Any]]]) -> list[list[
     return rows
 
 
-def run_paroquant_first_layer_case(
+def _run_paroquant_case(
     *,
-    model_path: str = _DEFAULT_MODEL,
-    calibration_rows: int = 64,
-    calibration_concat_size: int = 2048,
-    quant_batch_size: int = 1,
-    eval_batch_size: int = 64,
-    eval_max_rows: Optional[int] = None,
-    sym: bool = True,
-    fused_opt_rotation: bool = True,
-    opt_rotation_epochs: int = 10,
-    opt_finetune_epochs: int = 10,
-    opt_train_samples: int = 2048,
-    opt_validation_samples: int = 64,
-    opt_batch_size: int = 16,
+    model_path: str,
+    dynamic: dict[str, dict[str, Any]],
+    calibration_rows: int,
+    calibration_concat_size: int,
+    quant_batch_size: int,
+    eval_batch_size: int,
+    eval_max_rows: Optional[int],
+    sym: bool,
+    fused_opt_rotation: bool,
+    opt_rotation_epochs: int,
+    opt_finetune_epochs: int,
+    opt_train_samples: int,
+    opt_validation_samples: int,
+    opt_batch_size: int,
+    result_meta: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     if sym is not True:
         raise ValueError("ParoQuant benchmark: `sym=False` is disabled; use `sym=True`.")
     os.environ["GPTQMODEL_PAROQUANT_OPT_FUSED_ROTATION"] = "1" if fused_opt_rotation else "0"
 
     calibration_dataset = load_nm_calibration(calibration_rows)
-    probe_model = GPTQModel.load(
-        model_path,
-        quantize_config=QuantizeConfig(method=METHOD.PAROQUANT, format=FORMAT.PAROQUANT),
-        trust_remote_code=False,
-        dtype=torch.float16,
-        device_map=_single_gpu_device_map(),
-    )
-    dynamic = build_first_layer_only_dynamic(probe_model)
-    _cleanup_model(probe_model)
-    probe_model = None
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -474,26 +532,24 @@ def run_paroquant_first_layer_case(
         if torch.cuda.is_available():
             model.model.to("cuda:0")
 
-        eval_start = time.perf_counter()
-        eval_result = evaluate(
-            model_or_id_or_path=model,
-            tokenizer=model.tokenizer,
-            tasks=[EVAL.LM_EVAL.GSM8K_PLATINUM_COT],
-            framework=EVAL.LM_EVAL,
-            batch_size=eval_batch_size,
-            model_args={"padding_side": "left"},
-            apply_chat_template=True,
-            suite_kwargs=_suite_kwargs(eval_max_rows),
-        )
-        eval_wall_s = time.perf_counter() - eval_start
         kernel_rows = benchmark_quantized_first_layer_kernels(model, calibration_dataset)
+        with tempfile.TemporaryDirectory(prefix="paroquant_evalution_") as temp_dir:
+            save_start = time.perf_counter()
+            model.save(temp_dir)
+            save_wall_s = time.perf_counter() - save_start
+            eval_result, eval_wall_s = _run_evalution_path_eval(
+                model_or_id_or_path=temp_dir,
+                eval_batch_size=eval_batch_size,
+                eval_max_rows=eval_max_rows,
+            )
 
-        return {
-            "mode": "paroquant_first_layer",
+        result = {
+            "mode": "paroquant_prefix_layers",
             "device": _visible_cuda_device_name(),
             "fused_opt_rotation": fused_opt_rotation,
             "sym": sym,
             "quant_wall_s": quant_wall_s,
+            "save_wall_s": save_wall_s,
             "eval_wall_s": eval_wall_s,
             "quant_logs": quant_logs,
             "quant_region_snapshot": model.quant_region_timer.snapshot(),
@@ -503,10 +559,149 @@ def run_paroquant_first_layer_case(
             "eval_table": format_eval_result_table(eval_result),
             "kernel_rows": kernel_rows,
         }
+        if result_meta:
+            result.update(result_meta)
+        return result
     finally:
         _cleanup_model(model)
-        if probe_model is not None:
-            _cleanup_model(probe_model)
+
+
+def run_paroquant_first_layer_case(
+    *,
+    model_path: str = _DEFAULT_MODEL,
+    num_quant_layers: int = 1,
+    calibration_rows: int = 64,
+    calibration_concat_size: int = 2048,
+    quant_batch_size: int = 1,
+    eval_batch_size: int = 64,
+    eval_max_rows: Optional[int] = None,
+    sym: bool = True,
+    fused_opt_rotation: bool = True,
+    opt_rotation_epochs: int = 10,
+    opt_finetune_epochs: int = 10,
+    opt_train_samples: int = 2048,
+    opt_validation_samples: int = 64,
+    opt_batch_size: int = 16,
+) -> dict[str, Any]:
+    probe_model = GPTQModel.load(
+        model_path,
+        quantize_config=QuantizeConfig(method=METHOD.PAROQUANT, format=FORMAT.PAROQUANT),
+        trust_remote_code=False,
+        dtype=torch.float16,
+        device_map=_single_gpu_device_map(),
+    )
+    dynamic = build_prefix_layer_dynamic(probe_model, num_quant_layers=num_quant_layers)
+    _cleanup_model(probe_model)
+
+    return _run_paroquant_case(
+        model_path=model_path,
+        dynamic=dynamic,
+        calibration_rows=calibration_rows,
+        calibration_concat_size=calibration_concat_size,
+        quant_batch_size=quant_batch_size,
+        eval_batch_size=eval_batch_size,
+        eval_max_rows=eval_max_rows,
+        sym=sym,
+        fused_opt_rotation=fused_opt_rotation,
+        opt_rotation_epochs=opt_rotation_epochs,
+        opt_finetune_epochs=opt_finetune_epochs,
+        opt_train_samples=opt_train_samples,
+        opt_validation_samples=opt_validation_samples,
+        opt_batch_size=opt_batch_size,
+        result_meta={
+            "mode": "paroquant_prefix_layers",
+            "num_quant_layers": int(num_quant_layers),
+        },
+    )
+
+
+def run_paroquant_single_module_case(
+    *,
+    model_path: str = _DEFAULT_MODEL,
+    layer_idx: int,
+    module_name: str,
+    calibration_rows: int = 64,
+    calibration_concat_size: int = 2048,
+    quant_batch_size: int = 1,
+    eval_batch_size: int = 64,
+    eval_max_rows: Optional[int] = None,
+    sym: bool = True,
+    fused_opt_rotation: bool = True,
+    opt_rotation_epochs: int = 10,
+    opt_finetune_epochs: int = 10,
+    opt_train_samples: int = 2048,
+    opt_validation_samples: int = 64,
+    opt_batch_size: int = 16,
+) -> dict[str, Any]:
+    return run_paroquant_selected_modules_case(
+        model_path=model_path,
+        layer_idx=layer_idx,
+        module_names=[module_name],
+        calibration_rows=calibration_rows,
+        calibration_concat_size=calibration_concat_size,
+        quant_batch_size=quant_batch_size,
+        eval_batch_size=eval_batch_size,
+        eval_max_rows=eval_max_rows,
+        sym=sym,
+        fused_opt_rotation=fused_opt_rotation,
+        opt_rotation_epochs=opt_rotation_epochs,
+        opt_finetune_epochs=opt_finetune_epochs,
+        opt_train_samples=opt_train_samples,
+        opt_validation_samples=opt_validation_samples,
+        opt_batch_size=opt_batch_size,
+    )
+
+
+def run_paroquant_selected_modules_case(
+    *,
+    model_path: str = _DEFAULT_MODEL,
+    layer_idx: int,
+    module_names: list[str] | tuple[str, ...],
+    calibration_rows: int = 64,
+    calibration_concat_size: int = 2048,
+    quant_batch_size: int = 1,
+    eval_batch_size: int = 64,
+    eval_max_rows: Optional[int] = None,
+    sym: bool = True,
+    fused_opt_rotation: bool = True,
+    opt_rotation_epochs: int = 10,
+    opt_finetune_epochs: int = 10,
+    opt_train_samples: int = 2048,
+    opt_validation_samples: int = 64,
+    opt_batch_size: int = 16,
+) -> dict[str, Any]:
+    probe_model = GPTQModel.load(
+        model_path,
+        quantize_config=QuantizeConfig(method=METHOD.PAROQUANT, format=FORMAT.PAROQUANT),
+        trust_remote_code=False,
+        dtype=torch.float16,
+        device_map=_single_gpu_device_map(),
+    )
+    dynamic = build_selected_modules_dynamic(probe_model, layer_idx=layer_idx, module_names=module_names)
+    _cleanup_model(probe_model)
+
+    return _run_paroquant_case(
+        model_path=model_path,
+        dynamic=dynamic,
+        calibration_rows=calibration_rows,
+        calibration_concat_size=calibration_concat_size,
+        quant_batch_size=quant_batch_size,
+        eval_batch_size=eval_batch_size,
+        eval_max_rows=eval_max_rows,
+        sym=sym,
+        fused_opt_rotation=fused_opt_rotation,
+        opt_rotation_epochs=opt_rotation_epochs,
+        opt_finetune_epochs=opt_finetune_epochs,
+        opt_train_samples=opt_train_samples,
+        opt_validation_samples=opt_validation_samples,
+        opt_batch_size=opt_batch_size,
+        result_meta={
+            "mode": "paroquant_selected_modules",
+            "layer_idx": int(layer_idx),
+            "module_name": ",".join(str(name) for name in module_names),
+            "module_names": [str(name) for name in module_names],
+        },
+    )
 
 
 def comparison_rows(*cases: dict[str, Any]) -> list[list[str]]:

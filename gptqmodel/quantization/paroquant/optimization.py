@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -209,12 +209,19 @@ def _apply_rotation(
     *,
     scales: Optional[torch.Tensor],
     group_size: int,
+    fused_rotation: Optional[bool] = None,
 ) -> torch.Tensor:
     """Apply the forward ParoQuant transform in the optimization domain."""
     if x.dim() != 2:
         raise ValueError(f"ParoQuant optimization expects a rank-2 tensor, got {tuple(x.shape)}.")
 
-    if env_flag("GPTQMODEL_PAROQUANT_OPT_FUSED_ROTATION", default=True):
+    use_fused_rotation = (
+        env_flag("GPTQMODEL_PAROQUANT_OPT_FUSED_ROTATION", default=True)
+        if fused_rotation is None
+        else bool(fused_rotation)
+    )
+
+    if use_fused_rotation:
         scale_tensor = None if scales is None else scales.view(1, -1)
         return apply_paroquant_rotation_autograd(
             x,
@@ -259,6 +266,7 @@ def _apply_inverse_rotation(
     theta: torch.Tensor,
     *,
     group_size: int,
+    fused_rotation: Optional[bool] = None,
 ) -> torch.Tensor:
     """Apply the inverse transform that maps export-domain weights back to input space."""
     if pairs.shape[0] == 0:
@@ -269,6 +277,7 @@ def _apply_inverse_rotation(
         -theta.flip(0),
         scales=None,
         group_size=group_size,
+        fused_rotation=fused_rotation,
     )
 
 
@@ -413,6 +422,7 @@ class _ParoQuantOptimLinear(nn.Module):
         sym: bool,
         pairs: torch.Tensor,
         theta_mask: torch.Tensor,
+        fused_rotation: Optional[bool] = None,
     ) -> None:
         """Materialize a replayable linear layer in the original input domain."""
         super().__init__()
@@ -427,6 +437,7 @@ class _ParoQuantOptimLinear(nn.Module):
         self.theta = nn.Parameter(torch.zeros((pairs.shape[0], weight.shape[1] // 2), device=weight.device, dtype=weight.dtype))
         self.channel_scales_opt = nn.Parameter(torch.ones((weight.shape[1],), device=weight.device, dtype=weight.dtype))
         self.quantizer: Optional[GroupLinearQuantizer] = None
+        self.fused_rotation = fused_rotation
 
     def transformed_weight(self) -> torch.Tensor:
         """Project the learnable weight into ParoQuant's transformed domain."""
@@ -437,6 +448,7 @@ class _ParoQuantOptimLinear(nn.Module):
             self.theta,
             scales=None,
             group_size=self.group_size,
+            fused_rotation=self.fused_rotation,
         )
 
     def quantized_transformed_weight(self) -> torch.Tensor:
@@ -460,6 +472,7 @@ class _ParoQuantOptimLinear(nn.Module):
             self.pairs,
             self.theta,
             group_size=self.group_size,
+            fused_rotation=self.fused_rotation,
         )
         channel_scales = self.channel_scales_opt.view(1, -1).clamp(min=1e-5)
         return quantized / channel_scales
@@ -538,13 +551,103 @@ class ParoQuantOptimizationResult:
     used_identity: bool
 
 
+@dataclass
+class ParoQuantBlockOptimizationResult:
+    """Joint optimization results for one coupled ParoQuant block."""
+
+    module_results: dict[str, ParoQuantOptimizationResult]
+    train_loss: float
+    val_loss: float
+    used_identity: bool
+
+
+class _ParoQuantOptimLlamaMLPBlock(nn.Module):
+    """Joint ParoQuant replay model for Llama's gated MLP."""
+
+    def __init__(
+        self,
+        *,
+        gate_weight: torch.Tensor,
+        gate_bias: Optional[torch.Tensor],
+        up_weight: torch.Tensor,
+        up_bias: Optional[torch.Tensor],
+        down_weight: torch.Tensor,
+        down_bias: Optional[torch.Tensor],
+        bits: int,
+        gate_group_size: int,
+        up_group_size: int,
+        down_group_size: int,
+        sym: bool,
+        gate_pairs: torch.Tensor,
+        gate_theta_mask: torch.Tensor,
+        up_pairs: torch.Tensor,
+        up_theta_mask: torch.Tensor,
+        down_pairs: torch.Tensor,
+        down_theta_mask: torch.Tensor,
+        activation_fn: Callable[[torch.Tensor], torch.Tensor],
+        fused_rotation: Optional[bool] = None,
+    ) -> None:
+        """Materialize the three coupled linear layers that define a Llama MLP block."""
+        super().__init__()
+        _require_paroquant_sym(sym)
+
+        self.gate_proj = _ParoQuantOptimLinear(
+            gate_weight,
+            gate_bias,
+            bits=bits,
+            group_size=gate_group_size,
+            sym=sym,
+            pairs=gate_pairs,
+            theta_mask=gate_theta_mask,
+            fused_rotation=fused_rotation,
+        )
+        self.up_proj = _ParoQuantOptimLinear(
+            up_weight,
+            up_bias,
+            bits=bits,
+            group_size=up_group_size,
+            sym=sym,
+            pairs=up_pairs,
+            theta_mask=up_theta_mask,
+            fused_rotation=fused_rotation,
+        )
+        self.down_proj = _ParoQuantOptimLinear(
+            down_weight,
+            down_bias,
+            bits=bits,
+            group_size=down_group_size,
+            sym=sym,
+            pairs=down_pairs,
+            theta_mask=down_theta_mask,
+            fused_rotation=fused_rotation,
+        )
+        self.activation_fn = activation_fn
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Replay calibration rows through the true gated MLP math."""
+        hidden = self.activation_fn(self.gate_proj(x)) * self.up_proj(x)
+        return self.down_proj(hidden)
+
+    def reset_masked_angles(self) -> None:
+        """Force every padded rotation pair in the block to remain inactive."""
+        self.gate_proj.reset_masked_angles()
+        self.up_proj.reset_masked_angles()
+        self.down_proj.reset_masked_angles()
+
+    def init_quantizers(self) -> None:
+        """Bootstrap transformed-domain quantizers for all three projections."""
+        self.gate_proj.init_quantizer()
+        self.up_proj.init_quantizer()
+        self.down_proj.init_quantizer()
+
+
 def _chunk_rows(rows: torch.Tensor, batch_size: int) -> Iterable[torch.Tensor]:
     """Yield contiguous mini-batches from flattened calibration activations."""
     for start in range(0, rows.shape[0], batch_size):
         yield rows[start:start + batch_size]
 
 
-def _evaluate_model(model: _ParoQuantOptimLinear, inputs: torch.Tensor, targets: torch.Tensor) -> float:
+def _evaluate_model(model: nn.Module, inputs: torch.Tensor, targets: torch.Tensor) -> float:
     """Measure replay error for early stopping and stage selection."""
     if inputs.numel() == 0:
         return 0.0
@@ -555,7 +658,7 @@ def _evaluate_model(model: _ParoQuantOptimLinear, inputs: torch.Tensor, targets:
 
 def _run_stage(
     *,
-    model: _ParoQuantOptimLinear,
+    model: nn.Module,
     inputs_train: torch.Tensor,
     targets_train: torch.Tensor,
     inputs_val: torch.Tensor,
@@ -625,6 +728,30 @@ def _run_stage(
     return last_train_loss, best_val_loss
 
 
+def _result_from_model(
+    model: _ParoQuantOptimLinear,
+    *,
+    train_loss: float,
+    val_loss: float,
+    used_identity: bool,
+) -> ParoQuantOptimizationResult:
+    """Export one optimized linear replay module into the runtime tensor contract."""
+    pseudo_weight = model.pseudo_weight().detach()
+    pack_weight, q_scales, q_zeros, theta, channel_scales = model.export_pack_state()
+    return ParoQuantOptimizationResult(
+        pseudo_weight=pseudo_weight,
+        pack_weight=pack_weight.detach(),
+        q_scales=q_scales.detach(),
+        q_zeros=q_zeros.detach(),
+        pairs=model.pairs.detach(),
+        theta=theta.detach(),
+        channel_scales=channel_scales.detach(),
+        train_loss=float(train_loss),
+        val_loss=float(val_loss),
+        used_identity=used_identity,
+    )
+
+
 def _identity_result(
     *,
     weight: torch.Tensor,
@@ -673,6 +800,53 @@ def _identity_result(
     )
 
 
+def _identity_block_result(
+    *,
+    gate_weight: torch.Tensor,
+    gate_bias: Optional[torch.Tensor],
+    up_weight: torch.Tensor,
+    up_bias: Optional[torch.Tensor],
+    down_weight: torch.Tensor,
+    down_bias: Optional[torch.Tensor],
+    bits: int,
+    group_size: int,
+    sym: bool,
+    krot: int,
+) -> ParoQuantBlockOptimizationResult:
+    """Return per-module identity fallbacks when block activations are missing."""
+    return ParoQuantBlockOptimizationResult(
+        module_results={
+            "mlp.gate_proj": _identity_result(
+                weight=gate_weight,
+                bias=gate_bias,
+                bits=bits,
+                group_size=_normalize_group_size(group_size, gate_weight.shape[1]),
+                sym=sym,
+                krot=krot,
+            ),
+            "mlp.up_proj": _identity_result(
+                weight=up_weight,
+                bias=up_bias,
+                bits=bits,
+                group_size=_normalize_group_size(group_size, up_weight.shape[1]),
+                sym=sym,
+                krot=krot,
+            ),
+            "mlp.down_proj": _identity_result(
+                weight=down_weight,
+                bias=down_bias,
+                bits=bits,
+                group_size=_normalize_group_size(group_size, down_weight.shape[1]),
+                sym=sym,
+                krot=krot,
+            ),
+        },
+        train_loss=0.0,
+        val_loss=0.0,
+        used_identity=True,
+    )
+
+
 def optimize_paroquant_linear(
     *,
     weight: torch.Tensor,
@@ -692,6 +866,7 @@ def optimize_paroquant_linear(
     weight_lr: float,
     quantizer_lr: float,
     seed: int,
+    fused_rotation: Optional[bool] = None,
 ) -> ParoQuantOptimizationResult:
     """Optimize one linear layer following the paper's two-stage PTQ schedule."""
     _require_paroquant_sym(sym)
@@ -743,6 +918,7 @@ def optimize_paroquant_linear(
         sym=sym,
         pairs=pairs,
         theta_mask=theta_mask,
+        fused_rotation=fused_rotation,
     ).to(device=opt_device, dtype=opt_dtype)
     model.reset_masked_angles()
 
@@ -775,17 +951,211 @@ def optimize_paroquant_linear(
         batch_size=batch_size,
     )
 
-    pseudo_weight = model.pseudo_weight().detach()
-    pack_weight, q_scales, q_zeros, theta, channel_scales = model.export_pack_state()
+    return _result_from_model(
+        model,
+        train_loss=train_loss,
+        val_loss=val_loss,
+        used_identity=False,
+    )
 
-    return ParoQuantOptimizationResult(
-        pseudo_weight=pseudo_weight,
-        pack_weight=pack_weight.detach(),
-        q_scales=q_scales.detach(),
-        q_zeros=q_zeros.detach(),
-        pairs=pairs.detach(),
-        theta=theta.detach(),
-        channel_scales=channel_scales.detach(),
+
+def optimize_paroquant_llama_mlp_block(
+    *,
+    gate_weight: torch.Tensor,
+    gate_bias: Optional[torch.Tensor],
+    up_weight: torch.Tensor,
+    up_bias: Optional[torch.Tensor],
+    down_weight: torch.Tensor,
+    down_bias: Optional[torch.Tensor],
+    inputs: torch.Tensor,
+    bits: int,
+    group_size: int,
+    sym: bool,
+    krot: int,
+    pair_ratio: float,
+    train_rows: int,
+    val_rows: int,
+    batch_size: int,
+    rotation_epochs: int,
+    finetune_epochs: int,
+    rotation_lr: float,
+    weight_lr: float,
+    quantizer_lr: float,
+    seed: int,
+    activation_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    fused_rotation: Optional[bool] = None,
+) -> ParoQuantBlockOptimizationResult:
+    """Optimize a Llama gated MLP jointly using the true block output loss."""
+    _require_paroquant_sym(sym)
+    for name, weight in (
+        ("gate_proj", gate_weight),
+        ("up_proj", up_weight),
+        ("down_proj", down_weight),
+    ):
+        if weight.dim() != 2:
+            raise ValueError(f"ParoQuant optimization expects rank-2 weights, got {tuple(weight.shape)} for `{name}`.")
+
+    if gate_weight.shape[1] != up_weight.shape[1]:
+        raise ValueError("ParoQuant Llama MLP optimization expects gate_proj and up_proj to share input width.")
+    if gate_weight.shape[0] != up_weight.shape[0]:
+        raise ValueError("ParoQuant Llama MLP optimization expects gate_proj and up_proj to share hidden width.")
+    if down_weight.shape[1] != gate_weight.shape[0]:
+        raise ValueError(
+            "ParoQuant Llama MLP optimization expects down_proj input width to match the gate/up hidden width."
+        )
+
+    gate_group_size = _normalize_group_size(group_size, gate_weight.shape[1])
+    up_group_size = _normalize_group_size(group_size, up_weight.shape[1])
+    down_group_size = _normalize_group_size(group_size, down_weight.shape[1])
+
+    rows = _sample_activation_rows(inputs, max_rows=max(1, int(train_rows) + int(val_rows)))
+    if rows.numel() == 0:
+        return _identity_block_result(
+            gate_weight=gate_weight,
+            gate_bias=gate_bias,
+            up_weight=up_weight,
+            up_bias=up_bias,
+            down_weight=down_weight,
+            down_bias=down_bias,
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            krot=krot,
+        )
+
+    opt_device = gate_weight.device
+    opt_dtype = torch.float32
+    act_fn = F.silu if activation_fn is None else activation_fn
+
+    gate_weight_opt = gate_weight.detach().to(device=opt_device, dtype=opt_dtype)
+    gate_bias_opt = None if gate_bias is None else gate_bias.detach().to(device=opt_device, dtype=opt_dtype)
+    up_weight_opt = up_weight.detach().to(device=opt_device, dtype=opt_dtype)
+    up_bias_opt = None if up_bias is None else up_bias.detach().to(device=opt_device, dtype=opt_dtype)
+    down_weight_opt = down_weight.detach().to(device=opt_device, dtype=opt_dtype)
+    down_bias_opt = None if down_bias is None else down_bias.detach().to(device=opt_device, dtype=opt_dtype)
+    rows = rows.to(device=opt_device, dtype=opt_dtype)
+
+    targets = F.linear(
+        act_fn(F.linear(rows, gate_weight_opt, gate_bias_opt)) * F.linear(rows, up_weight_opt, up_bias_opt),
+        down_weight_opt,
+        down_bias_opt,
+    )
+    train_count = min(rows.shape[0], max(1, int(train_rows)))
+    val_count = min(max(1, int(val_rows)), max(1, rows.shape[0] - train_count))
+    inputs_train = rows[:train_count]
+    targets_train = targets[:train_count]
+    inputs_val = rows[-val_count:]
+    targets_val = targets[-val_count:]
+
+    if inputs_train.numel() == 0 or targets_train.numel() == 0:
+        raise ValueError("ParoQuant optimization requires non-empty training activations.")
+
+    gate_pairs, gate_theta_mask = build_random_rotation_buffers(
+        in_features=gate_weight_opt.shape[1],
+        group_size=gate_group_size,
+        krot=krot,
+        pair_ratio=pair_ratio,
+        seed=seed,
+        device=opt_device,
+    )
+    up_pairs, up_theta_mask = build_random_rotation_buffers(
+        in_features=up_weight_opt.shape[1],
+        group_size=up_group_size,
+        krot=krot,
+        pair_ratio=pair_ratio,
+        seed=seed + 1,
+        device=opt_device,
+    )
+    down_pairs, down_theta_mask = build_random_rotation_buffers(
+        in_features=down_weight_opt.shape[1],
+        group_size=down_group_size,
+        krot=krot,
+        pair_ratio=pair_ratio,
+        seed=seed + 2,
+        device=opt_device,
+    )
+
+    model = _ParoQuantOptimLlamaMLPBlock(
+        gate_weight=gate_weight_opt,
+        gate_bias=gate_bias_opt,
+        up_weight=up_weight_opt,
+        up_bias=up_bias_opt,
+        down_weight=down_weight_opt,
+        down_bias=down_bias_opt,
+        bits=bits,
+        gate_group_size=gate_group_size,
+        up_group_size=up_group_size,
+        down_group_size=down_group_size,
+        sym=sym,
+        gate_pairs=gate_pairs,
+        gate_theta_mask=gate_theta_mask,
+        up_pairs=up_pairs,
+        up_theta_mask=up_theta_mask,
+        down_pairs=down_pairs,
+        down_theta_mask=down_theta_mask,
+        activation_fn=act_fn,
+        fused_rotation=fused_rotation,
+    ).to(device=opt_device, dtype=opt_dtype)
+    model.reset_masked_angles()
+
+    train_loss, val_loss = _run_stage(
+        model=model,
+        inputs_train=inputs_train,
+        targets_train=targets_train,
+        inputs_val=inputs_val,
+        targets_val=targets_val,
+        param_groups=[
+            {"params": [model.gate_proj.channel_scales_opt], "lr": rotation_lr},
+            {"params": [model.gate_proj.theta], "lr": rotation_lr},
+            {"params": [model.up_proj.channel_scales_opt], "lr": rotation_lr},
+            {"params": [model.up_proj.theta], "lr": rotation_lr},
+            {"params": [model.down_proj.channel_scales_opt], "lr": rotation_lr},
+            {"params": [model.down_proj.theta], "lr": rotation_lr},
+        ],
+        epochs=rotation_epochs,
+        batch_size=batch_size,
+    )
+
+    model.init_quantizers()
+    train_loss, val_loss = _run_stage(
+        model=model,
+        inputs_train=inputs_train,
+        targets_train=targets_train,
+        inputs_val=inputs_val,
+        targets_val=targets_val,
+        param_groups=[
+            {"params": [model.gate_proj.weight], "lr": weight_lr},
+            {"params": model.gate_proj.quantizer.optim_params(), "lr": quantizer_lr},
+            {"params": [model.up_proj.weight], "lr": weight_lr},
+            {"params": model.up_proj.quantizer.optim_params(), "lr": quantizer_lr},
+            {"params": [model.down_proj.weight], "lr": weight_lr},
+            {"params": model.down_proj.quantizer.optim_params(), "lr": quantizer_lr},
+        ],
+        epochs=finetune_epochs,
+        batch_size=batch_size,
+    )
+
+    return ParoQuantBlockOptimizationResult(
+        module_results={
+            "mlp.gate_proj": _result_from_model(
+                model.gate_proj,
+                train_loss=train_loss,
+                val_loss=val_loss,
+                used_identity=False,
+            ),
+            "mlp.up_proj": _result_from_model(
+                model.up_proj,
+                train_loss=train_loss,
+                val_loss=val_loss,
+                used_identity=False,
+            ),
+            "mlp.down_proj": _result_from_model(
+                model.down_proj,
+                train_loss=train_loss,
+                val_loss=val_loss,
+                used_identity=False,
+            ),
+        },
         train_loss=float(train_loss),
         val_loss=float(val_loss),
         used_identity=False,
@@ -793,8 +1163,10 @@ def optimize_paroquant_linear(
 
 
 __all__ = [
+    "ParoQuantBlockOptimizationResult",
     "ParoQuantOptimizationResult",
     "build_random_rotation_buffers",
+    "optimize_paroquant_llama_mlp_block",
     "optimize_paroquant_linear",
     "pseudo_quantize_dequant",
 ]

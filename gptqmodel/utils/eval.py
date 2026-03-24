@@ -726,16 +726,29 @@ def _build_evalution_session_from_model(*, evalution: Any, engine: Any, model_co
         or getattr(getattr(inner_model, "config", None), "attn_implementation", None)
         or engine.attn_implementation
     )
+    prepare_tokenizer = _clone_prepare_tokenizer(
+        tokenizer=tokenizer,
+        model_config=model_config,
+        trust_remote_code=trust_remote_code,
+    )
+    requested_padding_side = getattr(engine, "padding_side", None)
+    if requested_padding_side:
+        for tok in (tokenizer, prepare_tokenizer):
+            if tok is None:
+                continue
+            if getattr(tok, "padding_side", None) != requested_padding_side:
+                tok.padding_side = requested_padding_side
+            if getattr(tok, "pad_token_id", None) is None:
+                eos_token_id = getattr(tok, "eos_token_id", None)
+                if eos_token_id is not None:
+                    tok.pad_token_id = eos_token_id
+
     session = TransformersCompatSession(
         config=engine,
         model_config=model_config,
         model=inner_model,
         tokenizer=tokenizer,
-        prepare_tokenizer=_clone_prepare_tokenizer(
-            tokenizer=tokenizer,
-            model_config=model_config,
-            trust_remote_code=trust_remote_code,
-        ),
+        prepare_tokenizer=prepare_tokenizer,
         input_device=_resolve_input_device(inner_model, prefer=engine.device),
         requested_attn_implementation=requested_attn,
         effective_attn_implementation=requested_attn,

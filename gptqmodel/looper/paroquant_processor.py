@@ -40,7 +40,8 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
-from ..quantization.paroquant.optimization import optimize_paroquant_linear
+from ..quantization.paroquant.optimization import optimize_paroquant_linear, optimize_paroquant_llama_mlp_block
+from ..utils.env import env_flag
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, move_to, pack_module
@@ -153,6 +154,18 @@ class ParoQuantProcessor(LoopProcessor):
                 self.tasks[module_name] = entry
             entry.setdefault("inputs", []).append(feature)
 
+    def _ensure_task_bucket(self, module_name: str, layer_index: int) -> None:
+        """Reset repeated relative module names when quantization advances to a new layer."""
+        with self.lock:
+            entry = self.tasks.get(module_name)
+            if entry is None or entry.get("layer_index") != layer_index:
+                self.tasks[module_name] = {
+                    "inputs": [],
+                    "layer_index": layer_index,
+                }
+                return
+            entry.setdefault("inputs", [])
+
     def _layer_input_features(self, state: _ParoQuantLayerState) -> Dict[str, torch.Tensor]:
         """Materialize concatenated calibration features for all modules in a layer."""
         features: Dict[str, torch.Tensor] = {}
@@ -186,6 +199,173 @@ class ParoQuantProcessor(LoopProcessor):
             )
         return weight
 
+    def _apply_optimization_result(self, module: NamedModule, result, original_weight: torch.Tensor) -> None:
+        """Store one optimization result into the wrapped module and its scratch state."""
+        weight = self._module_weight_matrix(module)
+        pseudo_weight = result.pseudo_weight.to(device=weight.device, dtype=weight.dtype)
+        pack_weight = result.pack_weight.to(dtype=weight.dtype).cpu()
+        q_scales = result.q_scales.to(dtype=weight.dtype).cpu()
+        q_zeros = result.q_zeros.cpu()
+        pairs = result.pairs.to(dtype=torch.int16).cpu()
+        theta = result.theta.to(dtype=weight.dtype).cpu()
+        channel_scales = result.channel_scales.to(dtype=weight.dtype).cpu()
+
+        with self.lock:
+            module.state.update(
+                {
+                    "pack_weight": pack_weight,
+                    "q_scales": q_scales,
+                    "q_zeros": q_zeros,
+                    "pairs": pairs,
+                    "theta": theta,
+                    "channel_scales": channel_scales,
+                }
+            )
+
+        if self.calculate_w_wq_diff:
+            if original_weight.dtype == torch.float16:
+                w_wq_diff = original_weight - pseudo_weight
+            else:
+                w_wq_diff = original_weight.to(dtype=torch.float32) - pseudo_weight.to(dtype=torch.float32)
+            with self.lock:
+                module.state["w_wq_diff"] = w_wq_diff
+
+        module.weight.data = pseudo_weight
+
+    def _log_quant_result(self, module: NamedModule, feat: torch.Tensor, val_loss: float, duration: float) -> None:
+        """Append one quantization log row using the same format as other processors."""
+        stat = {
+            PROCESS_LOG_NAME: self.name(),
+            PROCESS_LOG_LAYER: module.layer_index,
+            PROCESS_LOG_MODULE: module.name,
+            MODULE_FEATURE_COLUMN: self.module_feature_summary(module),
+            DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(module),
+            QUANT_LOG_LOSS: f"{val_loss:.10f}",
+            QUANT_LOG_NSAMPLES: f"{0 if feat.numel() == 0 else feat.reshape(-1, feat.shape[-1]).shape[0]}",
+            PROCESS_LOG_TIME: f"{duration:.3f}",
+            PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
+        }
+
+        with self.lock:
+            self.durations.append(duration)
+            self.avg_losses.append(val_loss)
+            self.module_names.append(f"layer-{module.layer_index}-{module.name}")
+            self.log.append(stat)
+
+        self.log_new_row(stat)
+
+    @staticmethod
+    def _llama_mlp_block_modules(state: _ParoQuantLayerState) -> Optional[Dict[str, NamedModule]]:
+        """Return the three coupled Llama MLP projections when the layer matches that pattern."""
+        required = ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
+        if any(name not in state.modules for name in required):
+            return None
+
+        modules = {name: state.modules[name] for name in required}
+        layer_module = next(
+            (named_module.state.get("layer_module") for named_module in modules.values() if named_module.state.get("layer_module")),
+            None,
+        )
+        if layer_module is None or type(layer_module).__name__ != "LlamaDecoderLayer":
+            return None
+
+        mlp_module = getattr(layer_module, "mlp", None)
+        if mlp_module is None or type(mlp_module).__name__ != "LlamaMLP":
+            return None
+        if not callable(getattr(mlp_module, "act_fn", None)):
+            return None
+
+        expected_modules = {
+            "mlp.gate_proj": getattr(mlp_module, "gate_proj", None),
+            "mlp.up_proj": getattr(mlp_module, "up_proj", None),
+            "mlp.down_proj": getattr(mlp_module, "down_proj", None),
+        }
+        if any(named_module.module is not expected_modules[name] for name, named_module in modules.items()):
+            return None
+
+        return modules
+
+    @staticmethod
+    def _llama_mlp_block_input(input_feat: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Use the shared MLP input captured at gate/up as the block replay input."""
+        gate_inputs = input_feat.get("mlp.gate_proj")
+        if gate_inputs is not None and gate_inputs.numel() > 0:
+            return gate_inputs
+        up_inputs = input_feat.get("mlp.up_proj")
+        if up_inputs is not None and up_inputs.numel() > 0:
+            return up_inputs
+        return torch.empty(0)
+
+    def _quantize_llama_mlp_block(
+        self,
+        block_modules: Dict[str, NamedModule],
+        input_feat: Dict[str, torch.Tensor],
+    ) -> Optional[Tuple[float, torch.Tensor]]:
+        """Optimize a Llama MLP trio jointly when all config and structure checks match."""
+        configs = {
+            name: self._module_quant_params(named_module.full_name)
+            for name, named_module in block_modules.items()
+        }
+        base_config = configs["mlp.gate_proj"]
+        if any(config != base_config for config in configs.values()):
+            return None
+
+        gate_module = block_modules["mlp.gate_proj"]
+        up_module = block_modules["mlp.up_proj"]
+        down_module = block_modules["mlp.down_proj"]
+        bits, group_size, sym = base_config
+
+        gate_weight = self._module_weight_matrix(gate_module)
+        up_weight = self._module_weight_matrix(up_module)
+        down_weight = self._module_weight_matrix(down_module)
+        gate_bias = gate_module.bias.data if getattr(gate_module, "bias", None) is not None else None
+        up_bias = up_module.bias.data if getattr(up_module, "bias", None) is not None else None
+        down_bias = down_module.bias.data if getattr(down_module, "bias", None) is not None else None
+        block_inputs = self._llama_mlp_block_input(input_feat)
+        if block_inputs.numel() == 0:
+            block_inputs = torch.empty((0, gate_weight.shape[1]), dtype=gate_weight.dtype, device=gate_weight.device)
+
+        layer_module = (
+            gate_module.state.get("layer_module")
+            or up_module.state.get("layer_module")
+            or down_module.state.get("layer_module")
+        )
+        original_weights = {
+            name: self._module_weight_matrix(named_module).detach().clone()
+            for name, named_module in block_modules.items()
+        }
+
+        with torch.inference_mode(False), torch.enable_grad():
+            result = optimize_paroquant_llama_mlp_block(
+                gate_weight=gate_weight,
+                gate_bias=gate_bias,
+                up_weight=up_weight,
+                up_bias=up_bias,
+                down_weight=down_weight,
+                down_bias=down_bias,
+                inputs=block_inputs,
+                bits=bits,
+                group_size=group_size,
+                sym=sym,
+                krot=self.qcfg.krot,
+                pair_ratio=self.qcfg.opt_pair_ratio,
+                train_rows=self.qcfg.opt_train_samples,
+                val_rows=self.qcfg.opt_validation_samples,
+                batch_size=self.qcfg.opt_batch_size,
+                rotation_epochs=self.qcfg.opt_rotation_epochs,
+                finetune_epochs=self.qcfg.opt_finetune_epochs,
+                rotation_lr=self.qcfg.opt_rotation_lr,
+                weight_lr=self.qcfg.opt_weight_lr,
+                quantizer_lr=self.qcfg.opt_quantizer_lr,
+                seed=self.qcfg.opt_seed + gate_module.layer_index + hash(f"{gate_module.full_name}:llama_mlp_block"),
+                activation_fn=layer_module.mlp.act_fn,
+                fused_rotation=self.qcfg.opt_fused_rotation,
+            )
+
+        for name, named_module in block_modules.items():
+            self._apply_optimization_result(named_module, result.module_results[name], original_weights[name])
+        return result.val_loss, block_inputs
+
     def _quantize_one_module(
         self,
         module: NamedModule,
@@ -218,37 +398,10 @@ class ParoQuantProcessor(LoopProcessor):
                 weight_lr=self.qcfg.opt_weight_lr,
                 quantizer_lr=self.qcfg.opt_quantizer_lr,
                 seed=self.qcfg.opt_seed + module.layer_index + hash(module.full_name),
+                fused_rotation=self.qcfg.opt_fused_rotation,
             )
 
-        pseudo_weight = result.pseudo_weight.to(device=weight.device, dtype=weight.dtype)
-        pack_weight = result.pack_weight.to(dtype=weight.dtype).cpu()
-        q_scales = result.q_scales.to(dtype=weight.dtype).cpu()
-        q_zeros = result.q_zeros.cpu()
-        pairs = result.pairs.to(dtype=torch.int16).cpu()
-        theta = result.theta.to(dtype=weight.dtype).cpu()
-        channel_scales = result.channel_scales.to(dtype=weight.dtype).cpu()
-
-        with self.lock:
-            module.state.update(
-                {
-                    "pack_weight": pack_weight,
-                    "q_scales": q_scales,
-                    "q_zeros": q_zeros,
-                    "pairs": pairs,
-                    "theta": theta,
-                    "channel_scales": channel_scales,
-                }
-            )
-
-        if self.calculate_w_wq_diff:
-            if original_weight.dtype == torch.float16:
-                w_wq_diff = original_weight - pseudo_weight
-            else:
-                w_wq_diff = original_weight.to(dtype=torch.float32) - pseudo_weight.to(dtype=torch.float32)
-            with self.lock:
-                module.state["w_wq_diff"] = w_wq_diff
-
-        module.weight.data = pseudo_weight
+        self._apply_optimization_result(module, result, original_weight)
         return result.train_loss, result.val_loss
 
     def _quantize_layer(self, layer_index: int, state: _ParoQuantLayerState) -> None:
@@ -263,36 +416,43 @@ class ParoQuantProcessor(LoopProcessor):
                     f"ParoQuantProcessor error: missing activation features for `{module_name}` with fallback disabled."
                 )
 
+        handled_modules: Set[str] = set()
+        enable_llama_mlp_block = env_flag("GPTQMODEL_PAROQUANT_ENABLE_LLAMA_MLP_BLOCK", default=False)
+        block_modules = self._llama_mlp_block_modules(state) if enable_llama_mlp_block else None
+        if block_modules is not None:
+            block_start = time.perf_counter()
+            block_result = self._quantize_llama_mlp_block(block_modules, input_feat)
+            if block_result is not None:
+                block_val_loss, block_inputs = block_result
+                block_duration = time.perf_counter() - block_start
+                split_duration = block_duration / float(len(block_modules))
+                for named_module in block_modules.values():
+                    self._log_quant_result(
+                        named_module,
+                        block_inputs,
+                        block_val_loss,
+                        split_duration,
+                    )
+                handled_modules.update(block_modules.keys())
+
         for module_name, named_module in list(state.modules.items()):
+            if module_name in handled_modules:
+                continue
             feat = input_feat.get(module_name)
             if feat is None:
                 feat = torch.empty(0)
 
             start = time.perf_counter()
-            train_loss, val_loss = self._quantize_one_module(named_module, feat)
+            _train_loss, val_loss = self._quantize_one_module(named_module, feat)
             duration = time.perf_counter() - start
-
-            stat = {
-                PROCESS_LOG_NAME: self.name(),
-                PROCESS_LOG_LAYER: named_module.layer_index,
-                PROCESS_LOG_MODULE: named_module.name,
-                MODULE_FEATURE_COLUMN: self.module_feature_summary(named_module),
-                DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(named_module),
-                QUANT_LOG_LOSS: f"{val_loss:.10f}",
-                QUANT_LOG_NSAMPLES: f"{0 if feat.numel() == 0 else feat.reshape(-1, feat.shape[-1]).shape[0]}",
-                PROCESS_LOG_TIME: f"{duration:.3f}",
-                PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
-            }
-
-            with self.lock:
-                self.durations.append(duration)
-                self.avg_losses.append(val_loss)
-                self.module_names.append(f"layer-{named_module.layer_index}-{named_module.name}")
-                self.log.append(stat)
-
-            self.log_new_row(stat)
+            self._log_quant_result(named_module, feat, val_loss, duration)
 
         state.quantized = True
+        with self.lock:
+            for module_name in list(state.modules):
+                entry = self.tasks.get(module_name)
+                if entry is not None and entry.get("layer_index") == layer_index:
+                    entry["inputs"] = []
         state.modules.clear()
         state.pending_modules.clear()
         state.processed_subsets.clear()
@@ -309,12 +469,7 @@ class ParoQuantProcessor(LoopProcessor):
             layer_state.modules[module.name] = module
             layer_state.pending_modules.add(module.name)
 
-        with self.lock:
-            entry = self.tasks.get(module.name)
-            if entry is None:
-                self.tasks[module.name] = {"inputs": []}
-            else:
-                entry.setdefault("inputs", [])
+        self._ensure_task_bucket(module.name, module.layer_index)
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Report whether a module has been excluded from ParoQuant processing."""

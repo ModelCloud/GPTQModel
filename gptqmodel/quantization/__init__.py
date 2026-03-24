@@ -28,6 +28,7 @@ from .config import (
                      GPTAQConfig,
                      GPTQQuantizeConfig,
                      HessianConfig,
+                     ParoQuantizeConfig,
                      ParoQuantQuantizeConfig,
                      PreFilterCode,
                      PreFilterQuantizeConfig,

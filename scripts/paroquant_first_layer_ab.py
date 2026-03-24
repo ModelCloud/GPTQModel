@@ -20,9 +20,10 @@ from gptqmodel.utils.paroquant_benchmark import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Benchmark first-layer-only ParoQuant on Llama-3.2-1B-Instruct and evaluate GSM8K Platinum."
+        description="Benchmark first-N-layer ParoQuant on Llama-3.2-1B-Instruct and evaluate GSM8K Platinum."
     )
     parser.add_argument("--model", default="/monster/data/model/Llama-3.2-1B-Instruct")
+    parser.add_argument("--quant-layers", type=int, default=1, help="Quantize the first N decoder layers.")
     parser.add_argument("--calibration-rows", type=int, default=64)
     parser.add_argument("--calibration-concat-size", type=int, default=2048)
     parser.add_argument("--quant-batch-size", type=int, default=1)
@@ -68,6 +69,7 @@ def main() -> int:
 
     quant_case = run_paroquant_first_layer_case(
         model_path=args.model,
+        num_quant_layers=args.quant_layers,
         calibration_rows=args.calibration_rows,
         calibration_concat_size=args.calibration_concat_size,
         quant_batch_size=args.quant_batch_size,
@@ -81,7 +83,9 @@ def main() -> int:
         opt_validation_samples=args.opt_validation_samples,
         opt_batch_size=args.opt_batch_size,
     )
-    quant_case["label"] = "paroquant_first_layer"
+    quant_case["label"] = (
+        "paroquant_first_layer" if args.quant_layers == 1 else f"paroquant_first_{args.quant_layers}_layers"
+    )
 
     if args.output_json is not None:
         write_case_json(quant_case, args.output_json)
