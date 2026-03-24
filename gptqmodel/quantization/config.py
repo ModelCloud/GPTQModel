@@ -2818,8 +2818,8 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_seed: int = field(default=0)
     opt_fused_rotation: bool = field(default=True)
     opt_enable_llama_mlp_block: bool = field(default=False)
-    opt_stage_impl: str = field(default="gptqmodel")
-    opt_pair_impl: str = field(default="gptqmodel")
+    opt_stage_impl: str = field(default="fast")
+    opt_pair_impl: str = field(default="fast")
     opt_quantizer_impl: str = field(default="fast")
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
@@ -2863,10 +2863,10 @@ class ParoQuantizeConfig(QuantizeConfig):
             raise ValueError("ParoQuantizeConfig: optimization learning rates must be positive.")
         if not (0.0 < self.opt_pair_ratio <= 0.5):
             raise ValueError("ParoQuantizeConfig: `opt_pair_ratio` must be in the interval (0, 0.5].")
-        if self.opt_stage_impl not in {"gptqmodel", "reference"}:
-            raise ValueError("ParoQuantizeConfig: `opt_stage_impl` must be one of {'gptqmodel', 'reference'}.")
-        if self.opt_pair_impl not in {"gptqmodel", "reference"}:
-            raise ValueError("ParoQuantizeConfig: `opt_pair_impl` must be one of {'gptqmodel', 'reference'}.")
+        if self.opt_stage_impl not in {"fast", "reference"}:
+            raise ValueError("ParoQuantizeConfig: `opt_stage_impl` must be one of {'fast', 'reference'}.")
+        if self.opt_pair_impl not in {"fast", "reference"}:
+            raise ValueError("ParoQuantizeConfig: `opt_pair_impl` must be one of {'fast', 'reference'}.")
         if self.opt_quantizer_impl not in {"fast", "reference"}:
             raise ValueError("ParoQuantizeConfig: `opt_quantizer_impl` must be one of {'fast', 'reference'}.")
 

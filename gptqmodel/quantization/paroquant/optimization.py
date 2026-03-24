@@ -30,7 +30,7 @@ from torch import nn
 from ...utils.env import env_flag
 from ...utils.paroquant import apply_paroquant_rotation_autograd, build_identity_rotation_buffers
 
-_PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("gptqmodel", "reference")
+_PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
 
 
@@ -1166,8 +1166,8 @@ def optimize_paroquant_linear(
     quantizer_lr: float,
     seed: int,
     fused_rotation: Optional[bool] = None,
-    stage_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
-    pair_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
+    stage_impl: Literal["fast", "reference"] = "fast",
+    pair_impl: Literal["fast", "reference"] = "fast",
     quantizer_impl: Literal["fast", "reference"] = "fast",
 ) -> ParoQuantOptimizationResult:
     """Optimize one linear layer following the paper's two-stage PTQ schedule."""
@@ -1302,8 +1302,8 @@ def optimize_paroquant_llama_mlp_block(
     seed: int,
     activation_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     fused_rotation: Optional[bool] = None,
-    stage_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
-    pair_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
+    stage_impl: Literal["fast", "reference"] = "fast",
+    pair_impl: Literal["fast", "reference"] = "fast",
     quantizer_impl: Literal["fast", "reference"] = "fast",
 ) -> ParoQuantBlockOptimizationResult:
     """Optimize a Llama gated MLP jointly using the true block output loss."""
