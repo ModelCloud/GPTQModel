@@ -8,9 +8,30 @@ import contextlib
 import threading
 
 import torch
+from .torch import TORCH_GTE_210
 
 
 _GLOBAL_WARMUP_LOCK = threading.Lock()
+
+
+def _get_cuda_preferred_linalg_library():
+    preferred = getattr(torch.backends.cuda, "preferred_linalg_library", None)
+    if preferred is None:
+        return None
+    if callable(preferred):
+        return preferred()
+    return preferred
+
+
+def _set_cuda_preferred_linalg_library(backend) -> bool:
+    preferred = getattr(torch.backends.cuda, "preferred_linalg_library", None)
+    if preferred is None:
+        return False
+    if callable(preferred):
+        preferred(backend=backend)
+        return True
+    setattr(torch.backends.cuda, "preferred_linalg_library", backend)
+    return True
 
 
 def _make_spd(size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -64,19 +85,18 @@ def run_torch_linalg_warmup(device: torch.device) -> None:
             _run_qr(device, dtype)
 
         if device.type == "cuda" and hasattr(torch.backends, "cuda"):
-            preferred = getattr(torch.backends.cuda, "preferred_linalg_library", None)
-            if callable(preferred):
-                current = preferred()
+            current = _get_cuda_preferred_linalg_library()
+            if current is not None and not TORCH_GTE_210:
                 # Core warmup already ran using the currently preferred backend above.
                 # Some installations fall back to MAGMA when the primary solver is unavailable,
                 # so we pre-initialize MAGMA as well when it differs from the preferred backend.
                 if current and current != "magma":
                     with contextlib.suppress(Exception):
-                        torch.backends.cuda.preferred_linalg_library(backend="magma")
+                        _set_cuda_preferred_linalg_library("magma")
                         _run_cholesky_and_eigh(device, torch.float32)
                 if current:
                     with contextlib.suppress(Exception):
-                        torch.backends.cuda.preferred_linalg_library(backend=current)
+                        _set_cuda_preferred_linalg_library(current)
 
 
 __all__ = ["run_torch_linalg_warmup"]
