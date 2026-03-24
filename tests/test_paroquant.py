@@ -7,6 +7,7 @@
 
 """Unit tests for ParoQuant config, optimizer, and lifecycle invariants."""
 
+import sys
 import threading
 
 import pytest
@@ -268,7 +269,7 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required to validate the ParoQuant AWQ bf16 kernel path.")
 
-    import gptqmodel.nn_modules.qlinear.paroquant as paroquant_module
+    paroquant_module = sys.modules[ParoQuantQuantLinear.__module__]
 
     module = ParoQuantQuantLinear(
         bits=4,
