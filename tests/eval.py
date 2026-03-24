@@ -6,18 +6,15 @@ from __future__ import annotations
 
 import importlib
 import json
-import os
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 from tabulate import tabulate
 
-from .backend import BACKEND
+from gptqmodel.utils.backend import BACKEND
 
 
-_EVALUTION_ROOT = Path(os.environ.get("GPTQMODEL_EVALUTION_PATH", "/root/Evalution")).expanduser()
 _MMLU_LOCAL_DATASET = Path("/monster/data/model/dataset/hails-mmlu_no_train")
 _GSM8K_LOCAL_DATASET = Path("/monster/data/model/dataset/gsm8k")
 _ENGINE_OPTION_KEYS = {
@@ -57,17 +54,10 @@ def import_evalution():
     try:
         return importlib.import_module("evalution")
     except ModuleNotFoundError:
-        if _EVALUTION_ROOT.exists():
-            root = str(_EVALUTION_ROOT)
-            if root not in sys.path:
-                sys.path.insert(0, root)
-        try:
-            return importlib.import_module("evalution")
-        except ModuleNotFoundError as exc:
-            raise ValueError(
-                "Evalution is required for evaluation. "
-                f"Expected a local checkout at `{_EVALUTION_ROOT}` or an installed `Evalution` package."
-            ) from exc
+        raise ValueError(
+            "Evalution is required for evaluation. "
+            "Install the `Evalution` package before running evaluation."
+        ) from None
 
 
 def list_supported_tasks() -> tuple[str, ...]:

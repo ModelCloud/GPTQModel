@@ -11,7 +11,7 @@ from models.model_test import ModelTest  # noqa: E402
 from parameterized import parameterized  # noqa: E402
 
 from gptqmodel import GPTQModel  # noqa: E402
-from gptqmodel.utils.eval import evaluate, get_eval_task_metrics  # noqa: E402
+from tests.eval import evaluate, get_eval_task_metrics  # noqa: E402
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"

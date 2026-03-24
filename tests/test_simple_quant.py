@@ -11,7 +11,7 @@ from logbar import LogBar
 
 from gptqmodel import GPTAQConfig, GPTQModel, QuantizeConfig
 from gptqmodel.quantization import FORMAT
-from gptqmodel.utils.eval import evaluate, format_eval_result_table, get_eval_task_metrics
+from tests.eval import evaluate, format_eval_result_table, get_eval_task_metrics
 
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]

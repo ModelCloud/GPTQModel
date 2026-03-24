@@ -19,7 +19,6 @@ from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonQuantLi
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.eval import evaluate, format_eval_result_table, get_eval_task_results
 
 
 _NM_CALIBRATION_PATH = "/monster/data/model/dataset/nm-calibration"
@@ -254,6 +253,18 @@ def _suite_kwargs(
     return merged or None
 
 
+def _load_eval_helpers():
+    try:
+        from tests.eval import evaluate, format_eval_result_table, get_eval_task_results
+    except Exception as exc:  # pragma: no cover - depends on test environment layout
+        raise ModuleNotFoundError(
+            "Evaluation helpers are now located in `tests/eval.py`. "
+            "Import this module from a test checkout when running ParoQuant benchmarks."
+        ) from exc
+
+    return evaluate, format_eval_result_table, get_eval_task_results
+
+
 def _run_evalution_path_eval(
     *,
     model_or_id_or_path: Any,
@@ -270,6 +281,7 @@ def _run_evalution_path_eval(
         model_args["dtype"] = normalized_dtype
     if eval_model_args:
         model_args.update(eval_model_args)
+    evaluate, _, _ = _load_eval_helpers()
     wall_start = time.perf_counter()
     eval_result = evaluate(
         model_or_id_or_path=model_or_id_or_path,
@@ -311,6 +323,7 @@ def run_dense_eval(
         eval_max_rows=eval_max_rows,
         model_dtype=normalized_dtype,
     )
+    _, format_eval_result_table, get_eval_task_results = _load_eval_helpers()
     metrics = get_eval_task_results(eval_result)
     formatted = format_eval_result_table(eval_result)
     return {
@@ -613,6 +626,7 @@ def _run_paroquant_case(
                 eval_model_args=eval_model_args,
                 eval_suite_kwargs=eval_suite_kwargs,
             )
+            _, format_eval_result_table, get_eval_task_results = _load_eval_helpers()
 
         result = {
             "mode": "paroquant_prefix_layers",

@@ -15,7 +15,7 @@ import gptqmodel
 from tabulate import tabulate
 from gptqmodel import GPTQModel
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.utils.eval import (
+from tests.eval import (
     evaluate,
     get_eval_task_results,
     list_supported_tasks,
