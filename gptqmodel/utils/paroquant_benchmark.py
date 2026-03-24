@@ -805,14 +805,7 @@ def comparison_rows(*cases: dict[str, Any]) -> list[list[str]]:
     for case in cases:
         metric = case.get("metrics") or case.get("eval_metrics") or {}
         gsm8k = metric.get("gsm8k_platinum_cot", {})
-        score = gsm8k.get("exact_match,flexible-extract")
-        if score is None and gsm8k:
-            for candidate_key in ("acc,num", "acc", "exact_match"):
-                if candidate_key in gsm8k:
-                    score = gsm8k[candidate_key]
-                    break
-            if score is None:
-                score = next(iter(gsm8k.values()))
+        score = gsm8k.get("acc,num")
         label = case.get("label") or case.get("mode", "")
         rows.append(
             [

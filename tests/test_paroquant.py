@@ -52,6 +52,7 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.quant_method == METHOD.PAROQUANT
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
+    assert cfg.opt_enable_llama_mlp_block is False
     assert cfg.export_quant_method() == METHOD.PAROQUANT
 
 
@@ -75,6 +76,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_pair_ratio": 0.5,
                 "opt_seed": 0,
                 "opt_fused_rotation": False,
+                "opt_enable_llama_mlp_block": True,
             },
         }
     )
@@ -95,7 +97,9 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_pair_ratio == 0.5
     assert cfg.opt_seed == 0
     assert cfg.opt_fused_rotation is False
+    assert cfg.opt_enable_llama_mlp_block is True
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
+    assert cfg.to_dict()["meta"]["opt_enable_llama_mlp_block"] is True
 
 
 def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch):
@@ -217,6 +221,25 @@ def test_paroquant_processor_resets_reused_module_buckets_per_layer():
     processor._ensure_task_bucket("mlp.gate_proj", layer_index=1)
     assert processor.tasks["mlp.gate_proj"]["layer_index"] == 1
     assert processor.tasks["mlp.gate_proj"]["inputs"] == []
+
+
+def test_paroquant_llama_mlp_block_toggle_uses_config_default_with_env_override(monkeypatch):
+    """Guard that config controls default and env remains an explicit override."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoQuantizeConfig(bits=4, group_size=128, sym=True, opt_enable_llama_mlp_block=False)
+
+    monkeypatch.delenv("GPTQMODEL_PAROQUANT_ENABLE_LLAMA_MLP_BLOCK", raising=False)
+    assert processor._enable_llama_mlp_block() is False
+
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ENABLE_LLAMA_MLP_BLOCK", "1")
+    assert processor._enable_llama_mlp_block() is True
+
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ENABLE_LLAMA_MLP_BLOCK", "0")
+    assert processor._enable_llama_mlp_block() is False
+
+    processor.qcfg = ParoQuantizeConfig(bits=4, group_size=128, sym=True, opt_enable_llama_mlp_block=True)
+    monkeypatch.delenv("GPTQMODEL_PAROQUANT_ENABLE_LLAMA_MLP_BLOCK", raising=False)
+    assert processor._enable_llama_mlp_block() is True
 
 
 def test_paroquant_quant_device_selection_forces_single_gpu():

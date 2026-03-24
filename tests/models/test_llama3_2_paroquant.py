@@ -60,7 +60,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.34325889164598844,
                 "floor_pct": 0.04,
             },

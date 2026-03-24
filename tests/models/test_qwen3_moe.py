@@ -49,7 +49,7 @@ class TestQwen3Moe(ModelTest):
         ######################################################################
         "gsm8k_platinum_cot": {
             "chat_template": False,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.9380,
                 "floor_pct": 0.04,
             },

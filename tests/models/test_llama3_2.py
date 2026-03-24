@@ -23,7 +23,7 @@ class TestLlama3_2(ModelTest):
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.3987,
                 "floor_pct": 0.04,
             },

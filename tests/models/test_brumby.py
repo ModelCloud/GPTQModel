@@ -20,7 +20,7 @@ class TestBrumby(ModelTest):
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.87,
                 "floor_pct": 0.05,
                 "ceil_pct": 0.10,
@@ -28,7 +28,7 @@ class TestBrumby(ModelTest):
         },
         "gsm8k_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.88,
                 "floor_pct": 0.05,
                 "ceil_pct": 0.10,

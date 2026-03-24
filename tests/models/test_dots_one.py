@@ -21,7 +21,7 @@ class TestDotsOne(ModelTest):
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.1944,
                 "floor_pct": 0.04,
             },

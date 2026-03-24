@@ -23,7 +23,7 @@ from gptqmodel.quantization.config import WeightOnlyConfig
 # |----------------------------------------------------|-----------|
 # | arc_challenge :: acc,none                          |    0.3191 |
 # | arc_challenge :: acc_norm,none                     |    0.3498 |
-# | gsm8k_platinum_cot :: exact_match,flexible-extract |    0.4756 |
+# | gsm8k_platinum_cot :: acc,num |    0.4756 |
 # | gsm8k_platinum_cot :: exact_match,strict-match     |    0.4458 |
 # | mmlu_stem :: acc,none                              |    0.4085 |
 class TestLlama3_2_FP8(ModelTest):
@@ -33,7 +33,7 @@ class TestLlama3_2_FP8(ModelTest):
     EVAL_TASKS = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.4756,
                 "floor_pct": 0.04,
             },

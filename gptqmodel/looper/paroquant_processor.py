@@ -417,7 +417,7 @@ class ParoQuantProcessor(LoopProcessor):
                 )
 
         handled_modules: Set[str] = set()
-        enable_llama_mlp_block = env_flag("GPTQMODEL_PAROQUANT_ENABLE_LLAMA_MLP_BLOCK", default=False)
+        enable_llama_mlp_block = self._enable_llama_mlp_block()
         block_modules = self._llama_mlp_block_modules(state) if enable_llama_mlp_block else None
         if block_modules is not None:
             block_start = time.perf_counter()
@@ -457,6 +457,11 @@ class ParoQuantProcessor(LoopProcessor):
         state.pending_modules.clear()
         state.processed_subsets.clear()
         state.subset_total = None
+
+    def _enable_llama_mlp_block(self) -> bool:
+        """Resolve joint Llama MLP block optimization toggle from config with env override."""
+        config_default = bool(getattr(self.qcfg, "opt_enable_llama_mlp_block", False))
+        return env_flag("GPTQMODEL_PAROQUANT_ENABLE_LLAMA_MLP_BLOCK", default=config_default)
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Register a module for later activation capture and deferred quantization."""

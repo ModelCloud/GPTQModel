@@ -70,10 +70,7 @@ def _score(case: dict) -> float | None:
     gsm = metric.get("gsm8k_platinum_cot", {})
     if not isinstance(gsm, dict):
         return None
-    for key in ("acc,num", "exact_match,flexible-extract", "acc", "exact_match"):
-        if key in gsm:
-            return float(gsm[key])
-    return None
+    return float(gsm["acc,num"]) if "acc,num" in gsm else None
 
 
 def main() -> int:

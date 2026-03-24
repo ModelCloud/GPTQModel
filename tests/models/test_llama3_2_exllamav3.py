@@ -23,7 +23,7 @@ from gptqmodel.quantization import FORMAT, METHOD
 # |----------------------------------------------------|------------|
 # | arc_challenge :: acc,none                          |     0.3174 |
 # | arc_challenge :: acc_norm,none                     |     0.3456 |
-# | gsm8k_platinum_cot :: exact_match,flexible-extract |     0.4715 |
+# | gsm8k_platinum_cot :: acc,num |     0.4715 |
 # | gsm8k_platinum_cot :: exact_match,strict-match     |     0.4218 |
 # | mmlu_stem :: acc,none                              |     0.3977 |
 class TestLlama3_2_ExllamaV3(ModelTest):
@@ -33,7 +33,7 @@ class TestLlama3_2_ExllamaV3(ModelTest):
     EVAL_TASKS = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.4715,
                 "floor_pct": 0.04,
             },

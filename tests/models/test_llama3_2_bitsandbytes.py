@@ -34,7 +34,7 @@ class TestLlama3_2_BitsAndBytes(ModelTest):
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.36,
                 "floor_pct": 0.04,
             },

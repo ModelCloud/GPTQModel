@@ -24,7 +24,7 @@ class TestMarin(ModelTest):
         },
         "gsm8k_platinum_cot": {
             "chat_template": False,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.6716294458229942,
                 "floor_pct": 0.04,
             },

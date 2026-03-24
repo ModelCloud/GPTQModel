@@ -2475,6 +2475,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_pair_ratio": "opt_pair_ratio",
             "opt_seed": "opt_seed",
             "opt_fused_rotation": "opt_fused_rotation",
+            "opt_enable_llama_mlp_block": "opt_enable_llama_mlp_block",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -2813,6 +2814,7 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_pair_ratio: float = field(default=0.5)
     opt_seed: int = field(default=0)
     opt_fused_rotation: bool = field(default=True)
+    opt_enable_llama_mlp_block: bool = field(default=False)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.PAROQUANT,)
@@ -2841,6 +2843,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_pair_ratio = float(self.opt_pair_ratio)
         self.opt_seed = int(self.opt_seed)
         self.opt_fused_rotation = bool(self.opt_fused_rotation)
+        self.opt_enable_llama_mlp_block = bool(self.opt_enable_llama_mlp_block)
         if self.opt_rotation_epochs < 0 or self.opt_finetune_epochs < 0:
             raise ValueError("ParoQuantizeConfig: optimization epochs must be non-negative.")
         if self.opt_train_samples <= 0 or self.opt_validation_samples <= 0:
@@ -2869,6 +2872,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_pair_ratio"] = self.opt_pair_ratio
         meta_payload["opt_seed"] = self.opt_seed
         meta_payload["opt_fused_rotation"] = self.opt_fused_rotation
+        meta_payload["opt_enable_llama_mlp_block"] = self.opt_enable_llama_mlp_block
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym

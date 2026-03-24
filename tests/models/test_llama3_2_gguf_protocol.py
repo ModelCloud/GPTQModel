@@ -78,7 +78,7 @@ class _BaseLlama3_2GGUFProtocol(ModelTest):
     EVAL_TASKS = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.4690,
                 "floor_pct": 0.05,
                 "ceil_pct": 0.05,

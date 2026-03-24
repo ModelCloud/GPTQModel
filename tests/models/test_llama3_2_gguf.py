@@ -19,7 +19,7 @@ class TestLlama3_2_GGUF(ModelTest):
     EVAL_TASKS = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.3871,
                 "floor_pct": 0.04,
                 "ceil_pct": 0.04,

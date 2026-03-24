@@ -20,7 +20,7 @@ class TestQwen2_5(ModelTest):
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.2963,
                 "floor_pct": 0.04,
             },
@@ -36,7 +36,7 @@ class TestQwen2_5(ModelTest):
     EVAL_TASKS_FAST = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.38626964433416044,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,

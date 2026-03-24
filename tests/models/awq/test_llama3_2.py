@@ -33,7 +33,7 @@ class TestLlama3_2_awq(ModelTest):
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.34987593052109184,
                 "floor_pct": 0.04,
             },
@@ -61,7 +61,7 @@ class TestLlama3_2_awq(ModelTest):
     EVAL_TASKS_FAST = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.4532671629445823,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
