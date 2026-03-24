@@ -922,7 +922,7 @@ def optimize_paroquant_linear(
     ).to(device=opt_device, dtype=opt_dtype)
     model.reset_masked_angles()
 
-    train_loss, val_loss = _run_stage(
+    _, _ = _run_stage(
         model=model,
         inputs_train=inputs_train,
         targets_train=targets_train,

@@ -225,6 +225,7 @@ def run_evalution(
         try:
             engine_payload["execution"] = session.describe_execution()
         except Exception:
+            # Best-effort metadata only; evaluation should continue if unavailable.
             pass
 
         result = evalution.RunResult(
@@ -684,6 +685,7 @@ def _normalize_dtype_name(dtype: Any) -> str | None:
         if dtype in mapping:
             return mapping[dtype]
     except ImportError:
+        # torch is optional here; fall back to returning str(dtype) below.
         pass
     return str(dtype)
 
