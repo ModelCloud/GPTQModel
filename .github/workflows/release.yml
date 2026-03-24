@@ -86,8 +86,9 @@ jobs:
       image: modelcloud/gptqmodel:alpine-ci-v1
     outputs:
       ip: ${{ steps.get_ip.outputs.ip }}
-      task_list: ${{ steps.assign.outputs.task_list }}
+      matrix: ${{ steps.build_matrix.outputs.matrix }}
       max-parallel: ${{ steps.get_ip.outputs.max-parallel }}
+      run_id: ${{ steps.get_ip.outputs.run_id }}
     if: ${{ inputs.github_vm == false }}
     steps:
       - name: Checkout Codes
@@ -109,210 +110,29 @@ jobs:
         run: |
           echo "ip=${RUNNER}" >> "$GITHUB_OUTPUT"
           echo "GPU_IP=${RUNNER}" >> $GITHUB_ENV
+          echo "run_id=${{ github.run_id }}" >> "$GITHUB_OUTPUT"
           echo "ip: $ip"
           max_p=${{ github.event.inputs.max-parallel }}
           max_p="{\"size\": ${max_p:-10}}"
           echo "max-parallel=$max_p" >> "$GITHUB_OUTPUT"
           echo "max-parallel=$max_p"
+
+      - name: Generate release matrix
+        id: build_matrix
+        run: |
+          matrix=$(python .github/scripts/generate_release_matrix.py)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix"
   release:
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJson(needs.check-vm.outputs.max-parallel).size || 10 }}
-      matrix:
-        include:
-          # pytorch 2.10
-          # cuda 13
-          - cuda: 130
-            torch: 2.10.0
-            python: 314
-          - cuda: 130
-            torch: 2.10.0
-            python: 314t
-          - cuda: 130
-            torch: 2.10.0
-            python: 313t
-          - cuda: 130
-            torch: 2.10.0
-            python: 313
-          - cuda: 130
-            torch: 2.10.0
-            python: 312
-          - cuda: 130
-            torch: 2.10.0
-            python: 311
-          - cuda: 130
-            torch: 2.10.0
-            python: 310
-          # cuda 128
-          - cuda: 128
-            torch: 2.10.0
-            python: 314t
-          - cuda: 128
-            torch: 2.10.0
-            python: 314
-          - cuda: 128
-            torch: 2.10.0
-            python: 313t
-          - cuda: 128
-            torch: 2.10.0
-            python: 313
-          - cuda: 128
-            torch: 2.10.0
-            python: 312
-          - cuda: 128
-            torch: 2.10.0
-            python: 311
-          - cuda: 128
-            torch: 2.10.0
-            python: 310
-          # cuda 126
-          - cuda: 126
-            torch: 2.10.0
-            python: 314t
-          - cuda: 126
-            torch: 2.10.0
-            python: 314
-          - cuda: 126
-            torch: 2.10.0
-            python: 313t
-          - cuda: 126
-            torch: 2.10.0
-            python: 313
-          - cuda: 126
-            torch: 2.10.0
-            python: 312
-          - cuda: 126
-            torch: 2.10.0
-            python: 311
-          - cuda: 126
-            torch: 2.10.0
-            python: 310
-
-          # pytorch 2.9
-          # cuda 13
-          - cuda: 130
-            torch: 2.9.0
-            python: 314
-          - cuda: 130
-            torch: 2.9.0
-            python: 314t
-          - cuda: 130
-            torch: 2.9.0
-            python: 313t
-          - cuda: 130
-            torch: 2.9.0
-            python: 313
-          - cuda: 130
-            torch: 2.9.0
-            python: 312
-          - cuda: 130
-            torch: 2.9.0
-            python: 311
-          - cuda: 130
-            torch: 2.9.0
-            python: 310
-          # cuda 128
-          - cuda: 128
-            torch: 2.9.0
-            python: 314t
-          - cuda: 128
-            torch: 2.9.0
-            python: 314
-          - cuda: 128
-            torch: 2.9.0
-            python: 313t
-          - cuda: 128
-            torch: 2.9.0
-            python: 313
-          - cuda: 128
-            torch: 2.9.0
-            python: 312
-          - cuda: 128
-            torch: 2.9.0
-            python: 311
-          - cuda: 128
-            torch: 2.9.0
-            python: 310
-          # cuda 126
-          - cuda: 126
-            torch: 2.9.0
-            python: 314t
-          - cuda: 126
-            torch: 2.9.0
-            python: 314
-          - cuda: 126
-            torch: 2.9.0
-            python: 313t
-          - cuda: 126
-            torch: 2.9.0
-            python: 313
-          - cuda: 126
-            torch: 2.9.0
-            python: 312
-          - cuda: 126
-            torch: 2.9.0
-            python: 311
-          - cuda: 126
-            torch: 2.9.0
-            python: 310
-
-          # not support yet, maybe later
-          # pytorch 2.8
-          # cuda 13
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 314
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 313t
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 313
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 312
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 311
-          # - cuda: 130
-          #   torch: 2.8.0
-          #   python: 310
-          # cuda 128
-          - cuda: 128
-            torch: 2.8.0
-            python: 313t
-          - cuda: 128
-            torch: 2.8.0
-            python: 313
-          - cuda: 128
-            torch: 2.8.0
-            python: 312
-          - cuda: 128
-            torch: 2.8.0
-            python: 311
-          - cuda: 128
-            torch: 2.8.0
-            python: 310
-          - cuda: 126
-            torch: 2.8.0
-            python: 313t
-          - cuda: 126
-            torch: 2.8.0
-            python: 313
-          - cuda: 126
-            torch: 2.8.0
-            python: 312
-          - cuda: 126
-            torch: 2.8.0
-            python: 311
-          - cuda: 126
-            torch: 2.8.0
-            python: 310
+      matrix: ${{ fromJson(needs.check-vm.outputs.matrix) }}
     runs-on: [ self-hosted, xeon5 ]
     needs:
       - check-vm
     container:
-      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_0206
+      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_0324
       volumes:
         - /monster/ci/env/entrypoint.sh:/entrypoint.sh
         - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
@@ -471,7 +291,7 @@ jobs:
     needs:
       - check-vm
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_0206
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_0324
       volumes:
         - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
         - /monster/ci/uv:/opt/uv
