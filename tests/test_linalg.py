@@ -14,6 +14,7 @@ import unittest  # noqa: E402
 import torch  # noqa: E402
 from logbar import LogBar  # noqa: E402
 from parameterized import parameterized  # noqa: E402
+
 from gptqmodel.utils.torch import TORCH_GTE_210
 
 
