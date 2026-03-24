@@ -52,9 +52,9 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.quant_method == METHOD.PAROQUANT
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
-    assert cfg.opt_stage_impl == "fast"
+    assert cfg.opt_stage_impl == "reference"
     assert cfg.opt_pair_impl == "fast"
-    assert cfg.opt_quantizer_impl == "fast"
+    assert cfg.opt_quantizer_impl == "reference"
     assert cfg.opt_enable_llama_mlp_block is False
     assert cfg.export_quant_method() == METHOD.PAROQUANT
 
@@ -80,9 +80,9 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_seed": 0,
                 "opt_fused_rotation": False,
                 "opt_enable_llama_mlp_block": True,
-                "opt_stage_impl": "fast",
+                "opt_stage_impl": "reference",
                 "opt_pair_impl": "fast",
-                "opt_quantizer_impl": "fast",
+                "opt_quantizer_impl": "reference",
             },
         }
     )
@@ -104,14 +104,14 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_seed == 0
     assert cfg.opt_fused_rotation is False
     assert cfg.opt_enable_llama_mlp_block is True
-    assert cfg.opt_stage_impl == "fast"
+    assert cfg.opt_stage_impl == "reference"
     assert cfg.opt_pair_impl == "fast"
-    assert cfg.opt_quantizer_impl == "fast"
+    assert cfg.opt_quantizer_impl == "reference"
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
     assert cfg.to_dict()["meta"]["opt_enable_llama_mlp_block"] is True
-    assert cfg.to_dict()["meta"]["opt_stage_impl"] == "fast"
+    assert cfg.to_dict()["meta"]["opt_stage_impl"] == "reference"
     assert cfg.to_dict()["meta"]["opt_pair_impl"] == "fast"
-    assert cfg.to_dict()["meta"]["opt_quantizer_impl"] == "fast"
+    assert cfg.to_dict()["meta"]["opt_quantizer_impl"] == "reference"
 
 
 def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch):

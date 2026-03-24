@@ -2818,9 +2818,9 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_seed: int = field(default=0)
     opt_fused_rotation: bool = field(default=True)
     opt_enable_llama_mlp_block: bool = field(default=False)
-    opt_stage_impl: str = field(default="fast")
+    opt_stage_impl: str = field(default="reference")
     opt_pair_impl: str = field(default="fast")
-    opt_quantizer_impl: str = field(default="fast")
+    opt_quantizer_impl: str = field(default="reference")
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.PAROQUANT,)
