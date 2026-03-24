@@ -244,24 +244,32 @@ def _prepare_eval_tokenizer(model) -> None:
             tokenizer.pad_token_id = eos_token_id
 
 
-def _suite_kwargs(max_rows: Optional[int]) -> dict[str, Any] | None:
-    if max_rows is None:
-        return None
-    return {"max_rows": int(max_rows)}
+def _suite_kwargs(
+    max_rows: Optional[int],
+    suite_kwargs: Optional[dict[str, Any]] = None,
+) -> dict[str, Any] | None:
+    merged = dict(suite_kwargs or {})
+    if max_rows is not None:
+        merged["max_rows"] = int(max_rows)
+    return merged or None
 
 
 def _run_evalution_path_eval(
     *,
     model_or_id_or_path: Any,
-    eval_batch_size: int,
+    eval_batch_size: int | str,
     eval_max_rows: Optional[int],
     model_dtype: Any = None,
     backend: BACKEND | str | None = None,
+    eval_model_args: Optional[dict[str, Any]] = None,
+    eval_suite_kwargs: Optional[dict[str, Any]] = None,
 ) -> tuple[dict[str, Any], float]:
     model_args = {"padding_side": "left"}
     normalized_dtype = _normalize_model_dtype(model_dtype)
     if normalized_dtype is not None:
         model_args["dtype"] = normalized_dtype
+    if eval_model_args:
+        model_args.update(eval_model_args)
     wall_start = time.perf_counter()
     eval_result = evaluate(
         model_or_id_or_path=model_or_id_or_path,
@@ -270,7 +278,7 @@ def _run_evalution_path_eval(
         batch_size=eval_batch_size,
         model_args=model_args,
         apply_chat_template=True,
-        suite_kwargs=_suite_kwargs(eval_max_rows),
+        suite_kwargs=_suite_kwargs(eval_max_rows, eval_suite_kwargs),
     )
     return eval_result, time.perf_counter() - wall_start
 
@@ -537,8 +545,10 @@ def _run_paroquant_case(
     calibration_rows: int,
     calibration_concat_size: int,
     quant_batch_size: int,
-    eval_batch_size: int,
+    eval_batch_size: int | str,
     eval_max_rows: Optional[int],
+    eval_model_args: Optional[dict[str, Any]],
+    eval_suite_kwargs: Optional[dict[str, Any]],
     sym: bool,
     fused_opt_rotation: bool,
     opt_rotation_epochs: int,
@@ -600,6 +610,8 @@ def _run_paroquant_case(
                 eval_max_rows=eval_max_rows,
                 model_dtype=normalized_dtype,
                 backend=eval_backend,
+                eval_model_args=eval_model_args,
+                eval_suite_kwargs=eval_suite_kwargs,
             )
 
         result = {
@@ -634,8 +646,10 @@ def run_paroquant_first_layer_case(
     calibration_rows: int = 64,
     calibration_concat_size: int = 2048,
     quant_batch_size: int = 1,
-    eval_batch_size: int = 64,
+    eval_batch_size: int | str = 64,
     eval_max_rows: Optional[int] = None,
+    eval_model_args: Optional[dict[str, Any]] = None,
+    eval_suite_kwargs: Optional[dict[str, Any]] = None,
     sym: bool = True,
     fused_opt_rotation: bool = True,
     opt_rotation_epochs: int = 10,
@@ -664,6 +678,8 @@ def run_paroquant_first_layer_case(
         quant_batch_size=quant_batch_size,
         eval_batch_size=eval_batch_size,
         eval_max_rows=eval_max_rows,
+        eval_model_args=eval_model_args,
+        eval_suite_kwargs=eval_suite_kwargs,
         sym=sym,
         fused_opt_rotation=fused_opt_rotation,
         opt_rotation_epochs=opt_rotation_epochs,
@@ -689,8 +705,10 @@ def run_paroquant_single_module_case(
     calibration_rows: int = 64,
     calibration_concat_size: int = 2048,
     quant_batch_size: int = 1,
-    eval_batch_size: int = 64,
+    eval_batch_size: int | str = 64,
     eval_max_rows: Optional[int] = None,
+    eval_model_args: Optional[dict[str, Any]] = None,
+    eval_suite_kwargs: Optional[dict[str, Any]] = None,
     sym: bool = True,
     fused_opt_rotation: bool = True,
     opt_rotation_epochs: int = 10,
@@ -709,6 +727,8 @@ def run_paroquant_single_module_case(
         quant_batch_size=quant_batch_size,
         eval_batch_size=eval_batch_size,
         eval_max_rows=eval_max_rows,
+        eval_model_args=eval_model_args,
+        eval_suite_kwargs=eval_suite_kwargs,
         sym=sym,
         fused_opt_rotation=fused_opt_rotation,
         opt_rotation_epochs=opt_rotation_epochs,
@@ -728,8 +748,10 @@ def run_paroquant_selected_modules_case(
     calibration_rows: int = 64,
     calibration_concat_size: int = 2048,
     quant_batch_size: int = 1,
-    eval_batch_size: int = 64,
+    eval_batch_size: int | str = 64,
     eval_max_rows: Optional[int] = None,
+    eval_model_args: Optional[dict[str, Any]] = None,
+    eval_suite_kwargs: Optional[dict[str, Any]] = None,
     sym: bool = True,
     fused_opt_rotation: bool = True,
     opt_rotation_epochs: int = 10,
@@ -758,6 +780,8 @@ def run_paroquant_selected_modules_case(
         quant_batch_size=quant_batch_size,
         eval_batch_size=eval_batch_size,
         eval_max_rows=eval_max_rows,
+        eval_model_args=eval_model_args,
+        eval_suite_kwargs=eval_suite_kwargs,
         sym=sym,
         fused_opt_rotation=fused_opt_rotation,
         opt_rotation_epochs=opt_rotation_epochs,
