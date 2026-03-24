@@ -46,6 +46,11 @@ def version_key(version: str) -> tuple[int, int, int, int]:
     return tuple(int(match.group(name) or 0) for name in ("major", "minor", "patch", "post"))
 
 
+def major_minor_key(version: str) -> tuple[int, int]:
+    major, minor, _, _ = version_key(version)
+    return major, minor
+
+
 def python_key(python_version: str) -> tuple[int, int]:
     free_threaded = python_version.endswith("t")
     base = int(python_version[:-1] if free_threaded else python_version)
@@ -82,6 +87,16 @@ def collect_version_list(wheel_names: list[str]) -> list[str]:
         if match:
             versions.add(match.group("torch_version"))
     return sorted(versions, key=version_key, reverse=True)
+
+
+def collapse_versions_by_major_minor(versions: list[str]) -> list[str]:
+    selected: dict[tuple[int, int], str] = {}
+    for version in versions:
+        key = major_minor_key(version)
+        current = selected.get(key)
+        if current is None or version_key(version) < version_key(current):
+            selected[key] = version
+    return sorted(selected.values(), key=version_key, reverse=True)
 
 
 def parse_release_builds(wheel_names: list[str]) -> list[ReleaseBuild]:
@@ -131,6 +146,11 @@ def filter_release_builds(
             continue
         filtered.append(build)
 
+    allowed_versions = set(
+        collapse_versions_by_major_minor(sorted({build.torch for build in filtered}, key=version_key))
+    )
+    filtered = [build for build in filtered if build.torch in allowed_versions]
+
     return sorted(
         filtered,
         key=lambda build: (version_key(build.torch), build.cuda, python_key(build.python)),
@@ -159,6 +179,7 @@ def build_debug_report(
         "source_url": source_url,
         "wheel_name_count": len(wheel_names),
         "version_list": collect_version_list(wheel_names),
+        "collapsed_version_list": collapse_versions_by_major_minor(collect_version_list(wheel_names)),
         "parsed_release_build_count": len(parsed_builds),
         "parsed_release_build_count_by_torch": count_builds_by_torch(parsed_builds),
         "filtered_release_build_count": len(filtered_builds),
