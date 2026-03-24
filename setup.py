@@ -15,6 +15,7 @@ from packaging.version import Version
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
 
+
 if Version(setuptools.__version__) < Version("78.1.1"):
     raise RuntimeError(
         f"\033[31mYour setuptools version (`{setuptools.__version__}`) is too old and incompatible.\n"

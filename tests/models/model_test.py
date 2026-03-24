@@ -78,12 +78,12 @@ from gptqmodel.quantization.config import (  # noqa: E402
     GPTAQConfig,
     HessianConfig,
     MoEConfig,
+    ParoQuantQuantizeConfig,
     QuantizeConfig,
     RTNQuantizeConfig,
     VramStrategy,
     WeightOnlyConfig,
     resolve_quant_format,
-    ParoQuantQuantizeConfig,
 )
 from gptqmodel.utils.eval import (  # noqa: E402
     evaluate,
