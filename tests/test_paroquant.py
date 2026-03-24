@@ -246,6 +246,62 @@ def test_paroquant_kernel_rejects_sym_false():
     assert "actual sym = `False`" in str(err)
 
 
+def test_paroquant_kernel_accepts_bf16():
+    """Guard that saved ParoQuant checkpoints can be reloaded for bf16 inference."""
+    ok, err = ParoQuantQuantLinear.validate(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=128,
+        pack_dtype=torch.int32,
+        dtype=torch.bfloat16,
+    )
+
+    assert ok
+    assert err is None
+
+
+def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
+    """Guard that the CUDA AWQ fast path does not silently downcast bf16 inputs."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant AWQ bf16 kernel path.")
+
+    import gptqmodel.nn_modules.qlinear.paroquant as paroquant_module
+
+    module = ParoQuantQuantLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda")
+    module.scales.fill_(1)
+
+    seen = {}
+
+    def fake_awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum=True):
+        del qweight, qzeros, split_k_iters, fp32_accum
+        seen["input_dtype"] = input.dtype
+        seen["scales_dtype"] = scales.dtype
+        return torch.zeros((input.shape[0], module.out_features), device=input.device, dtype=input.dtype)
+
+    monkeypatch.setattr(paroquant_module, "awq_ext", object())
+    monkeypatch.setattr(paroquant_module, "_awq_cuda_gemm_forward", fake_awq_cuda_gemm_forward)
+
+    x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
+    out = module._forward_cuda_awq_kernel(x)
+
+    assert seen["input_dtype"] == torch.bfloat16
+    assert seen["scales_dtype"] == torch.bfloat16
+    assert out is not None
+    assert out.dtype == torch.bfloat16
+
+
 def test_paroquant_optimizer_improves_over_identity_quantization():
     """Guard that learned rotations beat naive identity-domain quantization."""
     in_features = 128

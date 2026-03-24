@@ -18,12 +18,41 @@ from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.eval import EVAL, evaluate, format_eval_result_table, get_eval_task_results
 
 
 _NM_CALIBRATION_PATH = "/monster/data/model/dataset/nm-calibration"
 _NM_CALIBRATION_PARQUET = Path("/monster/data/model/dataset/nm-calibration/llm.parquet")
 _DEFAULT_MODEL = "/monster/data/model/Llama-3.2-1B-Instruct"
+
+
+def _normalize_model_dtype(model_dtype: Any) -> torch.dtype | str | None:
+    if model_dtype is None:
+        return None
+    if isinstance(model_dtype, str):
+        normalized = model_dtype.strip().lower()
+        mapping = {
+            "fp16": torch.float16,
+            "float16": torch.float16,
+            "half": torch.float16,
+            "bf16": torch.bfloat16,
+            "bfloat16": torch.bfloat16,
+            "fp32": torch.float32,
+            "float32": torch.float32,
+        }
+        return mapping.get(normalized, model_dtype)
+    return model_dtype
+
+
+def _dtype_label(model_dtype: Any) -> str:
+    normalized = _normalize_model_dtype(model_dtype)
+    mapping = {
+        torch.float16: "fp16",
+        torch.bfloat16: "bf16",
+        torch.float32: "fp32",
+    }
+    return mapping.get(normalized, str(normalized))
 
 
 def _visible_cuda_device_name() -> str:
@@ -226,14 +255,21 @@ def _run_evalution_path_eval(
     model_or_id_or_path: Any,
     eval_batch_size: int,
     eval_max_rows: Optional[int],
+    model_dtype: Any = None,
+    backend: BACKEND | str | None = None,
 ) -> tuple[dict[str, Any], float]:
+    model_args = {"padding_side": "left"}
+    normalized_dtype = _normalize_model_dtype(model_dtype)
+    if normalized_dtype is not None:
+        model_args["dtype"] = normalized_dtype
     wall_start = time.perf_counter()
     eval_result = evaluate(
         model_or_id_or_path=model_or_id_or_path,
         tasks=[EVAL.LM_EVAL.GSM8K_PLATINUM_COT],
         framework=EVAL.LM_EVAL,
+        backend=backend,
         batch_size=eval_batch_size,
-        model_args={"padding_side": "left"},
+        model_args=model_args,
         apply_chat_template=True,
         suite_kwargs=_suite_kwargs(eval_max_rows),
     )
@@ -246,15 +282,33 @@ def run_fp16_eval(
     eval_batch_size: int = 64,
     eval_max_rows: Optional[int] = None,
 ) -> dict[str, Any]:
+    return run_dense_eval(
+        model_path=model_path,
+        model_dtype=torch.float16,
+        eval_batch_size=eval_batch_size,
+        eval_max_rows=eval_max_rows,
+    )
+
+
+def run_dense_eval(
+    *,
+    model_path: str = _DEFAULT_MODEL,
+    model_dtype: Any = torch.float16,
+    eval_batch_size: int = 64,
+    eval_max_rows: Optional[int] = None,
+) -> dict[str, Any]:
+    normalized_dtype = _normalize_model_dtype(model_dtype)
     eval_result, wall_s = _run_evalution_path_eval(
         model_or_id_or_path=model_path,
         eval_batch_size=eval_batch_size,
         eval_max_rows=eval_max_rows,
+        model_dtype=normalized_dtype,
     )
     metrics = get_eval_task_results(eval_result)
     formatted = format_eval_result_table(eval_result)
     return {
-        "mode": "fp16",
+        "mode": f"dense_{_dtype_label(normalized_dtype)}",
+        "dtype": _dtype_label(normalized_dtype),
         "eval_wall_s": wall_s,
         "metrics": metrics,
         "eval_table": formatted,
@@ -403,7 +457,7 @@ def benchmark_quantized_first_layer_kernels(
         x = captured.get(name)
         if x is None or x.numel() == 0:
             continue
-        x = x.to(device=module.qweight.device, dtype=torch.float16)
+        x = x.to(device=module.qweight.device, dtype=x.dtype)
         triton_module = _clone_triton_module(module)
         with torch.inference_mode():
             dense = _dense_forward(module, x)
@@ -480,6 +534,7 @@ def _run_paroquant_case(
     *,
     model_path: str,
     dynamic: dict[str, dict[str, Any]],
+    model_dtype: Any = torch.float16,
     calibration_rows: int,
     calibration_concat_size: int,
     quant_batch_size: int,
@@ -493,10 +548,13 @@ def _run_paroquant_case(
     opt_validation_samples: int,
     opt_batch_size: int,
     result_meta: Optional[dict[str, Any]] = None,
+    eval_backend: BACKEND | str | None = None,
+    run_kernel_bench: bool = True,
 ) -> dict[str, Any]:
     if sym is not True:
         raise ValueError("ParoQuant benchmark: `sym=False` is disabled; use `sym=True`.")
     os.environ["GPTQMODEL_PAROQUANT_OPT_FUSED_ROTATION"] = "1" if fused_opt_rotation else "0"
+    normalized_dtype = _normalize_model_dtype(model_dtype)
 
     calibration_dataset = load_nm_calibration(calibration_rows)
 
@@ -516,7 +574,7 @@ def _run_paroquant_case(
         model_path,
         quantize_config=qcfg,
         trust_remote_code=False,
-        dtype=torch.float16,
+        dtype=normalized_dtype,
     )
     _prepare_eval_tokenizer(model)
     try:
@@ -532,7 +590,7 @@ def _run_paroquant_case(
         if torch.cuda.is_available():
             model.model.to("cuda:0")
 
-        kernel_rows = benchmark_quantized_first_layer_kernels(model, calibration_dataset)
+        kernel_rows = benchmark_quantized_first_layer_kernels(model, calibration_dataset) if run_kernel_bench else []
         with tempfile.TemporaryDirectory(prefix="paroquant_evalution_") as temp_dir:
             save_start = time.perf_counter()
             model.save(temp_dir)
@@ -541,11 +599,14 @@ def _run_paroquant_case(
                 model_or_id_or_path=temp_dir,
                 eval_batch_size=eval_batch_size,
                 eval_max_rows=eval_max_rows,
+                model_dtype=normalized_dtype,
+                backend=eval_backend,
             )
 
         result = {
             "mode": "paroquant_prefix_layers",
             "device": _visible_cuda_device_name(),
+            "dtype": _dtype_label(normalized_dtype),
             "fused_opt_rotation": fused_opt_rotation,
             "sym": sym,
             "quant_wall_s": quant_wall_s,
@@ -570,6 +631,7 @@ def run_paroquant_first_layer_case(
     *,
     model_path: str = _DEFAULT_MODEL,
     num_quant_layers: int = 1,
+    model_dtype: Any = torch.float16,
     calibration_rows: int = 64,
     calibration_concat_size: int = 2048,
     quant_batch_size: int = 1,
@@ -583,11 +645,12 @@ def run_paroquant_first_layer_case(
     opt_validation_samples: int = 64,
     opt_batch_size: int = 16,
 ) -> dict[str, Any]:
+    normalized_dtype = _normalize_model_dtype(model_dtype)
     probe_model = GPTQModel.load(
         model_path,
         quantize_config=QuantizeConfig(method=METHOD.PAROQUANT, format=FORMAT.PAROQUANT),
         trust_remote_code=False,
-        dtype=torch.float16,
+        dtype=normalized_dtype,
         device_map=_single_gpu_device_map(),
     )
     dynamic = build_prefix_layer_dynamic(probe_model, num_quant_layers=num_quant_layers)
@@ -596,6 +659,7 @@ def run_paroquant_first_layer_case(
     return _run_paroquant_case(
         model_path=model_path,
         dynamic=dynamic,
+        model_dtype=normalized_dtype,
         calibration_rows=calibration_rows,
         calibration_concat_size=calibration_concat_size,
         quant_batch_size=quant_batch_size,
@@ -608,6 +672,8 @@ def run_paroquant_first_layer_case(
         opt_train_samples=opt_train_samples,
         opt_validation_samples=opt_validation_samples,
         opt_batch_size=opt_batch_size,
+        eval_backend=BACKEND.PAROQUANT_TRITON if normalized_dtype == torch.bfloat16 else None,
+        run_kernel_bench=normalized_dtype != torch.bfloat16,
         result_meta={
             "mode": "paroquant_prefix_layers",
             "num_quant_layers": int(num_quant_layers),
@@ -620,6 +686,7 @@ def run_paroquant_single_module_case(
     model_path: str = _DEFAULT_MODEL,
     layer_idx: int,
     module_name: str,
+    model_dtype: Any = torch.float16,
     calibration_rows: int = 64,
     calibration_concat_size: int = 2048,
     quant_batch_size: int = 1,
@@ -637,6 +704,7 @@ def run_paroquant_single_module_case(
         model_path=model_path,
         layer_idx=layer_idx,
         module_names=[module_name],
+        model_dtype=model_dtype,
         calibration_rows=calibration_rows,
         calibration_concat_size=calibration_concat_size,
         quant_batch_size=quant_batch_size,
@@ -657,6 +725,7 @@ def run_paroquant_selected_modules_case(
     model_path: str = _DEFAULT_MODEL,
     layer_idx: int,
     module_names: list[str] | tuple[str, ...],
+    model_dtype: Any = torch.float16,
     calibration_rows: int = 64,
     calibration_concat_size: int = 2048,
     quant_batch_size: int = 1,
@@ -670,11 +739,12 @@ def run_paroquant_selected_modules_case(
     opt_validation_samples: int = 64,
     opt_batch_size: int = 16,
 ) -> dict[str, Any]:
+    normalized_dtype = _normalize_model_dtype(model_dtype)
     probe_model = GPTQModel.load(
         model_path,
         quantize_config=QuantizeConfig(method=METHOD.PAROQUANT, format=FORMAT.PAROQUANT),
         trust_remote_code=False,
-        dtype=torch.float16,
+        dtype=normalized_dtype,
         device_map=_single_gpu_device_map(),
     )
     dynamic = build_selected_modules_dynamic(probe_model, layer_idx=layer_idx, module_names=module_names)
@@ -683,6 +753,7 @@ def run_paroquant_selected_modules_case(
     return _run_paroquant_case(
         model_path=model_path,
         dynamic=dynamic,
+        model_dtype=normalized_dtype,
         calibration_rows=calibration_rows,
         calibration_concat_size=calibration_concat_size,
         quant_batch_size=quant_batch_size,
@@ -695,6 +766,8 @@ def run_paroquant_selected_modules_case(
         opt_train_samples=opt_train_samples,
         opt_validation_samples=opt_validation_samples,
         opt_batch_size=opt_batch_size,
+        eval_backend=BACKEND.PAROQUANT_TRITON if normalized_dtype == torch.bfloat16 else None,
+        run_kernel_bench=normalized_dtype != torch.bfloat16,
         result_meta={
             "mode": "paroquant_selected_modules",
             "layer_idx": int(layer_idx),
