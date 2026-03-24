@@ -35,8 +35,10 @@ from ..models.writer import (
     PROCESS_LOG_MODULE,
     PROCESS_LOG_NAME,
     PROCESS_LOG_TIME,
+    PROCESS_USED_MEMORY,
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
+    QUANT_LOG_DAMP,
 )
 from ..nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
@@ -242,8 +244,10 @@ class ParoQuantProcessor(LoopProcessor):
             DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(module),
             QUANT_LOG_LOSS: f"{val_loss:.10f}",
             QUANT_LOG_NSAMPLES: f"{0 if feat.numel() == 0 else feat.reshape(-1, feat.shape[-1]).shape[0]}",
+            QUANT_LOG_DAMP: "",
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
+            PROCESS_USED_MEMORY: self.device_memory_report(),
         }
 
         with self.lock:
