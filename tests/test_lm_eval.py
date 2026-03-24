@@ -15,7 +15,7 @@ import unittest  # noqa: E402
 import pytest
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.utils.eval import EVAL, evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
+from gptqmodel.utils.eval import evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
 
 class TestLmEval(unittest.TestCase):
@@ -24,7 +24,7 @@ class TestLmEval(unittest.TestCase):
     def setUpClass(self):
         self.MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
         self.random_seed = 1234
-        self.task = EVAL.LM_EVAL.ARC_CHALLENGE
+        self.task = "arc_challenge"
 
         # self.acc_score = 0.3183
         # self.acc_norm_score = 0.3515

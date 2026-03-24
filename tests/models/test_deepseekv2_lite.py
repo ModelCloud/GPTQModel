@@ -5,9 +5,6 @@
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
-from gptqmodel.utils.eval import EVAL
-
-
 class TestDeepseekV2Lite(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/DeepSeek-Coder-V2-Lite-Instruct" # "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.4753
@@ -18,7 +15,7 @@ class TestDeepseekV2Lite(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
     TRUST_REMOTE_CODE = True
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},

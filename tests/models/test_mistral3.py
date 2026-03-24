@@ -5,9 +5,6 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
-
 class TestMistral3(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ministral-3-3B-Instruct-2512-BF16" # "mistralai/Ministral-3-3B-Instruct-2512-BF16"
     NATIVE_ARC_CHALLENGE_ACC = 0.4974
@@ -19,7 +16,7 @@ class TestMistral3(ModelTest):
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": False,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},

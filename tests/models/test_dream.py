@@ -5,13 +5,10 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
-
 class TestDream(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Dream-v0-Instruct-7B"
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.3567, "floor_pct": 0.36},
             "acc_norm": {"value": 0.3805, "floor_pct": 0.36},

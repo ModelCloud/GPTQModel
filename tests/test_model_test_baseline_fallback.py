@@ -9,9 +9,6 @@ from pathlib import Path
 import pytest
 
 from gptqmodel import BACKEND
-from gptqmodel.utils.eval import EVAL
-
-
 sys.path.insert(0, str(Path(__file__).resolve().parent / "models"))
 from model_test import ModelTest  # noqa: E402
 
@@ -20,7 +17,7 @@ class _BaselineFallbackHarness(ModelTest):
     NATIVE_MODEL_ID = "/tmp/native-model"
     LOAD_BACKEND = BACKEND.TORCH
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {
                 "value": 0.30,
                 "floor_pct": 0.05,

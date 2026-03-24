@@ -29,7 +29,7 @@ from tabulate import tabulate  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL, evaluate, format_eval_result_table  # noqa: E402
+from gptqmodel.utils.eval import evaluate, format_eval_result_table  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
@@ -52,8 +52,7 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
 
     bench_result = evaluate(
         model_or_id_or_path=model,
-        framework=EVAL.LM_EVAL,
-        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU_STEM],
+        tasks=["arc_challenge", "mmlu_stem"],
         batch_size=16,
     )
 
@@ -70,7 +69,7 @@ class Test(ModelTest):
 
 
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.3567, "floor_pct": 0.36},
             "acc_norm": {"value": 0.3805, "floor_pct": 0.36},
         },

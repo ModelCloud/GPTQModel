@@ -8,10 +8,6 @@ from pathlib import Path
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
-
-# Scores below were captured on gpu6/4090 in fast mode.
 # | Metric                                             |   MARLIN |
 # |----------------------------------------------------|----------|
 # | arc_challenge :: acc,none                          |   0.3166 |
@@ -24,21 +20,21 @@ class TestLlama3_2(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
             "exact_match,flexible-extract": {
                 "value": 0.3987,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.3860, # 0.3099 4096, 0.3270 2048
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.3234,  # 0.3294 4096, 0.3242 2048
@@ -51,7 +47,7 @@ class TestLlama3_2(ModelTest):
         },
     }
     EVAL_TASKS_FAST = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
             "evalution_use_model_path": True,
             "evalution_batch_size": "auto",
@@ -72,7 +68,7 @@ class TestLlama3_2(ModelTest):
                 "ceil_pct": 1.0,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.3942,
@@ -80,7 +76,7 @@ class TestLlama3_2(ModelTest):
                 "ceil_pct": 1.0,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.3166,

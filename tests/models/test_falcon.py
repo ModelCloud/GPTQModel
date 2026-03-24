@@ -6,15 +6,12 @@
 import torch  # noqa: E402
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
-
 class TestFalcon(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/falcon-7b-instruct" # "tiiuae/falcon-7b-instruct"
     TRUST_REMOTE_CODE = False
     TORCH_DTYPE = torch.float16
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.3993, "floor_pct": 0.52},
             "acc_norm": {"value": 0.4292, "floor_pct": 0.52},

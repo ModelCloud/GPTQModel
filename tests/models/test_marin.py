@@ -5,19 +5,16 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
-
 class TestMarin(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/marin-32b-base"
     # VRAM_STRATEGY = VramStrategy.BALANCED
     # Marin inherits Qwen3's backbone with QK-Norm attention.
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.5725, "floor_pct": 0.04},
             "acc_norm": {"value": 0.6007, "floor_pct": 0.04},
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "acc": {"value": 0.6670, "floor_pct": 0.04},
         },
     }

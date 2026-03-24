@@ -6,9 +6,6 @@
 from model_test import ModelTest
 
 from gptqmodel.quantization.config import FORMAT, METHOD
-from gptqmodel.utils.eval import EVAL
-
-
 class TestMarin(ModelTest):
     DATASET_SIZE = 1024
     GROUP_SIZE = 32
@@ -19,18 +16,18 @@ class TestMarin(ModelTest):
     # VRAM_STRATEGY = VramStrategy.BALANCED
     # Marin inherits Qwen3's backbone with QK-Norm attention.
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.5299, "floor_pct": 0.04},
             "acc_norm": {"value": 0.5546, "floor_pct": 0.04},
         },
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": False,
             "exact_match,flexible-extract": {
                 "value": 0.6716294458229942,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "acc": {"value": 0.6676, "floor_pct": 0.04},
         },
     }

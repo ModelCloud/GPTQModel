@@ -5,9 +5,6 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
-
 class TestMpt(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/mpt-7b-instruct" # "mosaicml/mpt-7b-instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.4275
@@ -20,7 +17,7 @@ class TestMpt(ModelTest):
     EVAL_BATCH_SIZE = 6
     USE_FLASH_ATTN = False
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": False,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},

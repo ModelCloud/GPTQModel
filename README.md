@@ -476,17 +476,12 @@ Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/b
 
 ### Evaluation and Quality Benchmarks
 
-GPTQModel evaluation is integrated into [Evalution](https://github.com/modelcloud/Evalution) and [evalplus](https://github.com/evalplus/evalplus)  
-We highly recommend avoiding `ppl` and using Evalution or `evalplus` to validate post-quantization model quality. `ppl` should only be used for regression tests and is not a good indicator of model output quality.  
+GPTQModel evaluation is integrated into [Evalution](https://github.com/modelcloud/Evalution).  
+We highly recommend avoiding `ppl` and using Evalution to validate post-quantization model quality. `ppl` should only be used for regression tests and is not a good indicator of model output quality.  
 
 ```
 # install Evalution
 pip install Evalution
-```
-
-```
-# gptqmodel is integrated into evalplus[main]
-pip install -U "evalplus @ git+https://github.com/evalplus/evalplus"
 ```
 
 Below is a basic sample using Evalution's `GPTQModel` engine directly.

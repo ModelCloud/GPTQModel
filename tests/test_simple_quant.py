@@ -11,7 +11,7 @@ from logbar import LogBar
 
 from gptqmodel import GPTAQConfig, GPTQModel, QuantizeConfig
 from gptqmodel.quantization import FORMAT
-from gptqmodel.utils.eval import EVAL, evaluate, format_eval_result_table, get_eval_task_metrics
+from gptqmodel.utils.eval import evaluate, format_eval_result_table, get_eval_task_metrics
 
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
@@ -83,7 +83,7 @@ def _run_simple_quant_eval():
     with tempfile.TemporaryDirectory() as tmp_dir:
         results = evaluate(
             QUANT_SAVE_PATH,
-            tasks=[EVAL.LM_EVAL.GSM8K_COT],  #, EVAL.LM_EVAL.GSM8K_PLATINUM_COT],
+            tasks=["gsm8k_cot"],  #, "gsm8k_platinum_cot"],
             apply_chat_template=True,
             random_seed=898,
             output_path=tmp_dir,
@@ -91,7 +91,7 @@ def _run_simple_quant_eval():
 
         print(format_eval_result_table(results))
 
-        metrics = get_eval_task_metrics(results, EVAL.LM_EVAL.GSM8K_COT)
+        metrics = get_eval_task_metrics(results, "gsm8k_cot")
         filtered_metrics = {
             metric: value
             for metric, value in metrics.items()

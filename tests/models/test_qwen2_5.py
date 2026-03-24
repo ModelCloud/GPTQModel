@@ -5,10 +5,6 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
-
-# | Metric                         |   MARLIN |
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.2961 |
 # | arc_challenge :: acc_norm,none |   0.3285 |
@@ -21,23 +17,23 @@ class TestQwen2_5(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
             "exact_match,flexible-extract": {
                 "value": 0.2963,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.2961, "floor_pct": 0.04},
             "acc_norm": {"value": 0.3285, "floor_pct": 0.04},
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "acc": {"value": 0.3942, "floor_pct": 0.04},
         },
     }
     EVAL_TASKS_FAST = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
             "exact_match,flexible-extract": {
                 "value": 0.38626964433416044,
@@ -45,7 +41,7 @@ class TestQwen2_5(ModelTest):
                 "ceil_pct": 1.0,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {
                 "value": 0.2977815699658703,
                 "floor_pct": 0.04,
@@ -57,7 +53,7 @@ class TestQwen2_5(ModelTest):
                 "ceil_pct": 1.0,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "acc": {
                 "value": 0.3967649857278782,
                 "floor_pct": 0.04,

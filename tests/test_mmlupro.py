@@ -6,8 +6,7 @@
 import tempfile
 import unittest
 
-from gptqmodel import GPTQModel
-from gptqmodel.utils.eval import EVAL, evaluate
+from gptqmodel.utils.eval import evaluate, get_eval_task_metrics
 
 
 # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -24,11 +23,11 @@ class TestMMLUPRO(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             result = evaluate(
                 self.MODEL_ID,
-                framework=EVAL.MMLU_PRO,
-                tasks=EVAL.MMLU_PRO.MATH,
-                output_path=tmp_dir,
+                tasks="mmlu_pro:math",
+                output_path=f"{tmp_dir}/result.json",
                 batch_size=2,
                 ntrain=1,
                 max_samples=2,
             )
-            self.assertIn("Average accuracy", result)
+            metrics = get_eval_task_metrics(result, "mmlu_pro:math")
+            self.assertTrue(metrics)

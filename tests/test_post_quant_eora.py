@@ -29,7 +29,7 @@ from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel  # noqa: E402
 from gptqmodel.adapter.adapter import Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL, evaluate  # noqa: E402
+from gptqmodel.utils.eval import evaluate  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
@@ -60,8 +60,7 @@ def bench(path: str, backend: BACKEND, adapter: Optional[Lora]):
 
     bench_result = evaluate(
         model_or_id_or_path=model,
-        framework=EVAL.LM_EVAL,
-        tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU_STEM]
+        tasks=["arc_challenge", "mmlu_stem"]
     )
 
     del model

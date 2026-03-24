@@ -1,7 +1,6 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from __future__ import annotations
 
@@ -10,20 +9,12 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Type, Union
+from typing import Any, Dict, Mapping, Optional
 
 from tabulate import tabulate
 
 from .backend import BACKEND
-from .evalplus import patch_evalplus
-
-
-try:
-    from enum import EnumType
-except ImportError:
-    EnumType = type(Enum)
 
 
 _EVALUTION_ROOT = Path(os.environ.get("GPTQMODEL_EVALUTION_PATH", "/root/Evalution")).expanduser()
@@ -45,115 +36,21 @@ _DROPPED_MODEL_ARG_KEYS = {
     "tokenizer",
 }
 
-
-class EVAL:
-    class LM_EVAL(str, Enum):
-        ARC_CHALLENGE = "arc_challenge"
-        GSM8K_COT = "gsm8k_cot"
-        GSM8K_PLATINUM_COT = "gsm8k_platinum_cot"
-        HELLASWAG = "hellaswag"
-        MMLU = "mmlu"
-        MMLU_STEM = "mmlu_stem"
-        GPQA = "gpqa"
-        ARC_EASY = "arc_easy"
-        BOOLQ = "boolq"
-        OPENBOOKQA = "openbookqa"
-
-    class EVALPLUS(str, Enum):
-        HUMAN = "humaneval"
-        MBPP = "mbpp"
-
-    class MMLU_PRO(str, Enum):
-        BIOLOGY = "biology"
-        BUSINESS = "business"
-        CHEMISTRY = "chemistry"
-        COMPUTER_SCIENCE = "computer science"
-        ECONOMICS = "economics"
-        ENGINEERING = "engineering"
-        HEALTH = "health"
-        HISTORY = "history"
-        LAW = "law"
-        MATH = "math"
-        OTHER = "other"
-        PHILOSOPHY = "philosophy"
-        PHYSICS = "physics"
-        PSYCHOLOGY = "psychology"
-
-    @classmethod
-    def get_tasks_for_framework(cls, framework: Union[str, Type[Enum]]) -> list:
-        if isinstance(framework, EnumType):
-            framework = framework.__name__
-
-        if not hasattr(cls, framework):
-            raise ValueError(f"No such EVAL framework: `{framework}`")
-
-        enum_class = getattr(cls, framework)
-        return list(enum_class)
-
-    @classmethod
-    def get_task_enums(cls):
-        task_lists = []
-        for name in dir(cls):
-            attr = getattr(cls, name)
-            if isinstance(attr, type) and issubclass(attr, Enum):
-                task_lists.extend(list(attr))
-        return task_lists
-
-    @classmethod
-    def get_full_name(cls, member):
-        return f"{cls.__name__}.{member.__class__.__name__}.{member.name}"
-
-    @classmethod
-    def get_all_tasks_string(cls):
-        full_names = []
-        for name in dir(cls):
-            attr = getattr(cls, name)
-            if isinstance(attr, type) and issubclass(attr, Enum):
-                full_names.extend(cls.get_full_name(member) for member in attr)
-        return ', '.join(full_names)
-
-    @classmethod
-    def get_task_groups_from_tasks(cls, tasks: Union[str, List[str]]) -> Dict[Type[Enum], List[str]]:
-        """Group tasks by their evaluation framework.
-
-        Args:
-            tasks: Either a single task name or list of task names
-
-        Returns:
-            Dictionary mapping framework enum classes to lists of tasks
-            Example: {EVAL.LM_EVAL: ["arc_challenge", "hellaswag"], EVAL.EVALPLUS: ["humaneval"]}
-
-        Raises:
-            ValueError: If any task doesn't match a known framework
-        """
-        if isinstance(tasks, str):
-            tasks = [tasks]
-
-        # Create a mapping of task values to their enum classes
-        task_to_framework = {}
-
-        # Populate the mapping for all frameworks
-        for framework in [cls.LM_EVAL, cls.EVALPLUS, cls.MMLU_PRO]:
-            for task in framework:
-                task_to_framework[task.value] = framework
-
-        # Group tasks by their framework
-        task_groups = {}
-        unknown_tasks = []
-
-        for task in tasks:
-            if task in task_to_framework:
-                framework = task_to_framework[task]
-                if framework not in task_groups:
-                    task_groups[framework] = []
-                task_groups[framework].append(task)
-            else:
-                unknown_tasks.append(task)
-
-        if unknown_tasks:
-            raise ValueError(f"Unknown tasks: {unknown_tasks}")
-
-        return task_groups
+DEFAULT_TASKS: tuple[str, ...] = ("arc_challenge",)
+SUPPORTED_TASKS: tuple[str, ...] = (
+    "arc_challenge",
+    "arc_easy",
+    "boolq",
+    "gsm8k_cot",
+    "gsm8k_platinum_cot",
+    "gpqa",
+    "hellaswag",
+    "mmlu",
+    "mmlu_pro",
+    "mmlu_pro:math",
+    "mmlu_stem",
+    "openbookqa",
+)
 
 
 def import_evalution():
@@ -168,9 +65,25 @@ def import_evalution():
             return importlib.import_module("evalution")
         except ModuleNotFoundError as exc:
             raise ValueError(
-                "Evalution is required for framework=EVAL.LM_EVAL. "
-                f"Expected a local checkout at `{_EVALUTION_ROOT}` or an installed `evalution` package."
+                "Evalution is required for evaluation. "
+                f"Expected a local checkout at `{_EVALUTION_ROOT}` or an installed `Evalution` package."
             ) from exc
+
+
+def list_supported_tasks() -> tuple[str, ...]:
+    return SUPPORTED_TASKS
+
+
+def normalize_eval_task_name(task: Any) -> str:
+    if task is None:
+        raise ValueError("Evaluation task identifier cannot be None")
+    if isinstance(task, str):
+        normalized = task.strip()
+    else:
+        normalized = str(task).strip()
+    if not normalized:
+        raise ValueError("Evaluation task identifier cannot be empty")
+    return normalized
 
 
 def format_eval_result_table(result: Mapping[str, Any]) -> str:
@@ -199,7 +112,7 @@ def get_eval_task_results(result: Mapping[str, Any]) -> dict[str, dict[str, floa
 
 
 def get_eval_task_metrics(result: Mapping[str, Any], task: Any) -> dict[str, float]:
-    return get_eval_task_results(result).get(_task_name(task), {})
+    return get_eval_task_results(result).get(normalize_eval_task_name(task), {})
 
 
 def resolve_eval_metric_alias(metric_name: str, metrics: Mapping[str, Any]) -> str | None:
@@ -218,24 +131,89 @@ def resolve_eval_metric_alias(metric_name: str, metrics: Mapping[str, Any]) -> s
     return None
 
 
-def run_evalution_lm_eval(
+def evaluate(
+    model_or_id_or_path: Any = None,
+    tokenizer: Any = None,
+    tasks: Any = None,
+    batch_size: int | str = 1,
+    trust_remote_code: bool = False,
+    output_path: Optional[str] = None,
+    llm_backend: str = "gptqmodel",
+    backend: BACKEND | str | None = BACKEND.AUTO,
+    model_args: Optional[Dict[str, Any]] = None,
+    framework: Any | None = None,
+    **args,
+):
+    del framework
+
+    if llm_backend != "gptqmodel":
+        raise ValueError("Evalution-backed evaluation only supports llm_backend='gptqmodel'.")
+
+    if tasks is None:
+        task_list = list(DEFAULT_TASKS)
+    elif isinstance(tasks, (list, tuple)):
+        task_list = [normalize_eval_task_name(task) for task in tasks]
+    else:
+        task_list = [normalize_eval_task_name(tasks)]
+
+    model_args = dict(model_args or {})
+    gen_kwargs = args.pop("gen_kwargs", None)
+    apply_chat_template = bool(args.pop("apply_chat_template", False))
+    suite_kwargs = dict(args.pop("suite_kwargs", {}) or {})
+    args.pop("task_manager", None)
+
+    legacy_max_samples = args.pop("max_samples", None)
+    if legacy_max_samples is not None:
+        suite_kwargs.setdefault("max_rows", legacy_max_samples)
+
+    legacy_num_fewshot = args.pop("ntrain", None)
+    if legacy_num_fewshot is None:
+        legacy_num_fewshot = args.pop("num_fewshot", None)
+    if legacy_num_fewshot is not None:
+        suite_kwargs.setdefault("num_fewshot", legacy_num_fewshot)
+
+    # Preserve legacy call compatibility for callers that still pass lm-eval style
+    # seed arguments. Evalution suite constructors are not uniform here, so do not
+    # forward seeds generically.
+    args.pop("random_seed", None)
+    args.pop("seed", None)
+
+    if args:
+        # Evalution owns the actual suite/runtime behavior now. Drop legacy GPTQModel-local
+        # evaluation knobs only after the caller explicitly migrates them into model_args or
+        # suite_kwargs to keep this adapter narrow and predictable.
+        unexpected = ", ".join(sorted(args.keys()))
+        raise TypeError(f"Unsupported evaluation keyword arguments: {unexpected}")
+
+    return run_evalution(
+        model_or_id_or_path=model_or_id_or_path,
+        tokenizer=tokenizer,
+        tasks=task_list,
+        batch_size=batch_size,
+        trust_remote_code=trust_remote_code,
+        output_path=output_path,
+        backend=backend,
+        model_args=model_args,
+        apply_chat_template=apply_chat_template,
+        gen_kwargs=gen_kwargs,
+        suite_kwargs=suite_kwargs,
+    )
+
+
+def run_evalution(
     *,
     model_or_id_or_path: Any,
-    tasks: list[Any],
+    tokenizer: Any,
+    tasks: list[str],
     batch_size: int | str,
     trust_remote_code: bool,
     output_path: Optional[str],
-    llm_backend: str,
     backend: BACKEND | str | None,
-    model_args: Optional[Dict[str, Any]],
-    tokenizer: Any,
+    model_args: Dict[str, Any],
     apply_chat_template: bool,
     gen_kwargs: Any,
-    suite_kwargs: Optional[Dict[str, Any]] = None,
+    suite_kwargs: Dict[str, Any],
 ) -> dict[str, Any]:
-    if llm_backend != "gptqmodel":
-        raise ValueError("Evalution-backed framework=EVAL.LM_EVAL only supports llm_backend='gptqmodel'.")
-
     evalution = import_evalution()
     engine_config, model_config, session = _build_evalution_runtime(
         evalution=evalution,
@@ -243,7 +221,7 @@ def run_evalution_lm_eval(
         backend=backend,
         batch_size=batch_size,
         trust_remote_code=trust_remote_code,
-        model_args=model_args or {},
+        model_args=model_args,
         tokenizer=tokenizer,
     )
     suite_batch_size = _coerce_suite_batch_size(batch_size)
@@ -251,16 +229,16 @@ def run_evalution_lm_eval(
 
     try:
         test_results = []
-        for index, task in enumerate(tasks):
+        for index, task_name in enumerate(tasks):
             if index:
                 session.gc()
             suite = _build_evalution_suite(
                 evalution=evalution,
-                task=task,
+                task_name=task_name,
                 apply_chat_template=apply_chat_template,
                 batch_size=suite_batch_size,
                 generation_settings=generation_settings,
-                suite_kwargs=suite_kwargs or {},
+                suite_kwargs=suite_kwargs,
             )
             test_results.append(suite.evaluate(session))
 
@@ -282,182 +260,6 @@ def run_evalution_lm_eval(
 
     _maybe_write_evalution_output(output_path, result)
     return result
-
-
-def evaluate(
-    model_or_id_or_path: Any = None,
-    tokenizer: Any = None,
-    tasks: Any = None,
-    framework: Any = EVAL.LM_EVAL,
-    batch_size: int | str = 1,
-    trust_remote_code: bool = False,
-    output_path: Optional[str] = None,
-    llm_backend: str = "gptqmodel",
-    backend: BACKEND | str = BACKEND.AUTO,
-    random_seed: int = 1234,
-    model_args: Optional[Dict[str, Any]] = None,
-    ntrain: int = 1,
-    **args,
-):
-    import torch
-    from tokenicer import Tokenicer
-    from transformers import PreTrainedModel
-
-    from ..models.base import BaseQModel
-    from .hf import resolve_trust_remote_code
-
-    try:
-        from peft import PeftModel
-    except Exception:  # pragma: no cover - optional dependency
-        PeftModel = ()
-
-    if isinstance(model_or_id_or_path, str):
-        trust_remote_code = resolve_trust_remote_code(
-            model_or_id_or_path,
-            trust_remote_code=trust_remote_code,
-        )
-
-    if model_args is None:
-        model_args = {}
-    else:
-        model_args = dict(model_args)
-
-    if tasks is None:
-        if framework == EVAL.LM_EVAL:
-            tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
-        elif framework == EVAL.MMLU_PRO:
-            tasks = [EVAL.MMLU_PRO.MATH]
-        else:
-            tasks = [EVAL.EVALPLUS.HUMAN]
-    elif not isinstance(tasks, list):
-        tasks = [tasks]
-
-    if framework is None:
-        raise ValueError("Eval parameter: `framework` cannot be set to None")
-
-    if not isinstance(tasks, list):
-        raise ValueError("Eval parameter: `tasks` must be of List type")
-
-    if llm_backend not in ["gptqmodel", "vllm"]:
-        raise ValueError("Eval framework support llm_backend: [gptqmodel, vllm]")
-
-    if llm_backend == "vllm":
-        if "tensor_parallel_size" not in model_args:
-            try:
-                cuda_devices = torch.cuda.device_count() if torch.cuda.is_available() else 0
-            except Exception:
-                cuda_devices = 0
-            if cuda_devices:
-                model_args["tensor_parallel_size"] = cuda_devices
-        if "gpu_memory_utilization" not in model_args:
-            model_args["gpu_memory_utilization"] = 0.90
-
-    if framework == EVAL.LM_EVAL:
-        for task in tasks:
-            if task not in EVAL.get_task_enums():
-                raise ValueError(
-                    f"Eval.lm_eval supported `tasks`: `{EVAL.get_all_tasks_string()}`, actual = `{task}`"
-                )
-
-        gen_kwargs = args.pop("gen_kwargs", None)
-        if gen_kwargs is None:
-            gen_kwargs = "temperature=0.0,top_k=50"
-
-        apply_chat_template = args.pop("apply_chat_template", False)
-        suite_kwargs = args.pop("suite_kwargs", None)
-
-        return run_evalution_lm_eval(
-            model_or_id_or_path=model_or_id_or_path,
-            tasks=tasks,
-            batch_size=batch_size,
-            trust_remote_code=trust_remote_code,
-            output_path=output_path,
-            llm_backend=llm_backend,
-            backend=backend,
-            model_args=model_args,
-            tokenizer=tokenizer,
-            apply_chat_template=apply_chat_template,
-            gen_kwargs=gen_kwargs,
-            suite_kwargs=suite_kwargs,
-        )
-
-    from ..models.auto import GPTQModel
-
-    if isinstance(model_or_id_or_path, str):
-        load_backend = backend
-        disallowed_keys = {"pretrained", "tokenizer", "gptqmodel", "trust_remote_code", "backend", "model_id_or_path"}
-        load_kwargs = {k: v for k, v in model_args.items() if k not in disallowed_keys}
-        model = GPTQModel.load(
-            model_id_or_path=model_or_id_or_path,
-            backend=load_backend,
-            trust_remote_code=trust_remote_code,
-            **load_kwargs,
-        )
-        model_id_or_path = model_or_id_or_path
-    elif isinstance(model_or_id_or_path, BaseQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
-        model = model_or_id_or_path
-        model_id_or_path = model.config.name_or_path
-    else:
-        raise ValueError(
-            f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`"
-        )
-
-    if tokenizer is None:
-        if isinstance(model, BaseQModel):
-            tokenizer = model.tokenizer
-        elif isinstance(model, PreTrainedModel) or (isinstance(model_id_or_path, str) and model_id_or_path.strip()):
-            tokenizer = Tokenicer.load(model_id_or_path.strip())
-
-    if tokenizer is None:
-        raise ValueError(
-            "Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument."
-        )
-
-    if llm_backend == "gptqmodel":
-        model_args["tokenizer"] = tokenizer
-
-    if framework == EVAL.EVALPLUS:
-        for task in tasks:
-            if task not in EVAL.get_task_enums():
-                raise ValueError(f"evalplus support tasks: {EVAL.get_all_tasks_string()}")
-
-        results = {}
-        for task in tasks:
-            base_formatted, plus_formatted, result_path = evalplus(
-                model=model_id_or_path,
-                dataset=task.value,
-                batch=batch_size,
-                trust_remote_code=trust_remote_code,
-                output_file=output_path,
-                backend=llm_backend,
-            )
-            results[task.value] = {
-                "base tests": base_formatted,
-                "base + extra tests": plus_formatted,
-                "results_path": result_path,
-            }
-        return results
-
-    if framework == EVAL.MMLU_PRO:
-        for task in tasks:
-            if task not in EVAL.get_task_enums():
-                raise ValueError(f"eval support tasks: {EVAL.get_all_tasks_string()}")
-
-        from .mmlupro import mmlupro
-
-        selected_subjects = ",".join(_task_name(task) for task in tasks)
-        return mmlupro(
-            model,
-            tokenizer,
-            save_dir=output_path,
-            seed=random_seed,
-            selected_subjects=selected_subjects,
-            ntrain=ntrain,
-            batch_size=batch_size,
-            max_samples=args.pop("max_samples", None),
-        )
-
-    raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS, EVAL.MMLUPRO")
 
 
 @dataclass(slots=True)
@@ -507,10 +309,10 @@ class _ArcChallengeLoglikelihoodSuite:
         )
 
     def evaluate(self, session: Any) -> Any:
+        from evalution.benchmarks.data import doc_count, limit_docs, load_suite_dataset
         from evalution.engines.base import LoglikelihoodRequest
         from evalution.logbar import get_logger
         from evalution.results import SampleResult, TestResult
-        from evalution.benchmarks.data import doc_count, limit_docs, load_suite_dataset
 
         task_name = self.task_name()
         logger = get_logger()
@@ -619,10 +421,6 @@ def _result_tests(result: Mapping[str, Any]) -> list[dict[str, Any]]:
     return list(tests) if isinstance(tests, list) else []
 
 
-def _task_name(task: Any) -> str:
-    return getattr(task, "value", task)
-
-
 def _build_evalution_runtime(
     *,
     evalution: Any,
@@ -673,9 +471,7 @@ def _build_evalution_runtime(
     if isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)) or hasattr(model_or_id_or_path, "model"):
         model_path = _resolve_model_path(model_or_id_or_path)
         if model_path is None:
-            raise ValueError(
-                "Evalution-backed framework=EVAL.LM_EVAL requires a model path when evaluating a live model instance."
-            )
+            raise ValueError("Evalution requires a model path when evaluating a live model instance.")
 
         engine = evalution.TransformersCompat(
             dtype=engine_dtype or _normalize_dtype_name(getattr(model_or_id_or_path, "dtype", None)),
@@ -695,7 +491,6 @@ def _build_evalution_runtime(
             model_kwargs=load_kwargs,
         )
         session = _build_evalution_session_from_model(
-            evalution=evalution,
             engine=engine,
             model_config=model_config,
             model=model_or_id_or_path,
@@ -707,7 +502,7 @@ def _build_evalution_runtime(
     )
 
 
-def _build_evalution_session_from_model(*, evalution: Any, engine: Any, model_config: Any, model: Any):
+def _build_evalution_session_from_model(*, engine: Any, model_config: Any, model: Any):
     from evalution.engines.transformers_common import _clone_prepare_tokenizer, _resolve_input_device
     from evalution.engines.transformers_compat import TransformersCompatSession
 
@@ -762,85 +557,78 @@ def _build_evalution_session_from_model(*, evalution: Any, engine: Any, model_co
 def _build_evalution_suite(
     *,
     evalution: Any,
-    task: Any,
+    task_name: str,
     apply_chat_template: bool,
     batch_size: int | None,
     generation_settings: Dict[str, Any],
     suite_kwargs: Dict[str, Any],
 ):
     benchmarks = evalution.benchmarks
-    task_name = _task_name(task)
+    normalized_task = normalize_eval_task_name(task_name)
     max_new_tokens = int(generation_settings.get("max_new_tokens", 256))
     do_sample = bool(generation_settings.get("do_sample", False))
     temperature = float(generation_settings.get("temperature", 0.0))
-    suite_options = dict(suite_kwargs or {})
+    kwargs = dict(suite_kwargs or {})
 
-    if task_name == EVAL.LM_EVAL.ARC_CHALLENGE.value:
-        kwargs = {
-            "apply_chat_template": apply_chat_template,
-            "batch_size": batch_size,
-        }
-        kwargs.update(suite_options)
-        return _ArcChallengeLoglikelihoodSuite(
-            **kwargs,
-        )
-    if task_name == EVAL.LM_EVAL.ARC_EASY.value:
-        kwargs = {"batch_size": batch_size}
-        kwargs.update(suite_options)
-        return benchmarks.arc_easy(**kwargs)
-    if task_name == EVAL.LM_EVAL.BOOLQ.value:
-        kwargs = {"batch_size": batch_size}
-        kwargs.update(suite_options)
-        return benchmarks.boolq(**kwargs)
-    if task_name == EVAL.LM_EVAL.HELLASWAG.value:
-        kwargs = {"batch_size": batch_size}
-        kwargs.update(suite_options)
-        return benchmarks.hellaswag(**kwargs)
-    if task_name == EVAL.LM_EVAL.OPENBOOKQA.value:
-        kwargs = {"batch_size": batch_size}
-        kwargs.update(suite_options)
-        return benchmarks.openbookqa(**kwargs)
-    if task_name == EVAL.LM_EVAL.MMLU.value:
-        kwargs = {"batch_size": batch_size}
+    if normalized_task == "arc_challenge":
+        kwargs.setdefault("apply_chat_template", apply_chat_template)
+        kwargs.setdefault("batch_size", batch_size)
+        return _ArcChallengeLoglikelihoodSuite(**kwargs)
+    if normalized_task == "mmlu_stem":
+        kwargs.setdefault("subsets", "stem")
+        kwargs.setdefault("batch_size", batch_size)
         if _MMLU_LOCAL_DATASET.exists():
-            kwargs["dataset_path"] = str(_MMLU_LOCAL_DATASET)
-        kwargs.update(suite_options)
+            kwargs.setdefault("dataset_path", str(_MMLU_LOCAL_DATASET))
         return benchmarks.mmlu(**kwargs)
-    if task_name == EVAL.LM_EVAL.MMLU_STEM.value:
-        kwargs = {"subsets": "stem", "batch_size": batch_size}
-        if _MMLU_LOCAL_DATASET.exists():
-            kwargs["dataset_path"] = str(_MMLU_LOCAL_DATASET)
-        kwargs.update(suite_options)
-        return benchmarks.mmlu(**kwargs)
-    if task_name == EVAL.LM_EVAL.GSM8K_COT.value:
-        kwargs = {
-            "variant": "cot",
-            "apply_chat_template": apply_chat_template,
-            "max_new_tokens": max_new_tokens,
-            "batch_size": batch_size,
-            "do_sample": do_sample,
-            "temperature": temperature,
-        }
+    if normalized_task == "gsm8k_cot":
+        kwargs.setdefault("variant", "cot")
+        kwargs.setdefault("apply_chat_template", apply_chat_template)
+        kwargs.setdefault("max_new_tokens", max_new_tokens)
+        kwargs.setdefault("batch_size", batch_size)
+        kwargs.setdefault("do_sample", do_sample)
+        kwargs.setdefault("temperature", temperature)
         if _GSM8K_LOCAL_DATASET.exists():
-            kwargs["dataset_path"] = str(_GSM8K_LOCAL_DATASET)
-            kwargs["dataset_name"] = "main"
-        kwargs.update(suite_options)
+            kwargs.setdefault("dataset_path", str(_GSM8K_LOCAL_DATASET))
+            kwargs.setdefault("dataset_name", "main")
         return benchmarks.gsm8k(**kwargs)
-    if task_name == EVAL.LM_EVAL.GSM8K_PLATINUM_COT.value:
-        kwargs = {
-            "variant": "cot",
-            "apply_chat_template": apply_chat_template,
-            "max_new_tokens": max_new_tokens,
-            "batch_size": batch_size,
-            "do_sample": do_sample,
-            "temperature": temperature,
-        }
-        kwargs.update(suite_options)
+    if normalized_task == "gsm8k_platinum_cot":
+        kwargs.setdefault("variant", "cot")
+        kwargs.setdefault("apply_chat_template", apply_chat_template)
+        kwargs.setdefault("max_new_tokens", max_new_tokens)
+        kwargs.setdefault("batch_size", batch_size)
+        kwargs.setdefault("do_sample", do_sample)
+        kwargs.setdefault("temperature", temperature)
         return benchmarks.gsm8k_platinum(**kwargs)
-    if task_name == EVAL.LM_EVAL.GPQA.value:
-        raise ValueError("Evalution does not currently provide a GPQA suite.")
+    if normalized_task == "mmlu":
+        kwargs.setdefault("batch_size", batch_size)
+        if _MMLU_LOCAL_DATASET.exists():
+            kwargs.setdefault("dataset_path", str(_MMLU_LOCAL_DATASET))
+        return benchmarks.mmlu(**kwargs)
+    if normalized_task == "mmlu_pro":
+        kwargs.setdefault("apply_chat_template", apply_chat_template)
+        kwargs.setdefault("max_new_tokens", max_new_tokens)
+        kwargs.setdefault("batch_size", batch_size)
+        kwargs.setdefault("do_sample", do_sample)
+        kwargs.setdefault("temperature", temperature)
+        return benchmarks.mmlu_pro(**kwargs)
+    if normalized_task.startswith("mmlu_pro:"):
+        subset = normalized_task.split(":", 1)[1].strip()
+        if not subset:
+            raise ValueError(f"Invalid Evalution task: `{normalized_task}`")
+        kwargs.setdefault("subsets", subset)
+        kwargs.setdefault("apply_chat_template", apply_chat_template)
+        kwargs.setdefault("max_new_tokens", max_new_tokens)
+        kwargs.setdefault("batch_size", batch_size)
+        kwargs.setdefault("do_sample", do_sample)
+        kwargs.setdefault("temperature", temperature)
+        return benchmarks.mmlu_pro(**kwargs)
 
-    raise ValueError(f"Unsupported Evalution task: `{task_name}`")
+    generic_factory = getattr(benchmarks, normalized_task, None)
+    if callable(generic_factory):
+        kwargs.setdefault("batch_size", batch_size)
+        return generic_factory(**kwargs)
+
+    raise ValueError(f"Unsupported Evalution task: `{normalized_task}`")
 
 
 def _split_evalution_model_args(model_args: Dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -974,59 +762,15 @@ def _maybe_write_evalution_output(output_path: Optional[str], result: Mapping[st
         json.dump(result, handle, indent=2, sort_keys=True)
 
 
-def evalplus(
-        model,
-        dataset: str,
-        batch: int = 1,
-        trust_remote_code: bool = False,
-        output_file: Optional[str] = None,
-        backend: str = 'gptqmodel'
-):
-    patch_evalplus(model)
-
-    try:
-        from evalplus.evaluate import evaluate
-    except BaseException:
-        raise ValueError("evalplus is not installed. Please install via `pip install gptqmodel[evalplus]`.")
-
-    assert dataset in ["humaneval", "mbpp"], f"Invalid dataset {dataset}"
-
-    evaluate(dataset=dataset, model=model, backend=backend, bs=batch, trust_remote_code=trust_remote_code, output_file=output_file,
-             greedy=True)
-
-    if output_file is None:
-        base_name = model.strip("./").replace("/", "--") + "_gptqmodel_temp_0.0"
-        legacy_file = os.path.join("evalplus_results", dataset, base_name + "_eval_results.json")
-        new_file = os.path.join("evalplus_results", dataset, base_name + ".eval_results.json")
-        # Check legacy format first for backwards compatibility, then new format
-        output_file = legacy_file if os.path.exists(legacy_file) else new_file
-
-    if not os.path.exists(output_file):
-        raise FileNotFoundError(f"No such file: {output_file}")
-
-    try:
-        with open(output_file, 'r') as file:
-            data = json.load(file)
-    except json.JSONDecodeError:
-        raise ValueError(f"Failed to decode JSON: {output_file}")
-
-    try:
-        pass_at_k = data["pass_at_k"]
-        base = float(pass_at_k["base"]["pass@1"])
-        plus = float(pass_at_k["plus"]["pass@1"])
-
-        base_formatted = format(base, ".3f")
-        plus_formatted = format(plus, ".3f")
-    except KeyError as e:
-        raise ValueError(f"Required key not found in JSON: {str(e)}")
-    except ValueError as e:
-        raise ValueError(f"Data format error: {str(e)}")
-
-    return base_formatted, plus_formatted, output_file
-
-
-def evalplus_make_table(results):
-    print("|    Tasks    | base tests | base + extra tests |")
-    print("|-------------|------------|--------------------|")
-    for task, metrics in results.items():
-        print(f"| {task} | {metrics['base tests']} | {metrics['base + extra tests']} |")
+__all__ = [
+    "DEFAULT_TASKS",
+    "SUPPORTED_TASKS",
+    "evaluate",
+    "format_eval_result_table",
+    "get_eval_task_metrics",
+    "get_eval_task_results",
+    "import_evalution",
+    "list_supported_tasks",
+    "normalize_eval_task_name",
+    "resolve_eval_metric_alias",
+]

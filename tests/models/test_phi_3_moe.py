@@ -5,9 +5,6 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
-
 class TestPhi_3(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Phi-3.5-MoE-instruct" # microsoft/Phi-3.5-MoE-instruct
     NATIVE_ARC_CHALLENGE_ACC = 0.5401
@@ -17,7 +14,7 @@ class TestPhi_3(ModelTest):
     NATIVE_ARC_CHALLENGE_ACC_FAST = NATIVE_ARC_CHALLENGE_ACC_SLOW
     NATIVE_ARC_CHALLENGE_ACC_NORM_FAST = NATIVE_ARC_CHALLENGE_ACC_NORM_SLOW
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},

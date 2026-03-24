@@ -17,10 +17,6 @@ from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.quantization import FORMAT, METHOD
-from gptqmodel.utils.eval import EVAL
-
-
-# gpu0/a100
 # | Metric                                             | EXLLAMA_V3 |
 # |----------------------------------------------------|------------|
 # | arc_challenge :: acc,none                          |     0.3174 |
@@ -33,21 +29,21 @@ class TestLlama3_2_ExllamaV3(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
             "exact_match,flexible-extract": {
                 "value": 0.4715,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.3977,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.3174,

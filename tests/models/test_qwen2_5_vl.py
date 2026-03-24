@@ -6,13 +6,10 @@
 from model_test import ModelTest
 
 from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
-from gptqmodel.utils.eval import EVAL
-
-
 class TestQwen2_5_VL(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-VL-3B-Instruct"
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.4309, "floor_pct": 0.2},
             "acc_norm": {"value": 0.4113, "floor_pct": 0.2},

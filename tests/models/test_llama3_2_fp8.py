@@ -17,10 +17,6 @@ from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8QuantLinear
 from gptqmodel.quantization import METHOD
 from gptqmodel.quantization.config import WeightOnlyConfig
-from gptqmodel.utils.eval import EVAL
-
-
-# gpu0/a100
 # | Metric                                             | TORCH_FP8 |
 # |----------------------------------------------------|-----------|
 # | arc_challenge :: acc,none                          |    0.3191 |
@@ -33,21 +29,21 @@ class TestLlama3_2_FP8(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
             "exact_match,flexible-extract": {
                 "value": 0.4756,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.4085,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.3191,

@@ -5,10 +5,6 @@
 from model_test import ModelTest
 
 from gptqmodel.quantization.config import ExpertsRoutingOverride, Fallback, MoEConfig, VramStrategy
-from gptqmodel.utils.eval import EVAL
-
-
-# | Metric                         |   MARLIN |
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.5094 |
 # | arc_challenge :: acc_norm,none |   0.5486 |
@@ -28,7 +24,7 @@ class TestQwen3Moe(ModelTest):
     # HESSIAN_CHUNK_SIZE = 256 * 1024 * 1024
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.5137, "floor_pct": 0.04},
             "acc_norm": {"value": 0.5307, "floor_pct": 0.04},
         },
@@ -49,14 +45,14 @@ class TestQwen3Moe(ModelTest):
         #   as lead to unreliable evaluation results.
         #
         ######################################################################
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": False,
             "exact_match,flexible-extract": {
                 "value": 0.9380,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.7805,

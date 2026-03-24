@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 from types import SimpleNamespace
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.utils.eval import EVAL, evaluate
+from gptqmodel.utils.eval import evaluate
 
 
 def test_eval_string_model_load_filters_eval_only_keys(monkeypatch):
@@ -44,8 +44,7 @@ def test_eval_string_model_load_filters_eval_only_keys(monkeypatch):
     with pytest.raises(RuntimeError, match="sentinel-load-stop"):
         evaluate(
             model_or_id_or_path="/tmp/current-model",
-            framework=EVAL.LM_EVAL,
-            tasks=[EVAL.LM_EVAL.ARC_CHALLENGE],
+            tasks=["arc_challenge"],
             batch_size=1,
             backend=BACKEND.EXLLAMA_V3,
             llm_backend="gptqmodel",

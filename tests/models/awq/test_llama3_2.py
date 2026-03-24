@@ -17,10 +17,6 @@ from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.quantization import FORMAT, METHOD
-from gptqmodel.utils.eval import EVAL
-
-
-# Slow-mode regression scores captured on CUDA_VISIBLE_DEVICES=6 (RTX 4090).
 # | Metric                         | AWQ GEMM |
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.3140 |
@@ -33,14 +29,14 @@ class TestLlama3_2_awq(ModelTest):
     DATASET_CONCAT_SIZE = 2048 # new
     # STOP_AFTER_LAYER = 0
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
             "exact_match,flexible-extract": {
                 "value": 0.34987593052109184,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.31399317406143346,
@@ -51,7 +47,7 @@ class TestLlama3_2_awq(ModelTest):
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.3840786552489692,
@@ -61,7 +57,7 @@ class TestLlama3_2_awq(ModelTest):
     }
     # Fast-mode regression scores captured on CUDA_VISIBLE_DEVICES=6 (RTX 4090).
     EVAL_TASKS_FAST = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
             "exact_match,flexible-extract": {
                 "value": 0.4532671629445823,
@@ -69,7 +65,7 @@ class TestLlama3_2_awq(ModelTest):
                 "ceil_pct": 1.0,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.31313993174061433,
@@ -82,7 +78,7 @@ class TestLlama3_2_awq(ModelTest):
                 "ceil_pct": 1.0,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.3910561370123692,

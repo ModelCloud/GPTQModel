@@ -19,7 +19,7 @@ from gptqmodel.nn_modules.qlinear.paroquant_triton import ParoQuantTritonQuantLi
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.eval import EVAL, evaluate, format_eval_result_table, get_eval_task_results
+from gptqmodel.utils.eval import evaluate, format_eval_result_table, get_eval_task_results
 
 
 _NM_CALIBRATION_PATH = "/monster/data/model/dataset/nm-calibration"
@@ -265,8 +265,7 @@ def _run_evalution_path_eval(
     wall_start = time.perf_counter()
     eval_result = evaluate(
         model_or_id_or_path=model_or_id_or_path,
-        tasks=[EVAL.LM_EVAL.GSM8K_PLATINUM_COT],
-        framework=EVAL.LM_EVAL,
+        tasks=["gsm8k_platinum_cot"],
         backend=backend,
         batch_size=eval_batch_size,
         model_args=model_args,

@@ -5,9 +5,6 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
-
 class TestMinimaxM2(ModelTest):
 
     NATIVE_MODEL_ID = "/monster/data/model/MiniMax-M2-bf16"
@@ -17,11 +14,11 @@ class TestMinimaxM2(ModelTest):
     DATASET_SIZE = 1024
     GROUP_SIZE = 32
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.5026, "floor_pct": 0.04},
             "acc_norm": {"value": 0.5171, "floor_pct": 0.04},
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "acc": {"value": 0.6362, "floor_pct": 0.04},
         },
     }
