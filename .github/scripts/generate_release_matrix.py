@@ -7,9 +7,9 @@ from dataclasses import dataclass
 
 TORCH_SOURCE_URL = "https://download.pytorch.org/whl/torch/"
 
-MIN_TORCH_VERSION = "2.8.0"
+MIN_TORCH_VERSION = "2.9.0"
 MAX_TORCH_VERSION = "2.11.0"
-MIN_CUDA_VERSION = 126
+MIN_CUDA_VERSION = 128
 MAX_CUDA_VERSION = 130
 MIN_PYTHON_VERSION = 310
 MAX_PYTHON_VERSION = 314
