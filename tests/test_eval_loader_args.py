@@ -9,7 +9,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.utils.eval import evaluate
+from tests.eval import evaluate
 
 
 def test_eval_string_model_load_filters_eval_only_keys(monkeypatch):

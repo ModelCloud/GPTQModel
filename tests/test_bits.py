@@ -21,7 +21,7 @@ from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2QuantLinear  # noqa:
 from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2QuantLinear  # noqa: E402
-from gptqmodel.utils.eval import evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
+from tests.eval import evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
 
 logger = logging.getLogger(__name__)

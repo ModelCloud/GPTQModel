@@ -85,7 +85,7 @@ from gptqmodel.quantization.config import (  # noqa: E402
     WeightOnlyConfig,
     resolve_quant_format,
 )
-from gptqmodel.utils.eval import (  # noqa: E402
+from tests.eval import (  # noqa: E402
     evaluate,
     format_eval_result_table,
     get_eval_task_results,

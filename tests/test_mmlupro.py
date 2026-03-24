@@ -6,7 +6,7 @@
 import tempfile
 import unittest
 
-from gptqmodel.utils.eval import evaluate, get_eval_task_metrics
+from tests.eval import evaluate, get_eval_task_metrics
 
 
 # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
