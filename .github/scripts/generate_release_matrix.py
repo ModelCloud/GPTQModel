@@ -19,7 +19,7 @@ TORCH_WHEEL_RE = re.compile(
     r"(?:\+(?P<build_tag>[^-]+))?"
     r"-cp(?P<python_tag>\d+)-cp(?P<abi_tag>\d+t?)-(?P<platform>[^\"/]+)\.whl$"
 )
-WHEEL_LINK_RE = re.compile(r'href=["\']([^"\']+\.whl)["\']')
+HREF_RE = re.compile(r'href=["\']([^"\']+)["\']')
 VERSION_RE = re.compile(
     r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?:\.post(?P<post>\d+))?$"
 )
@@ -63,9 +63,11 @@ def fetch_torch_index(source_url: str) -> str:
 
 def extract_wheel_names(index_html: str) -> list[str]:
     wheel_names = []
-    for link in WHEEL_LINK_RE.findall(index_html):
+    for link in HREF_RE.findall(index_html):
         parsed = urllib.parse.urlsplit(link)
-        wheel_names.append(urllib.parse.unquote(parsed.path.rsplit("/", 1)[-1]))
+        wheel_name = urllib.parse.unquote(parsed.path.rsplit("/", 1)[-1])
+        if wheel_name.endswith(".whl"):
+            wheel_names.append(wheel_name)
     return wheel_names
 
 
@@ -140,14 +142,39 @@ def build_matrix(builds: list[ReleaseBuild]) -> dict[str, list[dict[str, int | s
     return {"include": [build.as_matrix_item() for build in builds]}
 
 
+def count_builds_by_torch(builds: list[ReleaseBuild]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for build in builds:
+        counts[build.torch] = counts.get(build.torch, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: version_key(item[0]), reverse=True))
+
+
+def build_debug_report(
+        source_url: str,
+        wheel_names: list[str],
+        parsed_builds: list[ReleaseBuild],
+        filtered_builds: list[ReleaseBuild],
+) -> dict[str, object]:
+    return {
+        "source_url": source_url,
+        "wheel_name_count": len(wheel_names),
+        "version_list": collect_version_list(wheel_names),
+        "parsed_release_build_count": len(parsed_builds),
+        "parsed_release_build_count_by_torch": count_builds_by_torch(parsed_builds),
+        "filtered_release_build_count": len(filtered_builds),
+        "filtered_release_build_count_by_torch": count_builds_by_torch(filtered_builds),
+        "filtered_release_builds": [build.as_matrix_item() for build in filtered_builds],
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-url", default=TORCH_SOURCE_URL)
     parser.add_argument(
         "--mode",
-        choices=("matrix", "versions"),
+        choices=("matrix", "versions", "debug"),
         default="matrix",
-        help="matrix: output GitHub Actions matrix JSON; versions: output parsed torch version list",
+        help="matrix: output GitHub Actions matrix JSON; versions: output parsed torch version list; debug: output diagnostic JSON",
     )
     parser.add_argument("--min-torch-version", default=MIN_TORCH_VERSION)
     parser.add_argument("--max-torch-version", default=MAX_TORCH_VERSION)
@@ -162,25 +189,33 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     wheel_names = extract_wheel_names(fetch_torch_index(args.source_url))
+    parsed_builds = parse_release_builds(wheel_names)
+    filtered_builds = filter_release_builds(
+        builds=parsed_builds,
+        min_torch_version=args.min_torch_version,
+        max_torch_version=args.max_torch_version,
+        min_cuda_version=args.min_cuda_version,
+        max_cuda_version=args.max_cuda_version,
+        min_python_version=args.min_python_version,
+        max_python_version=args.max_python_version,
+    )
 
     if args.mode == "versions":
         output = collect_version_list(wheel_names)
-    else:
-        builds = filter_release_builds(
-            builds=parse_release_builds(wheel_names),
-            min_torch_version=args.min_torch_version,
-            max_torch_version=args.max_torch_version,
-            min_cuda_version=args.min_cuda_version,
-            max_cuda_version=args.max_cuda_version,
-            min_python_version=args.min_python_version,
-            max_python_version=args.max_python_version,
+    elif args.mode == "debug":
+        output = build_debug_report(
+            source_url=args.source_url,
+            wheel_names=wheel_names,
+            parsed_builds=parsed_builds,
+            filtered_builds=filtered_builds,
         )
-        if not builds:
+    else:
+        if not filtered_builds:
             raise RuntimeError(
                 "no matching torch builds found; check network access, source URL, "
                 "wheel link encoding, or the configured torch/cuda/python version ranges"
             )
-        output = build_matrix(builds)
+        output = build_matrix(filtered_builds)
 
     print(json.dumps(output, ensure_ascii=False, indent=2 if args.pretty else None))
 
