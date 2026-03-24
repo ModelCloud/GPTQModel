@@ -10,13 +10,12 @@ from model_test import ModelTest
 from packaging.version import Version
 
 from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
-from gptqmodel.utils.eval import EVAL
 
 
 class TestQwen2_5_Omni(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-Omni-3B"
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.2329, "floor_pct": 0.2},
             "acc_norm": {"value": 0.2765, "floor_pct": 0.2},

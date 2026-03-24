@@ -23,7 +23,6 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:2
 
 # -- end do not touch
 
-from enum import Enum  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any, Dict, List, Optional  # noqa: E402
 
@@ -72,19 +71,26 @@ from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import (  # noqa: E402
+    BitsAndBytesConfig,
     Fallback,
     FP8Config,
     GGUFConfig,
     GPTAQConfig,
     HessianConfig,
     MoEConfig,
+    ParoQuantQuantizeConfig,
     QuantizeConfig,
     RTNQuantizeConfig,
     VramStrategy,
     WeightOnlyConfig,
-    resolve_quant_format, BitsAndBytesConfig, ParoQuantQuantizeConfig,
+    resolve_quant_format,
 )
-from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.utils.eval import (  # noqa: E402
+    evaluate,
+    format_eval_result_table,
+    get_eval_task_results,
+    resolve_eval_metric_alias,
+)
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
@@ -95,7 +101,7 @@ log = LogBar.shared()
 
 DEFAULT_FLOOR_PCT = 0.05
 DEFAULT_CEIL_PCT = 0.10
-DEFAULT_TASK_NAMES = (EVAL.LM_EVAL.ARC_CHALLENGE,)
+DEFAULT_TASK_NAMES = ("arc_challenge",)
 
 
 class ModelTest(unittest.TestCase):
@@ -360,43 +366,24 @@ class ModelTest(unittest.TestCase):
         return model, tokenizer, processor
 
     def _normalize_task_identifier(self, task):
-        if isinstance(task, Enum):
-            return task.value
         if task is None:
             raise ValueError("Evaluation task identifier cannot be None")
-        return str(task)
+        normalized = str(task).strip()
+        if not normalized:
+            raise ValueError("Evaluation task identifier cannot be empty")
+        return normalized
 
     def _normalize_task_list(self):
         task_specs = self.get_eval_tasks()
-        task_lookup = getattr(self, "_resolved_task_lookup", {})
-        resolved_tasks = []
         if task_specs:
-            for normalized_name in task_specs.keys():
-                original = task_lookup.get(normalized_name)
-                if original is None:
-                    original = self._resolve_task_enum(normalized_name)
-                    if isinstance(task_lookup, dict):
-                        task_lookup[normalized_name] = original
-                resolved_tasks.append(original)
+            task_names = list(task_specs.keys())
         else:
-            resolved_tasks = list(DEFAULT_TASK_NAMES)
-            self._resolved_task_lookup = {
-                self._normalize_task_identifier(task): task for task in resolved_tasks
-            }
+            task_names = list(DEFAULT_TASK_NAMES)
 
-        normalized = [self._normalize_task_identifier(task) for task in resolved_tasks if task is not None]
+        normalized = [self._normalize_task_identifier(task) for task in task_names if task is not None]
         if not normalized:
             raise ValueError("No evaluation tasks configured")
         return normalized
-
-    def _resolve_task_enum(self, task):
-        if isinstance(task, Enum):
-            return task
-        if isinstance(task, str):
-            for enum_member in EVAL.get_task_enums():
-                if task == enum_member.value or task == enum_member.name:
-                    return enum_member
-        raise ValueError(f"Unknown evaluation task identifier: {task}")
 
     def _legacy_arc_tasks(self):
         baselines = {}
@@ -417,11 +404,8 @@ class ModelTest(unittest.TestCase):
                 "ceil_pct": ceil_pct,
             }
         if arc_metrics:
-            normalized = self._normalize_task_identifier(EVAL.LM_EVAL.ARC_CHALLENGE)
+            normalized = self._normalize_task_identifier("arc_challenge")
             baselines[normalized] = arc_metrics
-            lookup = getattr(self, "_resolved_task_lookup", None)
-            if isinstance(lookup, dict):
-                lookup[normalized] = EVAL.LM_EVAL.ARC_CHALLENGE
             chat_lookup = getattr(self, "_task_chat_template", None)
             if isinstance(chat_lookup, dict):
                 chat_lookup[normalized] = False
@@ -459,19 +443,28 @@ class ModelTest(unittest.TestCase):
         }
 
     def get_eval_tasks(self):
-        self._resolved_task_lookup = {}
         self._task_chat_template = {}
+        self._task_evalution_suite_kwargs = {}
+        self._task_evalution_model_args = {}
+        self._task_evalution_use_model_path = {}
+        self._task_evalution_batch_size = {}
         eval_tasks = self._selected_eval_tasks_config()
         if eval_tasks:
             baselines = {}
             for task, metrics in eval_tasks.items():
-                resolved_task = self._resolve_task_enum(task)
-                normalized_task = self._normalize_task_identifier(resolved_task)
-                self._resolved_task_lookup[normalized_task] = resolved_task
+                normalized_task = self._normalize_task_identifier(task)
 
                 metrics_dict = dict(metrics or {})
                 chat_template = bool(metrics_dict.pop("chat_template", False))
+                evalution_suite_kwargs = dict(metrics_dict.pop("evalution_suite_kwargs", {}) or {})
+                evalution_model_args = dict(metrics_dict.pop("evalution_model_args", {}) or {})
+                evalution_use_model_path = bool(metrics_dict.pop("evalution_use_model_path", False))
+                evalution_batch_size = metrics_dict.pop("evalution_batch_size", None)
                 self._task_chat_template[normalized_task] = chat_template
+                self._task_evalution_suite_kwargs[normalized_task] = evalution_suite_kwargs
+                self._task_evalution_model_args[normalized_task] = evalution_model_args
+                self._task_evalution_use_model_path[normalized_task] = evalution_use_model_path
+                self._task_evalution_batch_size[normalized_task] = evalution_batch_size
 
                 baselines[normalized_task] = {
                     metric_name: self._normalize_metric_spec(spec)
@@ -484,6 +477,10 @@ class ModelTest(unittest.TestCase):
             for task_name in baselines.keys():
                 if task_name not in self._task_chat_template:
                     self._task_chat_template[task_name] = False
+                self._task_evalution_suite_kwargs.setdefault(task_name, {})
+                self._task_evalution_model_args.setdefault(task_name, {})
+                self._task_evalution_use_model_path.setdefault(task_name, False)
+                self._task_evalution_batch_size.setdefault(task_name, None)
         return baselines
 
     @staticmethod
@@ -1446,40 +1443,36 @@ class ModelTest(unittest.TestCase):
                     model_path = model
 
                 if self.USE_VLLM:
-                    tensor_parallel = 1
-                    if not self.EVAL_SINGLE_GPU:
-                        try:
-                            candidate = torch.cuda.device_count()
-                        except Exception:
-                            candidate = 1
-                        tensor_parallel = max(1, candidate)
-                    model_args = {
-                        "pretrained": model_path,
-                        "dtype": "auto", #"float16",
-                        "gpu_memory_utilization": 0.8,
-                        "tensor_parallel_size": tensor_parallel,
-                        "trust_remote_code": trust_remote_code,
-                        "max_model_len": self.MODEL_MAX_LEN
-                    }
-                else:
-                    model_args = {}
+                    raise ValueError("ModelTest USE_VLLM is no longer supported; evaluation is delegated to Evalution.")
+
+                model_args = {}
                 if extra_args:
                     model_args.update(extra_args)
 
-                from lm_eval.tasks import TaskManager
-                from lm_eval.utils import make_table
-
-                task_groups = EVAL.get_task_groups_from_tasks(task_names)
-
                 chat_template_lookup = getattr(self, "_task_chat_template", {}) or {}
+                suite_kwargs_lookup = getattr(self, "_task_evalution_suite_kwargs", {}) or {}
+                task_model_args_lookup = getattr(self, "_task_evalution_model_args", {}) or {}
+                use_model_path_lookup = getattr(self, "_task_evalution_use_model_path", {}) or {}
+                eval_batch_size_lookup = getattr(self, "_task_evalution_batch_size", {}) or {}
+                active_backend = self._current_load_backend()
+                log.info(f"TEST: Evalution starting: backend = {active_backend.name}")
+                if model_path:
+                    log.info(f"Inference from model path: {model_path}")
 
-                for framework, tasks in task_groups.items():
-                    active_backend = self._current_load_backend()
-                    log.info(f"TEST: EVAL starting: backend = {active_backend.name}")
-                    if model_path:
-                        log.info(f"Inference from model path: {model_path}")
+                for task_name in task_names:
+                    normalized_name = self._normalize_task_identifier(task_name)
+                    apply_chat_template = bool(chat_template_lookup.get(normalized_name, False))
+                    task_model_args = dict(model_args)
+                    task_model_args.update(task_model_args_lookup.get(normalized_name, {}) or {})
+                    task_suite_kwargs = dict(suite_kwargs_lookup.get(normalized_name, {}) or {})
+                    task_batch_size = eval_batch_size_lookup.get(normalized_name)
+                    if task_batch_size is None:
+                        task_batch_size = self.EVAL_BATCH_SIZE
+                    use_model_path = bool(use_model_path_lookup.get(normalized_name, False))
 
-                    if isinstance(model, BaseQModel) and not self.USE_VLLM:
+                    if use_model_path and model_path:
+                        eval_target = model_path
+                    elif isinstance(model, BaseQModel):
                         eval_target = model
                     else:
                         eval_target = model_path
@@ -1487,56 +1480,32 @@ class ModelTest(unittest.TestCase):
                     if eval_target is None:
                         raise ValueError("Model evaluation target could not be determined.")
 
-                    resolved_lookup = getattr(self, "_resolved_task_lookup", {})
-                    eval_tasks = []
-                    for task in tasks:
-                        original_task = resolved_lookup.get(task)
-                        if original_task is None:
-                            original_task = self._resolve_task_enum(task)
-                            if isinstance(resolved_lookup, dict):
-                                normalized_task = self._normalize_task_identifier(original_task)
-                                resolved_lookup[normalized_task] = original_task
-                        eval_tasks.append(original_task)
+                    results = evaluate(
+                        model_or_id_or_path=eval_target,
+                        model_args=task_model_args,
+                        output_path=tmp_dir,
+                        backend=active_backend,
+                        tasks=[normalized_name],
+                        apply_chat_template=apply_chat_template,
+                        trust_remote_code=trust_remote_code,
+                        batch_size=task_batch_size,
+                        gen_kwargs="temperature=0.0,top_k=50",
+                        suite_kwargs=task_suite_kwargs,
+                    )
 
-                    grouped_tasks: Dict[bool, List] = {}
-                    for task in eval_tasks:
-                        normalized_name = self._normalize_task_identifier(task)
-                        apply_chat = bool(chat_template_lookup.get(normalized_name, False))
-                        grouped_tasks.setdefault(apply_chat, []).append(task)
+                    print('--------Eval Result---------')
+                    print(format_eval_result_table(results))
+                    print('--------Eval Result End---------')
 
-                    for apply_chat_template, grouped in grouped_tasks.items():
-                        results = GPTQModel.eval(
-                            model_or_id_or_path=eval_target,
-                            llm_backend="vllm" if self.USE_VLLM else "gptqmodel",
-                            model_args=model_args,
-                            output_path=tmp_dir,
-                            backend=active_backend,
-                            framework=framework,
-                            tasks=grouped,
-                            apply_chat_template=apply_chat_template,
-                            trust_remote_code=trust_remote_code,
-                            batch_size=self.EVAL_BATCH_SIZE,
-                            gen_kwargs="temperature=0.0,top_k=50",
-                            random_seed=RAND_SEED,
-                            task_manager=TaskManager(include_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "../tasks"), include_defaults=False)
-                        )
-
-                        print('--------Eval Result---------')
-                        print(make_table(results))
-                        if "groups" in results:
-                            print(make_table(results, "groups"))
-                        print('--------Eval Result End---------')
-
-                        for task_name in grouped:
-                            normalized_task_name = self._normalize_task_identifier(task_name)
-                            metrics = results["results"].get(normalized_task_name, {})
-                            filtered_metrics = {
-                                metric: value
-                                for metric, value in metrics.items()
-                                if metric != "alias" and "stderr" not in metric
-                            }
-                            aggregated_results[normalized_task_name] = filtered_metrics
-                            print({normalized_task_name: filtered_metrics})
+                    result_metrics = get_eval_task_results(results)
+                    metrics = result_metrics.get(normalized_name, {})
+                    filtered_metrics = {
+                        metric: value
+                        for metric, value in metrics.items()
+                        if metric != "alias" and "stderr" not in metric
+                    }
+                    aggregated_results[normalized_name] = filtered_metrics
+                    print({normalized_name: filtered_metrics})
 
                 self._cleanup_quantized_model(model, enabled=delete_quantized_model)
                 return aggregated_results
@@ -1768,6 +1737,9 @@ class ModelTest(unittest.TestCase):
     def _resolve_metric_key(metric_name, metrics):
         if metric_name in metrics:
             return metric_name
+        alias = resolve_eval_metric_alias(metric_name, metrics)
+        if alias is not None:
+            return alias
         if metric_name is None:
             return None
         # if baseline uses canonical name without suffix, look for variants like acc,none

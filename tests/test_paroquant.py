@@ -7,20 +7,28 @@
 
 """Unit tests for ParoQuant config, optimizer, and lifecycle invariants."""
 
+import sys
+import threading
+
 import pytest
 import torch
 import torch.nn.functional as F
+from transformers.quantizers.auto import AutoQuantizationConfig
+from transformers.utils.quantization_config import GPTQConfig
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
-from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
-from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
+from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantizeConfig, ParoQuantQuantizeConfig, QuantizeConfig
+from gptqmodel.quantization.paroquant import optimization as paroquant_optimization
 from gptqmodel.quantization.paroquant.optimization import (
     GroupLinearQuantizer,
+    _apply_rotation,
     _ParoQuantOptimLinear,
     build_random_rotation_buffers,
     optimize_paroquant_linear,
+    optimize_paroquant_llama_mlp_block,
     pseudo_quantize_dequant,
 )
 from gptqmodel.utils.backend import BACKEND
@@ -44,6 +52,7 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.quant_method == METHOD.PAROQUANT
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
+    assert cfg.opt_enable_llama_mlp_block is False
     assert cfg.export_quant_method() == METHOD.PAROQUANT
 
 
@@ -66,10 +75,14 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_quantizer_lr": 1e-6,
                 "opt_pair_ratio": 0.5,
                 "opt_seed": 0,
+                "opt_fused_rotation": False,
+                "opt_enable_llama_mlp_block": True,
             },
         }
     )
 
+    assert isinstance(cfg, ParoQuantizeConfig)
+    assert ParoQuantQuantizeConfig is ParoQuantizeConfig
     assert cfg.quant_method == METHOD.PAROQUANT
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
@@ -83,6 +96,69 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_quantizer_lr == 1e-6
     assert cfg.opt_pair_ratio == 0.5
     assert cfg.opt_seed == 0
+    assert cfg.opt_fused_rotation is False
+    assert cfg.opt_enable_llama_mlp_block is True
+    assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
+    assert cfg.to_dict()["meta"]["opt_enable_llama_mlp_block"] is True
+
+
+def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch):
+    """Guard that the config-backed fused toggle overrides the legacy env fallback."""
+    x = torch.randn(4, 8, dtype=torch.float32)
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=1,
+        dtype=torch.float32,
+    )
+
+    calls = []
+
+    def fake_fused_rotation(x, pairs, theta, *, scales, group_size):
+        del pairs, theta, scales, group_size
+        calls.append("fused")
+        return x + 123.0
+
+    monkeypatch.setattr(paroquant_optimization, "apply_paroquant_rotation_autograd", fake_fused_rotation)
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_OPT_FUSED_ROTATION", "1")
+
+    reference_out = _apply_rotation(
+        x,
+        pairs,
+        theta,
+        scales=channel_scales,
+        group_size=8,
+        fused_rotation=False,
+    )
+    assert calls == []
+    torch.testing.assert_close(reference_out, x, atol=0, rtol=0)
+
+    fused_out = _apply_rotation(
+        x,
+        pairs,
+        theta,
+        scales=channel_scales,
+        group_size=8,
+        fused_rotation=True,
+    )
+    assert calls == ["fused"]
+    torch.testing.assert_close(fused_out, x + 123.0)
+
+
+def test_paroquant_registers_with_transformers_gptq_quantizer():
+    """Guard the HF quantization registry alias used by Evalution loaders."""
+    cfg = AutoQuantizationConfig.from_dict(
+        {
+            "quant_method": "paroquant",
+            "bits": 4,
+            "group_size": 128,
+            "sym": True,
+            "format": "paroquant",
+        }
+    )
+
+    assert isinstance(cfg, GPTQConfig)
+    assert getattr(cfg.quant_method, "value", cfg.quant_method) == "gptq"
 
 
 def test_paroquant_kernel_mapping_uses_paroquant_backend():
@@ -131,6 +207,41 @@ def test_paroquant_processor_is_not_awq_subclass():
     assert not issubclass(ParoQuantProcessor, AWQProcessor)
 
 
+def test_paroquant_processor_resets_reused_module_buckets_per_layer():
+    """Guard against cross-layer activation reuse for repeated relative module names."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.lock = threading.Lock()
+    processor.tasks = {}
+
+    processor._ensure_task_bucket("mlp.gate_proj", layer_index=0)
+    processor.tasks["mlp.gate_proj"]["inputs"].append(torch.randn(1, 8))
+    processor._ensure_task_bucket("mlp.gate_proj", layer_index=0)
+    assert len(processor.tasks["mlp.gate_proj"]["inputs"]) == 1
+
+    processor._ensure_task_bucket("mlp.gate_proj", layer_index=1)
+    assert processor.tasks["mlp.gate_proj"]["layer_index"] == 1
+    assert processor.tasks["mlp.gate_proj"]["inputs"] == []
+
+
+def test_paroquant_llama_mlp_block_toggle_uses_config_default_with_env_override(monkeypatch):
+    """Guard that config controls default and env remains an explicit override."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoQuantizeConfig(bits=4, group_size=128, sym=True, opt_enable_llama_mlp_block=False)
+
+    monkeypatch.delenv("GPTQMODEL_PAROQUANT_ENABLE_LLAMA_MLP_BLOCK", raising=False)
+    assert processor._enable_llama_mlp_block() is False
+
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ENABLE_LLAMA_MLP_BLOCK", "1")
+    assert processor._enable_llama_mlp_block() is True
+
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_ENABLE_LLAMA_MLP_BLOCK", "0")
+    assert processor._enable_llama_mlp_block() is False
+
+    processor.qcfg = ParoQuantizeConfig(bits=4, group_size=128, sym=True, opt_enable_llama_mlp_block=True)
+    monkeypatch.delenv("GPTQMODEL_PAROQUANT_ENABLE_LLAMA_MLP_BLOCK", raising=False)
+    assert processor._enable_llama_mlp_block() is True
+
+
 def test_paroquant_quant_device_selection_forces_single_gpu():
     """Guard against multi-GPU ParoQuant worker fan-out and sync hazards."""
     cuda_devices = [torch.device("cuda:0"), torch.device("cuda:1"), torch.device("cuda:2")]
@@ -157,6 +268,62 @@ def test_paroquant_kernel_rejects_sym_false():
     assert not ok
     assert isinstance(err, NotImplementedError)
     assert "actual sym = `False`" in str(err)
+
+
+def test_paroquant_kernel_accepts_bf16():
+    """Guard that saved ParoQuant checkpoints can be reloaded for bf16 inference."""
+    ok, err = ParoQuantQuantLinear.validate(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=128,
+        pack_dtype=torch.int32,
+        dtype=torch.bfloat16,
+    )
+
+    assert ok
+    assert err is None
+
+
+def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
+    """Guard that the CUDA AWQ fast path does not silently downcast bf16 inputs."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant AWQ bf16 kernel path.")
+
+    paroquant_module = sys.modules[ParoQuantQuantLinear.__module__]
+
+    module = ParoQuantQuantLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=128,
+        bias=False,
+        register_buffers=True,
+    ).to("cuda")
+    module.scales.fill_(1)
+
+    seen = {}
+
+    def fake_awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum=True):
+        del qweight, qzeros, split_k_iters, fp32_accum
+        seen["input_dtype"] = input.dtype
+        seen["scales_dtype"] = scales.dtype
+        return torch.zeros((input.shape[0], module.out_features), device=input.device, dtype=input.dtype)
+
+    monkeypatch.setattr(paroquant_module, "awq_ext", object())
+    monkeypatch.setattr(paroquant_module, "_awq_cuda_gemm_forward", fake_awq_cuda_gemm_forward)
+
+    x = torch.randn((2, module.in_features), device="cuda", dtype=torch.bfloat16)
+    out = module._forward_cuda_awq_kernel(x)
+
+    assert seen["input_dtype"] == torch.bfloat16
+    assert seen["scales_dtype"] == torch.bfloat16
+    assert out is not None
+    assert out.dtype == torch.bfloat16
 
 
 def test_paroquant_optimizer_improves_over_identity_quantization():
@@ -321,3 +488,90 @@ def test_paroquant_exported_runtime_state_matches_paper_contract():
         atol=1e-5,
         rtol=1e-5,
     )
+
+
+def test_paroquant_llama_mlp_block_export_state_matches_joint_pseudo_weights():
+    """Guard that the joint Llama MLP optimizer exports runtime tensors correctly."""
+    in_features = 64
+    hidden_features = 128
+    out_features = 64
+    group_size = 64
+    bits = 4
+
+    torch.manual_seed(17)
+    gate_weight = torch.randn(hidden_features, in_features, dtype=torch.float32) * 0.2
+    gate_bias = torch.randn(hidden_features, dtype=torch.float32) * 0.05
+    up_weight = torch.randn(hidden_features, in_features, dtype=torch.float32) * 0.2
+    up_bias = torch.randn(hidden_features, dtype=torch.float32) * 0.05
+    down_weight = torch.randn(out_features, hidden_features, dtype=torch.float32) * 0.2
+    down_bias = torch.randn(out_features, dtype=torch.float32) * 0.05
+    inputs = torch.randn(192, in_features, dtype=torch.float32)
+
+    result = optimize_paroquant_llama_mlp_block(
+        gate_weight=gate_weight,
+        gate_bias=gate_bias,
+        up_weight=up_weight,
+        up_bias=up_bias,
+        down_weight=down_weight,
+        down_bias=down_bias,
+        inputs=inputs,
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        krot=2,
+        pair_ratio=1.0 / group_size,
+        train_rows=128,
+        val_rows=64,
+        batch_size=32,
+        rotation_epochs=6,
+        finetune_epochs=4,
+        rotation_lr=0.03,
+        weight_lr=5e-4,
+        quantizer_lr=5e-4,
+        seed=17,
+    )
+
+    gate_result = result.module_results["mlp.gate_proj"]
+    up_result = result.module_results["mlp.up_proj"]
+    down_result = result.module_results["mlp.down_proj"]
+
+    pseudo_hidden = F.silu(F.linear(inputs, gate_result.pseudo_weight, gate_bias))
+    pseudo_hidden = pseudo_hidden * F.linear(inputs, up_result.pseudo_weight, up_bias)
+    pseudo_outputs = F.linear(pseudo_hidden, down_result.pseudo_weight, down_bias)
+
+    runtime_gate = F.linear(
+        apply_paroquant_rotation_reference(
+            inputs,
+            gate_result.pairs,
+            gate_result.theta,
+            scales=gate_result.channel_scales,
+            group_size=group_size,
+        ),
+        gate_result.pack_weight,
+        gate_bias,
+    )
+    runtime_up = F.linear(
+        apply_paroquant_rotation_reference(
+            inputs,
+            up_result.pairs,
+            up_result.theta,
+            scales=up_result.channel_scales,
+            group_size=group_size,
+        ),
+        up_result.pack_weight,
+        up_bias,
+    )
+    runtime_hidden = F.silu(runtime_gate) * runtime_up
+    runtime_outputs = F.linear(
+        apply_paroquant_rotation_reference(
+            runtime_hidden,
+            down_result.pairs,
+            down_result.theta,
+            scales=down_result.channel_scales,
+            group_size=group_size,
+        ),
+        down_result.pack_weight,
+        down_bias,
+    )
+
+    torch.testing.assert_close(runtime_outputs, pseudo_outputs, atol=1e-5, rtol=1e-5)

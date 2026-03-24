@@ -15,7 +15,6 @@ from gptqmodel.quantization.protocol import (
     compile_protocol,
     compile_protocol_yaml_text,
 )
-from gptqmodel.utils.eval import EVAL
 
 
 LAYER0_ONLY_NEGATIVE_MATCH = r".*layers\.(?:[1-9]|[12][0-9]|3[0-2])\..*"
@@ -84,15 +83,15 @@ class _BaseLlama3_2GPTQProtocol(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.4690,
                 "floor_pct": 0.05,
                 "ceil_pct": 0.05,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.3999,
@@ -100,7 +99,7 @@ class _BaseLlama3_2GPTQProtocol(ModelTest):
                 "ceil_pct": 0.03,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.3221,

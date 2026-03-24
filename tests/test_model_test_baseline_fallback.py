@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from gptqmodel import BACKEND
-from gptqmodel.utils.eval import EVAL
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "models"))
@@ -20,7 +19,7 @@ class _BaselineFallbackHarness(ModelTest):
     NATIVE_MODEL_ID = "/tmp/native-model"
     LOAD_BACKEND = BACKEND.TORCH
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {
                 "value": 0.30,
                 "floor_pct": 0.05,
@@ -33,6 +32,9 @@ class _BaselineFallbackHarness(ModelTest):
         super().__init__(methodName="runTest")
         self._stub_native_results = native_results
         self.lm_eval_calls = 0
+
+    def _model_test_mode(self) -> str:
+        return self.MODEL_TEST_MODE_SLOW
 
     def lm_eval(self, *args, **kwargs):  # pragma: no cover - exercised via check_results
         self.lm_eval_calls += 1

@@ -6,13 +6,12 @@
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
-from gptqmodel.utils.eval import EVAL
 
 
 class TestApertus(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Apertus-8B-Instruct-2509/"
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.5145, "floor_pct": 0.2},
             "acc_norm": {"value": 0.5256, "floor_pct": 0.2},

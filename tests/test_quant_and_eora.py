@@ -26,14 +26,13 @@ import tempfile  # noqa: E402
 from typing import Optional  # noqa: E402
 
 from datasets import load_dataset  # noqa: E402
-from lm_eval.utils import make_table  # noqa: E402
 from logbar import LogBar
 from models.model_test import ModelTest  # noqa: E402
 from tabulate import tabulate  # noqa: E402
 
 from gptqmodel import BACKEND, GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
+from gptqmodel.utils.eval import evaluate, format_eval_result_table  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 
 
@@ -52,7 +51,7 @@ class TestQuantAndEORA(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"  # "meta-llama/Llama-3.2-1B-Instruct"
 
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.3183, "floor_pct": 0.05},
             "acc_norm": {"value": 0.3404, "floor_pct": 0.05},
@@ -134,14 +133,10 @@ class TestQuantAndEORA(ModelTest):
                 # print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
 
                 print(f'--------Eval {quant_method} Result---------')
-                print(make_table(base_bench))
-                if "groups" in base_bench:
-                    print(make_table(base_bench, "groups"))
+                print(format_eval_result_table(base_bench))
 
                 print(f'--------Eval {quant_method} + EoRA Result---------')
-                print(make_table(eora_bench))
-                if "groups" in eora_bench:
-                    print(make_table(eora_bench, "groups"))
+                print(format_eval_result_table(eora_bench))
 
     def bench(self, path: str, backend: BACKEND, adapter: Optional[Lora]):
         # test post-quant inference
@@ -156,13 +151,12 @@ class TestQuantAndEORA(ModelTest):
         print(f"BACKEND: {backend}, Result: {result}")
         # assert "paris" in result.lower(), f"`paris` not found in `{result}`"
 
-        bench_result = GPTQModel.eval(
+        bench_result = evaluate(
             model_or_id_or_path=model,
-            framework=EVAL.LM_EVAL,
-            tasks=[EVAL.LM_EVAL.ARC_CHALLENGE],
+            tasks=["arc_challenge"],
             apply_chat_template=True,
             # MMLU is too slow for ci test
-            # EVAL.LM_EVAL.MMLU_STEM
+            # "mmlu_stem"
         )
 
         del model
@@ -183,7 +177,7 @@ class TestTransformers(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B"
 
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.3567, "floor_pct": 0.36},
             "acc_norm": {"value": 0.3805, "floor_pct": 0.36},
         },
@@ -276,14 +270,10 @@ class TestTransformers(ModelTest):
                 print(tabulate(table_data, headers=["Key", "Value"], tablefmt="grid"))
 
                 print('--------Eval GPTQ Result---------')
-                print(make_table(base_bench))
-                if "groups" in base_bench:
-                    print(make_table(base_bench, "groups"))
+                print(format_eval_result_table(base_bench))
 
                 print('--------Eval GPTQ + EoRA Result---------')
-                print(make_table(eora_bench))
-                if "groups" in eora_bench:
-                    print(make_table(eora_bench, "groups"))
+                print(format_eval_result_table(eora_bench))
 
     def bench(self, path: str, backend: BACKEND, adapter: Optional[Lora]):
         # test post-quant inference
@@ -327,10 +317,9 @@ class TestTransformers(ModelTest):
         print(f"BACKEND: {backend}, Result: {result}")
         # assert "paris" in result.lower(), f"`paris` not found in `{result}`"
 
-        bench_result = GPTQModel.eval(
+        bench_result = evaluate(
             model_or_id_or_path=model,
-            framework=EVAL.LM_EVAL,
-            tasks=[EVAL.LM_EVAL.ARC_CHALLENGE, EVAL.LM_EVAL.MMLU_STEM],
+            tasks=["arc_challenge", "mmlu_stem"],
         )
 
         del model

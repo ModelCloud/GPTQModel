@@ -3,17 +3,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import os
-import re
 import subprocess
 import sys
 import tarfile
 from pathlib import Path
 from shutil import rmtree
 
+import pcre as re
 import setuptools
 from packaging.version import Version
 from setuptools import find_namespace_packages, find_packages, setup
 from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
+
 
 if Version(setuptools.__version__) < Version("78.1.1"):
     raise RuntimeError(
@@ -91,7 +92,6 @@ def _detect_rocm_version():
         return v
     hip = _probe_cmd(["hipcc", "--version"])
     if hip:
-        import re
         m = re.search(r"\b([0-9]+\.[0-9]+)\b", hip)
         if m:
             return m.group(1)

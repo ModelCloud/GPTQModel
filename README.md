@@ -476,37 +476,43 @@ Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/b
 
 ### Evaluation and Quality Benchmarks
 
-GPTQModel inference is integrated into both [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) and [evalplus](https://github.com/evalplus/evalplus)  
-We highly recommend avoiding `ppl` and using `lm-eval`/`evalplus` to validate post-quantization model quality. `ppl` should only be used for regression tests and is not a good indicator of model output quality.  
+GPTQModel evaluation is integrated into [Evalution](https://github.com/modelcloud/Evalution).  
+We highly recommend avoiding `ppl` and using Evalution to validate post-quantization model quality. `ppl` should only be used for regression tests and is not a good indicator of model output quality.  
 
 ```
-# gptqmodel is integrated into lm-eval >= v0.4.7
-pip install lm-eval>=0.4.7
+# install Evalution
+pip install Evalution
 ```
 
-```
-# gptqmodel is integrated into evalplus[main]
-pip install -U "evalplus @ git+https://github.com/evalplus/evalplus"
-```
-
-Below is a basic sample using `GPTQModel.eval` API
+Below is a basic sample using Evalution's `GPTQModel` engine directly.
 
 ```py
-from gptqmodel import GPTQModel
-from gptqmodel.utils.eval import EVAL
+import evalution as eval
+import evalution.benchmarks as benchmarks
+import evalution.engines as engines
 
-model_id = "ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1"
+run = (
+    engines.GPTQModel(
+        backend="marlin",
+        device="cuda:0",
+        dtype="auto",
+        batch_size="auto",
+    )
+    .model(
+        eval.Model(
+            path="ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v1",
+        )
+    )
+    .run(
+        benchmarks.arc_challenge(
+            apply_chat_template=True,
+            batch_size=16,
+        )
+    )
+)
 
-# Use `lm-eval` as framework to evaluate the model
-lm_eval_data = GPTQModel.eval(model_id, 
-                    framework=EVAL.LM_EVAL, 
-                    tasks=[EVAL.LM_EVAL.ARC_CHALLENGE])
-
-
-# Use `evalplus` as framework to evaluate the model
-evalplus_data = GPTQModel.eval(model_id, 
-                    framework=EVAL.EVALPLUS, 
-                    tasks=[EVAL.EVALPLUS.HUMAN])
+result = run.to_dict()
+print(result["tests"][0]["metrics"])
 
 ```
 ### Dynamic Quantization (Per Module QuantizeConfig Override)

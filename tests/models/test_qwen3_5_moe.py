@@ -5,7 +5,6 @@
 from model_test import ModelTest
 
 from gptqmodel.quantization.config import Fallback, VramStrategy
-from gptqmodel.utils.eval import EVAL
 
 
 class TestQwen3_5Moe(ModelTest):
@@ -15,11 +14,11 @@ class TestQwen3_5Moe(ModelTest):
 
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3.5-35B-A3B"
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.5887, "floor_pct": 0.04},
             "acc_norm": {"value": 0.6100, "floor_pct": 0.04},
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.8106,

@@ -20,6 +20,7 @@ import torch
 
 from .pause_resume import _restore_terminal_settings_on_exit
 
+
 try:
     from device_smi import Device  # type: ignore
 except Exception:  # pragma: no cover - defensive: optional dependency may be unavailable

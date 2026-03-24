@@ -49,7 +49,7 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
-    SUPPORTS_DTYPES = [torch.float16]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = False
     QUANT_TYPE = "awq_paroquant"
@@ -166,18 +166,30 @@ class ParoQuantQuantLinear(AwqTorchQuantLinear):
         if awq_ext is None or x_flat.device.type != "cuda":
             return None
 
-        kernel_input = x_flat if x_flat.dtype == torch.float16 else x_flat.to(torch.float16)
+        compute_dtype = x_flat.dtype if x_flat.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        kernel_input = (
+            x_flat
+            if x_flat.dtype == compute_dtype and x_flat.is_contiguous()
+            else x_flat.to(device=x_flat.device, dtype=compute_dtype).contiguous()
+        )
+        kernel_scales = self.scales
+        if (
+            kernel_scales.device != kernel_input.device
+            or kernel_scales.dtype != compute_dtype
+            or not kernel_scales.is_contiguous()
+        ):
+            kernel_scales = kernel_scales.to(device=kernel_input.device, dtype=compute_dtype).contiguous()
         out = _awq_cuda_gemm_forward(
             kernel_input.reshape(-1, kernel_input.shape[-1]),
             self.qweight,
-            self.scales,
+            kernel_scales,
             self.qzeros,
             8,
             fp32_accum=self.fp32_accum,
         )
         if self.bias is not None:
-            out = out + self.bias
-        if x_flat.dtype != torch.float16:
+            out = out + self.bias.to(device=kernel_input.device, dtype=out.dtype)
+        if out.dtype != x_flat.dtype:
             out = out.to(dtype=x_flat.dtype)
         return out
 

@@ -9,8 +9,6 @@ import transformers
 from model_test import ModelTest
 from packaging.version import Version
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestInternlm2_5(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/internlm2_5-1_8b-chat" # "internlm/internlm2_5-1_8b-chat"
@@ -24,7 +22,7 @@ class TestInternlm2_5(ModelTest):
     EVAL_BATCH_SIZE = 6
     USE_VLLM = False
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},

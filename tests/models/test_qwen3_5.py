@@ -4,10 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
 
-
-# | Metric                         |   MARLIN |
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.6092 |
 # | arc_challenge :: acc_norm,none |   0.6143 |
@@ -19,11 +16,11 @@ class TestQwen3_5(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.6092, "floor_pct": 0.04},
             "acc_norm": {"value": 0.6143, "floor_pct": 0.04},
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "acc": {"value": 0.8461, "floor_pct": 0.04},
         },
     }

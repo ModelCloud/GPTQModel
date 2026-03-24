@@ -5,9 +5,9 @@
 
 
 import platform
-import re
 from typing import Optional, Tuple
 
+import pcre as re
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel

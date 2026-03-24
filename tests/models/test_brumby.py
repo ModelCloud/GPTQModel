@@ -9,8 +9,6 @@ from importlib.metadata import PackageNotFoundError, version
 from model_test import ModelTest
 from packaging.version import Version
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestBrumby(ModelTest):
     GROUP_SIZE = 32
@@ -20,26 +18,26 @@ class TestBrumby(ModelTest):
     LOAD_MODEL_EXTRA_ARGS = {"use_cache": False}
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.87,
                 "floor_pct": 0.05,
                 "ceil_pct": 0.10,
             },
         },
-        EVAL.LM_EVAL.GSM8K_COT: {
+        "gsm8k_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.88,
                 "floor_pct": 0.05,
                 "ceil_pct": 0.10,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.89, "floor_pct": 0.05, "ceil_pct": 0.10},
         },
-        EVAL.LM_EVAL.MMLU: {
+        "mmlu": {
             "acc": {"value": 0.71, "floor_pct": 0.05, "ceil_pct": 0.10},
         },
     }

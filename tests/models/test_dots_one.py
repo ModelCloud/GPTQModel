@@ -6,10 +6,7 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
 
-
-# | Metric                         |   MARLIN |
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.3046 |
 # | arc_challenge :: acc_norm,none |   0.3345 |
@@ -22,21 +19,21 @@ class TestDotsOne(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.1944,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.3768, # 0.3099 4096, 0.3270 2048
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.3046,  # 0.3294 4096, 0.3242 2048

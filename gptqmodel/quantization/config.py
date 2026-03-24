@@ -1938,7 +1938,7 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.EXL3:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.EXL3}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.EXL3
-    elif target_cls is ParoQuantQuantizeConfig:
+    elif target_cls is ParoQuantizeConfig:
         expected_method = METHOD.PAROQUANT
         format_value = normalized.get(FORMAT_FIELD_CODE)
         normalized_format = None
@@ -2474,6 +2474,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_quantizer_lr": "opt_quantizer_lr",
             "opt_pair_ratio": "opt_pair_ratio",
             "opt_seed": "opt_seed",
+            "opt_fused_rotation": "opt_fused_rotation",
+            "opt_enable_llama_mlp_block": "opt_enable_llama_mlp_block",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -2797,7 +2799,7 @@ class AWQQuantizeConfig(QuantizeConfig):
 
 
 @dataclass
-class ParoQuantQuantizeConfig(QuantizeConfig):
+class ParoQuantizeConfig(QuantizeConfig):
     method: METHOD = field(default=METHOD.PAROQUANT)
     format: FORMAT = field(default=FORMAT.PAROQUANT)
     krot: int = field(default=8)
@@ -2811,6 +2813,8 @@ class ParoQuantQuantizeConfig(QuantizeConfig):
     opt_quantizer_lr: float = field(default=1e-6)
     opt_pair_ratio: float = field(default=0.5)
     opt_seed: int = field(default=0)
+    opt_fused_rotation: bool = field(default=True)
+    opt_enable_llama_mlp_block: bool = field(default=False)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.PAROQUANT,)
@@ -2827,7 +2831,7 @@ class ParoQuantQuantizeConfig(QuantizeConfig):
         super().__post_init__()
         self.krot = int(self.krot)
         if self.krot <= 0:
-            raise ValueError("ParoQuantQuantizeConfig: `krot` must be a positive integer.")
+            raise ValueError("ParoQuantizeConfig: `krot` must be a positive integer.")
         self.opt_rotation_epochs = int(self.opt_rotation_epochs)
         self.opt_finetune_epochs = int(self.opt_finetune_epochs)
         self.opt_train_samples = int(self.opt_train_samples)
@@ -2838,16 +2842,18 @@ class ParoQuantQuantizeConfig(QuantizeConfig):
         self.opt_quantizer_lr = float(self.opt_quantizer_lr)
         self.opt_pair_ratio = float(self.opt_pair_ratio)
         self.opt_seed = int(self.opt_seed)
+        self.opt_fused_rotation = bool(self.opt_fused_rotation)
+        self.opt_enable_llama_mlp_block = bool(self.opt_enable_llama_mlp_block)
         if self.opt_rotation_epochs < 0 or self.opt_finetune_epochs < 0:
-            raise ValueError("ParoQuantQuantizeConfig: optimization epochs must be non-negative.")
+            raise ValueError("ParoQuantizeConfig: optimization epochs must be non-negative.")
         if self.opt_train_samples <= 0 or self.opt_validation_samples <= 0:
-            raise ValueError("ParoQuantQuantizeConfig: optimization sample counts must be positive.")
+            raise ValueError("ParoQuantizeConfig: optimization sample counts must be positive.")
         if self.opt_batch_size <= 0:
-            raise ValueError("ParoQuantQuantizeConfig: `opt_batch_size` must be positive.")
+            raise ValueError("ParoQuantizeConfig: `opt_batch_size` must be positive.")
         if self.opt_rotation_lr <= 0 or self.opt_weight_lr <= 0 or self.opt_quantizer_lr <= 0:
-            raise ValueError("ParoQuantQuantizeConfig: optimization learning rates must be positive.")
+            raise ValueError("ParoQuantizeConfig: optimization learning rates must be positive.")
         if not (0.0 < self.opt_pair_ratio <= 0.5):
-            raise ValueError("ParoQuantQuantizeConfig: `opt_pair_ratio` must be in the interval (0, 0.5].")
+            raise ValueError("ParoQuantizeConfig: `opt_pair_ratio` must be in the interval (0, 0.5].")
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
@@ -2865,11 +2871,16 @@ class ParoQuantQuantizeConfig(QuantizeConfig):
         meta_payload["opt_quantizer_lr"] = self.opt_quantizer_lr
         meta_payload["opt_pair_ratio"] = self.opt_pair_ratio
         meta_payload["opt_seed"] = self.opt_seed
+        meta_payload["opt_fused_rotation"] = self.opt_fused_rotation
+        meta_payload["opt_enable_llama_mlp_block"] = self.opt_enable_llama_mlp_block
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym
         out["krot"] = self.krot
         out[FORMAT_FIELD_CODE] = self.format
+
+
+ParoQuantQuantizeConfig = ParoQuantizeConfig
 
 
 @dataclass
@@ -3594,7 +3605,7 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
     if method == METHOD.EXL3 or format_value == FORMAT.EXL3:
         return EXL3QuantizeConfig
     if method == METHOD.PAROQUANT or format_value == FORMAT.PAROQUANT:
-        return ParoQuantQuantizeConfig
+        return ParoQuantizeConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
         return QQQQuantizeConfig
     if method == METHOD.AWQ:
@@ -3614,7 +3625,7 @@ def _known_quantize_config_field_names() -> set[str]:
         QuantizeConfig,
         GPTQQuantizeConfig,
         AWQQuantizeConfig,
-        ParoQuantQuantizeConfig,
+        ParoQuantizeConfig,
         QQQQuantizeConfig,
         FP8Config,
         BitsAndBytesConfig,

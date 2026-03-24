@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
-import re
+import pcre as re
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
@@ -573,7 +573,7 @@ def _run_single_subset_pass(
                 )
             if forward_pb is not None:
                 forward_pb.close()
-    
+
     returned_outputs = None
     if execute_forward and need_outputs:
         # For pre-process consumers, the next stage needs the forward outputs
@@ -582,7 +582,7 @@ def _run_single_subset_pass(
         if return_outputs:
              returned_outputs = processor.inputs_cache.layer_inputs
         del forward_outputs
-    
+
     if execute_forward and subset_event_cb:
         subset_event_cb(stage="forward_end", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=list(subset.keys()), processor=getattr(processor, "name", type(processor).__name__))
 
@@ -900,7 +900,7 @@ def run_subset_stage(
                 return_outputs=False,
             )
             processed_results.update(chunk_result)
-            
+
             # Force cleanup between chunks
             if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
                  torch_empty_cache()
@@ -923,7 +923,7 @@ def run_subset_stage(
              )
              if new_layer_inputs is not None:
                  layer_inputs = new_layer_inputs
-    
+
     elif plan.execute_forward:
         # Single pass
         processed_results, new_layer_inputs = _run_single_subset_pass(

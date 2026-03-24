@@ -16,14 +16,13 @@ from models.model_test import ModelTest  # noqa: E402
 
 from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
-from gptqmodel.utils.eval import EVAL  # noqa: E402
 
 
 class TestLmHeadLoad(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"  # "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"
     DEVICE = "cuda:0"
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.2799, "floor_pct": 0.2},
             "acc_norm": {"value": 0.3046, "floor_pct": 0.2},
         },
@@ -55,7 +54,7 @@ class TestLmHeadQuant(ModelTest):
 
     def test_quant_lm_head(self):
         self.EVAL_TASKS = {
-            EVAL.LM_EVAL.ARC_CHALLENGE: {
+            "arc_challenge": {
                 "chat_template": True,
                 "acc": {"value": 0.3148464163822526, "floor_pct": 0.2},
                 "acc_norm": {"value": 0.3310580204778157, "floor_pct": 0.2},

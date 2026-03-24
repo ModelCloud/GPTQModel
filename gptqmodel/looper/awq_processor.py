@@ -1330,7 +1330,7 @@ class AWQProcessor(LoopProcessor):
         for name, named_module in named_linears.items():
             base_title = f"Quantizing {named_module.name} in layer"
             self._pause_controller.register_and_draw_progress_bar(self.pb, title=base_title, subtitle="")
-            
+
             linear_layer = named_module.module
             linear_layer = linear_layer.to(get_best_device())
 

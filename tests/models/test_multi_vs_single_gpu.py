@@ -25,7 +25,6 @@ from gptqmodel.models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from gptqmodel.quantization.config import QuantizeConfig
-from gptqmodel.utils.eval import EVAL
 from gptqmodel.utils.torch import torch_empty_cache
 
 
@@ -47,7 +46,7 @@ def _is_free_threaded() -> bool:
 class TestMultiVsSingleGPU(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
     EVAL_TASKS = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": 0.3311, "floor_pct": 0.05},
             "acc_norm": {"value": 0.3549, "floor_pct": 0.05},

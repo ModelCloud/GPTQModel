@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import ctypes
 import os
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
+import pcre as re
 import torch
 from packaging import version
 

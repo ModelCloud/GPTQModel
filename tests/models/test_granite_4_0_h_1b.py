@@ -5,10 +5,8 @@
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
-from gptqmodel.utils.eval import EVAL
 
 
-# a100:0, TORCH kernel
 # desc_act = False, act_group_aware = True
 # | Metric                         |   MARLIN |
 # |--------------------------------|----------|
@@ -21,7 +19,7 @@ class Test_Granite_4_0_H_1B(ModelTest):
     EVAL_BATCH_SIZE = 1
     LOAD_BACKEND = BACKEND.TORCH
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.3968,
@@ -34,7 +32,7 @@ class Test_Granite_4_0_H_1B(ModelTest):
                 "ceil_pct": 0.10,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.4015,

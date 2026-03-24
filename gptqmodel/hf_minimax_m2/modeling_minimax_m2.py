@@ -383,7 +383,7 @@ class MiniMaxM2Attention(nn.Module):
             # Chunked attention computation to reduce peak memory usage
             out_parts = []
             attn_parts = [] if output_attentions else None
-            
+
             # A smaller chunk size reduces memory but may be slightly slower
             chunk_size = 1024
             for i in range(0, q.size(1), chunk_size):
@@ -399,12 +399,12 @@ class MiniMaxM2Attention(nn.Module):
 
                 if window_mask is not None:
                     attn_chunk.masked_fill_(window_mask[:, i:i + chunk_size, :], float("-inf"))
-                
+
                 attn_chunk = torch.softmax(attn_chunk, dim=-1, dtype=torch.float32).to(query_dtype)
 
                 if self.training and self.attention_dropout > 0:
                     attn_chunk = F.dropout(attn_chunk, p=self.attention_dropout, training=True)
-                
+
                 if output_attentions:
                     attn_parts.append(attn_chunk)
 
@@ -413,7 +413,7 @@ class MiniMaxM2Attention(nn.Module):
                 out_parts.append(out_chunk)
 
                 del q_chunk, attn_chunk, out_chunk
-            
+
             out = torch.cat(out_parts, dim=1)
             attn_output_parts.append(out)
 

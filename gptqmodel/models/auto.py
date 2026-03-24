@@ -49,14 +49,13 @@ if sys.platform == "darwin":
 import os.path  # noqa: E402
 import random  # noqa: E402
 from os.path import isdir, join  # noqa: E402
-from typing import Any, Dict, List, Optional, Type, Union  # noqa: E402
+from typing import Dict, List, Optional, Union  # noqa: E402
 
 import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from packaging.version import Version  # noqa: E402
-from tokenicer import Tokenicer  # noqa: E402
-from transformers import AutoConfig, GenerationConfig, PreTrainedModel, PreTrainedTokenizerBase  # noqa: E402
+from transformers import AutoConfig, PreTrainedTokenizerBase  # noqa: E402
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402
@@ -64,7 +63,6 @@ from ..nn_modules.qlinear.torch import TorchQuantLinear  # noqa: E402
 from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from ..utils import BACKEND  # noqa: E402
 from ..utils.backend import normalize_backend  # noqa: E402
-from ..utils.eval import EVAL  # noqa: E402
 from ..utils.hf import normalize_torch_dtype_kwarg, resolve_trust_remote_code  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
@@ -509,243 +507,6 @@ class GPTQModel:
             adapter=adapter,
             **kwargs,
         )
-
-    @classmethod
-    def eval(
-            cls,
-            model_or_id_or_path: str=None,
-            tokenizer: Union[PreTrainedTokenizerBase, Tokenicer]=None,
-            tasks: Union[EVAL.LM_EVAL, EVAL.EVALPLUS, List[EVAL.LM_EVAL], List[EVAL.EVALPLUS], EVAL.MMLU_PRO, List[EVAL.MMLU_PRO]] = None, # set to None to fix mutable warning
-            framework: Union[Type[EVAL.LM_EVAL],Type[EVAL.EVALPLUS],Type[EVAL.MMLU_PRO]] = EVAL.LM_EVAL,
-            batch_size: Union[int, str] = 1,
-            trust_remote_code: bool = False,
-            output_path: Optional[str] = None,
-            llm_backend: str = 'gptqmodel',
-            backend: BACKEND = BACKEND.AUTO, # gptqmodel arg only
-            random_seed: int = 1234,  # only for framework=EVAL.LM_EVAL backend=vllm
-            model_args: Dict[str, Any] = None,  # only for framework=EVAL.LM_EVAL backend=vllm
-            ntrain: int = 1,  # only for framework=EVAL.MMLUPRO
-            **args
-    ):
-        if isinstance(model_or_id_or_path, str):
-            trust_remote_code = resolve_trust_remote_code(model_or_id_or_path, trust_remote_code=trust_remote_code)
-
-        from peft import PeftModel
-        if model_args is None:
-            model_args = {}
-        if tasks is None:
-            if framework == EVAL.LM_EVAL:
-                tasks = [EVAL.LM_EVAL.ARC_CHALLENGE]
-            elif framework == EVAL.MMLU_PRO:
-                tasks = [EVAL.MMLU_PRO.MATH]
-            else:
-                tasks = [EVAL.EVALPLUS.HUMAN]
-
-        elif not isinstance(tasks, List):
-            tasks = [tasks]
-
-        if framework is None:
-            raise ValueError("Eval parameter: `framework` cannot be set to None")
-
-        if not isinstance(tasks, list):
-            raise ValueError("Eval parameter: `tasks` must be of List type")
-
-        if llm_backend not in ['gptqmodel', 'vllm']:
-            raise ValueError('Eval framework support llm_backend: [gptqmodel, vllm]')
-
-        if llm_backend == "vllm":
-            if "tensor_parallel_size" not in model_args:
-                try:
-                    cuda_devices = torch.cuda.device_count() if torch.cuda.is_available() else 0
-                except Exception:
-                    cuda_devices = 0
-                if cuda_devices:
-                    model_args["tensor_parallel_size"] = cuda_devices
-            if "gpu_memory_utilization" not in model_args:
-                model_args["gpu_memory_utilization"] = 0.90
-
-        if isinstance(model_or_id_or_path, str):
-            load_backend = backend
-            # These keys are consumed by eval wrappers and should never leak
-            # into GPTQModel.load when callers reuse a shared model_args dict.
-            disallowed_keys = {"pretrained", "tokenizer", "gptqmodel", "trust_remote_code", "backend", "model_id_or_path"}
-            load_kwargs = {k: v for k, v in model_args.items() if k not in disallowed_keys}
-
-            backend_name = load_backend.value if isinstance(load_backend, BACKEND) else str(load_backend)
-            log.info(f"Eval: loading using backend = `{backend_name}`")
-            model = GPTQModel.load(
-                model_id_or_path=model_or_id_or_path,
-                backend=load_backend,
-                trust_remote_code=trust_remote_code,
-                **load_kwargs,
-            )
-            model_id_or_path = model_or_id_or_path
-        elif isinstance(model_or_id_or_path, BaseQModel) or isinstance(model_or_id_or_path, (PreTrainedModel, PeftModel)):
-            model = model_or_id_or_path
-            model_id_or_path = model.config.name_or_path  #
-        else:
-            raise ValueError(f"`model_or_id_or_path` is invalid. expected: `model instance or str` actual: `{model_or_id_or_path}`")
-
-        if tokenizer is None:
-            if isinstance(model, BaseQModel):
-                tokenizer = model.tokenizer
-            elif isinstance(model, PreTrainedModel) or model_id_or_path.strip():
-                tokenizer = Tokenicer.load(model_id_or_path.strip())
-
-        if tokenizer is None:
-            raise ValueError("Tokenizer: Auto-loading of tokenizer failed with `model_or_id_or_path`. Please pass in `tokenizer` as argument.")
-
-        if llm_backend == "gptqmodel": # vllm loads tokenizer
-            model_args["tokenizer"] = tokenizer
-
-        if framework == EVAL.LM_EVAL:
-            from lm_eval.utils import make_table  # hack: circular import
-
-            for task in tasks:
-                if task not in EVAL.get_task_enums():
-                    raise ValueError(f"Eval.lm_eval supported `tasks`: `{EVAL.get_all_tasks_string()}`, actual = `{task}`")
-
-            model_name = "hf" if llm_backend == "gptqmodel" else llm_backend
-
-            if llm_backend == "gptqmodel" and isinstance(model, BaseQModel) and model.quantized:
-                model_args["gptqmodel"] = True
-            model_args["pretrained"] = model_id_or_path
-
-            # TODO FIXME lm-eval latest broken imports
-            # lm_eval indirectly imports sglang, which expects newer Triton helpers.
-            # Provide shims so import succeeds on older triton/runtime builds.
-            try:
-                from triton.runtime import cache as triton_cache
-
-                if not hasattr(triton_cache, "default_cache_dir"):
-                    triton_cache.default_cache_dir = lambda: getattr(triton_cache.knobs.cache, "dir", None)
-                if not hasattr(triton_cache, "default_override_dir"):
-                    triton_cache.default_override_dir = lambda: getattr(triton_cache.knobs.cache, "override_dir", None)
-                if not hasattr(triton_cache, "default_dump_dir"):
-                    triton_cache.default_dump_dir = lambda: getattr(triton_cache.knobs.cache, "dump_dir", None)
-            except Exception as exc:
-                log.warning("Triton cache shim failed; lm_eval import may fail: %s", exc)
-
-            try:
-                from lm_eval import simple_evaluate
-                from lm_eval.models.huggingface import HFLM
-            except BaseException as e:
-                raise ValueError(f"lm_eval import failed: {e}. Please install via `pip install gptqmodel[eval]`.") from e
-
-            if llm_backend == "gptqmodel" and model is not None:
-                with _hide_unsupported_quantization_config_for_lm_eval(model):
-                    model_name = HFLM(
-                        pretrained=model,
-                        batch_size=batch_size,
-                        trust_remote_code=trust_remote_code,
-                    )
-
-            gen_kwargs = args.pop("gen_kwargs", None)
-
-            # use model.generation_config whenever possible
-            if gen_kwargs is None:
-                # TODO: move to utils
-                if hasattr(model, "generation_config") and isinstance(model.generation_config, GenerationConfig):
-                    gen_dict = {
-                        "do_sample": model.generation_config.do_sample,
-                        "temperature": model.generation_config.temperature,
-                        "top_k": model.generation_config.top_k,
-                        "top_p": model.generation_config.top_p,
-                        "min_p": model.generation_config.min_p,
-
-                    }
-                    gen_kwargs = ','.join(f"{key}={value}" for key, value in gen_dict.items() if value not in ["", {}, None, []])
-                else:
-                    gen_kwargs = "temperature=0.0,top_k=50" # default
-
-            log.info(f"LM-EVAL: `gen_kwargs` = `{gen_kwargs}`")
-
-            # lm-eval has very low scores if apply_chat_template is enabled
-            apply_chat_template = args.pop("apply_chat_template", False) # args.pop("apply_chat_template", True if tokenizer.chat_template is not None else False)
-            log.info(f"LM-EVAL: `apply_chat_template` = `{apply_chat_template}`")
-
-            # TODO FIXME lm-eval latest broken imports
-            # lm_eval pretty prints task yaml paths using Path.relative_to; when custom tasks live outside the
-            # installed lm_eval package tree this raises ValueError. Monkeypatch to fall back to absolute paths.
-            from pathlib import Path
-            original_relative_to = Path.relative_to
-
-            def _relative_to_noerror(self, other, *extra_args, **kwargs):
-                try:
-                    return original_relative_to(self, other, *extra_args, **kwargs)
-                except ValueError:
-                    return self
-
-            Path.relative_to = _relative_to_noerror
-            try:
-                results = simple_evaluate(
-                    model=model_name,
-                    model_args=model_args,
-                    tasks=[task.value for task in tasks],
-                    batch_size=batch_size,
-                    apply_chat_template=apply_chat_template,
-                    gen_kwargs=gen_kwargs,
-                    random_seed=random_seed,
-                    numpy_random_seed=random_seed,
-                    torch_random_seed=random_seed,
-                    fewshot_random_seed=random_seed,
-                    **args,
-                )
-            finally:
-                Path.relative_to = original_relative_to
-
-            if results is None:
-                raise ValueError('lm_eval run fail, check your code!!!')
-
-            print('--------lm_eval Eval Result---------')
-            print(make_table(results))
-            if "groups" in results:
-                print(make_table(results, "groups"))
-            print('--------lm_eval Result End---------')
-            return results
-        elif framework == EVAL.EVALPLUS:
-            for task in tasks:
-                if task not in EVAL.get_task_enums():
-                    raise ValueError(f"evalplus support tasks: {EVAL.get_all_tasks_string()}")
-            from ..utils.eval import evalplus, evalplus_make_table
-
-            results = {}
-            for task in tasks:
-                base_formatted, plus_formatted, result_path = evalplus(
-                    model=model_id_or_path,
-                    dataset=task.value,
-                    batch=batch_size,
-                    trust_remote_code=trust_remote_code,
-                    output_file=output_path,
-                    backend=llm_backend
-                )
-                results[task.value] = {"base tests": base_formatted, "base + extra tests": plus_formatted,
-                                       "results_path": result_path}
-            print('--------evalplus Eval Result---------')
-            evalplus_make_table(results)
-            print('--------evalplus Result End---------')
-            return results
-        elif framework == EVAL.MMLU_PRO:
-            for task in tasks:
-                if task not in EVAL.get_task_enums():
-                    raise ValueError(f"eval support tasks: {EVAL.get_all_tasks_string()}")
-            from ..utils.mmlupro import mmlupro
-            selected_subjects = ",".join(tasks)
-            results = mmlupro(model,
-                              tokenizer,
-                              save_dir=output_path,
-                              seed=random_seed,
-                              selected_subjects=selected_subjects,
-                              ntrain=ntrain,
-                              batch_size=batch_size,
-                              max_samples=args.pop("max_samples", None))
-
-            print('--------MMLUPro Eval Result---------')
-            print(results)
-            print('--------MMLUPro Result End---------')
-            return results
-        else:
-            raise ValueError("Eval framework support: EVAL.LM_EVAL, EVAL.EVALPLUS, EVAL.MMLUPRO")
 
     @staticmethod
     def export(model_id_or_path: str, target_path: str, format: str, trust_remote_code: bool = False):

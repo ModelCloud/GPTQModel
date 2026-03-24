@@ -7,12 +7,11 @@ import tempfile
 
 import pytest
 from datasets import load_dataset
-from lm_eval.utils import make_table
 from logbar import LogBar
 
 from gptqmodel import GPTAQConfig, GPTQModel, QuantizeConfig
 from gptqmodel.quantization import FORMAT
-from gptqmodel.utils.eval import EVAL
+from gptqmodel.utils.eval import evaluate, format_eval_result_table, get_eval_task_metrics
 
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
@@ -82,26 +81,23 @@ def _run_simple_quant_eval():
         log.info(f"Quant Model Saved to: {QUANT_SAVE_PATH}")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        results = GPTQModel.eval(
+        results = evaluate(
             QUANT_SAVE_PATH,
-            tasks=[EVAL.LM_EVAL.GSM8K_COT],  #, EVAL.LM_EVAL.GSM8K_PLATINUM_COT],
+            tasks=["gsm8k_cot"],  #, "gsm8k_platinum_cot"],
             apply_chat_template=True,
-            random_seed=898,
             output_path=tmp_dir,
         )
 
-        print(make_table(results))
-        if "groups" in results:
-            print(make_table(results, "groups"))
+        print(format_eval_result_table(results))
 
-        metrics = results["results"].get("gsm8k_cot", {})
+        metrics = get_eval_task_metrics(results, "gsm8k_cot")
         filtered_metrics = {
             metric: value
             for metric, value in metrics.items()
             if metric != "alias" and "stderr" not in metric
         }
 
-        value = filtered_metrics['exact_match,flexible-extract']
+        value = filtered_metrics['acc,num']
         expected = 0.7998
         diff_pct = (value / expected) * 100
         floor_pct = 0.05
@@ -109,7 +105,7 @@ def _run_simple_quant_eval():
         negative_pct = 100 * (1 - floor_pct)
         positive_pct = 100 * (1 + ceil_pct)
 
-        assert negative_pct <= diff_pct <= positive_pct, (f"gsm8k_cot:exact_match,flexible-extract: `{value}` vs "
+        assert negative_pct <= diff_pct <= positive_pct, (f"gsm8k_cot:acc,num: `{value}` vs "
                                                           f"expected `{expected}`, diff {diff_pct:.2f}% is out of the "
                                                           f"expected range [{negative_pct}-{positive_pct}%]")
 

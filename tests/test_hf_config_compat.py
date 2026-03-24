@@ -11,8 +11,8 @@ from transformers.generation.configuration_utils import GenerationMode
 
 from gptqmodel.utils import hf as hf_utils
 from gptqmodel.utils.hf import (
-    normalize_torch_dtype_kwarg,
     normalize_hf_config_compat,
+    normalize_torch_dtype_kwarg,
     prepare_remote_model_init_compat,
     resolve_trust_remote_code,
 )

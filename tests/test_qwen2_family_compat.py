@@ -14,7 +14,6 @@ from tokenizers.pre_tokenizers import Whitespace
 from torch import nn
 from transformers import PreTrainedTokenizerFast
 
-from gptqmodel.models import loader as model_loader
 from gptqmodel.models.definitions import base_qwen2_5_omni, base_qwen2_vl
 from gptqmodel.utils.hf import load_tokenizer
 

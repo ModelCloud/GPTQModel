@@ -40,8 +40,8 @@ from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     get_hf_config_dtype,
     has_native_transformers_causallm_support,
-    normalize_torch_dtype_kwarg,
     normalize_hf_config_compat,
+    normalize_torch_dtype_kwarg,
     prepare_remote_model_init_compat,
     resolve_trust_remote_code,
     set_hf_config_dtype,

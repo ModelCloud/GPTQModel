@@ -7,7 +7,6 @@ from model_test import ModelTest
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
-from gptqmodel.utils.eval import EVAL
 
 
 class TestLlama3_2_ParoQuant(ModelTest):
@@ -15,15 +14,28 @@ class TestLlama3_2_ParoQuant(ModelTest):
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_FAST = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
-                "value": 0.45905707196029777,
+            "evalution_use_model_path": True,
+            "evalution_batch_size": "auto",
+            "evalution_model_args": {
+                "dtype": "bfloat16",
+                "attn_implementation": "paged|flash_attention_2",
+                "device": "cuda:0",
+            },
+            "evalution_suite_kwargs": {
+                "batch_size": 24,
+                "max_new_tokens": 96,
+                "streaming": True,
+                "max_rows": 128,
+            },
+            "acc,num": {
+                "value": 0.460938,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.3216723549488055,
@@ -36,7 +48,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
                 "ceil_pct": 1.0,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.40120520139549637,
@@ -46,14 +58,14 @@ class TestLlama3_2_ParoQuant(ModelTest):
         },
     }
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.34325889164598844,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.30631399317406144,
@@ -64,7 +76,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.3850301300348874,

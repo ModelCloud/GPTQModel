@@ -4,8 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestTeleChat_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/TeleChat2-7B/"  # "Tele-AI/TeleChat2-7B"
@@ -20,7 +18,7 @@ class TestTeleChat_2(ModelTest):
     USE_VLLM = False
     USE_FLASH_ATTN = False
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},

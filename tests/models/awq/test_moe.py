@@ -13,10 +13,8 @@ from model_test import ModelTest
 
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
-from gptqmodel.utils.eval import EVAL
 
 
-# | Metric                         |   MARLIN |
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.5094 |
 # | arc_challenge :: acc_norm,none |   0.5486 |
@@ -24,7 +22,7 @@ class TestQwen3MoeAwq(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B"
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.5094, "floor_pct": 0.04},
             "acc_norm": {"value": 0.5486, "floor_pct": 0.04},
         },

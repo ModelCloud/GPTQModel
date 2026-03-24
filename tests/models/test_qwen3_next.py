@@ -6,10 +6,8 @@
 from model_test import ModelTest
 
 from gptqmodel.quantization.config import VramStrategy
-from gptqmodel.utils.eval import EVAL
 
 
-# | Metric                         |   MARLIN |
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.6271 |
 # | arc_challenge :: acc_norm,none |   0.6613 |
@@ -17,11 +15,11 @@ from gptqmodel.utils.eval import EVAL
 class TestQwen3Next(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-Next-80B-A3B-Instruct"
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.6271, "floor_pct": 0.04},
             "acc_norm": {"value": 0.6613, "floor_pct": 0.04},
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "acc": {"value": 0.8403, "floor_pct": 0.04},
         },
     }

@@ -5,8 +5,6 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestGlm4v(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/GLM-4.1V-9B-Thinking"
@@ -19,7 +17,7 @@ class TestGlm4v(ModelTest):
     TRUST_REMOTE_CODE = False
     EVAL_BATCH_SIZE = 6
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": False,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},

@@ -23,7 +23,6 @@ from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastQuantLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteQuantLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, QUANT_CONFIG_FILENAME
-from gptqmodel.utils.eval import EVAL
 from gptqmodel.utils.machete import _validate_machete_device_support, machete_import_exception
 
 
@@ -232,14 +231,14 @@ class TestQwen3_8B_Base_awq(ModelTest):
     # DATASET_CONCAT_SIZE = 2048 # new
     # STOP_AFTER_LAYER = 0
     EVAL_TASKS = {
-        EVAL.LM_EVAL.GSM8K_PLATINUM_COT: {
+        "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
+            "acc,num": {
                 "value": 0.2994,
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {
                 "value": 0.3166,
@@ -250,7 +249,7 @@ class TestQwen3_8B_Base_awq(ModelTest):
                 "floor_pct": 0.04,
             },
         },
-        EVAL.LM_EVAL.MMLU_STEM: {
+        "mmlu_stem": {
             "chat_template": False,
             "acc": {
                 "value": 0.3692,

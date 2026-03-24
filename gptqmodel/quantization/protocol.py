@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+import pcre as re
 
 from .config import FORMAT, METHOD, GGUFBits, GGUFConfig, QuantizeConfig, SmoothMAD
 

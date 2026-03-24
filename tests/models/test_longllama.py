@@ -6,14 +6,13 @@
 from model_test import ModelTest
 
 from gptqmodel.utils.backend import BACKEND
-from gptqmodel.utils.eval import EVAL
 
 
 class TestLongLlama(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/long_llama_3b_instruct" # "syzymon/long_llama_3b_instruct"
     TRUST_REMOTE_CODE = True
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "acc": {"value": 0.3515, "floor_pct": 0.5},
             "acc_norm": {"value": 0.3652, "floor_pct": 0.5},
         },

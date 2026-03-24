@@ -5,8 +5,6 @@
 
 from model_test import ModelTest
 
-from gptqmodel.utils.eval import EVAL
-
 
 class TestYi(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Yi-Coder-1.5B-Chat" # "01-ai/Yi-Coder-1.5B-Chat"
@@ -20,14 +18,14 @@ class TestYi(ModelTest):
     EVAL_BATCH_SIZE = 4
     APPLY_CHAT_TEMPLATE = True
     EVAL_TASKS_SLOW = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM},
         },
     }
     EVAL_TASKS_FAST = {
-        EVAL.LM_EVAL.ARC_CHALLENGE: {
+        "arc_challenge": {
             "chat_template": True,
             "acc": {"value": NATIVE_ARC_CHALLENGE_ACC_FAST, "ceil_pct": 1.0},
             "acc_norm": {"value": NATIVE_ARC_CHALLENGE_ACC_NORM_FAST, "ceil_pct": 1.0},
