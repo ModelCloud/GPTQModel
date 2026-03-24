@@ -26,7 +26,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
             "evalution_suite_kwargs": {
                 "batch_size": 24,
                 "max_new_tokens": 96,
-                "streaming": True,
+                "stream": True,
                 "max_rows": 128,
             },
             "acc,num": {
@@ -93,9 +93,10 @@ class TestLlama3_2_ParoQuant(ModelTest):
     KERNEL_QUANT = {ParoQuantQuantLinear}
     KERNEL_INFERENCE = {ParoQuantQuantLinear}
 
-    PAROQUANT_ROTATION_EPOCHS = 5
-    PAROQUANT_FINETUNE_EPOCHS = 5
-    PAROQUANT_TRAIN_SAMPLES = 512
+    # Mirror benchmark settings: 1+1 epochs on 128 train rows
+    PAROQUANT_ROTATION_EPOCHS = 1
+    PAROQUANT_FINETUNE_EPOCHS = 1
+    PAROQUANT_TRAIN_SAMPLES = 128
 
     def _build_quantize_config(self):
         return ParoQuantQuantizeConfig(

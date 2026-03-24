@@ -38,7 +38,7 @@ def test_llama3_2_paroquant_first_4_layers_full_model():
         eval_suite_kwargs={
             "batch_size": int(os.environ.get("GPTQMODEL_PAROQUANT_TEST_SUITE_BATCH", "24")),
             "max_new_tokens": int(os.environ.get("GPTQMODEL_PAROQUANT_TEST_MAX_NEW_TOKENS", "96")),
-            "streaming": os.environ.get("GPTQMODEL_PAROQUANT_TEST_STREAMING", "1") != "0",
+            "stream": os.environ.get("GPTQMODEL_PAROQUANT_TEST_STREAMING", "1") != "0",
             "max_rows": resolved_eval_max_rows,
         },
         sym=True,
