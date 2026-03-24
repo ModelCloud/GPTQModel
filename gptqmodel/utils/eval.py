@@ -683,7 +683,7 @@ def _normalize_dtype_name(dtype: Any) -> str | None:
         }
         if dtype in mapping:
             return mapping[dtype]
-    except Exception:
+    except ImportError:
         pass
     return str(dtype)
 
