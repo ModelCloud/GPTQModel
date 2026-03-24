@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from model_test import ModelTest
 
+
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.6092 |
 # | arc_challenge :: acc_norm,none |   0.6143 |

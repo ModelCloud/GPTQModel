@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from types import SimpleNamespace
+
 import pytest
 from transformers import AutoTokenizer
-from types import SimpleNamespace
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.utils.eval import evaluate

@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 import os
-import pcre as re
 import subprocess
 import sys
 import tarfile
 from pathlib import Path
 from shutil import rmtree
 
+import pcre as re
 import setuptools
 from packaging.version import Version
 from setuptools import find_namespace_packages, find_packages, setup

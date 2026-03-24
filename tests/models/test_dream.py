@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestDream(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Dream-v0-Instruct-7B"
     EVAL_TASKS_SLOW = {

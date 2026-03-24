@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestGlm4Moe(ModelTest):
     # FORMAT = FORMAT.GEMM
     # METHOD = METHOD.AWQ

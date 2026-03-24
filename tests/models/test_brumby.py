@@ -9,6 +9,7 @@ from importlib.metadata import PackageNotFoundError, version
 from model_test import ModelTest
 from packaging.version import Version
 
+
 class TestBrumby(ModelTest):
     GROUP_SIZE = 32
     DATASET_SIZE = 1024

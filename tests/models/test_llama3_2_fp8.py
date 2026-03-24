@@ -17,6 +17,8 @@ from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8QuantLinear
 from gptqmodel.quantization import METHOD
 from gptqmodel.quantization.config import WeightOnlyConfig
+
+
 # | Metric                                             | TORCH_FP8 |
 # |----------------------------------------------------|-----------|
 # | arc_challenge :: acc,none                          |    0.3191 |

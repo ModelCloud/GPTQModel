@@ -10,6 +10,8 @@ from model_test import ModelTest
 from packaging.version import Version
 
 from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
+
+
 class TestQwen2_5_Omni(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-Omni-3B"
     EVAL_TASKS = {

@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestCohere(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/aya-expanse-8b" # "CohereForAI/aya-expanse-8b"
     EVAL_TASKS_SLOW = {

@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestSeedOSS(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Seed-OSS-36B-Instruct/"
     EVAL_TASKS_SLOW = {

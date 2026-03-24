@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestMinimaxM2(ModelTest):
 
     NATIVE_MODEL_ID = "/monster/data/model/MiniMax-M2-bf16"

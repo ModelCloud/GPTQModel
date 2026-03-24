@@ -6,6 +6,8 @@
 from model_test import ModelTest
 
 from gptqmodel.quantization.config import VramStrategy
+
+
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.6271 |
 # | arc_challenge :: acc_norm,none |   0.6613 |

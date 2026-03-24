@@ -49,13 +49,13 @@ if sys.platform == "darwin":
 import os.path  # noqa: E402
 import random  # noqa: E402
 from os.path import isdir, join  # noqa: E402
-from typing import Any, Dict, List, Optional, Union  # noqa: E402
+from typing import Dict, List, Optional, Union  # noqa: E402
 
 import numpy  # noqa: E402
 import torch  # noqa: E402
 from huggingface_hub import list_repo_files  # noqa: E402
 from packaging.version import Version  # noqa: E402
-from transformers import AutoConfig, GenerationConfig, PreTrainedTokenizerBase  # noqa: E402
+from transformers import AutoConfig, PreTrainedTokenizerBase  # noqa: E402
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from ..adapter.adapter import Adapter, Lora, normalize_adapter  # noqa: E402

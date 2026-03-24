@@ -5,6 +5,8 @@
 from model_test import ModelTest
 
 from gptqmodel.quantization.config import Fallback, VramStrategy
+
+
 class TestQwen3_5Moe(ModelTest):
     FALLBACK = Fallback()
     # FORMAT = FORMAT.GEMM

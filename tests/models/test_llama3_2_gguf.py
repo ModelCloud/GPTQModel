@@ -3,12 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import torch
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
-import torch
 
 
 class TestLlama3_2_GGUF(ModelTest):

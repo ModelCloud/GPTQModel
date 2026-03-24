@@ -5,6 +5,8 @@
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
+
+
 # desc_act = False, act_group_aware = True
 # | Metric                         |   MARLIN |
 # |--------------------------------|----------|

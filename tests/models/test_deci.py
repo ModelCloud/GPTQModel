@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestDeci(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/DeciLM-7B-instruct" # "Deci/DeciLM-7B-instruct"
     EVAL_TASKS_SLOW = {

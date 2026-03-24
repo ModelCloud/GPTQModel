@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestHymba(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Hymba-1.5B-Instruct/"  # "baichuan-inc/Baichuan2-7B-Chat"
     EVAL_TASKS_SLOW = {

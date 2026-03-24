@@ -13,6 +13,8 @@ from model_test import ModelTest
 
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
+
+
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.5094 |
 # | arc_challenge :: acc_norm,none |   0.5486 |

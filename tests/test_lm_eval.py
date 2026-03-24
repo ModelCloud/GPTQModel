@@ -14,7 +14,7 @@ import unittest  # noqa: E402
 
 import pytest
 
-from gptqmodel import BACKEND, GPTQModel
+from gptqmodel import BACKEND
 from gptqmodel.utils.eval import evaluate, format_eval_result_table, get_eval_task_metrics  # noqa: E402
 
 

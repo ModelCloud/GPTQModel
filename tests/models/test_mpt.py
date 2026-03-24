@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestMpt(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/mpt-7b-instruct" # "mosaicml/mpt-7b-instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.4275

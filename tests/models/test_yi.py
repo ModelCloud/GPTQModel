@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestYi(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Yi-Coder-1.5B-Chat" # "01-ai/Yi-Coder-1.5B-Chat"
     NATIVE_ARC_CHALLENGE_ACC = 0.2679

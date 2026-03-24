@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestCohere2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/c4ai-command-r7b-12-2024"
     EVAL_TASKS_SLOW = {

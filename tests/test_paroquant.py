@@ -18,17 +18,17 @@ from transformers.utils.quantization_config import GPTQConfig
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
-from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
-from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantQuantizeConfig, ParoQuantizeConfig, QuantizeConfig
+from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
+from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantizeConfig, ParoQuantQuantizeConfig, QuantizeConfig
 from gptqmodel.quantization.paroquant import optimization as paroquant_optimization
 from gptqmodel.quantization.paroquant.optimization import (
     GroupLinearQuantizer,
-    _ParoQuantOptimLinear,
     _apply_rotation,
+    _ParoQuantOptimLinear,
     build_random_rotation_buffers,
-    optimize_paroquant_llama_mlp_block,
     optimize_paroquant_linear,
+    optimize_paroquant_llama_mlp_block,
     pseudo_quantize_dequant,
 )
 from gptqmodel.utils.backend import BACKEND

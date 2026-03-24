@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from gptqmodel import BACKEND
+
+
 sys.path.insert(0, str(Path(__file__).resolve().parent / "models"))
 from model_test import ModelTest  # noqa: E402
 

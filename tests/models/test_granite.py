@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestGranite(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/granite-3.0-2b-instruct" # "ibm-granite/granite-3.0-2b-instruct"
     TRUST_REMOTE_CODE = True

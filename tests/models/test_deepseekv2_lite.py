@@ -5,6 +5,8 @@
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
+
+
 class TestDeepseekV2Lite(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/DeepSeek-Coder-V2-Lite-Instruct" # "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.4753

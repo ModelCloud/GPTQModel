@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestPhi_4(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Phi-4-multimodal-instruct" # "microsoft/Phi-3-mini-4k-instruct"
     NATIVE_ARC_CHALLENGE_ACC = 0.5401

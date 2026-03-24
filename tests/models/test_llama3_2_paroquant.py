@@ -7,6 +7,8 @@ from model_test import ModelTest
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD
+
+
 class TestLlama3_2_ParoQuant(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64

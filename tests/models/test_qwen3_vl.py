@@ -6,6 +6,8 @@
 from model_test import ModelTest
 
 from gptqmodel.models.definitions.qwen3_vl import Qwen3_VLQModel
+
+
 class TestQwen3_VL(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-VL-2B-Instruct/"
     EVAL_TASKS_SLOW = {

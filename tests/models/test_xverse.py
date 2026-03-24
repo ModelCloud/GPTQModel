@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestXVerse(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/XVERSE-7B-Chat" # "xverse/XVERSE-7B-Chat"
     EVAL_TASKS_SLOW = {

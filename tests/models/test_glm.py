@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.5154 |
 # | arc_challenge :: acc_norm,none |   0.535  |

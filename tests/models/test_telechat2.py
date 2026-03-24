@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from model_test import ModelTest
 
+
 class TestTeleChat_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/TeleChat2-7B/"  # "Tele-AI/TeleChat2-7B"
     NATIVE_ARC_CHALLENGE_ACC = 0.3677

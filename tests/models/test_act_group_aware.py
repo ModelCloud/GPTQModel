@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestHybridActOrder(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_TASKS_SLOW = {

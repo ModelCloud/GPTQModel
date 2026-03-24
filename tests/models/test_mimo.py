@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestMimo(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/MiMo-7B-RL"
     EVAL_TASKS_SLOW = {

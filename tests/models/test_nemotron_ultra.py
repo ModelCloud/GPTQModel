@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestNemotronUltra(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3_1-Nemotron-Ultra-253B-v1"
     EVAL_TASKS_SLOW = {

@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestLlama4(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-4-Scout-17B-16E-Instruct" # "meta-llama/Llama-4-Scout-17B-16E-Instruct"
     EVAL_TASKS_SLOW = {

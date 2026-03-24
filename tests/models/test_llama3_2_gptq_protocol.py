@@ -15,6 +15,8 @@ from gptqmodel.quantization.protocol import (
     compile_protocol,
     compile_protocol_yaml_text,
 )
+
+
 LAYER0_ONLY_NEGATIVE_MATCH = r".*layers\.(?:[1-9]|[12][0-9]|3[0-2])\..*"
 
 

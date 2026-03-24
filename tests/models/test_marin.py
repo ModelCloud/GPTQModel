@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestMarin(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/marin-32b-base"
     # VRAM_STRATEGY = VramStrategy.BALANCED

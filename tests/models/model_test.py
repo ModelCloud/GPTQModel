@@ -71,6 +71,7 @@ from gptqmodel.models.base import BaseQModel  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.quantization import FORMAT, METHOD  # noqa: E402
 from gptqmodel.quantization.config import (  # noqa: E402
+    BitsAndBytesConfig,
     Fallback,
     FP8Config,
     GGUFConfig,
@@ -81,7 +82,7 @@ from gptqmodel.quantization.config import (  # noqa: E402
     RTNQuantizeConfig,
     VramStrategy,
     WeightOnlyConfig,
-    resolve_quant_format, BitsAndBytesConfig,
+    resolve_quant_format,
 )
 from gptqmodel.utils.eval import (  # noqa: E402
     evaluate,

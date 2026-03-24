@@ -6,6 +6,8 @@
 from model_test import ModelTest
 
 from gptqmodel.quantization import FORMAT, METHOD
+
+
 class TestGlm4Moe(ModelTest):
     FORMAT = FORMAT.GEMM
     METHOD = METHOD.AWQ

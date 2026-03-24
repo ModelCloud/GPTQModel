@@ -17,6 +17,8 @@ from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.quantization import FORMAT, METHOD
+
+
 # | Metric                         | AWQ GEMM |
 # |--------------------------------|----------|
 # | arc_challenge :: acc,none      |   0.3140 |

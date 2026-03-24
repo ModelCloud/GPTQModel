@@ -5,6 +5,7 @@
 
 from models.model_test import ModelTest
 
+
 class TestQwen2_5_GPTAQ(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
     EVAL_TASKS = {

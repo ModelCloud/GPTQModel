@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestMistral(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Mistral-7B-Instruct-v0.2" # "mistralai/Mistral-7B-Instruct-v0.2"
     NATIVE_ARC_CHALLENGE_ACC = 0.5427

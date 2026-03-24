@@ -8,6 +8,7 @@ from pathlib import Path
 
 from model_test import ModelTest
 
+
 # | Metric                                             |   MARLIN |
 # |----------------------------------------------------|----------|
 # | arc_challenge :: acc,none                          |   0.3166 |

@@ -6,6 +6,8 @@
 from model_test import ModelTest
 
 from gptqmodel.quantization.config import FORMAT, METHOD
+
+
 class TestMarin(ModelTest):
     DATASET_SIZE = 1024
     GROUP_SIZE = 32

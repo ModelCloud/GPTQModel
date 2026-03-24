@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestQwen2_5_Moe(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Qwen1.5-MoE-A2.7B" # Qwen/Qwen1.5-MoE-A2.7B
     EVAL_TASKS_SLOW = {

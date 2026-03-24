@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestLing(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Ling-mini-2.0/"
     EVAL_TASKS_SLOW = {

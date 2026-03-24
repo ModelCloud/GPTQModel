@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestGlm4v(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/GLM-4.1V-9B-Thinking"
     NATIVE_ARC_CHALLENGE_ACC = 0.5119

@@ -6,6 +6,7 @@
 import torch  # noqa: E402
 from model_test import ModelTest
 
+
 class TestFalcon(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/falcon-7b-instruct" # "tiiuae/falcon-7b-instruct"
     TRUST_REMOTE_CODE = False

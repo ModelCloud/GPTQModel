@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from model_test import ModelTest
 
 from gptqmodel.quantization.config import FORMAT, METHOD, Fallback, VramStrategy
+
+
 class TestQwen3_5Moe(ModelTest):
     FALLBACK = Fallback()
     FORMAT = FORMAT.GEMM

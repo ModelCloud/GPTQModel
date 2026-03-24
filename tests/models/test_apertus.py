@@ -6,6 +6,8 @@
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
+
+
 class TestApertus(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Apertus-8B-Instruct-2509/"
     EVAL_TASKS_SLOW = {

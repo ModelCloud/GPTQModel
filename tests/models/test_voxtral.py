@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestVoxtral(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Voxtral-Mini-3B-2507"
     NATIVE_ARC_CHALLENGE_ACC = 0.3392

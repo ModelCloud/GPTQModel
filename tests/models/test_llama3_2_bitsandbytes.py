@@ -3,12 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import torch
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.bitsandbytes import BITSANDBYTES_AVAILABLE, BitsAndBytesQuantLinear
-from gptqmodel.quantization import FORMAT, METHOD, BitsAndBytesConfig
-import torch
+from gptqmodel.quantization import FORMAT, METHOD
 
 
 class TestLlama3_2_BitsAndBytes(ModelTest):
