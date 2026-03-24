@@ -131,7 +131,7 @@ class ModelTest(unittest.TestCase):
     MODEL_TEST_MODE_ENV = "GPTQMODEL_MODEL_TEST_MODE"
     MODEL_TEST_MODE_FAST = "fast"
     MODEL_TEST_MODE_SLOW = "slow"
-    MODEL_COMPAT_FAST_LAYER_COUNT = 4
+    MODEL_COMPAT_FAST_LAYER_COUNT = None
 
     KERNEL_QUANT = {}  # kernel sets
     KERNEL_INFERENCE = {}  # kernel sets
@@ -287,23 +287,81 @@ class ModelTest(unittest.TestCase):
             merged.update(copy.deepcopy(config))
         return merged or None
 
-    def _build_fast_model_compat_dynamic(self, model) -> Optional[Dict[str, Dict[str, Any]]]:
-        if not self._should_use_fast_model_compat_quant():
-            return None
-
-        layer_limit = max(int(self.MODEL_COMPAT_FAST_LAYER_COUNT), 0)
-
+    def _resolve_layers_for_fast_model_compat(self, model):
         layers_node = model.extract_layers_node()
         if isinstance(layers_node, (list, tuple)):
             if not layers_node:
-                return None
+                return None, None
             layers_node = layers_node[0]
 
         layers = model.model
         for part in layers_node.split("."):
             layers = getattr(layers, part)
 
+        return layers_node, layers
+
+    @staticmethod
+    def _layer_type_signature(layer) -> tuple:
+        layer_type = f"{type(layer).__module__}.{type(layer).__qualname__}"
+        top_children = tuple(
+            (name, f"{type(module).__module__}.{type(module).__qualname__}")
+            for name, module in layer.named_children()
+        )
+        feature_tokens = ("moe", "expert", "router", "gate")
+        features = set()
+        for name, _module in layer.named_modules():
+            lower = name.lower()
+            for token in feature_tokens:
+                if token in lower:
+                    features.add(token)
+        return layer_type, top_children, tuple(sorted(features))
+
+    def _summarize_layer_signatures(self, layers) -> List[Dict[str, Any]]:
+        summaries: Dict[tuple, Dict[str, Any]] = {}
+        for idx, layer in enumerate(layers):
+            signature = self._layer_type_signature(layer)
+            summary = summaries.get(signature)
+            if summary is None:
+                layer_type, top_children, features = signature
+                summary = {
+                    "first_idx": idx,
+                    "count": 0,
+                    "layer_type": layer_type,
+                    "top_children": [name for name, _ in top_children][:8],
+                    "features": list(features),
+                }
+                summaries[signature] = summary
+            summary["count"] += 1
+
+        return sorted(summaries.values(), key=lambda item: item["first_idx"])
+
+    def _fast_model_layer_limit(self, layers) -> int:
         layer_count = len(layers)
+        configured_min_layers = self.MODEL_COMPAT_FAST_LAYER_COUNT
+        min_layers = int(configured_min_layers) if configured_min_layers is not None else 2
+        min_layers = max(min_layers, 0)
+        if layer_count <= min_layers:
+            return layer_count
+
+        signature_summaries = self._summarize_layer_signatures(layers)
+        unique_signatures = len(signature_summaries)
+
+        if unique_signatures == 1:
+            return min(min_layers, layer_count)
+
+        last_first_idx = max((item["first_idx"] for item in signature_summaries), default=0)
+        return min(layer_count, max(min_layers, last_first_idx + 1))
+
+    def _build_fast_model_compat_dynamic(self, model) -> Optional[Dict[str, Dict[str, Any]]]:
+        if not self._should_use_fast_model_compat_quant():
+            return None
+
+        layers_node, layers = self._resolve_layers_for_fast_model_compat(model)
+        if layers_node is None or layers is None:
+            return None
+
+        layer_count = len(layers)
+        layer_limit = self._fast_model_layer_limit(layers)
         if layer_count <= layer_limit:
             return None
 
@@ -312,10 +370,25 @@ class ModelTest(unittest.TestCase):
             for i in range(layer_limit, layer_count)
         }
 
+        unique_layer_types = len({self._layer_type_signature(layer) for layer in layers})
         log.info(
-            "Fast quant mode: quantizing first %s layers, skipping %s layers.",
+            "Fast quant mode: quantizing first %s/%s layers (%s unique layer type signatures covered), skipping %s layers.",
             layer_limit,
+            layer_count,
+            unique_layer_types,
             layer_count - layer_limit,
+        )
+        signature_summaries = self._summarize_layer_signatures(layers)
+        log.info(
+            "Fast quant mode layer signature details: \n%s",
+            "\n".join(
+                (
+                    f"first_layer={item['first_idx']}, count={item['count']}, "
+                    f"type={item['layer_type']}, top_children={item['top_children'] or ['<none>']}, "
+                    f"special_features={item['features'] or ['<none>']}"
+                )
+                for item in signature_summaries
+            ),
         )
 
         return dynamic
