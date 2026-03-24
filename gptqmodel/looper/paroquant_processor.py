@@ -360,6 +360,8 @@ class ParoQuantProcessor(LoopProcessor):
                 seed=self.qcfg.opt_seed + gate_module.layer_index + hash(f"{gate_module.full_name}:llama_mlp_block"),
                 activation_fn=layer_module.mlp.act_fn,
                 fused_rotation=self.qcfg.opt_fused_rotation,
+                stage_impl=self.qcfg.opt_stage_impl,
+                pair_impl=self.qcfg.opt_pair_impl,
             )
 
         for name, named_module in block_modules.items():
@@ -399,6 +401,8 @@ class ParoQuantProcessor(LoopProcessor):
                 quantizer_lr=self.qcfg.opt_quantizer_lr,
                 seed=self.qcfg.opt_seed + module.layer_index + hash(module.full_name),
                 fused_rotation=self.qcfg.opt_fused_rotation,
+                stage_impl=self.qcfg.opt_stage_impl,
+                pair_impl=self.qcfg.opt_pair_impl,
             )
 
         self._apply_optimization_result(module, result, original_weight)

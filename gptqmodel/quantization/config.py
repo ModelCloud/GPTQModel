@@ -2476,6 +2476,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_seed": "opt_seed",
             "opt_fused_rotation": "opt_fused_rotation",
             "opt_enable_llama_mlp_block": "opt_enable_llama_mlp_block",
+            "opt_stage_impl": "opt_stage_impl",
+            "opt_pair_impl": "opt_pair_impl",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -2815,6 +2817,8 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_seed: int = field(default=0)
     opt_fused_rotation: bool = field(default=True)
     opt_enable_llama_mlp_block: bool = field(default=False)
+    opt_stage_impl: str = field(default="gptqmodel")
+    opt_pair_impl: str = field(default="gptqmodel")
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.PAROQUANT,)
@@ -2844,6 +2848,8 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_seed = int(self.opt_seed)
         self.opt_fused_rotation = bool(self.opt_fused_rotation)
         self.opt_enable_llama_mlp_block = bool(self.opt_enable_llama_mlp_block)
+        self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
+        self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
         if self.opt_rotation_epochs < 0 or self.opt_finetune_epochs < 0:
             raise ValueError("ParoQuantizeConfig: optimization epochs must be non-negative.")
         if self.opt_train_samples <= 0 or self.opt_validation_samples <= 0:
@@ -2854,6 +2860,10 @@ class ParoQuantizeConfig(QuantizeConfig):
             raise ValueError("ParoQuantizeConfig: optimization learning rates must be positive.")
         if not (0.0 < self.opt_pair_ratio <= 0.5):
             raise ValueError("ParoQuantizeConfig: `opt_pair_ratio` must be in the interval (0, 0.5].")
+        if self.opt_stage_impl not in {"gptqmodel", "reference"}:
+            raise ValueError("ParoQuantizeConfig: `opt_stage_impl` must be one of {'gptqmodel', 'reference'}.")
+        if self.opt_pair_impl not in {"gptqmodel", "reference"}:
+            raise ValueError("ParoQuantizeConfig: `opt_pair_impl` must be one of {'gptqmodel', 'reference'}.")
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
@@ -2873,6 +2883,8 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_seed"] = self.opt_seed
         meta_payload["opt_fused_rotation"] = self.opt_fused_rotation
         meta_payload["opt_enable_llama_mlp_block"] = self.opt_enable_llama_mlp_block
+        meta_payload["opt_stage_impl"] = self.opt_stage_impl
+        meta_payload["opt_pair_impl"] = self.opt_pair_impl
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym

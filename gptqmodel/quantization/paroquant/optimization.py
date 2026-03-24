@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import math
 import random
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Callable, Iterable, Literal, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -28,6 +29,17 @@ from torch import nn
 
 from ...utils.env import env_flag
 from ...utils.paroquant import apply_paroquant_rotation_autograd, build_identity_rotation_buffers
+
+_PAROQUANT_OPT_IMPLS: tuple[str, ...] = ("gptqmodel", "reference")
+
+
+def _normalize_opt_impl(name: str, *, field: str) -> str:
+    normalized = str(name).strip().lower()
+    if normalized not in _PAROQUANT_OPT_IMPLS:
+        raise ValueError(
+            f"ParoQuant optimization: `{field}` must be one of {_PAROQUANT_OPT_IMPLS}, got `{name}`."
+        )
+    return normalized
 
 
 def _round_ste(x: torch.Tensor) -> torch.Tensor:
@@ -190,6 +202,155 @@ def build_random_rotation_buffers(
             mask_rows[rot_idx] = torch.cat((mask_rows[rot_idx], mask), dim=0)
 
     return torch.stack(rotation_rows, dim=0).contiguous(), torch.stack(mask_rows, dim=0).contiguous()
+
+
+def _get_independent_channel_pairs_reference(
+    pairs: torch.Tensor,
+    dim: int,
+    num_rotations: int,
+    num_pairs_each: int,
+) -> list[list[tuple[int, int]]]:
+    pairs_cpu = pairs.cpu().tolist()
+    rotations_pairs: list[list[tuple[int, int]]] = []
+    available = torch.ones(dim, dim)
+    available.fill_diagonal_(0)
+
+    for _ in range(num_rotations):
+        independent_pairs: list[tuple[int, int]] = []
+        available_in_rotation = available.clone()
+        for i, j in pairs_cpu:
+            if len(independent_pairs) == num_pairs_each:
+                break
+            if available_in_rotation[i, j] == 0:
+                continue
+            independent_pairs.append((i, j))
+            available_in_rotation[i, :] = 0
+            available_in_rotation[j, :] = 0
+            available_in_rotation[:, i] = 0
+            available_in_rotation[:, j] = 0
+            available[i, j] = 0
+            available[j, i] = 0
+        rotations_pairs.append(independent_pairs)
+    return rotations_pairs
+
+
+def _align_pairs_to_kernel_shape_reference(
+    pair: torch.Tensor,
+    angle: torch.Tensor,
+    *,
+    group_size: int,
+    include_mask: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    if pair.size(0) != angle.size(0) or pair.size(1) != 2:
+        raise ValueError("ParoQuant optimization(reference): pair/angle shape mismatch.")
+
+    group_idx = 0
+    pair_ptr = 0
+    pair_groups: list[torch.Tensor] = []
+    angle_groups: list[torch.Tensor] = []
+    mask_groups: list[torch.Tensor] = []
+
+    while True:
+        if pair_ptr >= pair.size(0):
+            break
+        occupied = torch.zeros((group_size), dtype=torch.int32)
+        count = 0
+        temp_pairs = torch.zeros((group_size // 2, 2), dtype=torch.int32, device=pair.device)
+        temp_angle = torch.zeros((group_size // 2), dtype=torch.float, device=angle.device)
+        temp_mask = torch.zeros((group_size // 2), dtype=torch.int32, device=angle.device)
+        while count < group_size // 2:
+            if (
+                pair_ptr < pair.size(0)
+                and pair[pair_ptr, 0] - group_idx * group_size < group_size
+                and pair[pair_ptr, 1] - group_idx * group_size < group_size
+            ):
+                temp_pairs[count, :] = pair[pair_ptr, :]
+                temp_angle[count] = angle[pair_ptr]
+                if occupied[pair[pair_ptr, 0] % group_size] == 1 or occupied[pair[pair_ptr, 1] % group_size] == 1:
+                    raise ValueError("ParoQuant optimization(reference): illegal pair.")
+                occupied[pair[pair_ptr, :] % group_size] = 1
+                pair_ptr += 1
+            else:
+                t_pair = torch.tensor([-1, -1])
+                for i in range(group_size):
+                    if occupied[i] == 0:
+                        t_pair[0] = i
+                        occupied[i] = 1
+                        break
+                for i in range(group_size):
+                    if occupied[i] == 0:
+                        t_pair[1] = i
+                        occupied[i] = 1
+                        break
+                if t_pair[0] == -1 or t_pair[1] == -1:
+                    raise ValueError("ParoQuant optimization(reference): unable to find dummy pair.")
+                temp_pairs[count, :] = t_pair
+                temp_angle[count] = float(0)
+                temp_mask[count] = 1
+            count += 1
+        group_idx += 1
+        pair_groups.append(temp_pairs)
+        angle_groups.append(temp_angle)
+        mask_groups.append(temp_mask)
+
+    rotation_pairs = torch.cat(pair_groups, dim=0).view(-1).contiguous() % group_size
+    angles = torch.cat(angle_groups, dim=0)
+    masks = torch.cat(mask_groups, dim=0)
+    if include_mask:
+        return rotation_pairs, angles, masks
+    return rotation_pairs, angles, None
+
+
+def build_random_rotation_buffers_reference(
+    *,
+    in_features: int,
+    group_size: int,
+    krot: int,
+    pair_ratio: float,
+    seed: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    normalized_group_size = _normalize_group_size(group_size, in_features)
+    if krot <= 0:
+        raise ValueError(f"ParoQuant optimization(reference): `krot` must be positive, got {krot}.")
+    if not (0.0 < float(pair_ratio) <= 0.5):
+        raise ValueError("ParoQuant optimization(reference): `pair_ratio` must be in the interval (0, 0.5].")
+
+    rng = random.Random(int(seed))
+    group_num = in_features // normalized_group_size
+    num_pairs_per_group = int(normalized_group_size * float(pair_ratio))
+    pairs_by_rotation: list[list[tuple[int, int]]] = [[] for _ in range(krot)]
+
+    for group_idx in range(group_num):
+        all_pairs = [(i, j) for i in range(normalized_group_size) for j in range(i + 1, normalized_group_size)]
+        rng.shuffle(all_pairs)
+        selected_by_rotation = _get_independent_channel_pairs_reference(
+            torch.tensor(all_pairs),
+            normalized_group_size,
+            krot,
+            num_pairs_per_group,
+        )
+        offset = group_idx * normalized_group_size
+        for rotation_idx in range(krot):
+            for col1, col2 in selected_by_rotation[rotation_idx]:
+                pairs_by_rotation[rotation_idx].append((col1 + offset, col2 + offset))
+
+    pair_tensors = [torch.tensor(pairs, dtype=torch.int32, device=device) for pairs in pairs_by_rotation]
+    angle_tensors = [torch.zeros((pairs.shape[0],), dtype=torch.float32, device=device) for pairs in pair_tensors]
+
+    aligned_pairs: list[torch.Tensor] = []
+    aligned_masks: list[torch.Tensor] = []
+    for pair_tensor, angle_tensor in zip(pair_tensors, angle_tensors):
+        pair, _angle, mask = _align_pairs_to_kernel_shape_reference(
+            pair_tensor,
+            angle_tensor,
+            group_size=normalized_group_size,
+            include_mask=True,
+        )
+        aligned_pairs.append(pair.to(dtype=torch.int16))
+        aligned_masks.append(mask.to(dtype=torch.bool))
+
+    return torch.stack(aligned_pairs, dim=0).contiguous(), torch.stack(aligned_masks, dim=0).contiguous()
 
 
 def _sample_activation_rows(inputs: torch.Tensor, max_rows: int) -> torch.Tensor:
@@ -647,16 +808,24 @@ def _chunk_rows(rows: torch.Tensor, batch_size: int) -> Iterable[torch.Tensor]:
         yield rows[start:start + batch_size]
 
 
-def _evaluate_model(model: nn.Module, inputs: torch.Tensor, targets: torch.Tensor) -> float:
+def _evaluate_model(
+    model: nn.Module,
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    use_amp: bool = False,
+) -> float:
     """Measure replay error for early stopping and stage selection."""
     if inputs.numel() == 0:
         return 0.0
     with torch.no_grad():
-        preds = model(inputs)
+        autocast_ctx = torch.amp.autocast("cuda") if use_amp and inputs.device.type == "cuda" else nullcontext()
+        with autocast_ctx:
+            preds = model(inputs)
         return float(F.smooth_l1_loss(preds, targets).item())
 
 
-def _run_stage(
+def _run_stage_gptqmodel(
     *,
     model: nn.Module,
     inputs_train: torch.Tensor,
@@ -684,8 +853,8 @@ def _run_stage(
         )
 
     if epochs <= 0 or not normalized_groups:
-        train_loss = _evaluate_model(model, inputs_train, targets_train)
-        val_loss = _evaluate_model(model, inputs_val, targets_val)
+        train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
         return train_loss, val_loss
 
     optimizer = torch.optim.AdamW(normalized_groups)
@@ -696,7 +865,7 @@ def _run_stage(
 
     best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
     best_val_loss = float("inf")
-    last_train_loss = _evaluate_model(model, inputs_train, targets_train)
+    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
 
     for _epoch in range(epochs):
         epoch_loss = 0.0
@@ -718,7 +887,7 @@ def _run_stage(
             batch_count += 1
 
         last_train_loss = epoch_loss / max(1, batch_count)
-        val_loss = _evaluate_model(model, inputs_val, targets_val)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
@@ -726,6 +895,121 @@ def _run_stage(
     model.load_state_dict(best_state, strict=True)
     model.reset_masked_angles()
     return last_train_loss, best_val_loss
+
+
+def _run_stage_reference(
+    *,
+    model: nn.Module,
+    inputs_train: torch.Tensor,
+    targets_train: torch.Tensor,
+    inputs_val: torch.Tensor,
+    targets_val: torch.Tensor,
+    param_groups: Sequence[dict[str, object]],
+    epochs: int,
+    batch_size: int,
+) -> tuple[float, float]:
+    """Official-parity stage runner: AMP + GradScaler + cosine LR update."""
+    normalized_groups = []
+    for param_group in param_groups:
+        params = [param for param in param_group.get("params", []) if param.requires_grad]
+        if not params:
+            continue
+        normalized_groups.append(
+            {
+                "params": params,
+                "lr": float(param_group["lr"]),
+                "weight_decay": float(param_group.get("weight_decay", 0.01)),
+                "betas": tuple(param_group.get("betas", (0.9, 0.95))),
+                "eps": float(param_group.get("eps", 1e-10)),
+            }
+        )
+
+    use_amp = inputs_train.device.type == "cuda"
+    if epochs <= 0 or not normalized_groups:
+        train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
+        return train_loss, val_loss
+
+    optimizer = torch.optim.AdamW(normalized_groups)
+    steps_per_epoch = max(1, math.ceil(max(1, inputs_train.shape[0]) / max(1, batch_size)))
+    total_steps = max(1, epochs * steps_per_epoch)
+    base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
+    scaler = torch.amp.GradScaler(enabled=use_amp)
+    global_step = 0
+
+    best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+    best_val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
+    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
+
+    for _ in range(epochs):
+        epoch_loss = 0.0
+        batch_count = 0
+        optimizer.zero_grad(set_to_none=True)
+
+        for input_batch, target_batch in zip(_chunk_rows(inputs_train, batch_size), _chunk_rows(targets_train, batch_size)):
+            autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
+            with autocast_ctx:
+                preds = model(input_batch)
+                loss = F.smooth_l1_loss(preds, target_batch)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+            global_step += 1
+            cosine_ratio = 0.5 * (1.0 + math.cos(math.pi * min(global_step, total_steps) / total_steps))
+            for group, base_lr in zip(optimizer.param_groups, base_lrs):
+                group["lr"] = (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio)
+
+            model.reset_masked_angles()
+            epoch_loss += float(loss.item())
+            batch_count += 1
+
+        last_train_loss = epoch_loss / max(1, batch_count)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+
+    model.load_state_dict(best_state, strict=True)
+    model.reset_masked_angles()
+    return last_train_loss, best_val_loss
+
+
+def _run_stage(
+    *,
+    model: nn.Module,
+    inputs_train: torch.Tensor,
+    targets_train: torch.Tensor,
+    inputs_val: torch.Tensor,
+    targets_val: torch.Tensor,
+    param_groups: Sequence[dict[str, object]],
+    epochs: int,
+    batch_size: int,
+    stage_impl: str,
+) -> tuple[float, float]:
+    impl = _normalize_opt_impl(stage_impl, field="stage_impl")
+    if impl == "reference":
+        return _run_stage_reference(
+            model=model,
+            inputs_train=inputs_train,
+            targets_train=targets_train,
+            inputs_val=inputs_val,
+            targets_val=targets_val,
+            param_groups=param_groups,
+            epochs=epochs,
+            batch_size=batch_size,
+        )
+    return _run_stage_gptqmodel(
+        model=model,
+        inputs_train=inputs_train,
+        targets_train=targets_train,
+        inputs_val=inputs_val,
+        targets_val=targets_val,
+        param_groups=param_groups,
+        epochs=epochs,
+        batch_size=batch_size,
+    )
 
 
 def _result_from_model(
@@ -867,6 +1151,8 @@ def optimize_paroquant_linear(
     quantizer_lr: float,
     seed: int,
     fused_rotation: Optional[bool] = None,
+    stage_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
+    pair_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
 ) -> ParoQuantOptimizationResult:
     """Optimize one linear layer following the paper's two-stage PTQ schedule."""
     _require_paroquant_sym(sym)
@@ -902,14 +1188,26 @@ def optimize_paroquant_linear(
     if inputs_train.numel() == 0 or targets_train.numel() == 0:
         raise ValueError("ParoQuant optimization requires non-empty training activations.")
 
-    pairs, theta_mask = build_random_rotation_buffers(
-        in_features=weight_opt.shape[1],
-        group_size=normalized_group_size,
-        krot=krot,
-        pair_ratio=pair_ratio,
-        seed=seed,
-        device=opt_device,
-    )
+    normalized_pair_impl = _normalize_opt_impl(pair_impl, field="pair_impl")
+    normalized_stage_impl = _normalize_opt_impl(stage_impl, field="stage_impl")
+    if normalized_pair_impl == "reference":
+        pairs, theta_mask = build_random_rotation_buffers_reference(
+            in_features=weight_opt.shape[1],
+            group_size=normalized_group_size,
+            krot=krot,
+            pair_ratio=pair_ratio,
+            seed=seed,
+            device=opt_device,
+        )
+    else:
+        pairs, theta_mask = build_random_rotation_buffers(
+            in_features=weight_opt.shape[1],
+            group_size=normalized_group_size,
+            krot=krot,
+            pair_ratio=pair_ratio,
+            seed=seed,
+            device=opt_device,
+        )
     model = _ParoQuantOptimLinear(
         weight_opt,
         bias_opt,
@@ -934,6 +1232,7 @@ def optimize_paroquant_linear(
         ],
         epochs=rotation_epochs,
         batch_size=batch_size,
+        stage_impl=normalized_stage_impl,
     )
 
     model.init_quantizer()
@@ -949,6 +1248,7 @@ def optimize_paroquant_linear(
         ],
         epochs=finetune_epochs,
         batch_size=batch_size,
+        stage_impl=normalized_stage_impl,
     )
 
     return _result_from_model(
@@ -984,6 +1284,8 @@ def optimize_paroquant_llama_mlp_block(
     seed: int,
     activation_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     fused_rotation: Optional[bool] = None,
+    stage_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
+    pair_impl: Literal["gptqmodel", "reference"] = "gptqmodel",
 ) -> ParoQuantBlockOptimizationResult:
     """Optimize a Llama gated MLP jointly using the true block output loss."""
     _require_paroquant_sym(sym)
@@ -1050,7 +1352,11 @@ def optimize_paroquant_llama_mlp_block(
     if inputs_train.numel() == 0 or targets_train.numel() == 0:
         raise ValueError("ParoQuant optimization requires non-empty training activations.")
 
-    gate_pairs, gate_theta_mask = build_random_rotation_buffers(
+    normalized_pair_impl = _normalize_opt_impl(pair_impl, field="pair_impl")
+    normalized_stage_impl = _normalize_opt_impl(stage_impl, field="stage_impl")
+    pair_builder = build_random_rotation_buffers_reference if normalized_pair_impl == "reference" else build_random_rotation_buffers
+
+    gate_pairs, gate_theta_mask = pair_builder(
         in_features=gate_weight_opt.shape[1],
         group_size=gate_group_size,
         krot=krot,
@@ -1058,7 +1364,7 @@ def optimize_paroquant_llama_mlp_block(
         seed=seed,
         device=opt_device,
     )
-    up_pairs, up_theta_mask = build_random_rotation_buffers(
+    up_pairs, up_theta_mask = pair_builder(
         in_features=up_weight_opt.shape[1],
         group_size=up_group_size,
         krot=krot,
@@ -1066,7 +1372,7 @@ def optimize_paroquant_llama_mlp_block(
         seed=seed + 1,
         device=opt_device,
     )
-    down_pairs, down_theta_mask = build_random_rotation_buffers(
+    down_pairs, down_theta_mask = pair_builder(
         in_features=down_weight_opt.shape[1],
         group_size=down_group_size,
         krot=krot,
@@ -1114,6 +1420,7 @@ def optimize_paroquant_llama_mlp_block(
         ],
         epochs=rotation_epochs,
         batch_size=batch_size,
+        stage_impl=normalized_stage_impl,
     )
 
     model.init_quantizers()
@@ -1133,6 +1440,7 @@ def optimize_paroquant_llama_mlp_block(
         ],
         epochs=finetune_epochs,
         batch_size=batch_size,
+        stage_impl=normalized_stage_impl,
     )
 
     return ParoQuantBlockOptimizationResult(
