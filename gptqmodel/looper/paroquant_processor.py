@@ -35,8 +35,10 @@ from ..models.writer import (
     PROCESS_LOG_MODULE,
     PROCESS_LOG_NAME,
     PROCESS_LOG_TIME,
+    PROCESS_USED_MEMORY,
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
+    QUANT_LOG_DAMP,
 )
 from ..nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
@@ -234,6 +236,8 @@ class ParoQuantProcessor(LoopProcessor):
 
     def _log_quant_result(self, module: NamedModule, feat: torch.Tensor, val_loss: float, duration: float) -> None:
         """Append one quantization log row using the same format as other processors."""
+        n_samples = 0 if feat.numel() == 0 else feat.reshape(-1, feat.shape[-1]).shape[0]
+
         stat = {
             PROCESS_LOG_NAME: self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
@@ -241,9 +245,11 @@ class ParoQuantProcessor(LoopProcessor):
             MODULE_FEATURE_COLUMN: self.module_feature_summary(module),
             DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(module),
             QUANT_LOG_LOSS: f"{val_loss:.10f}",
-            QUANT_LOG_NSAMPLES: f"{0 if feat.numel() == 0 else feat.reshape(-1, feat.shape[-1]).shape[0]}",
+            QUANT_LOG_NSAMPLES: f"{n_samples}",
+            QUANT_LOG_DAMP: "",
             PROCESS_LOG_TIME: f"{duration:.3f}",
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
+            PROCESS_USED_MEMORY: self.device_memory_report(),
         }
 
         with self.lock:
@@ -253,6 +259,17 @@ class ParoQuantProcessor(LoopProcessor):
             self.log.append(stat)
 
         self.log_new_row(stat)
+
+        log.info(
+            "ParoQuant quantized layer=%s module=%s loss=%s nsamples=%s time=%ss fwd_time=%s mem=%s",
+            module.layer_index,
+            module.name,
+            stat[QUANT_LOG_LOSS],
+            stat[QUANT_LOG_NSAMPLES],
+            stat[PROCESS_LOG_TIME],
+            stat[PROCESS_LOG_FWD_TIME],
+            stat[PROCESS_USED_MEMORY],
+        )
 
     @staticmethod
     def _llama_mlp_block_modules(state: _ParoQuantLayerState) -> Optional[Dict[str, NamedModule]]:
