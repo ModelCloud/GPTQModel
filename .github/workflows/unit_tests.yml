@@ -174,7 +174,7 @@ jobs:
       - list-test-files
     if: needs.list-test-files.outputs.torch-files != '[]' || needs.list-test-files.outputs.model-files != '[]'
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0206
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0324
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /monster/ci/env/entrypoint.sh:/entrypoint.sh
@@ -370,7 +370,7 @@ jobs:
       - check-vm
     runs-on: [ self-hosted, xeon5 ]
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0206
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0324
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /monster/ci/env/entrypoint.sh:/entrypoint.sh
@@ -762,7 +762,7 @@ jobs:
       - check-vm
     runs-on: [ self-hosted, xeon5 ]
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0206
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:${{ needs.check-vm.outputs.cuda_version }}-ubuntu22.04_0324
       options: --device /dev/dri --ipc=host --runtime=nvidia --gpus all
       volumes:
         - /monster/ci/env/entrypoint.sh:/entrypoint.sh
