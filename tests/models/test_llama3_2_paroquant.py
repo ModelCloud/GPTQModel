@@ -16,8 +16,21 @@ class TestLlama3_2_ParoQuant(ModelTest):
     EVAL_TASKS_FAST = {
         "gsm8k_platinum_cot": {
             "chat_template": True,
-            "exact_match,flexible-extract": {
-                "value": 0.45905707196029777,
+            "evalution_use_model_path": True,
+            "evalution_batch_size": "auto",
+            "evalution_model_args": {
+                "dtype": "bfloat16",
+                "attn_implementation": "paged|flash_attention_2",
+                "device": "cuda:0",
+            },
+            "evalution_suite_kwargs": {
+                "batch_size": 24,
+                "max_new_tokens": 96,
+                "streaming": True,
+                "max_rows": 128,
+            },
+            "acc,num": {
+                "value": 0.460938,
                 "floor_pct": 0.04,
                 "ceil_pct": 1.0,
             },
