@@ -433,6 +433,11 @@ version_vars = {}
 exec("exec(open('gptqmodel/version.py').read()); version=__version__", {}, version_vars)
 gptqmodel_version = version_vars["version"]
 
+if RELEASE_MODE == "1":
+    gptqmodel_version = f"{gptqmodel_version}+{get_version_tag()}"
+else:
+    gptqmodel_version = f"{gptqmodel_version}+{_get_git_commit()}"
+
 # -----------------------------
 # Prebuilt wheel download config
 # -----------------------------
@@ -540,10 +545,6 @@ else:
             HAS_CUDA_V8 = False
             HAS_CUDA_V9 = False
 
-if RELEASE_MODE == "1":
-    gptqmodel_version = f"{gptqmodel_version}+{get_version_tag()}"
-else:
-    gptqmodel_version = f"{gptqmodel_version}+{_get_git_commit()}"
 
 include_dirs = ["gptqmodel_ext"]
 
