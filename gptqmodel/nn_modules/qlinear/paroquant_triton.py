@@ -86,9 +86,7 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
         self._plan_cache: dict[str, str] = {}
 
     def post_init(self):
-        """Normalize scale dtype before deferring to the shared ParoQuant setup."""
-        if self.scales is not None:
-            self.scales = self.scales.to(dtype=torch.float16)
+        """Defer to the shared ParoQuant setup without forcing compute dtype."""
         super().post_init()
 
     def clear_autotune(self):
@@ -193,16 +191,11 @@ class ParoQuantTritonQuantLinear(ParoQuantQuantLinear):
         """Rotate inputs, pick a Triton plan, and preserve adapter semantics."""
         original_shape = x.shape[:-1] + (self.out_features,)
         adapter_input = x.reshape(-1, x.shape[-1])
-        input_dtype = x.dtype
-        x_work = x if input_dtype == torch.float16 else x.to(torch.float16)
-        x_flat = x_work.reshape(-1, x_work.shape[-1])
+        x_flat = x.reshape(-1, x.shape[-1])
         rotated = self._rotate_inputs(x_flat)
 
-        plan = self._select_plan(self._classify_forward_kind(x_work, x_flat), rotated)
+        plan = self._select_plan(self._classify_forward_kind(x, x_flat), rotated)
         out = self._run_plan(plan, rotated)
-
-        if input_dtype != torch.float16:
-            out = out.to(dtype=input_dtype)
 
         if self.adapter:
             out = self.adapter.apply(x=adapter_input, out=out)
