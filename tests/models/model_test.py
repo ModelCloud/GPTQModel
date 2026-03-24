@@ -82,7 +82,7 @@ from gptqmodel.quantization.config import (  # noqa: E402
     RTNQuantizeConfig,
     VramStrategy,
     WeightOnlyConfig,
-    resolve_quant_format, BitsAndBytesConfig,
+    resolve_quant_format, BitsAndBytesConfig, ParoQuantQuantizeConfig,
 )
 from gptqmodel.utils.eval import EVAL  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
@@ -149,6 +149,10 @@ class ModelTest(unittest.TestCase):
     BNB_FORMAT = None
     BNB_BLOCK_SIZE = None
     BNB_COMPRESS_STATISTICS = None
+
+    PAROQUANT_ROTATION_EPOCHS = None
+    PAROQUANT_FINETUNE_EPOCHS = None
+    PAROQUANT_TRAIN_SAMPLES = None
 
     SAVE_PATH = None  # default is temp folder
     SPLIT_BY: Optional[str] = "layer"
@@ -1117,18 +1121,33 @@ class ModelTest(unittest.TestCase):
     def _build_quantize_config(self):
         format_family = resolve_quant_format(self.FORMAT, self.METHOD)
 
-        if self.METHOD == METHOD.BITSANDBYTES and self.WEIGHT_ONLY is None:
-            return BitsAndBytesConfig(
-                bits=self.BITS,
-                format=self.BNB_FORMAT,
-                block_size=self.BNB_BLOCK_SIZE,
-                compress_statistics=self.BNB_COMPRESS_STATISTICS,
-                adapter=self.EORA,
-                vram_strategy=self.VRAM_STRATEGY,
-                dynamic=self.DYNAMIC,
-                moe=self.MOE_CONFIG,
-                offload_to_disk=self.OFFLOAD_TO_DISK,
-            )
+        if self.WEIGHT_ONLY is None:
+            if self.METHOD == METHOD.BITSANDBYTES:
+                return BitsAndBytesConfig(
+                    bits=self.BITS,
+                    format=self.BNB_FORMAT,
+                    block_size=self.BNB_BLOCK_SIZE,
+                    compress_statistics=self.BNB_COMPRESS_STATISTICS,
+                    adapter=self.EORA,
+                    vram_strategy=self.VRAM_STRATEGY,
+                    dynamic=self.DYNAMIC,
+                    moe=self.MOE_CONFIG,
+                    offload_to_disk=self.OFFLOAD_TO_DISK,
+                )
+            elif self.METHOD == METHOD.PAROQUANT:
+                return ParoQuantQuantizeConfig(
+                    bits=self.BITS,
+                    method=METHOD.PAROQUANT,
+                    format=FORMAT.PAROQUANT,
+                    opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
+                    opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
+                    opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
+                    adapter=self.EORA,
+                    vram_strategy=self.VRAM_STRATEGY,
+                    dynamic=self.DYNAMIC,
+                    moe=self.MOE_CONFIG,
+                    offload_to_disk=self.OFFLOAD_TO_DISK,
+                )
 
         if self.WEIGHT_ONLY is not None:
             if not isinstance(self.WEIGHT_ONLY, WeightOnlyConfig):
