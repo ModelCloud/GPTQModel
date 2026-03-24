@@ -319,7 +319,7 @@ jobs:
 
       - name: Compile
         run: |
-          uv pip install build wheel twine setuptools torch ninja -U
+          uv pip install build wheel twine setuptools torch ninja pypcre -U
           python -m build --no-isolation --sdist
 
       - name: Check dist
@@ -411,7 +411,7 @@ jobs:
 
       - name: Install requirements
         run: |
-          uv pip install torch twine ninja setuptools setuptools-scm[toml]>=8.0 --system
+          uv pip install torch twine ninja setuptools setuptools-scm[toml]>=8.0 pypcre --system
 
       - name: Compile
         run: |
