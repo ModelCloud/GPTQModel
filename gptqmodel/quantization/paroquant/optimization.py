@@ -1316,7 +1316,6 @@ def optimize_paroquant_linear(
         theta_mask=theta_mask,
         fused_rotation=fused_rotation,
     ).to(device=opt_device, dtype=opt_dtype)
-    model.theta.zero_()
     model.reset_masked_angles()
 
     _, _ = _run_stage(
@@ -1504,9 +1503,6 @@ def optimize_paroquant_llama_mlp_block(
         activation_fn=act_fn,
         fused_rotation=fused_rotation,
     ).to(device=opt_device, dtype=opt_dtype)
-    model.gate_proj.theta.zero_()
-    model.up_proj.theta.zero_()
-    model.down_proj.theta.zero_()
     model.reset_masked_angles()
 
     train_loss, val_loss = _run_stage(
