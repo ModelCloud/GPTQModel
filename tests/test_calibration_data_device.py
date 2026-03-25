@@ -1173,6 +1173,8 @@ class TestCalibrationDataDeviceIntegration:
     @pytest.fixture(autouse=True)
     def setup(self):
         """Set up test fixtures."""
+        import gc
+
         # Skip if model is missing (matching test_failsafe.py pattern)
         _skip_if_model_missing(self.NATIVE_MODEL_ID)
 
@@ -1191,22 +1193,54 @@ class TestCalibrationDataDeviceIntegration:
             "Quantization reduces model size while maintaining accuracy by converting floating-point numbers to lower precision representations, making models faster and more memory efficient.",
         ]
 
+        yield
+
+        # Teardown: aggressive cleanup to prevent VRAM leak between tests
+        self.calibration_data = None
+        self.tokenizer = None
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+    def _cleanup_model(self, model):
+        """Immediately delete model and free GPU memory."""
+        if model is not None:
+            del model
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+
+    def _create_quantize_config(self, calibration_data_device, **kwargs):
+        """Create QuantizeConfig with memory-efficient defaults for integration tests."""
+        defaults = {
+            "bits": 4,
+            "group_size": 128,
+            "calibration_data_device": calibration_data_device,
+            "offload_to_disk": False,
+            # Memory-efficient settings for multi-test runs
+            "auto_forward_data_parallel": False,
+            "wait_for_submodule_finalizers": True,
+            "gc_mode": "on_stage_end",
+        }
+        defaults.update(kwargs)
+        return QuantizeConfig(**defaults)
+
     def test_calibration_data_device_cpu_integration(self, tmp_path):
         """Integration test: quantization with calibration_data_device='cpu'."""
         from gptqmodel import GPTQModel
 
-        quantize_config = QuantizeConfig(
-            bits=4,
-            group_size=128,
-            calibration_data_device="cpu",
-            offload_to_disk=False,
-        )
+        quantize_config = self._create_quantize_config(calibration_data_device="cpu")
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
         model.quantize(self.calibration_data, batch_size=1)
 
         save_path = str(tmp_path / "quantized")
         model.save(save_path)
+        self._cleanup_model(model)
 
         loaded = GPTQModel.load(save_path)
         assert loaded is not None
@@ -1214,6 +1248,7 @@ class TestCalibrationDataDeviceIntegration:
         inp = self.tokenizer("Hello", return_tensors="pt").to(loaded.device)
         output = loaded.generate(**inp, max_new_tokens=5)
         assert output is not None
+        self._cleanup_model(loaded)
 
     @pytest.mark.skipif(
         torch.cuda.device_count() < 2,
@@ -1223,21 +1258,18 @@ class TestCalibrationDataDeviceIntegration:
         """Integration test: quantization with calibration_data_device='balanced'."""
         from gptqmodel import GPTQModel
 
-        quantize_config = QuantizeConfig(
-            bits=4,
-            group_size=128,
-            calibration_data_device="balanced",
-            offload_to_disk=False,
-        )
+        quantize_config = self._create_quantize_config(calibration_data_device="balanced")
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
         model.quantize(self.calibration_data, batch_size=1)
 
         save_path = str(tmp_path / "quantized_balanced")
         model.save(save_path)
+        self._cleanup_model(model)
 
         loaded = GPTQModel.load(save_path)
         assert loaded is not None
+        self._cleanup_model(loaded)
 
     @pytest.mark.skipif(
         torch.cuda.device_count() < 2,
@@ -1251,12 +1283,9 @@ class TestCalibrationDataDeviceIntegration:
         def compute_device_filter(devices):
             return [d for d in devices if d != torch.device("cuda:1")]
 
-        quantize_config = QuantizeConfig(
-            bits=4,
-            group_size=128,
+        quantize_config = self._create_quantize_config(
             calibration_data_device="cuda:1",
             compute_device_filter=compute_device_filter,
-            offload_to_disk=False,
         )
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
@@ -1264,6 +1293,8 @@ class TestCalibrationDataDeviceIntegration:
 
         save_path = str(tmp_path / "quantized_cuda1")
         model.save(save_path)
+        self._cleanup_model(model)
 
         loaded = GPTQModel.load(save_path)
         assert loaded is not None
+        self._cleanup_model(loaded)
