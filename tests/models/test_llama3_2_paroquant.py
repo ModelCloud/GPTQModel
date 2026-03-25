@@ -26,7 +26,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
             "evalution_suite_kwargs": {
                 "batch_size": 24,
                 "max_new_tokens": 96,
-                "stream": True,
+                "streaming": True,
                 "max_rows": 128,
             },
             "acc,num": {
