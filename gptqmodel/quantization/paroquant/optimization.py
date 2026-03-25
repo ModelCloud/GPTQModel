@@ -176,7 +176,7 @@ def _pad_rotation_group(
     return pairs, mask
 
 
-@lru_cache(maxsize=128)
+# @lru_cache(maxsize=128)
 def _build_random_rotation_buffers_cached_cpu(
     in_features: int,
     group_size: int,
@@ -196,7 +196,9 @@ def _build_random_rotation_buffers_cached_cpu(
 def _clear_random_rotation_buffers_cache() -> None:
     """Clear cached rotation buffers under a lock."""
     with _PAIR_CACHE_LOCK:
-        _build_random_rotation_buffers_cached_cpu.cache_clear()
+        cache_clear = getattr(_build_random_rotation_buffers_cached_cpu, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
 
 
 def _warm_random_rotation_buffers_cache(
