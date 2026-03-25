@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import math
 import random
+import threading
 from contextlib import nullcontext
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable, Iterable, Literal, Optional, Sequence
 
 import torch
@@ -33,6 +35,7 @@ from ...utils.paroquant import apply_paroquant_rotation_autograd, build_identity
 
 _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
+_PAIR_CACHE_LOCK = threading.Lock()
 
 
 def _normalize_opt_impl(name: str, *, field: str) -> str:
@@ -173,16 +176,56 @@ def _pad_rotation_group(
     return pairs, mask
 
 
-def build_random_rotation_buffers(
+@lru_cache(maxsize=128)
+def _build_random_rotation_buffers_cached_cpu(
+    in_features: int,
+    group_size: int,
+    krot: int,
+    pair_ratio: float,
+    seed: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+    return _build_random_rotation_buffers_cpu(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=pair_ratio,
+        seed=seed,
+    )
+
+
+def _clear_random_rotation_buffers_cache() -> None:
+    """Clear cached rotation buffers under a lock."""
+    with _PAIR_CACHE_LOCK:
+        _build_random_rotation_buffers_cached_cpu.cache_clear()
+
+
+def _warm_random_rotation_buffers_cache(
     *,
     in_features: int,
     group_size: int,
     krot: int,
     pair_ratio: float,
     seed: int,
-    device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build randomized pair schedules and masks for ParoQuant angle learning."""
+    """Populate the cache under a lock and return the cached buffers."""
+    with _PAIR_CACHE_LOCK:
+        return _build_random_rotation_buffers_cached_cpu(
+            in_features=in_features,
+            group_size=group_size,
+            krot=krot,
+            pair_ratio=pair_ratio,
+            seed=seed,
+        )
+
+
+def _build_random_rotation_buffers_cpu(
+    *,
+    in_features: int,
+    group_size: int,
+    krot: int,
+    pair_ratio: float,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
     normalized_group_size = _normalize_group_size(group_size, in_features)
     if krot <= 0:
         raise ValueError(f"ParoQuant optimization: `krot` must be positive, got {krot}.")
@@ -198,10 +241,10 @@ def build_random_rotation_buffers(
     mask_rows: list[torch.Tensor] = []
 
     for _ in range(krot):
-        rotation_rows.append(torch.empty(0, dtype=torch.int16, device=device))
-        mask_rows.append(torch.empty(0, dtype=torch.bool, device=device))
+        rotation_rows.append(torch.empty(0, dtype=torch.int16, device=torch.device("cpu")))
+        mask_rows.append(torch.empty(0, dtype=torch.bool, device=torch.device("cpu")))
 
-    for _group_index in range(num_groups):
+    for _ in range(num_groups):
         group_pairs = [(i, j) for i in range(normalized_group_size) for j in range(i + 1, normalized_group_size)]
         rng.shuffle(group_pairs)
         selected_per_rotation = _select_independent_pairs(
@@ -215,12 +258,42 @@ def build_random_rotation_buffers(
             padded_pairs, mask = _pad_rotation_group(
                 selected_per_rotation[rot_idx],
                 normalized_group_size,
-                device=device,
+                device=torch.device("cpu"),
             )
             rotation_rows[rot_idx] = torch.cat((rotation_rows[rot_idx], padded_pairs.reshape(-1)), dim=0)
             mask_rows[rot_idx] = torch.cat((mask_rows[rot_idx], mask), dim=0)
 
-    return torch.stack(rotation_rows, dim=0).contiguous(), torch.stack(mask_rows, dim=0).contiguous()
+    pairs = torch.stack(rotation_rows, dim=0).contiguous()
+    masks = torch.stack(mask_rows, dim=0).contiguous()
+    return pairs, masks
+
+
+def build_random_rotation_buffers(
+    *,
+    in_features: int,
+    group_size: int,
+    krot: int,
+    pair_ratio: float,
+    seed: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build randomized pair schedules and masks for ParoQuant angle learning."""
+    if krot <= 0:
+        raise ValueError(f"ParoQuant optimization: `krot` must be positive, got {krot}.")
+    if not (0.0 < float(pair_ratio) <= 0.5):
+        raise ValueError("ParoQuant optimization: `pair_ratio` must be in the interval (0, 0.5].")
+
+    pairs_cpu, masks_cpu = _build_random_rotation_buffers_cached_cpu(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=float(pair_ratio),
+        seed=int(seed),
+    )
+
+    if torch.device(device).type == "cuda":
+        return pairs_cpu.to(device=device), masks_cpu.to(device=device)
+    return pairs_cpu, masks_cpu
 
 
 def _get_independent_channel_pairs_reference(
@@ -838,7 +911,8 @@ def _evaluate_model(
         autocast_ctx = torch.amp.autocast("cuda") if use_amp and inputs.device.type == "cuda" else nullcontext()
         with autocast_ctx:
             preds = model(inputs)
-        return float(F.smooth_l1_loss(preds, targets).item())
+            loss = F.smooth_l1_loss(preds, targets)
+        return float(loss.item())
 
 
 def _run_stage_gptqmodel(
@@ -851,7 +925,7 @@ def _run_stage_gptqmodel(
     param_groups: Sequence[dict[str, object]],
     epochs: int,
     batch_size: int,
-) -> tuple[float, float]:
+    ) -> tuple[float, float]:
     """Run one optimization stage with validation-based best-state selection."""
     normalized_groups = []
     for param_group in param_groups:
@@ -868,20 +942,22 @@ def _run_stage_gptqmodel(
             }
         )
 
+    use_amp = inputs_train.device.type == "cuda"
     if epochs <= 0 or not normalized_groups:
-        train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
-        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
+        train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         return train_loss, val_loss
 
     optimizer = torch.optim.AdamW(normalized_groups)
     steps_per_epoch = max(1, math.ceil(max(1, inputs_train.shape[0]) / max(1, batch_size)))
     total_steps = max(1, epochs * steps_per_epoch)
     base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
+    scaler = torch.amp.GradScaler(enabled=use_amp)
     global_step = 0
 
     best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
     best_val_loss = float("inf")
-    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
+    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
 
     for _epoch in range(epochs):
         epoch_loss = 0.0
@@ -889,10 +965,13 @@ def _run_stage_gptqmodel(
 
         for input_batch, target_batch in zip(_chunk_rows(inputs_train, batch_size), _chunk_rows(targets_train, batch_size)):
             optimizer.zero_grad(set_to_none=True)
-            preds = model(input_batch)
-            loss = F.smooth_l1_loss(preds, target_batch)
-            loss.backward()
-            optimizer.step()
+            autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
+            with autocast_ctx:
+                preds = model(input_batch)
+                loss = F.smooth_l1_loss(preds, target_batch)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             global_step += 1
             cosine_ratio = 0.5 * (1.0 + math.cos(math.pi * min(global_step, total_steps) / total_steps))
             for group, base_lr in zip(optimizer.param_groups, base_lrs):
@@ -903,7 +982,7 @@ def _run_stage_gptqmodel(
             batch_count += 1
 
         last_train_loss = epoch_loss / max(1, batch_count)
-        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}

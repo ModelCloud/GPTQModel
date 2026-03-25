@@ -244,7 +244,14 @@ class _ArcChallengeLoglikelihoodSuite:
     def dataset_loader(self) -> Any:
         from datasets import load_dataset
 
-        return load_dataset
+        def _loader(path: str, *args, stream: bool = False, **kwargs):
+            # Evalution forwards `stream`; Hugging Face expects `streaming`.
+            # Enforce the new API by rejecting legacy `streaming`.
+            if "streaming" in kwargs:
+                raise TypeError("use `stream=` (Evalution) not `streaming=`")
+            return load_dataset(path, *args, streaming=stream, **kwargs)
+
+        return _loader
 
     def task_name(self) -> str:
         return "arc_challenge"
@@ -537,6 +544,10 @@ def _build_evalution_suite(
     do_sample = bool(generation_settings.get("do_sample", False))
     temperature = float(generation_settings.get("temperature", 0.0))
     kwargs = dict(suite_kwargs or {})
+    if "stream" not in kwargs and "streaming" in kwargs:
+        kwargs["stream"] = bool(kwargs.pop("streaming"))
+    elif "streaming" in kwargs:
+        kwargs.pop("streaming")
 
     if normalized_task == "arc_challenge":
         kwargs.setdefault("apply_chat_template", apply_chat_template)

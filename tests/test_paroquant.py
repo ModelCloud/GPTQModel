@@ -7,8 +7,10 @@
 
 """Unit tests for ParoQuant config, optimizer, and lifecycle invariants."""
 
+from contextlib import contextmanager
 import sys
 import threading
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -155,6 +157,210 @@ def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch)
     )
     assert calls == ["fused"]
     torch.testing.assert_close(fused_out, x + 123.0)
+
+
+@pytest.mark.parametrize(
+    ("device_type", "expected_use_amp"),
+    [
+        ("cpu", False),
+        ("cuda", True),
+    ],
+)
+def test_paroquant_fast_stage_matches_reference_amp_eval_flag(monkeypatch, device_type, expected_use_amp):
+    """Guard that the fast stage uses CUDA AMP for eval bookkeeping like reference."""
+    calls = []
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1))
+
+    class _FakeTensor:
+        def __init__(self, kind: str):
+            self.device = SimpleNamespace(type=kind)
+
+    def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
+        calls.append(use_amp)
+        return 0.0
+
+    monkeypatch.setattr(paroquant_optimization, "_evaluate_model", fake_evaluate)
+
+    train_loss, val_loss = paroquant_optimization._run_stage_gptqmodel(
+        model=_DummyModel(),
+        inputs_train=_FakeTensor(device_type),
+        targets_train=_FakeTensor(device_type),
+        inputs_val=_FakeTensor(device_type),
+        targets_val=_FakeTensor(device_type),
+        param_groups=[],
+        epochs=0,
+        batch_size=16,
+    )
+
+    assert train_loss == 0.0
+    assert val_loss == 0.0
+    assert calls == [expected_use_amp, expected_use_amp]
+
+
+def test_paroquant_evaluate_model_keeps_loss_inside_cuda_autocast(monkeypatch):
+    """Guard the PR-18 fix so validation loss stays inside the CUDA autocast region."""
+    state = {"autocast_active": False, "loss_saw_autocast": None}
+
+    @contextmanager
+    def fake_autocast(device_type: str):
+        assert device_type == "cuda"
+        previous = state["autocast_active"]
+        state["autocast_active"] = True
+        try:
+            yield
+        finally:
+            state["autocast_active"] = previous
+
+    class _FakeInput:
+        def __init__(self):
+            self.device = SimpleNamespace(type="cuda")
+
+        def numel(self):
+            return 1
+
+    class _DummyModel(torch.nn.Module):
+        def forward(self, _inputs):
+            return torch.tensor([1.0], dtype=torch.float32)
+
+    def fake_loss(preds, targets):
+        del preds, targets
+        state["loss_saw_autocast"] = state["autocast_active"]
+        return torch.tensor(0.25, dtype=torch.float32)
+
+    monkeypatch.setattr(torch.amp, "autocast", fake_autocast)
+    monkeypatch.setattr(paroquant_optimization.F, "smooth_l1_loss", fake_loss)
+
+    loss = paroquant_optimization._evaluate_model(
+        _DummyModel(),
+        _FakeInput(),
+        torch.tensor([0.0], dtype=torch.float32),
+        use_amp=True,
+    )
+
+    assert loss == 0.25
+    assert state["loss_saw_autocast"] is True
+
+
+def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
+    """Guard that the fast stage now mirrors upstream AMP training on CUDA."""
+    state = {"autocast_active": False, "loss_saw_autocast": []}
+    scaler_events = []
+
+    @contextmanager
+    def fake_autocast(device_type: str):
+        assert device_type == "cuda"
+        previous = state["autocast_active"]
+        state["autocast_active"] = True
+        try:
+            yield
+        finally:
+            state["autocast_active"] = previous
+
+    class _FakeScaler:
+        def __init__(self, *, enabled: bool):
+            scaler_events.append(("init", enabled))
+            self.enabled = enabled
+
+        def scale(self, loss):
+            scaler_events.append(("scale", self.enabled))
+
+            class _ScaledLoss:
+                def __init__(self, wrapped_loss):
+                    self.wrapped_loss = wrapped_loss
+
+                def backward(self):
+                    scaler_events.append(("backward", self.wrapped_loss.detach().item()))
+                    self.wrapped_loss.backward()
+
+            return _ScaledLoss(loss)
+
+        def step(self, optimizer):
+            scaler_events.append(("step", self.enabled))
+            optimizer.step()
+
+        def update(self):
+            scaler_events.append(("update", self.enabled))
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([[1.0]], dtype=torch.float32))
+
+        def forward(self, x):
+            return x @ self.weight
+
+        def reset_masked_angles(self):
+            return None
+
+    class _FakeRows:
+        def __init__(self, rows: int):
+            self.device = SimpleNamespace(type="cuda")
+            self.shape = (rows, 1)
+
+    train_inputs = _FakeRows(rows=2)
+    train_targets = _FakeRows(rows=2)
+    val_inputs = _FakeRows(rows=1)
+    val_targets = _FakeRows(rows=1)
+
+    train_input_batches = [torch.tensor([[1.0]], dtype=torch.float32), torch.tensor([[2.0]], dtype=torch.float32)]
+    train_target_batches = [torch.tensor([[0.0]], dtype=torch.float32), torch.tensor([[0.0]], dtype=torch.float32)]
+
+    def fake_chunk_rows(rows, batch_size):
+        del batch_size
+        if rows is train_inputs:
+            return train_input_batches
+        if rows is train_targets:
+            return train_target_batches
+        raise AssertionError("unexpected rows object")
+
+    def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
+        assert use_amp is True
+        return 0.0
+
+    original_loss = paroquant_optimization.F.smooth_l1_loss
+
+    def wrapped_loss(preds, targets):
+        state["loss_saw_autocast"].append(state["autocast_active"])
+        return original_loss(preds, targets)
+
+    monkeypatch.setattr(paroquant_optimization, "_chunk_rows", fake_chunk_rows)
+    monkeypatch.setattr(paroquant_optimization, "_evaluate_model", fake_evaluate)
+    monkeypatch.setattr(paroquant_optimization.F, "smooth_l1_loss", wrapped_loss)
+    monkeypatch.setattr(torch.amp, "autocast", fake_autocast)
+    monkeypatch.setattr(torch.amp, "GradScaler", _FakeScaler)
+
+    model = _TinyModel()
+    train_loss, val_loss = paroquant_optimization._run_stage_gptqmodel(
+        model=model,
+        inputs_train=train_inputs,
+        targets_train=train_targets,
+        inputs_val=val_inputs,
+        targets_val=val_targets,
+        param_groups=[{"params": [model.weight], "lr": 0.1}],
+        epochs=1,
+        batch_size=1,
+    )
+
+    assert train_loss >= 0.0
+    assert val_loss == 0.0
+    assert state["loss_saw_autocast"] == [True, True]
+    assert scaler_events[0] == ("init", True)
+    assert [event[0] for event in scaler_events[1:]] == [
+        "scale",
+        "backward",
+        "step",
+        "update",
+        "scale",
+        "backward",
+        "step",
+        "update",
+    ]
+    assert all(event[1] is True for event in scaler_events if event[0] != "backward")
+    assert all(event[1] >= 0.0 for event in scaler_events if event[0] == "backward")
 
 
 def test_paroquant_registers_with_transformers_gptq_quantizer():
