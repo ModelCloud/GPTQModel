@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import random
+import threading
 from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
@@ -34,6 +35,7 @@ from ...utils.paroquant import apply_paroquant_rotation_autograd, build_identity
 
 _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
+_PAIR_CACHE_LOCK = threading.Lock()
 
 
 def _normalize_opt_impl(name: str, *, field: str) -> str:
@@ -181,7 +183,7 @@ def _build_random_rotation_buffers_cached_cpu(
     krot: int,
     pair_ratio: float,
     seed: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
     return _build_random_rotation_buffers_cpu(
         in_features=in_features,
         group_size=group_size,
@@ -189,6 +191,31 @@ def _build_random_rotation_buffers_cached_cpu(
         pair_ratio=pair_ratio,
         seed=seed,
     )
+
+
+def _clear_random_rotation_buffers_cache() -> None:
+    """Clear cached rotation buffers under a lock."""
+    with _PAIR_CACHE_LOCK:
+        _build_random_rotation_buffers_cached_cpu.cache_clear()
+
+
+def _warm_random_rotation_buffers_cache(
+    *,
+    in_features: int,
+    group_size: int,
+    krot: int,
+    pair_ratio: float,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Populate the cache under a lock and return the cached buffers."""
+    with _PAIR_CACHE_LOCK:
+        return _build_random_rotation_buffers_cached_cpu(
+            in_features=in_features,
+            group_size=group_size,
+            krot=krot,
+            pair_ratio=pair_ratio,
+            seed=seed,
+        )
 
 
 def _build_random_rotation_buffers_cpu(
