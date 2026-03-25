@@ -115,6 +115,11 @@ class HFKernelAwqLinear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        build_error = HFKernelLinear._hf_kernels_import_guard(cls.__name__)
+        if build_error is not None:
+            log.warning(str(build_error))
+            return False, build_error
+
         if not HFKernelLinear._is_torch_release():
             msg = (
                 f"HFKernelAwqLinear requires a release version of torch, "
