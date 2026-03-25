@@ -19,10 +19,8 @@ from __future__ import annotations
 
 import math
 import random
-import threading
 from contextlib import nullcontext
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Callable, Iterable, Literal, Optional, Sequence
 
 import torch
@@ -35,7 +33,6 @@ from ...utils.paroquant import apply_paroquant_rotation_autograd, build_identity
 
 _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
-_PAIR_CACHE_LOCK = threading.Lock()
 
 
 def _normalize_opt_impl(name: str, *, field: str) -> str:
@@ -176,50 +173,6 @@ def _pad_rotation_group(
     return pairs, mask
 
 
-# @lru_cache(maxsize=128)
-def _build_random_rotation_buffers_cached_cpu(
-    in_features: int,
-    group_size: int,
-    krot: int,
-    pair_ratio: float,
-    seed: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-    return _build_random_rotation_buffers_cpu(
-        in_features=in_features,
-        group_size=group_size,
-        krot=krot,
-        pair_ratio=pair_ratio,
-        seed=seed,
-    )
-
-
-def _clear_random_rotation_buffers_cache() -> None:
-    """Clear cached rotation buffers under a lock."""
-    with _PAIR_CACHE_LOCK:
-        cache_clear = getattr(_build_random_rotation_buffers_cached_cpu, "cache_clear", None)
-        if cache_clear is not None:
-            cache_clear()
-
-
-def _warm_random_rotation_buffers_cache(
-    *,
-    in_features: int,
-    group_size: int,
-    krot: int,
-    pair_ratio: float,
-    seed: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Populate the cache under a lock and return the cached buffers."""
-    with _PAIR_CACHE_LOCK:
-        return _build_random_rotation_buffers_cached_cpu(
-            in_features=in_features,
-            group_size=group_size,
-            krot=krot,
-            pair_ratio=pair_ratio,
-            seed=seed,
-        )
-
-
 def _build_random_rotation_buffers_cpu(
     *,
     in_features: int,
@@ -285,7 +238,7 @@ def build_random_rotation_buffers(
     if not (0.0 < float(pair_ratio) <= 0.5):
         raise ValueError("ParoQuant optimization: `pair_ratio` must be in the interval (0, 0.5].")
 
-    pairs_cpu, masks_cpu = _build_random_rotation_buffers_cached_cpu(
+    pairs_cpu, masks_cpu = _build_random_rotation_buffers_cpu(
         in_features=in_features,
         group_size=group_size,
         krot=krot,
