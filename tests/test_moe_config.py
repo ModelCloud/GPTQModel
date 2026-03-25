@@ -87,7 +87,6 @@ class TestMoEConfig(ModelTest):
 
     NATIVE_MODEL_ID = "/monster/data/model/Qwen3-30B-A3B-layers-1"
     VRAM_STRATEGY = VramStrategy.BALANCED
-    SAVE_PATH = "Qwen3-30B-A3B-layers-1-gptq"
 
     calibration_dataset = None
     calibration_dataset_token_size = None
