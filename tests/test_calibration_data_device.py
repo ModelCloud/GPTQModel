@@ -1199,6 +1199,7 @@ class TestCalibrationDataDeviceIntegration:
             bits=4,
             group_size=128,
             calibration_data_device="cpu",
+            offload_to_disk=False,
         )
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
@@ -1226,6 +1227,7 @@ class TestCalibrationDataDeviceIntegration:
             bits=4,
             group_size=128,
             calibration_data_device="balanced",
+            offload_to_disk=False,
         )
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
@@ -1254,6 +1256,7 @@ class TestCalibrationDataDeviceIntegration:
             group_size=128,
             calibration_data_device="cuda:1",
             compute_device_filter=compute_device_filter,
+            offload_to_disk=False,
         )
 
         model = GPTQModel.load(self.NATIVE_MODEL_ID, quantize_config=quantize_config)
