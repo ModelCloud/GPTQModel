@@ -193,13 +193,14 @@ def build_random_rotation_buffers(
     num_groups = in_features // normalized_group_size
     num_pairs_each = max(1, int(normalized_group_size * float(pair_ratio)))
     num_pairs_each = min(num_pairs_each, normalized_group_size // 2)
+    workspace_device = torch.device("cpu") if torch.device(device).type == "cuda" else torch.device(device)
 
     rotation_rows: list[torch.Tensor] = []
     mask_rows: list[torch.Tensor] = []
 
     for _ in range(krot):
-        rotation_rows.append(torch.empty(0, dtype=torch.int16, device=device))
-        mask_rows.append(torch.empty(0, dtype=torch.bool, device=device))
+        rotation_rows.append(torch.empty(0, dtype=torch.int16, device=workspace_device))
+        mask_rows.append(torch.empty(0, dtype=torch.bool, device=workspace_device))
 
     for _group_index in range(num_groups):
         group_pairs = [(i, j) for i in range(normalized_group_size) for j in range(i + 1, normalized_group_size)]
@@ -215,12 +216,17 @@ def build_random_rotation_buffers(
             padded_pairs, mask = _pad_rotation_group(
                 selected_per_rotation[rot_idx],
                 normalized_group_size,
-                device=device,
+                device=workspace_device,
             )
             rotation_rows[rot_idx] = torch.cat((rotation_rows[rot_idx], padded_pairs.reshape(-1)), dim=0)
             mask_rows[rot_idx] = torch.cat((mask_rows[rot_idx], mask), dim=0)
 
-    return torch.stack(rotation_rows, dim=0).contiguous(), torch.stack(mask_rows, dim=0).contiguous()
+    pairs = torch.stack(rotation_rows, dim=0).contiguous()
+    masks = torch.stack(mask_rows, dim=0).contiguous()
+    if pairs.device != torch.device(device):
+        pairs = pairs.to(device=device)
+        masks = masks.to(device=device)
+    return pairs, masks
 
 
 def _get_independent_channel_pairs_reference(
