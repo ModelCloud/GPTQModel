@@ -111,6 +111,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
     PAROQUANT_ROTATION_EPOCHS = 3
     PAROQUANT_FINETUNE_EPOCHS = 3
     PAROQUANT_TRAIN_SAMPLES = 128
+    PAROQUANT_SEED = 3141592653
 
     def _build_quantize_config(self):
         return ParoQuantQuantizeConfig(
@@ -120,6 +121,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
             opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
             opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
             opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
+            opt_seed=self.PAROQUANT_SEED,
             opt_stage_impl="reference",
             opt_pair_impl="fast",
             opt_quantizer_impl="reference",
