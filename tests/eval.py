@@ -544,6 +544,10 @@ def _build_evalution_suite(
     do_sample = bool(generation_settings.get("do_sample", False))
     temperature = float(generation_settings.get("temperature", 0.0))
     kwargs = dict(suite_kwargs or {})
+    if "stream" not in kwargs and "streaming" in kwargs:
+        kwargs["stream"] = bool(kwargs.pop("streaming"))
+    elif "streaming" in kwargs:
+        kwargs.pop("streaming")
 
     if normalized_task == "arc_challenge":
         kwargs.setdefault("apply_chat_template", apply_chat_template)
