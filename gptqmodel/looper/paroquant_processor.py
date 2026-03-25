@@ -272,7 +272,7 @@ class ParoQuantProcessor(LoopProcessor):
         original_weight = weight.detach().clone()
         if inputs.numel() == 0:
             inputs = torch.empty((0, weight.shape[1]), dtype=weight.dtype, device=weight.device)
-        module_seed = self._module_archetype_seed(module.full_name)
+        module_seed = self._module_seed(module.layer_index, module.full_name)
 
         with torch.inference_mode(False), torch.enable_grad():
             result = optimize_paroquant_linear(
@@ -307,10 +307,10 @@ class ParoQuantProcessor(LoopProcessor):
         """Use the terminal module name as the shared seed key across layers."""
         return full_name.rsplit(".", 1)[-1]
 
-    def _module_archetype_seed(self, full_name: str) -> int:
-        """Derive a deterministic seed shared by the same module role across layers."""
-        archetype = self._module_archetype(full_name)
-        seed_material = f"{int(self.qcfg.opt_seed)}:{archetype}".encode("utf-8")
+    def _module_seed(self, layer_index: int, full_name: str) -> int:
+        """Derive a deterministic per-module seed from base seed, layer index, and module name."""
+        module_name = self._module_archetype(full_name)
+        seed_material = f"{int(self.qcfg.opt_seed)}:{int(layer_index)}:{module_name}".encode("utf-8")
         digest = hashlib.blake2b(seed_material, digest_size=8).digest()
         return int.from_bytes(digest, byteorder="big", signed=False)
 
