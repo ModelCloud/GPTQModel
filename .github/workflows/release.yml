@@ -131,7 +131,7 @@ jobs:
     needs:
       - check-vm
     container:
-      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu22.04_0324
+      image: 10.0.13.31:5000/nvidia/cuda:${{ matrix.cuda }}-ubuntu24.04_0325
       volumes:
         - /monster/ci/env/entrypoint.sh:/entrypoint.sh
         - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
@@ -286,7 +286,7 @@ jobs:
     needs:
       - check-vm
     container:
-      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu22.04_0324
+      image: ${{ needs.check-vm.outputs.ip }}:5000/nvidia/cuda:128-ubuntu24.04_0325
       volumes:
         - /monster/ci/env/entrypoint.sh:/etc/profile.d/01-entrypoint.sh
         - /monster/ci/uv:/opt/uv
