@@ -21,6 +21,7 @@ import math
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable, Iterable, Literal, Optional, Sequence
 
 import torch
@@ -173,16 +174,31 @@ def _pad_rotation_group(
     return pairs, mask
 
 
-def build_random_rotation_buffers(
+@lru_cache(maxsize=128)
+def _build_random_rotation_buffers_cached_cpu(
+    in_features: int,
+    group_size: int,
+    krot: int,
+    pair_ratio: float,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return _build_random_rotation_buffers_cpu(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=pair_ratio,
+        seed=seed,
+    )
+
+
+def _build_random_rotation_buffers_cpu(
     *,
     in_features: int,
     group_size: int,
     krot: int,
     pair_ratio: float,
     seed: int,
-    device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build randomized pair schedules and masks for ParoQuant angle learning."""
     normalized_group_size = _normalize_group_size(group_size, in_features)
     if krot <= 0:
         raise ValueError(f"ParoQuant optimization: `krot` must be positive, got {krot}.")
@@ -193,16 +209,15 @@ def build_random_rotation_buffers(
     num_groups = in_features // normalized_group_size
     num_pairs_each = max(1, int(normalized_group_size * float(pair_ratio)))
     num_pairs_each = min(num_pairs_each, normalized_group_size // 2)
-    workspace_device = torch.device("cpu") if torch.device(device).type == "cuda" else torch.device(device)
 
     rotation_rows: list[torch.Tensor] = []
     mask_rows: list[torch.Tensor] = []
 
     for _ in range(krot):
-        rotation_rows.append(torch.empty(0, dtype=torch.int16, device=workspace_device))
-        mask_rows.append(torch.empty(0, dtype=torch.bool, device=workspace_device))
+        rotation_rows.append(torch.empty(0, dtype=torch.int16, device=torch.device("cpu")))
+        mask_rows.append(torch.empty(0, dtype=torch.bool, device=torch.device("cpu")))
 
-    for _group_index in range(num_groups):
+    for _ in range(num_groups):
         group_pairs = [(i, j) for i in range(normalized_group_size) for j in range(i + 1, normalized_group_size)]
         rng.shuffle(group_pairs)
         selected_per_rotation = _select_independent_pairs(
@@ -216,17 +231,42 @@ def build_random_rotation_buffers(
             padded_pairs, mask = _pad_rotation_group(
                 selected_per_rotation[rot_idx],
                 normalized_group_size,
-                device=workspace_device,
+                device=torch.device("cpu"),
             )
             rotation_rows[rot_idx] = torch.cat((rotation_rows[rot_idx], padded_pairs.reshape(-1)), dim=0)
             mask_rows[rot_idx] = torch.cat((mask_rows[rot_idx], mask), dim=0)
 
     pairs = torch.stack(rotation_rows, dim=0).contiguous()
     masks = torch.stack(mask_rows, dim=0).contiguous()
-    if pairs.device != torch.device(device):
-        pairs = pairs.to(device=device)
-        masks = masks.to(device=device)
     return pairs, masks
+
+
+def build_random_rotation_buffers(
+    *,
+    in_features: int,
+    group_size: int,
+    krot: int,
+    pair_ratio: float,
+    seed: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build randomized pair schedules and masks for ParoQuant angle learning."""
+    if krot <= 0:
+        raise ValueError(f"ParoQuant optimization: `krot` must be positive, got {krot}.")
+    if not (0.0 < float(pair_ratio) <= 0.5):
+        raise ValueError("ParoQuant optimization: `pair_ratio` must be in the interval (0, 0.5].")
+
+    pairs_cpu, masks_cpu = _build_random_rotation_buffers_cached_cpu(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=float(pair_ratio),
+        seed=int(seed),
+    )
+
+    if torch.device(device).type == "cuda":
+        return pairs_cpu.to(device=device), masks_cpu.to(device=device)
+    return pairs_cpu, masks_cpu
 
 
 def _get_independent_channel_pairs_reference(
