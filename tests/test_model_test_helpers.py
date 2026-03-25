@@ -1,6 +1,6 @@
 import torch
-from models import model_test as model_test_module
-from models.model_test import ModelTest
+import model_test as model_test_module
+from model_test import ModelTest
 
 
 class FakeBatchEncoding(dict):
@@ -142,3 +142,46 @@ def test_load_dataset_falls_back_when_hf_loader_raises(monkeypatch):
     dataset = ModelTest.load_dataset(rows=5)
 
     assert list(dataset) == [{"text": "x"}, {"text": "y"}]
+
+
+def test_detect_gpu_profile_from_cuda0_name(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _idx: "NVIDIA A100-SXM4-80GB")
+    assert ModelTest._detect_gpu_profile() == "A100"
+
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _idx: "NVIDIA GeForce RTX 4090")
+    assert ModelTest._detect_gpu_profile() == "RTX4090"
+
+
+def test_resolve_metric_baseline_value_uses_gpu_profile(monkeypatch):
+    helper = ModelTest(methodName="runTest")
+    monkeypatch.setattr(ModelTest, "_detect_gpu_profile", classmethod(lambda cls: "A100"))
+    selected = helper._resolve_metric_baseline_value({"A100": 0.6, "RTX4090": 0.5})
+    assert selected == 0.6
+
+    monkeypatch.setattr(ModelTest, "_detect_gpu_profile", classmethod(lambda cls: "unknown"))
+    selected_a100_fallback = helper._resolve_metric_baseline_value({"A100": 0.6, "RTX4090": 0.5})
+    assert selected_a100_fallback == 0.6
+
+    monkeypatch.setattr(ModelTest, "_detect_gpu_profile", classmethod(lambda cls: "A100"))
+    selected_a100_fallback = helper._resolve_metric_baseline_value(0.6)
+    assert selected_a100_fallback == 0.6
+
+    monkeypatch.setattr(ModelTest, "_detect_gpu_profile", classmethod(lambda cls: "RTX 4090"))
+    selected_a100_fallback = helper._resolve_metric_baseline_value(0.6)
+    assert selected_a100_fallback == 0.6
+
+    monkeypatch.setattr(ModelTest, "_detect_gpu_profile", classmethod(lambda cls: "unknown"))
+    selected_a100_fallback = helper._resolve_metric_baseline_value(0.6)
+    assert selected_a100_fallback == 0.6
+
+
+def test_mode_specific_baseline_value_supports_gpu_mapping(monkeypatch):
+    class _ModeSpecificHarness(ModelTest):
+        NATIVE_ARC_CHALLENGE_ACC_FAST = {"A100": 0.55, "RTX4090": 0.53}
+
+    helper = _ModeSpecificHarness(methodName="runTest")
+    monkeypatch.setattr(_ModeSpecificHarness, "_is_fast_model_test_mode", lambda self: True)
+    monkeypatch.setattr(_ModeSpecificHarness, "_detect_gpu_profile", classmethod(lambda cls: "RTX4090"))
+
+    assert helper._mode_specific_baseline_value("NATIVE_ARC_CHALLENGE_ACC") == 0.53
