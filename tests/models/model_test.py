@@ -265,14 +265,14 @@ class ModelTest(unittest.TestCase):
         mode_suffix = "FAST" if self._is_fast_model_test_mode() else "SLOW"
         preferred = f"{attr_name}_{mode_suffix}"
         if hasattr(self, preferred):
-            return getattr(self, preferred)
+            return self._resolve_metric_baseline_value(getattr(self, preferred))
 
         if self._is_fast_model_test_mode():
             fallback = f"{attr_name}_SLOW"
             if hasattr(self, fallback):
-                return getattr(self, fallback)
+                return self._resolve_metric_baseline_value(getattr(self, fallback))
 
-        return getattr(self, attr_name, None)
+        return self._resolve_metric_baseline_value(getattr(self, attr_name, None))
 
     def _legacy_metric_ceil_pct(self) -> float:
         if self._is_fast_model_test_mode():
@@ -492,12 +492,12 @@ class ModelTest(unittest.TestCase):
         if isinstance(spec, dict):
             if "value" not in spec:
                 raise ValueError("Baseline metric dictionaries must include a `value` key.")
-            value = spec["value"]
+            value = self._resolve_metric_baseline_value(spec["value"])
             floor_pct = spec.get("floor_pct", spec.get("max_delta_floor_percent", default_floor))
             ceil_pct = spec.get("ceil_pct", spec.get("max_delta_ceil_percent", default_ceil))
             metric_key = spec.get("metric_key")
         else:
-            value = spec
+            value = self._resolve_metric_baseline_value(spec)
             floor_pct = default_floor
             ceil_pct = default_ceil
             metric_key = None
@@ -515,6 +515,62 @@ class ModelTest(unittest.TestCase):
             "ceil_pct": float(ceil_pct),
             "metric_key": metric_key,
         }
+
+    @staticmethod
+    def _detect_cuda0_name():
+        try:
+            if not torch.cuda.is_available():
+                return None
+            return str(torch.cuda.get_device_name(0))
+        except Exception:
+            return None
+
+    @classmethod
+    def _detect_gpu_profile(cls):
+        cuda0_name = cls._detect_cuda0_name()
+        if not cuda0_name:
+            return None
+
+        normalized = cuda0_name.lower()
+        if "a100" in normalized:
+            return "A100"
+        if "4090" in normalized:
+            return "RTX4090"
+        return None
+
+    def _resolve_metric_baseline_value(self, value):
+        if not isinstance(value, Mapping):
+            return value
+
+        normalized_lookup = {
+            self._normalize_gpu_profile_key(key): val
+            for key, val in value.items()
+        }
+        gpu_profile = self._detect_gpu_profile()
+        normalized_profile = self._normalize_gpu_profile_key(gpu_profile)
+
+        if normalized_profile is not None and normalized_profile in normalized_lookup:
+            return normalized_lookup[normalized_profile]
+
+        if "a100" in normalized_lookup:
+            return normalized_lookup["a100"]
+
+        available = ", ".join(sorted(normalized_lookup.keys()))
+        raise ValueError(
+            "Unable to resolve GPU-specific baseline value. "
+            f"Detected profile={gpu_profile!r}, available profiles={available}."
+        )
+
+    @staticmethod
+    def _normalize_gpu_profile_key(profile):
+        if profile is None:
+            return None
+        normalized = str(profile).strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+        if normalized == "a100":
+            return "a100"
+        if normalized in {"rtx4090", "4090"}:
+            return "rtx4090"
+        return normalized
 
     def get_eval_tasks(self):
         self._task_chat_template = {}

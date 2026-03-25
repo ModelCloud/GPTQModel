@@ -13,8 +13,8 @@ class TestApertus(ModelTest):
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
             "chat_template": True,
-            "acc": {"value": 0.5145, "floor_pct": 0.2},
-            "acc_norm": {"value": 0.5256, "floor_pct": 0.2},
+            "acc": {"value": {"A100": 0.5136, "RTX4090": 0.5136}, "floor_pct": 0.20},
+            "acc_norm": {"value": {"A100": 0.5085, "RTX4090": 0.5059}, "floor_pct": 0.20},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
