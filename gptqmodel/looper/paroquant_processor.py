@@ -255,21 +255,10 @@ class ParoQuantProcessor(LoopProcessor):
         with self.lock:
             self.durations.append(duration)
             self.avg_losses.append(val_loss)
-            self.module_names.append(f"layer-{module.layer_index}-{module.name}")
-            self.log.append(stat)
+        self.module_names.append(f"layer-{module.layer_index}-{module.name}")
+        self.log.append(stat)
 
         self.log_new_row(stat)
-
-        log.info(
-            "ParoQuant quantized layer=%s module=%s loss=%s nsamples=%s time=%ss fwd_time=%s mem=%s",
-            module.layer_index,
-            module.name,
-            stat[QUANT_LOG_LOSS],
-            stat[QUANT_LOG_NSAMPLES],
-            stat[PROCESS_LOG_TIME],
-            stat[PROCESS_LOG_FWD_TIME],
-            stat[PROCESS_USED_MEMORY],
-        )
 
     @staticmethod
     def _llama_mlp_block_modules(state: _ParoQuantLayerState) -> Optional[Dict[str, NamedModule]]:
