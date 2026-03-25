@@ -10,8 +10,8 @@ class TestCohere(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/aya-expanse-8b" # "CohereForAI/aya-expanse-8b"
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
-            "acc": {"value": 0.5520, "floor_pct": 0.20}, # A100: 0.5546 4090: 0.5520
-            "acc_norm": {"value": 0.5802, "floor_pct": 0.20}, # A100: 0.5802 4090: 0.5802
+            "acc": {"value": {"A100": 0.5546, "RTX4090": 0.5520}, "floor_pct": 0.20},
+            "acc_norm": {"value": {"A100": 0.5802, "RTX4090": 0.5802}, "floor_pct": 0.20},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
