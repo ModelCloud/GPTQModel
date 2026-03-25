@@ -2101,6 +2101,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                   "Example to exclude device 0: compute_device_filter=lambda devices: [d for d in devices if d.index != 0]"}
     )
 
+    # Device for storing calibration data during input capture
+    calibration_data_device: Optional[Union[str, torch.device]] = field(
+        default=None,
+        metadata={"help": "Device for storing calibration data. 'balanced' = round-robin across GPUs, or specify device like 'cuda:1'."}
+    )
+
     auto_forward_data_parallel: bool = field(
         default=True,
         metadata={"help": "When multi-gpu is detected, we may data clone modules to each gpu for data parallelism "
@@ -2266,6 +2272,16 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         self.vram_strategy = _normalize_vram_strategy(self.vram_strategy)
         self.gc_mode = _normalize_gc_mode(self.gc_mode)
         self.moe = _normalize_moe_config(self.moe)
+
+        # Normalize calibration_data_device to canonical form if it's a specific device (not "balanced")
+        if self.calibration_data_device is not None:
+            if isinstance(self.calibration_data_device, str):
+                if self.calibration_data_device.lower() == "balanced":
+                    self.calibration_data_device = "balanced"
+                else:
+                    # Import here to avoid circular import
+                    from ..utils.looper_helpers import _canonical_device
+                    self.calibration_data_device = _canonical_device(torch.device(self.calibration_data_device))
 
     def extension_set(self, key: str, value: Any):
         if self.adapter is None:
