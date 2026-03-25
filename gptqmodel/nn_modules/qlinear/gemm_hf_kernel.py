@@ -18,6 +18,7 @@ from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.python import is_free_threading_build
 
 
 log = setup_logger()
@@ -51,12 +52,31 @@ class HFKernelLinear(PackableQuantLinear):
     KERNEL_REPO_ID = "kernels-community/quantization-gptq"
 
     @classmethod
+    def _hf_kernels_import_guard(cls, kernel_name: Optional[str] = None) -> Optional[RuntimeError]:
+        if not is_free_threading_build():
+            return None
+
+        kernel_name = kernel_name or cls.__name__
+        # FIXME: Remove this guard once https://github.com/huggingface/kernels/issues/312 is fixed.
+        msg = (
+            f"{kernel_name} is disabled on free-threaded Python builds "
+            "(Py_GIL_DISABLED=1) because importing `kernels` can segfault "
+            "even when the runtime GIL is enabled. Please use a standard "
+            "GIL-enabled Python build."
+        )
+        return RuntimeError(msg)
+
+    @classmethod
     def _load_cpu_kernel_variant(cls, repo_id: str):
         """
         kernels.get_kernel() picks variants from the local torch build. On CUDA-enabled torch
         wheels running CPU-only inference, that can miss CPU-only kernel repos. Fall back to an
         explicit CPU variant selection from repo build artifacts.
         """
+        build_error = cls._hf_kernels_import_guard()
+        if build_error is not None:
+            raise build_error
+
         from kernels.utils import _import_from_path, install_kernel_all_variants, package_name_from_repo_id
 
         build_dir = install_kernel_all_variants(repo_id, revision="main")
@@ -138,6 +158,11 @@ class HFKernelLinear(PackableQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        build_error = cls._hf_kernels_import_guard()
+        if build_error is not None:
+            log.warning(str(build_error))
+            return False, build_error
+
         if not cls._is_torch_release():
             msg = (
                 f"HFKernelLinear requires a release version of torch, "
