@@ -53,8 +53,6 @@ class TestLlama3_2_GGUF(ModelTest):
     LOAD_BACKEND = BACKEND.GGUF_TORCH
     KERNEL_INFERENCE = {GGUFTorchQuantLinear}
 
-    SAVE_PATH = "temp/llama3_2_guff"
-
     def test_llama3_2_gguf_full_model(self):
         self.quant_lm_eval()
 

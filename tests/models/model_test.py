@@ -1364,10 +1364,7 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.config.model_type == "ovis"
         need_create_processor = is_image_to_text_model and not is_ovis_model
 
-        debug_short_circuit = False
         if not is_quantized:
-            save_context = None
-            planned_save_path = None
             cleanup_callback = None
             try:
                 save_context, planned_save_path, cleanup_callback = self._prepare_quant_save_destination(need_eval)
