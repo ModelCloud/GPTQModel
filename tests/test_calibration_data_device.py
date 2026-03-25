@@ -1116,7 +1116,8 @@ def test_auto_forward_data_parallel_false_uses_single_mode(monkeypatch):
         single_called[0] = True
         return []
 
-    looper._run_forward_batches_single = patched_single
+    # Patch the forward_executor's run_single method (not looper's non-existent _run_forward_batches_single)
+    looper._forward_executor.run_single = patched_single
 
     class DummyProcessor:
         num_batches = 1

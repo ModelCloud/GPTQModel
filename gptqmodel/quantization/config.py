@@ -2282,6 +2282,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
                     # Import here to avoid circular import
                     from ..utils.looper_helpers import _canonical_device
                     self.calibration_data_device = _canonical_device(torch.device(self.calibration_data_device))
+            elif isinstance(self.calibration_data_device, torch.device):
+                # Also normalize when passed as torch.device object
+                from ..utils.looper_helpers import _canonical_device
+                self.calibration_data_device = _canonical_device(self.calibration_data_device)
 
     def extension_set(self, key: str, value: Any):
         if self.adapter is None:

@@ -533,7 +533,10 @@ class ForwardExecutor:
             if module_output is None:
                 raise RuntimeError("Forward batch returned no output; data-parallel execution produced empty result.")
             primary = module_output[0] if isinstance(module_output, tuple) else module_output
-            primary = move_to(primary, device=cur_layer_device)
+            # Move output back to the same device where input was stored
+            # This preserves calibration data placement
+            input_device = layer_inputs[idx][0].device if layer_inputs[idx] else cur_layer_device
+            primary = move_to(primary, device=input_device)
             ordered_outputs.append([primary])
 
         return ordered_outputs
