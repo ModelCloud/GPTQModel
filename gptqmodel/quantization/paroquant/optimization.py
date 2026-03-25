@@ -838,7 +838,8 @@ def _evaluate_model(
         autocast_ctx = torch.amp.autocast("cuda") if use_amp and inputs.device.type == "cuda" else nullcontext()
         with autocast_ctx:
             preds = model(inputs)
-        return float(F.smooth_l1_loss(preds, targets).item())
+            loss = F.smooth_l1_loss(preds, targets)
+        return float(loss.item())
 
 
 def _run_stage_gptqmodel(
@@ -851,7 +852,7 @@ def _run_stage_gptqmodel(
     param_groups: Sequence[dict[str, object]],
     epochs: int,
     batch_size: int,
-) -> tuple[float, float]:
+    ) -> tuple[float, float]:
     """Run one optimization stage with validation-based best-state selection."""
     normalized_groups = []
     for param_group in param_groups:
@@ -868,20 +869,22 @@ def _run_stage_gptqmodel(
             }
         )
 
+    use_amp = inputs_train.device.type == "cuda"
     if epochs <= 0 or not normalized_groups:
-        train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
-        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
+        train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         return train_loss, val_loss
 
     optimizer = torch.optim.AdamW(normalized_groups)
     steps_per_epoch = max(1, math.ceil(max(1, inputs_train.shape[0]) / max(1, batch_size)))
     total_steps = max(1, epochs * steps_per_epoch)
     base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
+    scaler = torch.amp.GradScaler(enabled=use_amp)
     global_step = 0
 
     best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
     best_val_loss = float("inf")
-    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
+    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
 
     for _epoch in range(epochs):
         epoch_loss = 0.0
@@ -889,10 +892,13 @@ def _run_stage_gptqmodel(
 
         for input_batch, target_batch in zip(_chunk_rows(inputs_train, batch_size), _chunk_rows(targets_train, batch_size)):
             optimizer.zero_grad(set_to_none=True)
-            preds = model(input_batch)
-            loss = F.smooth_l1_loss(preds, target_batch)
-            loss.backward()
-            optimizer.step()
+            autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
+            with autocast_ctx:
+                preds = model(input_batch)
+                loss = F.smooth_l1_loss(preds, target_batch)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             global_step += 1
             cosine_ratio = 0.5 * (1.0 + math.cos(math.pi * min(global_step, total_steps) / total_steps))
             for group, base_lr in zip(optimizer.param_groups, base_lrs):
@@ -903,7 +909,7 @@ def _run_stage_gptqmodel(
             batch_count += 1
 
         last_train_loss = epoch_loss / max(1, batch_count)
-        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}

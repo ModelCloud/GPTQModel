@@ -244,7 +244,14 @@ class _ArcChallengeLoglikelihoodSuite:
     def dataset_loader(self) -> Any:
         from datasets import load_dataset
 
-        return load_dataset
+        def _loader(path: str, *args, stream: bool = False, **kwargs):
+            # Evalution forwards `stream`; Hugging Face expects `streaming`.
+            # Enforce the new API by rejecting legacy `streaming`.
+            if "streaming" in kwargs:
+                raise TypeError("use `stream=` (Evalution) not `streaming=`")
+            return load_dataset(path, *args, streaming=stream, **kwargs)
+
+        return _loader
 
     def task_name(self) -> str:
         return "arc_challenge"
