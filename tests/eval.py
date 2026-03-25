@@ -239,7 +239,7 @@ class _ArcChallengeLoglikelihoodSuite:
     split: str = "test"
     max_rows: int | None = None
     cache_dir: str | None = None
-    streaming: bool = False
+    stream: bool = False
 
     def dataset_loader(self) -> Any:
         from datasets import load_dataset
@@ -257,7 +257,7 @@ class _ArcChallengeLoglikelihoodSuite:
             "dataset_path": self.dataset_path,
             "dataset_name": self.dataset_name,
             "split": self.split,
-            "streaming": self.streaming,
+            "stream": self.stream,
             "apply_chat_template": self.apply_chat_template,
             "scoring_mode": "multiple_choice_loglikelihood",
         }
@@ -291,7 +291,7 @@ class _ArcChallengeLoglikelihoodSuite:
             dataset_name=self.dataset_name,
             split=self.split,
             cache_dir=self.cache_dir,
-            streaming=self.streaming,
+            stream=self.stream,
         )
 
         docs = limit_docs(loaded_docs, self.max_rows)

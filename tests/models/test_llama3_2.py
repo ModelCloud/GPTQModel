@@ -4,8 +4,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from pathlib import Path
-
 from model_test import ModelTest
 
 
@@ -17,7 +15,6 @@ from model_test import ModelTest
 # | mmlu_stem :: acc,none                              |   0.3942 |
 class TestLlama3_2(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
-    SAVE_PATH = str(Path(__file__).resolve().parents[2] / "local_llama3_2_gptq_w4a16")
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
     EVAL_TASKS_SLOW = {
@@ -60,7 +57,7 @@ class TestLlama3_2(ModelTest):
             "evalution_suite_kwargs": {
                 "batch_size": 24,
                 "max_new_tokens": 96,
-                "streaming": True,
+                "stream": True,
                 "max_rows": 128,
             },
             "acc,num": {

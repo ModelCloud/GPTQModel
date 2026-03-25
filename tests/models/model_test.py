@@ -65,6 +65,13 @@ except Exception:  # pragma: no cover - availability check
     def is_flash_attn_2_available():  # type: ignore
         return False
 
+from tests.eval import (  # noqa: E402
+    evaluate,
+    format_eval_result_table,
+    get_eval_task_results,
+    resolve_eval_metric_alias,
+)
+
 from gptqmodel import BACKEND, DEBUG_ON, GPTQModel  # noqa: E402
 from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
@@ -84,12 +91,6 @@ from gptqmodel.quantization.config import (  # noqa: E402
     VramStrategy,
     WeightOnlyConfig,
     resolve_quant_format,
-)
-from tests.eval import (  # noqa: E402
-    evaluate,
-    format_eval_result_table,
-    get_eval_task_results,
-    resolve_eval_metric_alias,
 )
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
@@ -1419,10 +1420,7 @@ class ModelTest(unittest.TestCase):
         is_ovis_model = model.config.model_type == "ovis"
         need_create_processor = is_image_to_text_model and not is_ovis_model
 
-        debug_short_circuit = False
         if not is_quantized:
-            save_context = None
-            planned_save_path = None
             cleanup_callback = None
             try:
                 save_context, planned_save_path, cleanup_callback = self._prepare_quant_save_destination(need_eval)
