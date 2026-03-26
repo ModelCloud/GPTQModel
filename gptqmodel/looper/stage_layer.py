@@ -76,6 +76,154 @@ def _find_last_quantized_layer_index(
     return last_quantized_layer_index
 
 
+def _collect_layer_forward_progress(
+    looper: "ModuleLooper",
+    *,
+    processor,
+    layer_inputs: List[List[torch.Tensor]],
+) -> tuple[int, List[int], int]:
+    """Compute replay progress metadata for a whole-layer lifecycle forward.
+
+    Subset-driven replay normally reuses progress data that was already planned
+    inside :class:`SubsetPlan`. When an entire layer is dynamically excluded,
+    no subset plan exists, but the layer stage may still need one untouched
+    forward pass so the next layer receives the correct activations.
+
+    This helper mirrors the subset planner's batch/row normalization so the
+    fallback layer replay uses the same progress accounting contract:
+    - `batch_count`: number of cached calibration batches to replay
+    - `forward_row_counts`: per-batch row counts for progress updates
+    - `forward_total_rows`: normalized total rows shown by the replay progress
+    """
+
+    batch_count = looper._resolve_batch_total(
+        getattr(processor, "num_batches", None),
+        layer_inputs,
+    )
+    forward_row_counts = list(looper._collect_row_counts(layer_inputs))
+    if not forward_row_counts and batch_count > 0:
+        forward_row_counts = [1] * batch_count
+    if len(forward_row_counts) > batch_count:
+        forward_row_counts = forward_row_counts[:batch_count]
+
+    forward_total_rows = sum(forward_row_counts) if forward_row_counts else batch_count
+    forward_total_rows = max(forward_total_rows, 1)
+
+    if len(forward_row_counts) < batch_count:
+        forward_row_counts.extend([1] * (batch_count - len(forward_row_counts)))
+
+    return batch_count, forward_row_counts, forward_total_rows
+
+
+def _replay_layer_outputs(
+    looper: "ModuleLooper",
+    *,
+    module: torch.nn.Module,
+    processor,
+    layer_inputs: List[List[torch.Tensor]],
+    layer_input_kwargs: List[Dict[str, torch.Tensor]],
+    position_ids: List[torch.Tensor],
+    attention_masks: List[torch.Tensor],
+    cur_layer_device: torch.device,
+    is_lm_head_module: bool,
+    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    layer_index: int,
+    layer_descriptor: str,
+    full,
+    log,
+    region_timer,
+    replay_plan: Optional[SubsetPlan] = None,
+) -> List[List[torch.Tensor]]:
+    """Replay one layer forward to materialize outputs for the next layer."""
+
+    if replay_plan is None:
+        replay_batch_count, replay_row_counts, replay_total_rows = _collect_layer_forward_progress(
+            looper,
+            processor=processor,
+            layer_inputs=layer_inputs,
+        )
+        replay_source = f"{layer_descriptor}:untouched"
+        replay_modules = None
+        replay_forward_device_map: Dict[str, torch.device] = {}
+        replay_force_serial = False
+        replay_preserve_module_devices = False
+    else:
+        replay_batch_count = replay_plan.batch_count
+        replay_row_counts = replay_plan.forward_row_counts
+        replay_total_rows = replay_plan.forward_total_rows
+        replay_source = (
+            f"{layer_descriptor}:subset"
+            f"{replay_plan.subset_index + 1}/{replay_plan.subset_total}"
+        )
+        replay_modules = replay_plan.modules
+        replay_forward_device_map = replay_plan.forward_device_map
+        replay_force_serial = replay_plan.subset_forward_serial
+        replay_preserve_module_devices = replay_plan.preserve_module_devices
+
+    replay_msg = (
+        "Forward replay "
+        f"(layer=`{layer_descriptor}`, batches={replay_batch_count}, rows={replay_total_rows})"
+    )
+    replay_pb = (
+        log.pb(range(replay_total_rows))
+           .manual()
+           .set(show_left_steps=False)
+    )
+    replay_pb.title(replay_msg).subtitle(
+        f"Forward replay Row 0/{replay_total_rows}"
+    ).draw()
+
+    replay_prev_devices: Dict[str, torch.device] = {}
+    if replay_modules is not None and replay_forward_device_map:
+        replay_prev_devices = looper._apply_forward_device_overrides(
+            replay_modules,
+            replay_forward_device_map,
+            fallback_modules=full,
+        )
+
+    replay_start = time.perf_counter()
+    try:
+        looper._current_subset = None
+        layer_outputs = looper._run_forward_batches(
+            module=module,
+            processor=processor,
+            layer_inputs=layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            position_ids=position_ids,
+            attention_masks=attention_masks,
+            cur_layer_device=cur_layer_device,
+            is_lm_head_module=is_lm_head_module,
+            shared_kv_cache_dict=shared_kv_cache_dict,
+            layer_index=layer_index,
+            need_outputs=True,
+            reuse_kv=False,
+            progress_pb=replay_pb,
+            progress_title=replay_msg,
+            progress_stage="Forward replay",
+            progress_rows_per_batch=replay_row_counts,
+            progress_total_rows=replay_total_rows,
+            force_serial=replay_force_serial,
+            preserve_module_devices=replay_preserve_module_devices,
+        )
+    finally:
+        if replay_modules is not None and replay_forward_device_map:
+            looper._restore_forward_device_overrides(
+                replay_modules,
+                replay_prev_devices,
+                fallback_modules=full,
+            )
+        replay_pb.close()
+
+    if region_timer is not None:
+        region_timer.record(
+            "post_quant_forward",
+            time.perf_counter() - replay_start,
+            source=replay_source,
+        )
+
+    return layer_outputs
+
+
 def run_layer_stage(
     looper: 'ModuleLooper',
     *,
@@ -198,6 +346,7 @@ def run_layer_stage(
                 fallback=fallback,
             )
 
+            is_last_module = layer_index == len(pb) - 1
             for subset_plan in subset_plans:
                 # Process the layer in smaller subsets so attention groups or
                 # MoE experts can be quantized independently within a layer.
@@ -254,113 +403,63 @@ def run_layer_stage(
                     # for the outputs that flow into the next layer.
                     last_subset_plan = subset_result.plan
 
-            is_last_module = layer_index == len(pb) - 1
             layer_outputs: List[List[torch.Tensor]] = []
             replay_plan = last_subset_plan
+
+            # When dynamic exclusions remove every module from a layer, no subset
+            # stage runs and therefore nothing materializes that layer's outputs.
+            # GPTQ-style processors still need the untouched layer output so the
+            # next layer sees the correct activation stream.
+            if (
+                not is_last_module
+                and not subset_plans
+                and execution_config.require_fwd
+                and execution_config.fwd_after_process
+            ):
+                layer_outputs = _replay_layer_outputs(
+                    looper,
+                    module=module,
+                    processor=processor,
+                    layer_inputs=layer_inputs,
+                    layer_input_kwargs=layer_input_kwargs,
+                    position_ids=position_ids,
+                    attention_masks=attention_masks,
+                    cur_layer_device=cur_layer_device,
+                    is_lm_head_module=is_lm_head_module,
+                    shared_kv_cache_dict=shared_kv_cache_dict,
+                    layer_index=layer_index,
+                    layer_descriptor=layer_descriptor,
+                    full=full,
+                    log=log,
+                    region_timer=region_timer,
+                )
 
             # Some processors consume outputs only after `process()` updates the
             # current layer. In that case, replay the layer once using the
             # metadata already computed by the final subset plan.
-            if not is_last_module and replay_plan is not None and replay_plan.replay_after_process:
+            elif not is_last_module and replay_plan is not None and replay_plan.replay_after_process:
                 # Reuse the last subset plan's replay metadata directly so the
                 # layer stage does not need to reconstruct batch counts,
                 # row-count progress, or forward device overrides after the
                 # subset stage has already decided them.
-                replay_batch_count = replay_plan.batch_count
-                replay_row_counts = replay_plan.forward_row_counts
-                replay_total_rows = replay_plan.forward_total_rows
-                replay_msg = (
-                    "Forward replay "
-                    f"(layer=`{layer_descriptor}`, batches={replay_batch_count}, rows={replay_total_rows})"
+                layer_outputs = _replay_layer_outputs(
+                    looper,
+                    module=module,
+                    processor=processor,
+                    layer_inputs=layer_inputs,
+                    layer_input_kwargs=layer_input_kwargs,
+                    position_ids=position_ids,
+                    attention_masks=attention_masks,
+                    cur_layer_device=cur_layer_device,
+                    is_lm_head_module=is_lm_head_module,
+                    shared_kv_cache_dict=shared_kv_cache_dict,
+                    layer_index=layer_index,
+                    layer_descriptor=layer_descriptor,
+                    full=full,
+                    log=log,
+                    region_timer=region_timer,
+                    replay_plan=replay_plan,
                 )
-                replay_pb = (
-                    log.pb(range(replay_total_rows))
-                       .manual()
-                       .set(show_left_steps=False)
-                )
-                replay_pb.title(replay_msg).subtitle(
-                    f"Forward replay Row 0/{replay_total_rows}"
-                ).draw()
-                # Forward replay shares the same VRAM spike; block until the pool drains first.
-                # DEVICE_THREAD_POOL.wait()
-                # try to cleanup recent objects before forward
-                #timed_gc_collect(1)
-
-                replay_start = time.perf_counter()
-                replay_source = (
-                    f"{layer_descriptor}:subset"
-                    f"{replay_plan.subset_index + 1}/{replay_plan.subset_total}"
-                )
-
-                replay_prev_devices: Dict[str, torch.device] = {}
-                if replay_plan.forward_device_map:
-                    replay_prev_devices = looper._apply_forward_device_overrides(
-                        replay_plan.modules,
-                        replay_plan.forward_device_map,
-                        fallback_modules=full,
-                    )
-
-                # if log.isEnabledFor(logging.DEBUG):
-                #     replay_snapshot = []
-                #     for name, named_module in subset.items():
-                #         target_device = getattr(named_module, "target_device", None)
-                #         if target_device is None:
-                #             try:
-                #                 target_device = get_device(named_module.module)
-                #             except Exception:
-                #                 target_device = None
-                #         target_device_str = str(target_device) if target_device is not None else "unknown"
-                #         replay_snapshot.append(f"{name}:{target_device_str}")
-                #     log.debug(
-                #         "ModuleLooper: Forward replay device snapshot (layer=`%s`, subset=%d/%d, serial=%s) %s",
-                #         layer_descriptor,
-                #         index + 1,
-                #         subset_total,
-                #         subset_forward_serial,
-                #         ", ".join(replay_snapshot),
-                #     )
-
-                try:
-                    # Reset current subset for MoE lifecycle hooks as we do not need to collect activation at this stage,
-                    # and need to collect only outputs produced by original forward
-                    looper._current_subset = None
-
-                    layer_outputs = looper._run_forward_batches(
-                        module=module,
-                        processor=processor,
-                        layer_inputs=layer_inputs,
-                        layer_input_kwargs=layer_input_kwargs,
-                        position_ids=position_ids,
-                        attention_masks=attention_masks,
-                        cur_layer_device=cur_layer_device,
-                        is_lm_head_module=is_lm_head_module,
-                        shared_kv_cache_dict=shared_kv_cache_dict,
-                        layer_index=layer_index,
-                        need_outputs=True,
-                        reuse_kv=False,
-                        progress_pb=replay_pb,
-                        progress_title=replay_msg,
-                        progress_stage="Forward replay",
-                        progress_rows_per_batch=replay_row_counts,
-                        progress_total_rows=replay_total_rows,
-                        force_serial=replay_plan.subset_forward_serial,
-                        preserve_module_devices=replay_plan.preserve_module_devices,
-                    )
-                finally:
-                    if replay_plan.forward_device_map:
-                        looper._restore_forward_device_overrides(
-                            replay_plan.modules,
-                            replay_prev_devices,
-                            fallback_modules=full,
-                        )
-                    if replay_pb is not None:
-                        replay_pb.close()
-                if region_timer is not None:
-                    region_timer.record(
-                        "post_quant_forward",
-                        time.perf_counter() - replay_start,
-                        source=replay_source,
-                    )
 
             # Finalize module after last processor
             if p_index == len(looper.processors) - 1:
