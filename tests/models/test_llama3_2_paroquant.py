@@ -94,9 +94,9 @@ class TestLlama3_2_ParoQuant(ModelTest):
     KERNEL_INFERENCE = {ParoQuantQuantLinear}
 
     # Mirror benchmark settings: 1+1 epochs on 128 train rows
-    PAROQUANT_ROTATION_EPOCHS = 5
-    PAROQUANT_FINETUNE_EPOCHS = 5
-    PAROQUANT_TRAIN_SAMPLES = 128
+    PAROQUANT_ROTATION_EPOCHS = 7
+    PAROQUANT_FINETUNE_EPOCHS = 7
+    PAROQUANT_TRAIN_SAMPLES = 1024
     PAROQUANT_SEED = 3141592653
 
     def _build_quantize_config(self):

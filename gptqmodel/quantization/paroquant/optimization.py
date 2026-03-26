@@ -645,9 +645,24 @@ class _ParoQuantOptimLinear(nn.Module):
         self.quantizer: Optional[GroupLinearQuantizer] = None
         self.fused_rotation = fused_rotation
 
-    def transformed_weight(self) -> torch.Tensor:
+    def _safe_channel_scales(self, use_ste: bool) -> torch.Tensor:
+        """Keep learned channel scales in a numerically safe range.
+
+        During optimization we use an STE clamp so forward values stay bounded
+        while gradients still flow to ``channel_scales_opt``. During export we
+        switch to a hard clamp so the saved runtime tensors reflect the exact
+        bounded values.
+        """
+        scales = self.channel_scales_opt.view(1, -1)
+        if use_ste:
+            return _clamp_ste(scales, min_value=1e-5, max_value=1e5)
+        return scales.clamp(min=1e-5, max=1e5)
+
+    def transformed_weight(self, *, use_ste: bool = True) -> torch.Tensor:
         """Project the learnable weight into ParoQuant's transformed domain."""
-        scaled_weight = self.weight * self.channel_scales_opt.view(1, -1)
+        # Keep training-time scale updates differentiable while preventing
+        # near-zero / exploding channel scales from destabilizing the transform.
+        scaled_weight = self.weight * self._safe_channel_scales(use_ste=use_ste)
         return _apply_rotation(
             scaled_weight,
             self.pairs,
@@ -659,7 +674,7 @@ class _ParoQuantOptimLinear(nn.Module):
 
     def quantized_transformed_weight(self) -> torch.Tensor:
         """Pseudo-quantize the transformed weight using current learned qparams."""
-        transformed = self.transformed_weight()
+        transformed = self.transformed_weight(use_ste=True)
         if self.quantizer is None:
             return pseudo_quantize_dequant(
                 transformed,
@@ -680,7 +695,7 @@ class _ParoQuantOptimLinear(nn.Module):
             group_size=self.group_size,
             fused_rotation=self.fused_rotation,
         )
-        channel_scales = self.channel_scales_opt.view(1, -1).clamp(min=1e-5)
+        channel_scales = self._safe_channel_scales(use_ste=True)
         return quantized / channel_scales
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -694,7 +709,7 @@ class _ParoQuantOptimLinear(nn.Module):
 
     def init_quantizer(self) -> None:
         """Bootstrap the transformed-domain quantizer from the current rotated weight."""
-        transformed = self.transformed_weight().detach()
+        transformed = self.transformed_weight(use_ste=False).detach()
         self.quantizer = GroupLinearQuantizer(
             transformed,
             bits=self.bits,
@@ -704,7 +719,7 @@ class _ParoQuantOptimLinear(nn.Module):
 
     def export_pack_state(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Export runtime tensors that should match the pseudo-quantized layer exactly."""
-        transformed = self.transformed_weight().detach()
+        transformed = self.transformed_weight(use_ste=False).detach()
         if self.quantizer is None:
             quantizer = GroupLinearQuantizer(
                 transformed,
@@ -737,7 +752,9 @@ class _ParoQuantOptimLinear(nn.Module):
             )
 
         theta = self.theta.detach().masked_fill(self.theta_mask, 0)
-        runtime_channel_scales = self.channel_scales_opt.detach().clamp(min=1e-5).reciprocal().view(1, -1)
+        # Export the exact bounded inverse scales that runtime input rotation
+        # multiplies into activations.
+        runtime_channel_scales = self._safe_channel_scales(use_ste=False).detach().reciprocal()
         return quantized, pack_scales, pack_zeros, theta, runtime_channel_scales
 
 
