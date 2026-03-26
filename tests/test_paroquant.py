@@ -53,7 +53,7 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.quant_method == METHOD.PAROQUANT
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
-    assert cfg.opt_stage_impl == "reference"
+    assert cfg.opt_stage_impl == "fast"
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
     assert cfg.opt_channel_scale_clamp_min == 1e-2

@@ -2822,7 +2822,7 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_pair_ratio: float = field(default=0.5)
     opt_seed: int = field(default=0)
     opt_fused_rotation: bool = field(default=True)
-    opt_stage_impl: str = field(default="reference")
+    opt_stage_impl: str = field(default="fast")
     opt_pair_impl: str = field(default="fast")
     opt_quantizer_impl: str = field(default="reference")
     opt_channel_scale_clamp_min: float = field(default=PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT)
