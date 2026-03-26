@@ -418,6 +418,40 @@ def test_paroquant_fast_pair_builder_emits_disjoint_matchings():
             seen_edges.add(edge)
 
 
+def test_paroquant_optim_forward_matches_pseudo_weight_contract():
+    """Guard the stage-time forward rewrite against the original pseudo-weight contract."""
+    torch.manual_seed(0)
+    weight = torch.randn((16, 8), dtype=torch.float32)
+    inputs = torch.randn((5, 8), dtype=torch.float32)
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=3,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    model = _ParoQuantOptimLinear(
+        weight,
+        None,
+        bits=4,
+        group_size=8,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    with torch.no_grad():
+        model.theta.uniform_(-0.2, 0.2)
+        model.channel_scales_opt.uniform_(0.8, 1.2)
+    model.init_quantizer()
+
+    expected = F.linear(inputs, model.pseudo_weight(), model.bias)
+    actual = model(inputs)
+
+    torch.testing.assert_close(actual, expected, atol=2e-6, rtol=1e-5)
+
+
 def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
     """Guard that CUDA-graph replay only activates for real CUDA tensor stages."""
     class _DummyModel(torch.nn.Module):

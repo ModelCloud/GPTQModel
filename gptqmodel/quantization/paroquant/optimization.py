@@ -783,8 +783,20 @@ class _ParoQuantOptimLinear(nn.Module):
         return quantized / channel_scales
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Replay calibration activations through the current pseudo-quantized layer."""
-        return F.linear(x, self.pseudo_weight(), self.bias)
+        """Replay calibration activations through the runtime-equivalent transformed-domain path."""
+        # Rotate the minibatch instead of reconstructing full pseudo-weights on
+        # every step. This preserves the runtime contract while shrinking the
+        # per-step rotation work from weight-sized tensors to batch-sized ones.
+        runtime_scales = self._safe_channel_scales(use_ste=True).reciprocal()
+        rotated_inputs = _apply_rotation(
+            x,
+            self.pairs,
+            self.theta,
+            scales=runtime_scales,
+            group_size=self.group_size,
+            fused_rotation=self.fused_rotation,
+        )
+        return F.linear(rotated_inputs, self.quantized_transformed_weight(), self.bias)
 
     def reset_masked_angles(self) -> None:
         """Force dummy padded pairs to stay at zero angle during optimization."""
