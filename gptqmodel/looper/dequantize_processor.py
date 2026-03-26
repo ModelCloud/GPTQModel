@@ -30,7 +30,7 @@ class DequantizeProcessor(LoopProcessor):
             batch_size=1,
             execution_config=ExecutionConfig(
                 require_fwd=False,
-                fwd_after_process=False,
+                fwd_replay_after_process=False,
             ),
         )
 

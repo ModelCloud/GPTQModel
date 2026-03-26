@@ -58,20 +58,22 @@ class ExecutionConfig:
 
     Processor defaults:
 
-    +--------------+------+------------------+---------------------------+----------------+--------------------+
-    | Processor     | fwd? | after_process?   | single_pass_all_modules?  | early_stop?    | activation_capture?|
-    +--------------+------+------------------+---------------------------+----------------+--------------------+
-    | GPTQ          | yes  | yes              | no                        | yes            | no                 |
-    | AWQ           | yes  | yes              | no                        | yes            | yes                |
-    | Native        | yes  | no               | yes                       | no             | no                 |
-    | WeightOnly    | no   | no               | no/default                | no/default     | no                 |
-    +--------------+------+------------------+---------------------------+----------------+--------------------+
+    +--------------+------+------------------------+---------------------------+----------------+--------------------+
+    | Processor     | fwd? | replay_after_process? | single_pass_all_modules?  | early_stop?    | activation_capture?|
+    +--------------+------+------------------------+---------------------------+----------------+--------------------+
+    | GPTQ          | yes  | yes                    | no                        | yes            | no                 |
+    | AWQ           | yes  | yes                    | no                        | yes            | yes                |
+    | ParoQuant     | yes  | yes                    | no                        | yes            | yes                |
+    | Native        | yes  | no                     | yes                       | no             | no                 |
+    | WeightOnly    | no   | no                     | no/default                | no/default     | no                 |
+    +--------------+------+------------------------+---------------------------+----------------+--------------------+
     """
 
     # Whether the processor needs forward replay at all.
     require_fwd: bool = True
-    # Whether the next layer consumes outputs after process() instead of before it.
-    fwd_after_process: bool = True
+    # Whether the layer outputs become authoritative only after a replay that
+    # runs after process(), rather than from the subset forward itself.
+    fwd_replay_after_process: bool = True
     # Whether layer modules are replayed in one combined pass instead of per subset.
     fwd_all_modules_in_single_pass: bool = False
     # Whether a subset forward can stop as soon as the last subset hook fires.

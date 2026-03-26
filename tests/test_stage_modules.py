@@ -8,7 +8,7 @@ from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
-from gptqmodel.looper.stage_layer import run_layer_stage
+from gptqmodel.looper.stage_layer import _replay_layer_outputs, run_layer_stage
 from gptqmodel.looper.stage_subset import CalibrationCoveragePolicy, SubsetPlan, SubsetStageResult
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.pause_resume import PauseResumeController
@@ -212,7 +212,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             tensor = torch.zeros(1, 1, 1)
             self.execution_config = ExecutionConfig(
                 require_fwd=True,
-                fwd_after_process=False,
+                fwd_replay_after_process=False,
                 fwd_all_modules_in_single_pass=False,
             )
             self.inputs_cache = types.SimpleNamespace(
@@ -416,7 +416,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             tensor = torch.zeros(1, 1, 1)
             self.execution_config = ExecutionConfig(
                 require_fwd=True,
-                fwd_after_process=False,
+                fwd_replay_after_process=False,
                 fwd_all_modules_in_single_pass=False,
             )
             self.inputs_cache = types.SimpleNamespace(
@@ -656,7 +656,7 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
         def __init__(self):
             self.execution_config = ExecutionConfig(
                 require_fwd=True,
-                fwd_after_process=True,
+                fwd_replay_after_process=True,
                 fwd_all_modules_in_single_pass=False,
             )
             self.inputs_cache = types.SimpleNamespace(
@@ -779,3 +779,515 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
     assert looper.forward_override_modules is replay_modules
     assert looper.forward_override_map == {"self_attn.q_proj": torch.device("cuda:0")}
     assert looper.restored_override_modules is replay_modules
+
+
+def test_replay_layer_outputs_without_plan_uses_generic_progress():
+    input_tensor = torch.ones(2, 1, 1)
+    expected_output = input_tensor + 3.0
+    timer_records = []
+
+    class DummyPB:
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            return self
+
+        def title(self, *_):
+            return self
+
+        def subtitle(self, *_):
+            return self
+
+        def draw(self):
+            return self
+
+        def close(self):
+            return self
+
+    class DummyLogger:
+        def pb(self, iterable):
+            return DummyPB()
+
+    class DummyTimer:
+        def record(self, *args, **kwargs):
+            timer_records.append((args, kwargs))
+
+    class DummyLooper:
+        def __init__(self):
+            self._current_subset = "not-cleared"
+            self.forward_calls = []
+
+        def _resolve_batch_total(self, _num_batches, layer_inputs):
+            return len(layer_inputs)
+
+        def _collect_row_counts(self, layer_inputs):
+            return [int(batch[0].shape[0]) for batch in layer_inputs]
+
+        def _run_forward_batches(self, **kwargs):
+            self.forward_calls.append(kwargs)
+            return [[expected_output.clone()]]
+
+        def _apply_forward_device_overrides(self, *args, **kwargs):
+            raise AssertionError("untouched-layer replay should not install device overrides")
+
+        def _restore_forward_device_overrides(self, *args, **kwargs):
+            raise AssertionError("untouched-layer replay should not restore device overrides")
+
+    looper = DummyLooper()
+    processor = types.SimpleNamespace(num_batches=None)
+
+    outputs = _replay_layer_outputs(
+        looper,
+        module=torch.nn.Identity(),
+        processor=processor,
+        layer_inputs=[[input_tensor]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.layers.0",
+        full={},
+        log=DummyLogger(),
+        region_timer=DummyTimer(),
+        replay_plan=None,
+    )
+
+    assert len(looper.forward_calls) == 1
+    assert looper.forward_calls[0]["progress_rows_per_batch"] == [2]
+    assert looper.forward_calls[0]["progress_total_rows"] == 2
+    assert looper.forward_calls[0]["force_serial"] is False
+    assert looper.forward_calls[0]["preserve_module_devices"] is False
+    assert looper._current_subset is None
+    assert len(outputs) == 1
+    assert len(outputs[0]) == 1
+    assert torch.allclose(outputs[0][0], expected_output)
+    assert timer_records[0][1]["source"] == "model.layers.0:untouched"
+
+
+def test_replay_layer_outputs_with_plan_uses_plan_metadata_and_device_overrides():
+    tensor = torch.zeros(1, 1, 1)
+    replay_modules = {
+        "self_attn.q_proj": NamedModule(
+            torch.nn.Linear(1, 1, bias=False),
+            name="self_attn.q_proj",
+            full_name="model.layers.0.self_attn.q_proj",
+            layer_index=0,
+        )
+    }
+    replay_plan = SubsetPlan(
+        modules=replay_modules,
+        subset_index=0,
+        subset_total=1,
+        execute_forward=True,
+        replay_after_process=True,
+        forward_mode="serial",
+        batch_count=2,
+        forward_row_counts=[2, 3],
+        forward_total_rows=5,
+        moe_groups={},
+        forward_device_map={"self_attn.q_proj": torch.device("cuda:0")},
+        calibration_coverage_policy=CalibrationCoveragePolicy(
+            validate_input_coverage=False,
+            fallback_enabled=True,
+            prune_uncovered_modules=False,
+            record_dynamic_exclusions=False,
+        ),
+        module_chunks=[replay_modules],
+    )
+    timer_records = []
+
+    class DummyPB:
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            return self
+
+        def title(self, *_):
+            return self
+
+        def subtitle(self, *_):
+            return self
+
+        def draw(self):
+            return self
+
+        def close(self):
+            return self
+
+    class DummyLogger:
+        def pb(self, iterable):
+            return DummyPB()
+
+    class DummyTimer:
+        def record(self, *args, **kwargs):
+            timer_records.append((args, kwargs))
+
+    class DummyLooper:
+        def __init__(self):
+            self._current_subset = replay_modules
+            self.forward_calls = []
+
+        def _run_forward_batches(self, **kwargs):
+            self.forward_calls.append(kwargs)
+            return [[tensor]]
+
+        def _apply_forward_device_overrides(self, modules, forward_device_map, fallback_modules=None):
+            self.forward_override_modules = modules
+            self.forward_override_map = forward_device_map
+            self.forward_override_fallback = fallback_modules
+            return {"self_attn.q_proj": torch.device("cpu")}
+
+        def _restore_forward_device_overrides(self, modules, previous_devices, fallback_modules=None):
+            self.restored_override_modules = modules
+            self.restored_previous_devices = previous_devices
+            self.restored_override_fallback = fallback_modules
+
+    looper = DummyLooper()
+    processor = types.SimpleNamespace(num_batches=None)
+
+    outputs = _replay_layer_outputs(
+        looper,
+        module=torch.nn.Linear(1, 1, bias=False),
+        processor=processor,
+        layer_inputs=[[tensor]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.layers.0",
+        full={},
+        log=DummyLogger(),
+        region_timer=DummyTimer(),
+        replay_plan=replay_plan,
+    )
+
+    assert len(looper.forward_calls) == 1
+    assert looper.forward_calls[0]["progress_rows_per_batch"] == [2, 3]
+    assert looper.forward_calls[0]["progress_total_rows"] == 5
+    assert looper.forward_calls[0]["force_serial"] is True
+    assert looper.forward_calls[0]["preserve_module_devices"] is True
+    assert looper._current_subset is None
+    assert outputs == [[tensor]]
+    assert looper.forward_override_modules is replay_modules
+    assert looper.forward_override_map == {"self_attn.q_proj": torch.device("cuda:0")}
+    assert looper.restored_override_modules is replay_modules
+    assert looper.restored_previous_devices == {"self_attn.q_proj": torch.device("cpu")}
+    assert timer_records[0][1]["source"] == "model.layers.0:subset1/1"
+
+
+class _ToySelfAttention(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q_proj = torch.nn.Linear(1, 1, bias=False)
+        self.k_proj = torch.nn.Linear(1, 1, bias=False)
+        self.v_proj = torch.nn.Linear(1, 1, bias=False)
+        self.o_proj = torch.nn.Linear(1, 1, bias=False)
+        for proj in (self.q_proj, self.k_proj, self.v_proj, self.o_proj):
+            torch.nn.init.constant_(proj.weight, 1.0)
+
+    def forward(self, hidden_states):
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+        return self.o_proj(q + k + v)
+
+
+class _ToyMLP(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate_proj = torch.nn.Linear(1, 1, bias=False)
+        self.up_proj = torch.nn.Linear(1, 1, bias=False)
+        self.down_proj = torch.nn.Linear(1, 1, bias=False)
+        for proj in (self.gate_proj, self.up_proj, self.down_proj):
+            torch.nn.init.constant_(proj.weight, 1.0)
+
+    def forward(self, hidden_states):
+        gate = self.gate_proj(hidden_states)
+        up = self.up_proj(hidden_states)
+        return self.down_proj(gate + up)
+
+
+class _ToyLlamaDecoderLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.input_layernorm = torch.nn.Identity()
+        self.self_attn = _ToySelfAttention()
+        self.post_attention_layernorm = torch.nn.Identity()
+        self.mlp = _ToyMLP()
+        self.forward_inputs = []
+
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, **kwargs):
+        self.forward_inputs.append(hidden_states.detach().clone())
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.self_attn(hidden_states)
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states
+
+
+def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skipped(monkeypatch):
+    observed_layer_inputs = []
+
+    def fake_run_subset_stage(looper, **kwargs):
+        observed_layer_inputs.append(
+            (
+                kwargs["layer_index"],
+                kwargs["plan"].subset_index,
+                kwargs["layer_inputs"][0][0].detach().clone(),
+            )
+        )
+        return SubsetStageResult(
+            processed_subset={},
+            layer_inputs=kwargs["layer_inputs"],
+            plan=kwargs["plan"],
+        )
+
+    monkeypatch.setattr("gptqmodel.looper.stage_layer.run_subset_stage", fake_run_subset_stage)
+    monkeypatch.setattr("gptqmodel.looper.stage_layer.find_modules", lambda *_, **__: {})
+
+    class DummyPB:
+        def __init__(self, iterable):
+            self._iterable = list(iterable)
+            self.current_iter_step = 0
+
+        def __iter__(self):
+            return iter(self._iterable)
+
+        def __len__(self):
+            return len(self._iterable)
+
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            return self
+
+        def title(self, *_):
+            return self
+
+        def subtitle(self, *_):
+            return self
+
+        def draw(self):
+            return self
+
+        def next(self):
+            return self
+
+        def close(self):
+            return self
+
+    class DummyLogger:
+        def pb(self, iterable):
+            return DummyPB(iterable)
+
+        def info(self, *_, **__):
+            return None
+
+        def debug(self, *_, **__):
+            return None
+
+        def warning(self, *_, **__):
+            return None
+
+        warn = warning
+
+        def error(self, *_, **__):
+            return None
+
+    class DummyProcessor:
+        def __init__(self, initial_inputs):
+            self.execution_config = ExecutionConfig(
+                require_fwd=True,
+                fwd_replay_after_process=True,
+                fwd_all_modules_in_single_pass=False,
+                subset_forward_early_stop=True,
+            )
+            self.inputs_cache = types.SimpleNamespace(
+                layer_inputs=initial_inputs,
+                layer_input_kwargs=[{}],
+                position_ids=[],
+                attention_masks=[],
+            )
+            self.calibration_dataset = []
+            self.log = []
+            self.tasks = {}
+
+        def collect_memory_info(self, *_):
+            return None
+
+        def clear_cache_data(self):
+            self.tasks = {}
+            self.inputs_cache.layer_inputs = []
+
+        def receive_layer_inputs(self, inputs):
+            self.inputs_cache.layer_inputs = inputs
+
+        def set_fwd_time(self, *_):
+            return None
+
+        def name(self):
+            return "GPTQProcessor"
+
+        def submodule_finalize(self, *_, **__):
+            return None
+
+        def finalize(self, *_, **__):
+            return None
+
+        def log_plotly(self):
+            return None
+
+    class DummyGptqModel:
+        def __init__(self):
+            self.model = torch.nn.Module()
+            self.model.config = types.SimpleNamespace(model_type="llama")
+            self.quantize_config = QuantizeConfig(
+                bits=4,
+                group_size=128,
+                offload_to_disk=False,
+                wait_for_submodule_finalizers=True,
+                dynamic={
+                    r"-:^model\.layers\.0\.": {},
+                },
+            )
+            self.lm_head = None
+
+        def pre_quantize(self, module):
+            return module
+
+        def post_quantize(self, module):
+            return module
+
+        def lm_head_pre_quantize_generate_hook(self, value):
+            return value
+
+    class DummyLooper:
+        def __init__(self, layers, initial_inputs):
+            self.gptq_model = DummyGptqModel()
+            self.processors = [DummyProcessor(initial_inputs)]
+            self._quant_devices = [torch.device("cpu")]
+            self._module_device_map = {}
+            self._quant_device_lock = threading.Lock()
+            self._moe_subset_threshold = 16
+            self._vram_strategy = types.SimpleNamespace()
+            self.pause_controller = PauseResumeController()
+            self._current_subset = None
+            self.support_batch_quantize = False
+            self.moe_routing_override = None
+            self.moe_routing_bypass = False
+            self.forward_layer_indices = []
+            self.layers = layers
+
+        def _run_forward_batches(self, **kwargs):
+            self.forward_layer_indices.append(kwargs["layer_index"])
+            outputs = []
+            for batch_inputs in kwargs["layer_inputs"]:
+                hidden_states = batch_inputs[0]
+                output = kwargs["module"](
+                    hidden_states=hidden_states,
+                    attention_mask=None,
+                    position_ids=None,
+                )
+                outputs.append([output])
+            return outputs
+
+        def _check_loop_stop(self):
+            return False
+
+        def _is_attention_module_name(self, name):
+            return name.startswith("self_attn.")
+
+        def _extract_moe_group_key(self, _name):
+            return None
+
+        def _resolve_batch_total(self, _num_batches, layer_inputs):
+            return len(layer_inputs)
+
+        def _collect_row_counts(self, layer_inputs):
+            return [int(batch[0].shape[0]) for batch in layer_inputs]
+
+        def _emit_layer_complete(self, *, layer_idx, submodule_finalized, raise_in_place):
+            return None
+
+        def _request_loop_stop(self, exc):
+            self._stop_exc = exc
+
+        def _subset_event_dispatch(self, *kwargs):
+            return None
+
+        def register_dangling_thread(self, thread):
+            return None
+
+        def create_named_modules(
+            self,
+            module,
+            full,
+            is_lm_head_module,
+            layer_index,
+            layers_prefix,
+            names,
+            processor,
+            fallback,
+            layer_module=None,
+        ) -> Dict[str, NamedModule]:
+            subset = {}
+            for name in names:
+                full_name = f"{layers_prefix}.{layer_index}.{name}"
+                if self.gptq_model.quantize_config.dynamic_get(layer_name=full_name) is False:
+                    continue
+                subset[name] = NamedModule(
+                    module.get_submodule(name),
+                    name=name,
+                    full_name=full_name,
+                    layer_index=layer_index,
+                )
+            return subset
+
+    input_tensor = torch.tensor([[[2.0]]])
+    layers = [_ToyLlamaDecoderLayer(), _ToyLlamaDecoderLayer()]
+    looper = DummyLooper(layers, initial_inputs=[[input_tensor.clone()]])
+    processor = looper.processors[0]
+    pb = DummyPB(range(2))
+    processor.layer_count = 2
+    processor.pb = pb
+
+    run_layer_stage(
+        looper,
+        layers=layers,
+        layer_modules=[
+            ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+            ["self_attn.o_proj"],
+            ["mlp.gate_proj", "mlp.up_proj"],
+            ["mlp.down_proj"],
+        ],
+        layers_prefix="model.layers",
+        fallback=True,
+        shared_kv_cache_dict={},
+        pb=pb,
+        layer_count=2,
+        region_timer=None,
+        finalize_progress_cls=FinalizeProgressInfo,
+        logger=DummyLogger(),
+    )
+
+    layer1_inputs = [
+        layer_input
+        for layer_idx, _subset_idx, layer_input in observed_layer_inputs
+        if layer_idx == 1
+    ]
+    expected_layer0_output = input_tensor * 6.0
+
+    assert looper.forward_layer_indices == [0]
+    assert len(layers[0].forward_inputs) == 1
+    assert torch.allclose(layers[0].forward_inputs[0], input_tensor)
+    assert layer1_inputs
+    assert all(torch.allclose(layer_input, expected_layer0_output) for layer_input in layer1_inputs)

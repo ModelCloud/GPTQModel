@@ -311,7 +311,7 @@ def build_subset_plan(
         subset_index=subset_index,
         subset_total=subset_total,
         execute_forward=execute_forward,
-        replay_after_process=execute_forward and execution_config.fwd_after_process,
+        replay_after_process=execute_forward and execution_config.fwd_replay_after_process,
         forward_mode="serial" if subset_forward_serial else "parallel",
         batch_count=batch_count,
         forward_row_counts=forward_row_counts,
@@ -466,7 +466,7 @@ def _run_single_subset_pass(
                 else:
                     subset[name].forward_hook = looper._masked_hook_wrapper(processor, original_hook, hook_source)
                 enable_stop = (
-                    execution_config.fwd_after_process
+                    execution_config.fwd_replay_after_process
                     or execution_config.subset_forward_early_stop
                 )
                 if is_last and enable_stop:
