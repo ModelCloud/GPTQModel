@@ -410,7 +410,7 @@ def run_layer_stage(
             # stage runs and therefore nothing materializes that layer's outputs.
             # GPTQ-style processors still need the untouched layer output so the
             # next layer sees the correct activation stream.
-            replay_untouched_layer = (
+            replay_skipped_layer = (
                 not is_last_module
                 and not subset_plans
                 and execution_config.require_fwd
@@ -426,7 +426,7 @@ def run_layer_stage(
                 and replay_plan.replay_after_process
             )
 
-            if replay_untouched_layer or replay_after_process:
+            if replay_skipped_layer or replay_after_process:
                 # Pass `replay_plan` through unconditionally: the helper uses
                 # subset metadata when available and falls back to generic
                 # untouched-layer replay when it is `None`.
