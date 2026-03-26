@@ -895,9 +895,12 @@ def _should_use_paroquant_stage_cudagraph(
     *,
     inputs_train: torch.Tensor,
     batch_size: int,
+    stage_cudagraph: Optional[bool] = None,
 ) -> bool:
     """Use CUDA graphs only for real CUDA tensor stages where launch overhead is worth amortizing."""
-    if not env_flag("GPTQMODEL_PAROQUANT_OPT_STAGE_CUDAGRAPH", default=True):
+    if stage_cudagraph is None:
+        stage_cudagraph = env_flag("GPTQMODEL_PAROQUANT_OPT_STAGE_CUDAGRAPH", default=True)
+    if not bool(stage_cudagraph):
         return False
     if not isinstance(inputs_train, torch.Tensor):
         return False
@@ -1055,9 +1058,15 @@ def _run_stage_gptqmodel(
     param_groups: Sequence[dict[str, object]],
     epochs: int,
     batch_size: int,
+    stage_cudagraph: Optional[bool] = None,
 ) -> tuple[float, float]:
     """Run the fast stage, preferring CUDA-graph replay on fused CUDA paths and falling back to eager."""
-    if not _should_use_paroquant_stage_cudagraph(model, inputs_train=inputs_train, batch_size=batch_size):
+    if not _should_use_paroquant_stage_cudagraph(
+        model,
+        inputs_train=inputs_train,
+        batch_size=batch_size,
+        stage_cudagraph=stage_cudagraph,
+    ):
         return _run_stage_gptqmodel_impl(
             model=model,
             inputs_train=inputs_train,
@@ -1188,6 +1197,7 @@ def _run_stage(
     epochs: int,
     batch_size: int,
     stage_impl: str,
+    stage_cudagraph: Optional[bool] = None,
 ) -> tuple[float, float]:
     impl = _normalize_opt_impl(stage_impl, field="stage_impl")
     if impl == "reference":
@@ -1210,6 +1220,7 @@ def _run_stage(
         param_groups=param_groups,
         epochs=epochs,
         batch_size=batch_size,
+        stage_cudagraph=stage_cudagraph,
     )
 
 
@@ -1305,6 +1316,7 @@ def optimize_paroquant_linear(
     quantizer_lr: float,
     seed: int,
     fused_rotation: Optional[bool] = None,
+    stage_cudagraph: Optional[bool] = None,
     stage_impl: Literal["fast", "reference"] = "fast",
     pair_impl: Literal["fast", "reference"] = "fast",
     quantizer_impl: Literal["fast", "reference"] = "fast",
@@ -1394,6 +1406,7 @@ def optimize_paroquant_linear(
         epochs=rotation_epochs,
         batch_size=batch_size,
         stage_impl=normalized_stage_impl,
+        stage_cudagraph=stage_cudagraph,
     )
 
     model.init_quantizer()
@@ -1410,6 +1423,7 @@ def optimize_paroquant_linear(
         epochs=finetune_epochs,
         batch_size=batch_size,
         stage_impl=normalized_stage_impl,
+        stage_cudagraph=stage_cudagraph,
     )
 
     return _result_from_model(

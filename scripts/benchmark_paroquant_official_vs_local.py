@@ -435,6 +435,7 @@ def _run_local_case(
             quantizer_sym=quantizer_sym,
             pairs=pairs,
             theta_mask=theta_mask,
+            fused_rotation=True,
         ).to(device=device, dtype=torch.float32)
         model.reset_masked_angles()
 

@@ -57,6 +57,7 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.opt_stage_impl == "fast"
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
+    assert cfg.opt_stage_cudagraph is True
     assert cfg.opt_channel_scale_clamp_min == 1e-2
     assert cfg.opt_channel_scale_clamp_max == 1e2
     assert cfg.export_quant_method() == METHOD.PAROQUANT
@@ -82,6 +83,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_pair_ratio": 0.5,
                 "opt_seed": 0,
                 "opt_fused_rotation": False,
+                "opt_stage_cudagraph": False,
                 "opt_stage_impl": "reference",
                 "opt_pair_impl": "fast",
                 "opt_quantizer_impl": "reference",
@@ -106,12 +108,14 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_pair_ratio == 0.5
     assert cfg.opt_seed == 0
     assert cfg.opt_fused_rotation is False
+    assert cfg.opt_stage_cudagraph is False
     assert cfg.opt_stage_impl == "reference"
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
     assert cfg.opt_channel_scale_clamp_min == 0.02
     assert cfg.opt_channel_scale_clamp_max == 50.0
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
+    assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
     assert cfg.to_dict()["meta"]["opt_stage_impl"] == "reference"
     assert cfg.to_dict()["meta"]["opt_pair_impl"] == "fast"
     assert cfg.to_dict()["meta"]["opt_quantizer_impl"] == "reference"
@@ -449,6 +453,49 @@ def test_paroquant_stage_cudagraph_falls_back_to_eager_on_runtime_error(monkeypa
 
     assert (train_loss, val_loss) == (1.25, 2.5)
     assert call_order == [("graph", model), model]
+
+
+def test_optimize_paroquant_linear_forwards_stage_cudagraph(monkeypatch):
+    """Guard that explicit CUDA-graph policy is forwarded into both optimization stages."""
+    stage_cudagraph_calls = []
+    original_run_stage = paroquant_optimization._run_stage
+
+    def spy_run_stage(*, stage_cudagraph=None, **kwargs):
+        stage_cudagraph_calls.append(stage_cudagraph)
+        return original_run_stage(stage_cudagraph=stage_cudagraph, **kwargs)
+
+    monkeypatch.setattr(paroquant_optimization, "_run_stage", spy_run_stage)
+
+    weight = torch.randn((8, 8), dtype=torch.float32)
+    inputs = torch.randn((64, 8), dtype=torch.float32)
+
+    result = optimize_paroquant_linear(
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        pair_ratio=0.5,
+        train_rows=32,
+        val_rows=16,
+        batch_size=16,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        fused_rotation=True,
+        stage_cudagraph=False,
+        stage_impl="fast",
+        pair_impl="fast",
+        quantizer_impl="reference",
+    )
+
+    assert result.val_loss >= 0.0
+    assert stage_cudagraph_calls == [False, False]
 
 
 def test_paroquant_registers_with_transformers_gptq_quantizer():
