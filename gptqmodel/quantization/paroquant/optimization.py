@@ -30,7 +30,11 @@ from torch import nn
 
 from ..config import PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT, PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT
 from ...utils.env import env_flag
-from ...utils.paroquant import apply_paroquant_rotation_autograd, build_identity_rotation_buffers
+from ...utils.paroquant import (
+    apply_paroquant_rotation,
+    apply_paroquant_rotation_autograd,
+    build_identity_rotation_buffers,
+)
 
 
 _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
@@ -501,6 +505,18 @@ def _apply_rotation(
 
     if use_fused_rotation:
         scale_tensor = None if scales is None else scales.view(1, -1)
+        if not (
+            x.requires_grad
+            or theta.requires_grad
+            or (scale_tensor is not None and scale_tensor.requires_grad)
+        ):
+            return apply_paroquant_rotation(
+                x,
+                pairs,
+                theta,
+                scales=scale_tensor,
+                group_size=group_size,
+            )
         return apply_paroquant_rotation_autograd(
             x,
             pairs,

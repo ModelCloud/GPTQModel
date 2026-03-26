@@ -151,6 +151,7 @@ def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch)
         krot=1,
         dtype=torch.float32,
     )
+    theta = theta.clone().requires_grad_(True)
 
     calls = []
 
@@ -183,6 +184,56 @@ def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch)
     )
     assert calls == ["fused"]
     torch.testing.assert_close(fused_out, x + 123.0)
+
+
+def test_paroquant_fused_rotation_uses_forward_only_path_without_grad_inputs(monkeypatch):
+    """Guard that inactive rotation grads do not route through the autograd wrapper."""
+    x = torch.randn(4, 8, dtype=torch.float32)
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=1,
+        dtype=torch.float32,
+    )
+
+    calls = []
+
+    def fake_forward_only(x, pairs, theta, *, scales, group_size):
+        del pairs, theta, scales, group_size
+        calls.append("forward")
+        return x + 1.0
+
+    def fake_autograd(x, pairs, theta, *, scales, group_size):
+        del pairs, theta, scales, group_size
+        calls.append("autograd")
+        return x + 2.0
+
+    monkeypatch.setattr(paroquant_optimization, "apply_paroquant_rotation", fake_forward_only)
+    monkeypatch.setattr(paroquant_optimization, "apply_paroquant_rotation_autograd", fake_autograd)
+
+    out = _apply_rotation(
+        x,
+        pairs,
+        theta,
+        scales=channel_scales,
+        group_size=8,
+        fused_rotation=True,
+    )
+    torch.testing.assert_close(out, x + 1.0)
+    assert calls == ["forward"]
+
+    calls.clear()
+    theta = theta.clone().requires_grad_(True)
+    out = _apply_rotation(
+        x,
+        pairs,
+        theta,
+        scales=channel_scales,
+        group_size=8,
+        fused_rotation=True,
+    )
+    torch.testing.assert_close(out, x + 2.0)
+    assert calls == ["autograd"]
 
 
 @pytest.mark.parametrize(
