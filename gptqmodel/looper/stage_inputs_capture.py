@@ -93,8 +93,8 @@ class StageInputsCapture:
         balanced_mode = False
         if calib_device_cfg == "balanced":
             balanced_mode = True
-            # Get all available devices of same type
-            all_devices = select_forward_devices(cur_layer_device)
+            # Get all available devices of same type as the quantization device
+            all_devices = select_forward_devices(self.gptq_model.quantize_config.device)
             # Apply compute_device_filter if set
             compute_device_filter = self.gptq_model.quantize_config.compute_device_filter
             if compute_device_filter is not None:

@@ -360,9 +360,10 @@ def build_layer_subset_plans(
             fallback,
             layer_module=module,
         )
-        # Note: Empty subsets are handled by _handle_empty_subset in run_subset_stage
-        # which skips quantization but still produces consistent events for monitoring
-        subsets.append(subset)
+        # Skip empty subsets caused by per-layer structure differences or dynamic
+        # exclusions so execution only sees real work.
+        if subset:
+            subsets.append(subset)
 
     subset_total = len(subsets)
     return [
@@ -425,21 +426,6 @@ def _run_single_subset_pass(
     batch_count = plan.batch_count
     forward_device_map = plan.forward_device_map
     execute_forward = plan.execute_forward if execute_forward is None else execute_forward
-
-    # OPTIMIZATION: Early exit for empty created subsets
-    # This handles cases where module names exist but no actual modules are found
-    # (e.g., when expert modules are excluded or absent on current layer)
-    if not subset:
-        return _handle_empty_subset(
-            layer_index=layer_index,
-            subset_index=subset_index,
-            subset_total=subset_total,
-            processor_name=processor_name,
-            subset_event_cb=subset_event_cb,
-            layer_inputs=layer_inputs,
-            logger=logger,
-            looper=looper,
-        )
 
     handle = []
     subset_size = len(subset)
@@ -781,47 +767,6 @@ def _run_single_subset_pass(
         subset_event_cb(stage="quant_complete", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=list(subset.keys()), processor=getattr(processor, "name", type(processor).__name__))
 
     return processed_subset, returned_outputs
-
-
-def _handle_empty_subset(
-    layer_index: int,
-    subset_index: int,
-    subset_total: int,
-    processor_name: str,
-    subset_event_cb: Optional[Callable[..., None]],
-    layer_inputs: List[List[torch.Tensor]],
-    logger,
-    looper,
-) -> SubsetStageResult:
-    """Handle empty subset with consistent logging, events, and memory cleanup."""
-    if DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            f"StageSubset: layer={layer_index} subset={subset_index + 1}/{subset_total} "
-            f"processor={processor_name} skipping empty subset"
-        )
-
-    # Emit subset lifecycle events for consistency with monitoring systems
-    # Only emit events that match processor requirements
-    subset_lifecycle_stages = ["forward_start", "forward_end", "quant_start", "quant_complete"]
-    for stage in subset_lifecycle_stages:
-        if subset_event_cb:
-            try:
-                subset_event_cb(
-                    stage=stage,
-                    layer_idx=layer_index,
-                    subset_index=subset_index,
-                    subset_total=subset_total,
-                    module_names=[],
-                    processor=processor_name,
-                )
-            except Exception as e:
-                logger.warning(f"Subset event callback failed for stage {stage}: {e}")
-
-    return SubsetStageResult(
-        processed_subset={},
-        layer_inputs=layer_inputs,
-        plan=None,
-    )
 
 
 def run_subset_stage(
