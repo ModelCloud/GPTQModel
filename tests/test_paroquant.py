@@ -385,6 +385,72 @@ def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
     assert all(event[1] >= 0.0 for event in scaler_events if event[0] == "backward")
 
 
+def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
+    """Guard that CUDA-graph replay only activates for real CUDA tensor stages."""
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones((2, 4), dtype=torch.float32))
+            self.fused_rotation = True
+
+    class _FakeRows:
+        def __init__(self, device_type: str):
+            self.shape = (2048, 4)
+            self.device = SimpleNamespace(type=device_type, index=0 if device_type == "cuda" else None)
+
+    monkeypatch.delenv("GPTQMODEL_PAROQUANT_OPT_STAGE_CUDAGRAPH", raising=False)
+
+    model = _DummyModel()
+    real_cpu_rows = torch.ones((2048, 4), dtype=torch.float32)
+    fake_cuda_rows = _FakeRows("cuda")
+
+    assert paroquant_optimization._should_use_paroquant_stage_cudagraph(model, inputs_train=real_cpu_rows, batch_size=64) is False
+    assert paroquant_optimization._should_use_paroquant_stage_cudagraph(model, inputs_train=fake_cuda_rows, batch_size=64) is False
+
+
+def test_paroquant_stage_cudagraph_falls_back_to_eager_on_runtime_error(monkeypatch):
+    """Guard that a CUDA-graph stage failure restores model state and reruns eagerly."""
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([[1.0]], dtype=torch.float32))
+            self.fused_rotation = True
+
+        def reset_masked_angles(self):
+            return None
+
+    model = _DummyModel()
+    call_order = []
+
+    def fake_impl(*, model, **kwargs):
+        del kwargs
+        call_order.append(model)
+        return 1.25, 2.5
+
+    def fake_cudagraph(*, model, **kwargs):
+        del kwargs
+        call_order.append(("graph", model))
+        raise RuntimeError("graph failed at runtime")
+
+    monkeypatch.setattr(paroquant_optimization, "_should_use_paroquant_stage_cudagraph", lambda *args, **kwargs: True)
+    monkeypatch.setattr(paroquant_optimization, "_run_stage_gptqmodel_cudagraph", fake_cudagraph)
+    monkeypatch.setattr(paroquant_optimization, "_run_stage_gptqmodel_impl", fake_impl)
+
+    train_loss, val_loss = paroquant_optimization._run_stage_gptqmodel(
+        model=model,
+        inputs_train=torch.ones((2, 1), dtype=torch.float32),
+        targets_train=torch.zeros((2, 1), dtype=torch.float32),
+        inputs_val=torch.ones((1, 1), dtype=torch.float32),
+        targets_val=torch.zeros((1, 1), dtype=torch.float32),
+        param_groups=[],
+        epochs=1,
+        batch_size=1,
+    )
+
+    assert (train_loss, val_loss) == (1.25, 2.5)
+    assert call_order == [("graph", model), model]
+
+
 def test_paroquant_registers_with_transformers_gptq_quantizer():
     """Guard the HF quantization registry alias used by Evalution loaders."""
     cfg = AutoQuantizationConfig.from_dict(

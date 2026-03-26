@@ -813,7 +813,7 @@ def _evaluate_model(
         return float(loss.item())
 
 
-def _run_stage_gptqmodel(
+def _run_stage_gptqmodel_impl(
     *,
     model: nn.Module,
     inputs_train: torch.Tensor,
@@ -823,7 +823,7 @@ def _run_stage_gptqmodel(
     param_groups: Sequence[dict[str, object]],
     epochs: int,
     batch_size: int,
-    ) -> tuple[float, float]:
+) -> tuple[float, float]:
     """Run one optimization stage with validation-based best-state selection."""
     normalized_groups = []
     for param_group in param_groups:
@@ -888,6 +888,214 @@ def _run_stage_gptqmodel(
     model.load_state_dict(best_state, strict=True)
     model.reset_masked_angles()
     return last_train_loss, best_val_loss
+
+
+def _should_use_paroquant_stage_cudagraph(
+    model: nn.Module,
+    *,
+    inputs_train: torch.Tensor,
+    batch_size: int,
+) -> bool:
+    """Use CUDA graphs only for real CUDA tensor stages where launch overhead is worth amortizing."""
+    if not env_flag("GPTQMODEL_PAROQUANT_OPT_STAGE_CUDAGRAPH", default=True):
+        return False
+    if not isinstance(inputs_train, torch.Tensor):
+        return False
+    if inputs_train.device.type != "cuda":
+        return False
+    if not bool(getattr(model, "fused_rotation", False)):
+        return False
+    return inputs_train.shape[0] >= max(1, int(batch_size))
+
+
+def _run_stage_gptqmodel_cudagraph(
+    *,
+    model: nn.Module,
+    inputs_train: torch.Tensor,
+    targets_train: torch.Tensor,
+    inputs_val: torch.Tensor,
+    targets_val: torch.Tensor,
+    param_groups: Sequence[dict[str, object]],
+    epochs: int,
+    batch_size: int,
+) -> tuple[float, float]:
+    """Replay fixed-size CUDA mini-batches through one captured train-step graph with eager tail fallback."""
+    normalized_groups = []
+    for param_group in param_groups:
+        params = [param for param in param_group.get("params", []) if param.requires_grad]
+        if not params:
+            continue
+        normalized_groups.append(
+            {
+                "params": params,
+                "lr": float(param_group["lr"]),
+                "weight_decay": float(param_group.get("weight_decay", 0.01)),
+                "betas": tuple(param_group.get("betas", (0.9, 0.95))),
+                "eps": float(param_group.get("eps", 1e-10)),
+            }
+        )
+
+    if epochs <= 0 or not normalized_groups:
+        train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
+        return train_loss, val_loss
+
+    lr_tensors = [
+        torch.tensor(float(group["lr"]), device=inputs_train.device, dtype=torch.float32)
+        for group in normalized_groups
+    ]
+    optimizer = torch.optim.AdamW(
+        [
+            {
+                "params": group["params"],
+                "lr": lr_tensor,
+                "weight_decay": group["weight_decay"],
+                "betas": group["betas"],
+                "eps": group["eps"],
+            }
+            for group, lr_tensor in zip(normalized_groups, lr_tensors)
+        ],
+        capturable=True,
+    )
+    steps_per_epoch = max(1, math.ceil(max(1, inputs_train.shape[0]) / max(1, batch_size)))
+    total_steps = max(1, epochs * steps_per_epoch)
+    base_lrs = [float(group["lr"]) for group in normalized_groups]
+    global_step = 0
+
+    best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+    best_val_loss = float("inf")
+    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
+
+    static_input = torch.empty(
+        (batch_size, inputs_train.shape[1]),
+        device=inputs_train.device,
+        dtype=inputs_train.dtype,
+    )
+    static_target = torch.empty(
+        (batch_size, targets_train.shape[1]),
+        device=targets_train.device,
+        dtype=targets_train.dtype,
+    )
+
+    warmup_stream = torch.cuda.Stream(device=inputs_train.device)
+    warmup_stream.wait_stream(torch.cuda.current_stream(inputs_train.device))
+    with torch.cuda.stream(warmup_stream):
+        warm_input = inputs_train[:batch_size]
+        warm_target = targets_train[:batch_size]
+        for _ in range(3):
+            static_input.copy_(warm_input)
+            static_target.copy_(warm_target)
+            optimizer.zero_grad(set_to_none=True)
+            preds = model(static_input)
+            loss = F.smooth_l1_loss(preds, static_target)
+            loss.backward()
+            optimizer.step()
+            model.reset_masked_angles()
+            del preds, loss
+
+    torch.cuda.current_stream(inputs_train.device).wait_stream(warmup_stream)
+    torch.cuda.synchronize(inputs_train.device)
+
+    graph = torch.cuda.CUDAGraph()
+    optimizer.zero_grad(set_to_none=True)
+    with torch.cuda.graph(graph):
+        preds = model(static_input)
+        static_loss = F.smooth_l1_loss(preds, static_target)
+        static_loss.backward()
+        optimizer.step()
+        model.reset_masked_angles()
+
+    for _epoch in range(epochs):
+        epoch_loss = 0.0
+        batch_count = 0
+
+        for input_batch, target_batch in zip(_chunk_rows(inputs_train, batch_size), _chunk_rows(targets_train, batch_size)):
+            global_step += 1
+            cosine_ratio = 0.5 * (1.0 + math.cos(math.pi * min(global_step, total_steps) / total_steps))
+            for group, lr_tensor, base_lr in zip(optimizer.param_groups, lr_tensors, base_lrs):
+                new_lr = (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio)
+                lr_tensor.fill_(new_lr)
+                group["lr"] = lr_tensor
+
+            if input_batch.shape[0] == batch_size:
+                static_input.copy_(input_batch)
+                static_target.copy_(target_batch)
+                graph.replay()
+                loss_value = float(static_loss.item())
+            else:
+                optimizer.zero_grad(set_to_none=True)
+                preds = model(input_batch)
+                loss = F.smooth_l1_loss(preds, target_batch)
+                loss.backward()
+                optimizer.step()
+                model.reset_masked_angles()
+                loss_value = float(loss.item())
+
+            epoch_loss += loss_value
+            batch_count += 1
+
+        last_train_loss = epoch_loss / max(1, batch_count)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+
+    model.load_state_dict(best_state, strict=True)
+    model.reset_masked_angles()
+    return last_train_loss, best_val_loss
+
+
+def _run_stage_gptqmodel(
+    *,
+    model: nn.Module,
+    inputs_train: torch.Tensor,
+    targets_train: torch.Tensor,
+    inputs_val: torch.Tensor,
+    targets_val: torch.Tensor,
+    param_groups: Sequence[dict[str, object]],
+    epochs: int,
+    batch_size: int,
+) -> tuple[float, float]:
+    """Run the fast stage, preferring CUDA-graph replay on fused CUDA paths and falling back to eager."""
+    if not _should_use_paroquant_stage_cudagraph(model, inputs_train=inputs_train, batch_size=batch_size):
+        return _run_stage_gptqmodel_impl(
+            model=model,
+            inputs_train=inputs_train,
+            targets_train=targets_train,
+            inputs_val=inputs_val,
+            targets_val=targets_val,
+            param_groups=param_groups,
+            epochs=epochs,
+            batch_size=batch_size,
+        )
+
+    initial_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+
+    try:
+        return _run_stage_gptqmodel_cudagraph(
+            model=model,
+            inputs_train=inputs_train,
+            targets_train=targets_train,
+            inputs_val=inputs_val,
+            targets_val=targets_val,
+            param_groups=param_groups,
+            epochs=epochs,
+            batch_size=batch_size,
+        )
+    except Exception:
+        model.load_state_dict(initial_state, strict=True)
+        if hasattr(model, "reset_masked_angles"):
+            model.reset_masked_angles()
+        return _run_stage_gptqmodel_impl(
+            model=model,
+            inputs_train=inputs_train,
+            targets_train=targets_train,
+            inputs_val=inputs_val,
+            targets_val=targets_val,
+            param_groups=param_groups,
+            epochs=epochs,
+            batch_size=batch_size,
+        )
 
 
 def _run_stage_reference(

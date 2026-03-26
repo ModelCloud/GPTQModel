@@ -252,8 +252,8 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
         )
 
         for rot_idx in range(pairs.shape[0] - 1, -1, -1):
-            neg_theta = -theta[[rot_idx]]
-            pair_row = pairs[[rot_idx]]
+            pair_row = pairs.narrow(0, rot_idx, 1)
+            neg_theta = theta.narrow(0, rot_idx, 1).neg()
             rotated = torch.ops.gptqmodel_paroquant.rotate(rotated, pair_row, neg_theta, None, group_size)
             grad = torch.ops.gptqmodel_paroquant.rotate(grad, pair_row, neg_theta, None, group_size)
 
@@ -266,7 +266,7 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
             grad_i = grad[:, idx_i].reshape(batch_rows, num_groups, half_group)
             grad_j = grad[:, idx_j].reshape(batch_rows, num_groups, half_group)
 
-            theta_view = theta[rot_idx].reshape(num_groups, half_group)
+            theta_view = theta.narrow(0, rot_idx, 1).reshape(num_groups, half_group)
             sin_t = theta_view.sin()
             cos_t = theta_view.cos()
             grad_theta[rot_idx] = (
