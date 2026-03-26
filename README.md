@@ -137,7 +137,7 @@ got full end-to-end in/out features padding to enhance current/future model comp
 * 07/08/2024 🚀 [0.9.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.6): [Intel/AutoRound](https://github.com/intel/auto-round) QUANT_METHOD support added for a potentially higher quality quantization with `lm_head` module quantization support for even more VRAM reduction: format export to `FORMAT.GPTQ` for max inference compatibility.
 * 07/05/2024 🚀 [0.9.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.5): CUDA kernels have been fully deprecated in favor of Exllama(v1/v2)/Marlin/Triton.
 * 07/03/2024 🚀 [0.9.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.4): HF Transformers integration added and bug fixed Gemma 2 support.
-* 07/02/2024 🚀 [0.9.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.3): Added Gemma 2 support, faster PPL calculations on GPU, and more code/arg refactor.
+* 07/02/2024 🚀 [0.9.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.3): Added Gemma 2 support, faster quality/benchmark calculations on GPU, and more code/arg refactor.
 * 06/30/2024 🚀 [0.9.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.2): Added auto-padding of model in/out-features for exllama and exllama v2. 
 Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepSeek V2-Lite.
 * 06/29/2024 🚀 [0.9.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.1): With 3 new models (DeepSeek-V2, DeepSeek-V2-Lite, DBRX Converted), BITBLAS new format/kernel, proper batching of calibration dataset resulting > 50% quantization speedup, security hash check of loaded model weights, tons of refactor/usability improvements, bug fixes, and much more.
@@ -477,7 +477,7 @@ Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/b
 ### Evaluation and Quality Benchmarks
 
 GPTQModel evaluation is integrated into [Evalution](https://github.com/modelcloud/Evalution).  
-We highly recommend avoiding `ppl` and using Evalution to validate post-quantization model quality. `ppl` should only be used for regression tests and is not a good indicator of model output quality.  
+We highly recommend using Evalution to validate post-quantization model quality. Regression-only language-model metrics are deprecated in this guide.
 
 ```
 # install Evalution

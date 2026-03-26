@@ -17,7 +17,6 @@ To Execute `basic_usage_wikitext2.py`, using command like this:
 ```shell
 python basic_usage_wikitext2.py
 ```
-> Note: There is about 0.6 ppl degrade on opt-125m model using GPTQModel, compared to GPTQ-for-LLaMa.
 
 ### Quantize with different backend
 To Execute `basic_usage_bitblas.py`, using command like this:

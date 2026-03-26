@@ -72,7 +72,7 @@ def main():
         quantize_config = QuantizeConfig(
             bits=4,  # quantize model to 4-bit
             group_size=128,  # it is recommended to set the value to 128
-            # set to False can significantly speed up inference but the perplexity may slightly bad
+            # set to False can significantly speed up inference but may slightly affect output quality
             desc_act=False if backend == BACKEND.BITBLAS or backend == BACKEND.MARLIN else True,
         )
 
