@@ -141,6 +141,31 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
             return None
         return int(layer_match.group(1))
 
+    @staticmethod
+    def _saved_module_name_candidates(module_name: str) -> list[str]:
+        """Generate candidate tensor prefixes for wrapped module names."""
+        candidates = [module_name]
+        trimmed_name = module_name
+        while trimmed_name.startswith("model."):
+            trimmed_name = trimmed_name[len("model."):]
+            if trimmed_name:
+                candidates.append(trimmed_name)
+        return candidates
+
+    def _resolve_saved_module_name(
+        self,
+        module_name: str,
+        tensor_dtypes: dict[str, str],
+        required_suffix: str,
+    ) -> str:
+        """Map an in-memory module path to the saved checkpoint tensor prefix."""
+        for candidate in self._saved_module_name_candidates(module_name):
+            if f"{candidate}.{required_suffix}" in tensor_dtypes:
+                return candidate
+        raise AssertionError(
+            f"Could not resolve saved tensor prefix for `{module_name}` with suffix `{required_suffix}`."
+        )
+
     def _collect_saved_safetensor_dtypes(self, model_path: str) -> dict[str, str]:
         """Read tensor dtype metadata from saved safetensor shards without loading weights."""
         shard_paths = sorted(Path(model_path).rglob("*.safetensors"))
@@ -194,22 +219,27 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
             assert layer_idx in expected_quantized_layers, (
                 f"Only layers 0 and 2 should be quantized, but found `{module_name}` in layer {layer_idx}."
             )
+            saved_module_name = self._resolve_saved_module_name(
+                module_name,
+                tensor_dtypes,
+                required_suffix="qweight",
+            )
             for suffix in GPTQ_TENSOR_SUFFIXES:
-                tensor_key = f"{module_name}.{suffix}"
+                tensor_key = f"{saved_module_name}.{suffix}"
                 assert tensor_key in tensor_dtypes, (
                     f"Missing saved GPTQ tensor `{tensor_key}` for quantized module `{module_name}`."
                 )
 
-            assert tensor_dtypes[f"{module_name}.scales"] in HALF_PRECISION_DTYPES, (
-                f"Expected `{module_name}.scales` to be saved in half precision, "
-                f"but found `{tensor_dtypes[f'{module_name}.scales']}`."
+            assert tensor_dtypes[f"{saved_module_name}.scales"] in HALF_PRECISION_DTYPES, (
+                f"Expected `{saved_module_name}.scales` to be saved in half precision, "
+                f"but found `{tensor_dtypes[f'{saved_module_name}.scales']}`."
             )
             for suffix in ("qweight", "qzeros", "g_idx"):
-                dtype_name = tensor_dtypes[f"{module_name}.{suffix}"]
+                dtype_name = tensor_dtypes[f"{saved_module_name}.{suffix}"]
                 assert dtype_name.startswith(("I", "U")), (
-                    f"Expected `{module_name}.{suffix}` to use an integer dtype, but found `{dtype_name}`."
+                    f"Expected `{saved_module_name}.{suffix}` to use an integer dtype, but found `{dtype_name}`."
                 )
-            assert f"{module_name}.weight" not in tensor_dtypes, (
+            assert f"{saved_module_name}.weight" not in tensor_dtypes, (
                 f"Quantized module `{module_name}` should not be saved with a native `.weight` tensor."
             )
 
@@ -217,7 +247,12 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
             assert layer_idx not in expected_quantized_layers, (
                 f"Module `{module_name}` in quantized layer {layer_idx} unexpectedly remained native."
             )
-            tensor_key = f"{module_name}.weight"
+            saved_module_name = self._resolve_saved_module_name(
+                module_name,
+                tensor_dtypes,
+                required_suffix="weight",
+            )
+            tensor_key = f"{saved_module_name}.weight"
             assert tensor_key in tensor_dtypes, (
                 f"Missing native weight tensor `{tensor_key}` for skipped module `{module_name}`."
             )
@@ -225,7 +260,7 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
                 f"Expected `{tensor_key}` to remain in bf16/f16, but found `{tensor_dtypes[tensor_key]}`."
             )
             for suffix in GPTQ_TENSOR_SUFFIXES:
-                unexpected_key = f"{module_name}.{suffix}"
+                unexpected_key = f"{saved_module_name}.{suffix}"
                 assert unexpected_key not in tensor_dtypes, (
                     f"Skipped module `{module_name}` should not have saved GPTQ tensor `{unexpected_key}`."
                 )
