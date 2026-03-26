@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
+from pathlib import Path
 
 import pytest
 import torch
+import torch.nn as nn
 from model_test import ModelTest
+from safetensors import safe_open
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
@@ -13,6 +16,10 @@ from gptqmodel.nn_modules.qlinear.marlin import MarlinQuantLinear
 
 
 LAYER0_AND_LAYER2_ONLY_NEGATIVE_MATCH = r"^model\.layers\.(?!(?:0|2)\.)\d+\."
+# Saved GPTQ checkpoints represent quantized linears with these tensor names.
+GPTQ_TENSOR_SUFFIXES = ("qweight", "qzeros", "scales", "g_idx")
+# Dynamically skipped layers must remain in native half precision on disk.
+HALF_PRECISION_DTYPES = {"F16", "BF16"}
 
 
 class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
@@ -126,6 +133,103 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
             f"but found additional quantized modules: {unexpected_quantized[:8]}"
         )
 
+    @staticmethod
+    def _layer_index_from_module_name(module_name: str) -> int | None:
+        """Return the transformer layer index encoded in a module/tensor name."""
+        layer_match = re.search(r"\.layers\.(\d+)\.", module_name)
+        if layer_match is None:
+            return None
+        return int(layer_match.group(1))
+
+    def _collect_saved_safetensor_dtypes(self, model_path: str) -> dict[str, str]:
+        """Read tensor dtype metadata from saved safetensor shards without loading weights."""
+        shard_paths = sorted(Path(model_path).rglob("*.safetensors"))
+        assert shard_paths, f"No safetensors shards found under `{model_path}`."
+
+        tensor_dtypes = {}
+        for shard_path in shard_paths:
+            with safe_open(str(shard_path), framework="pt") as shard:
+                for key in shard.keys():
+                    tensor_dtypes[key] = str(shard.get_slice(key).get_dtype())
+        return tensor_dtypes
+
+    def _assert_saved_checkpoint_preserves_dynamic_layer_selection(self, model) -> None:
+        """Verify the saved checkpoint only GPTQ-serializes layers 0 and 2."""
+        model_path = self._resolve_quantized_model_path(model)
+        assert model_path, "Expected the quantized model to expose a saved checkpoint path."
+
+        tensor_dtypes = self._collect_saved_safetensor_dtypes(model_path)
+        expected_quantized_layers = {0, 2}
+        quantized_module_names = []
+        native_linear_module_names = []
+
+        for name, module in model.named_modules():
+            layer_idx = self._layer_index_from_module_name(name)
+            if layer_idx is None:
+                continue
+
+            if isinstance(module, BaseQuantLinear):
+                quantized_module_names.append((name, layer_idx))
+            elif isinstance(module, nn.Linear):
+                native_linear_module_names.append((name, layer_idx))
+
+        assert quantized_module_names, "Expected at least one quantized linear module in the saved model."
+        assert native_linear_module_names, "Expected skipped layers to retain native linear weights in the saved model."
+
+        unexpected_quantized_keys = []
+        quantized_tensor_pattern = re.compile(r"^(model\.layers\.(\d+)\..*)\.(qweight|qzeros|scales|g_idx)$")
+        for tensor_name in tensor_dtypes:
+            match = quantized_tensor_pattern.match(tensor_name)
+            if match is None:
+                continue
+            layer_idx = int(match.group(2))
+            if layer_idx not in expected_quantized_layers:
+                unexpected_quantized_keys.append(tensor_name)
+        assert not unexpected_quantized_keys, (
+            "Only layers 0 and 2 should have GPTQ-style tensors on disk, "
+            f"but found additional quantized tensors: {unexpected_quantized_keys[:8]}"
+        )
+
+        for module_name, layer_idx in quantized_module_names:
+            assert layer_idx in expected_quantized_layers, (
+                f"Only layers 0 and 2 should be quantized, but found `{module_name}` in layer {layer_idx}."
+            )
+            for suffix in GPTQ_TENSOR_SUFFIXES:
+                tensor_key = f"{module_name}.{suffix}"
+                assert tensor_key in tensor_dtypes, (
+                    f"Missing saved GPTQ tensor `{tensor_key}` for quantized module `{module_name}`."
+                )
+
+            assert tensor_dtypes[f"{module_name}.scales"] in HALF_PRECISION_DTYPES, (
+                f"Expected `{module_name}.scales` to be saved in half precision, "
+                f"but found `{tensor_dtypes[f'{module_name}.scales']}`."
+            )
+            for suffix in ("qweight", "qzeros", "g_idx"):
+                dtype_name = tensor_dtypes[f"{module_name}.{suffix}"]
+                assert dtype_name.startswith(("I", "U")), (
+                    f"Expected `{module_name}.{suffix}` to use an integer dtype, but found `{dtype_name}`."
+                )
+            assert f"{module_name}.weight" not in tensor_dtypes, (
+                f"Quantized module `{module_name}` should not be saved with a native `.weight` tensor."
+            )
+
+        for module_name, layer_idx in native_linear_module_names:
+            assert layer_idx not in expected_quantized_layers, (
+                f"Module `{module_name}` in quantized layer {layer_idx} unexpectedly remained native."
+            )
+            tensor_key = f"{module_name}.weight"
+            assert tensor_key in tensor_dtypes, (
+                f"Missing native weight tensor `{tensor_key}` for skipped module `{module_name}`."
+            )
+            assert tensor_dtypes[tensor_key] in HALF_PRECISION_DTYPES, (
+                f"Expected `{tensor_key}` to remain in bf16/f16, but found `{tensor_dtypes[tensor_key]}`."
+            )
+            for suffix in GPTQ_TENSOR_SUFFIXES:
+                unexpected_key = f"{module_name}.{suffix}"
+                assert unexpected_key not in tensor_dtypes, (
+                    f"Skipped module `{module_name}` should not have saved GPTQ tensor `{unexpected_key}`."
+                )
+
     def _run_dynamic_skip_replay_eval(self) -> None:
         cfg = self._build_quantize_config()
         self._assert_dynamic_config_targets_only_layers_0_and_2(cfg)
@@ -138,6 +242,7 @@ class TestLlama3_2DynamicSkipLayerReplay(ModelTest):
         )
         self.check_kernel(self.model, self.KERNEL_INFERENCE)
         self._assert_only_layers_0_and_2_quantized(self.model)
+        self._assert_saved_checkpoint_preserves_dynamic_layer_selection(self.model)
 
         eval_records = getattr(self, "_post_quant_eval_records", {})
         target_backend = self._current_load_backend()
