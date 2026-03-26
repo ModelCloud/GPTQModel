@@ -3,7 +3,6 @@ common:
   - transformers
   - tabulate
   - swig # for models/tests
-  - https://github.com/ModelCloud/Evalution
 
 tests:
   test_awq_bitblas.py:
