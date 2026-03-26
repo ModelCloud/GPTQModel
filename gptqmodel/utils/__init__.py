@@ -22,7 +22,6 @@ if os.environ.get("GPTQMODEL_DISABLE_GIL_WARNING") == "1":
     pass
 elif has_gil_disabled():
     log.info("Python GIL is disabled and GPTQModel will auto enable multi-gpu quant acceleration for MoE models plus multi-cpu accelerated packing.")
-    from .perplexity import Perplexity
 else:
     if has_gil_control():
         log.warn(
@@ -30,5 +29,3 @@ else:
 
     log.warn(
         "Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.")
-
-    log_gil_requirements_for("utils/Perplexity")

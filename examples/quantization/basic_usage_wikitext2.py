@@ -22,26 +22,6 @@ def get_wikitext2(tokenizer, nsamples, seqlen):
     return [tokenizer(example["text"]) for example in traindata.select(range(nsamples))]
 
 
-@torch.inference_mode()
-def calculate_avg_ppl(model, tokenizer):
-    from gptqmodel.utils.perplexity import Perplexity
-
-    ppl = Perplexity(
-        model=model,
-        tokenizer=tokenizer,
-        dataset_path="wikitext",
-        dataset_name="wikitext-2-raw-v1",
-        split="train",
-        text_column="text",
-    )
-
-    all = ppl.calculate(n_ctx=512, n_batch=512)
-
-    # average ppl
-    avg = sum(all) / len(all)
-
-    return avg
-
 def main():
     tokenizer = AutoTokenizer.from_pretrained(pretrained_model_id, use_fast=True)
 
@@ -68,8 +48,6 @@ def main():
 
     # inference with model.generate
     print(tokenizer.decode(model.generate(**tokenizer("test is", return_tensors="pt").to(device))[0]))
-
-    print(f"Quantized Model {quantized_model_id} avg PPL is {calculate_avg_ppl(model, tokenizer)}")
 
 
 if __name__ == "__main__":
