@@ -208,7 +208,7 @@ class _StubAWQProcessor(LoopProcessor):
             batch_size=1,
             execution_config=ExecutionConfig(
                 require_fwd=True,
-                fwd_after_process=False,
+                fwd_replay_after_process=False,
                 subset_forward_early_stop=True,
             ),
         )

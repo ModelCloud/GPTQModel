@@ -41,7 +41,7 @@ class TensorParallelWeightProcessor(LoopProcessor):
             "execution_config",
             ExecutionConfig(
                 require_fwd=False,
-                fwd_after_process=False,
+                fwd_replay_after_process=False,
             ),
         )
         super().__init__(*args, **kwargs)

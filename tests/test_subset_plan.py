@@ -83,7 +83,7 @@ def test_build_subset_plan_balanced_moe_uses_serial_forward_and_device_map():
     processor = _StubProcessor(
         ExecutionConfig(
             require_fwd=True,
-            fwd_after_process=True,
+            fwd_replay_after_process=True,
         )
     )
     subset = {
@@ -142,7 +142,7 @@ def test_build_layer_subset_plans_merges_groups_for_single_pass_processors():
     processor = _StubProcessor(
         ExecutionConfig(
             require_fwd=True,
-            fwd_after_process=False,
+            fwd_replay_after_process=False,
             fwd_all_modules_in_single_pass=True,
         )
     )

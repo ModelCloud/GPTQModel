@@ -48,7 +48,7 @@ class NativeProcessor(LoopProcessor):
             batch_size=batch_size,
             execution_config=ExecutionConfig(
                 require_fwd=require_fwd,
-                fwd_after_process=False,
+                fwd_replay_after_process=False,
                 fwd_all_modules_in_single_pass=True,
             ),
         )

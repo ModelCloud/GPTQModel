@@ -44,7 +44,7 @@ class TestMoEExpertBatching(unittest.TestCase):
         self.processor.name.return_value = "GPTQProcessor"
         self.processor.execution_config = ExecutionConfig(
             require_fwd=True,
-            fwd_after_process=True,
+            fwd_replay_after_process=True,
         )
         # Mock processor tasks
         self.processor.tasks = {}

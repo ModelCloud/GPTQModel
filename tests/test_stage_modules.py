@@ -212,7 +212,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
             tensor = torch.zeros(1, 1, 1)
             self.execution_config = ExecutionConfig(
                 require_fwd=True,
-                fwd_after_process=False,
+                fwd_replay_after_process=False,
                 fwd_all_modules_in_single_pass=False,
             )
             self.inputs_cache = types.SimpleNamespace(
@@ -416,7 +416,7 @@ def test_run_layer_stage_stops_after_last_quantized_layer(monkeypatch):
             tensor = torch.zeros(1, 1, 1)
             self.execution_config = ExecutionConfig(
                 require_fwd=True,
-                fwd_after_process=False,
+                fwd_replay_after_process=False,
                 fwd_all_modules_in_single_pass=False,
             )
             self.inputs_cache = types.SimpleNamespace(
@@ -656,7 +656,7 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
         def __init__(self):
             self.execution_config = ExecutionConfig(
                 require_fwd=True,
-                fwd_after_process=True,
+                fwd_replay_after_process=True,
                 fwd_all_modules_in_single_pass=False,
             )
             self.inputs_cache = types.SimpleNamespace(
@@ -1107,7 +1107,7 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
         def __init__(self, initial_inputs):
             self.execution_config = ExecutionConfig(
                 require_fwd=True,
-                fwd_after_process=True,
+                fwd_replay_after_process=True,
                 fwd_all_modules_in_single_pass=False,
                 subset_forward_early_stop=True,
             )

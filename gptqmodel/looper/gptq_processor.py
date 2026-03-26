@@ -112,7 +112,7 @@ class GPTQProcessor(LoopProcessor):
             batch_size=batch_size,
             execution_config=ExecutionConfig(
                 require_fwd=require_fwd,
-                fwd_after_process=True,
+                fwd_replay_after_process=True,
                 subset_forward_early_stop=True,
             ),
         )

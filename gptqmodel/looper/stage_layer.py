@@ -409,13 +409,13 @@ def run_layer_stage(
             # When dynamic exclusions remove every tracked module from a layer,
             # no subset stage runs, so nothing materializes that layer's
             # outputs. Processors that enable post-process forward replay
-            # (`fwd_after_process`) still need one forward of the untouched
+            # (`fwd_replay_after_process`) still need one forward of the untouched
             # layer so the next layer receives the correct activations.
             replay_skipped_layer = (
                 not is_last_module
                 and not subset_plans
                 and execution_config.require_fwd
-                and execution_config.fwd_after_process
+                and execution_config.fwd_replay_after_process
             )
 
             # Some processors consume outputs only after `process()` updates the
@@ -474,7 +474,7 @@ def run_layer_stage(
                 if region_timer is not None:
                     region_timer.flush()
 
-            if execution_config.fwd_after_process:
+            if execution_config.fwd_replay_after_process:
                 processor.clear_cache_data()
                 processor.receive_layer_inputs(layer_outputs)
                 layer_inputs = processor.inputs_cache.layer_inputs
