@@ -9,6 +9,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from gptqmodel import BACKEND, GPTQModel
+from tests import eval as eval_module
 from tests.eval import evaluate
 
 
@@ -59,3 +60,56 @@ def test_eval_string_model_load_filters_eval_only_keys(monkeypatch):
     assert captured["trust_remote_code"] is True
     for key in ("gptqmodel", "pretrained", "tokenizer"):
         assert key not in captured
+
+
+def test_build_evalution_runtime_supports_vllm_engine_options():
+    captured = {}
+
+    class FakeVLLM:
+        def __init__(self, **kwargs):
+            captured["engine_kwargs"] = kwargs
+
+        def build(self, model_config):
+            captured["model_config"] = model_config
+            return "session"
+
+    class FakeModel:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def to_dict(self):
+            return dict(self.kwargs)
+
+    fake_evalution = SimpleNamespace(
+        VLLM=FakeVLLM,
+        Model=FakeModel,
+    )
+
+    engine, model_config, session = eval_module._build_evalution_runtime(
+        evalution=fake_evalution,
+        model_or_id_or_path="/tmp/model",
+        llm_backend="vllm",
+        backend=BACKEND.AUTO,
+        batch_size=1,
+        trust_remote_code=True,
+        model_args={
+            "dtype": "float16",
+            "gpu_memory_utilization": 0.8,
+            "tensor_parallel_size": "2",
+            "quantization": "gptq",
+            "tokenizer_mode": "auto",
+            "max_model_len": "4096",
+            "foo": "bar",
+        },
+        tokenizer=None,
+    )
+
+    assert session == "session"
+    assert engine is not None
+    assert model_config.kwargs["path"] == "/tmp/model"
+    assert model_config.kwargs["model_kwargs"] == {"foo": "bar"}
+    assert captured["engine_kwargs"]["dtype"] == "float16"
+    assert captured["engine_kwargs"]["gpu_memory_utilization"] == 0.8
+    assert captured["engine_kwargs"]["tensor_parallel_size"] == 2
+    assert captured["engine_kwargs"]["quantization"] == "gptq"
+    assert captured["engine_kwargs"]["max_model_len"] == 4096
