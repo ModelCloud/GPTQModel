@@ -17,9 +17,7 @@ direct way:
 
 from __future__ import annotations
 
-import json
 import math
-import os
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -29,27 +27,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from ..config import PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT, PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT
 from ...utils.env import env_flag
 from ...utils.paroquant import apply_paroquant_rotation_autograd, build_identity_rotation_buffers
 
 
 _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
-# Debug env vars let test runs bypass the channel-scale clamp and collect
-# optimizer-range telemetry without changing the public quantization config.
-_PAROQUANT_DISABLE_CHANNEL_SCALE_CLAMP_ENV = "GPTQMODEL_PAROQUANT_DISABLE_CHANNEL_SCALE_CLAMP"
-_PAROQUANT_CHANNEL_SCALE_STATS_PATH_ENV = "GPTQMODEL_PAROQUANT_CHANNEL_SCALE_STATS_PATH"
-# Clamp learned channel scales to the range observed in the unclamped Llama 3.2
-# 1B fast test: healthy positive values stayed below ~3.05, while collapse
-# pushed a small tail below 1e-2 and made runtime reciprocals exceed 1e2.
-_PAROQUANT_CHANNEL_SCALE_MIN = 1e-2
-_PAROQUANT_CHANNEL_SCALE_MAX = 1e2
-_PAROQUANT_RANGE_CANDIDATES: tuple[tuple[str, float, float], ...] = (
-    ("1e-05..1e+05", 1e-5, 1e5),
-    ("1e-04..1e+04", 1e-4, 1e4),
-    ("1e-03..1e+03", 1e-3, 1e3),
-    ("1e-02..1e+02", 1e-2, 1e2),
-)
 
 
 def _normalize_opt_impl(name: str, *, field: str) -> str:
@@ -69,11 +53,6 @@ def _normalize_quantizer_impl(name: str) -> str:
             f"{_PAROQUANT_QUANTIZER_IMPLS}, got `{name}`."
         )
     return normalized
-
-
-def _channel_scale_clamp_enabled() -> bool:
-    """Return whether channel-scale clamping should remain active for this run."""
-    return not env_flag(_PAROQUANT_DISABLE_CHANNEL_SCALE_CLAMP_ENV, default=False)
 
 
 def _quantizer_sym_for_impl(sym: bool, quantizer_impl: str) -> bool:
@@ -109,121 +88,6 @@ def _normalize_group_size(group_size: int, in_features: int) -> int:
     if normalized % 2 != 0:
         raise ValueError(f"ParoQuant optimization: group_size ({normalized}) must be even.")
     return normalized
-
-
-def _tensor_stat_summary(values: torch.Tensor) -> dict[str, object]:
-    """Summarize tensor ranges on CPU so debug runs can compare clamp candidates."""
-    flat = values.detach().reshape(-1).to(device="cpu", dtype=torch.float32)
-    finite_mask = torch.isfinite(flat)
-    finite = flat[finite_mask]
-    positive = finite[finite > 0]
-
-    summary: dict[str, object] = {
-        "count": int(flat.numel()),
-        "finite_count": int(finite.numel()),
-        "nan_count": int(torch.isnan(flat).sum().item()),
-        "posinf_count": int(torch.isposinf(flat).sum().item()),
-        "neginf_count": int(torch.isneginf(flat).sum().item()),
-        "nonpositive_count": int((finite <= 0).sum().item()),
-        "zero_count": int((finite == 0).sum().item()),
-        "range_hits": {},
-    }
-
-    if finite.numel() == 0:
-        return summary
-
-    percentiles = torch.tensor([0.001, 0.01, 0.05, 0.50, 0.95, 0.99, 0.999], dtype=torch.float32)
-    finite_q = torch.quantile(finite, percentiles)
-    summary.update(
-        {
-            "min": float(finite.min().item()),
-            "max": float(finite.max().item()),
-            "mean": float(finite.mean().item()),
-            "std": float(finite.std(unbiased=False).item()),
-            "abs_max": float(finite.abs().max().item()),
-            "p001": float(finite_q[0].item()),
-            "p01": float(finite_q[1].item()),
-            "p05": float(finite_q[2].item()),
-            "p50": float(finite_q[3].item()),
-            "p95": float(finite_q[4].item()),
-            "p99": float(finite_q[5].item()),
-            "p999": float(finite_q[6].item()),
-        }
-    )
-
-    range_hits: dict[str, dict[str, int]] = {}
-    for label, lower, upper in _PAROQUANT_RANGE_CANDIDATES:
-        below = int((finite < lower).sum().item())
-        above = int((finite > upper).sum().item())
-        range_hits[label] = {
-            "below": below,
-            "above": above,
-            "outside": below + above,
-        }
-    summary["range_hits"] = range_hits
-
-    if positive.numel() > 0:
-        positive_q = torch.quantile(positive, percentiles)
-        reciprocal = positive.reciprocal()
-        reciprocal_q = torch.quantile(reciprocal, percentiles)
-        summary["positive_only"] = {
-            "min": float(positive.min().item()),
-            "max": float(positive.max().item()),
-            "mean": float(positive.mean().item()),
-            "p001": float(positive_q[0].item()),
-            "p01": float(positive_q[1].item()),
-            "p05": float(positive_q[2].item()),
-            "p50": float(positive_q[3].item()),
-            "p95": float(positive_q[4].item()),
-            "p99": float(positive_q[5].item()),
-            "p999": float(positive_q[6].item()),
-        }
-        summary["reciprocal_positive_only"] = {
-            "min": float(reciprocal.min().item()),
-            "max": float(reciprocal.max().item()),
-            "mean": float(reciprocal.mean().item()),
-            "p001": float(reciprocal_q[0].item()),
-            "p01": float(reciprocal_q[1].item()),
-            "p05": float(reciprocal_q[2].item()),
-            "p50": float(reciprocal_q[3].item()),
-            "p95": float(reciprocal_q[4].item()),
-            "p99": float(reciprocal_q[5].item()),
-            "p999": float(reciprocal_q[6].item()),
-        }
-
-    return summary
-
-
-def _record_channel_scale_stats(
-    *,
-    module_label: Optional[str],
-    stage: str,
-    tensor_name: str,
-    values: torch.Tensor,
-    clamp_enabled: bool,
-    bits: int,
-    group_size: int,
-    train_loss: Optional[float] = None,
-    val_loss: Optional[float] = None,
-) -> None:
-    """Append one JSONL telemetry record for offline clamp-range analysis."""
-    stats_path = os.getenv(_PAROQUANT_CHANNEL_SCALE_STATS_PATH_ENV)
-    if not stats_path:
-        return
-
-    record = {
-        "module": module_label or "<unknown>",
-        "stage": stage,
-        "tensor_name": tensor_name,
-        "clamp_enabled": bool(clamp_enabled),
-        "bits": int(bits),
-        "group_size": int(group_size),
-        "train_loss": None if train_loss is None else float(train_loss),
-        "val_loss": None if val_loss is None else float(val_loss),
-        "stats": _tensor_stat_summary(values),
-    }
-    with open(stats_path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + os.linesep)
 
 
 def _require_paroquant_sym(sym: bool) -> None:
@@ -766,6 +630,8 @@ class _ParoQuantOptimLinear(nn.Module):
         quantizer_sym: bool,
         pairs: torch.Tensor,
         theta_mask: torch.Tensor,
+        scale_clamp_min: float = PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT,
+        scale_clamp_max: float = PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT,
         fused_rotation: Optional[bool] = None,
     ) -> None:
         """Materialize a replayable linear layer in the original input domain."""
@@ -773,6 +639,14 @@ class _ParoQuantOptimLinear(nn.Module):
         self.bits = int(bits)
         self.group_size = int(group_size)
         self.quantizer_sym = bool(quantizer_sym)
+        self.scale_clamp_min = float(scale_clamp_min)
+        self.scale_clamp_max = float(scale_clamp_max)
+        if self.scale_clamp_min <= 0 or self.scale_clamp_max <= 0:
+            raise ValueError("ParoQuant optimization: scale clamp bounds must be positive.")
+        if self.scale_clamp_min >= self.scale_clamp_max:
+            raise ValueError(
+                "ParoQuant optimization: `scale_clamp_min` must be smaller than `scale_clamp_max`."
+            )
         self.register_buffer("pairs", pairs)
         self.register_buffer("theta_mask", theta_mask)
         self.weight = nn.Parameter(weight.clone())
@@ -791,15 +665,13 @@ class _ParoQuantOptimLinear(nn.Module):
         bounded values.
         """
         scales = self.channel_scales_opt.view(1, -1)
-        if not _channel_scale_clamp_enabled():
-            return scales
         if use_ste:
             return _clamp_ste(
                 scales,
-                min_value=_PAROQUANT_CHANNEL_SCALE_MIN,
-                max_value=_PAROQUANT_CHANNEL_SCALE_MAX,
+                min_value=self.scale_clamp_min,
+                max_value=self.scale_clamp_max,
             )
-        return scales.clamp(min=_PAROQUANT_CHANNEL_SCALE_MIN, max=_PAROQUANT_CHANNEL_SCALE_MAX)
+        return scales.clamp(min=self.scale_clamp_min, max=self.scale_clamp_max)
 
     def transformed_weight(self, *, use_ste: bool = True) -> torch.Tensor:
         """Project the learnable weight into ParoQuant's transformed domain."""
@@ -1228,7 +1100,8 @@ def optimize_paroquant_linear(
     stage_impl: Literal["fast", "reference"] = "fast",
     pair_impl: Literal["fast", "reference"] = "fast",
     quantizer_impl: Literal["fast", "reference"] = "fast",
-    debug_label: Optional[str] = None,
+    scale_clamp_min: float = PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT,
+    scale_clamp_max: float = PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT,
 ) -> ParoQuantOptimizationResult:
     """Optimize one linear layer following the paper's two-stage PTQ schedule."""
     _require_paroquant_sym(sym)
@@ -1294,12 +1167,13 @@ def optimize_paroquant_linear(
         quantizer_sym=quantizer_sym,
         pairs=pairs,
         theta_mask=theta_mask,
+        scale_clamp_min=scale_clamp_min,
+        scale_clamp_max=scale_clamp_max,
         fused_rotation=fused_rotation,
     ).to(device=opt_device, dtype=opt_dtype)
     model.reset_masked_angles()
 
-    clamp_enabled = _channel_scale_clamp_enabled()
-    rotation_train_loss, rotation_val_loss = _run_stage(
+    _rotation_train_loss, _rotation_val_loss = _run_stage(
         model=model,
         inputs_train=inputs_train,
         targets_train=targets_train,
@@ -1312,17 +1186,6 @@ def optimize_paroquant_linear(
         epochs=rotation_epochs,
         batch_size=batch_size,
         stage_impl=normalized_stage_impl,
-    )
-    _record_channel_scale_stats(
-        module_label=debug_label,
-        stage="after_rotation",
-        tensor_name="channel_scales_opt",
-        values=model.channel_scales_opt.detach(),
-        clamp_enabled=clamp_enabled,
-        bits=bits,
-        group_size=normalized_group_size,
-        train_loss=rotation_train_loss,
-        val_loss=rotation_val_loss,
     )
 
     model.init_quantizer()
@@ -1340,36 +1203,13 @@ def optimize_paroquant_linear(
         batch_size=batch_size,
         stage_impl=normalized_stage_impl,
     )
-    _record_channel_scale_stats(
-        module_label=debug_label,
-        stage="after_finetune",
-        tensor_name="channel_scales_opt",
-        values=model.channel_scales_opt.detach(),
-        clamp_enabled=clamp_enabled,
-        bits=bits,
-        group_size=normalized_group_size,
-        train_loss=train_loss,
-        val_loss=val_loss,
-    )
 
-    result = _result_from_model(
+    return _result_from_model(
         model,
         train_loss=train_loss,
         val_loss=val_loss,
         used_identity=False,
     )
-    _record_channel_scale_stats(
-        module_label=debug_label,
-        stage="export_runtime",
-        tensor_name="runtime_channel_scales",
-        values=result.channel_scales.detach(),
-        clamp_enabled=clamp_enabled,
-        bits=bits,
-        group_size=normalized_group_size,
-        train_loss=train_loss,
-        val_loss=val_loss,
-    )
-    return result
 
 
 __all__ = [

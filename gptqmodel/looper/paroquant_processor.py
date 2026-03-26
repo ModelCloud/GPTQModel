@@ -297,7 +297,8 @@ class ParoQuantProcessor(LoopProcessor):
                 stage_impl=self.qcfg.opt_stage_impl,
                 pair_impl=self.qcfg.opt_pair_impl,
                 quantizer_impl=self.qcfg.opt_quantizer_impl,
-                debug_label=module.full_name,
+                scale_clamp_min=self.qcfg.opt_scale_clamp_min,
+                scale_clamp_max=self.qcfg.opt_scale_clamp_max,
             )
 
         self._apply_optimization_result(module, result, original_weight)

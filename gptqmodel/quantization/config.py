@@ -1305,6 +1305,10 @@ AWQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 PAROQUANT_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.PAROQUANT,
 )
+# Keep ParoQuant channel-scale clamps configurable so users can relax or
+# tighten the safeguard without patching the optimizer code.
+PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT = 1e-2
+PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT = 1e2
 QQQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.QQQ,
 )
@@ -2478,6 +2482,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_stage_impl": "opt_stage_impl",
             "opt_pair_impl": "opt_pair_impl",
             "opt_quantizer_impl": "opt_quantizer_impl",
+            "opt_scale_clamp_min": "opt_scale_clamp_min",
+            "opt_scale_clamp_max": "opt_scale_clamp_max",
         }
         if isinstance(meta_payload, dict):
             for normalized_key, meta_key in meta_field_map.items():
@@ -2819,6 +2825,8 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_stage_impl: str = field(default="reference")
     opt_pair_impl: str = field(default="fast")
     opt_quantizer_impl: str = field(default="reference")
+    opt_scale_clamp_min: float = field(default=PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT)
+    opt_scale_clamp_max: float = field(default=PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.PAROQUANT,)
@@ -2850,6 +2858,8 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
         self.opt_quantizer_impl = str(self.opt_quantizer_impl).strip().lower()
+        self.opt_scale_clamp_min = float(self.opt_scale_clamp_min)
+        self.opt_scale_clamp_max = float(self.opt_scale_clamp_max)
         if self.opt_rotation_epochs < 0 or self.opt_finetune_epochs < 0:
             raise ValueError("ParoQuantizeConfig: optimization epochs must be non-negative.")
         if self.opt_train_samples <= 0 or self.opt_validation_samples <= 0:
@@ -2866,6 +2876,10 @@ class ParoQuantizeConfig(QuantizeConfig):
             raise ValueError("ParoQuantizeConfig: `opt_pair_impl` must be one of {'fast', 'reference'}.")
         if self.opt_quantizer_impl not in {"fast", "reference"}:
             raise ValueError("ParoQuantizeConfig: `opt_quantizer_impl` must be one of {'fast', 'reference'}.")
+        if self.opt_scale_clamp_min <= 0 or self.opt_scale_clamp_max <= 0:
+            raise ValueError("ParoQuantizeConfig: scale clamp bounds must be positive.")
+        if self.opt_scale_clamp_min >= self.opt_scale_clamp_max:
+            raise ValueError("ParoQuantizeConfig: `opt_scale_clamp_min` must be smaller than `opt_scale_clamp_max`.")
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {
@@ -2887,6 +2901,8 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_stage_impl"] = self.opt_stage_impl
         meta_payload["opt_pair_impl"] = self.opt_pair_impl
         meta_payload["opt_quantizer_impl"] = self.opt_quantizer_impl
+        meta_payload["opt_scale_clamp_min"] = self.opt_scale_clamp_min
+        meta_payload["opt_scale_clamp_max"] = self.opt_scale_clamp_max
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym
