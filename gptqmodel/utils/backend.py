@@ -19,8 +19,7 @@ class BACKEND(str, Enum):
     BITSANDBYTES = "bitsandbytes"  # bitsandbytes 4-bit/8-bit kernel with optional CPU/CUDA support
     GPTQ_EXLLAMA_V2 = "gptq_exllama_v2"  # FASTER: optimized for batching > 1
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
-    GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops in fp32
-    GPTQ_MARLIN_FP16 = "gptq_marlin_fp16"  # marlin reduce ops in fp16
+    GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_HF_KERNEL = "gptq_hf_kernel"  # HuggingFace kernels-community GPTQ path
 
@@ -72,7 +71,6 @@ class BACKEND(str, Enum):
     EXLLAMA_V3 = "exllama_v3"
     MACHETE = "machete"
     MARLIN = "marlin"
-    MARLIN_FP16 = "marlin_fp16"
     BITBLAS = "bitblas"
     HF_KERNEL = "hf_kernel"
     GEMM = "gemm"
@@ -96,7 +94,6 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.EXLLAMA_V2: BACKEND.GPTQ_EXLLAMA_V2,
         BACKEND.MACHETE: BACKEND.GPTQ_MACHETE,
         BACKEND.MARLIN: BACKEND.GPTQ_MARLIN,
-        BACKEND.MARLIN_FP16: BACKEND.GPTQ_MARLIN_FP16,
         BACKEND.BITBLAS: BACKEND.GPTQ_BITBLAS,
         BACKEND.HF_KERNEL: BACKEND.GPTQ_HF_KERNEL,
     },

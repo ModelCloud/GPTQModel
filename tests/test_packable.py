@@ -30,7 +30,6 @@ class TestPackable(unittest.TestCase):
         BACKEND.TORCH: TorchQuantLinear,
         BACKEND.TORCH_FUSED: TorchFusedQuantLinear,
         BACKEND.MARLIN: MarlinQuantLinear,
-        BACKEND.MARLIN_FP16: MarlinQuantLinear,
         # BACKEND.BITBLAS: BitBLASQuantLinear,
     }
 
@@ -55,7 +54,6 @@ class TestPackable(unittest.TestCase):
             (BACKEND.TORCH_FUSED, {"qweight": True, "qzeros": True, "scales": False, "g_idx": True}),
             # (BACKEND.BITBLAS, {"qweight": True, "qzeros": True, "scales": True, "g_idx": True}),
             (BACKEND.MARLIN, {"qweight": False, "qzeros": False, "scales": False, "g_idx": False}),
-            (BACKEND.MARLIN_FP16, {"qweight": False, "qzeros": False, "scales": False, "g_idx": False}),
         ]
     )
     def test_post_init(self, backend: BACKEND, equal: Dict[str, bool]):
