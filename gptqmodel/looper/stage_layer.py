@@ -410,38 +410,26 @@ def run_layer_stage(
             # stage runs and therefore nothing materializes that layer's outputs.
             # GPTQ-style processors still need the untouched layer output so the
             # next layer sees the correct activation stream.
-            if (
+            replay_untouched_layer = (
                 not is_last_module
                 and not subset_plans
                 and execution_config.require_fwd
                 and execution_config.fwd_after_process
-            ):
-                layer_outputs = _replay_layer_outputs(
-                    looper,
-                    module=module,
-                    processor=processor,
-                    layer_inputs=layer_inputs,
-                    layer_input_kwargs=layer_input_kwargs,
-                    position_ids=position_ids,
-                    attention_masks=attention_masks,
-                    cur_layer_device=cur_layer_device,
-                    is_lm_head_module=is_lm_head_module,
-                    shared_kv_cache_dict=shared_kv_cache_dict,
-                    layer_index=layer_index,
-                    layer_descriptor=layer_descriptor,
-                    full=full,
-                    log=log,
-                    region_timer=region_timer,
-                )
+            )
 
             # Some processors consume outputs only after `process()` updates the
             # current layer. In that case, replay the layer once using the
             # metadata already computed by the final subset plan.
-            elif not is_last_module and replay_plan is not None and replay_plan.replay_after_process:
-                # Reuse the last subset plan's replay metadata directly so the
-                # layer stage does not need to reconstruct batch counts,
-                # row-count progress, or forward device overrides after the
-                # subset stage has already decided them.
+            replay_after_process = (
+                not is_last_module
+                and replay_plan is not None
+                and replay_plan.replay_after_process
+            )
+
+            if replay_untouched_layer or replay_after_process:
+                # Pass `replay_plan` through unconditionally: the helper uses
+                # subset metadata when available and falls back to generic
+                # untouched-layer replay when it is `None`.
                 layer_outputs = _replay_layer_outputs(
                     looper,
                     module=module,
