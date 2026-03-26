@@ -592,10 +592,7 @@ def ModelLoader(cls):
 
         if format_code == FORMAT.MARLIN:
             # format marlin requires marlin kernel
-            expected_marlin_backends = [BACKEND.AWQ_MARLIN] if qcfg.quant_method == METHOD.AWQ else [
-                BACKEND.GPTQ_MARLIN,
-                BACKEND.GPTQ_MARLIN_FP16,
-            ]
+            expected_marlin_backends = [BACKEND.AWQ_MARLIN] if qcfg.quant_method == METHOD.AWQ else [BACKEND.GPTQ_MARLIN]
             expected_marlin_backend = expected_marlin_backends[0]
             if backend not in expected_marlin_backends and backend != BACKEND.AUTO:
                 raise TypeError(
@@ -605,7 +602,7 @@ def ModelLoader(cls):
 
         # marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
         # check for marlin compat for cuda device only
-        # if backend not in [BACKEND.GPTQ_MARLIN, BACKEND.GPTQ_MARLIN_FP16, BACKEND.AWQ_MARLIN] and device == DEVICE.CUDA:
+        # if backend not in [BACKEND.GPTQ_MARLIN, BACKEND.AWQ_MARLIN] and device == DEVICE.CUDA:
         #     unsupported = _validate_marlin_compatibility(qcfg)
         #     if unsupported is None and marlin_compatible:
         #         logger.info(
@@ -975,7 +972,7 @@ def ModelLoader(cls):
                     f"Kernel: Machete kernel requires compute capability >= 9.0. Detected capability: {torch.cuda.get_device_capability()}"
                 )
 
-        if backend in [BACKEND.GPTQ_MARLIN, BACKEND.GPTQ_MARLIN_FP16, BACKEND.AWQ_MARLIN] and (
+        if backend in [BACKEND.GPTQ_MARLIN, BACKEND.AWQ_MARLIN] and (
                 preload_qlinear_kernel == ExllamaV2QuantLinear or format_code == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
@@ -1015,7 +1012,6 @@ def ModelLoader(cls):
             BACKEND.GPTQ_MACHETE,
             BACKEND.AWQ_MACHETE,
             BACKEND.GPTQ_MARLIN,
-            BACKEND.GPTQ_MARLIN_FP16,
             BACKEND.AWQ_MARLIN,
             BACKEND.GPTQ_BITBLAS,
             BACKEND.AWQ_BITBLAS,

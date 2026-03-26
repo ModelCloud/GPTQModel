@@ -26,6 +26,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
     _transform_param,
@@ -49,7 +50,7 @@ log = setup_logger()
 
 
 class MarlinQuantLinear(GPTQQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN, BACKEND.GPTQ_MARLIN_FP16]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 90, FORMAT.MARLIN: 90}
     SUPPORTS_BITS = [4, 8]
@@ -105,6 +106,8 @@ class MarlinQuantLinear(GPTQQuantLinear):
             # (since we have only one group per output channel)
             desc_act = False
 
+        self.fp32 = env_flag("GPTQMODEL_MARLIN_USE_FP32", default=True)
+
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -119,12 +122,9 @@ class MarlinQuantLinear(GPTQQuantLinear):
             register_buffers=False, # do not register buffers in super()
             **kwargs)
 
-        # toggle fp32 mode depending on MARLIN or MARLIN_FP16 backend
-        self.fp32 = True if self.backend in [BACKEND.GPTQ_MARLIN, BACKEND.AUTO] else False
-
         if not self.fp32:
             log.warn.once(
-                "Kernel: Marlin FP16 mode is activated with reduced accuracy. Use default Marlin model for improved inference quality.")
+                "Kernel: GPTQMODEL_MARLIN_USE_FP32 is disabled. Marlin will use reduced-precision reduction.")
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(desc_act,
