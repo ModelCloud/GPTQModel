@@ -39,6 +39,7 @@ from ...utils.paroquant import (
 
 _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
+_PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL = 8_000_000
 
 
 def _normalize_opt_impl(name: str, *, field: str) -> str:
@@ -627,7 +628,7 @@ class GroupLinearQuantizer(nn.Module):
 
     def forward(self, weight: torch.Tensor) -> torch.Tensor:
         """Pseudo-quantize a transformed weight tensor with STE-enabled qparams."""
-        return pseudo_quantize_dequant(
+        return _maybe_compile_large_train_quant(
             weight,
             bits=self.bits,
             group_size=self.group_size,
@@ -701,6 +702,58 @@ def pseudo_quantize_dequant(
         dequant = (quant - round_zero_point) * scale
 
     return dequant.reshape_as(weight).to(dtype)
+
+
+@lru_cache(maxsize=1)
+def _get_large_train_quant_compile():
+    """Lazily compile the large training-time quant path once per process."""
+    compile_fn = getattr(torch, "compile", None)
+    if compile_fn is None:
+        return None
+    try:
+        return compile_fn(pseudo_quantize_dequant, mode="default", fullgraph=True)
+    except Exception:
+        return None
+
+
+def _maybe_compile_large_train_quant(
+    weight: torch.Tensor,
+    *,
+    bits: int,
+    group_size: int,
+    sym: bool,
+    scale: Optional[torch.Tensor] = None,
+    zero_point_float: Optional[torch.Tensor] = None,
+    use_ste: bool = True,
+) -> torch.Tensor:
+    """Compile only large training-time quant calls where the compile tax amortizes."""
+    should_compile = (
+        bool(use_ste)
+        and weight.device.type == "cuda"
+        and weight.numel() >= _PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL
+        and env_flag("GPTQMODEL_PAROQUANT_OPT_LARGE_TRAIN_QUANT_COMPILE", default=True)
+    )
+    if should_compile:
+        compiled = _get_large_train_quant_compile()
+        if compiled is not None:
+            return compiled(
+                weight,
+                bits=bits,
+                group_size=group_size,
+                sym=sym,
+                scale=scale,
+                zero_point_float=zero_point_float,
+                use_ste=use_ste,
+            )
+    return pseudo_quantize_dequant(
+        weight,
+        bits=bits,
+        group_size=group_size,
+        sym=sym,
+        scale=scale,
+        zero_point_float=zero_point_float,
+        use_ste=use_ste,
+    )
 
 
 class _ParoQuantOptimLinear(nn.Module):
@@ -777,12 +830,11 @@ class _ParoQuantOptimLinear(nn.Module):
         """Pseudo-quantize the transformed weight using current learned qparams."""
         transformed = self.transformed_weight(use_ste=True)
         if self.quantizer is None:
-            return pseudo_quantize_dequant(
+            return _maybe_compile_large_train_quant(
                 transformed,
                 bits=self.bits,
                 group_size=self.group_size,
                 sym=self.quantizer_sym,
-                use_ste=True,
             )
         return self.quantizer(transformed)
 
