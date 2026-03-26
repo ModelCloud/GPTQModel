@@ -1291,3 +1291,61 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
     assert torch.allclose(layers[0].forward_inputs[0], input_tensor)
     assert layer1_inputs
     assert all(torch.allclose(layer_input, expected_layer0_output) for layer_input in layer1_inputs)
+
+
+def test_masked_hook_wrapper_trims_left_padded_inputs_before_add_batch():
+    looper = ModuleLooper.__new__(ModuleLooper)
+    looper.gptq_model = types.SimpleNamespace(quant_region_timer=None)
+
+    class _FakeTask:
+        def __init__(self):
+            self.add_batch_input = None
+
+        def add_batch(self, inp, out, batch_index=None):
+            self.add_batch_input = inp
+
+    processor = types.SimpleNamespace()
+    task = _FakeTask()
+
+    input_ids = torch.tensor(
+        [
+            [[1.0, 1.0], [2.0, 2.0], [30.0, 30.0], [40.0, 40.0]],
+            [[3.0, 3.0], [4.0, 4.0], [50.0, 50.0], [60.0, 60.0]],
+        ],
+        dtype=torch.float32,
+    )
+
+    attention_mask = torch.tensor(
+        [
+            [0, 0, 1, 1],
+            [1, 1, 0, 0],
+        ],
+        dtype=torch.bool,
+    )
+    looper._set_processor_mask(processor, attention_mask)
+
+    def inner_hook(module, hook_inputs, hook_output):
+        task.add_batch(hook_inputs[0], torch.empty(0))
+        return module, hook_inputs, hook_output
+
+    wrapped_hook = looper._masked_hook_wrapper(processor, inner_hook, "test")
+    wrapped_hook(
+        None,
+        (input_ids,),
+        torch.empty((2, 4, 2)),
+    )
+
+    assert task.add_batch_input is not None
+    assert task.add_batch_input.shape == (4, 2)
+    assert torch.equal(
+        task.add_batch_input,
+        torch.tensor(
+            [
+                [30.0, 30.0],
+                [40.0, 40.0],
+                [3.0, 3.0],
+                [4.0, 4.0],
+            ],
+            dtype=torch.float32,
+        ),
+    )

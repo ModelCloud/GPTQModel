@@ -372,6 +372,12 @@ def prepare_calibration_dataset(
                 if _maybe_resolve_length(getattr(model_config, attr_name, None), attr_name):
                     break
 
+    padding_side = getattr(tokenizer, "padding_side", "right") if tokenizer is not None else "right"
+    if padding_side not in ("left", "right"):
+        raise ValueError(
+            f"Unsupported tokenizer.padding_side `{padding_side}`. Expected `left` or `right`."
+        )
+
     for example in calibration_dataset:
         input_ids = _convert_tensor_to_list(example["input_ids"])
         attention_mask = _convert_tensor_to_list(example["attention_mask"])
@@ -387,8 +393,12 @@ def prepare_calibration_dataset(
                     trimmed = True
                     trimmed_row_count += 1
                     longest_trimmed_row = max(longest_trimmed_row, row_len)
-                    trimmed_input_ids.append(row_ids[:max_positions])
-                    trimmed_attention_mask.append(row_mask[:max_positions])
+                    if padding_side == "left":
+                        trimmed_input_ids.append(row_ids[-max_positions:])
+                        trimmed_attention_mask.append(row_mask[-max_positions:])
+                    else:
+                        trimmed_input_ids.append(row_ids[:max_positions])
+                        trimmed_attention_mask.append(row_mask[:max_positions])
                 else:
                     trimmed_input_ids.append(row_ids)
                     trimmed_attention_mask.append(row_mask)
@@ -504,8 +514,12 @@ def prepare_calibration_dataset(
             padding_length = calibration_dataset_concat_size - len(input_ids_buff)
             if padding_length > 0:
                 pad_id = getattr(tokenizer, "pad_token_id", 0)
-                input_ids_buff.extend([pad_id] * padding_length)
-                attention_mask_buff.extend([0] * padding_length)
+                if padding_side == "left":
+                    input_ids_buff = ([pad_id] * padding_length) + input_ids_buff
+                    attention_mask_buff = ([0] * padding_length) + attention_mask_buff
+                else:
+                    input_ids_buff.extend([pad_id] * padding_length)
+                    attention_mask_buff.extend([0] * padding_length)
             concatenated_data.append(
                 {
                     "input_ids": [input_ids_buff],
@@ -558,7 +572,11 @@ def prepare_calibration_dataset(
     if support_batch_quantize:
         pad_token_id = getattr(tokenizer, "pad_token_id", 0) if tokenizer is not None else 0
         new_calibration_dataset_batched = [
-            collate_data(sorted_dataset[start : start + batch_size], pad_token_id)
+            collate_data(
+                sorted_dataset[start : start + batch_size],
+                pad_token_id,
+                padding_side=getattr(tokenizer, "padding_side", "right"),
+            )
             for start in range(0, len(sorted_dataset), batch_size)
         ]
 
