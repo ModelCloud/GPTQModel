@@ -37,9 +37,6 @@ class TestLlama3_2_ParoQuant(ModelTest):
         },
         "arc_challenge": {
             "chat_template": True,
-            "evalution_suite_kwargs": {
-                "max_rows": 128,
-            },
             "acc": {
                 "value": 0.3216723549488055,
                 "floor_pct": 0.04,
@@ -53,10 +50,6 @@ class TestLlama3_2_ParoQuant(ModelTest):
         },
         "mmlu_stem": {
             "chat_template": False,
-            "evalution_suite_kwargs": {
-                "num_fewshot": 0,
-                "max_rows": 128,
-            },
             "acc": {
                 "value": 0.40120520139549637,
                 "floor_pct": 0.04,
@@ -74,9 +67,6 @@ class TestLlama3_2_ParoQuant(ModelTest):
         },
         "arc_challenge": {
             "chat_template": True,
-            "evalution_suite_kwargs": {
-                "max_rows": 128,
-            },
             "acc": {
                 "value": 0.30631399317406144,
                 "floor_pct": 0.04,
@@ -88,10 +78,6 @@ class TestLlama3_2_ParoQuant(ModelTest):
         },
         "mmlu_stem": {
             "chat_template": False,
-            "evalution_suite_kwargs": {
-                "num_fewshot": 0,
-                "max_rows": 128,
-            },
             "acc": {
                 "value": 0.3850301300348874,
                 "floor_pct": 0.04,
@@ -108,8 +94,8 @@ class TestLlama3_2_ParoQuant(ModelTest):
     KERNEL_INFERENCE = {ParoQuantQuantLinear}
 
     # Mirror benchmark settings: 1+1 epochs on 128 train rows
-    PAROQUANT_ROTATION_EPOCHS = 3
-    PAROQUANT_FINETUNE_EPOCHS = 3
+    PAROQUANT_ROTATION_EPOCHS = 5
+    PAROQUANT_FINETUNE_EPOCHS = 5
     PAROQUANT_TRAIN_SAMPLES = 128
     PAROQUANT_SEED = 3141592653
 

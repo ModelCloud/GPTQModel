@@ -1,5 +1,5 @@
 common:
-  py: 3.14 # common config
+  py: 3.14t # common config
   gpu: 1
 
 tests:

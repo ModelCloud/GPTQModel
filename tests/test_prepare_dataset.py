@@ -6,8 +6,10 @@
 import copy
 
 import torch
+import pytest
 
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.utils.data import collate_data
 
 
 class _StubTokenizer:
@@ -270,3 +272,94 @@ def test_prepare_dataset_falls_back_to_text_when_get_chat_template_raises():
 
     expected_ids = qmodel.tokenizer(dataset[0]["text"], return_tensors="pt")["input_ids"].tolist()
     assert batches[0]["input_ids"].tolist() == expected_ids
+
+
+def test_collate_data_uses_right_padding_by_default():
+    batch = [
+        {
+            "input_ids": [[1, 2, 3], [4, 5]],
+            "attention_mask": [[1, 1, 1], [1, 1]],
+        },
+    ]
+
+    result = collate_data(batch, pad_token_id=0)
+
+    assert result["input_ids"].tolist() == [[1, 2, 3], [4, 5, 0]]
+    assert result["attention_mask"].int().tolist() == [[1, 1, 1], [1, 1, 0]]
+
+
+def test_collate_data_left_padding_when_requested():
+    batch = [
+        {
+            "input_ids": [[1, 2, 3], [4, 5]],
+            "attention_mask": [[1, 1, 1], [1, 1]],
+        },
+    ]
+
+    result = collate_data(batch, pad_token_id=0, padding_side="left")
+
+    assert result["input_ids"].tolist() == [[1, 2, 3], [0, 4, 5]]
+    assert result["attention_mask"].int().tolist() == [[1, 1, 1], [0, 1, 1]]
+
+
+def test_collate_data_raises_for_invalid_padding_side():
+    batch = [
+        {
+            "input_ids": [[1, 2, 3]],
+            "attention_mask": [[1, 1, 1]],
+        }
+    ]
+
+    with pytest.raises(ValueError, match="Unsupported padding_side"):
+        collate_data(batch, pad_token_id=0, padding_side="center")
+
+
+def test_prepare_dataset_uses_tokenizer_padding_side_left():
+    qmodel = _make_qmodel()
+    qmodel.tokenizer.padding_side = "left"
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=[[1, 2, 3, 4], [5, 6]],
+        calibration_dataset_sort=None,
+        batch_size=2,
+        calibration_data_min_length=0,
+    )
+
+    assert batches[0]["input_ids"].tolist() == [[1, 2, 3, 4], [0, 0, 5, 6]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1, 1], [0, 0, 1, 1]]
+
+
+def test_prepare_dataset_concat_respects_tokenizer_padding_side_left():
+    qmodel = _make_qmodel()
+    qmodel.tokenizer.padding_side = "left"
+    dataset = copy.deepcopy(_sample_dataset())
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=dataset,
+        calibration_dataset_concat_size=5,
+        calibration_dataset_sort=None,
+        batch_size=1,
+        calibration_data_min_length=0,
+        calibration_concat_separator=None,
+    )
+
+    assert len(batches) == 1
+    assert batches[0]["input_ids"].tolist() == [[0, 0, 1, 2, 3]]
+    assert batches[0]["attention_mask"].int().tolist() == [[0, 0, 1, 1, 1]]
+
+
+def test_prepare_dataset_trims_left_padded_rows_from_the_left_edge():
+    qmodel = _make_qmodel()
+    qmodel.tokenizer.padding_side = "left"
+    qmodel.model.config.max_position_embeddings = 4
+
+    batches = qmodel.prepare_dataset(
+        calibration_dataset=[{"input_ids": [[0, 0, 11, 12, 13, 14]], "attention_mask": [[0, 0, 1, 1, 1, 1]]}],
+        calibration_dataset_sort=None,
+        batch_size=1,
+        calibration_data_min_length=0,
+    )
+
+    assert len(batches) == 1
+    assert batches[0]["input_ids"].tolist() == [[11, 12, 13, 14]]
+    assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1, 1]]
