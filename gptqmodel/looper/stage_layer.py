@@ -406,10 +406,11 @@ def run_layer_stage(
             layer_outputs: List[List[torch.Tensor]] = []
             replay_plan = last_subset_plan
 
-            # When dynamic exclusions remove every module from a layer, no subset
-            # stage runs and therefore nothing materializes that layer's outputs.
-            # GPTQ-style processors still need the untouched layer output so the
-            # next layer sees the correct activation stream.
+            # When dynamic exclusions remove every tracked module from a layer,
+            # no subset stage runs, so nothing materializes that layer's
+            # outputs. Processors that enable post-process forward replay
+            # (`fwd_after_process`) still need one forward of the untouched
+            # layer so the next layer receives the correct activations.
             replay_skipped_layer = (
                 not is_last_module
                 and not subset_plans
