@@ -58,7 +58,6 @@ class TestLlama3_2(ModelTest):
                 "batch_size": 24,
                 "max_new_tokens": 96,
                 "stream": True,
-                "max_rows": 128,
             },
             "acc,num": {
                 "value": 0.390625,
