@@ -278,8 +278,10 @@ class ForwardExecutor:
                 if need_outputs and module_output is not None:
                     primary = module_output[0] if isinstance(module_output, tuple) else module_output
                     # Move output back to the same device where input was stored
-                    # This preserves calibration data placement
-                    primary = move_to(primary, device=input_device)
+                    # This preserves calibration data placement when calibration_data_device is set
+                    calib_device_cfg = self.looper.gptq_model.quantize_config.calibration_data_device
+                    target_device = input_device if calib_device_cfg is not None else cur_layer_device
+                    primary = move_to(primary, device=target_device)
                     outputs.append([primary])
 
                 if module_output is not None:
@@ -534,9 +536,11 @@ class ForwardExecutor:
                 raise RuntimeError("Forward batch returned no output; data-parallel execution produced empty result.")
             primary = module_output[0] if isinstance(module_output, tuple) else module_output
             # Move output back to the same device where input was stored
-            # This preserves calibration data placement
+            # This preserves calibration data placement when calibration_data_device is set
+            calib_device_cfg = self.looper.gptq_model.quantize_config.calibration_data_device
             input_device = layer_inputs[idx][0].device if layer_inputs[idx] else cur_layer_device
-            primary = move_to(primary, device=input_device)
+            target_device = input_device if calib_device_cfg is not None else cur_layer_device
+            primary = move_to(primary, device=target_device)
             ordered_outputs.append([primary])
 
         return ordered_outputs
