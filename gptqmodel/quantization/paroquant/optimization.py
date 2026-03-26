@@ -21,6 +21,7 @@ import math
 import random
 from contextlib import nullcontext
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable, Iterable, Literal, Optional, Sequence
 
 import torch
@@ -174,7 +175,7 @@ def _pad_rotation_group(
     return pairs, mask
 
 
-def _build_random_rotation_buffers_cpu(
+def _build_random_rotation_buffers_cpu_legacy(
     *,
     in_features: int,
     group_size: int,
@@ -222,6 +223,74 @@ def _build_random_rotation_buffers_cpu(
     pairs = torch.stack(rotation_rows, dim=0).contiguous()
     masks = torch.stack(mask_rows, dim=0).contiguous()
     return pairs, masks
+
+
+@lru_cache(maxsize=32)
+def _round_robin_pair_template(group_size: int) -> torch.Tensor:
+    """Cache one-factorized full matchings for an even group size."""
+    if group_size <= 0 or group_size % 2 != 0:
+        raise ValueError(f"ParoQuant optimization: group_size ({group_size}) must be a positive even integer.")
+
+    players = list(range(group_size))
+    half_group = group_size // 2
+    rounds: list[torch.Tensor] = []
+    for _ in range(group_size - 1):
+        round_pairs = torch.empty((half_group, 2), dtype=torch.long)
+        for pair_idx in range(half_group):
+            round_pairs[pair_idx, 0] = players[pair_idx]
+            round_pairs[pair_idx, 1] = players[group_size - 1 - pair_idx]
+        rounds.append(round_pairs)
+        players = [players[0], players[-1], *players[1:-1]]
+    return torch.stack(rounds, dim=0).contiguous()
+
+
+def _build_random_rotation_buffers_cpu(
+    *,
+    in_features: int,
+    group_size: int,
+    krot: int,
+    pair_ratio: float,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build randomized pair schedules using cached round-robin matchings plus per-group permutations."""
+    normalized_group_size = _normalize_group_size(group_size, in_features)
+    if krot <= 0:
+        raise ValueError(f"ParoQuant optimization: `krot` must be positive, got {krot}.")
+    if not (0.0 < float(pair_ratio) <= 0.5):
+        raise ValueError("ParoQuant optimization: `pair_ratio` must be in the interval (0, 0.5].")
+    if krot > normalized_group_size - 1:
+        return _build_random_rotation_buffers_cpu_legacy(
+            in_features=in_features,
+            group_size=normalized_group_size,
+            krot=krot,
+            pair_ratio=pair_ratio,
+            seed=seed,
+        )
+
+    half_group = normalized_group_size // 2
+    num_groups = in_features // normalized_group_size
+    num_pairs_each = max(1, int(normalized_group_size * float(pair_ratio)))
+    num_pairs_each = min(num_pairs_each, half_group)
+    template = _round_robin_pair_template(normalized_group_size)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed))
+
+    pair_rows = torch.empty((krot, in_features), dtype=torch.int16)
+    mask_rows = torch.zeros((krot, in_features // 2), dtype=torch.bool)
+    if num_pairs_each < half_group:
+        for group_idx in range(num_groups):
+            start = group_idx * half_group
+            mask_rows[:, start + num_pairs_each:start + half_group] = True
+
+    for group_idx in range(num_groups):
+        round_order = torch.randperm(template.shape[0], generator=generator)[:krot]
+        local_template = template.index_select(0, round_order)
+        perm = torch.randperm(normalized_group_size, generator=generator)
+        group_pairs = perm[local_template].to(dtype=torch.int16).reshape(krot, normalized_group_size)
+        start = group_idx * normalized_group_size
+        pair_rows[:, start:start + normalized_group_size] = group_pairs
+
+    return pair_rows.contiguous(), mask_rows.contiguous()
 
 
 def build_random_rotation_buffers(

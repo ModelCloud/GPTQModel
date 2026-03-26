@@ -389,6 +389,35 @@ def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
     assert all(event[1] >= 0.0 for event in scaler_events if event[0] == "backward")
 
 
+def test_paroquant_fast_pair_builder_emits_disjoint_matchings():
+    """Guard the fast pair builder so each rotation remains kernel-legal."""
+    pairs, masks = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=3,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+
+    assert pairs.shape == (3, 8)
+    assert masks.shape == (3, 4)
+    assert torch.count_nonzero(masks).item() == 0
+
+    seen_edges = set()
+    for rotation_pairs in pairs.view(3, 4, 2).tolist():
+        used_channels = set()
+        for left, right in rotation_pairs:
+            assert left != right
+            assert left not in used_channels
+            assert right not in used_channels
+            used_channels.add(left)
+            used_channels.add(right)
+            edge = tuple(sorted((left, right)))
+            assert edge not in seen_edges
+            seen_edges.add(edge)
+
+
 def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
     """Guard that CUDA-graph replay only activates for real CUDA tensor stages."""
     class _DummyModel(torch.nn.Module):
