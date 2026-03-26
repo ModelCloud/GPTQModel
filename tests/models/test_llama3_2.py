@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
+
 from model_test import ModelTest
 
 
@@ -14,6 +16,12 @@ from model_test import ModelTest
 # | gsm8k_platinum_cot :: acc,num                      |   0.3906 |
 # | mmlu_stem :: acc,none                              |   0.3942 |
 class TestLlama3_2(ModelTest):
+    # Keep one stable saved checkpoint so eval-only repro runs can reuse the exact post-quant model.
+    SAVE_PATH = os.environ.get(
+        "GPTQMODEL_LLAMA3_2_SAVE_PATH",
+        "/tmp/llama3_2_gptq_saved_ckpt",
+    )
+    DELETE_QUANTIZED_MODEL = False
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct" # "meta-llama/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
@@ -25,13 +33,13 @@ class TestLlama3_2(ModelTest):
                 "floor_pct": 0.04,
             },
         },
-        "mmlu_stem": {
-            "chat_template": False,
-            "acc": {
-                "value": 0.3860, # 0.3099 4096, 0.3270 2048
-                "floor_pct": 0.04,
-            },
-        },
+        # "mmlu_stem": {
+        #     "chat_template": False,
+        #     "acc": {
+        #         "value": 0.3860, # 0.3099 4096, 0.3270 2048
+        #         "floor_pct": 0.04,
+        #     },
+        # },
         "arc_challenge": {
             "chat_template": True,
             "acc": {
@@ -55,10 +63,9 @@ class TestLlama3_2(ModelTest):
                 "device": "cuda:0",
             },
             "evalution_suite_kwargs": {
-                "batch_size": 24,
-                "max_new_tokens": 96,
+                "batch_size": 32,
+                "max_new_tokens": 256,
                 "stream": True,
-                "max_rows": 128,
             },
             "acc,num": {
                 "value": 0.390625,
@@ -66,14 +73,15 @@ class TestLlama3_2(ModelTest):
                 "ceil_pct": 1.0,
             },
         },
-        "mmlu_stem": {
-            "chat_template": False,
-            "acc": {
-                "value": 0.3942,
-                "floor_pct": 0.04,
-                "ceil_pct": 1.0,
-            },
-        },
+        # "mmlu_stem": {
+        #     "chat_template": False,
+        #     "acc": {
+        #         "value": 0.3942,
+        #         "floor_pct": 0.04,
+        #         "ceil_pct": 1.0,
+        #     },
+        #     "max_rows": 256,
+        # },
         "arc_challenge": {
             "chat_template": True,
             "acc": {

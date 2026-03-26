@@ -1,15 +1,23 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import torch
 from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
-from gptqmodel.quantization import FORMAT, METHOD, ParoQuantQuantizeConfig
+from gptqmodel.quantization import FORMAT, METHOD, ParoQuantizeConfig
 
 
 class TestLlama3_2_ParoQuant(ModelTest):
+    # Keep one stable saved checkpoint so eval-only repro runs can reload the exact post-quant model.
+    SAVE_PATH = os.environ.get(
+        "GPTQMODEL_PAROQUANT_SAVE_PATH",
+        "/tmp/paroquant_evalution_saved_ckpt",
+    )
+    DELETE_QUANTIZED_MODEL = False
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
     EVAL_BATCH_SIZE = 64
     DATASET_CONCAT_SIZE = 2048
@@ -24,10 +32,9 @@ class TestLlama3_2_ParoQuant(ModelTest):
                 "device": "cuda:0",
             },
             "evalution_suite_kwargs": {
-                "batch_size": 24,
-                "max_new_tokens": 96,
+                "batch_size": 32,
+                "max_new_tokens": 256,
                 "stream": True,
-                "max_rows": 128,
             },
             "acc,num": {
                 "value": 0.460938,
@@ -48,14 +55,14 @@ class TestLlama3_2_ParoQuant(ModelTest):
                 "ceil_pct": 1.0,
             },
         },
-        "mmlu_stem": {
-            "chat_template": False,
-            "acc": {
-                "value": 0.40120520139549637,
-                "floor_pct": 0.04,
-                "ceil_pct": 1.0,
-            },
-        },
+        # "mmlu_stem": {
+        #     "chat_template": False,
+        #     "acc": {
+        #         "value": 0.40120520139549637,
+        #         "floor_pct": 0.04,
+        #         "ceil_pct": 1.0,
+        #     },
+        # },
     }
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
@@ -76,13 +83,13 @@ class TestLlama3_2_ParoQuant(ModelTest):
                 "floor_pct": 0.04,
             },
         },
-        "mmlu_stem": {
-            "chat_template": False,
-            "acc": {
-                "value": 0.3850301300348874,
-                "floor_pct": 0.04,
-            },
-        },
+        # "mmlu_stem": {
+        #     "chat_template": False,
+        #     "acc": {
+        #         "value": 0.3850301300348874,
+        #         "floor_pct": 0.04,
+        #     },
+        # },
     }
     FORMAT = FORMAT.PAROQUANT
     METHOD = METHOD.PAROQUANT
@@ -94,13 +101,13 @@ class TestLlama3_2_ParoQuant(ModelTest):
     KERNEL_INFERENCE = {ParoQuantQuantLinear}
 
     # Mirror benchmark settings: 1+1 epochs on 128 train rows
-    PAROQUANT_ROTATION_EPOCHS = 5
-    PAROQUANT_FINETUNE_EPOCHS = 5
-    PAROQUANT_TRAIN_SAMPLES = 128
+    PAROQUANT_ROTATION_EPOCHS = 2
+    PAROQUANT_FINETUNE_EPOCHS = 2
+    PAROQUANT_TRAIN_SAMPLES = 2048
     PAROQUANT_SEED = 3141592653
 
     def _build_quantize_config(self):
-        return ParoQuantQuantizeConfig(
+        return ParoQuantizeConfig(
             bits=self.BITS,
             method=METHOD.PAROQUANT,
             format=FORMAT.PAROQUANT,

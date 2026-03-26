@@ -239,12 +239,12 @@ class _ArcChallengeLoglikelihoodSuite:
     split: str = "test"
     max_rows: int | None = None
     cache_dir: str | None = None
-    stream: bool = False
+    stream: bool = True
 
     def dataset_loader(self) -> Any:
         from datasets import load_dataset
 
-        def _loader(path: str, *args, stream: bool = False, **kwargs):
+        def _loader(path: str, *args, stream: bool = True, **kwargs):
             # Evalution forwards `stream`; Hugging Face expects `streaming`.
             # Enforce the new API by rejecting legacy `streaming`.
             if "streaming" in kwargs:
@@ -556,6 +556,7 @@ def _build_evalution_suite(
     if normalized_task == "mmlu_stem":
         kwargs.setdefault("subsets", "stem")
         kwargs.setdefault("batch_size", batch_size)
+        kwargs.setdefault("stream", True)
         if _MMLU_LOCAL_DATASET.exists():
             kwargs.setdefault("dataset_path", str(_MMLU_LOCAL_DATASET))
         return benchmarks.mmlu(**kwargs)
@@ -580,6 +581,7 @@ def _build_evalution_suite(
         return benchmarks.gsm8k_platinum(**kwargs)
     if normalized_task == "mmlu":
         kwargs.setdefault("batch_size", batch_size)
+        kwargs.setdefault("stream", True)
         if _MMLU_LOCAL_DATASET.exists():
             kwargs.setdefault("dataset_path", str(_MMLU_LOCAL_DATASET))
         return benchmarks.mmlu(**kwargs)

@@ -22,7 +22,7 @@ from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
-from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantizeConfig, ParoQuantQuantizeConfig, QuantizeConfig
+from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantizeConfig, QuantizeConfig
 from gptqmodel.quantization.paroquant import optimization as paroquant_optimization
 from gptqmodel.quantization.paroquant.optimization import (
     GroupLinearQuantizer,
@@ -56,6 +56,8 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.opt_stage_impl == "reference"
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
+    assert cfg.opt_channel_scale_clamp_min == 1e-2
+    assert cfg.opt_channel_scale_clamp_max == 1e2
     assert cfg.export_quant_method() == METHOD.PAROQUANT
 
 
@@ -82,12 +84,13 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_stage_impl": "reference",
                 "opt_pair_impl": "fast",
                 "opt_quantizer_impl": "reference",
+                "opt_channel_scale_clamp_min": 0.02,
+                "opt_channel_scale_clamp_max": 50.0,
             },
         }
     )
 
     assert isinstance(cfg, ParoQuantizeConfig)
-    assert ParoQuantQuantizeConfig is ParoQuantizeConfig
     assert cfg.quant_method == METHOD.PAROQUANT
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
@@ -105,10 +108,33 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_stage_impl == "reference"
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
+    assert cfg.opt_channel_scale_clamp_min == 0.02
+    assert cfg.opt_channel_scale_clamp_max == 50.0
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
     assert cfg.to_dict()["meta"]["opt_stage_impl"] == "reference"
     assert cfg.to_dict()["meta"]["opt_pair_impl"] == "fast"
     assert cfg.to_dict()["meta"]["opt_quantizer_impl"] == "reference"
+    assert cfg.to_dict()["meta"]["opt_channel_scale_clamp_min"] == 0.02
+    assert cfg.to_dict()["meta"]["opt_channel_scale_clamp_max"] == 50.0
+
+
+def test_paroquant_quantize_config_rejects_invalid_scale_clamp_range():
+    """Guard that ParoQuant scale-clamp overrides remain numerically valid."""
+    with pytest.raises(ValueError, match="scale clamp bounds must be positive"):
+        ParoQuantizeConfig(
+            bits=4,
+            group_size=128,
+            opt_channel_scale_clamp_min=0.0,
+            opt_channel_scale_clamp_max=10.0,
+        )
+
+    with pytest.raises(ValueError, match="opt_channel_scale_clamp_min"):
+        ParoQuantizeConfig(
+            bits=4,
+            group_size=128,
+            opt_channel_scale_clamp_min=10.0,
+            opt_channel_scale_clamp_max=10.0,
+        )
 
 
 def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch):

@@ -29,7 +29,6 @@ from .config import (
                      GPTQQuantizeConfig,
                      HessianConfig,
                      ParoQuantizeConfig,
-                     ParoQuantQuantizeConfig,
                      PreFilterCode,
                      PreFilterQuantizeConfig,
                      QuantBits,
