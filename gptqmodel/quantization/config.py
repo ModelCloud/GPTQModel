@@ -2815,7 +2815,7 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_finetune_epochs: int = field(default=10)
     opt_train_samples: int = field(default=2048)
     opt_validation_samples: int = field(default=64)
-    opt_batch_size: int = field(default=48)
+    opt_batch_size: int = field(default=64)
     opt_rotation_lr: float = field(default=0.05)
     opt_weight_lr: float = field(default=1e-5)
     opt_quantizer_lr: float = field(default=1e-6)

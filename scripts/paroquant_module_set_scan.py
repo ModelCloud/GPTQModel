@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--opt-finetune-epochs", type=int, default=10)
     parser.add_argument("--opt-train-samples", type=int, default=2048)
     parser.add_argument("--opt-validation-samples", type=int, default=64)
-    parser.add_argument("--opt-batch-size", type=int, default=16)
+    parser.add_argument("--opt-batch-size", type=int, default=64)
     parser.add_argument("--output-json", type=Path, default=None)
     return parser.parse_args()
 

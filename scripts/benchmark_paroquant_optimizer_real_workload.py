@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pair-ratio", type=float, default=0.5)
     parser.add_argument("--train-rows", type=int, default=2048)
     parser.add_argument("--val-rows", type=int, default=64)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--rotation-epochs", type=int, default=10)
     parser.add_argument("--finetune-epochs", type=int, default=10)
     parser.add_argument("--rotation-lr", type=float, default=0.05)
