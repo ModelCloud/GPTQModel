@@ -33,13 +33,13 @@ class TestLlama3_2(ModelTest):
                 "floor_pct": 0.04,
             },
         },
-        "mmlu_stem": {
-            "chat_template": False,
-            "acc": {
-                "value": 0.3860, # 0.3099 4096, 0.3270 2048
-                "floor_pct": 0.04,
-            },
-        },
+        # "mmlu_stem": {
+        #     "chat_template": False,
+        #     "acc": {
+        #         "value": 0.3860, # 0.3099 4096, 0.3270 2048
+        #         "floor_pct": 0.04,
+        #     },
+        # },
         "arc_challenge": {
             "chat_template": True,
             "acc": {

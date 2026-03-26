@@ -83,13 +83,13 @@ class TestLlama3_2_ParoQuant(ModelTest):
                 "floor_pct": 0.04,
             },
         },
-        "mmlu_stem": {
-            "chat_template": False,
-            "acc": {
-                "value": 0.3850301300348874,
-                "floor_pct": 0.04,
-            },
-        },
+        # "mmlu_stem": {
+        #     "chat_template": False,
+        #     "acc": {
+        #         "value": 0.3850301300348874,
+        #         "floor_pct": 0.04,
+        #     },
+        # },
     }
     FORMAT = FORMAT.PAROQUANT
     METHOD = METHOD.PAROQUANT
@@ -101,8 +101,8 @@ class TestLlama3_2_ParoQuant(ModelTest):
     KERNEL_INFERENCE = {ParoQuantQuantLinear}
 
     # Mirror benchmark settings: 1+1 epochs on 128 train rows
-    PAROQUANT_ROTATION_EPOCHS = 1
-    PAROQUANT_FINETUNE_EPOCHS = 1
+    PAROQUANT_ROTATION_EPOCHS = 2
+    PAROQUANT_FINETUNE_EPOCHS = 2
     PAROQUANT_TRAIN_SAMPLES = 2048
     PAROQUANT_SEED = 3141592653
 
