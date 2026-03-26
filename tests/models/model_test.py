@@ -85,7 +85,7 @@ from gptqmodel.quantization.config import (  # noqa: E402
     GPTAQConfig,
     HessianConfig,
     MoEConfig,
-    ParoQuantQuantizeConfig,
+    ParoQuantizeConfig,
     QuantizeConfig,
     RTNQuantizeConfig,
     VramStrategy,
@@ -1265,7 +1265,7 @@ class ModelTest(unittest.TestCase):
                     offload_to_disk=self.OFFLOAD_TO_DISK,
                 )
             elif self.METHOD == METHOD.PAROQUANT:
-                return ParoQuantQuantizeConfig(
+                return ParoQuantizeConfig(
                     bits=self.BITS,
                     method=METHOD.PAROQUANT,
                     format=FORMAT.PAROQUANT,

@@ -6,7 +6,7 @@ from model_test import ModelTest
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
-from gptqmodel.quantization import FORMAT, METHOD, ParoQuantQuantizeConfig
+from gptqmodel.quantization import FORMAT, METHOD, ParoQuantizeConfig
 
 
 class TestLlama3_2_ParoQuant(ModelTest):
@@ -100,7 +100,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
     PAROQUANT_SEED = 3141592653
 
     def _build_quantize_config(self):
-        return ParoQuantQuantizeConfig(
+        return ParoQuantizeConfig(
             bits=self.BITS,
             method=METHOD.PAROQUANT,
             format=FORMAT.PAROQUANT,
