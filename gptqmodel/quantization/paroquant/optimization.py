@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import math
 import random
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Callable, Iterable, Literal, Optional, Sequence
+from typing import Iterable, Literal, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -662,10 +662,11 @@ def pseudo_quantize_dequant(
         if use_ste:
             scale = _clamp_ste(scale, min_value=1e-5, max_value=1e5)
             quant = _clamp_ste(_round_ste(weight_view / scale), qmin, qmax)
+            dequant = quant * scale
         else:
             scale = scale.clamp(min=1e-5, max=1e5)
             quant = torch.clamp(torch.round(weight_view / scale), qmin, qmax)
-        dequant = quant * scale
+            dequant = quant * scale
     else:
         qmin = 0
         qmax = 2**bits - 1
@@ -874,6 +875,31 @@ def _chunk_rows(rows: torch.Tensor, batch_size: int) -> Iterable[torch.Tensor]:
     """Yield contiguous mini-batches from flattened calibration activations."""
     for start in range(0, rows.shape[0], batch_size):
         yield rows[start:start + batch_size]
+
+
+@contextmanager
+def _activate_stage_params(
+    model: nn.Module,
+    param_groups: Sequence[dict[str, object]],
+) -> Iterable[None]:
+    """Temporarily disable gradients for parameters that are inactive in the current stage."""
+    active_param_ids = {
+        id(param)
+        for param_group in param_groups
+        for param in param_group.get("params", [])
+        if isinstance(param, nn.Parameter)
+    }
+    original_flags = [(param, param.requires_grad) for param in model.parameters()]
+    for param, was_enabled in original_flags:
+        should_enable = id(param) in active_param_ids
+        if was_enabled != should_enable:
+            param.requires_grad_(should_enable)
+    try:
+        yield
+    finally:
+        for param, was_enabled in original_flags:
+            if param.requires_grad != was_enabled:
+                param.requires_grad_(was_enabled)
 
 
 def _evaluate_model(
@@ -1281,8 +1307,19 @@ def _run_stage(
     stage_cudagraph: Optional[bool] = None,
 ) -> tuple[float, float]:
     impl = _normalize_opt_impl(stage_impl, field="stage_impl")
-    if impl == "reference":
-        return _run_stage_reference(
+    with _activate_stage_params(model, param_groups):
+        if impl == "reference":
+            return _run_stage_reference(
+                model=model,
+                inputs_train=inputs_train,
+                targets_train=targets_train,
+                inputs_val=inputs_val,
+                targets_val=targets_val,
+                param_groups=param_groups,
+                epochs=epochs,
+                batch_size=batch_size,
+            )
+        return _run_stage_gptqmodel(
             model=model,
             inputs_train=inputs_train,
             targets_train=targets_train,
@@ -1291,18 +1328,8 @@ def _run_stage(
             param_groups=param_groups,
             epochs=epochs,
             batch_size=batch_size,
+            stage_cudagraph=stage_cudagraph,
         )
-    return _run_stage_gptqmodel(
-        model=model,
-        inputs_train=inputs_train,
-        targets_train=targets_train,
-        inputs_val=inputs_val,
-        targets_val=targets_val,
-        param_groups=param_groups,
-        epochs=epochs,
-        batch_size=batch_size,
-        stage_cudagraph=stage_cudagraph,
-    )
 
 
 def _result_from_model(

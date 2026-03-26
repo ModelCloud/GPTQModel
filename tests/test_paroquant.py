@@ -452,6 +452,45 @@ def test_paroquant_optim_forward_matches_pseudo_weight_contract():
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=1e-5)
 
 
+def test_paroquant_materialized_sym_scale_ste_matches_legacy_gradients():
+    """Guard the stage2 symmetric quantizer rewrite against the legacy STE math."""
+    torch.manual_seed(0)
+    group_size = 8
+    bits = 4
+    qmin = -(2 ** (bits - 1))
+    qmax = 2 ** (bits - 1) - 1
+
+    weight = torch.randn((6, group_size), dtype=torch.float32, requires_grad=True)
+    scale = (torch.rand((6, 1), dtype=torch.float32) + 0.1).requires_grad_()
+
+    legacy_scale = scale.clone().detach().requires_grad_(True)
+    legacy_weight = weight.clone().detach().requires_grad_(True)
+    legacy_scale_safe = paroquant_optimization._clamp_ste(legacy_scale, min_value=1e-5, max_value=1e5)
+    legacy_quant = paroquant_optimization._clamp_ste(
+        paroquant_optimization._round_ste(legacy_weight / legacy_scale_safe),
+        qmin,
+        qmax,
+    )
+    legacy_output = (legacy_quant * legacy_scale_safe).reshape_as(legacy_weight)
+
+    actual_output = pseudo_quantize_dequant(
+        weight,
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        scale=scale,
+        use_ste=True,
+    )
+
+    torch.testing.assert_close(actual_output, legacy_output, atol=0, rtol=0)
+
+    legacy_output.sum().backward()
+    actual_output.sum().backward()
+
+    torch.testing.assert_close(weight.grad, legacy_weight.grad, atol=0, rtol=0)
+    torch.testing.assert_close(scale.grad, legacy_scale.grad, atol=0, rtol=0)
+
+
 def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
     """Guard that CUDA-graph replay only activates for real CUDA tensor stages."""
     class _DummyModel(torch.nn.Module):
@@ -559,6 +598,58 @@ def test_optimize_paroquant_linear_forwards_stage_cudagraph(monkeypatch):
 
     assert result.val_loss >= 0.0
     assert stage_cudagraph_calls == [False, False]
+
+
+def test_paroquant_run_stage_only_enables_active_gradients(monkeypatch):
+    """Guard that each stage only backpropagates through the parameters it optimizes."""
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=1,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    model = _ParoQuantOptimLinear(
+        torch.randn((8, 8), dtype=torch.float32),
+        torch.randn((8,), dtype=torch.float32),
+        bits=4,
+        group_size=8,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    original_flags = {name: param.requires_grad for name, param in model.named_parameters()}
+    seen_flags = {}
+
+    def fake_stage_impl(**kwargs):
+        del kwargs
+        seen_flags.update({name: param.requires_grad for name, param in model.named_parameters()})
+        return 0.0, 0.0
+
+    monkeypatch.setattr(paroquant_optimization, "_run_stage_gptqmodel", fake_stage_impl)
+
+    paroquant_optimization._run_stage(
+        model=model,
+        inputs_train=torch.randn((4, 8), dtype=torch.float32),
+        targets_train=torch.randn((4, 8), dtype=torch.float32),
+        inputs_val=torch.randn((2, 8), dtype=torch.float32),
+        targets_val=torch.randn((2, 8), dtype=torch.float32),
+        param_groups=[
+            {"params": [model.channel_scales_opt], "lr": 0.05},
+            {"params": [model.theta], "lr": 0.05},
+        ],
+        epochs=1,
+        batch_size=2,
+        stage_impl="fast",
+    )
+
+    assert seen_flags["theta"] is True
+    assert seen_flags["channel_scales_opt"] is True
+    assert seen_flags["weight"] is False
+    assert seen_flags["bias"] is False
+    assert {name: param.requires_grad for name, param in model.named_parameters()} == original_flags
 
 
 def test_paroquant_registers_with_transformers_gptq_quantizer():
