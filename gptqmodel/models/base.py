@@ -28,7 +28,6 @@ from transformers import (
     modeling_utils,
 )
 
-
 try:  # Optional dependency for huggingface datasets support
     from datasets import Dataset as HFDataset
     from datasets import IterableDataset as HFIterableDataset
@@ -272,6 +271,7 @@ class BaseQModel(nn.Module):
         self._turtle_reload_threshold_bytes = self._resolve_turtle_reload_threshold()
         self._turtle_reload_accum_bytes = 0
         self._turtle_materialized_ids: Set[int] = set()
+        self._runtime_generate = None
 
         self.processor: ProcessorMixin = None
 
@@ -1114,12 +1114,44 @@ class BaseQModel(nn.Module):
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
+    def _generate_with_runtime(self, runtime_generate, inputs=None, **kwargs):
+        def _normalize_generate_attention_mask(input_ids, attention_mask):
+            if not torch.is_tensor(attention_mask) or attention_mask.ndim <= 2:
+                return attention_mask
+
+            seq_len = None
+            if torch.is_tensor(input_ids) and input_ids.ndim >= 2:
+                seq_len = input_ids.shape[-1]
+
+            return normalize_seq_mask(attention_mask, seq_len=seq_len)
+
+        if isinstance(inputs, str) or (isinstance(inputs, list) and all(isinstance(x, str) for x in inputs)):
+            kwargs.setdefault("prompts", inputs)
+        elif hasattr(inputs, "get") and not torch.is_tensor(inputs):
+            merged_kwargs = dict(inputs)
+            merged_kwargs.update(kwargs)
+            kwargs = merged_kwargs
+        elif inputs is not None:
+            kwargs.setdefault("input_ids", inputs)
+
+        if "attention_mask" in kwargs:
+            kwargs["attention_mask"] = _normalize_generate_attention_mask(
+                kwargs.get("input_ids"),
+                kwargs["attention_mask"],
+            )
+
+        return runtime_generate(self.model, **kwargs)
+
     def generate(self, inputs=None, **kwargs):
         with torch.inference_mode():
             # fix hf generate not applying correct pad token
             pad_token_id = kwargs.get("pad_token_id", None)
             if pad_token_id is None and self.tokenizer:
                 kwargs["pad_token_id"] = self.tokenizer.pad_token_id
+
+            runtime_generate = getattr(self, "_runtime_generate", None)
+            if runtime_generate is not None:
+                return self._generate_with_runtime(runtime_generate, inputs=inputs, **kwargs)
 
             def _normalize_generate_attention_mask(input_ids, attention_mask):
                 if not torch.is_tensor(attention_mask) or attention_mask.ndim <= 2:

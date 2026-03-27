@@ -14,7 +14,6 @@ from tabulate import tabulate
 
 from gptqmodel.utils.backend import BACKEND
 
-
 _MMLU_LOCAL_DATASET = Path("/monster/data/model/dataset/hails-mmlu_no_train")
 _GSM8K_LOCAL_DATASET = Path("/monster/data/model/dataset/gsm8k")
 _ENGINE_OPTION_KEYS = {
@@ -22,8 +21,18 @@ _ENGINE_OPTION_KEYS = {
     "device",
     "device_map",
     "dtype",
+    "enforce_eager",
+    "gpu_memory_utilization",
+    "llm_kwargs",
+    "max_model_len",
     "padding_side",
+    "quantization",
+    "seed",
+    "tensor_parallel_size",
+    "tokenizer_mode",
+    "tokenizer_revision",
     "trust_remote_code",
+    "vllm_path",
 }
 _DROPPED_MODEL_ARG_KEYS = {
     "backend",
@@ -133,8 +142,11 @@ def evaluate(
     model_args: Optional[Dict[str, Any]] = None,
     **args,
 ):
-    if llm_backend != "gptqmodel":
-        raise ValueError("Evalution-backed evaluation only supports llm_backend='gptqmodel'.")
+    normalized_llm_backend = str(llm_backend).strip().lower()
+    if normalized_llm_backend not in {"gptqmodel", "vllm"}:
+        raise ValueError(
+            "Evalution-backed evaluation only supports llm_backend='gptqmodel' or llm_backend='vllm'."
+        )
 
     if tasks is None:
         task_list = list(DEFAULT_TASKS)
@@ -159,6 +171,7 @@ def evaluate(
         batch_size=batch_size,
         trust_remote_code=trust_remote_code,
         output_path=output_path,
+        llm_backend=normalized_llm_backend,
         backend=backend,
         model_args=model_args,
         apply_chat_template=apply_chat_template,
@@ -175,6 +188,7 @@ def run_evalution(
     batch_size: int | str,
     trust_remote_code: bool,
     output_path: Optional[str],
+        llm_backend: str,
     backend: BACKEND | str | None,
     model_args: Dict[str, Any],
     apply_chat_template: bool,
@@ -185,6 +199,7 @@ def run_evalution(
     engine_config, model_config, session = _build_evalution_runtime(
         evalution=evalution,
         model_or_id_or_path=model_or_id_or_path,
+        llm_backend=llm_backend,
         backend=backend,
         batch_size=batch_size,
         trust_remote_code=trust_remote_code,
@@ -400,6 +415,7 @@ def _build_evalution_runtime(
     *,
     evalution: Any,
     model_or_id_or_path: Any,
+        llm_backend: str,
     backend: BACKEND | str | None,
     batch_size: int | str,
     trust_remote_code: bool,
@@ -421,6 +437,45 @@ def _build_evalution_runtime(
     engine_padding_side = engine_options.get("padding_side", "left")
 
     tokenizer_path = _resolve_tokenizer_path(tokenizer)
+
+    if llm_backend == "vllm":
+        model_path = (
+            model_or_id_or_path
+            if isinstance(model_or_id_or_path, str)
+            else _resolve_model_path(model_or_id_or_path)
+        )
+        if model_path is None:
+            raise ValueError("Evalution vLLM evaluation requires a model path.")
+
+        max_model_len = engine_options.get("max_model_len")
+        tensor_parallel_size = engine_options.get("tensor_parallel_size", 1)
+        gpu_memory_utilization = engine_options.get("gpu_memory_utilization", 0.9)
+        llm_kwargs = dict(engine_options.get("llm_kwargs", {}) or {})
+
+        engine = evalution.VLLM(
+            dtype=engine_dtype,
+            batch_size=batch_size,
+            trust_remote_code=trust_remote_code,
+            padding_side=engine_padding_side,
+            seed=engine_options.get("seed"),
+            tokenizer_mode=engine_options.get("tokenizer_mode", "auto"),
+            tensor_parallel_size=int(tensor_parallel_size),
+            gpu_memory_utilization=float(gpu_memory_utilization),
+            quantization=engine_options.get("quantization"),
+            max_model_len=int(max_model_len) if max_model_len is not None else None,
+            enforce_eager=bool(engine_options.get("enforce_eager", False)),
+            tokenizer_revision=engine_options.get("tokenizer_revision"),
+            vllm_path=engine_options.get("vllm_path"),
+            llm_kwargs=llm_kwargs,
+        )
+        model_config = evalution.Model(
+            path=model_path,
+            tokenizer_path=tokenizer_path,
+            trust_remote_code=trust_remote_code,
+            model_kwargs=load_kwargs,
+        )
+        session = engine.build(model_config)
+        return engine, model_config, session
 
     if isinstance(model_or_id_or_path, str):
         engine = evalution.GPTQModel(
@@ -552,6 +607,7 @@ def _build_evalution_suite(
     if normalized_task == "arc_challenge":
         kwargs.setdefault("apply_chat_template", apply_chat_template)
         kwargs.setdefault("batch_size", batch_size)
+        kwargs.pop("num_fewshot", None)
         return _ArcChallengeLoglikelihoodSuite(**kwargs)
     if normalized_task == "mmlu_stem":
         kwargs.setdefault("subsets", "stem")

@@ -18,7 +18,6 @@ import transformers
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.structure import print_module_tree
 
-
 if ensure_modelscope_available():
     from modelscope import snapshot_download
 else:
@@ -547,6 +546,7 @@ def ModelLoader(cls):
         )
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
+            runtime_generate = None
             if backend == BACKEND.VLLM:
                 if format_code not in [FORMAT.GPTQ, FORMAT.GEMM]:
                     raise ValueError(f"{backend} backend only supports FORMAT.GPTQ or FORMAT.GEMM: actual = {qcfg.format}")
@@ -565,8 +565,7 @@ def ModelLoader(cls):
 
                 model.config = model.llm_engine.model_config
                 model.device = model.llm_engine.vllm_config.device_config.device
-
-                cls.generate = lambda self, **kwargs: vllm_generate(self.model, **kwargs)
+                runtime_generate = vllm_generate
 
             elif backend == BACKEND.SGLANG:
                 from ..utils.sglang import load_model_by_sglang, sglang_generate
@@ -578,8 +577,8 @@ def ModelLoader(cls):
                     **kwargs,
                 )
                 model.config = hf_config
-                cls.generate = lambda self, **kwargs: sglang_generate(self.model, **kwargs)
-            return cls(
+                runtime_generate = sglang_generate
+            instance = cls(
                 model,
                 quantized=True,
                 quantize_config=qcfg,
@@ -589,6 +588,8 @@ def ModelLoader(cls):
                 trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
             )
+            instance._runtime_generate = runtime_generate
+            return instance
 
         if format_code == FORMAT.MARLIN:
             # format marlin requires marlin kernel
