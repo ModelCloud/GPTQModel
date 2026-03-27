@@ -58,6 +58,7 @@ class _ParoQuantLayerState:
     """Per-layer bookkeeping for activation capture and deferred quantization."""
 
     modules: Dict[str, NamedModule] = field(default_factory=dict)
+    layer_module: Optional[torch.nn.Module] = None
     subset_total: Optional[int] = None
     processed_subsets: Set[int] = field(default_factory=set)
     pending_modules: Set[str] = field(default_factory=set)
@@ -317,10 +318,71 @@ class ParoQuantProcessor(LoopProcessor):
         digest = hashlib.blake2b(seed_material, digest_size=8).digest()
         return int.from_bytes(digest, byteorder="big", signed=False)
 
+    @staticmethod
+    def _module_subsection_label(module_name: str) -> str:
+        """Map common projection archetypes to subsection optimization buckets."""
+        leaf = module_name.rsplit(".", 1)[-1]
+        if leaf in {"q_proj", "k_proj", "v_proj"}:
+            return "attn_qkv"
+        if leaf == "o_proj":
+            return "attn_o"
+        if leaf in {"gate_proj", "up_proj"}:
+            return "mlp_gate_up"
+        if leaf == "down_proj":
+            return "mlp_down"
+        return f"single:{module_name}"
+
+    @staticmethod
+    def _module_subsection_order(module_name: str) -> tuple[int, str]:
+        """Keep subsection members in canonical architectural order."""
+        leaf = module_name.rsplit(".", 1)[-1]
+        order = {
+            "q_proj": 0,
+            "k_proj": 1,
+            "v_proj": 2,
+            "o_proj": 3,
+            "gate_proj": 4,
+            "up_proj": 5,
+            "down_proj": 6,
+        }
+        return (order.get(leaf, 100), module_name)
+
+    def _optimization_groups_for_layer(
+        self,
+        state: _ParoQuantLayerState,
+    ) -> list[tuple[str, list[NamedModule]]]:
+        """Resolve the optimization unit for the current layer.
+
+        `module` keeps today's per-linear behavior. `subsection` and `layer`
+        are scaffolded here so the lifecycle can switch units explicitly once
+        their execution paths land.
+        """
+        mode = str(self.qcfg.opt_unit).strip().lower()
+        named_modules = [state.modules[name] for name in sorted(state.modules)]
+        if mode == "module":
+            return [(module.name, [module]) for module in named_modules]
+        if mode == "subsection":
+            grouped: Dict[str, list[NamedModule]] = {}
+            for module in named_modules:
+                grouped.setdefault(self._module_subsection_label(module.name), []).append(module)
+            for label in grouped:
+                grouped[label].sort(key=lambda module: self._module_subsection_order(module.name))
+            return [(label, grouped[label]) for label in sorted(grouped)]
+        if mode == "layer":
+            return [("layer", named_modules)]
+        raise ValueError(f"ParoQuantProcessor: unsupported optimize unit `{self.qcfg.opt_unit}`.")
+
     def _quantize_layer(self, layer_index: int, state: _ParoQuantLayerState) -> None:
         """Quantize every captured module in a layer once all subsets are ready."""
         if state.quantized:
             return
+
+        optimization_groups = self._optimization_groups_for_layer(state)
+        if str(self.qcfg.opt_unit).strip().lower() != "module":
+            raise NotImplementedError(
+                "ParoQuantProcessor optimize units `subsection` and `layer` are scaffolded but not implemented yet. "
+                f"Resolved groups for layer {layer_index}: {[label for label, _modules in optimization_groups]}"
+            )
 
         input_feat = self._layer_input_features(state)
         for module_name, tensor in input_feat.items():
@@ -359,6 +421,7 @@ class ParoQuantProcessor(LoopProcessor):
         layer_state = self._get_layer_state(module.layer_index)
         with layer_state.lock:
             layer_state.modules[module.name] = module
+            layer_state.layer_module = module.state.get("layer_module", layer_state.layer_module)
             layer_state.pending_modules.add(module.name)
 
         self._ensure_task_bucket(module.name, module.layer_index)

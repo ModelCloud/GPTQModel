@@ -848,6 +848,47 @@ def test_paroquant_processor_resets_reused_module_buckets_per_layer():
     assert processor.tasks["mlp.gate_proj"]["inputs"] == []
 
 
+def test_paroquant_processor_groups_common_llama_subsections():
+    """Guard the planned subsection optimizer buckets for attention and MLP projections."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_unit="subsection")
+
+    state = SimpleNamespace(
+        modules={
+            "self_attn.q_proj": SimpleNamespace(name="self_attn.q_proj"),
+            "self_attn.k_proj": SimpleNamespace(name="self_attn.k_proj"),
+            "self_attn.v_proj": SimpleNamespace(name="self_attn.v_proj"),
+            "self_attn.o_proj": SimpleNamespace(name="self_attn.o_proj"),
+            "mlp.gate_proj": SimpleNamespace(name="mlp.gate_proj"),
+            "mlp.up_proj": SimpleNamespace(name="mlp.up_proj"),
+            "mlp.down_proj": SimpleNamespace(name="mlp.down_proj"),
+        }
+    )
+
+    groups = processor._optimization_groups_for_layer(state)
+
+    assert [(label, [module.name for module in modules]) for label, modules in groups] == [
+        ("attn_o", ["self_attn.o_proj"]),
+        ("attn_qkv", ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]),
+        ("mlp_down", ["mlp.down_proj"]),
+        ("mlp_gate_up", ["mlp.gate_proj", "mlp.up_proj"]),
+    ]
+
+
+def test_paroquant_processor_rejects_unimplemented_non_module_units():
+    """Guard that scaffolded optimize units fail loudly until their execution paths are implemented."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_unit="layer")
+
+    state = SimpleNamespace(
+        quantized=False,
+        modules={"mlp.gate_proj": SimpleNamespace(name="mlp.gate_proj")},
+    )
+
+    with pytest.raises(NotImplementedError, match="scaffolded but not implemented"):
+        processor._quantize_layer(layer_index=0, state=state)
+
+
 def test_paroquant_quant_device_selection_forces_single_gpu():
     """Guard against multi-GPU ParoQuant worker fan-out and sync hazards."""
     cuda_devices = [torch.device("cuda:0"), torch.device("cuda:1"), torch.device("cuda:2")]
