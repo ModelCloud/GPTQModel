@@ -892,15 +892,7 @@ class ParoQuantProcessor(LoopProcessor):
             scaler = torch.amp.GradScaler(enabled=use_amp)
             best_state = {key: tensor.detach().clone() for key, tensor in layer.state_dict().items()}
             best_val_loss = float("inf")
-            last_train_loss = self._evaluate_group_layer(
-                layer,
-                input_batches=input_batches_train,
-                input_kwargs_batches=input_kwargs_train,
-                target_batches=target_batches_train,
-                position_ids=position_ids_train,
-                attention_masks=attention_masks_train,
-                use_amp=use_amp,
-            )
+            last_train_loss = 0.0
             global_step = 0
 
             for _epoch in range(epochs):

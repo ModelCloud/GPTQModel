@@ -1363,6 +1363,52 @@ def test_paroquant_processor_group_adamw_uses_merged_groups(monkeypatch):
     assert calls == [{}]
 
 
+def test_paroquant_processor_group_stage_skips_redundant_initial_train_eval(monkeypatch):
+    """Guard grouped stage timing against paying an extra full train-set eval before epoch 1."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, **_kwargs):
+            return self.linear(x)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_stage_impl="fast")
+    processor.gptq_model = None
+    processor.model = None
+    calls = []
+
+    def fake_evaluate(*_args, **_kwargs):
+        calls.append("eval")
+        return 0.0
+
+    monkeypatch.setattr(processor, "_evaluate_group_layer", fake_evaluate)
+    layer = _ToyLayer()
+    input_batch = [[torch.randn(2, 4)]]
+    target_batch = [[torch.randn(2, 4)]]
+
+    processor._run_group_stage(
+        layer,
+        optim_modules={},
+        input_batches_train=input_batch,
+        input_kwargs_train=[{}],
+        target_batches_train=target_batch,
+        position_ids_train=[None],
+        attention_masks_train=[None],
+        input_batches_val=input_batch,
+        input_kwargs_val=[{}],
+        target_batches_val=target_batch,
+        position_ids_val=[None],
+        attention_masks_val=[None],
+        param_groups=[{"params": [layer.linear.weight], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}],
+        epochs=1,
+    )
+
+    assert calls == ["eval"]
+
+
 def test_paroquant_processor_optimize_group_runs_on_toy_layer():
     """Guard the grouped optimizer path on a tiny layer without needing the full looper."""
 
