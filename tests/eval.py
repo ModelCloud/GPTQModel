@@ -18,19 +18,34 @@ _MMLU_LOCAL_DATASET = Path("/monster/data/model/dataset/hails-mmlu_no_train")
 _GSM8K_LOCAL_DATASET = Path("/monster/data/model/dataset/gsm8k")
 _ENGINE_OPTION_KEYS = {
     "attn_implementation",
+    "attention_backend",
+    "base_url",
+    "context_length",
+    "dp_size",
     "device",
     "device_map",
     "dtype",
     "enforce_eager",
     "gpu_memory_utilization",
     "llm_kwargs",
+    "load_format",
     "max_model_len",
+    "max_running_requests",
+    "max_total_tokens",
+    "mem_fraction_static",
     "padding_side",
+    "pp_size",
     "quantization",
+    "random_seed",
+    "sampling_backend",
+    "sampling_params",
     "seed",
+    "skip_tokenizer_init",
     "tensor_parallel_size",
+    "tokenizer_worker_num",
     "tokenizer_mode",
     "tokenizer_revision",
+    "tp_size",
     "trust_remote_code",
     "vllm_path",
 }
@@ -143,9 +158,9 @@ def evaluate(
     **args,
 ):
     normalized_llm_backend = str(llm_backend).strip().lower()
-    if normalized_llm_backend not in {"gptqmodel", "vllm"}:
+    if normalized_llm_backend not in {"gptqmodel", "vllm", "sglang"}:
         raise ValueError(
-            "Evalution-backed evaluation only supports llm_backend='gptqmodel' or llm_backend='vllm'."
+            "Evalution-backed evaluation only supports llm_backend='gptqmodel', 'vllm', or 'sglang'."
         )
 
     if tasks is None:
@@ -438,7 +453,7 @@ def _build_evalution_runtime(
 
     tokenizer_path = _resolve_tokenizer_path(tokenizer)
 
-    if llm_backend == "vllm":
+    if llm_backend in {"vllm", "sglang"}:
         model_path = (
             model_or_id_or_path
             if isinstance(model_or_id_or_path, str)
@@ -447,27 +462,38 @@ def _build_evalution_runtime(
         if model_path is None:
             raise ValueError("Evalution vLLM evaluation requires a model path.")
 
-        max_model_len = engine_options.get("max_model_len")
-        tensor_parallel_size = engine_options.get("tensor_parallel_size", 1)
-        gpu_memory_utilization = engine_options.get("gpu_memory_utilization", 0.9)
-        llm_kwargs = dict(engine_options.get("llm_kwargs", {}) or {})
+        if llm_backend == "vllm":
+            max_model_len = engine_options.get("max_model_len")
+            tensor_parallel_size = engine_options.get("tensor_parallel_size", 1)
+            gpu_memory_utilization = engine_options.get("gpu_memory_utilization", 0.9)
+            llm_kwargs = dict(engine_options.get("llm_kwargs", {}) or {})
 
-        engine = evalution.VLLM(
-            dtype=engine_dtype,
-            batch_size=batch_size,
-            trust_remote_code=trust_remote_code,
-            padding_side=engine_padding_side,
-            seed=engine_options.get("seed"),
-            tokenizer_mode=engine_options.get("tokenizer_mode", "auto"),
-            tensor_parallel_size=int(tensor_parallel_size),
-            gpu_memory_utilization=float(gpu_memory_utilization),
-            quantization=engine_options.get("quantization"),
-            max_model_len=int(max_model_len) if max_model_len is not None else None,
-            enforce_eager=bool(engine_options.get("enforce_eager", False)),
-            tokenizer_revision=engine_options.get("tokenizer_revision"),
-            vllm_path=engine_options.get("vllm_path"),
-            llm_kwargs=llm_kwargs,
-        )
+            engine = evalution.VLLM(
+                dtype=engine_dtype,
+                batch_size=batch_size,
+                trust_remote_code=trust_remote_code,
+                padding_side=engine_padding_side,
+                seed=engine_options.get("seed"),
+                tokenizer_mode=engine_options.get("tokenizer_mode", "auto"),
+                tensor_parallel_size=int(tensor_parallel_size),
+                gpu_memory_utilization=float(gpu_memory_utilization),
+                quantization=engine_options.get("quantization"),
+                max_model_len=int(max_model_len) if max_model_len is not None else None,
+                enforce_eager=bool(engine_options.get("enforce_eager", False)),
+                tokenizer_revision=engine_options.get("tokenizer_revision"),
+                vllm_path=engine_options.get("vllm_path"),
+                llm_kwargs=llm_kwargs,
+            )
+        else:
+            sglang_config = _build_sglang_engine_kwargs(
+                engine_options=engine_options,
+                batch_size=batch_size,
+                trust_remote_code=trust_remote_code,
+                padding_side=engine_padding_side,
+                engine_dtype=engine_dtype,
+            )
+            engine = evalution.SGLang(**sglang_config)
+        print("load_kwargs",load_kwargs)
         model_config = evalution.Model(
             path=model_path,
             tokenizer_path=tokenizer_path,
@@ -679,6 +705,59 @@ def _split_evalution_model_args(model_args: Dict[str, Any]) -> tuple[dict[str, A
         else:
             load_kwargs[key] = value
     return engine_options, load_kwargs
+
+def _build_sglang_engine_kwargs(
+    *,
+    engine_options: Dict[str, Any],
+    batch_size: int | str,
+    trust_remote_code: bool,
+    padding_side: str,
+    engine_dtype: str | None,
+) -> Dict[str, Any]:
+    context_length = engine_options.get("context_length", engine_options.get("max_model_len"))
+    tp_size = engine_options.get("tp_size", engine_options.get("tensor_parallel_size", 1))
+    mem_fraction_static = engine_options.get(
+        "mem_fraction_static",
+        engine_options.get("gpu_memory_utilization"),
+    )
+
+    return {
+        "dtype": engine_dtype,
+        "device": engine_options.get("device"),
+        "seed": engine_options.get("seed"),
+        "trust_remote_code": trust_remote_code,
+        "padding_side": padding_side,
+        "base_url": engine_options.get("base_url"),
+        "batch_size": batch_size,
+        "tokenizer_mode": engine_options.get("tokenizer_mode", "auto"),
+        "tokenizer_worker_num": int(engine_options.get("tokenizer_worker_num", 1)),
+        "skip_tokenizer_init": bool(engine_options.get("skip_tokenizer_init", False)),
+        "load_format": engine_options.get("load_format", "auto"),
+        "context_length": int(context_length) if context_length is not None else None,
+        "quantization": engine_options.get("quantization"),
+        "mem_fraction_static": float(mem_fraction_static) if mem_fraction_static is not None else None,
+        "tp_size": int(tp_size),
+        "dp_size": int(engine_options.get("dp_size", 1)),
+        "pp_size": int(engine_options.get("pp_size", 1)),
+        "attention_backend": engine_options.get("attention_backend"),
+        "sampling_backend": engine_options.get("sampling_backend"),
+        "max_running_requests": (
+            int(engine_options["max_running_requests"])
+            if engine_options.get("max_running_requests") is not None
+            else None
+        ),
+        "max_total_tokens": (
+            int(engine_options["max_total_tokens"])
+            if engine_options.get("max_total_tokens") is not None
+            else None
+        ),
+        "random_seed": (
+            int(engine_options["random_seed"])
+            if engine_options.get("random_seed") is not None
+            else None
+        ),
+        "sampling_params": dict(engine_options.get("sampling_params", {}) or {}),
+    }
 
 
 def _parse_generation_settings(gen_kwargs: Any) -> Dict[str, Any]:

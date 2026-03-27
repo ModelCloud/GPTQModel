@@ -113,3 +113,72 @@ def test_build_evalution_runtime_supports_vllm_engine_options():
     assert captured["engine_kwargs"]["tensor_parallel_size"] == 2
     assert captured["engine_kwargs"]["quantization"] == "gptq"
     assert captured["engine_kwargs"]["max_model_len"] == 4096
+
+
+def test_build_evalution_runtime_supports_sglang_engine_options():
+    captured = {}
+
+    class FakeSGLang:
+        def __init__(self, **kwargs):
+            captured["engine_kwargs"] = kwargs
+
+        def build(self, model_config):
+            captured["model_config"] = model_config
+            return "session"
+
+    class FakeModel:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def to_dict(self):
+            return dict(self.kwargs)
+
+    fake_evalution = SimpleNamespace(
+        SGLang=FakeSGLang,
+        Model=FakeModel,
+    )
+
+    engine, model_config, session = eval_module._build_evalution_runtime(
+        evalution=fake_evalution,
+        model_or_id_or_path="/tmp/model",
+        llm_backend="sglang",
+        backend=BACKEND.AUTO,
+        batch_size=2,
+        trust_remote_code=True,
+        model_args={
+            "dtype": "float16",
+            "device": "cuda",
+            "gpu_memory_utilization": "0.75",
+            "tensor_parallel_size": "2",
+            "quantization": "gptq",
+            "tokenizer_mode": "auto",
+            "max_model_len": "8192",
+            "attention_backend": "flashinfer",
+            "sampling_backend": "pytorch",
+            "max_running_requests": "16",
+            "max_total_tokens": "32768",
+            "random_seed": "123",
+            "sampling_params": {"top_p": 0.9},
+            "foo": "bar",
+        },
+        tokenizer=None,
+    )
+
+    assert session == "session"
+    assert engine is not None
+    assert model_config.kwargs["path"] == "/tmp/model"
+    assert model_config.kwargs["model_kwargs"] == {"foo": "bar",}
+    assert captured["engine_kwargs"]["dtype"] == "float16"
+    assert captured["engine_kwargs"]["device"] == "cuda"
+    assert captured["engine_kwargs"]["batch_size"] == 2
+    assert captured["engine_kwargs"]["trust_remote_code"] is True
+    assert captured["engine_kwargs"]["quantization"] == "gptq"
+    assert captured["engine_kwargs"]["context_length"] == 8192
+    assert captured["engine_kwargs"]["tp_size"] == 2
+    assert captured["engine_kwargs"]["mem_fraction_static"] == 0.75
+    assert captured["engine_kwargs"]["attention_backend"] == "flashinfer"
+    assert captured["engine_kwargs"]["sampling_backend"] == "pytorch"
+    assert captured["engine_kwargs"]["max_running_requests"] == 16
+    assert captured["engine_kwargs"]["max_total_tokens"] == 32768
+    assert captured["engine_kwargs"]["random_seed"] == 123
+    assert captured["engine_kwargs"]["sampling_params"] == {"top_p": 0.9}
