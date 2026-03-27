@@ -8,7 +8,7 @@ from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
-from gptqmodel.looper.stage_layer import _replay_layer_outputs, run_layer_stage
+from gptqmodel.looper.stage_layer import _capture_pristine_group_context, _replay_layer_outputs, run_layer_stage
 from gptqmodel.looper.stage_subset import CalibrationCoveragePolicy, SubsetPlan, SubsetStageResult
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.pause_resume import PauseResumeController
@@ -84,7 +84,10 @@ class _TinyGptqModel:
     def __init__(self):
         self.layer = _TinyLayer()
         self.model = _TinyModel(self.layer)
-        self.quantize_config = types.SimpleNamespace(device=torch.device("cpu"))
+        self.quantize_config = types.SimpleNamespace(
+            device=torch.device("cpu"),
+            calibration_data_device=None,
+        )
         self._hook_started = False
         self._hook_finished = False
 
@@ -1291,6 +1294,71 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
     assert torch.allclose(layers[0].forward_inputs[0], input_tensor)
     assert layer1_inputs
     assert all(torch.allclose(layer_input, expected_layer0_output) for layer_input in layer1_inputs)
+
+
+def test_capture_pristine_group_context_preserves_untouched_layer_io(monkeypatch):
+    observed = {}
+    sentinel_outputs = [[torch.randn(1, 1, 1)]]
+
+    def fake_replay_layer_outputs(*_args, **kwargs):
+        observed["replay_kwargs"] = kwargs
+        return sentinel_outputs
+
+    monkeypatch.setattr("gptqmodel.looper.stage_layer._replay_layer_outputs", fake_replay_layer_outputs)
+
+    class DummyProcessor:
+        def uses_grouped_optimization(self):
+            return True
+
+        def receive_layer_forward_context(self, **kwargs):
+            observed["receive_kwargs"] = kwargs
+
+    tensor = torch.randn(1, 1, 1)
+    subset_plan = SubsetPlan(
+        modules={},
+        subset_index=0,
+        subset_total=1,
+        execute_forward=True,
+        replay_after_process=True,
+        forward_mode="serial",
+        batch_count=1,
+        forward_row_counts=[1],
+        forward_total_rows=1,
+        moe_groups={},
+        forward_device_map={},
+        calibration_coverage_policy=CalibrationCoveragePolicy(
+            validate_input_coverage=False,
+            fallback_enabled=True,
+            prune_uncovered_modules=False,
+            record_dynamic_exclusions=False,
+        ),
+        module_chunks=[{}],
+    )
+
+    _capture_pristine_group_context(
+        looper=types.SimpleNamespace(),
+        processor=DummyProcessor(),
+        module=torch.nn.Identity(),
+        subset_plans=[subset_plan],
+        layer_inputs=[[tensor]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.layers.0",
+        full={},
+        log=None,
+        region_timer=None,
+    )
+
+    assert observed["replay_kwargs"]["replay_plan"] is None
+    assert observed["receive_kwargs"]["layer_outputs"] is sentinel_outputs
+    assert observed["receive_kwargs"]["layer_inputs"] == [[tensor]]
+    assert observed["receive_kwargs"]["layer_input_kwargs"] == [{}]
+    assert observed["receive_kwargs"]["subset_total"] == 1
 
 
 def test_masked_hook_wrapper_trims_left_padded_inputs_before_add_batch():

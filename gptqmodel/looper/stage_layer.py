@@ -224,6 +224,60 @@ def _replay_layer_outputs(
     return layer_outputs
 
 
+def _capture_pristine_group_context(
+    looper: "ModuleLooper",
+    *,
+    processor,
+    module: torch.nn.Module,
+    subset_plans: List[SubsetPlan],
+    layer_inputs: List[List[torch.Tensor]],
+    layer_input_kwargs: List[Dict[str, torch.Tensor]],
+    position_ids: List[torch.Tensor],
+    attention_masks: List[torch.Tensor],
+    cur_layer_device: torch.device,
+    is_lm_head_module: bool,
+    shared_kv_cache_dict: Dict[int, torch.Tensor],
+    layer_index: int,
+    layer_descriptor: str,
+    full,
+    log,
+    region_timer,
+) -> None:
+    """Capture untouched full-layer IO once for ParoQuant grouped optimization modes."""
+    uses_grouped_optimization = getattr(processor, "uses_grouped_optimization", None)
+    if not callable(uses_grouped_optimization) or not uses_grouped_optimization():
+        return
+    if not subset_plans:
+        return
+
+    pristine_outputs = _replay_layer_outputs(
+        looper,
+        module=module,
+        processor=processor,
+        layer_inputs=layer_inputs,
+        layer_input_kwargs=layer_input_kwargs,
+        position_ids=position_ids,
+        attention_masks=attention_masks,
+        cur_layer_device=cur_layer_device,
+        is_lm_head_module=is_lm_head_module,
+        shared_kv_cache_dict=shared_kv_cache_dict,
+        layer_index=layer_index,
+        layer_descriptor=layer_descriptor,
+        full=full,
+        log=log,
+        region_timer=region_timer,
+        replay_plan=None,
+    )
+    processor.receive_layer_forward_context(
+        layer_index=layer_index,
+        layer_inputs=layer_inputs,
+        layer_input_kwargs=layer_input_kwargs,
+        layer_outputs=pristine_outputs,
+        subset_index=None,
+        subset_total=len(subset_plans),
+    )
+
+
 def run_layer_stage(
     looper: 'ModuleLooper',
     *,
@@ -344,6 +398,25 @@ def run_layer_stage(
                 layer_index=layer_index,
                 layers_prefix=layers_prefix,
                 fallback=fallback,
+            )
+
+            _capture_pristine_group_context(
+                looper,
+                processor=processor,
+                module=module,
+                subset_plans=subset_plans,
+                layer_inputs=layer_inputs,
+                layer_input_kwargs=layer_input_kwargs,
+                position_ids=position_ids,
+                attention_masks=attention_masks,
+                cur_layer_device=cur_layer_device,
+                is_lm_head_module=is_lm_head_module,
+                shared_kv_cache_dict=shared_kv_cache_dict,
+                layer_index=layer_index,
+                layer_descriptor=layer_descriptor,
+                full=full,
+                log=log,
+                region_timer=region_timer,
             )
 
             is_last_module = layer_index == len(pb) - 1

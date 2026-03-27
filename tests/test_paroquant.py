@@ -19,6 +19,7 @@ from transformers.quantizers.auto import AutoQuantizationConfig
 from transformers.utils.quantization_config import GPTQConfig
 
 from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
@@ -518,6 +519,40 @@ def test_paroquant_optim_forward_matches_pseudo_weight_contract():
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=1e-5)
 
 
+def test_paroquant_optim_forward_matches_pseudo_weight_contract_for_rank3():
+    """Guard grouped/layer optimization forwards that pass [batch, seq, hidden] activations."""
+    torch.manual_seed(0)
+    weight = torch.randn((16, 8), dtype=torch.float32)
+    inputs = torch.randn((2, 3, 8), dtype=torch.float32)
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=3,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    model = _ParoQuantOptimLinear(
+        weight,
+        None,
+        bits=4,
+        group_size=8,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    with torch.no_grad():
+        model.theta.uniform_(-0.2, 0.2)
+        model.channel_scales_opt.uniform_(0.8, 1.2)
+    model.init_quantizer()
+
+    expected = F.linear(inputs, model.pseudo_weight(), model.bias)
+    actual = model(inputs)
+
+    torch.testing.assert_close(actual, expected, atol=2e-6, rtol=1e-5)
+
+
 def test_paroquant_materialized_sym_scale_ste_matches_legacy_gradients():
     """Guard the stage2 symmetric quantizer rewrite against the legacy STE math."""
     torch.manual_seed(0)
@@ -876,18 +911,87 @@ def test_paroquant_processor_groups_common_llama_subsections():
     ]
 
 
-def test_paroquant_processor_rejects_unimplemented_non_module_units():
-    """Guard that scaffolded optimize units fail loudly until their execution paths are implemented."""
+def test_paroquant_processor_grouped_modes_capture_pristine_context_outside_subset_forward():
+    """Guard grouped modes against treating early-stopped subset forwards as full-layer targets."""
     processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_unit="subsection")
+    assert processor.uses_grouped_optimization() is True
+    assert processor.capture_layer_forward_context_during_subset() is False
+
     processor.qcfg = SimpleNamespace(opt_unit="layer")
+    assert processor.uses_grouped_optimization() is True
+    assert processor.capture_layer_forward_context_during_subset() is False
+
+    processor.qcfg = SimpleNamespace(opt_unit="module")
+    assert processor.uses_grouped_optimization() is False
+    assert processor.capture_layer_forward_context_during_subset() is True
+
+
+def test_paroquant_processor_routes_non_module_units_through_group_optimizer():
+    """Guard that subsection/layer modes now use grouped optimization instead of raising."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_unit="subsection")
+    processor.fallback = True
+    processor.lock = threading.Lock()
+    processor.tasks = {}
+    processor.calculate_w_wq_diff = False
+    processor._log_quant_result = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    layer = torch.nn.Module()
+    layer.self_attn = torch.nn.Module()
+    layer.self_attn.q_proj = torch.nn.Linear(8, 8, bias=False)
+    layer.self_attn.k_proj = torch.nn.Linear(8, 8, bias=False)
+    layer.self_attn.v_proj = torch.nn.Linear(8, 8, bias=False)
+
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+    processor._layer_input_features = lambda _state: {  # type: ignore[method-assign]
+        q_proj.name: torch.randn(4, 8),
+        k_proj.name: torch.randn(4, 8),
+        v_proj.name: torch.randn(4, 8),
+    }
+
+    observed_groups = []
+
+    def fake_optimize_group(state, group_modules):
+        del state
+        observed_groups.append([module.name for module in group_modules])
+        results = {}
+        for module in group_modules:
+            weight = module.weight.data.detach()
+            results[module.name] = SimpleNamespace(
+                pseudo_weight=weight + 1.0,
+                pack_weight=weight + 2.0,
+                q_scales=torch.ones((weight.shape[0], max(1, weight.shape[1] // 8)), dtype=weight.dtype),
+                q_zeros=torch.zeros((weight.shape[0], max(1, weight.shape[1] // 8)), dtype=torch.int32),
+                pairs=torch.zeros((1, 8), dtype=torch.int16),
+                theta=torch.zeros((1, weight.shape[1] // 2), dtype=weight.dtype),
+                channel_scales=torch.ones((1, weight.shape[1]), dtype=weight.dtype),
+            )
+        return results, 0.25
+
+    processor._optimize_group = fake_optimize_group  # type: ignore[method-assign]
 
     state = SimpleNamespace(
         quantized=False,
-        modules={"mlp.gate_proj": SimpleNamespace(name="mlp.gate_proj")},
+        modules={q_proj.name: q_proj, k_proj.name: k_proj, v_proj.name: v_proj},
+        layer_inputs=[[torch.randn(1, 2, 8)]],
+        layer_outputs=[[torch.randn(1, 2, 8)]],
+        pending_modules=set(),
+        processed_subsets={0},
+        subset_total=1,
     )
 
-    with pytest.raises(NotImplementedError, match="scaffolded but not implemented"):
-        processor._quantize_layer(layer_index=0, state=state)
+    original_q_weight = q_proj.weight.data.clone()
+    processor._quantize_layer(layer_index=0, state=state)
+
+    assert observed_groups == [["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]]
+    torch.testing.assert_close(q_proj.weight.data, original_q_weight + 1.0)
+    assert state.quantized is True
+    assert state.modules == {}
+    assert state.pending_modules == set()
+    assert state.processed_subsets == set()
 
 
 def test_paroquant_processor_captures_first_layer_forward_context():
@@ -1027,6 +1131,170 @@ def test_paroquant_processor_builds_group_optim_layer_clone():
     assert set(optim_modules) == {"self_attn.q_proj", "self_attn.k_proj"}
     assert layer_clone.self_attn.q_proj.weight.dtype == torch.float32
     assert layer_clone.self_attn.k_proj.weight.dtype == torch.float32
+
+
+def test_paroquant_processor_optimize_group_runs_on_toy_layer():
+    """Guard the grouped optimizer path on a tiny layer without needing the full looper."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
+
+    class _ToyMlp(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(8, 8, bias=False)
+            self.up_proj = torch.nn.Linear(8, 8, bias=False)
+            self.down_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.down_proj(torch.sigmoid(self.gate_proj(x)) * self.up_proj(x))
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+            self.mlp = _ToyMlp()
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            x = self.self_attn(x)
+            return self.mlp(x)
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = layer(x).detach()
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=0,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+    )
+
+    results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    assert results["self_attn.q_proj"].pseudo_weight.shape == q_proj.weight.shape
+    assert results["self_attn.k_proj"].pseudo_weight.shape == k_proj.weight.shape
+    assert results["self_attn.v_proj"].pseudo_weight.shape == v_proj.weight.shape
+
+
+def test_paroquant_processor_optimize_group_reenables_grad_inside_inference_mode():
+    """Guard grouped optimization under the worker lifecycle, which runs process() inside inference mode."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = torch.nn.Module()
+            self.self_attn.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.v_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return self.self_attn.q_proj(x) + self.self_attn.k_proj(x) + self.self_attn.v_proj(x)
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = layer(x).detach()
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+    )
+
+    with torch.inference_mode():
+        results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
 
 
 def test_paroquant_quant_device_selection_forces_single_gpu():

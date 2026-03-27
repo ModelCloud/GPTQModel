@@ -503,6 +503,10 @@ def _run_single_subset_pass(
             )
 
     capture_layer_forward_context = execute_forward and execution_config.capture_layer_forward_context
+    if capture_layer_forward_context:
+        subset_capture_override = getattr(processor, "capture_layer_forward_context_during_subset", None)
+        if callable(subset_capture_override):
+            capture_layer_forward_context = bool(subset_capture_override())
     need_outputs = execute_forward and (plan.need_forward_outputs or capture_layer_forward_context)
     fwd_start = None
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
