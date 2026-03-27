@@ -71,7 +71,7 @@ class TestLoadVLLM(ModelTest):
                 output_path=f"{tmp_dir}/result.json",
                 llm_backend="vllm",
                 model_args={
-                    "enforce_eager": True,
+                    "enforce_eager": False,
                     "gpu_memory_utilization": 0.8,
                     "tensor_parallel_size": 1,
                 },
