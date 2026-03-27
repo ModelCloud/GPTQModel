@@ -17,6 +17,7 @@ This processor keeps ParoQuant separate from the AWQ lifecycle:
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import threading
 import time
@@ -43,10 +44,19 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
-from ..quantization.paroquant.optimization import optimize_paroquant_linear
+from ..quantization.paroquant.optimization import (
+    _ParoQuantOptimLinear,
+    _normalize_group_size,
+    _normalize_opt_impl,
+    _normalize_quantizer_impl,
+    _quantizer_sym_for_impl,
+    build_random_rotation_buffers,
+    build_random_rotation_buffers_reference,
+    optimize_paroquant_linear,
+)
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, find_modules, move_to, pack_module
+from ..utils.model import create_quant_module, find_modules, move_to, pack_module, recurse_setattr
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import CPU
 
@@ -321,6 +331,71 @@ class ParoQuantProcessor(LoopProcessor):
         seed_material = f"{int(self.qcfg.opt_seed)}:{int(layer_index)}:{module_name}".encode("utf-8")
         digest = hashlib.blake2b(seed_material, digest_size=8).digest()
         return int.from_bytes(digest, byteorder="big", signed=False)
+
+    def _build_group_optim_linear(self, module: NamedModule) -> _ParoQuantOptimLinear:
+        """Materialize one ParoQuant optimizer wrapper from the current live module state."""
+        bits, group_size, sym = self._module_quant_params(module.full_name)
+        weight = self._module_weight_matrix(module)
+        bias = module.bias.data if getattr(module, "bias", None) is not None else None
+        normalized_group_size = _normalize_group_size(group_size, weight.shape[1])
+        normalized_pair_impl = _normalize_opt_impl(self.qcfg.opt_pair_impl, field="pair_impl")
+        quantizer_sym = _quantizer_sym_for_impl(sym, self.qcfg.opt_quantizer_impl)
+        _normalize_quantizer_impl(self.qcfg.opt_quantizer_impl)
+        module_seed = self._module_seed(module.layer_index, module.full_name)
+
+        if normalized_pair_impl == "reference":
+            pairs, theta_mask = build_random_rotation_buffers_reference(
+                in_features=weight.shape[1],
+                group_size=normalized_group_size,
+                krot=self.qcfg.krot,
+                pair_ratio=self.qcfg.opt_pair_ratio,
+                seed=module_seed,
+                device=weight.device,
+            )
+        else:
+            pairs, theta_mask = build_random_rotation_buffers(
+                in_features=weight.shape[1],
+                group_size=normalized_group_size,
+                krot=self.qcfg.krot,
+                pair_ratio=self.qcfg.opt_pair_ratio,
+                seed=module_seed,
+                device=weight.device,
+            )
+
+        return _ParoQuantOptimLinear(
+            weight.detach().to(device=weight.device, dtype=torch.float32),
+            None if bias is None else bias.detach().to(device=weight.device, dtype=torch.float32),
+            bits=bits,
+            group_size=normalized_group_size,
+            quantizer_sym=quantizer_sym,
+            pairs=pairs,
+            theta_mask=theta_mask,
+            scale_clamp_min=self.qcfg.opt_channel_scale_clamp_min,
+            scale_clamp_max=self.qcfg.opt_channel_scale_clamp_max,
+            fused_rotation=self.qcfg.opt_fused_rotation,
+        ).to(device=weight.device, dtype=torch.float32)
+
+    def _build_group_optim_layer(
+        self,
+        state: _ParoQuantLayerState,
+        group_modules: list[NamedModule],
+    ) -> tuple[torch.nn.Module, dict[str, _ParoQuantOptimLinear]]:
+        """Clone the layer and swap one selected group to ParoQuant optimizer wrappers."""
+        if state.layer_module is None:
+            raise RuntimeError("ParoQuantProcessor grouped optimization requires the source layer module.")
+        if not group_modules:
+            raise ValueError("ParoQuantProcessor grouped optimization requires at least one module.")
+
+        layer_clone = copy.deepcopy(state.layer_module)
+        layer_clone = layer_clone.to(dtype=torch.float32)
+
+        optim_modules: dict[str, _ParoQuantOptimLinear] = {}
+        for named_module in group_modules:
+            optim_module = self._build_group_optim_linear(named_module)
+            recurse_setattr(layer_clone, named_module.name, optim_module)
+            optim_modules[named_module.name] = optim_module
+
+        return layer_clone, optim_modules
 
     @staticmethod
     def _module_subsection_label(module_name: str) -> str:

@@ -20,6 +20,7 @@ from transformers.utils.quantization_config import GPTQConfig
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantizeConfig, QuantizeConfig
@@ -965,6 +966,67 @@ def test_paroquant_quantize_layer_clears_stored_forward_context():
     assert state.layer_outputs is None
     assert state.subset_total is None
     assert processor.tasks["mlp.gate_proj"]["inputs"] == []
+
+
+def test_paroquant_processor_builds_group_optim_layer_clone():
+    """Guard that subsection/layer modes can swap selected modules into a cloned float layer."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+    class _ToyMlp(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(8, 8, bias=False)
+            self.up_proj = torch.nn.Linear(8, 8, bias=False)
+            self.down_proj = torch.nn.Linear(8, 8, bias=False)
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+            self.mlp = _ToyMlp()
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer().half()
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        dynamic_get=_dynamic_get,
+    )
+
+    state = SimpleNamespace(layer_module=layer)
+    layer_clone, optim_modules = processor._build_group_optim_layer(state, [q_proj, k_proj])
+
+    assert layer_clone is not layer
+    assert isinstance(layer.self_attn.q_proj, torch.nn.Linear)
+    assert isinstance(layer.self_attn.k_proj, torch.nn.Linear)
+    assert isinstance(layer_clone.self_attn.q_proj, _ParoQuantOptimLinear)
+    assert isinstance(layer_clone.self_attn.k_proj, _ParoQuantOptimLinear)
+    assert isinstance(layer_clone.self_attn.v_proj, torch.nn.Linear)
+    assert set(optim_modules) == {"self_attn.q_proj", "self_attn.k_proj"}
+    assert layer_clone.self_attn.q_proj.weight.dtype == torch.float32
+    assert layer_clone.self_attn.k_proj.weight.dtype == torch.float32
 
 
 def test_paroquant_quant_device_selection_forces_single_gpu():
