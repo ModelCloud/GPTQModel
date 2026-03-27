@@ -65,7 +65,7 @@ env:
   LOGBAR_ANIMATION: '0'
   CUDA_VERSION: 131
   UV_TORCH_BACKEND: cu130
-  TORCH_VERSION: 2.10.0
+  TORCH_VERSION: 2.11.0
   # vllm doesn't support 3.14
   PYTHON_VERSION: 3.13
   UV_PYTHON: python3.13
@@ -454,9 +454,9 @@ jobs:
           echo "--- uninstalling required deps..."
           python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
 
-      - name: Install Evalution
-        run: |
-          uv pip install git+https://x-access-token:${{ secrets.REPO_TOKEN }}@github.com/ModelCloud/Evalution.git
+      # - name: Install Evalution
+      #   run: |
+      #     uv pip install git+https://x-access-token:${{ secrets.REPO_TOKEN }}@github.com/ModelCloud/Evalution.git
       #      - name: Install requirements
       #        run: |
       #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version${{ env.PYTHON_VERSION }}
