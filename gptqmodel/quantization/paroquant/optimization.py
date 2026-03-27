@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import math
 import random
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import Callable, Iterable, Literal, Optional, Sequence
+from functools import lru_cache
+from typing import Iterable, Literal, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -29,11 +30,16 @@ from torch import nn
 
 from ..config import PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT, PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT
 from ...utils.env import env_flag
-from ...utils.paroquant import apply_paroquant_rotation_autograd, build_identity_rotation_buffers
+from ...utils.paroquant import (
+    apply_paroquant_rotation,
+    apply_paroquant_rotation_autograd,
+    build_identity_rotation_buffers,
+)
 
 
 _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
+_PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL = 8_000_000
 
 
 def _normalize_opt_impl(name: str, *, field: str) -> str:
@@ -174,7 +180,7 @@ def _pad_rotation_group(
     return pairs, mask
 
 
-def _build_random_rotation_buffers_cpu(
+def _build_random_rotation_buffers_cpu_legacy(
     *,
     in_features: int,
     group_size: int,
@@ -222,6 +228,74 @@ def _build_random_rotation_buffers_cpu(
     pairs = torch.stack(rotation_rows, dim=0).contiguous()
     masks = torch.stack(mask_rows, dim=0).contiguous()
     return pairs, masks
+
+
+@lru_cache(maxsize=32)
+def _round_robin_pair_template(group_size: int) -> torch.Tensor:
+    """Cache one-factorized full matchings for an even group size."""
+    if group_size <= 0 or group_size % 2 != 0:
+        raise ValueError(f"ParoQuant optimization: group_size ({group_size}) must be a positive even integer.")
+
+    players = list(range(group_size))
+    half_group = group_size // 2
+    rounds: list[torch.Tensor] = []
+    for _ in range(group_size - 1):
+        round_pairs = torch.empty((half_group, 2), dtype=torch.long)
+        for pair_idx in range(half_group):
+            round_pairs[pair_idx, 0] = players[pair_idx]
+            round_pairs[pair_idx, 1] = players[group_size - 1 - pair_idx]
+        rounds.append(round_pairs)
+        players = [players[0], players[-1], *players[1:-1]]
+    return torch.stack(rounds, dim=0).contiguous()
+
+
+def _build_random_rotation_buffers_cpu(
+    *,
+    in_features: int,
+    group_size: int,
+    krot: int,
+    pair_ratio: float,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build randomized pair schedules using cached round-robin matchings plus per-group permutations."""
+    normalized_group_size = _normalize_group_size(group_size, in_features)
+    if krot <= 0:
+        raise ValueError(f"ParoQuant optimization: `krot` must be positive, got {krot}.")
+    if not (0.0 < float(pair_ratio) <= 0.5):
+        raise ValueError("ParoQuant optimization: `pair_ratio` must be in the interval (0, 0.5].")
+    if krot > normalized_group_size - 1:
+        return _build_random_rotation_buffers_cpu_legacy(
+            in_features=in_features,
+            group_size=normalized_group_size,
+            krot=krot,
+            pair_ratio=pair_ratio,
+            seed=seed,
+        )
+
+    half_group = normalized_group_size // 2
+    num_groups = in_features // normalized_group_size
+    num_pairs_each = max(1, int(normalized_group_size * float(pair_ratio)))
+    num_pairs_each = min(num_pairs_each, half_group)
+    template = _round_robin_pair_template(normalized_group_size)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed))
+
+    pair_rows = torch.empty((krot, in_features), dtype=torch.int16)
+    mask_rows = torch.zeros((krot, in_features // 2), dtype=torch.bool)
+    if num_pairs_each < half_group:
+        for group_idx in range(num_groups):
+            start = group_idx * half_group
+            mask_rows[:, start + num_pairs_each:start + half_group] = True
+
+    for group_idx in range(num_groups):
+        round_order = torch.randperm(template.shape[0], generator=generator)[:krot]
+        local_template = template.index_select(0, round_order)
+        perm = torch.randperm(normalized_group_size, generator=generator)
+        group_pairs = perm[local_template].to(dtype=torch.int16).reshape(krot, normalized_group_size)
+        start = group_idx * normalized_group_size
+        pair_rows[:, start:start + normalized_group_size] = group_pairs
+
+    return pair_rows.contiguous(), mask_rows.contiguous()
 
 
 def build_random_rotation_buffers(
@@ -432,6 +506,18 @@ def _apply_rotation(
 
     if use_fused_rotation:
         scale_tensor = None if scales is None else scales.view(1, -1)
+        if not (
+            x.requires_grad
+            or theta.requires_grad
+            or (scale_tensor is not None and scale_tensor.requires_grad)
+        ):
+            return apply_paroquant_rotation(
+                x,
+                pairs,
+                theta,
+                scales=scale_tensor,
+                group_size=group_size,
+            )
         return apply_paroquant_rotation_autograd(
             x,
             pairs,
@@ -542,7 +628,7 @@ class GroupLinearQuantizer(nn.Module):
 
     def forward(self, weight: torch.Tensor) -> torch.Tensor:
         """Pseudo-quantize a transformed weight tensor with STE-enabled qparams."""
-        return pseudo_quantize_dequant(
+        return _maybe_compile_large_train_quant(
             weight,
             bits=self.bits,
             group_size=self.group_size,
@@ -593,10 +679,11 @@ def pseudo_quantize_dequant(
         if use_ste:
             scale = _clamp_ste(scale, min_value=1e-5, max_value=1e5)
             quant = _clamp_ste(_round_ste(weight_view / scale), qmin, qmax)
+            dequant = quant * scale
         else:
             scale = scale.clamp(min=1e-5, max=1e5)
             quant = torch.clamp(torch.round(weight_view / scale), qmin, qmax)
-        dequant = quant * scale
+            dequant = quant * scale
     else:
         qmin = 0
         qmax = 2**bits - 1
@@ -615,6 +702,58 @@ def pseudo_quantize_dequant(
         dequant = (quant - round_zero_point) * scale
 
     return dequant.reshape_as(weight).to(dtype)
+
+
+@lru_cache(maxsize=1)
+def _get_large_train_quant_compile():
+    """Lazily compile the large training-time quant path once per process."""
+    compile_fn = getattr(torch, "compile", None)
+    if compile_fn is None:
+        return None
+    try:
+        return compile_fn(pseudo_quantize_dequant, mode="default", fullgraph=True)
+    except Exception:
+        return None
+
+
+def _maybe_compile_large_train_quant(
+    weight: torch.Tensor,
+    *,
+    bits: int,
+    group_size: int,
+    sym: bool,
+    scale: Optional[torch.Tensor] = None,
+    zero_point_float: Optional[torch.Tensor] = None,
+    use_ste: bool = True,
+) -> torch.Tensor:
+    """Compile only large training-time quant calls where the compile tax amortizes."""
+    should_compile = (
+        bool(use_ste)
+        and weight.device.type == "cuda"
+        and weight.numel() >= _PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL
+        and env_flag("GPTQMODEL_PAROQUANT_OPT_LARGE_TRAIN_QUANT_COMPILE", default=True)
+    )
+    if should_compile:
+        compiled = _get_large_train_quant_compile()
+        if compiled is not None:
+            return compiled(
+                weight,
+                bits=bits,
+                group_size=group_size,
+                sym=sym,
+                scale=scale,
+                zero_point_float=zero_point_float,
+                use_ste=use_ste,
+            )
+    return pseudo_quantize_dequant(
+        weight,
+        bits=bits,
+        group_size=group_size,
+        sym=sym,
+        scale=scale,
+        zero_point_float=zero_point_float,
+        use_ste=use_ste,
+    )
 
 
 class _ParoQuantOptimLinear(nn.Module):
@@ -691,12 +830,11 @@ class _ParoQuantOptimLinear(nn.Module):
         """Pseudo-quantize the transformed weight using current learned qparams."""
         transformed = self.transformed_weight(use_ste=True)
         if self.quantizer is None:
-            return pseudo_quantize_dequant(
+            return _maybe_compile_large_train_quant(
                 transformed,
                 bits=self.bits,
                 group_size=self.group_size,
                 sym=self.quantizer_sym,
-                use_ste=True,
             )
         return self.quantizer(transformed)
 
@@ -714,8 +852,20 @@ class _ParoQuantOptimLinear(nn.Module):
         return quantized / channel_scales
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Replay calibration activations through the current pseudo-quantized layer."""
-        return F.linear(x, self.pseudo_weight(), self.bias)
+        """Replay calibration activations through the runtime-equivalent transformed-domain path."""
+        # Rotate the minibatch instead of reconstructing full pseudo-weights on
+        # every step. This preserves the runtime contract while shrinking the
+        # per-step rotation work from weight-sized tensors to batch-sized ones.
+        runtime_scales = self._safe_channel_scales(use_ste=True).reciprocal()
+        rotated_inputs = _apply_rotation(
+            x,
+            self.pairs,
+            self.theta,
+            scales=runtime_scales,
+            group_size=self.group_size,
+            fused_rotation=self.fused_rotation,
+        )
+        return F.linear(rotated_inputs, self.quantized_transformed_weight(), self.bias)
 
     def reset_masked_angles(self) -> None:
         """Force dummy padded pairs to stay at zero angle during optimization."""
@@ -795,6 +945,31 @@ def _chunk_rows(rows: torch.Tensor, batch_size: int) -> Iterable[torch.Tensor]:
         yield rows[start:start + batch_size]
 
 
+@contextmanager
+def _activate_stage_params(
+    model: nn.Module,
+    param_groups: Sequence[dict[str, object]],
+) -> Iterable[None]:
+    """Temporarily disable gradients for parameters that are inactive in the current stage."""
+    active_param_ids = {
+        id(param)
+        for param_group in param_groups
+        for param in param_group.get("params", [])
+        if isinstance(param, nn.Parameter)
+    }
+    original_flags = [(param, param.requires_grad) for param in model.parameters()]
+    for param, was_enabled in original_flags:
+        should_enable = id(param) in active_param_ids
+        if was_enabled != should_enable:
+            param.requires_grad_(should_enable)
+    try:
+        yield
+    finally:
+        for param, was_enabled in original_flags:
+            if param.requires_grad != was_enabled:
+                param.requires_grad_(was_enabled)
+
+
 def _evaluate_model(
     model: nn.Module,
     inputs: torch.Tensor,
@@ -813,7 +988,7 @@ def _evaluate_model(
         return float(loss.item())
 
 
-def _run_stage_gptqmodel(
+def _run_stage_gptqmodel_impl(
     *,
     model: nn.Module,
     inputs_train: torch.Tensor,
@@ -823,7 +998,7 @@ def _run_stage_gptqmodel(
     param_groups: Sequence[dict[str, object]],
     epochs: int,
     batch_size: int,
-    ) -> tuple[float, float]:
+) -> tuple[float, float]:
     """Run one optimization stage with validation-based best-state selection."""
     normalized_groups = []
     for param_group in param_groups:
@@ -888,6 +1063,223 @@ def _run_stage_gptqmodel(
     model.load_state_dict(best_state, strict=True)
     model.reset_masked_angles()
     return last_train_loss, best_val_loss
+
+
+def _should_use_paroquant_stage_cudagraph(
+    model: nn.Module,
+    *,
+    inputs_train: torch.Tensor,
+    batch_size: int,
+    stage_cudagraph: Optional[bool] = None,
+) -> bool:
+    """Use CUDA graphs only for real CUDA tensor stages where launch overhead is worth amortizing."""
+    if stage_cudagraph is None:
+        stage_cudagraph = env_flag("GPTQMODEL_PAROQUANT_OPT_STAGE_CUDAGRAPH", default=True)
+    if not bool(stage_cudagraph):
+        return False
+    if not isinstance(inputs_train, torch.Tensor):
+        return False
+    if inputs_train.device.type != "cuda":
+        return False
+    if not bool(getattr(model, "fused_rotation", False)):
+        return False
+    return inputs_train.shape[0] >= max(1, int(batch_size))
+
+
+def _run_stage_gptqmodel_cudagraph(
+    *,
+    model: nn.Module,
+    inputs_train: torch.Tensor,
+    targets_train: torch.Tensor,
+    inputs_val: torch.Tensor,
+    targets_val: torch.Tensor,
+    param_groups: Sequence[dict[str, object]],
+    epochs: int,
+    batch_size: int,
+) -> tuple[float, float]:
+    """Replay fixed-size CUDA mini-batches through one captured train-step graph with eager tail fallback."""
+    normalized_groups = []
+    for param_group in param_groups:
+        params = [param for param in param_group.get("params", []) if param.requires_grad]
+        if not params:
+            continue
+        normalized_groups.append(
+            {
+                "params": params,
+                "lr": float(param_group["lr"]),
+                "weight_decay": float(param_group.get("weight_decay", 0.01)),
+                "betas": tuple(param_group.get("betas", (0.9, 0.95))),
+                "eps": float(param_group.get("eps", 1e-10)),
+            }
+        )
+
+    if epochs <= 0 or not normalized_groups:
+        train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
+        return train_loss, val_loss
+
+    lr_tensors = [
+        torch.tensor(float(group["lr"]), device=inputs_train.device, dtype=torch.float32)
+        for group in normalized_groups
+    ]
+    optimizer = torch.optim.AdamW(
+        [
+            {
+                "params": group["params"],
+                "lr": lr_tensor,
+                "weight_decay": group["weight_decay"],
+                "betas": group["betas"],
+                "eps": group["eps"],
+            }
+            for group, lr_tensor in zip(normalized_groups, lr_tensors)
+        ],
+        capturable=True,
+    )
+    steps_per_epoch = max(1, math.ceil(max(1, inputs_train.shape[0]) / max(1, batch_size)))
+    total_steps = max(1, epochs * steps_per_epoch)
+    base_lrs = [float(group["lr"]) for group in normalized_groups]
+    global_step = 0
+
+    best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+    best_val_loss = float("inf")
+    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
+
+    static_input = torch.empty(
+        (batch_size, inputs_train.shape[1]),
+        device=inputs_train.device,
+        dtype=inputs_train.dtype,
+    )
+    static_target = torch.empty(
+        (batch_size, targets_train.shape[1]),
+        device=targets_train.device,
+        dtype=targets_train.dtype,
+    )
+
+    warmup_stream = torch.cuda.Stream(device=inputs_train.device)
+    warmup_stream.wait_stream(torch.cuda.current_stream(inputs_train.device))
+    with torch.cuda.stream(warmup_stream):
+        warm_input = inputs_train[:batch_size]
+        warm_target = targets_train[:batch_size]
+        for _ in range(3):
+            static_input.copy_(warm_input)
+            static_target.copy_(warm_target)
+            optimizer.zero_grad(set_to_none=True)
+            preds = model(static_input)
+            loss = F.smooth_l1_loss(preds, static_target)
+            loss.backward()
+            optimizer.step()
+            model.reset_masked_angles()
+            del preds, loss
+
+    torch.cuda.current_stream(inputs_train.device).wait_stream(warmup_stream)
+    torch.cuda.synchronize(inputs_train.device)
+
+    graph = torch.cuda.CUDAGraph()
+    optimizer.zero_grad(set_to_none=True)
+    with torch.cuda.graph(graph):
+        preds = model(static_input)
+        static_loss = F.smooth_l1_loss(preds, static_target)
+        static_loss.backward()
+        optimizer.step()
+        model.reset_masked_angles()
+
+    for _epoch in range(epochs):
+        epoch_loss = 0.0
+        batch_count = 0
+
+        for input_batch, target_batch in zip(_chunk_rows(inputs_train, batch_size), _chunk_rows(targets_train, batch_size)):
+            global_step += 1
+            cosine_ratio = 0.5 * (1.0 + math.cos(math.pi * min(global_step, total_steps) / total_steps))
+            for group, lr_tensor, base_lr in zip(optimizer.param_groups, lr_tensors, base_lrs):
+                new_lr = (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio)
+                lr_tensor.fill_(new_lr)
+                group["lr"] = lr_tensor
+
+            if input_batch.shape[0] == batch_size:
+                static_input.copy_(input_batch)
+                static_target.copy_(target_batch)
+                graph.replay()
+                loss_value = float(static_loss.item())
+            else:
+                optimizer.zero_grad(set_to_none=True)
+                preds = model(input_batch)
+                loss = F.smooth_l1_loss(preds, target_batch)
+                loss.backward()
+                optimizer.step()
+                model.reset_masked_angles()
+                loss_value = float(loss.item())
+
+            epoch_loss += loss_value
+            batch_count += 1
+
+        last_train_loss = epoch_loss / max(1, batch_count)
+        val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+
+    model.load_state_dict(best_state, strict=True)
+    model.reset_masked_angles()
+    return last_train_loss, best_val_loss
+
+
+def _run_stage_gptqmodel(
+    *,
+    model: nn.Module,
+    inputs_train: torch.Tensor,
+    targets_train: torch.Tensor,
+    inputs_val: torch.Tensor,
+    targets_val: torch.Tensor,
+    param_groups: Sequence[dict[str, object]],
+    epochs: int,
+    batch_size: int,
+    stage_cudagraph: Optional[bool] = None,
+) -> tuple[float, float]:
+    """Run the fast stage, preferring CUDA-graph replay on fused CUDA paths and falling back to eager."""
+    if not _should_use_paroquant_stage_cudagraph(
+        model,
+        inputs_train=inputs_train,
+        batch_size=batch_size,
+        stage_cudagraph=stage_cudagraph,
+    ):
+        return _run_stage_gptqmodel_impl(
+            model=model,
+            inputs_train=inputs_train,
+            targets_train=targets_train,
+            inputs_val=inputs_val,
+            targets_val=targets_val,
+            param_groups=param_groups,
+            epochs=epochs,
+            batch_size=batch_size,
+        )
+
+    initial_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
+
+    try:
+        return _run_stage_gptqmodel_cudagraph(
+            model=model,
+            inputs_train=inputs_train,
+            targets_train=targets_train,
+            inputs_val=inputs_val,
+            targets_val=targets_val,
+            param_groups=param_groups,
+            epochs=epochs,
+            batch_size=batch_size,
+        )
+    except Exception:
+        model.load_state_dict(initial_state, strict=True)
+        if hasattr(model, "reset_masked_angles"):
+            model.reset_masked_angles()
+        return _run_stage_gptqmodel_impl(
+            model=model,
+            inputs_train=inputs_train,
+            targets_train=targets_train,
+            inputs_val=inputs_val,
+            targets_val=targets_val,
+            param_groups=param_groups,
+            epochs=epochs,
+            batch_size=batch_size,
+        )
 
 
 def _run_stage_reference(
@@ -980,10 +1372,22 @@ def _run_stage(
     epochs: int,
     batch_size: int,
     stage_impl: str,
+    stage_cudagraph: Optional[bool] = None,
 ) -> tuple[float, float]:
     impl = _normalize_opt_impl(stage_impl, field="stage_impl")
-    if impl == "reference":
-        return _run_stage_reference(
+    with _activate_stage_params(model, param_groups):
+        if impl == "reference":
+            return _run_stage_reference(
+                model=model,
+                inputs_train=inputs_train,
+                targets_train=targets_train,
+                inputs_val=inputs_val,
+                targets_val=targets_val,
+                param_groups=param_groups,
+                epochs=epochs,
+                batch_size=batch_size,
+            )
+        return _run_stage_gptqmodel(
             model=model,
             inputs_train=inputs_train,
             targets_train=targets_train,
@@ -992,17 +1396,8 @@ def _run_stage(
             param_groups=param_groups,
             epochs=epochs,
             batch_size=batch_size,
+            stage_cudagraph=stage_cudagraph,
         )
-    return _run_stage_gptqmodel(
-        model=model,
-        inputs_train=inputs_train,
-        targets_train=targets_train,
-        inputs_val=inputs_val,
-        targets_val=targets_val,
-        param_groups=param_groups,
-        epochs=epochs,
-        batch_size=batch_size,
-    )
 
 
 def _result_from_model(
@@ -1097,6 +1492,7 @@ def optimize_paroquant_linear(
     quantizer_lr: float,
     seed: int,
     fused_rotation: Optional[bool] = None,
+    stage_cudagraph: Optional[bool] = None,
     stage_impl: Literal["fast", "reference"] = "fast",
     pair_impl: Literal["fast", "reference"] = "fast",
     quantizer_impl: Literal["fast", "reference"] = "fast",
@@ -1186,6 +1582,7 @@ def optimize_paroquant_linear(
         epochs=rotation_epochs,
         batch_size=batch_size,
         stage_impl=normalized_stage_impl,
+        stage_cudagraph=stage_cudagraph,
     )
 
     model.init_quantizer()
@@ -1202,6 +1599,7 @@ def optimize_paroquant_linear(
         epochs=finetune_epochs,
         batch_size=batch_size,
         stage_impl=normalized_stage_impl,
+        stage_cudagraph=stage_cudagraph,
     )
 
     return _result_from_model(

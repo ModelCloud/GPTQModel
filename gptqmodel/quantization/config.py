@@ -2500,6 +2500,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_pair_ratio": "opt_pair_ratio",
             "opt_seed": "opt_seed",
             "opt_fused_rotation": "opt_fused_rotation",
+            "opt_stage_cudagraph": "opt_stage_cudagraph",
             "opt_stage_impl": "opt_stage_impl",
             "opt_pair_impl": "opt_pair_impl",
             "opt_quantizer_impl": "opt_quantizer_impl",
@@ -2836,14 +2837,15 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_finetune_epochs: int = field(default=10)
     opt_train_samples: int = field(default=2048)
     opt_validation_samples: int = field(default=64)
-    opt_batch_size: int = field(default=16)
+    opt_batch_size: int = field(default=64)
     opt_rotation_lr: float = field(default=0.05)
     opt_weight_lr: float = field(default=1e-5)
     opt_quantizer_lr: float = field(default=1e-6)
     opt_pair_ratio: float = field(default=0.5)
     opt_seed: int = field(default=0)
     opt_fused_rotation: bool = field(default=True)
-    opt_stage_impl: str = field(default="reference")
+    opt_stage_cudagraph: bool = field(default=True)
+    opt_stage_impl: str = field(default="fast")
     opt_pair_impl: str = field(default="fast")
     opt_quantizer_impl: str = field(default="reference")
     opt_channel_scale_clamp_min: float = field(default=PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT)
@@ -2876,6 +2878,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_pair_ratio = float(self.opt_pair_ratio)
         self.opt_seed = int(self.opt_seed)
         self.opt_fused_rotation = bool(self.opt_fused_rotation)
+        self.opt_stage_cudagraph = bool(self.opt_stage_cudagraph)
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
         self.opt_quantizer_impl = str(self.opt_quantizer_impl).strip().lower()
@@ -2922,6 +2925,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_pair_ratio"] = self.opt_pair_ratio
         meta_payload["opt_seed"] = self.opt_seed
         meta_payload["opt_fused_rotation"] = self.opt_fused_rotation
+        meta_payload["opt_stage_cudagraph"] = self.opt_stage_cudagraph
         meta_payload["opt_stage_impl"] = self.opt_stage_impl
         meta_payload["opt_pair_impl"] = self.opt_pair_impl
         meta_payload["opt_quantizer_impl"] = self.opt_quantizer_impl

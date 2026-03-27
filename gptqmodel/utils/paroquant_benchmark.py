@@ -201,7 +201,7 @@ def make_paroquant_config(
     opt_finetune_epochs: int = 10,
     opt_train_samples: int = 2048,
     opt_validation_samples: int = 64,
-    opt_batch_size: int = 16,
+    opt_batch_size: int = 64,
     offload_to_disk: bool = False,
 ) -> QuantizeConfig:
     if sym is not True:
@@ -670,7 +670,7 @@ def run_paroquant_first_layer_case(
     opt_finetune_epochs: int = 10,
     opt_train_samples: int = 2048,
     opt_validation_samples: int = 64,
-    opt_batch_size: int = 16,
+    opt_batch_size: int = 64,
 ) -> dict[str, Any]:
     normalized_dtype = _normalize_model_dtype(model_dtype)
     probe_model = GPTQModel.load(
@@ -729,7 +729,7 @@ def run_paroquant_single_module_case(
     opt_finetune_epochs: int = 10,
     opt_train_samples: int = 2048,
     opt_validation_samples: int = 64,
-    opt_batch_size: int = 16,
+    opt_batch_size: int = 64,
 ) -> dict[str, Any]:
     return run_paroquant_selected_modules_case(
         model_path=model_path,
@@ -772,7 +772,7 @@ def run_paroquant_selected_modules_case(
     opt_finetune_epochs: int = 10,
     opt_train_samples: int = 2048,
     opt_validation_samples: int = 64,
-    opt_batch_size: int = 16,
+    opt_batch_size: int = 64,
 ) -> dict[str, Any]:
     normalized_dtype = _normalize_model_dtype(model_dtype)
     probe_model = GPTQModel.load(

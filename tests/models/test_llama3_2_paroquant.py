@@ -115,7 +115,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
             opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
             opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
             opt_seed=self.PAROQUANT_SEED,
-            opt_stage_impl="reference",
+            opt_stage_impl="fast",
             opt_pair_impl="fast",
             opt_quantizer_impl="reference",
             adapter=self.EORA,

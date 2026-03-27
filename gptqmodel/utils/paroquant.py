@@ -228,6 +228,9 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
         ctx.orig_dtype = x.dtype
         ctx.has_scale = scale_tensor is not None
         ctx.group_size = int(group_size)
+        ctx.needs_x_grad = bool(x.requires_grad)
+        ctx.needs_theta_grad = bool(theta.requires_grad)
+        ctx.needs_scale_grad = bool(scale_tensor is not None and scale_tensor.requires_grad)
 
         y = torch.ops.gptqmodel_paroquant.rotate(x, pairs, theta, scale_tensor, int(group_size))
         saved = (x, pairs, theta, y, scale_tensor) if ctx.has_scale else (x, pairs, theta, y)
@@ -244,50 +247,62 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
         num_groups = hidden // group_size
         half_group = group_size // 2
         batch_rows = y.numel() // hidden
-        rotated = y.reshape(batch_rows, hidden)
         grad = grad_out.reshape(batch_rows, hidden)
-        grad_theta = torch.zeros_like(theta)
-        offsets = (
-            torch.arange(num_groups, device=pairs.device, dtype=torch.long).unsqueeze(1) * group_size
-        )
+        grad_theta = None
 
-        for rot_idx in range(pairs.shape[0] - 1, -1, -1):
-            neg_theta = -theta[[rot_idx]]
-            pair_row = pairs[[rot_idx]]
-            rotated = torch.ops.gptqmodel_paroquant.rotate(rotated, pair_row, neg_theta, None, group_size)
-            grad = torch.ops.gptqmodel_paroquant.rotate(grad, pair_row, neg_theta, None, group_size)
-
-            pair_view = pair_row.reshape(num_groups, group_size)
-            idx_i = (pair_view[:, 0::2] + offsets).reshape(-1)
-            idx_j = (pair_view[:, 1::2] + offsets).reshape(-1)
-
-            xi = rotated[:, idx_i].reshape(batch_rows, num_groups, half_group)
-            xj = rotated[:, idx_j].reshape(batch_rows, num_groups, half_group)
-            grad_i = grad[:, idx_i].reshape(batch_rows, num_groups, half_group)
-            grad_j = grad[:, idx_j].reshape(batch_rows, num_groups, half_group)
-
-            theta_view = theta[rot_idx].reshape(num_groups, half_group)
-            sin_t = theta_view.sin()
-            cos_t = theta_view.cos()
-            grad_theta[rot_idx] = (
-                (
-                    (grad_i * xj - grad_j * xi).sum(0) * cos_t
-                    - (grad_i * xi + grad_j * xj).sum(0) * sin_t
-                )
-                .reshape(-1)
-                .to(theta.dtype)
+        if ctx.needs_theta_grad:
+            rotated = y.reshape(batch_rows, hidden)
+            grad_theta = torch.zeros_like(theta)
+            offsets = (
+                torch.arange(num_groups, device=pairs.device, dtype=torch.long).unsqueeze(1) * group_size
             )
+
+            for rot_idx in range(pairs.shape[0] - 1, -1, -1):
+                pair_row = pairs.narrow(0, rot_idx, 1)
+                neg_theta = theta.narrow(0, rot_idx, 1).neg()
+                rotated = torch.ops.gptqmodel_paroquant.rotate(rotated, pair_row, neg_theta, None, group_size)
+                grad = torch.ops.gptqmodel_paroquant.rotate(grad, pair_row, neg_theta, None, group_size)
+
+                pair_view = pair_row.reshape(num_groups, group_size)
+                idx_i = (pair_view[:, 0::2] + offsets).reshape(-1)
+                idx_j = (pair_view[:, 1::2] + offsets).reshape(-1)
+
+                xi = rotated[:, idx_i].reshape(batch_rows, num_groups, half_group)
+                xj = rotated[:, idx_j].reshape(batch_rows, num_groups, half_group)
+                grad_i = grad[:, idx_i].reshape(batch_rows, num_groups, half_group)
+                grad_j = grad[:, idx_j].reshape(batch_rows, num_groups, half_group)
+
+                theta_view = theta.narrow(0, rot_idx, 1).reshape(num_groups, half_group)
+                sin_t = theta_view.sin()
+                cos_t = theta_view.cos()
+                grad_theta[rot_idx] = (
+                    (
+                        (grad_i * xj - grad_j * xi).sum(0) * cos_t
+                        - (grad_i * xi + grad_j * xj).sum(0) * sin_t
+                    )
+                    .reshape(-1)
+                    .to(theta.dtype)
+                )
+        else:
+            for rot_idx in range(pairs.shape[0] - 1, -1, -1):
+                pair_row = pairs.narrow(0, rot_idx, 1)
+                neg_theta = theta.narrow(0, rot_idx, 1).neg()
+                grad = torch.ops.gptqmodel_paroquant.rotate(grad, pair_row, neg_theta, None, group_size)
 
         if ctx.has_scale:
             scale_flat = scale_tensor.reshape(-1)
-            grad_x = (grad * scale_flat.unsqueeze(0)).reshape(ctx.orig_shape).to(ctx.orig_dtype)
-            grad_scale = (x.reshape(batch_rows, hidden) * grad).sum(0).to(
-                dtype=scale_tensor.dtype,
-                device=scale_tensor.device,
-            )
-            grad_scale = grad_scale.reshape_as(scale_tensor)
+            grad_x = None
+            if ctx.needs_x_grad:
+                grad_x = (grad * scale_flat.unsqueeze(0)).reshape(ctx.orig_shape).to(ctx.orig_dtype)
+            grad_scale = None
+            if ctx.needs_scale_grad:
+                grad_scale = (x.reshape(batch_rows, hidden) * grad).sum(0).to(
+                    dtype=scale_tensor.dtype,
+                    device=scale_tensor.device,
+                )
+                grad_scale = grad_scale.reshape_as(scale_tensor)
         else:
-            grad_x = grad.reshape(ctx.orig_shape).to(ctx.orig_dtype)
+            grad_x = grad.reshape(ctx.orig_shape).to(ctx.orig_dtype) if ctx.needs_x_grad else None
             grad_scale = None
 
         return grad_x, None, grad_theta, grad_scale, None

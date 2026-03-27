@@ -53,9 +53,11 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.quant_method == METHOD.PAROQUANT
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
-    assert cfg.opt_stage_impl == "reference"
+    assert cfg.opt_batch_size == 64
+    assert cfg.opt_stage_impl == "fast"
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
+    assert cfg.opt_stage_cudagraph is True
     assert cfg.opt_channel_scale_clamp_min == 1e-2
     assert cfg.opt_channel_scale_clamp_max == 1e2
     assert cfg.export_quant_method() == METHOD.PAROQUANT
@@ -81,6 +83,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_pair_ratio": 0.5,
                 "opt_seed": 0,
                 "opt_fused_rotation": False,
+                "opt_stage_cudagraph": False,
                 "opt_stage_impl": "reference",
                 "opt_pair_impl": "fast",
                 "opt_quantizer_impl": "reference",
@@ -105,12 +108,14 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_pair_ratio == 0.5
     assert cfg.opt_seed == 0
     assert cfg.opt_fused_rotation is False
+    assert cfg.opt_stage_cudagraph is False
     assert cfg.opt_stage_impl == "reference"
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
     assert cfg.opt_channel_scale_clamp_min == 0.02
     assert cfg.opt_channel_scale_clamp_max == 50.0
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
+    assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
     assert cfg.to_dict()["meta"]["opt_stage_impl"] == "reference"
     assert cfg.to_dict()["meta"]["opt_pair_impl"] == "fast"
     assert cfg.to_dict()["meta"]["opt_quantizer_impl"] == "reference"
@@ -146,6 +151,7 @@ def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch)
         krot=1,
         dtype=torch.float32,
     )
+    theta = theta.clone().requires_grad_(True)
 
     calls = []
 
@@ -178,6 +184,56 @@ def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch)
     )
     assert calls == ["fused"]
     torch.testing.assert_close(fused_out, x + 123.0)
+
+
+def test_paroquant_fused_rotation_uses_forward_only_path_without_grad_inputs(monkeypatch):
+    """Guard that inactive rotation grads do not route through the autograd wrapper."""
+    x = torch.randn(4, 8, dtype=torch.float32)
+    pairs, theta, channel_scales = build_identity_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=1,
+        dtype=torch.float32,
+    )
+
+    calls = []
+
+    def fake_forward_only(x, pairs, theta, *, scales, group_size):
+        del pairs, theta, scales, group_size
+        calls.append("forward")
+        return x + 1.0
+
+    def fake_autograd(x, pairs, theta, *, scales, group_size):
+        del pairs, theta, scales, group_size
+        calls.append("autograd")
+        return x + 2.0
+
+    monkeypatch.setattr(paroquant_optimization, "apply_paroquant_rotation", fake_forward_only)
+    monkeypatch.setattr(paroquant_optimization, "apply_paroquant_rotation_autograd", fake_autograd)
+
+    out = _apply_rotation(
+        x,
+        pairs,
+        theta,
+        scales=channel_scales,
+        group_size=8,
+        fused_rotation=True,
+    )
+    torch.testing.assert_close(out, x + 1.0)
+    assert calls == ["forward"]
+
+    calls.clear()
+    theta = theta.clone().requires_grad_(True)
+    out = _apply_rotation(
+        x,
+        pairs,
+        theta,
+        scales=channel_scales,
+        group_size=8,
+        fused_rotation=True,
+    )
+    torch.testing.assert_close(out, x + 2.0)
+    assert calls == ["autograd"]
 
 
 @pytest.mark.parametrize(
@@ -382,6 +438,322 @@ def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
     ]
     assert all(event[1] is True for event in scaler_events if event[0] != "backward")
     assert all(event[1] >= 0.0 for event in scaler_events if event[0] == "backward")
+
+
+def test_paroquant_fast_pair_builder_emits_disjoint_matchings():
+    """Guard the fast pair builder so each rotation remains kernel-legal."""
+    pairs, masks = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=3,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+
+    assert pairs.shape == (3, 8)
+    assert masks.shape == (3, 4)
+    assert torch.count_nonzero(masks).item() == 0
+
+    seen_edges = set()
+    for rotation_pairs in pairs.view(3, 4, 2).tolist():
+        used_channels = set()
+        for left, right in rotation_pairs:
+            assert left != right
+            assert left not in used_channels
+            assert right not in used_channels
+            used_channels.add(left)
+            used_channels.add(right)
+            edge = tuple(sorted((left, right)))
+            assert edge not in seen_edges
+            seen_edges.add(edge)
+
+
+def test_paroquant_optim_forward_matches_pseudo_weight_contract():
+    """Guard the stage-time forward rewrite against the original pseudo-weight contract."""
+    torch.manual_seed(0)
+    weight = torch.randn((16, 8), dtype=torch.float32)
+    inputs = torch.randn((5, 8), dtype=torch.float32)
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=3,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    model = _ParoQuantOptimLinear(
+        weight,
+        None,
+        bits=4,
+        group_size=8,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    with torch.no_grad():
+        model.theta.uniform_(-0.2, 0.2)
+        model.channel_scales_opt.uniform_(0.8, 1.2)
+    model.init_quantizer()
+
+    expected = F.linear(inputs, model.pseudo_weight(), model.bias)
+    actual = model(inputs)
+
+    torch.testing.assert_close(actual, expected, atol=2e-6, rtol=1e-5)
+
+
+def test_paroquant_materialized_sym_scale_ste_matches_legacy_gradients():
+    """Guard the stage2 symmetric quantizer rewrite against the legacy STE math."""
+    torch.manual_seed(0)
+    group_size = 8
+    bits = 4
+    qmin = -(2 ** (bits - 1))
+    qmax = 2 ** (bits - 1) - 1
+
+    weight = torch.randn((6, group_size), dtype=torch.float32, requires_grad=True)
+    scale = (torch.rand((6, 1), dtype=torch.float32) + 0.1).requires_grad_()
+
+    legacy_scale = scale.clone().detach().requires_grad_(True)
+    legacy_weight = weight.clone().detach().requires_grad_(True)
+    legacy_scale_safe = paroquant_optimization._clamp_ste(legacy_scale, min_value=1e-5, max_value=1e5)
+    legacy_quant = paroquant_optimization._clamp_ste(
+        paroquant_optimization._round_ste(legacy_weight / legacy_scale_safe),
+        qmin,
+        qmax,
+    )
+    legacy_output = (legacy_quant * legacy_scale_safe).reshape_as(legacy_weight)
+
+    actual_output = pseudo_quantize_dequant(
+        weight,
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        scale=scale,
+        use_ste=True,
+    )
+
+    torch.testing.assert_close(actual_output, legacy_output, atol=0, rtol=0)
+
+    legacy_output.sum().backward()
+    actual_output.sum().backward()
+
+    torch.testing.assert_close(weight.grad, legacy_weight.grad, atol=0, rtol=0)
+    torch.testing.assert_close(scale.grad, legacy_scale.grad, atol=0, rtol=0)
+
+
+def test_paroquant_large_train_quant_compile_dispatch(monkeypatch):
+    """Guard that only large CUDA training-time quant calls route into the compiled helper."""
+    class _FakeWeight:
+        def __init__(self, numel: int, device_type: str = "cuda"):
+            self._numel = numel
+            self.device = SimpleNamespace(type=device_type)
+
+        def numel(self) -> int:
+            return self._numel
+
+    monkeypatch.setattr(paroquant_optimization, "_PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL", 16)
+    monkeypatch.setattr(paroquant_optimization, "env_flag", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(paroquant_optimization, "_get_large_train_quant_compile", lambda: lambda *_args, **_kwargs: "compiled")
+    monkeypatch.setattr(paroquant_optimization, "pseudo_quantize_dequant", lambda *_args, **_kwargs: "eager")
+
+    assert (
+        paroquant_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(32),
+            bits=4,
+            group_size=8,
+            sym=True,
+        )
+        == "compiled"
+    )
+    assert (
+        paroquant_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(8),
+            bits=4,
+            group_size=8,
+            sym=True,
+        )
+        == "eager"
+    )
+    assert (
+        paroquant_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(32),
+            bits=4,
+            group_size=8,
+            sym=False,
+        )
+        == "compiled"
+    )
+    assert (
+        paroquant_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(32, device_type="cpu"),
+            bits=4,
+            group_size=8,
+            sym=True,
+        )
+        == "eager"
+    )
+
+
+def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
+    """Guard that CUDA-graph replay only activates for real CUDA tensor stages."""
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones((2, 4), dtype=torch.float32))
+            self.fused_rotation = True
+
+    class _FakeRows:
+        def __init__(self, device_type: str):
+            self.shape = (2048, 4)
+            self.device = SimpleNamespace(type=device_type, index=0 if device_type == "cuda" else None)
+
+    monkeypatch.delenv("GPTQMODEL_PAROQUANT_OPT_STAGE_CUDAGRAPH", raising=False)
+
+    model = _DummyModel()
+    real_cpu_rows = torch.ones((2048, 4), dtype=torch.float32)
+    fake_cuda_rows = _FakeRows("cuda")
+
+    assert paroquant_optimization._should_use_paroquant_stage_cudagraph(model, inputs_train=real_cpu_rows, batch_size=64) is False
+    assert paroquant_optimization._should_use_paroquant_stage_cudagraph(model, inputs_train=fake_cuda_rows, batch_size=64) is False
+
+
+def test_paroquant_stage_cudagraph_falls_back_to_eager_on_runtime_error(monkeypatch):
+    """Guard that a CUDA-graph stage failure restores model state and reruns eagerly."""
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([[1.0]], dtype=torch.float32))
+            self.fused_rotation = True
+
+        def reset_masked_angles(self):
+            return None
+
+    model = _DummyModel()
+    call_order = []
+
+    def fake_impl(*, model, **kwargs):
+        del kwargs
+        call_order.append(model)
+        return 1.25, 2.5
+
+    def fake_cudagraph(*, model, **kwargs):
+        del kwargs
+        call_order.append(("graph", model))
+        raise RuntimeError("graph failed at runtime")
+
+    monkeypatch.setattr(paroquant_optimization, "_should_use_paroquant_stage_cudagraph", lambda *args, **kwargs: True)
+    monkeypatch.setattr(paroquant_optimization, "_run_stage_gptqmodel_cudagraph", fake_cudagraph)
+    monkeypatch.setattr(paroquant_optimization, "_run_stage_gptqmodel_impl", fake_impl)
+
+    train_loss, val_loss = paroquant_optimization._run_stage_gptqmodel(
+        model=model,
+        inputs_train=torch.ones((2, 1), dtype=torch.float32),
+        targets_train=torch.zeros((2, 1), dtype=torch.float32),
+        inputs_val=torch.ones((1, 1), dtype=torch.float32),
+        targets_val=torch.zeros((1, 1), dtype=torch.float32),
+        param_groups=[],
+        epochs=1,
+        batch_size=1,
+    )
+
+    assert (train_loss, val_loss) == (1.25, 2.5)
+    assert call_order == [("graph", model), model]
+
+
+def test_optimize_paroquant_linear_forwards_stage_cudagraph(monkeypatch):
+    """Guard that explicit CUDA-graph policy is forwarded into both optimization stages."""
+    stage_cudagraph_calls = []
+    original_run_stage = paroquant_optimization._run_stage
+
+    def spy_run_stage(*, stage_cudagraph=None, **kwargs):
+        stage_cudagraph_calls.append(stage_cudagraph)
+        return original_run_stage(stage_cudagraph=stage_cudagraph, **kwargs)
+
+    monkeypatch.setattr(paroquant_optimization, "_run_stage", spy_run_stage)
+
+    weight = torch.randn((8, 8), dtype=torch.float32)
+    inputs = torch.randn((64, 8), dtype=torch.float32)
+
+    result = optimize_paroquant_linear(
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        pair_ratio=0.5,
+        train_rows=32,
+        val_rows=16,
+        batch_size=16,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        fused_rotation=True,
+        stage_cudagraph=False,
+        stage_impl="fast",
+        pair_impl="fast",
+        quantizer_impl="reference",
+    )
+
+    assert result.val_loss >= 0.0
+    assert stage_cudagraph_calls == [False, False]
+
+
+def test_paroquant_run_stage_only_enables_active_gradients(monkeypatch):
+    """Guard that each stage only backpropagates through the parameters it optimizes."""
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=1,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    model = _ParoQuantOptimLinear(
+        torch.randn((8, 8), dtype=torch.float32),
+        torch.randn((8,), dtype=torch.float32),
+        bits=4,
+        group_size=8,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    original_flags = {name: param.requires_grad for name, param in model.named_parameters()}
+    seen_flags = {}
+
+    def fake_stage_impl(**kwargs):
+        del kwargs
+        seen_flags.update({name: param.requires_grad for name, param in model.named_parameters()})
+        return 0.0, 0.0
+
+    monkeypatch.setattr(paroquant_optimization, "_run_stage_gptqmodel", fake_stage_impl)
+
+    paroquant_optimization._run_stage(
+        model=model,
+        inputs_train=torch.randn((4, 8), dtype=torch.float32),
+        targets_train=torch.randn((4, 8), dtype=torch.float32),
+        inputs_val=torch.randn((2, 8), dtype=torch.float32),
+        targets_val=torch.randn((2, 8), dtype=torch.float32),
+        param_groups=[
+            {"params": [model.channel_scales_opt], "lr": 0.05},
+            {"params": [model.theta], "lr": 0.05},
+        ],
+        epochs=1,
+        batch_size=2,
+        stage_impl="fast",
+    )
+
+    assert seen_flags["theta"] is True
+    assert seen_flags["channel_scales_opt"] is True
+    assert seen_flags["weight"] is False
+    assert seen_flags["bias"] is False
+    assert {name: param.requires_grad for name, param in model.named_parameters()} == original_flags
 
 
 def test_paroquant_registers_with_transformers_gptq_quantizer():

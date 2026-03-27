@@ -294,6 +294,7 @@ class ParoQuantProcessor(LoopProcessor):
                 quantizer_lr=self.qcfg.opt_quantizer_lr,
                 seed=module_seed,
                 fused_rotation=self.qcfg.opt_fused_rotation,
+                stage_cudagraph=self.qcfg.opt_stage_cudagraph,
                 stage_impl=self.qcfg.opt_stage_impl,
                 pair_impl=self.qcfg.opt_pair_impl,
                 quantizer_impl=self.qcfg.opt_quantizer_impl,
