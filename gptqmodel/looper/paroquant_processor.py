@@ -59,6 +59,9 @@ class _ParoQuantLayerState:
 
     modules: Dict[str, NamedModule] = field(default_factory=dict)
     layer_module: Optional[torch.nn.Module] = None
+    layer_inputs: Optional[List[List[torch.Tensor]]] = None
+    layer_input_kwargs: Optional[List[Dict[str, torch.Tensor]]] = None
+    layer_outputs: Optional[List[List[torch.Tensor]]] = None
     subset_total: Optional[int] = None
     processed_subsets: Set[int] = field(default_factory=set)
     pending_modules: Set[str] = field(default_factory=set)
@@ -99,6 +102,7 @@ class ParoQuantProcessor(LoopProcessor):
                 fwd_replay_after_process=True,
                 subset_forward_early_stop=True,
                 enable_activation_capture=True,
+                capture_layer_forward_context=True,
             ),
         )
 
@@ -410,6 +414,9 @@ class ParoQuantProcessor(LoopProcessor):
         state.modules.clear()
         state.pending_modules.clear()
         state.processed_subsets.clear()
+        state.layer_inputs = None
+        state.layer_input_kwargs = None
+        state.layer_outputs = None
         state.subset_total = None
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
@@ -473,6 +480,29 @@ class ParoQuantProcessor(LoopProcessor):
             )
             if should_quantize:
                 self._quantize_layer(layer_index, state)
+
+    def receive_layer_forward_context(
+        self,
+        *,
+        layer_index: int,
+        layer_inputs: List[List[torch.Tensor]],
+        layer_input_kwargs: List[Dict[str, torch.Tensor]],
+        layer_outputs: List[List[torch.Tensor]],
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ) -> None:
+        """Preserve the original float layer IO for grouped optimization modes."""
+        del subset_index
+        state = self._get_layer_state(layer_index)
+        with state.lock:
+            if state.layer_inputs is None:
+                state.layer_inputs = layer_inputs
+            if state.layer_input_kwargs is None:
+                state.layer_input_kwargs = layer_input_kwargs
+            if state.layer_outputs is None:
+                state.layer_outputs = layer_outputs
+            if subset_total is not None and state.subset_total is None:
+                state.subset_total = subset_total
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         """Pack one optimized float module into its ParoQuant runtime form."""

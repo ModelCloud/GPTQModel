@@ -502,7 +502,8 @@ def _run_single_subset_pass(
                 len(subset),
             )
 
-    need_outputs = execute_forward and plan.need_forward_outputs
+    capture_layer_forward_context = execute_forward and execution_config.capture_layer_forward_context
+    need_outputs = execute_forward and (plan.need_forward_outputs or capture_layer_forward_context)
     fwd_start = None
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
     if execute_forward:
@@ -575,7 +576,17 @@ def _run_single_subset_pass(
                 forward_pb.close()
 
     returned_outputs = None
-    if execute_forward and need_outputs:
+    if execute_forward and capture_layer_forward_context:
+        processor.receive_layer_forward_context(
+            layer_index=layer_index,
+            layer_inputs=layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            layer_outputs=forward_outputs,
+            subset_index=subset_index,
+            subset_total=subset_total,
+        )
+
+    if execute_forward and plan.need_forward_outputs:
         # For pre-process consumers, the next stage needs the forward outputs
         # immediately rather than after the later layer replay step.
         processor.receive_layer_inputs(forward_outputs)

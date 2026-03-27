@@ -80,6 +80,10 @@ class ExecutionConfig:
     subset_forward_early_stop: bool = False
     # Whether capture-only modules/hooks (for example ':?') should be enabled.
     enable_activation_capture: bool = False
+    # Whether the processor needs the original layer IO from the pre-process
+    # forward, even when the authoritative next-layer cache is produced by a
+    # later replay-after-process step.
+    capture_layer_forward_context: bool = False
 
 
 # LoopProcessor is a singleton(), not per module instance
@@ -690,6 +694,27 @@ class LoopProcessor:
         """Replaces cached layer outputs that feed the next loop stage."""
 
         self.inputs_cache.layer_inputs = layer_inputs
+
+    def receive_layer_forward_context(
+        self,
+        *,
+        layer_index: int,
+        layer_inputs: List[List[Tensor]],
+        layer_input_kwargs: List[Dict[str, Tensor]],
+        layer_outputs: List[List[Tensor]],
+        subset_index: Optional[int] = None,
+        subset_total: Optional[int] = None,
+    ) -> None:
+        """Override point for processors that need original layer IO snapshots."""
+
+        del (
+            layer_index,
+            layer_inputs,
+            layer_input_kwargs,
+            layer_outputs,
+            subset_index,
+            subset_total,
+        )
 
     def clear_cache_data(self):
         """Drops transient task data and cached layer inputs after replay."""

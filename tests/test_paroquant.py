@@ -889,6 +889,84 @@ def test_paroquant_processor_rejects_unimplemented_non_module_units():
         processor._quantize_layer(layer_index=0, state=state)
 
 
+def test_paroquant_processor_captures_first_layer_forward_context():
+    """Guard that grouped optimization modes keep the original float layer IO once."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor._layer_states = {}
+    processor._layer_states_lock = threading.Lock()
+
+    first_inputs = [[torch.randn(1, 4)]]
+    first_kwargs = [{"attention_mask": torch.ones((1, 4), dtype=torch.int64)}]
+    first_outputs = [[torch.randn(1, 4)]]
+    second_inputs = [[torch.randn(1, 4)]]
+    second_kwargs = [{"attention_mask": torch.zeros((1, 4), dtype=torch.int64)}]
+    second_outputs = [[torch.randn(1, 4)]]
+
+    processor.receive_layer_forward_context(
+        layer_index=0,
+        layer_inputs=first_inputs,
+        layer_input_kwargs=first_kwargs,
+        layer_outputs=first_outputs,
+        subset_index=0,
+        subset_total=2,
+    )
+    processor.receive_layer_forward_context(
+        layer_index=0,
+        layer_inputs=second_inputs,
+        layer_input_kwargs=second_kwargs,
+        layer_outputs=second_outputs,
+        subset_index=1,
+        subset_total=2,
+    )
+
+    state = processor._get_layer_state(0)
+    assert state.layer_inputs is first_inputs
+    assert state.layer_input_kwargs is first_kwargs
+    assert state.layer_outputs is first_outputs
+    assert state.subset_total == 2
+
+
+def test_paroquant_quantize_layer_clears_stored_forward_context():
+    """Guard that transient grouped-optimization IO snapshots do not leak across layers."""
+    module = SimpleNamespace(
+        name="mlp.gate_proj",
+        full_name="model.layers.0.mlp.gate_proj",
+        weight=SimpleNamespace(data=torch.randn(8, 8)),
+        bias=None,
+    )
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_unit="module")
+    processor.fallback = True
+    processor.lock = threading.Lock()
+    processor.tasks = {"mlp.gate_proj": {"inputs": [torch.randn(1, 8)], "layer_index": 0}}
+    processor._layer_input_features = lambda _state: {"mlp.gate_proj": torch.randn(4, 8)}
+    processor._quantize_one_module = lambda named_module, feat: (0.0, float(feat.numel() > 0))  # type: ignore[method-assign]
+    processor._log_quant_result = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    state = SimpleNamespace(
+        quantized=False,
+        modules={"mlp.gate_proj": module},
+        pending_modules=set(),
+        processed_subsets={0},
+        layer_inputs=[[torch.randn(1, 8)]],
+        layer_input_kwargs=[{"attention_mask": torch.ones((1, 8), dtype=torch.int64)}],
+        layer_outputs=[[torch.randn(1, 8)]],
+        subset_total=1,
+    )
+
+    processor._quantize_layer(layer_index=0, state=state)
+
+    assert state.quantized is True
+    assert state.modules == {}
+    assert state.pending_modules == set()
+    assert state.processed_subsets == set()
+    assert state.layer_inputs is None
+    assert state.layer_input_kwargs is None
+    assert state.layer_outputs is None
+    assert state.subset_total is None
+    assert processor.tasks["mlp.gate_proj"]["inputs"] == []
+
+
 def test_paroquant_quant_device_selection_forces_single_gpu():
     """Guard against multi-GPU ParoQuant worker fan-out and sync hazards."""
     cuda_devices = [torch.device("cuda:0"), torch.device("cuda:1"), torch.device("cuda:2")]
