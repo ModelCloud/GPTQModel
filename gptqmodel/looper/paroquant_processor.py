@@ -85,6 +85,7 @@ class _ParoQuantLayerState:
     layer_module: Optional[torch.nn.Module] = None
     pristine_layer_module: Optional[torch.nn.Module] = None
     prepared_group_source_module: Optional[torch.nn.Module] = None
+    prepared_group_source_module_by_device: Optional[Dict[str, torch.nn.Module]] = None
     layer_inputs: Optional[List[List[torch.Tensor]]] = None
     layer_input_kwargs: Optional[List[Dict[str, torch.Tensor]]] = None
     layer_outputs: Optional[List[List[torch.Tensor]]] = None
@@ -434,9 +435,28 @@ class ParoQuantProcessor(LoopProcessor):
 
             state.prepared_group_source_module = prepared_source
 
-        layer_clone = copy.deepcopy(prepared_source)
         target_device = group_modules[0].weight.device
-        layer_clone = layer_clone.to(device=target_device, dtype=torch.float32)
+        if self._opt_unit_mode() == "subsection":
+            device_cache = getattr(state, "prepared_group_source_module_by_device", None)
+            if device_cache is None:
+                device_cache = {}
+                state.prepared_group_source_module_by_device = device_cache
+
+            device_key = str(target_device)
+            prepared_source_for_device = device_cache.get(device_key)
+            if prepared_source_for_device is None:
+                if device_key == str(CPU):
+                    prepared_source_for_device = prepared_source
+                else:
+                    prepared_source_for_device = copy.deepcopy(prepared_source).to(device=target_device, dtype=torch.float32)
+                device_cache[device_key] = prepared_source_for_device
+
+            layer_clone = copy.deepcopy(prepared_source_for_device)
+            if next(layer_clone.parameters()).device != target_device:
+                layer_clone = layer_clone.to(device=target_device, dtype=torch.float32)
+        else:
+            layer_clone = copy.deepcopy(prepared_source)
+            layer_clone = layer_clone.to(device=target_device, dtype=torch.float32)
 
         optim_modules: dict[str, _ParoQuantOptimLinear] = {}
         for named_module in group_modules:
@@ -1212,6 +1232,7 @@ class ParoQuantProcessor(LoopProcessor):
         state.layer_outputs = None
         state.pristine_layer_module = None
         state.prepared_group_source_module = None
+        state.prepared_group_source_module_by_device = None
         state.grouped_dataset = None
         state.grouped_dataset_by_device = None
         state.subset_total = None

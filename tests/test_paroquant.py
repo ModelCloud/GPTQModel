@@ -1065,10 +1065,12 @@ def test_paroquant_quantize_layer_clears_stored_forward_context():
         processed_subsets={0},
         pristine_layer_module=torch.nn.Linear(8, 8, bias=False),
         prepared_group_source_module=torch.nn.Linear(8, 8, bias=False),
+        prepared_group_source_module_by_device={"cpu": torch.nn.Linear(8, 8, bias=False)},
         layer_inputs=[[torch.randn(1, 8)]],
         layer_input_kwargs=[{"attention_mask": torch.ones((1, 8), dtype=torch.int64)}],
         layer_outputs=[[torch.randn(1, 8)]],
         grouped_dataset=("cached",),
+        grouped_dataset_by_device={"cpu": ("cached",)},
         subset_total=1,
     )
 
@@ -1083,7 +1085,9 @@ def test_paroquant_quantize_layer_clears_stored_forward_context():
     assert state.layer_outputs is None
     assert state.pristine_layer_module is None
     assert state.prepared_group_source_module is None
+    assert state.prepared_group_source_module_by_device is None
     assert state.grouped_dataset is None
+    assert state.grouped_dataset_by_device is None
     assert state.subset_total is None
     assert processor.tasks["mlp.gate_proj"]["inputs"] == []
 
@@ -1122,6 +1126,7 @@ def test_paroquant_processor_builds_group_optim_layer_clone():
 
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = SimpleNamespace(
+        opt_unit="subsection",
         runtime_bits=4,
         group_size=8,
         sym=True,
@@ -1198,6 +1203,7 @@ def test_paroquant_processor_builds_group_optim_layer_from_pristine_snapshot():
 
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = SimpleNamespace(
+        opt_unit="subsection",
         runtime_bits=4,
         group_size=8,
         sym=True,
@@ -1263,6 +1269,7 @@ def test_paroquant_processor_reuses_cached_group_source_clone():
 
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = SimpleNamespace(
+        opt_unit="subsection",
         runtime_bits=4,
         group_size=8,
         sym=True,
@@ -1290,6 +1297,122 @@ def test_paroquant_processor_reuses_cached_group_source_clone():
 
     assert isinstance(layer_clone.self_attn.o_proj, torch.nn.Linear)
     assert not isinstance(layer_clone.self_attn.o_proj, _HookedLike)
+
+
+def test_paroquant_processor_reuses_cached_group_source_clone_per_device():
+    """Guard grouped clone preparation against repeating the same device-local source setup."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(_attn_implementation="sdpa")
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer().half()
+    q_proj = NamedModule(
+        layer.self_attn.q_proj,
+        "self_attn.q_proj",
+        "model.layers.0.self_attn.q_proj",
+        0,
+    )
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_unit="subsection",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        dynamic_get=_dynamic_get,
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        prepared_group_source_module=None,
+        prepared_group_source_module_by_device=None,
+    )
+    processor._build_group_optim_layer(state, [q_proj])
+    cached_source = state.prepared_group_source_module_by_device["cpu"]
+
+    processor._build_group_optim_layer(state, [q_proj])
+
+    assert state.prepared_group_source_module is not None
+    assert state.prepared_group_source_module_by_device is not None
+    assert state.prepared_group_source_module_by_device["cpu"] is cached_source
+
+
+def test_paroquant_processor_device_group_source_cache_is_subsection_only():
+    """Guard grouped source-device caching so whole-layer mode keeps the simpler one-shot path."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(_attn_implementation="sdpa")
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer().half()
+    q_proj = NamedModule(
+        layer.self_attn.q_proj,
+        "self_attn.q_proj",
+        "model.layers.0.self_attn.q_proj",
+        0,
+    )
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_unit="layer",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        dynamic_get=_dynamic_get,
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        prepared_group_source_module=None,
+        prepared_group_source_module_by_device=None,
+    )
+    processor._build_group_optim_layer(state, [q_proj])
+
+    assert state.prepared_group_source_module is not None
+    assert state.prepared_group_source_module_by_device is None
 
 
 def test_paroquant_processor_caches_group_dataset_split():
