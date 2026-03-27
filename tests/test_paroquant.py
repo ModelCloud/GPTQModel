@@ -1064,9 +1064,11 @@ def test_paroquant_quantize_layer_clears_stored_forward_context():
         pending_modules=set(),
         processed_subsets={0},
         pristine_layer_module=torch.nn.Linear(8, 8, bias=False),
+        prepared_group_source_module=torch.nn.Linear(8, 8, bias=False),
         layer_inputs=[[torch.randn(1, 8)]],
         layer_input_kwargs=[{"attention_mask": torch.ones((1, 8), dtype=torch.int64)}],
         layer_outputs=[[torch.randn(1, 8)]],
+        grouped_dataset=("cached",),
         subset_total=1,
     )
 
@@ -1080,6 +1082,8 @@ def test_paroquant_quantize_layer_clears_stored_forward_context():
     assert state.layer_input_kwargs is None
     assert state.layer_outputs is None
     assert state.pristine_layer_module is None
+    assert state.prepared_group_source_module is None
+    assert state.grouped_dataset is None
     assert state.subset_total is None
     assert processor.tasks["mlp.gate_proj"]["inputs"] == []
 
@@ -1218,6 +1222,100 @@ def test_paroquant_processor_builds_group_optim_layer_from_pristine_snapshot():
     assert isinstance(layer_clone.self_attn.k_proj, _ParoQuantOptimLinear)
     assert isinstance(layer_clone.self_attn.o_proj, torch.nn.Linear)
     assert not isinstance(layer_clone.self_attn.o_proj, _HookedLike)
+
+
+def test_paroquant_processor_reuses_cached_group_source_clone():
+    """Guard grouped clone preparation against rebuilding from a later-mutated pristine snapshot."""
+
+    class _HookedLike(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.randn(8, 8))
+
+        def forward(self, x):
+            return x
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(_attn_implementation="sdpa")
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    pristine_layer = _ToyLayer().half()
+    live_layer = copy.deepcopy(pristine_layer)
+    q_proj = NamedModule(
+        live_layer.self_attn.q_proj,
+        "self_attn.q_proj",
+        "model.layers.0.self_attn.q_proj",
+        0,
+    )
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        dynamic_get=_dynamic_get,
+    )
+
+    state = SimpleNamespace(
+        layer_module=live_layer,
+        pristine_layer_module=pristine_layer,
+        prepared_group_source_module=None,
+    )
+    processor._build_group_optim_layer(state, [q_proj])
+    assert state.prepared_group_source_module is not None
+
+    state.pristine_layer_module.self_attn.o_proj = _HookedLike()
+    layer_clone, _optim_modules = processor._build_group_optim_layer(state, [q_proj])
+
+    assert isinstance(layer_clone.self_attn.o_proj, torch.nn.Linear)
+    assert not isinstance(layer_clone.self_attn.o_proj, _HookedLike)
+
+
+def test_paroquant_processor_caches_group_dataset_split():
+    """Guard grouped dataset slicing against recomputing the same train/val split every group."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=4, opt_validation_samples=2)
+    processor.inputs_cache = SimpleNamespace(position_ids=[], attention_masks=[])
+
+    inputs = [[torch.randn(1, 4)], [torch.randn(1, 4)]]
+    outputs = [[torch.randn(1, 4)], [torch.randn(1, 4)]]
+    state = SimpleNamespace(
+        layer_inputs=inputs,
+        layer_input_kwargs=[{}, {}],
+        layer_outputs=outputs,
+        grouped_dataset=None,
+    )
+
+    first = processor._group_dataset_from_state(state)
+    assert state.grouped_dataset is first
+
+    state.layer_inputs = []
+    state.layer_input_kwargs = []
+    state.layer_outputs = []
+    second = processor._group_dataset_from_state(state)
+
+    assert second is first
 
 
 def test_paroquant_processor_optimize_group_runs_on_toy_layer():

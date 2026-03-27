@@ -84,9 +84,11 @@ class _ParoQuantLayerState:
     modules: Dict[str, NamedModule] = field(default_factory=dict)
     layer_module: Optional[torch.nn.Module] = None
     pristine_layer_module: Optional[torch.nn.Module] = None
+    prepared_group_source_module: Optional[torch.nn.Module] = None
     layer_inputs: Optional[List[List[torch.Tensor]]] = None
     layer_input_kwargs: Optional[List[Dict[str, torch.Tensor]]] = None
     layer_outputs: Optional[List[List[torch.Tensor]]] = None
+    grouped_dataset: Optional[Any] = None
     subset_total: Optional[int] = None
     processed_subsets: Set[int] = field(default_factory=set)
     pending_modules: Set[str] = field(default_factory=set)
@@ -411,22 +413,29 @@ class ParoQuantProcessor(LoopProcessor):
         group_modules: list[NamedModule],
     ) -> tuple[torch.nn.Module, dict[str, _ParoQuantOptimLinear]]:
         """Clone the layer and swap one selected group to ParoQuant optimizer wrappers."""
-        source_layer = getattr(state, "pristine_layer_module", None) or state.layer_module
-        if source_layer is None:
-            raise RuntimeError("ParoQuantProcessor grouped optimization requires the source layer module.")
         if not group_modules:
             raise ValueError("ParoQuantProcessor grouped optimization requires at least one module.")
 
-        layer_clone = copy.deepcopy(source_layer)
+        prepared_source = getattr(state, "prepared_group_source_module", None)
+        if prepared_source is None:
+            source_layer = getattr(state, "pristine_layer_module", None) or state.layer_module
+            if source_layer is None:
+                raise RuntimeError("ParoQuantProcessor grouped optimization requires the source layer module.")
+
+            prepared_source = copy.deepcopy(source_layer).to(device=CPU, dtype=torch.float32)
+            # Grouped optimization needs stable, differentiable attention semantics.
+            # Keep the cloned calibration-time layer on eager attention even if the
+            # live model prefers SDPA/flash kernels for inference throughput.
+            layer_attn = getattr(prepared_source, "self_attn", None)
+            layer_attn_config = getattr(layer_attn, "config", None)
+            if layer_attn_config is not None and hasattr(layer_attn_config, "_attn_implementation"):
+                layer_attn_config._attn_implementation = "eager"
+
+            state.prepared_group_source_module = prepared_source
+
+        layer_clone = copy.deepcopy(prepared_source)
         target_device = group_modules[0].weight.device
         layer_clone = layer_clone.to(device=target_device, dtype=torch.float32)
-        # Grouped optimization needs stable, differentiable attention semantics.
-        # Keep the cloned calibration-time layer on eager attention even if the
-        # live model prefers SDPA/flash kernels for inference throughput.
-        layer_attn = getattr(layer_clone, "self_attn", None)
-        layer_attn_config = getattr(layer_attn, "config", None)
-        if layer_attn_config is not None and hasattr(layer_attn_config, "_attn_implementation"):
-            layer_attn_config._attn_implementation = "eager"
 
         optim_modules: dict[str, _ParoQuantOptimLinear] = {}
         for named_module in group_modules:
@@ -647,6 +656,10 @@ class ParoQuantProcessor(LoopProcessor):
         list[Optional[torch.Tensor]],
     ]:
         """Slice the preserved layer IO into train/validation batch lists for grouped optimization."""
+        cached_dataset = getattr(state, "grouped_dataset", None)
+        if cached_dataset is not None:
+            return cached_dataset
+
         input_batches = state.layer_inputs or []
         input_kwargs_batches = state.layer_input_kwargs or []
         output_batches = state.layer_outputs or []
@@ -671,7 +684,7 @@ class ParoQuantProcessor(LoopProcessor):
         val_batch_count = self._suffix_batch_count_for_rows(input_batches, int(self.qcfg.opt_validation_samples))
         val_start = max(0, len(input_batches) - val_batch_count)
 
-        return (
+        grouped_dataset = (
             input_batches[:train_batch_count],
             input_kwargs_batches[:train_batch_count],
             output_batches[:train_batch_count],
@@ -683,6 +696,8 @@ class ParoQuantProcessor(LoopProcessor):
             position_ids[val_start:],
             attention_masks[val_start:],
         )
+        state.grouped_dataset = grouped_dataset
+        return grouped_dataset
 
     def _forward_group_batch(
         self,
@@ -1098,6 +1113,8 @@ class ParoQuantProcessor(LoopProcessor):
         state.layer_input_kwargs = None
         state.layer_outputs = None
         state.pristine_layer_module = None
+        state.prepared_group_source_module = None
+        state.grouped_dataset = None
         state.subset_total = None
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
