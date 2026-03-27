@@ -41,10 +41,10 @@ def parse_args() -> argparse.Namespace:
         help="Disable the fused CUDA rotation autograd path during ParoQuant optimization.",
     )
     parser.add_argument(
-        "--opt-unit",
+        "--opt-scope",
         choices=("module", "subsection", "layer"),
         default="module",
-        help="ParoQuant optimization unit for the selected decoder layers.",
+        help="ParoQuant optimization scope for the selected decoder layers.",
     )
     parser.add_argument("--opt-rotation-epochs", type=int, default=10)
     parser.add_argument("--opt-finetune-epochs", type=int, default=10)
@@ -83,7 +83,7 @@ def main() -> int:
         eval_max_rows=args.eval_max_rows,
         sym=args.sym,
         fused_opt_rotation=not args.no_fused_opt_rotation,
-        opt_unit=args.opt_unit,
+        opt_scope=args.opt_scope,
         opt_rotation_epochs=args.opt_rotation_epochs,
         opt_finetune_epochs=args.opt_finetune_epochs,
         opt_train_samples=args.opt_train_samples,
@@ -102,7 +102,7 @@ def main() -> int:
     print(
         tabulate(
             comparison_rows(*cases),
-            headers=["case", "opt_unit", "sym", "fused_opt", "gsm8k_platinum_cot", "quant_wall_s", "eval_wall_s"],
+            headers=["case", "opt_scope", "sym", "fused_opt", "gsm8k_platinum_cot", "quant_wall_s", "eval_wall_s"],
             tablefmt="grid",
         )
     )

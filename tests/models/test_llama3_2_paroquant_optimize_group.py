@@ -19,9 +19,9 @@ def test_llama3_2_paroquant_optimize_group_first_2_layers(capsys: pytest.Capture
         pytest.skip("Set GPTQMODEL_RUN_PAROQUANT_OPTIMIZE_GROUP_TEST=1 to run this grouped integration test.")
 
     num_quant_layers = int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_NUM_LAYERS", "2"))
-    opt_unit = os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_OPT_UNIT", "subsection").strip().lower()
-    if opt_unit == "module":
-        pytest.skip("Grouped optimize_group integration test requires opt_unit=subsection or opt_unit=layer.")
+    opt_scope = os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_OPT_SCOPE", "subsection").strip().lower()
+    if opt_scope == "module":
+        pytest.skip("Grouped optimize_group integration test requires opt_scope=subsection or opt_scope=layer.")
 
     eval_max_rows = os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_MAX_ROWS")
     eval_batch = os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_EVAL_BATCH", "auto").strip().lower()
@@ -49,7 +49,7 @@ def test_llama3_2_paroquant_optimize_group_first_2_layers(capsys: pytest.Capture
         },
         sym=True,
         fused_opt_rotation=os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_FUSED", "1") != "0",
-        opt_unit=opt_unit,
+        opt_scope=opt_scope,
         opt_rotation_epochs=int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_ROT_EPOCHS", "4")),
         opt_finetune_epochs=int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_FT_EPOCHS", "4")),
         opt_train_samples=int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_TRAIN_ROWS", "512")),
@@ -59,15 +59,15 @@ def test_llama3_2_paroquant_optimize_group_first_2_layers(capsys: pytest.Capture
 
     assert result["module_time_rows"], "expected per-module quantization timings"
     assert result["num_quant_layers"] == num_quant_layers
-    assert result["opt_unit"] == opt_unit
-    assert result["opt_unit"] in {"subsection", "layer"}
+    assert result["opt_scope"] == opt_scope
+    assert result["opt_scope"] in {"subsection", "layer"}
     assert "gsm8k_platinum_cot" in result["eval_metrics"], "expected gsm8k platinum metrics"
     gsm8k_metrics = result["eval_metrics"]["gsm8k_platinum_cot"]
     assert "acc,num" in gsm8k_metrics, "expected gsm8k_platinum_cot acc,num metric"
 
     summary_rows = [
         ["num_quant_layers", str(result["num_quant_layers"])],
-        ["opt_unit", str(result["opt_unit"])],
+        ["opt_scope", str(result["opt_scope"])],
         ["quant_wall_s", f"{float(result['quant_wall_s']):.3f}"],
         ["eval_wall_s", f"{float(result['eval_wall_s']):.3f}"],
         ["gsm8k_platinum_cot acc,num", f"{float(gsm8k_metrics['acc,num']):.6f}"],

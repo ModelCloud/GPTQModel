@@ -354,13 +354,13 @@ class ParoQuantProcessor(LoopProcessor):
         digest = hashlib.blake2b(seed_material, digest_size=8).digest()
         return int.from_bytes(digest, byteorder="big", signed=False)
 
-    def _opt_unit_mode(self) -> str:
-        """Normalize the configured ParoQuant optimization unit."""
-        return str(getattr(self.qcfg, "opt_unit", "module")).strip().lower()
+    def _opt_scope_mode(self) -> str:
+        """Normalize the configured ParoQuant optimization scope."""
+        return str(getattr(self.qcfg, "opt_scope", getattr(self.qcfg, "opt_unit", "module"))).strip().lower()
 
     def uses_grouped_optimization(self) -> bool:
-        """Return whether this layer should optimize subsection/layer groups instead of one linear at a time."""
-        return self._opt_unit_mode() != "module"
+        """Return whether this layer should optimize subsection/layer scopes instead of one linear at a time."""
+        return self._opt_scope_mode() != "module"
 
     def capture_layer_forward_context_during_subset(self) -> bool:
         """Grouped modes capture pristine layer IO separately before subset hooks are active."""
@@ -436,7 +436,7 @@ class ParoQuantProcessor(LoopProcessor):
             state.prepared_group_source_module = prepared_source
 
         target_device = group_modules[0].weight.device
-        if self._opt_unit_mode() == "subsection":
+        if self._opt_scope_mode() == "subsection":
             device_cache = getattr(state, "prepared_group_source_module_by_device", None)
             if device_cache is None:
                 device_cache = {}
@@ -1156,7 +1156,7 @@ class ParoQuantProcessor(LoopProcessor):
         are scaffolded here so the lifecycle can switch units explicitly once
         their execution paths land.
         """
-        mode = self._opt_unit_mode()
+        mode = self._opt_scope_mode()
         named_modules = [state.modules[name] for name in sorted(state.modules)]
         if mode == "module":
             return [(module.name, [module]) for module in named_modules]
@@ -1169,7 +1169,8 @@ class ParoQuantProcessor(LoopProcessor):
             return [(label, grouped[label]) for label in sorted(grouped)]
         if mode == "layer":
             return [("layer", named_modules)]
-        raise ValueError(f"ParoQuantProcessor: unsupported optimize unit `{self.qcfg.opt_unit}`.")
+        configured_scope = getattr(self.qcfg, "opt_scope", getattr(self.qcfg, "opt_unit", "module"))
+        raise ValueError(f"ParoQuantProcessor: unsupported optimize scope `{configured_scope}`.")
 
     def _quantize_layer(self, layer_index: int, state: _ParoQuantLayerState) -> None:
         """Quantize every captured module in a layer once all subsets are ready."""
@@ -1177,7 +1178,7 @@ class ParoQuantProcessor(LoopProcessor):
             return
 
         optimization_groups = self._optimization_groups_for_layer(state)
-        mode = str(self.qcfg.opt_unit).strip().lower()
+        mode = self._opt_scope_mode()
 
         input_feat = self._layer_input_features(state)
         for module_name, tensor in input_feat.items():

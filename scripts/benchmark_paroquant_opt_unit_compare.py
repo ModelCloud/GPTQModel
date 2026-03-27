@@ -165,7 +165,7 @@ def _capture_module_inputs(
 
 def _build_processor(
     *,
-    opt_unit: str,
+    opt_scope: str,
     kwargs: dict[str, Any],
     all_input_batches: list[torch.Tensor],
     bits: int,
@@ -189,7 +189,7 @@ def _build_processor(
 
     sanitized_kwargs = {k: v for k, v in kwargs.items() if k not in ("attention_mask", "position_ids", "use_cache")}
     processor.qcfg = SimpleNamespace(
-        opt_unit=opt_unit,
+        opt_scope=opt_scope,
         runtime_bits=bits,
         group_size=group_size,
         sym=True,
@@ -272,7 +272,7 @@ def _benchmark_local_module(
     all_inputs = train_input_batches + val_input_batches
     all_outputs = train_output_batches + val_output_batches
     processor = _build_processor(
-        opt_unit="module",
+        opt_scope="module",
         kwargs=kwargs,
         all_input_batches=all_inputs,
         bits=args.bits,
@@ -344,7 +344,7 @@ def _benchmark_local_module(
 
 def _benchmark_local_group(
     *,
-    opt_unit: str,
+    opt_scope: str,
     base_layer: torch.nn.Module,
     layer_index: int,
     train_input_batches: list[torch.Tensor],
@@ -362,7 +362,7 @@ def _benchmark_local_group(
     all_inputs = train_input_batches + val_input_batches
     all_outputs = train_output_batches + val_output_batches
     processor = _build_processor(
-        opt_unit=opt_unit,
+        opt_scope=opt_scope,
         kwargs=kwargs,
         all_input_batches=all_inputs,
         bits=args.bits,
@@ -409,7 +409,7 @@ def _benchmark_local_group(
         output_batches=val_output_batches,
         kwargs=kwargs,
     )
-    return BenchRow(case=f"local_{opt_unit}", total_s=total_s, val_smoothl1=val_loss)
+    return BenchRow(case=f"local_{opt_scope}", total_s=total_s, val_smoothl1=val_loss)
 
 
 def _benchmark_official_layer(
@@ -563,8 +563,8 @@ def main() -> int:
     requested_cases = set(args.cases or [])
     cases = [
         ("local_module", lambda: _benchmark_local_module(module_names=module_names, device=device, dtype=dtype, args=args, layer_index=args.layer_idx, **captured)),
-        ("local_subsection", lambda: _benchmark_local_group(opt_unit="subsection", module_names=module_names, device=device, dtype=dtype, args=args, layer_index=args.layer_idx, **captured)),
-        ("local_layer", lambda: _benchmark_local_group(opt_unit="layer", module_names=module_names, device=device, dtype=dtype, args=args, layer_index=args.layer_idx, **captured)),
+        ("local_subsection", lambda: _benchmark_local_group(opt_scope="subsection", module_names=module_names, device=device, dtype=dtype, args=args, layer_index=args.layer_idx, **captured)),
+        ("local_layer", lambda: _benchmark_local_group(opt_scope="layer", module_names=module_names, device=device, dtype=dtype, args=args, layer_index=args.layer_idx, **captured)),
     ]
     if not args.skip_official:
         cases.append(("official_layer", lambda: _benchmark_official_layer(device=device, dtype=dtype, args=args, **captured)))
