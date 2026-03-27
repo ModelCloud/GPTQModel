@@ -890,7 +890,7 @@ class ParoQuantProcessor(LoopProcessor):
             total_steps = max(1, epochs * max(1, len(input_batches_train)))
             base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
             scaler = torch.amp.GradScaler(enabled=use_amp)
-            best_state = {key: tensor.detach().clone() for key, tensor in layer.state_dict().items()}
+            best_state: Optional[dict[str, torch.Tensor]] = None
             best_val_loss = float("inf")
             last_train_loss = 0.0
             global_step = 0
@@ -946,11 +946,12 @@ class ParoQuantProcessor(LoopProcessor):
                     attention_masks=attention_masks_val,
                     use_amp=use_amp,
                 )
-                if val_loss < best_val_loss:
+                if best_state is None or val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_state = {key: tensor.detach().clone() for key, tensor in layer.state_dict().items()}
 
-            layer.load_state_dict(best_state, strict=True)
+            if best_state is not None:
+                layer.load_state_dict(best_state, strict=True)
             self._reset_group_angles(optim_modules)
             return last_train_loss, best_val_loss
 

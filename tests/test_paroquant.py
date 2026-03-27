@@ -1409,6 +1409,50 @@ def test_paroquant_processor_group_stage_skips_redundant_initial_train_eval(monk
     assert calls == ["eval"]
 
 
+def test_paroquant_processor_group_stage_defers_best_state_snapshot_until_first_val(monkeypatch):
+    """Guard grouped stage setup against cloning the full layer before the first val result exists."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+            self.state_dict_calls = 0
+
+        def forward(self, x, **_kwargs):
+            return self.linear(x)
+
+        def state_dict(self, *args, **kwargs):
+            self.state_dict_calls += 1
+            return super().state_dict(*args, **kwargs)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_stage_impl="fast")
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    input_batch = [[torch.randn(2, 4)]]
+    target_batch = [[torch.randn(2, 4)]]
+
+    processor._run_group_stage(
+        layer,
+        optim_modules={},
+        input_batches_train=input_batch,
+        input_kwargs_train=[{}],
+        target_batches_train=target_batch,
+        position_ids_train=[None],
+        attention_masks_train=[None],
+        input_batches_val=input_batch,
+        input_kwargs_val=[{}],
+        target_batches_val=target_batch,
+        position_ids_val=[None],
+        attention_masks_val=[None],
+        param_groups=[{"params": [layer.linear.weight], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}],
+        epochs=1,
+    )
+
+    assert layer.state_dict_calls == 1
+
+
 def test_paroquant_processor_optimize_group_runs_on_toy_layer():
     """Guard the grouped optimizer path on a tiny layer without needing the full looper."""
 
