@@ -14,6 +14,7 @@ For each processor and layer, this stage:
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import time
@@ -229,6 +230,7 @@ def _capture_pristine_group_context(
     *,
     processor,
     module: torch.nn.Module,
+    pristine_module: Optional[torch.nn.Module],
     subset_plans: List[SubsetPlan],
     layer_inputs: List[List[torch.Tensor]],
     layer_input_kwargs: List[Dict[str, torch.Tensor]],
@@ -249,6 +251,12 @@ def _capture_pristine_group_context(
         return
     if not subset_plans:
         return
+    capture_pristine_layer_module = getattr(processor, "receive_pristine_layer_module", None)
+    if callable(capture_pristine_layer_module):
+        capture_pristine_layer_module(
+            layer_index=layer_index,
+            layer_module=pristine_module if pristine_module is not None else module,
+        )
 
     pristine_outputs = _replay_layer_outputs(
         looper,
@@ -329,9 +337,11 @@ def run_layer_stage(
         if is_lm_head_module:
             layer_title = "Quantizing lm_head"
             module = get_module(looper.gptq_model.model, key=looper.gptq_model.lm_head)
+            pristine_group_module = None
         else:
             layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
             module = layers[layer_index]
+            pristine_group_module = None
 
         looper.pause_controller.register_and_draw_progress_bar(pb, title=layer_title, subtitle="")
 
@@ -348,6 +358,13 @@ def run_layer_stage(
             if model_type in MODULE_CONVERTER_MAP:
                 converter = MODULE_CONVERTER_MAP[model_type]
                 module = converter(module, looper.gptq_model.model.config)
+
+            needs_group_pristine = any(
+                callable(getattr(processor, "uses_grouped_optimization", None)) and processor.uses_grouped_optimization()
+                for processor in looper.processors
+            )
+            if needs_group_pristine:
+                pristine_group_module = copy.deepcopy(module)
 
             replace_module_with_hooked_legacy(module, quant_lm_head=looper.gptq_model.quantize_config.lm_head)
 
@@ -404,6 +421,7 @@ def run_layer_stage(
                 looper,
                 processor=processor,
                 module=module,
+                pristine_module=pristine_group_module,
                 subset_plans=subset_plans,
                 layer_inputs=layer_inputs,
                 layer_input_kwargs=layer_input_kwargs,

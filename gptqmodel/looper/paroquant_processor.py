@@ -83,6 +83,7 @@ class _ParoQuantLayerState:
 
     modules: Dict[str, NamedModule] = field(default_factory=dict)
     layer_module: Optional[torch.nn.Module] = None
+    pristine_layer_module: Optional[torch.nn.Module] = None
     layer_inputs: Optional[List[List[torch.Tensor]]] = None
     layer_input_kwargs: Optional[List[Dict[str, torch.Tensor]]] = None
     layer_outputs: Optional[List[List[torch.Tensor]]] = None
@@ -410,13 +411,22 @@ class ParoQuantProcessor(LoopProcessor):
         group_modules: list[NamedModule],
     ) -> tuple[torch.nn.Module, dict[str, _ParoQuantOptimLinear]]:
         """Clone the layer and swap one selected group to ParoQuant optimizer wrappers."""
-        if state.layer_module is None:
+        source_layer = getattr(state, "pristine_layer_module", None) or state.layer_module
+        if source_layer is None:
             raise RuntimeError("ParoQuantProcessor grouped optimization requires the source layer module.")
         if not group_modules:
             raise ValueError("ParoQuantProcessor grouped optimization requires at least one module.")
 
-        layer_clone = copy.deepcopy(state.layer_module)
-        layer_clone = layer_clone.to(dtype=torch.float32)
+        layer_clone = copy.deepcopy(source_layer)
+        target_device = group_modules[0].weight.device
+        layer_clone = layer_clone.to(device=target_device, dtype=torch.float32)
+        # Grouped optimization needs stable, differentiable attention semantics.
+        # Keep the cloned calibration-time layer on eager attention even if the
+        # live model prefers SDPA/flash kernels for inference throughput.
+        layer_attn = getattr(layer_clone, "self_attn", None)
+        layer_attn_config = getattr(layer_attn, "config", None)
+        if layer_attn_config is not None and hasattr(layer_attn_config, "_attn_implementation"):
+            layer_attn_config._attn_implementation = "eager"
 
         optim_modules: dict[str, _ParoQuantOptimLinear] = {}
         for named_module in group_modules:
@@ -1087,6 +1097,7 @@ class ParoQuantProcessor(LoopProcessor):
         state.layer_inputs = None
         state.layer_input_kwargs = None
         state.layer_outputs = None
+        state.pristine_layer_module = None
         state.subset_total = None
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
@@ -1173,6 +1184,18 @@ class ParoQuantProcessor(LoopProcessor):
                 state.layer_outputs = layer_outputs
             if subset_total is not None and state.subset_total is None:
                 state.subset_total = subset_total
+
+    def receive_pristine_layer_module(
+        self,
+        *,
+        layer_index: int,
+        layer_module: torch.nn.Module,
+    ) -> None:
+        """Preserve an untouched float layer snapshot for grouped optimization clones."""
+        state = self._get_layer_state(layer_index)
+        with state.lock:
+            if state.pristine_layer_module is None:
+                state.pristine_layer_module = copy.deepcopy(layer_module).to(device=CPU)
 
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
         """Pack one optimized float module into its ParoQuant runtime form."""
