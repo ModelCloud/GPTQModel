@@ -77,7 +77,9 @@ PROCESS_USED_MEMORY = "(v)ram"
 
 EORA_DEFAULT_FILE = "eora.safetensors"
 
-SUPPORTED_SPLIT_BY = {None, "layer"}
+# disable gptqmodel split_by layer feature (until sglang pr is merged since our dir struct is not compatible)
+# SUPPORTED_SPLIT_BY = {None, "layer"}
+SUPPORTED_SPLIT_BY = {None}
 
 
 def _parse_split_by(value: Optional[str]) -> Optional[str]:
