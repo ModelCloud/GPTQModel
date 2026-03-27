@@ -638,7 +638,6 @@ def _run_paroquant_case(
             "dtype": _dtype_label(normalized_dtype),
             "fused_opt_rotation": fused_opt_rotation,
             "opt_scope": opt_scope,
-            "opt_unit": opt_scope,
             "sym": sym,
             "quant_wall_s": quant_wall_s,
             "save_wall_s": save_wall_s,
@@ -715,7 +714,6 @@ def run_paroquant_first_layer_case(
             "mode": "paroquant_prefix_layers",
             "num_quant_layers": int(num_quant_layers),
             "opt_scope": opt_scope,
-            "opt_unit": opt_scope,
         },
     )
 
@@ -825,7 +823,6 @@ def run_paroquant_selected_modules_case(
             "module_name": ",".join(str(name) for name in module_names),
             "module_names": [str(name) for name in module_names],
             "opt_scope": opt_scope,
-            "opt_unit": opt_scope,
         },
     )
 
@@ -840,7 +837,7 @@ def comparison_rows(*cases: dict[str, Any]) -> list[list[str]]:
         rows.append(
             [
                 label,
-                str(case.get("opt_scope", case.get("opt_unit", ""))),
+                str(case.get("opt_scope", "")),
                 str(case.get("sym", "")),
                 str(case.get("fused_opt_rotation", "")),
                 "" if score is None else f"{float(score):.6f}",

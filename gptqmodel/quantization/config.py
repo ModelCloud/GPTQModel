@@ -2502,7 +2502,6 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_fused_rotation": "opt_fused_rotation",
             "opt_stage_cudagraph": "opt_stage_cudagraph",
             "opt_scope": "opt_scope",
-            "opt_unit": "opt_unit",
             "opt_stage_impl": "opt_stage_impl",
             "opt_pair_impl": "opt_pair_impl",
             "opt_quantizer_impl": "opt_quantizer_impl",
@@ -2848,7 +2847,6 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_fused_rotation: bool = field(default=True)
     opt_stage_cudagraph: bool = field(default=True)
     opt_scope: str = field(default="module")
-    opt_unit: Optional[str] = field(default=None, repr=False)
     opt_stage_impl: str = field(default="fast")
     opt_pair_impl: str = field(default="fast")
     opt_quantizer_impl: str = field(default="reference")
@@ -2883,15 +2881,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_seed = int(self.opt_seed)
         self.opt_fused_rotation = bool(self.opt_fused_rotation)
         self.opt_stage_cudagraph = bool(self.opt_stage_cudagraph)
-        if self.opt_unit is not None:
-            alias_scope = str(self.opt_unit).strip().lower()
-            primary_scope = str(self.opt_scope).strip().lower()
-            if primary_scope != "module" and primary_scope != alias_scope:
-                raise ValueError("ParoQuantizeConfig: `opt_scope` and deprecated `opt_unit` disagree.")
-            if primary_scope == "module" and alias_scope != "module":
-                self.opt_scope = alias_scope
         self.opt_scope = str(self.opt_scope).strip().lower()
-        self.opt_unit = self.opt_scope
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
         self.opt_quantizer_impl = str(self.opt_quantizer_impl).strip().lower()
@@ -2942,7 +2932,6 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_fused_rotation"] = self.opt_fused_rotation
         meta_payload["opt_stage_cudagraph"] = self.opt_stage_cudagraph
         meta_payload["opt_scope"] = self.opt_scope
-        meta_payload["opt_unit"] = self.opt_scope
         meta_payload["opt_stage_impl"] = self.opt_stage_impl
         meta_payload["opt_pair_impl"] = self.opt_pair_impl
         meta_payload["opt_quantizer_impl"] = self.opt_quantizer_impl

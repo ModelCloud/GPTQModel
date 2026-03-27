@@ -356,7 +356,7 @@ class ParoQuantProcessor(LoopProcessor):
 
     def _opt_scope_mode(self) -> str:
         """Normalize the configured ParoQuant optimization scope."""
-        return str(getattr(self.qcfg, "opt_scope", getattr(self.qcfg, "opt_unit", "module"))).strip().lower()
+        return str(getattr(self.qcfg, "opt_scope", "module")).strip().lower()
 
     def uses_grouped_optimization(self) -> bool:
         """Return whether this layer should optimize subsection/layer scopes instead of one linear at a time."""
@@ -1150,10 +1150,10 @@ class ParoQuantProcessor(LoopProcessor):
         self,
         state: _ParoQuantLayerState,
     ) -> list[tuple[str, list[NamedModule]]]:
-        """Resolve the optimization unit for the current layer.
+        """Resolve the optimization scope for the current layer.
 
         `module` keeps today's per-linear behavior. `subsection` and `layer`
-        are scaffolded here so the lifecycle can switch units explicitly once
+        are scaffolded here so the lifecycle can switch scopes explicitly once
         their execution paths land.
         """
         mode = self._opt_scope_mode()
@@ -1169,8 +1169,7 @@ class ParoQuantProcessor(LoopProcessor):
             return [(label, grouped[label]) for label in sorted(grouped)]
         if mode == "layer":
             return [("layer", named_modules)]
-        configured_scope = getattr(self.qcfg, "opt_scope", getattr(self.qcfg, "opt_unit", "module"))
-        raise ValueError(f"ParoQuantProcessor: unsupported optimize scope `{configured_scope}`.")
+        raise ValueError(f"ParoQuantProcessor: unsupported optimize scope `{self.qcfg.opt_scope}`.")
 
     def _quantize_layer(self, layer_index: int, state: _ParoQuantLayerState) -> None:
         """Quantize every captured module in a layer once all subsets are ready."""

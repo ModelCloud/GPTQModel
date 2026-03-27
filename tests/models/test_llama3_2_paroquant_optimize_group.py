@@ -19,10 +19,7 @@ def test_llama3_2_paroquant_optimize_group_first_2_layers(capsys: pytest.Capture
         pytest.skip("Set GPTQMODEL_RUN_PAROQUANT_OPTIMIZE_GROUP_TEST=1 to run this grouped integration test.")
 
     num_quant_layers = int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_NUM_LAYERS", "2"))
-    opt_scope = os.environ.get(
-        "GPTQMODEL_PAROQUANT_GROUP_TEST_OPT_SCOPE",
-        os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_OPT_UNIT", "subsection"),
-    ).strip().lower()
+    opt_scope = os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_OPT_SCOPE", "subsection").strip().lower()
     if opt_scope == "module":
         pytest.skip("Grouped optimize_group integration test requires opt_scope=subsection or opt_scope=layer.")
 

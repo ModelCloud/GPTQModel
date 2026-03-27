@@ -59,7 +59,6 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.krot == 8
     assert cfg.opt_batch_size == 64
     assert cfg.opt_scope == "module"
-    assert cfg.opt_unit == "module"
     assert cfg.opt_stage_impl == "fast"
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
@@ -117,7 +116,6 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_fused_rotation is False
     assert cfg.opt_stage_cudagraph is False
     assert cfg.opt_scope == "subsection"
-    assert cfg.opt_unit == "subsection"
     assert cfg.opt_stage_impl == "reference"
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
@@ -126,7 +124,6 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
     assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
     assert cfg.to_dict()["meta"]["opt_scope"] == "subsection"
-    assert cfg.to_dict()["meta"]["opt_unit"] == "subsection"
     assert cfg.to_dict()["meta"]["opt_stage_impl"] == "reference"
     assert cfg.to_dict()["meta"]["opt_pair_impl"] == "fast"
     assert cfg.to_dict()["meta"]["opt_quantizer_impl"] == "reference"
@@ -169,7 +166,6 @@ def test_paroquant_benchmark_config_preserves_opt_scope():
 
     assert cfg.quant_method == METHOD.PAROQUANT
     assert cfg.opt_scope == "subsection"
-    assert cfg.opt_unit == "subsection"
 
 
 def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch):
