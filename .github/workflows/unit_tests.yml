@@ -454,9 +454,9 @@ jobs:
           echo "--- uninstalling required deps..."
           python .github/scripts/uninstall_deps.py ${{ matrix.test_script }}
 
-      - name: Install Evalution
-        run: |
-          uv pip install git+https://x-access-token:${{ secrets.REPO_TOKEN }}@github.com/ModelCloud/Evalution.git
+      # - name: Install Evalution
+      #   run: |
+      #     uv pip install git+https://x-access-token:${{ secrets.REPO_TOKEN }}@github.com/ModelCloud/Evalution.git
       #      - name: Install requirements
       #        run: |
       #          bash -c "$(curl -L http://${RUNNER}/scripts/env/init_compiler_no_env.sh)" @ ${{ needs.check-vm.outputs.cuda_version }} ${{ env.TORCH_VERSION }} $python_version${{ env.PYTHON_VERSION }}
