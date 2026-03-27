@@ -1318,6 +1318,51 @@ def test_paroquant_processor_caches_group_dataset_split():
     assert second is first
 
 
+def test_paroquant_processor_merges_equivalent_group_optimizer_param_groups():
+    """Guard grouped AdamW setup against spawning redundant one-parameter optimizer groups."""
+    p1 = torch.nn.Parameter(torch.randn(4))
+    p2 = torch.nn.Parameter(torch.randn(4))
+    p3 = torch.nn.Parameter(torch.randn(4))
+    processor = object.__new__(ParoQuantProcessor)
+
+    groups = processor._normalize_group_optimizer_param_groups(
+        [
+            {"params": [p1], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [p2], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [p1], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [p3], "lr": 1e-5, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+        ]
+    )
+
+    assert len(groups) == 2
+    assert groups[0]["params"] == [p1, p2]
+    assert groups[1]["params"] == [p3]
+
+
+def test_paroquant_processor_group_adamw_uses_merged_groups(monkeypatch):
+    """Guard grouped optimizer setup against re-expanding merged parameter buckets."""
+    processor = object.__new__(ParoQuantProcessor)
+    param = torch.nn.Parameter(torch.randn(4))
+    calls = []
+
+    class _FakeOptimizer:
+        def __init__(self):
+            self.param_groups = [{"params": [param], "lr": 0.05}]
+
+    def fake_adamw(param_groups, **kwargs):
+        calls.append(kwargs.copy())
+        return _FakeOptimizer()
+
+    monkeypatch.setattr(torch.optim, "AdamW", fake_adamw)
+    optimizer = processor._build_group_adamw(
+        [{"params": [param], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}],
+        device=torch.device("cuda"),
+    )
+
+    assert isinstance(optimizer, _FakeOptimizer)
+    assert calls == [{}]
+
+
 def test_paroquant_processor_optimize_group_runs_on_toy_layer():
     """Guard the grouped optimizer path on a tiny layer without needing the full looper."""
 

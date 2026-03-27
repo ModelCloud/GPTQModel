@@ -779,6 +779,67 @@ class ParoQuantProcessor(LoopProcessor):
                     total_loss += float(F.smooth_l1_loss(preds, target).item())
         return total_loss / max(1, len(input_batches))
 
+    @staticmethod
+    def _normalize_group_optimizer_param_groups(
+        param_groups: List[dict[str, object]],
+    ) -> List[dict[str, object]]:
+        """Merge equivalent AdamW groups so grouped optimization pays less optimizer overhead."""
+        normalized_groups: List[dict[str, object]] = []
+        group_index_by_key: Dict[tuple[float, float, tuple[float, float], float], int] = {}
+        seen_param_ids: set[int] = set()
+
+        for param_group in param_groups:
+            raw_params = param_group.get("params", [])
+            if isinstance(raw_params, nn.Parameter):
+                raw_params = [raw_params]
+
+            params: list[nn.Parameter] = []
+            for param in raw_params:
+                if not isinstance(param, nn.Parameter):
+                    continue
+                param_id = id(param)
+                if param_id in seen_param_ids:
+                    continue
+                seen_param_ids.add(param_id)
+                params.append(param)
+
+            if not params:
+                continue
+
+            lr = float(param_group["lr"])
+            weight_decay = float(param_group.get("weight_decay", 0.01))
+            betas_obj = tuple(float(beta) for beta in param_group.get("betas", (0.9, 0.95)))
+            betas = (betas_obj[0], betas_obj[1])
+            eps = float(param_group.get("eps", 1e-10))
+            key = (lr, weight_decay, betas, eps)
+
+            bucket_index = group_index_by_key.get(key)
+            if bucket_index is None:
+                group_index_by_key[key] = len(normalized_groups)
+                normalized_groups.append(
+                    {
+                        "params": list(params),
+                        "lr": lr,
+                        "weight_decay": weight_decay,
+                        "betas": betas,
+                        "eps": eps,
+                    }
+                )
+            else:
+                normalized_groups[bucket_index]["params"].extend(params)
+
+        return normalized_groups
+
+    @staticmethod
+    def _build_group_adamw(
+        normalized_groups: List[dict[str, object]],
+        *,
+        device: torch.device,
+    ) -> torch.optim.Optimizer:
+        """Construct the grouped AdamW optimizer after redundant groups are merged away."""
+        del device
+        return torch.optim.AdamW(normalized_groups)
+
     def _run_group_stage(
         self,
         layer: torch.nn.Module,
@@ -799,20 +860,7 @@ class ParoQuantProcessor(LoopProcessor):
     ) -> tuple[float, float]:
         """Run one grouped optimization stage against preserved full-layer outputs."""
         _normalize_opt_impl(self.qcfg.opt_stage_impl, field="stage_impl")
-        normalized_groups = []
-        for param_group in param_groups:
-            params = [param for param in param_group.get("params", []) if isinstance(param, nn.Parameter)]
-            if not params:
-                continue
-            normalized_groups.append(
-                {
-                    "params": params,
-                    "lr": float(param_group["lr"]),
-                    "weight_decay": float(param_group.get("weight_decay", 0.01)),
-                    "betas": tuple(param_group.get("betas", (0.9, 0.95))),
-                    "eps": float(param_group.get("eps", 1e-10)),
-                }
-            )
+        normalized_groups = self._normalize_group_optimizer_param_groups(param_groups)
 
         opt_device = next(layer.parameters()).device
         use_amp = opt_device.type == "cuda"
@@ -838,7 +886,7 @@ class ParoQuantProcessor(LoopProcessor):
                 )
                 return train_loss, val_loss
 
-            optimizer = torch.optim.AdamW(normalized_groups)
+            optimizer = self._build_group_adamw(normalized_groups, device=opt_device)
             total_steps = max(1, epochs * max(1, len(input_batches_train)))
             base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
             scaler = torch.amp.GradScaler(enabled=use_amp)
