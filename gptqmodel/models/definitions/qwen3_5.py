@@ -20,6 +20,10 @@ class Qwen3_5QModel(LlamaQModel):
 
     layer_modules_strict = False
 
+    pre_lm_head_norm_module = "model.language_model.norm"
+
+    rotary_embedding = "model.language_model.rotary_emb"
+
     module_tree = [
         "model",
         "language_model",
