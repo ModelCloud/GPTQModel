@@ -5,12 +5,13 @@ import os
 
 import pytest
 import torch
+from tabulate import tabulate
 
 from gptqmodel.utils.paroquant_benchmark import run_paroquant_first_layer_case
 
 
 @pytest.mark.cuda
-def test_llama3_2_paroquant_optimize_group_first_2_layers():
+def test_llama3_2_paroquant_optimize_group_first_2_layers(capsys: pytest.CaptureFixture[str]):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required for grouped ParoQuant integration test")
 
@@ -63,3 +64,25 @@ def test_llama3_2_paroquant_optimize_group_first_2_layers():
     assert "gsm8k_platinum_cot" in result["eval_metrics"], "expected gsm8k platinum metrics"
     gsm8k_metrics = result["eval_metrics"]["gsm8k_platinum_cot"]
     assert "acc,num" in gsm8k_metrics, "expected gsm8k_platinum_cot acc,num metric"
+
+    summary_rows = [
+        ["num_quant_layers", str(result["num_quant_layers"])],
+        ["opt_unit", str(result["opt_unit"])],
+        ["quant_wall_s", f"{float(result['quant_wall_s']):.3f}"],
+        ["eval_wall_s", f"{float(result['eval_wall_s']):.3f}"],
+        ["gsm8k_platinum_cot acc,num", f"{float(gsm8k_metrics['acc,num']):.6f}"],
+    ]
+    summary_table = tabulate(summary_rows, headers=["metric", "value"], tablefmt="grid")
+    module_times = tabulate(
+        result["module_time_rows"],
+        headers=["layer", "module", "feat", "samples", "loss", "time_s"],
+        tablefmt="grid",
+    )
+
+    with capsys.disabled():
+        print("\nParoQuant Optimize Group Summary", flush=True)
+        print(summary_table, flush=True)
+        print("\nParoQuant Optimize Group Eval", flush=True)
+        print(result.get("eval_table", ""), flush=True)
+        print("\nParoQuant Optimize Group Module Times", flush=True)
+        print(module_times, flush=True)
