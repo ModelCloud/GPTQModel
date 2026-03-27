@@ -162,7 +162,7 @@ class ModelTest(unittest.TestCase):
     PAROQUANT_TRAIN_SAMPLES = None
 
     SAVE_PATH = None  # default is temp folder
-    SPLIT_BY: Optional[str] = "layer"
+    SPLIT_BY: Optional[str] = None
 
     USE_FLASH_ATTN = True
 
