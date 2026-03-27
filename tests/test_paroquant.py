@@ -41,6 +41,7 @@ from gptqmodel.utils.paroquant import (
     apply_paroquant_rotation_reference,
     build_identity_rotation_buffers,
 )
+from gptqmodel.utils.paroquant_benchmark import make_paroquant_config
 
 
 def test_paroquant_quantize_config_dispatches_constructor():
@@ -157,6 +158,14 @@ def test_paroquant_quantize_config_rejects_invalid_opt_unit():
             group_size=128,
             opt_unit="block",
         )
+
+
+def test_paroquant_benchmark_config_preserves_opt_unit():
+    """Benchmark helpers should propagate the requested optimization unit."""
+    cfg = make_paroquant_config(dynamic={}, opt_unit="subsection")
+
+    assert cfg.quant_method == METHOD.PAROQUANT
+    assert cfg.opt_unit == "subsection"
 
 
 def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch):

@@ -43,6 +43,7 @@ def test_llama3_2_paroquant_first_4_layers_full_model():
         },
         sym=True,
         fused_opt_rotation=os.environ.get("GPTQMODEL_PAROQUANT_TEST_FUSED", "1") != "0",
+        opt_unit=os.environ.get("GPTQMODEL_PAROQUANT_TEST_OPT_UNIT", "module"),
         opt_rotation_epochs=int(os.environ.get("GPTQMODEL_PAROQUANT_TEST_ROT_EPOCHS", "4")),
         opt_finetune_epochs=int(os.environ.get("GPTQMODEL_PAROQUANT_TEST_FT_EPOCHS", "4")),
         opt_train_samples=int(os.environ.get("GPTQMODEL_PAROQUANT_TEST_TRAIN_ROWS", "512")),
@@ -52,6 +53,7 @@ def test_llama3_2_paroquant_first_4_layers_full_model():
 
     assert result["module_time_rows"], "expected per-module quantization timings"
     assert result["num_quant_layers"] == int(os.environ.get("GPTQMODEL_PAROQUANT_TEST_NUM_LAYERS", "4"))
+    assert result["opt_unit"] == os.environ.get("GPTQMODEL_PAROQUANT_TEST_OPT_UNIT", "module")
     assert "gsm8k_platinum_cot" in result["eval_metrics"], "expected gsm8k platinum metrics"
     gsm8k_metrics = result["eval_metrics"]["gsm8k_platinum_cot"]
     assert "acc,num" in gsm8k_metrics, "expected gsm8k_platinum_cot acc,num metric"
