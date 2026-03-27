@@ -79,6 +79,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-lr", type=float, default=1e-5)
     parser.add_argument("--quantizer-lr", type=float, default=1e-6)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--case",
+        dest="cases",
+        action="append",
+        choices=("local_module", "local_subsection", "local_layer", "official_layer"),
+        default=None,
+        help="Optional repeated case filter. By default all cases run.",
+    )
     parser.add_argument("--skip-official", action="store_true")
     parser.add_argument("--output-json", type=Path, default=None)
     return parser.parse_args()
@@ -552,6 +560,7 @@ def main() -> int:
     captured = _load_first_layer_io(args, device, dtype)
 
     rows: list[BenchRow] = []
+    requested_cases = set(args.cases or [])
     cases = [
         ("local_module", lambda: _benchmark_local_module(module_names=module_names, device=device, dtype=dtype, args=args, layer_index=args.layer_idx, **captured)),
         ("local_subsection", lambda: _benchmark_local_group(opt_unit="subsection", module_names=module_names, device=device, dtype=dtype, args=args, layer_index=args.layer_idx, **captured)),
@@ -561,6 +570,8 @@ def main() -> int:
         cases.append(("official_layer", lambda: _benchmark_official_layer(device=device, dtype=dtype, args=args, **captured)))
 
     for label, fn in cases:
+        if requested_cases and label not in requested_cases:
+            continue
         print(f"[run] {label}", flush=True)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
