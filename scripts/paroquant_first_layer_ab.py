@@ -42,6 +42,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--opt-scope",
+        "--opt-unit",
+        dest="opt_scope",
         choices=("module", "subsection", "layer"),
         default="module",
         help="ParoQuant optimization scope for the selected decoder layers.",
