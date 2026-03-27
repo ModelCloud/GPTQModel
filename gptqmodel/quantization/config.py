@@ -2501,6 +2501,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_seed": "opt_seed",
             "opt_fused_rotation": "opt_fused_rotation",
             "opt_stage_cudagraph": "opt_stage_cudagraph",
+            "opt_unit": "opt_unit",
             "opt_stage_impl": "opt_stage_impl",
             "opt_pair_impl": "opt_pair_impl",
             "opt_quantizer_impl": "opt_quantizer_impl",
@@ -2845,6 +2846,7 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_seed: int = field(default=0)
     opt_fused_rotation: bool = field(default=True)
     opt_stage_cudagraph: bool = field(default=True)
+    opt_unit: str = field(default="module")
     opt_stage_impl: str = field(default="fast")
     opt_pair_impl: str = field(default="fast")
     opt_quantizer_impl: str = field(default="reference")
@@ -2879,6 +2881,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_seed = int(self.opt_seed)
         self.opt_fused_rotation = bool(self.opt_fused_rotation)
         self.opt_stage_cudagraph = bool(self.opt_stage_cudagraph)
+        self.opt_unit = str(self.opt_unit).strip().lower()
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
         self.opt_quantizer_impl = str(self.opt_quantizer_impl).strip().lower()
@@ -2894,6 +2897,8 @@ class ParoQuantizeConfig(QuantizeConfig):
             raise ValueError("ParoQuantizeConfig: optimization learning rates must be positive.")
         if not (0.0 < self.opt_pair_ratio <= 0.5):
             raise ValueError("ParoQuantizeConfig: `opt_pair_ratio` must be in the interval (0, 0.5].")
+        if self.opt_unit not in {"module", "subsection", "layer"}:
+            raise ValueError("ParoQuantizeConfig: `opt_unit` must be one of {'module', 'subsection', 'layer'}.")
         if self.opt_stage_impl not in {"fast", "reference"}:
             raise ValueError("ParoQuantizeConfig: `opt_stage_impl` must be one of {'fast', 'reference'}.")
         if self.opt_pair_impl not in {"fast", "reference"}:
@@ -2926,6 +2931,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_seed"] = self.opt_seed
         meta_payload["opt_fused_rotation"] = self.opt_fused_rotation
         meta_payload["opt_stage_cudagraph"] = self.opt_stage_cudagraph
+        meta_payload["opt_unit"] = self.opt_unit
         meta_payload["opt_stage_impl"] = self.opt_stage_impl
         meta_payload["opt_pair_impl"] = self.opt_pair_impl
         meta_payload["opt_quantizer_impl"] = self.opt_quantizer_impl
