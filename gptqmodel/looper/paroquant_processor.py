@@ -89,6 +89,7 @@ class _ParoQuantLayerState:
     layer_input_kwargs: Optional[List[Dict[str, torch.Tensor]]] = None
     layer_outputs: Optional[List[List[torch.Tensor]]] = None
     grouped_dataset: Optional[Any] = None
+    grouped_dataset_by_device: Optional[Dict[str, Any]] = None
     subset_total: Optional[int] = None
     processed_subsets: Set[int] = field(default_factory=set)
     pending_modules: Set[str] = field(default_factory=set)
@@ -699,6 +700,62 @@ class ParoQuantProcessor(LoopProcessor):
         state.grouped_dataset = grouped_dataset
         return grouped_dataset
 
+    def _group_dataset_for_device(
+        self,
+        state: _ParoQuantLayerState,
+        target_device: Optional[torch.device],
+    ) -> tuple[
+        list[List[torch.Tensor]],
+        list[Dict[str, Any]],
+        list[Any],
+        list[Optional[torch.Tensor]],
+        list[Optional[torch.Tensor]],
+        list[List[torch.Tensor]],
+        list[Dict[str, Any]],
+        list[Any],
+        list[Optional[torch.Tensor]],
+        list[Optional[torch.Tensor]],
+    ]:
+        """Materialize the cached grouped dataset on the target device once per layer/device pair."""
+        grouped_dataset = self._group_dataset_from_state(state)
+        device = torch.device(target_device) if target_device is not None else CPU
+        cache_key = str(device)
+        grouped_dataset_by_device = getattr(state, "grouped_dataset_by_device", None)
+        if grouped_dataset_by_device is None:
+            grouped_dataset_by_device = {}
+            state.grouped_dataset_by_device = grouped_dataset_by_device
+
+        cached_dataset = grouped_dataset_by_device.get(cache_key)
+        if cached_dataset is not None:
+            return cached_dataset
+
+        def _move_tensor_batches(batches: list[List[torch.Tensor]]) -> list[List[torch.Tensor]]:
+            return [[move_to(tensor, device=device) for tensor in batch] for batch in batches]
+
+        def _move_kwargs_batches(kwargs_batches: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+            return [nested_move_to(kwargs, device=device) for kwargs in kwargs_batches]
+
+        def _move_target_batches(target_batches: list[Any]) -> list[Any]:
+            return [nested_move_to(batch, device=device) for batch in target_batches]
+
+        def _move_optional_tensors(optional_tensors: list[Optional[torch.Tensor]]) -> list[Optional[torch.Tensor]]:
+            return [None if tensor is None else move_to(tensor, device=device) for tensor in optional_tensors]
+
+        device_dataset = (
+            _move_tensor_batches(grouped_dataset[0]),
+            _move_kwargs_batches(grouped_dataset[1]),
+            _move_target_batches(grouped_dataset[2]),
+            _move_optional_tensors(grouped_dataset[3]),
+            _move_optional_tensors(grouped_dataset[4]),
+            _move_tensor_batches(grouped_dataset[5]),
+            _move_kwargs_batches(grouped_dataset[6]),
+            _move_target_batches(grouped_dataset[7]),
+            _move_optional_tensors(grouped_dataset[8]),
+            _move_optional_tensors(grouped_dataset[9]),
+        )
+        grouped_dataset_by_device[cache_key] = device_dataset
+        return device_dataset
+
     def _forward_group_batch(
         self,
         layer: torch.nn.Module,
@@ -977,7 +1034,7 @@ class ParoQuantProcessor(LoopProcessor):
                 target_batches_val,
                 position_ids_val,
                 attention_masks_val,
-            ) = self._group_dataset_from_state(state)
+            ) = self._group_dataset_for_device(state, next(layer_clone.parameters()).device)
 
             self._run_group_stage(
                 layer_clone,
@@ -1156,6 +1213,7 @@ class ParoQuantProcessor(LoopProcessor):
         state.pristine_layer_module = None
         state.prepared_group_source_module = None
         state.grouped_dataset = None
+        state.grouped_dataset_by_device = None
         state.subset_total = None
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):

@@ -1453,6 +1453,34 @@ def test_paroquant_processor_group_stage_defers_best_state_snapshot_until_first_
     assert layer.state_dict_calls == 1
 
 
+def test_paroquant_processor_group_dataset_for_device_caches_per_device():
+    """Guard grouped dataset replay so repeated requests on the same device reuse one cached copy."""
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=8, opt_validation_samples=8)
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[torch.randn(1, 4)]],
+        layer_input_kwargs=[{"position_ids": None}],
+        position_ids=[torch.arange(4).unsqueeze(0)],
+        attention_masks=[None],
+    )
+    state = SimpleNamespace(
+        layer_inputs=[[torch.randn(1, 4)]],
+        layer_input_kwargs=[{"position_ids": None}],
+        layer_outputs=[[torch.randn(1, 4)]],
+        grouped_dataset=None,
+        grouped_dataset_by_device=None,
+    )
+
+    first = processor._group_dataset_for_device(state, torch.device("cpu"))
+    second = processor._group_dataset_for_device(state, torch.device("cpu"))
+
+    assert first is second
+    assert state.grouped_dataset is not None
+    assert state.grouped_dataset_by_device is not None
+    assert state.grouped_dataset_by_device["cpu"] is first
+
+
 def test_paroquant_processor_optimize_group_runs_on_toy_layer():
     """Guard the grouped optimizer path on a tiny layer without needing the full looper."""
 
