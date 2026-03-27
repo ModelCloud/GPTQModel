@@ -934,7 +934,32 @@ def test_paroquant_processor_grouped_modes_capture_pristine_context_outside_subs
 
     processor.qcfg = SimpleNamespace(opt_scope="module")
     assert processor.uses_grouped_optimization() is False
-    assert processor.capture_layer_forward_context_during_subset() is True
+    assert processor.capture_layer_forward_context_during_subset() is False
+
+
+@pytest.mark.parametrize(
+    ("opt_scope", "expected_capture"),
+    [
+        ("module", False),
+        ("subsection", True),
+        ("layer", True),
+    ],
+)
+def test_paroquant_processor_enables_layer_context_capture_only_for_grouped_scopes(opt_scope, expected_capture):
+    """Guard module scope against retaining pristine layer IO it never consumes."""
+    processor = ParoQuantProcessor(
+        tokenizer=None,
+        qcfg=ParoQuantizeConfig(bits=4, group_size=128, opt_scope=opt_scope),
+        calibration=None,
+        prepare_dataset_func=None,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        batch_size=1,
+        gptq_model=None,
+        model=None,
+    )
+
+    assert processor.execution_config.capture_layer_forward_context is expected_capture
 
 
 def test_paroquant_processor_routes_non_module_units_through_group_optimizer():

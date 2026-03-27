@@ -117,6 +117,7 @@ class ParoQuantProcessor(LoopProcessor):
         calibration_concat_separator: Optional[str] = None,
     ):
         """Configure a looper that captures activations and quantizes after replay."""
+        capture_group_layer_context = str(getattr(qcfg, "opt_scope", "module")).strip().lower() != "module"
         super().__init__(
             tokenizer=tokenizer,
             qcfg=qcfg,
@@ -131,7 +132,7 @@ class ParoQuantProcessor(LoopProcessor):
                 fwd_replay_after_process=True,
                 subset_forward_early_stop=True,
                 enable_activation_capture=True,
-                capture_layer_forward_context=True,
+                capture_layer_forward_context=capture_group_layer_context,
             ),
         )
 
@@ -363,8 +364,8 @@ class ParoQuantProcessor(LoopProcessor):
         return self._opt_scope_mode() != "module"
 
     def capture_layer_forward_context_during_subset(self) -> bool:
-        """Grouped modes capture pristine layer IO separately before subset hooks are active."""
-        return not self.uses_grouped_optimization()
+        """ParoQuant captures grouped pristine layer IO outside subset forwards only."""
+        return False
 
     def _build_group_optim_linear(self, module: NamedModule) -> _ParoQuantOptimLinear:
         """Materialize one ParoQuant optimizer wrapper from the current live module state."""
