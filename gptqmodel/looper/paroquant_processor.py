@@ -605,10 +605,7 @@ class ParoQuantProcessor(LoopProcessor):
         cache: bool = True,
     ) -> Dict[str, Any]:
         """Refresh grouped replay kwargs so real decoder layers can be replayed safely."""
-        try:
-            target_device = next(layer.parameters()).device
-        except (StopIteration, RuntimeError):
-            target_device = x.device
+        target_device = x.device
 
         prepared_cache_key = None
         prepared_cache = None
@@ -1122,10 +1119,7 @@ class ParoQuantProcessor(LoopProcessor):
         cache_kwargs: bool,
     ) -> torch.Tensor:
         """Run one streamed replay batch through the live grouped layer."""
-        try:
-            layer_device = next(layer.parameters()).device
-        except (StopIteration, RuntimeError):
-            layer_device = CPU
+        layer_device = replay_batch.inputs[0].device if replay_batch.inputs else CPU
 
         inputs = [
             inp if inp.device == layer_device else _LayerShardLoader._tensor_to_device(inp, layer_device)
