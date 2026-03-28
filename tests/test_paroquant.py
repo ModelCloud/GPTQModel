@@ -1708,6 +1708,50 @@ def test_paroquant_processor_replay_batches_cache_cpu_splits():
         assert all(batch.target.is_pinned() for batch in first_train + first_val)
 
 
+def test_paroquant_processor_layer_shard_loader_reuses_metadata_tensors():
+    """Guard streamed layer replay so shared position/mask tensors can stay cached on one device."""
+
+    if not torch.cuda.is_available():
+        return
+
+    cpu_pos = torch.arange(8).unsqueeze(0)
+    cpu_mask = torch.ones(1, 8)
+    if not cpu_pos.is_pinned():
+        cpu_pos = cpu_pos.pin_memory()
+    if not cpu_mask.is_pinned():
+        cpu_mask = cpu_mask.pin_memory()
+
+    replay_batch = paroquant_processor_module._ParoQuantReplayBatch(
+        inputs=[torch.randn(1, 8).pin_memory()],
+        input_kwargs={},
+        target=torch.randn(1, 8).pin_memory(),
+        position_ids=cpu_pos,
+        attention_mask=cpu_mask,
+        row_count=1,
+    )
+    metadata_cache = {}
+
+    loader_a = paroquant_processor_module._LayerShardLoader(
+        [replay_batch],
+        target_device=torch.device("cuda"),
+        shard_batches=1,
+        metadata_cache=metadata_cache,
+    )
+    loader_b = paroquant_processor_module._LayerShardLoader(
+        [replay_batch],
+        target_device=torch.device("cuda"),
+        shard_batches=1,
+        metadata_cache=metadata_cache,
+    )
+
+    batch_a = next(loader_a.iter_shards())[0]
+    batch_b = next(loader_b.iter_shards())[0]
+
+    assert batch_a.position_ids is batch_b.position_ids
+    assert batch_a.attention_mask is batch_b.attention_mask
+    assert batch_a.target is not batch_b.target
+
+
 def test_paroquant_processor_group_best_state_tracks_only_active_prefixes():
     """Guard grouped best-state snapshots against cloning untouched layer state."""
 
@@ -1904,6 +1948,79 @@ def test_paroquant_processor_caches_full_group_forward_kwargs(monkeypatch):
     assert kwargs_a is not kwargs_b
     assert kwargs_a.keys() == kwargs_b.keys()
     assert torch.allclose(kwargs_a["position_embeddings"], kwargs_b["position_embeddings"])
+
+
+def test_paroquant_processor_caches_rotary_position_embeddings_across_distinct_inputs(monkeypatch):
+    """Guard streamed grouped replay against recomputing HF rotary embeddings for identical ids/device/dtype."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None, position_embeddings=None):
+            del attention_mask, position_ids, position_embeddings
+            return self.linear(x)
+
+    class _FakeLlamaRotaryEmbedding(torch.nn.Module):
+        __module__ = "transformers.models.llama.modeling_llama"
+
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, x, position_ids):
+            self.calls += 1
+            base = position_ids.unsqueeze(-1).to(device=x.device, dtype=x.dtype)
+            return (base.cos(), base.sin())
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    rotary = _FakeLlamaRotaryEmbedding()
+
+    monkeypatch.setattr(processor, "_get_root_rotary", lambda: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_for_device", lambda device: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_device", lambda module, fallback=None: torch.device("cpu"))
+
+    shared_position_ids = torch.arange(4).unsqueeze(0)
+
+    kwargs_a = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(1, 4, 4),
+        input_kwargs={},
+        attention_mask=torch.ones(1, 4),
+        position_ids=shared_position_ids,
+        cache=False,
+    )
+    kwargs_b = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(1, 4, 4),
+        input_kwargs={},
+        attention_mask=torch.ones(1, 4),
+        position_ids=shared_position_ids,
+        cache=False,
+    )
+
+    assert rotary.calls == 1
+    assert torch.allclose(kwargs_a["position_embeddings"][0], kwargs_b["position_embeddings"][0])
+    assert torch.allclose(kwargs_a["position_embeddings"][1], kwargs_b["position_embeddings"][1])
+
+
+def test_paroquant_processor_caches_generated_position_ids():
+    """Guard grouped replay against rebuilding deterministic synthetic position ids."""
+
+    processor = object.__new__(ParoQuantProcessor)
+
+    first = processor._cached_group_position_ids(device=torch.device("cpu"), batch_dim=2, seq_len=8)
+    second = processor._cached_group_position_ids(device=torch.device("cpu"), batch_dim=2, seq_len=8)
+    third = processor._cached_group_position_ids(device=torch.device("cpu"), batch_dim=1, seq_len=8)
+
+    assert first is second
+    assert third is not first
+    assert first.shape == (2, 8)
+    assert third.shape == (1, 8)
 
 
 def test_paroquant_processor_streamed_group_forward_kwargs_skip_redundant_moves(monkeypatch):

@@ -120,10 +120,12 @@ class _LayerShardLoader:
         *,
         target_device: torch.device,
         shard_batches: int,
+        metadata_cache: Optional[dict[tuple[int, str], torch.Tensor]] = None,
     ) -> None:
         self.batches = batches
         self.target_device = torch.device(target_device)
         self.shard_batches = max(1, int(shard_batches))
+        self.metadata_cache = metadata_cache
 
     @staticmethod
     def _tensor_to_device(value: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -131,6 +133,21 @@ class _LayerShardLoader:
         if value.device == device:
             return value
         return value.to(device=device, non_blocking=non_blocking)
+
+    def _metadata_tensor_to_device(self, value: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if value is None:
+            return None
+        if value.device == self.target_device:
+            return value
+        cache = self.metadata_cache
+        if cache is None:
+            return self._tensor_to_device(value, self.target_device)
+        cache_key = (id(value), str(self.target_device))
+        cached = cache.get(cache_key)
+        if cached is None:
+            cached = self._tensor_to_device(value, self.target_device)
+            cache[cache_key] = cached
+        return cached
 
     @staticmethod
     def _move_value_to_device(value: Any, device: torch.device) -> Any:
@@ -152,8 +169,8 @@ class _LayerShardLoader:
                 for key, value in batch.input_kwargs.items()
             },
             target=self._tensor_to_device(batch.target, self.target_device),
-            position_ids=None if batch.position_ids is None else self._tensor_to_device(batch.position_ids, self.target_device),
-            attention_mask=None if batch.attention_mask is None else self._tensor_to_device(batch.attention_mask, self.target_device),
+            position_ids=self._metadata_tensor_to_device(batch.position_ids),
+            attention_mask=self._metadata_tensor_to_device(batch.attention_mask),
             row_count=batch.row_count,
         )
 
@@ -594,6 +611,62 @@ class ParoQuantProcessor(LoopProcessor):
 
             return cached
 
+    @staticmethod
+    def _can_cache_rotary_position_embeddings(rotary: Optional[nn.Module]) -> bool:
+        """Allow memoized rotary embeddings only for known HF rotary classes that depend on ids, device, and dtype."""
+        if rotary is None:
+            return False
+        rotary_type = type(rotary)
+        return rotary_type.__module__.startswith("transformers.models.") and rotary_type.__name__.endswith("RotaryEmbedding")
+
+    def _cached_group_position_ids(
+        self,
+        *,
+        device: torch.device,
+        batch_dim: int,
+        seq_len: int,
+    ) -> torch.Tensor:
+        """Reuse deterministic generated position ids for repeated grouped layer replay batches."""
+        position_ids_cache = getattr(self, "_group_position_ids_cache", None)
+        if position_ids_cache is None:
+            position_ids_cache = {}
+            self._group_position_ids_cache = position_ids_cache
+
+        cache_key = (str(device), int(batch_dim), int(seq_len))
+        cached_position_ids = position_ids_cache.get(cache_key)
+        if cached_position_ids is None:
+            cached_position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(batch_dim, -1)
+            position_ids_cache[cache_key] = cached_position_ids
+        return cached_position_ids
+
+    def _cached_group_rotary_position_embeddings(
+        self,
+        *,
+        rotary: nn.Module,
+        x: torch.Tensor,
+        position_ids: torch.Tensor,
+        rotary_device: Optional[torch.device],
+    ) -> Any:
+        """Reuse rotary outputs when ids, dtype, and device are unchanged across replay batches/epochs."""
+        target_rotary_device = rotary_device or x.device
+        rotary_cache = getattr(self, "_group_rotary_position_embeddings_cache", None)
+        if rotary_cache is None:
+            rotary_cache = {}
+            self._group_rotary_position_embeddings_cache = rotary_cache
+
+        cache_key = (
+            id(rotary),
+            id(position_ids),
+            str(target_rotary_device),
+            str(x.dtype),
+        )
+        cached_position_embeddings = rotary_cache.get(cache_key)
+        if cached_position_embeddings is None:
+            x_for_rotary = x if x.device == target_rotary_device else x.to(target_rotary_device)
+            cached_position_embeddings = rotary(x_for_rotary, position_ids)
+            rotary_cache[cache_key] = cached_position_embeddings
+        return cached_position_embeddings
+
     def _prepare_group_forward_kwargs(
         self,
         layer: torch.nn.Module,
@@ -695,9 +768,11 @@ class ParoQuantProcessor(LoopProcessor):
             rotary_device = self._get_rotary_device(rotary, target_device or x.device)
             pos_for_rotary = position_ids if supports_position_ids else None
             if pos_for_rotary is None or pos_for_rotary.shape[-1] != seq_len:
-                pos_values = torch.arange(seq_len, device=rotary_device or x.device, dtype=torch.long)
-                if x.dim() >= 2:
-                    pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
+                pos_values = self._cached_group_position_ids(
+                    device=rotary_device or x.device,
+                    batch_dim=batch_dim,
+                    seq_len=seq_len,
+                )
                 if supports_position_ids:
                     module_kwargs["position_ids"] = pos_values
                 pos_for_rotary = pos_values
@@ -707,13 +782,23 @@ class ParoQuantProcessor(LoopProcessor):
                 if supports_position_ids:
                     module_kwargs["position_ids"] = pos_for_rotary
 
-            x_for_rotary = x if rotary_device is None or x.device == rotary_device else x.to(rotary_device)
-            module_kwargs["position_embeddings"] = rotary(x_for_rotary, pos_for_rotary)
+            if self._can_cache_rotary_position_embeddings(rotary):
+                module_kwargs["position_embeddings"] = self._cached_group_rotary_position_embeddings(
+                    rotary=rotary,
+                    x=x,
+                    position_ids=pos_for_rotary,
+                    rotary_device=rotary_device,
+                )
+            else:
+                x_for_rotary = x if rotary_device is None or x.device == rotary_device else x.to(rotary_device)
+                module_kwargs["position_embeddings"] = rotary(x_for_rotary, pos_for_rotary)
         elif supports_position_ids:
             if position_ids is None or position_ids.shape[-1] != seq_len:
-                pos_values = torch.arange(seq_len, device=target_device or x.device, dtype=torch.long)
-                if x.dim() >= 2:
-                    pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
+                pos_values = self._cached_group_position_ids(
+                    device=target_device or x.device,
+                    batch_dim=batch_dim,
+                    seq_len=seq_len,
+                )
                 module_kwargs["position_ids"] = pos_values
             else:
                 module_kwargs["position_ids"] = position_ids if position_ids.device == target_device else move_to(position_ids, device=target_device)
@@ -1422,13 +1507,19 @@ class ParoQuantProcessor(LoopProcessor):
         replay_batches: list[_ParoQuantReplayBatch],
         use_amp: bool,
         target_device: torch.device,
+        metadata_cache: Optional[dict[tuple[int, str], torch.Tensor]] = None,
     ) -> float:
         """Measure full-layer reconstruction error while streaming one validation batch at a time."""
         if not replay_batches:
             return 0.0
 
         total_loss = 0.0
-        loader = _LayerShardLoader(replay_batches, target_device=target_device, shard_batches=1)
+        loader = _LayerShardLoader(
+            replay_batches,
+            target_device=target_device,
+            shard_batches=1,
+            metadata_cache=metadata_cache,
+        )
         autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
         with torch.inference_mode(), autocast_ctx:
             for shard in loader.iter_shards():
@@ -1456,6 +1547,7 @@ class ParoQuantProcessor(LoopProcessor):
         replay_batches_val: list[_ParoQuantReplayBatch],
         param_groups: List[dict[str, object]],
         epochs: int,
+        metadata_cache: Optional[dict[tuple[int, str], torch.Tensor]] = None,
     ) -> tuple[float, float]:
         """Run one grouped layer stage while streaming train shards and validation batches from CPU."""
         _normalize_opt_impl(self.qcfg.opt_stage_impl, field="stage_impl")
@@ -1470,12 +1562,14 @@ class ParoQuantProcessor(LoopProcessor):
                     replay_batches=replay_batches_train,
                     use_amp=use_amp,
                     target_device=opt_device,
+                    metadata_cache=metadata_cache,
                 )
                 val_loss = self._evaluate_group_layer_streamed(
                     layer,
                     replay_batches=replay_batches_val,
                     use_amp=use_amp,
                     target_device=opt_device,
+                    metadata_cache=metadata_cache,
                 )
                 return train_loss, val_loss
 
@@ -1503,6 +1597,7 @@ class ParoQuantProcessor(LoopProcessor):
                     replay_batches_train,
                     target_device=opt_device,
                     shard_batches=shard_batches,
+                    metadata_cache=metadata_cache,
                 )
 
                 autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
@@ -1543,6 +1638,7 @@ class ParoQuantProcessor(LoopProcessor):
                     replay_batches=replay_batches_val,
                     use_amp=use_amp,
                     target_device=opt_device,
+                    metadata_cache=metadata_cache,
                 )
                 if best_state is None or val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -1573,6 +1669,7 @@ class ParoQuantProcessor(LoopProcessor):
         target_device = group_modules[0].weight.device
         layer = layer.to(device=target_device, dtype=torch.float32)
         replay_batches_train, replay_batches_val = self._replay_batches_from_state(state)
+        metadata_cache: dict[tuple[int, str], torch.Tensor] = {}
         optim_modules: dict[str, _ParoQuantOptimLinear] = {}
 
         for param in layer.parameters():
@@ -1596,6 +1693,7 @@ class ParoQuantProcessor(LoopProcessor):
                 for optim_module in optim_modules.values()
             ],
             epochs=int(self.qcfg.opt_rotation_epochs),
+            metadata_cache=metadata_cache,
         )
 
         for optim_module in optim_modules.values():
@@ -1615,7 +1713,10 @@ class ParoQuantProcessor(LoopProcessor):
                 if optim_module.quantizer is not None
             ],
             epochs=int(self.qcfg.opt_finetune_epochs),
+            metadata_cache=metadata_cache,
         )
+
+        metadata_cache.clear()
 
         results: dict[str, object] = {}
         for named_module in group_modules:
@@ -1845,6 +1946,10 @@ class ParoQuantProcessor(LoopProcessor):
             self._group_forward_prepared_cache.clear()
         if hasattr(self, "_group_target_cache"):
             self._group_target_cache.clear()
+        if hasattr(self, "_group_position_ids_cache"):
+            self._group_position_ids_cache.clear()
+        if hasattr(self, "_group_rotary_position_embeddings_cache"):
+            self._group_rotary_position_embeddings_cache.clear()
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Register a module for later activation capture and deferred quantization."""
