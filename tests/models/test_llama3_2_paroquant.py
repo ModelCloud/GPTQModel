@@ -94,7 +94,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
     FORMAT = FORMAT.PAROQUANT
     METHOD = METHOD.PAROQUANT
     SYM = True
-    TORCH_DTYPE = torch.float16
+    TORCH_DTYPE = torch.bfloat16
     LOAD_BACKEND = BACKEND.PAROQUANT
     QUANT_BACKEND = BACKEND.PAROQUANT
     KERNEL_QUANT = {ParoQuantQuantLinear}
@@ -103,7 +103,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
     # Mirror benchmark settings: 1+1 epochs on 128 train rows
     PAROQUANT_ROTATION_EPOCHS = 2
     PAROQUANT_FINETUNE_EPOCHS = 2
-    PAROQUANT_TRAIN_SAMPLES = 2048
+    PAROQUANT_TRAIN_SAMPLES = 4096
     PAROQUANT_SEED = 3141592653
 
     def _build_quantize_config(self):
@@ -111,7 +111,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
             bits=self.BITS,
             method=METHOD.PAROQUANT,
             format=FORMAT.PAROQUANT,
-            opt_scope="module",
+            opt_scope="layer",
             opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
             opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
             opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,

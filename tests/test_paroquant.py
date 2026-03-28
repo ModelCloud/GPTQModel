@@ -26,6 +26,7 @@ from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
 from gptqmodel.looper.named_module import NamedModule
 import gptqmodel.looper.paroquant_processor as paroquant_processor_module
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantizeConfig, QuantizeConfig
 from gptqmodel.quantization.paroquant import optimization as paroquant_optimization
@@ -1786,6 +1787,59 @@ def test_paroquant_processor_layer_shard_loader_normalizes_inference_inputs():
     assert output.shape == materialized_batch.inputs[0].shape
 
 
+def test_paroquant_processor_cached_group_position_ids_are_autograd_safe():
+    """Generated position-id cache entries must stay reusable outside worker inference mode."""
+
+    processor = object.__new__(ParoQuantProcessor)
+
+    with torch.inference_mode():
+        cached = processor._cached_group_position_ids(
+            device=torch.device("cpu"),
+            batch_dim=2,
+            seq_len=4,
+        )
+
+    assert not cached.is_inference()
+    assert processor._cached_group_position_ids(device=torch.device("cpu"), batch_dim=2, seq_len=4) is cached
+
+
+def test_paroquant_processor_cached_rotary_embeddings_are_autograd_safe():
+    """Rotary cache entries created during inference replay must not leak inference tensors into training."""
+
+    class _ToyRotary(torch.nn.Module):
+        def forward(self, x, position_ids):
+            pos = position_ids.unsqueeze(-1).to(dtype=x.dtype)
+            return x + pos, x - pos
+
+    processor = object.__new__(ParoQuantProcessor)
+    rotary = _ToyRotary()
+
+    with torch.inference_mode():
+        x = torch.randn(1, 4, 8)
+        position_ids = torch.arange(4).unsqueeze(0)
+        cached = processor._cached_group_rotary_position_embeddings(
+            rotary=rotary,
+            x=x,
+            position_ids=position_ids,
+            rotary_device=torch.device("cpu"),
+        )
+
+    assert not paroquant_processor_module._value_has_inference_tensor(cached)
+
+    with torch.inference_mode(False), torch.enable_grad():
+        q = torch.randn(1, 4, 8, requires_grad=True)
+        cos, sin = processor._cached_group_rotary_position_embeddings(
+            rotary=rotary,
+            x=x,
+            position_ids=position_ids,
+            rotary_device=torch.device("cpu"),
+        )
+        loss = (q * cos).sum() + (q * sin).sum()
+        loss.backward()
+
+    assert q.grad is not None
+
+
 def test_paroquant_processor_layer_shard_loader_reuses_metadata_tensors():
     """Guard streamed layer replay so shared position/mask tensors can stay cached on one device."""
 
@@ -2143,6 +2197,127 @@ def test_paroquant_processor_streamed_group_forward_kwargs_skip_redundant_moves(
     assert kwargs["foo"]["bar"] is shared_kwargs["foo"]["bar"]
     assert kwargs["attention_mask"] is attention_mask
     assert kwargs["position_ids"] is position_ids
+
+
+def test_paroquant_processor_group_forward_kwargs_drop_past_key_values():
+    """Layer-scope replay must mirror the normal forward executor and omit KV-cache objects."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(
+            self,
+            x,
+            attention_mask=None,
+            position_ids=None,
+            past_key_values=None,
+            past_key_value=None,
+            use_cache=False,
+        ):
+            del attention_mask, position_ids, past_key_values, past_key_value, use_cache
+            return self.linear(x)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+
+    kwargs = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs={
+            "past_key_values": object(),
+            "past_key_value": object(),
+            "cache_position": torch.arange(2),
+        },
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+        cache=False,
+    )
+
+    assert "past_key_values" not in kwargs
+    assert "past_key_value" not in kwargs
+    assert "cache_position" in kwargs
+
+
+def test_paroquant_processor_force_layer_eager_attention_restores_shared_config():
+    """Live-layer optimization should temporarily switch shared attention config to eager and restore it."""
+
+    class _Config:
+        def __init__(self):
+            self._attn_implementation = "flash_attention_2"
+            self.attn_implementation = "flash_attention_2"
+
+    class _ToyAttention(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+            self.self_attn = _ToyAttention(config)
+
+    processor = object.__new__(ParoQuantProcessor)
+    shared_config = _Config()
+    layer = _ToyLayer(shared_config)
+
+    overrides = processor._force_layer_eager_attention(layer)
+
+    assert shared_config._attn_implementation == "eager"
+    assert shared_config.attn_implementation == "eager"
+    assert len(overrides) == 2
+
+    processor._restore_layer_attention_impl(overrides)
+
+    assert shared_config._attn_implementation == "flash_attention_2"
+    assert shared_config.attn_implementation == "flash_attention_2"
+
+
+def test_paroquant_processor_prepare_group_forward_kwargs_normalizes_inference_position_embeddings(monkeypatch):
+    """Grouped replay kwargs must clone rotary metadata back to normal tensors before live-layer forward."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None, position_embeddings=None):
+            del attention_mask, position_ids, position_embeddings
+            return self.linear(x)
+
+    class _FakeLlamaRotaryEmbedding(torch.nn.Module):
+        __module__ = "transformers.models.llama.modeling_llama"
+
+        def forward(self, x, position_ids):
+            del x, position_ids
+            with torch.inference_mode():
+                return (torch.randn(1, 2, 4), torch.randn(1, 2, 4))
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    rotary = _FakeLlamaRotaryEmbedding()
+
+    monkeypatch.setattr(processor, "_get_root_rotary", lambda: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_for_device", lambda device: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_device", lambda module, fallback=None: torch.device("cpu"))
+
+    kwargs = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(1, 2, 4),
+        input_kwargs={},
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+        cache=False,
+    )
+
+    assert "position_embeddings" in kwargs
+    assert not paroquant_processor_module._value_has_inference_tensor(kwargs["position_embeddings"])
 
 
 def test_paroquant_processor_caches_group_targets_by_dtype_and_device():
@@ -2523,6 +2698,218 @@ def test_paroquant_processor_optimize_group_reenables_grad_inside_inference_mode
 
     assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
     assert val_loss >= 0.0
+
+
+def test_paroquant_processor_layer_scope_strips_hooked_linear_wrappers():
+    """Layer-scope live optimization must unwrap HookedLinear so training does not re-enter inference mode."""
+
+    class _ToyNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(8))
+
+        def forward(self, hidden_states):
+            input_dtype = hidden_states.dtype
+            hidden_states = hidden_states.to(torch.float32)
+            return self.weight * hidden_states.to(input_dtype)
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = torch.nn.Module()
+            self.self_attn.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.o_proj = torch.nn.Linear(8, 8, bias=False)
+            self.post_attention_layernorm = _ToyNorm()
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            hidden_states = (
+                self.self_attn.q_proj(x)
+                + self.self_attn.k_proj(x)
+                + self.self_attn.v_proj(x)
+            )
+            hidden_states = self.self_attn.o_proj(hidden_states)
+            return self.post_attention_layernorm(hidden_states)
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    float_layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = float_layer(x).detach()
+
+    hooked_layer = copy.deepcopy(float_layer)
+    replace_module_with_hooked_legacy(hooked_layer)
+
+    q_proj = NamedModule(hooked_layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(hooked_layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(hooked_layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="layer",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor.model = None
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=hooked_layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+        replay_batches=None,
+    )
+
+    with torch.inference_mode():
+        results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    assert hooked_layer.self_attn.o_proj.__class__ is torch.nn.Linear
+
+
+def test_paroquant_processor_layer_scope_restores_live_layer_dtype_after_fp32_training():
+    """Layer-scope live optimization must downcast the layer back to its original replay dtype."""
+
+    class _ToyConfig:
+        def __init__(self):
+            self._attn_implementation = "flash_attention_2"
+            self.attn_implementation = "flash_attention_2"
+            self.dtype = torch.bfloat16
+
+    class _ToyNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(8, dtype=torch.bfloat16))
+
+        def forward(self, hidden_states):
+            input_dtype = hidden_states.dtype
+            hidden_states = hidden_states.to(torch.float32)
+            return (self.weight.to(torch.float32) * hidden_states).to(input_dtype)
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+            self.q_proj = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
+
+        def forward(self, hidden_states, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            hidden_states = self.q_proj(hidden_states) + self.k_proj(hidden_states) + self.v_proj(hidden_states)
+            return self.o_proj(hidden_states), None
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = _ToyConfig()
+            self.self_attn = _ToyAttn(self.config)
+            self.post_attention_layernorm = _ToyNorm()
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            attn_out, _ = self.self_attn(
+                x,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=use_cache,
+            )
+            return self.post_attention_layernorm(attn_out)
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer()
+    x = torch.randn(1, 2, 8, dtype=torch.bfloat16)
+    y = layer(x).detach()
+
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="layer",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor.model = None
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+        replay_batches=None,
+    )
+
+    with torch.inference_mode():
+        results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    assert layer.self_attn.q_proj.weight.dtype == torch.bfloat16
+    assert layer.self_attn.k_proj.weight.dtype == torch.bfloat16
+    assert layer.self_attn.v_proj.weight.dtype == torch.bfloat16
+    assert layer.self_attn.o_proj.weight.dtype == torch.bfloat16
+    assert layer.post_attention_layernorm.weight.dtype == torch.bfloat16
+    assert layer(x).dtype == torch.bfloat16
 
 
 def test_paroquant_quant_device_selection_forces_single_gpu():

@@ -21,6 +21,7 @@ import copy
 import hashlib
 import inspect
 import math
+import sys
 import threading
 import time
 from contextlib import nullcontext
@@ -46,6 +47,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
     QUANT_LOG_DAMP,
 )
+from ..nn_modules.hooked_linear import HookedLinear
 from ..nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
 from ..quantization.paroquant.optimization import (
@@ -69,6 +71,7 @@ from ..utils.model import (
     move_to,
     nested_move_to,
     pack_module,
+    recurse_getattr,
     recurse_setattr,
 )
 from ..utils.module_locks import parent_module_lock
@@ -111,6 +114,17 @@ class _ParoQuantReplayBatch:
     row_count: int
 
 
+def _value_has_inference_tensor(value: Any) -> bool:
+    """Detect nested inference-mode tensors so caches can rebuild autograd-safe values."""
+    if isinstance(value, torch.Tensor):
+        return value.is_inference()
+    if isinstance(value, dict):
+        return any(_value_has_inference_tensor(inner) for inner in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_value_has_inference_tensor(inner) for inner in value)
+    return False
+
+
 class _LayerShardLoader:
     """Stream replay batches from CPU to one device shard at a time."""
 
@@ -142,7 +156,7 @@ class _LayerShardLoader:
     def _metadata_tensor_to_device(self, value: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
         if value is None:
             return None
-        if value.device == self.target_device:
+        if value.device == self.target_device and not value.is_inference():
             return value
         cache = self.metadata_cache
         if cache is None:
@@ -494,8 +508,213 @@ class ParoQuantProcessor(LoopProcessor):
             theta_mask=theta_mask,
             scale_clamp_min=self.qcfg.opt_channel_scale_clamp_min,
             scale_clamp_max=self.qcfg.opt_channel_scale_clamp_max,
-            fused_rotation=self.qcfg.opt_fused_rotation,
+            # Layer-scope live optimization must stay on the portable PyTorch
+            # rotation path. The fused autograd kernel can fail to load on some
+            # fleet GPUs and the error may surface asynchronously well after the
+            # original rotation call.
+            fused_rotation=False if self._opt_scope_mode() == "layer" else self.qcfg.opt_fused_rotation,
         ).to(device=weight.device, dtype=torch.float32)
+
+    @staticmethod
+    def _restore_linear_from_hooked(module: HookedLinear) -> torch.nn.Linear:
+        """Drop HookedLinear's inference-only forward while preserving the shared parameter storage."""
+        restored = torch.nn.Linear.__new__(torch.nn.Linear)
+        torch.nn.Module.__init__(restored)
+        restored.in_features = module.in_features
+        restored.out_features = module.out_features
+        restored.weight = module.weight
+        restored.bias = module.bias
+        return restored
+
+    def _strip_hooked_linear_wrappers(self, module: torch.nn.Module) -> int:
+        """Layer-scope training must not run through HookedLinear, which always forwards in inference mode."""
+        replaced = 0
+        for child_name, child in list(module.named_children()):
+            if isinstance(child, HookedLinear):
+                setattr(module, child_name, self._restore_linear_from_hooked(child))
+                replaced += 1
+                continue
+            replaced += self._strip_hooked_linear_wrappers(child)
+        return replaced
+
+    @staticmethod
+    def _force_layer_eager_attention(layer: torch.nn.Module) -> list[tuple[object, str, object]]:
+        """Temporarily force live-layer grouped optimization onto eager attention kernels."""
+        overrides: list[tuple[object, str, object]] = []
+        seen_configs: set[int] = set()
+        candidate_configs = [
+            getattr(layer, "config", None),
+            getattr(getattr(layer, "self_attn", None), "config", None),
+        ]
+        for config in candidate_configs:
+            if config is None:
+                continue
+            config_id = id(config)
+            if config_id in seen_configs:
+                continue
+            seen_configs.add(config_id)
+            for attr in ("_attn_implementation", "attn_implementation"):
+                if not hasattr(config, attr):
+                    continue
+                original_value = getattr(config, attr)
+                if original_value == "eager":
+                    continue
+                setattr(config, attr, "eager")
+                overrides.append((config, attr, original_value))
+        return overrides
+
+    @staticmethod
+    def _restore_layer_attention_impl(overrides: list[tuple[object, str, object]]) -> None:
+        """Restore any attention implementation overrides after live-layer grouped optimization."""
+        for config, attr, original_value in reversed(overrides):
+            setattr(config, attr, original_value)
+
+    @staticmethod
+    def _unwrap_kernel_func_module(func_module: object) -> Optional[Callable[..., Any]]:
+        """Recover the plain callable hidden inside Transformers' `Func()` wrapper modules."""
+        if not isinstance(func_module, nn.Module):
+            return None
+        closure = getattr(func_module.forward, "__closure__", None)
+        if not closure:
+            return None
+        for cell in closure:
+            try:
+                candidate = cell.cell_contents
+            except ValueError:
+                continue
+            if inspect.isfunction(candidate):
+                return candidate
+        return None
+
+    def _bypass_layer_rotary_func_modules(
+        self,
+        layer: torch.nn.Module,
+    ) -> list[tuple[object, str, object]]:
+        """Temporarily replace shared `Func()` rotary wrappers with their plain callables.
+
+        Some recent Transformers builds expose rotary helpers as shared `nn.Module`
+        instances. The live layer optimization path only needs the raw function
+        semantics, and using the plain callable avoids any module-level wrapper
+        behavior leaking inference tensors into the attention path.
+        """
+        overrides: list[tuple[object, str, object]] = []
+        layer_module = sys.modules.get(type(layer).__module__)
+        if layer_module is None:
+            return overrides
+
+        for attr in ("apply_rotary_pos_emb",):
+            wrapped = getattr(layer_module, attr, None)
+            plain_callable = self._unwrap_kernel_func_module(wrapped)
+            if plain_callable is None:
+                continue
+            setattr(layer_module, attr, plain_callable)
+            overrides.append((layer_module, attr, wrapped))
+        return overrides
+
+    @staticmethod
+    def _restore_layer_callable_overrides(overrides: list[tuple[object, str, object]]) -> None:
+        """Restore temporarily bypassed module-level callables after live optimization."""
+        for owner, attr, original_value in reversed(overrides):
+            setattr(owner, attr, original_value)
+
+    def _install_live_layer_input_sanitizers(
+        self,
+        layer: torch.nn.Module,
+    ) -> list[torch.utils.hooks.RemovableHandle]:
+        """Normalize inference-mode tensors again at submodule call boundaries.
+
+        The replay cache already rebuilds tensors outside inference mode, but
+        some HF layer internals can still thread inference tensors through
+        nested module calls. A forward pre-hook lets the live optimization path
+        rebuild those boundary tensors before the next submodule consumes them.
+        """
+
+        def _sanitize_hook(_module: torch.nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]):
+            if not any(_value_has_inference_tensor(value) for value in args) and not _value_has_inference_tensor(kwargs):
+                return None
+            normalized_args = tuple(self._normalize_group_runtime_metadata(value) for value in args)
+            normalized_kwargs = self._normalize_group_runtime_metadata(kwargs)
+            return normalized_args, normalized_kwargs
+
+        handles: list[torch.utils.hooks.RemovableHandle] = []
+        for submodule in layer.modules():
+            if submodule is layer:
+                continue
+            handles.append(submodule.register_forward_pre_hook(_sanitize_hook, with_kwargs=True))
+        return handles
+
+    @staticmethod
+    def _remove_live_layer_hooks(handles: list[torch.utils.hooks.RemovableHandle]) -> None:
+        """Remove temporary live-layer hook handles after grouped optimization."""
+        for handle in handles:
+            handle.remove()
+
+    def _enable_live_layer_training(
+        self,
+        layer: torch.nn.Module,
+    ) -> list[tuple[torch.nn.Module, bool]]:
+        """Temporarily switch the root model and live layer to training mode for grouped optimization.
+
+        The layer-scope path runs real backward passes. Flipping the root model
+        back to training ensures Transformers components that branch on
+        ``module.training`` or rebind instance-level kernels do not stay stuck in
+        inference behavior just because the quantization pipeline loaded the model
+        in eval mode.
+        """
+        modules_to_toggle: list[torch.nn.Module] = []
+        root_model = getattr(self, "model", None)
+        if isinstance(root_model, torch.nn.Module):
+            modules_to_toggle.append(root_model)
+        if layer is not root_model:
+            modules_to_toggle.append(layer)
+
+        original_states = [(module, bool(module.training)) for module in modules_to_toggle]
+        for module, was_training in original_states:
+            if not was_training:
+                module.train(True)
+        return original_states
+
+    @staticmethod
+    def _restore_live_layer_training(
+        original_states: list[tuple[torch.nn.Module, bool]],
+    ) -> None:
+        """Restore model/layer training flags after live-layer grouped optimization."""
+        for module, was_training in original_states:
+            if module.training != was_training:
+                module.train(was_training)
+
+    @staticmethod
+    def _materialize_live_layer_autograd_tensors(
+        layer: torch.nn.Module,
+    ) -> tuple[int, int]:
+        """Replace inference-born params/buffers with fresh normal tensors for live autograd.
+
+        The layer object itself stays in place, but worker-side model loading can
+        create parameters and buffers under ``torch.inference_mode()``. Those
+        tensors keep inference-only bookkeeping even after ``module.to(...)``,
+        which breaks backward in the in-place layer optimizer. Rebuilding them
+        in place gives the live layer normal autograd-safe storage without
+        falling back to a full cloned layer path.
+        """
+        replaced_params = 0
+        replaced_buffers = 0
+        with torch.inference_mode(False):
+            for module in layer.modules():
+                for name, param in list(module._parameters.items()):
+                    if param is None:
+                        continue
+                    rebuilt = nn.Parameter(param.detach().clone(), requires_grad=param.requires_grad)
+                    if rebuilt is not param:
+                        module._parameters[name] = rebuilt
+                        replaced_params += 1
+                for name, buffer in list(module._buffers.items()):
+                    if buffer is None:
+                        continue
+                    rebuilt = buffer.detach().clone()
+                    if rebuilt is not buffer:
+                        module._buffers[name] = rebuilt
+                        replaced_buffers += 1
+        return replaced_params, replaced_buffers
 
     def _build_group_optim_layer(
         self,
@@ -639,8 +858,9 @@ class ParoQuantProcessor(LoopProcessor):
 
         cache_key = (str(device), int(batch_dim), int(seq_len))
         cached_position_ids = position_ids_cache.get(cache_key)
-        if cached_position_ids is None:
-            cached_position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(batch_dim, -1)
+        if cached_position_ids is None or cached_position_ids.is_inference():
+            with torch.inference_mode(False):
+                cached_position_ids = torch.arange(seq_len, device=device, dtype=torch.long).unsqueeze(0).expand(batch_dim, -1)
             position_ids_cache[cache_key] = cached_position_ids
         return cached_position_ids
 
@@ -666,9 +886,11 @@ class ParoQuantProcessor(LoopProcessor):
             str(x.dtype),
         )
         cached_position_embeddings = rotary_cache.get(cache_key)
-        if cached_position_embeddings is None:
-            x_for_rotary = x if x.device == target_rotary_device else x.to(target_rotary_device)
-            cached_position_embeddings = rotary(x_for_rotary, position_ids)
+        if cached_position_embeddings is None or _value_has_inference_tensor(cached_position_embeddings):
+            x_for_rotary = _LayerShardLoader._tensor_to_device(x, target_rotary_device)
+            pos_for_rotary = _LayerShardLoader._tensor_to_device(position_ids, target_rotary_device)
+            with torch.inference_mode(False):
+                cached_position_embeddings = rotary(x_for_rotary, pos_for_rotary)
             rotary_cache[cache_key] = cached_position_embeddings
         return cached_position_embeddings
 
@@ -704,14 +926,7 @@ class ParoQuantProcessor(LoopProcessor):
             if cached_prepared is not None:
                 return dict(cached_prepared)
 
-        def _value_on_device(value: Any) -> bool:
-            if isinstance(value, torch.Tensor):
-                return value.device == target_device
-            if isinstance(value, dict):
-                return all(_value_on_device(inner) for inner in value.values())
-            if isinstance(value, (list, tuple)):
-                return all(_value_on_device(inner) for inner in value)
-            return True
+        skip_kwargs = {"past_key_values", "past_key_value"}
 
         if cache:
             kwargs_cache = getattr(self, "_group_forward_kwargs_cache", None)
@@ -721,13 +936,19 @@ class ParoQuantProcessor(LoopProcessor):
             kwargs_cache_key = (id(input_kwargs), str(target_device))
             cached_module_kwargs = kwargs_cache.get(kwargs_cache_key)
             if cached_module_kwargs is None:
-                cached_module_kwargs = {key: nested_move_to(value, device=target_device) for key, value in input_kwargs.items()}
+                cached_module_kwargs = {
+                    key: nested_move_to(value, device=target_device)
+                    for key, value in input_kwargs.items()
+                    if key not in skip_kwargs
+                }
                 kwargs_cache[kwargs_cache_key] = cached_module_kwargs
             module_kwargs = dict(cached_module_kwargs)
-        elif _value_on_device(input_kwargs):
-            module_kwargs = dict(input_kwargs)
         else:
-            module_kwargs = {key: _LayerShardLoader._move_value_to_device(value, target_device) for key, value in input_kwargs.items()}
+            module_kwargs = {
+                key: _LayerShardLoader._move_value_to_device(value, target_device)
+                for key, value in input_kwargs.items()
+                if key not in skip_kwargs
+            }
 
         signature_cache = getattr(self, "_group_forward_signature_cache", None)
         if signature_cache is None:
@@ -752,7 +973,7 @@ class ParoQuantProcessor(LoopProcessor):
 
         if supports_attention_mask:
             module_kwargs["attention_mask"] = None if attention_mask is None else (
-                attention_mask if attention_mask.device == target_device else move_to(attention_mask, device=target_device)
+                _LayerShardLoader._tensor_to_device(attention_mask, target_device)
             )
 
         if x.dim() == 2 and (supports_position_ids or supports_position_embeddings):
@@ -783,7 +1004,7 @@ class ParoQuantProcessor(LoopProcessor):
                 pos_for_rotary = pos_values
             else:
                 if rotary_device is not None and pos_for_rotary.device != rotary_device:
-                    pos_for_rotary = pos_for_rotary.to(rotary_device)
+                    pos_for_rotary = _LayerShardLoader._tensor_to_device(pos_for_rotary, rotary_device)
                 if supports_position_ids:
                     module_kwargs["position_ids"] = pos_for_rotary
 
@@ -806,12 +1027,33 @@ class ParoQuantProcessor(LoopProcessor):
                 )
                 module_kwargs["position_ids"] = pos_values
             else:
-                module_kwargs["position_ids"] = position_ids if position_ids.device == target_device else move_to(position_ids, device=target_device)
+                module_kwargs["position_ids"] = _LayerShardLoader._tensor_to_device(position_ids, target_device)
 
         module_kwargs["use_cache"] = False
+        module_kwargs = self._normalize_group_runtime_metadata(module_kwargs)
         if prepared_cache_key is not None and prepared_cache is not None:
             prepared_cache[prepared_cache_key] = dict(module_kwargs)
         return module_kwargs
+
+    @staticmethod
+    def _clone_group_runtime_metadata(value: Any) -> Any:
+        """Rebuild replay/runtime tensor trees with fresh normal tensors.
+
+        This is stricter than the inference-detection path. It protects the
+        live layer optimizer from tensors that still alias inference-backed
+        storage even when `is_inference()` does not fire on the exact view that
+        reaches the layer entry point.
+        """
+        if isinstance(value, torch.Tensor):
+            with torch.inference_mode(False):
+                return value.clone()
+        if isinstance(value, dict):
+            return {key: ParoQuantProcessor._clone_group_runtime_metadata(inner) for key, inner in value.items()}
+        if isinstance(value, list):
+            return [ParoQuantProcessor._clone_group_runtime_metadata(inner) for inner in value]
+        if isinstance(value, tuple):
+            return tuple(ParoQuantProcessor._clone_group_runtime_metadata(inner) for inner in value)
+        return value
 
     @staticmethod
     def _layer_batch_row_count(input_batch: List[torch.Tensor]) -> int:
@@ -882,6 +1124,11 @@ class ParoQuantProcessor(LoopProcessor):
     ) -> torch.Tensor:
         """Cache grouped loss targets after primary-tensor normalization and dtype/device conversion."""
         target = self._target_primary(target_batch)
+        if target.is_inference():
+            with torch.inference_mode(False):
+                target = target.to(device=device, dtype=dtype, copy=True)
+            if not cache:
+                return target
         if not cache:
             return target.to(device=device, dtype=dtype)
         target_cache = getattr(self, "_group_target_cache", None)
@@ -913,6 +1160,22 @@ class ParoQuantProcessor(LoopProcessor):
             return [ParoQuantProcessor._move_group_value_to_cpu(inner) for inner in value]
         if isinstance(value, tuple):
             return tuple(ParoQuantProcessor._move_group_value_to_cpu(inner) for inner in value)
+        return value
+
+    @staticmethod
+    def _normalize_group_runtime_metadata(value: Any) -> Any:
+        """Rebuild inference-mode replay metadata once kwargs are fully assembled on the live device."""
+        if isinstance(value, torch.Tensor):
+            return _LayerShardLoader._tensor_to_device(value, value.device)
+        if isinstance(value, dict):
+            return {
+                key: ParoQuantProcessor._normalize_group_runtime_metadata(inner)
+                for key, inner in value.items()
+            }
+        if isinstance(value, list):
+            return [ParoQuantProcessor._normalize_group_runtime_metadata(inner) for inner in value]
+        if isinstance(value, tuple):
+            return tuple(ParoQuantProcessor._normalize_group_runtime_metadata(inner) for inner in value)
         return value
 
     def _replay_batches_from_state(
@@ -1182,7 +1445,7 @@ class ParoQuantProcessor(LoopProcessor):
         except (StopIteration, RuntimeError):
             layer_device = CPU
 
-        inputs = [move_to(inp, device=layer_device) for inp in input_batch]
+        inputs = [_LayerShardLoader._tensor_to_device(inp, layer_device) for inp in input_batch]
         if not inputs:
             raise RuntimeError("ParoQuant grouped optimization forward requires at least one input tensor.")
 
@@ -1216,7 +1479,7 @@ class ParoQuantProcessor(LoopProcessor):
         layer_device = replay_batch.inputs[0].device if replay_batch.inputs else CPU
 
         inputs = [
-            inp if inp.device == layer_device else _LayerShardLoader._tensor_to_device(inp, layer_device)
+            self._clone_group_runtime_metadata(_LayerShardLoader._tensor_to_device(inp, layer_device))
             for inp in replay_batch.inputs
         ]
         if not inputs:
@@ -1230,6 +1493,14 @@ class ParoQuantProcessor(LoopProcessor):
             position_ids=replay_batch.position_ids,
             cache=cache_kwargs,
         )
+        additional_inputs = self._clone_group_runtime_metadata(additional_inputs)
+        if any(inp.is_inference() for inp in inputs) or _value_has_inference_tensor(additional_inputs):
+            raise RuntimeError(
+                "ParoQuant layer replay assembled inference-mode live inputs. "
+                f"inputs_inference={[inp.is_inference() for inp in inputs]} "
+                f"kwargs_inference={_value_has_inference_tensor(additional_inputs)} "
+                f"kwargs_keys={sorted(additional_inputs.keys())}"
+            )
         module_output = layer(*inputs, **additional_inputs)
         if module_output is None:
             raise RuntimeError("ParoQuant grouped optimization forward returned no output.")
@@ -1676,67 +1947,90 @@ class ParoQuantProcessor(LoopProcessor):
 
         layer = state.layer_module
         target_device = group_modules[0].weight.device
+        original_layer_dtype = group_modules[0].weight.dtype
         layer = layer.to(device=target_device, dtype=torch.float32)
+        self._strip_hooked_linear_wrappers(layer)
+        training_state_overrides = self._enable_live_layer_training(layer)
+        attn_impl_overrides = self._force_layer_eager_attention(layer)
+        callable_overrides = self._bypass_layer_rotary_func_modules(layer)
+        input_sanitizer_handles = self._install_live_layer_input_sanitizers(layer)
         replay_batches_train, replay_batches_val = self._replay_batches_from_state(state)
         metadata_cache: dict[tuple[int, str], torch.Tensor] = {}
         optim_modules: dict[str, _ParoQuantOptimLinear] = {}
+        original_modules: dict[str, torch.nn.Module] = {}
+        try:
+            for param in layer.parameters():
+                param.requires_grad_(False)
 
-        for param in layer.parameters():
-            param.requires_grad_(False)
+            for named_module in group_modules:
+                original_modules[named_module.name] = recurse_getattr(layer, named_module.name)
+                optim_module = self._build_group_optim_linear(named_module)
+                recurse_setattr(layer, named_module.name, optim_module)
+                optim_modules[named_module.name] = optim_module
 
-        for named_module in group_modules:
-            optim_module = self._build_group_optim_linear(named_module)
-            recurse_setattr(layer, named_module.name, optim_module)
-            optim_modules[named_module.name] = optim_module
+            self._materialize_live_layer_autograd_tensors(layer)
 
-        self._run_group_stage_streamed(
-            layer,
-            optim_modules=optim_modules,
-            replay_batches_train=replay_batches_train,
-            replay_batches_val=replay_batches_val,
-            param_groups=[
-                {"params": [optim_module.channel_scales_opt], "lr": self.qcfg.opt_rotation_lr}
-                for optim_module in optim_modules.values()
-            ] + [
-                {"params": [optim_module.theta], "lr": self.qcfg.opt_rotation_lr}
-                for optim_module in optim_modules.values()
-            ],
-            epochs=int(self.qcfg.opt_rotation_epochs),
-            metadata_cache=metadata_cache,
-        )
-
-        for optim_module in optim_modules.values():
-            optim_module.init_quantizer()
-
-        train_loss, val_loss = self._run_group_stage_streamed(
-            layer,
-            optim_modules=optim_modules,
-            replay_batches_train=replay_batches_train,
-            replay_batches_val=replay_batches_val,
-            param_groups=[
-                {"params": [optim_module.weight], "lr": self.qcfg.opt_weight_lr}
-                for optim_module in optim_modules.values()
-            ] + [
-                {"params": optim_module.quantizer.optim_params(), "lr": self.qcfg.opt_quantizer_lr}
-                for optim_module in optim_modules.values()
-                if optim_module.quantizer is not None
-            ],
-            epochs=int(self.qcfg.opt_finetune_epochs),
-            metadata_cache=metadata_cache,
-        )
-
-        metadata_cache.clear()
-
-        results: dict[str, object] = {}
-        for named_module in group_modules:
-            optim_module = optim_modules[named_module.name]
-            results[named_module.name] = _result_from_model(
-                optim_module,
-                train_loss=train_loss,
-                val_loss=val_loss,
-                used_identity=False,
+            self._run_group_stage_streamed(
+                layer,
+                optim_modules=optim_modules,
+                replay_batches_train=replay_batches_train,
+                replay_batches_val=replay_batches_val,
+                param_groups=[
+                    {"params": [optim_module.channel_scales_opt], "lr": self.qcfg.opt_rotation_lr}
+                    for optim_module in optim_modules.values()
+                ] + [
+                    {"params": [optim_module.theta], "lr": self.qcfg.opt_rotation_lr}
+                    for optim_module in optim_modules.values()
+                ],
+                epochs=int(self.qcfg.opt_rotation_epochs),
+                metadata_cache=metadata_cache,
             )
-        return results, val_loss
+
+            for optim_module in optim_modules.values():
+                optim_module.init_quantizer()
+
+            train_loss, val_loss = self._run_group_stage_streamed(
+                layer,
+                optim_modules=optim_modules,
+                replay_batches_train=replay_batches_train,
+                replay_batches_val=replay_batches_val,
+                param_groups=[
+                    {"params": [optim_module.weight], "lr": self.qcfg.opt_weight_lr}
+                    for optim_module in optim_modules.values()
+                ] + [
+                    {"params": optim_module.quantizer.optim_params(), "lr": self.qcfg.opt_quantizer_lr}
+                    for optim_module in optim_modules.values()
+                    if optim_module.quantizer is not None
+                ],
+                epochs=int(self.qcfg.opt_finetune_epochs),
+                metadata_cache=metadata_cache,
+            )
+
+            metadata_cache.clear()
+
+            results: dict[str, object] = {}
+            for named_module in group_modules:
+                optim_module = optim_modules[named_module.name]
+                results[named_module.name] = _result_from_model(
+                    optim_module,
+                    train_loss=train_loss,
+                    val_loss=val_loss,
+                    used_identity=False,
+                )
+            return results, val_loss
+        finally:
+            for named_module in reversed(group_modules):
+                original_module = original_modules.get(named_module.name)
+                if original_module is not None:
+                    recurse_setattr(layer, named_module.name, original_module)
+            # Live-layer training happens in fp32, but replay and inference should
+            # return to the layer's native dtype so flash-attn and downstream
+            # kernels see the original half/bfloat activations again.
+            layer.to(device=target_device, dtype=original_layer_dtype)
+            self._remove_live_layer_hooks(input_sanitizer_handles)
+            self._restore_layer_callable_overrides(callable_overrides)
+            self._restore_layer_attention_impl(attn_impl_overrides)
+            self._restore_live_layer_training(training_state_overrides)
 
     def _optimize_group(
         self,
