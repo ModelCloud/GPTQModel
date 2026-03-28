@@ -2233,6 +2233,58 @@ def test_paroquant_exported_runtime_state_matches_paper_contract():
     )
 
 
+def test_paroquant_result_from_model_matches_direct_export():
+    """Guard the fused result export against the original direct pseudo/export path."""
+    torch.manual_seed(7)
+    in_features = 128
+    out_features = 64
+    group_size = 128
+    bits = 4
+    weight = torch.randn((out_features, in_features), dtype=torch.float32)
+    bias = torch.randn((out_features,), dtype=torch.float32)
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=2,
+        pair_ratio=2.0 / in_features,
+        seed=7,
+        device=torch.device("cpu"),
+    )
+    model = _ParoQuantOptimLinear(
+        weight,
+        bias,
+        bits=bits,
+        group_size=group_size,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    model.init_quantizer()
+    with torch.no_grad():
+        model.theta.normal_(mean=0.0, std=0.05)
+        model.channel_scales_opt.uniform_(0.8, 1.2)
+
+    direct_pseudo_weight = model.pseudo_weight().detach()
+    direct_pack_weight, direct_q_scales, direct_q_zeros, direct_theta, direct_channel_scales = model.export_pack_state()
+    result = paroquant_optimization._result_from_model(
+        model,
+        train_loss=0.123,
+        val_loss=0.456,
+        used_identity=False,
+    )
+
+    torch.testing.assert_close(result.pseudo_weight, direct_pseudo_weight, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(result.pack_weight, direct_pack_weight, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(result.q_scales, direct_q_scales, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(result.q_zeros, direct_q_zeros, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(result.theta, direct_theta, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(result.channel_scales, direct_channel_scales, atol=1e-5, rtol=1e-5)
+    assert result.train_loss == pytest.approx(0.123)
+    assert result.val_loss == pytest.approx(0.456)
+    assert result.used_identity is False
+
+
 def test_paroquant_reference_quantizer_exports_affine_qzeros():
     """Guard that reference optimizer mode uses affine qparams despite sym runtime config."""
     torch.manual_seed(5)

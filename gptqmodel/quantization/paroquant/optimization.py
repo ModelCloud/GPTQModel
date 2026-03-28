@@ -889,8 +889,10 @@ class _ParoQuantOptimLinear(nn.Module):
             sym=self.quantizer_sym,
         )
 
-    def export_pack_state(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Export runtime tensors that should match the pseudo-quantized layer exactly."""
+    def _export_runtime_state(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Export quantized transformed weights and the exact runtime-equivalent pseudo weight in one pass."""
         transformed = self.transformed_weight(use_ste=False).detach()
         if self.quantizer is None:
             quantizer = GroupLinearQuantizer(
@@ -927,6 +929,18 @@ class _ParoQuantOptimLinear(nn.Module):
         # Export the exact bounded inverse scales that runtime input rotation
         # multiplies into activations.
         runtime_channel_scales = self._safe_channel_scales(use_ste=False).detach().reciprocal()
+        pseudo_weight = _apply_inverse_rotation(
+            quantized,
+            self.pairs,
+            self.theta,
+            group_size=self.group_size,
+            fused_rotation=self.fused_rotation,
+        ) * runtime_channel_scales
+        return quantized, pack_scales, pack_zeros, theta, runtime_channel_scales, pseudo_weight
+
+    def export_pack_state(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Export runtime tensors that should match the pseudo-quantized layer exactly."""
+        quantized, pack_scales, pack_zeros, theta, runtime_channel_scales, _pseudo_weight = self._export_runtime_state()
         return quantized, pack_scales, pack_zeros, theta, runtime_channel_scales
 
 
@@ -1415,10 +1429,9 @@ def _result_from_model(
     used_identity: bool,
 ) -> ParoQuantOptimizationResult:
     """Export one optimized linear replay module into the runtime tensor contract."""
-    pseudo_weight = model.pseudo_weight().detach()
-    pack_weight, q_scales, q_zeros, theta, channel_scales = model.export_pack_state()
+    pack_weight, q_scales, q_zeros, theta, channel_scales, pseudo_weight = model._export_runtime_state()
     return ParoQuantOptimizationResult(
-        pseudo_weight=pseudo_weight,
+        pseudo_weight=pseudo_weight.detach(),
         pack_weight=pack_weight.detach(),
         q_scales=q_scales.detach(),
         q_zeros=q_zeros.detach(),
