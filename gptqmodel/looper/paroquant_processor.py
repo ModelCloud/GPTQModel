@@ -1346,6 +1346,7 @@ class ParoQuantProcessor(LoopProcessor):
             base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
             scaler = torch.amp.GradScaler(enabled=use_amp)
             active_prefixes = tuple(optim_modules.keys())
+            needs_angle_reset = any(optim_module.theta.requires_grad for optim_module in optim_modules.values())
             best_state: Optional[dict[str, torch.Tensor]] = None
             best_val_loss = float("inf")
             last_train_loss = 0.0
@@ -1483,6 +1484,7 @@ class ParoQuantProcessor(LoopProcessor):
             base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
             scaler = torch.amp.GradScaler(enabled=use_amp)
             active_prefixes = tuple(optim_modules.keys())
+            needs_angle_reset = any(optim_module.theta.requires_grad for optim_module in optim_modules.values())
             best_state: Optional[dict[str, torch.Tensor]] = None
             best_val_loss = float("inf")
             last_train_loss = 0.0
@@ -1530,7 +1532,8 @@ class ParoQuantProcessor(LoopProcessor):
                             for group, base_lr in zip(optimizer.param_groups, base_lrs):
                                 group["lr"] = (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio)
 
-                            self._reset_group_angles(optim_modules)
+                            if needs_angle_reset:
+                                self._reset_group_angles(optim_modules)
                             epoch_loss += float(loss.item())
                             batch_count += 1
 
@@ -1551,7 +1554,8 @@ class ParoQuantProcessor(LoopProcessor):
 
             if best_state is not None:
                 self._restore_group_best_state(layer, best_state=best_state)
-            self._reset_group_angles(optim_modules)
+            if needs_angle_reset:
+                self._reset_group_angles(optim_modules)
             return last_train_loss, best_val_loss
 
     def _optimize_live_layer(

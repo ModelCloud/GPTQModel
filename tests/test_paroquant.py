@@ -2159,6 +2159,106 @@ def test_paroquant_processor_layer_scope_streams_without_device_dataset(monkeypa
     assert all(batch.inputs[0].device.type == "cpu" for batch in replay_train + replay_val)
 
 
+def test_paroquant_processor_layer_scope_skips_angle_reset_when_theta_frozen(monkeypatch):
+    """Guard finetune-only layer scope against redundant masked-angle resets."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
+
+    class _ToyMlp(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(8, 8, bias=False)
+            self.up_proj = torch.nn.Linear(8, 8, bias=False)
+            self.down_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.down_proj(torch.sigmoid(self.gate_proj(x)) * self.up_proj(x))
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+            self.mlp = _ToyMlp()
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return self.mlp(self.self_attn(x))
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = layer(x).detach()
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="layer",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=0,
+        opt_finetune_epochs=1,
+        dynamic_get=_dynamic_get,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor.model = None
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+        replay_batches=None,
+    )
+
+    reset_calls = []
+
+    def counting_reset(optim_modules):
+        reset_calls.append(tuple(sorted(optim_modules)))
+
+    monkeypatch.setattr(processor, "_reset_group_angles", counting_reset)
+
+    results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    assert reset_calls == []
+
+
 def test_paroquant_processor_optimize_group_reenables_grad_inside_inference_mode():
     """Guard grouped optimization under the worker lifecycle, which runs process() inside inference mode."""
 
