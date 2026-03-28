@@ -24,6 +24,7 @@ from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
 from gptqmodel.looper.named_module import NamedModule
+import gptqmodel.looper.paroquant_processor as paroquant_processor_module
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantizeConfig, QuantizeConfig
@@ -1700,6 +1701,52 @@ def test_paroquant_processor_caches_group_forward_signature_flags(monkeypatch):
     assert len(signature_calls) == 1
     assert kwargs_a.keys() == kwargs_b.keys()
     assert processor._group_forward_signature_cache[type(layer)] == (True, False, True)
+
+
+def test_paroquant_processor_caches_group_forward_base_kwargs(monkeypatch):
+    """Guard grouped replay kwargs against repeated nested device moves for the same cached dict."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None):
+            del attention_mask, position_ids
+            return self.linear(x)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    move_calls = []
+    original_nested_move_to = paroquant_processor_module.nested_move_to
+
+    def counting_nested_move_to(value, *, device):
+        move_calls.append((type(value).__name__, str(device)))
+        return original_nested_move_to(value, device=device)
+
+    monkeypatch.setattr(paroquant_processor_module, "nested_move_to", counting_nested_move_to)
+    shared_kwargs = {"foo": {"bar": torch.randn(1)}}
+
+    kwargs_a = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs=shared_kwargs,
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+    )
+    kwargs_b = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs=shared_kwargs,
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+    )
+
+    assert len(move_calls) == 1
+    assert kwargs_a.keys() == kwargs_b.keys()
+    assert torch.allclose(kwargs_a["foo"]["bar"], kwargs_b["foo"]["bar"])
 
 
 def test_paroquant_processor_optimize_group_runs_on_toy_layer():

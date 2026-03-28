@@ -543,7 +543,16 @@ class ParoQuantProcessor(LoopProcessor):
         except (StopIteration, RuntimeError):
             target_device = x.device
 
-        module_kwargs = {key: nested_move_to(value, device=target_device) for key, value in input_kwargs.items()}
+        kwargs_cache = getattr(self, "_group_forward_kwargs_cache", None)
+        if kwargs_cache is None:
+            kwargs_cache = {}
+            self._group_forward_kwargs_cache = kwargs_cache
+        kwargs_cache_key = (id(input_kwargs), str(target_device))
+        cached_module_kwargs = kwargs_cache.get(kwargs_cache_key)
+        if cached_module_kwargs is None:
+            cached_module_kwargs = {key: nested_move_to(value, device=target_device) for key, value in input_kwargs.items()}
+            kwargs_cache[kwargs_cache_key] = cached_module_kwargs
+        module_kwargs = dict(cached_module_kwargs)
 
         signature_cache = getattr(self, "_group_forward_signature_cache", None)
         if signature_cache is None:
@@ -1282,6 +1291,8 @@ class ParoQuantProcessor(LoopProcessor):
         state.grouped_dataset = None
         state.grouped_dataset_by_device = None
         state.subset_total = None
+        if hasattr(self, "_group_forward_kwargs_cache"):
+            self._group_forward_kwargs_cache.clear()
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Register a module for later activation capture and deferred quantization."""
