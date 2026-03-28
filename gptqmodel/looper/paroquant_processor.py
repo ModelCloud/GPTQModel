@@ -545,16 +545,26 @@ class ParoQuantProcessor(LoopProcessor):
 
         module_kwargs = {key: nested_move_to(value, device=target_device) for key, value in input_kwargs.items()}
 
-        supports_position_ids = False
-        supports_position_embeddings = False
-        supports_attention_mask = False
-        try:
-            signature = inspect.signature(layer.forward).parameters
-            supports_position_ids = "position_ids" in signature
-            supports_position_embeddings = "position_embeddings" in signature
-            supports_attention_mask = "attention_mask" in signature
-        except (ValueError, TypeError):
-            supports_attention_mask = True
+        signature_cache = getattr(self, "_group_forward_signature_cache", None)
+        if signature_cache is None:
+            signature_cache = {}
+            self._group_forward_signature_cache = signature_cache
+        layer_type = type(layer)
+        cached_signature = signature_cache.get(layer_type)
+        if cached_signature is None:
+            supports_position_ids = False
+            supports_position_embeddings = False
+            supports_attention_mask = False
+            try:
+                signature = inspect.signature(layer.forward).parameters
+                supports_position_ids = "position_ids" in signature
+                supports_position_embeddings = "position_embeddings" in signature
+                supports_attention_mask = "attention_mask" in signature
+            except (ValueError, TypeError):
+                supports_attention_mask = True
+            cached_signature = (supports_position_ids, supports_position_embeddings, supports_attention_mask)
+            signature_cache[layer_type] = cached_signature
+        supports_position_ids, supports_position_embeddings, supports_attention_mask = cached_signature
 
         if supports_attention_mask:
             module_kwargs["attention_mask"] = None if attention_mask is None else move_to(attention_mask, device=target_device)

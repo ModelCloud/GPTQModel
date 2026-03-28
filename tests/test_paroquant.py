@@ -9,6 +9,7 @@
 
 import copy
 from contextlib import contextmanager
+import inspect
 import sys
 import threading
 from types import SimpleNamespace
@@ -1654,6 +1655,51 @@ def test_paroquant_processor_group_best_state_tracks_only_active_prefixes():
     assert torch.allclose(layer.a.weight, best_state["a.weight"])
     assert torch.allclose(layer.b.weight, torch.full_like(layer.b.weight, 7.0))
     assert not torch.allclose(layer.b.weight, original_b)
+
+
+def test_paroquant_processor_caches_group_forward_signature_flags(monkeypatch):
+    """Guard grouped replay kwargs against repeated forward-signature introspection."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None):
+            del attention_mask, position_ids
+            return self.linear(x)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    signature_calls = []
+    original_signature = inspect.signature
+
+    def counting_signature(obj):
+        signature_calls.append(obj)
+        return original_signature(obj)
+
+    monkeypatch.setattr(inspect, "signature", counting_signature)
+
+    kwargs_a = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs={},
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+    )
+    kwargs_b = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs={},
+        attention_mask=torch.ones(1, 2),
+        position_ids=torch.arange(2).unsqueeze(0),
+    )
+
+    assert len(signature_calls) == 1
+    assert kwargs_a.keys() == kwargs_b.keys()
+    assert processor._group_forward_signature_cache[type(layer)] == (True, False, True)
 
 
 def test_paroquant_processor_optimize_group_runs_on_toy_layer():
