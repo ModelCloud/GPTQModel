@@ -1672,6 +1672,9 @@ def test_paroquant_processor_replay_batches_cache_cpu_splits():
     assert len(first_val) == 1
     assert all(batch.inputs[0].device.type == "cpu" for batch in first_train + first_val)
     assert all(batch.target.device.type == "cpu" for batch in first_train + first_val)
+    if torch.cuda.is_available():
+        assert all(batch.inputs[0].is_pinned() for batch in first_train + first_val)
+        assert all(batch.target.is_pinned() for batch in first_train + first_val)
 
 
 def test_paroquant_processor_group_best_state_tracks_only_active_prefixes():

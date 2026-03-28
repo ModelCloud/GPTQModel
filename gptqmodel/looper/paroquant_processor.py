@@ -126,9 +126,16 @@ class _LayerShardLoader:
         self.shard_batches = max(1, int(shard_batches))
 
     @staticmethod
+    def _tensor_to_device(value: torch.Tensor, device: torch.device) -> torch.Tensor:
+        non_blocking = value.device.type == CPU.type and value.is_pinned() and device.type == "cuda"
+        if value.device == device:
+            return value
+        return value.to(device=device, non_blocking=non_blocking)
+
+    @staticmethod
     def _move_value_to_device(value: Any, device: torch.device) -> Any:
         if isinstance(value, torch.Tensor):
-            return move_to(value, device=device)
+            return _LayerShardLoader._tensor_to_device(value, device)
         if isinstance(value, dict):
             return {key: _LayerShardLoader._move_value_to_device(inner, device) for key, inner in value.items()}
         if isinstance(value, list):
@@ -139,14 +146,14 @@ class _LayerShardLoader:
 
     def _materialize_batch(self, batch: _ParoQuantReplayBatch) -> _ParoQuantReplayBatch:
         return _ParoQuantReplayBatch(
-            inputs=[move_to(tensor, device=self.target_device) for tensor in batch.inputs],
+            inputs=[self._tensor_to_device(tensor, self.target_device) for tensor in batch.inputs],
             input_kwargs={
                 key: self._move_value_to_device(value, self.target_device)
                 for key, value in batch.input_kwargs.items()
             },
-            target=move_to(batch.target, device=self.target_device),
-            position_ids=None if batch.position_ids is None else move_to(batch.position_ids, device=self.target_device),
-            attention_mask=None if batch.attention_mask is None else move_to(batch.attention_mask, device=self.target_device),
+            target=self._tensor_to_device(batch.target, self.target_device),
+            position_ids=None if batch.position_ids is None else self._tensor_to_device(batch.position_ids, self.target_device),
+            attention_mask=None if batch.attention_mask is None else self._tensor_to_device(batch.attention_mask, self.target_device),
             row_count=batch.row_count,
         )
 
@@ -791,7 +798,10 @@ class ParoQuantProcessor(LoopProcessor):
     def _move_group_value_to_cpu(value: Any) -> Any:
         """Recursively normalize replay metadata onto CPU-owned tensors."""
         if isinstance(value, torch.Tensor):
-            return value.detach().cpu() if value.device.type != CPU.type else value.detach()
+            tensor = value.detach().cpu() if value.device.type != CPU.type else value.detach()
+            if torch.cuda.is_available() and not tensor.is_pinned():
+                tensor = tensor.pin_memory()
+            return tensor
         if isinstance(value, dict):
             return {key: ParoQuantProcessor._move_group_value_to_cpu(inner) for key, inner in value.items()}
         if isinstance(value, list):
@@ -838,7 +848,7 @@ class ParoQuantProcessor(LoopProcessor):
             attention_masks,
         ):
             cpu_inputs = [
-                tensor.detach().cpu() if tensor.device.type != CPU.type else tensor.detach()
+                self._move_group_value_to_cpu(tensor)
                 for tensor in input_batch
             ]
             replay_batches.append(
@@ -848,7 +858,7 @@ class ParoQuantProcessor(LoopProcessor):
                         key: self._move_group_value_to_cpu(value)
                         for key, value in input_kwargs.items()
                     },
-                    target=self._target_primary(output_batch).detach().cpu(),
+                    target=self._move_group_value_to_cpu(self._target_primary(output_batch)),
                     position_ids=None if pos_ids is None else self._move_group_value_to_cpu(pos_ids),
                     attention_mask=None if attn_mask is None else self._move_group_value_to_cpu(attn_mask),
                     row_count=self._layer_batch_row_count(cpu_inputs),
