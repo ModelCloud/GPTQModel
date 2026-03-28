@@ -1434,23 +1434,22 @@ class ParoQuantProcessor(LoopProcessor):
 
         total_loss = 0.0
         loader = _LayerShardLoader(replay_batches, target_device=target_device, shard_batches=1)
-        with torch.inference_mode():
+        autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
+        with torch.inference_mode(), autocast_ctx:
             for shard in loader.iter_shards():
                 replay_batch = shard[0]
-                autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
-                with autocast_ctx:
-                    preds = self._forward_replay_batch(
-                        layer,
-                        replay_batch=replay_batch,
-                        cache_kwargs=False,
-                    )
-                    target = self._prepare_group_target(
-                        replay_batch.target,
-                        device=preds.device,
-                        dtype=preds.dtype,
-                        cache=False,
-                    )
-                    total_loss += float(F.smooth_l1_loss(preds, target).item())
+                preds = self._forward_replay_batch(
+                    layer,
+                    replay_batch=replay_batch,
+                    cache_kwargs=False,
+                )
+                target = self._prepare_group_target(
+                    replay_batch.target,
+                    device=preds.device,
+                    dtype=preds.dtype,
+                    cache=False,
+                )
+                total_loss += float(F.smooth_l1_loss(preds, target).item())
         return total_loss / max(1, len(replay_batches))
 
     def _run_group_stage_streamed(
@@ -1510,10 +1509,10 @@ class ParoQuantProcessor(LoopProcessor):
                     shard_batches=shard_batches,
                 )
 
-                for shard in train_loader.iter_shards():
-                    for replay_batch in shard:
-                        autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
-                        with autocast_ctx:
+                autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
+                with autocast_ctx:
+                    for shard in train_loader.iter_shards():
+                        for replay_batch in shard:
                             preds = self._forward_replay_batch(
                                 layer,
                                 replay_batch=replay_batch,
@@ -1527,19 +1526,19 @@ class ParoQuantProcessor(LoopProcessor):
                             )
                             loss = F.smooth_l1_loss(preds, target)
 
-                        scaler.scale(loss).backward()
-                        scaler.step(optimizer)
-                        scaler.update()
-                        optimizer.zero_grad(set_to_none=True)
+                            scaler.scale(loss).backward()
+                            scaler.step(optimizer)
+                            scaler.update()
+                            optimizer.zero_grad(set_to_none=True)
 
-                        global_step += 1
-                        cosine_ratio = 0.5 * (1.0 + math.cos(math.pi * min(global_step, total_steps) / total_steps))
-                        for group, base_lr in zip(optimizer.param_groups, base_lrs):
-                            group["lr"] = (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio)
+                            global_step += 1
+                            cosine_ratio = 0.5 * (1.0 + math.cos(math.pi * min(global_step, total_steps) / total_steps))
+                            for group, base_lr in zip(optimizer.param_groups, base_lrs):
+                                group["lr"] = (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio)
 
-                        self._reset_group_angles(optim_modules)
-                        epoch_loss += float(loss.item())
-                        batch_count += 1
+                            self._reset_group_angles(optim_modules)
+                            epoch_loss += float(loss.item())
+                            batch_count += 1
 
                 last_train_loss = epoch_loss / max(1, batch_count)
                 val_loss = self._evaluate_group_layer_streamed(
