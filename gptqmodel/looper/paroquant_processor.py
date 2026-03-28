@@ -1176,7 +1176,7 @@ class ParoQuantProcessor(LoopProcessor):
             return 0.0
 
         total_loss = 0.0
-        with torch.no_grad():
+        with torch.inference_mode():
             for batch_index, (input_batch, input_kwargs, target_batch, pos_ids, attn_mask) in enumerate(
                 zip(input_batches, input_kwargs_batches, target_batches, position_ids, attention_masks)
             ):
@@ -1425,7 +1425,7 @@ class ParoQuantProcessor(LoopProcessor):
 
         total_loss = 0.0
         loader = _LayerShardLoader(replay_batches, target_device=target_device, shard_batches=1)
-        with torch.no_grad():
+        with torch.inference_mode():
             for shard in loader.iter_shards():
                 replay_batch = shard[0]
                 autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
