@@ -543,6 +543,24 @@ class ParoQuantProcessor(LoopProcessor):
         except (StopIteration, RuntimeError):
             target_device = x.device
 
+        prepared_cache = getattr(self, "_group_forward_prepared_cache", None)
+        if prepared_cache is None:
+            prepared_cache = {}
+            self._group_forward_prepared_cache = prepared_cache
+        prepared_cache_key = None
+        if not x.requires_grad:
+            prepared_cache_key = (
+                id(layer),
+                id(x),
+                id(input_kwargs),
+                id(attention_mask) if attention_mask is not None else 0,
+                id(position_ids) if position_ids is not None else 0,
+                str(target_device),
+            )
+            cached_prepared = prepared_cache.get(prepared_cache_key)
+            if cached_prepared is not None:
+                return dict(cached_prepared)
+
         kwargs_cache = getattr(self, "_group_forward_kwargs_cache", None)
         if kwargs_cache is None:
             kwargs_cache = {}
@@ -619,6 +637,8 @@ class ParoQuantProcessor(LoopProcessor):
                 module_kwargs["position_ids"] = move_to(position_ids, device=target_device)
 
         module_kwargs["use_cache"] = False
+        if prepared_cache_key is not None:
+            prepared_cache[prepared_cache_key] = dict(module_kwargs)
         return module_kwargs
 
     @staticmethod
@@ -1293,6 +1313,8 @@ class ParoQuantProcessor(LoopProcessor):
         state.subset_total = None
         if hasattr(self, "_group_forward_kwargs_cache"):
             self._group_forward_kwargs_cache.clear()
+        if hasattr(self, "_group_forward_prepared_cache"):
+            self._group_forward_prepared_cache.clear()
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Register a module for later activation capture and deferred quantization."""

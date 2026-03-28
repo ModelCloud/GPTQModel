@@ -1749,6 +1749,63 @@ def test_paroquant_processor_caches_group_forward_base_kwargs(monkeypatch):
     assert torch.allclose(kwargs_a["foo"]["bar"], kwargs_b["foo"]["bar"])
 
 
+def test_paroquant_processor_caches_full_group_forward_kwargs(monkeypatch):
+    """Guard grouped replay kwargs against recomputing rotary-derived inputs for identical batches."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None, position_embeddings=None):
+            del attention_mask, position_ids, position_embeddings
+            return self.linear(x)
+
+    class _FakeRotary(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, x, position_ids):
+            self.calls += 1
+            return x + position_ids.unsqueeze(-1).to(dtype=x.dtype)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    rotary = _FakeRotary()
+
+    monkeypatch.setattr(processor, "_get_root_rotary", lambda: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_for_device", lambda device: rotary)
+    monkeypatch.setattr(processor, "_get_rotary_device", lambda module, fallback=None: torch.device("cpu"))
+
+    x = torch.randn(1, 2, 4)
+    attention_mask = torch.ones(1, 2)
+    position_ids = torch.arange(2).unsqueeze(0)
+    shared_kwargs = {}
+
+    kwargs_a = processor._prepare_group_forward_kwargs(
+        layer,
+        x=x,
+        input_kwargs=shared_kwargs,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+    )
+    kwargs_b = processor._prepare_group_forward_kwargs(
+        layer,
+        x=x,
+        input_kwargs=shared_kwargs,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+    )
+
+    assert rotary.calls == 1
+    assert kwargs_a is not kwargs_b
+    assert kwargs_a.keys() == kwargs_b.keys()
+    assert torch.allclose(kwargs_a["position_embeddings"], kwargs_b["position_embeddings"])
+
+
 def test_paroquant_processor_optimize_group_runs_on_toy_layer():
     """Guard the grouped optimizer path on a tiny layer without needing the full looper."""
 
