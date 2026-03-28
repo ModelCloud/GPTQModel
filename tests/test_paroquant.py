@@ -1628,6 +1628,33 @@ def test_paroquant_processor_group_dataset_for_device_caches_per_device():
     assert state.grouped_dataset_by_device is not None
     assert state.grouped_dataset_by_device["cpu"] is first
 
+def test_paroquant_processor_group_best_state_tracks_only_active_prefixes():
+    """Guard grouped best-state snapshots against cloning untouched layer state."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a = torch.nn.Linear(4, 4, bias=False)
+            self.b = torch.nn.Linear(4, 4, bias=False)
+
+    processor = object.__new__(ParoQuantProcessor)
+    layer = _ToyLayer()
+    original_b = layer.b.weight.detach().clone()
+
+    best_state = processor._snapshot_group_best_state(layer, active_prefixes=("a",))
+
+    assert sorted(best_state.keys()) == ["a.weight"]
+
+    with torch.no_grad():
+        layer.a.weight.zero_()
+        layer.b.weight.fill_(7.0)
+
+    processor._restore_group_best_state(layer, best_state=best_state)
+
+    assert torch.allclose(layer.a.weight, best_state["a.weight"])
+    assert torch.allclose(layer.b.weight, torch.full_like(layer.b.weight, 7.0))
+    assert not torch.allclose(layer.b.weight, original_b)
+
 
 def test_paroquant_processor_optimize_group_runs_on_toy_layer():
     """Guard the grouped optimizer path on a tiny layer without needing the full looper."""

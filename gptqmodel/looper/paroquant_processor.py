@@ -97,7 +97,6 @@ class _ParoQuantLayerState:
     quantized: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-
 class ParoQuantProcessor(LoopProcessor):
     """Standalone ParoQuant lifecycle: capture, optimize, export, then pack."""
 
@@ -918,6 +917,38 @@ class ParoQuantProcessor(LoopProcessor):
         del device
         return torch.optim.AdamW(normalized_groups)
 
+    @staticmethod
+    def _group_state_key_matches_prefixes(state_key: str, active_prefixes: tuple[str, ...]) -> bool:
+        """Match state keys that belong to the active grouped modules only."""
+        return any(state_key == prefix or state_key.startswith(f"{prefix}.") for prefix in active_prefixes)
+
+    def _snapshot_group_best_state(
+        self,
+        layer: torch.nn.Module,
+        *,
+        active_prefixes: tuple[str, ...],
+    ) -> dict[str, torch.Tensor]:
+        """Capture only the mutable grouped module state instead of the whole layer clone."""
+        return {
+            key: tensor.detach().clone()
+            for key, tensor in layer.state_dict().items()
+            if self._group_state_key_matches_prefixes(key, active_prefixes)
+        }
+
+    @staticmethod
+    def _restore_group_best_state(
+        layer: torch.nn.Module,
+        *,
+        best_state: dict[str, torch.Tensor],
+    ) -> None:
+        """Restore the captured grouped module state in-place."""
+        if not best_state:
+            return
+        live_state = layer.state_dict(keep_vars=True)
+        with torch.no_grad():
+            for key, tensor in best_state.items():
+                live_state[key].copy_(tensor)
+
     def _run_group_stage(
         self,
         layer: torch.nn.Module,
@@ -968,6 +999,7 @@ class ParoQuantProcessor(LoopProcessor):
             total_steps = max(1, epochs * max(1, len(input_batches_train)))
             base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
             scaler = torch.amp.GradScaler(enabled=use_amp)
+            active_prefixes = tuple(optim_modules.keys())
             best_state: Optional[dict[str, torch.Tensor]] = None
             best_val_loss = float("inf")
             last_train_loss = 0.0
@@ -1026,10 +1058,13 @@ class ParoQuantProcessor(LoopProcessor):
                 )
                 if best_state is None or val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    best_state = {key: tensor.detach().clone() for key, tensor in layer.state_dict().items()}
+                    best_state = self._snapshot_group_best_state(
+                        layer,
+                        active_prefixes=active_prefixes,
+                    )
 
             if best_state is not None:
-                layer.load_state_dict(best_state, strict=True)
+                self._restore_group_best_state(layer, best_state=best_state)
             self._reset_group_angles(optim_modules)
             return last_train_loss, best_val_loss
 
