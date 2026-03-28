@@ -130,6 +130,11 @@ class _LayerShardLoader:
     @staticmethod
     def _tensor_to_device(value: torch.Tensor, device: torch.device) -> torch.Tensor:
         non_blocking = value.device.type == CPU.type and value.is_pinned() and device.type == "cuda"
+        if value.is_inference():
+            # Replay tensors may be captured under worker inference-mode; moving
+            # them with copy=True recreates normal tensors that autograd can use.
+            with torch.inference_mode(False):
+                return value.to(device=device, non_blocking=non_blocking, copy=True)
         if value.device == device:
             return value
         return value.to(device=device, non_blocking=non_blocking)
@@ -894,7 +899,11 @@ class ParoQuantProcessor(LoopProcessor):
     def _move_group_value_to_cpu(value: Any) -> Any:
         """Recursively normalize replay metadata onto CPU-owned tensors."""
         if isinstance(value, torch.Tensor):
-            tensor = value.detach().cpu() if value.device.type != CPU.type else value.detach()
+            if value.is_inference():
+                with torch.inference_mode(False):
+                    tensor = value.detach().to(device=CPU, copy=True)
+            else:
+                tensor = value.detach().cpu() if value.device.type != CPU.type else value.detach()
             if torch.cuda.is_available() and not tensor.is_pinned():
                 tensor = tensor.pin_memory()
             return tensor

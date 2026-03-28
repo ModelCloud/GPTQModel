@@ -1708,6 +1708,84 @@ def test_paroquant_processor_replay_batches_cache_cpu_splits():
         assert all(batch.target.is_pinned() for batch in first_train + first_val)
 
 
+def test_paroquant_processor_replay_batches_strip_inference_tensors():
+    """Replay-cache tensors must be recreated outside inference mode before layer training."""
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=2, opt_validation_samples=1)
+
+    with torch.inference_mode():
+        cached_input = torch.randn(2, 4)
+        cached_kwarg = torch.randn(2, 4)
+        cached_output = torch.randn(2, 4)
+        cached_pos = torch.arange(4).unsqueeze(0)
+        cached_mask = torch.ones(1, 4)
+
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[cached_input]],
+        layer_input_kwargs=[{"cache_position": cached_kwarg}],
+        position_ids=[cached_pos],
+        attention_masks=[cached_mask],
+    )
+    state = SimpleNamespace(
+        layer_inputs=[[cached_input]],
+        layer_input_kwargs=[{"cache_position": cached_kwarg}],
+        layer_outputs=[[cached_output]],
+        replay_batches=None,
+    )
+
+    train_batches, val_batches = processor._replay_batches_from_state(state)
+    replay_batch = train_batches[0]
+
+    assert not replay_batch.inputs[0].is_inference()
+    assert not replay_batch.input_kwargs["cache_position"].is_inference()
+    assert not replay_batch.target.is_inference()
+    assert replay_batch.position_ids is not None
+    assert replay_batch.attention_mask is not None
+    assert not replay_batch.position_ids.is_inference()
+    assert not replay_batch.attention_mask.is_inference()
+    assert len(train_batches) == 1
+    assert len(val_batches) == 1
+
+
+def test_paroquant_processor_layer_shard_loader_normalizes_inference_inputs():
+    """Materialized replay batches must hand autograd normal tensors even if cache input is inference-mode."""
+
+    class _ToyNorm(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4))
+
+        def forward(self, hidden_states):
+            return self.weight * hidden_states.to(hidden_states.dtype)
+
+    with torch.inference_mode():
+        replay_batch = paroquant_processor_module._ParoQuantReplayBatch(
+            inputs=[torch.randn(2, 4)],
+            input_kwargs={},
+            target=torch.randn(2, 4),
+            position_ids=None,
+            attention_mask=None,
+            row_count=2,
+        )
+
+    loader = paroquant_processor_module._LayerShardLoader(
+        [replay_batch],
+        target_device=torch.device("cpu"),
+        shard_batches=1,
+    )
+    materialized_batch = next(loader.iter_shards())[0]
+    layer = _ToyNorm()
+
+    assert not materialized_batch.inputs[0].is_inference()
+    assert not materialized_batch.target.is_inference()
+
+    with torch.inference_mode(False), torch.enable_grad():
+        output = layer(materialized_batch.inputs[0])
+
+    assert output.shape == materialized_batch.inputs[0].shape
+
+
 def test_paroquant_processor_layer_shard_loader_reuses_metadata_tensors():
     """Guard streamed layer replay so shared position/mask tensors can stay cached on one device."""
 
