@@ -629,6 +629,15 @@ class ParoQuantProcessor(LoopProcessor):
             if cached_prepared is not None:
                 return dict(cached_prepared)
 
+        def _value_on_device(value: Any) -> bool:
+            if isinstance(value, torch.Tensor):
+                return value.device == target_device
+            if isinstance(value, dict):
+                return all(_value_on_device(inner) for inner in value.values())
+            if isinstance(value, (list, tuple)):
+                return all(_value_on_device(inner) for inner in value)
+            return True
+
         if cache:
             kwargs_cache = getattr(self, "_group_forward_kwargs_cache", None)
             if kwargs_cache is None:
@@ -640,6 +649,8 @@ class ParoQuantProcessor(LoopProcessor):
                 cached_module_kwargs = {key: nested_move_to(value, device=target_device) for key, value in input_kwargs.items()}
                 kwargs_cache[kwargs_cache_key] = cached_module_kwargs
             module_kwargs = dict(cached_module_kwargs)
+        elif _value_on_device(input_kwargs):
+            module_kwargs = dict(input_kwargs)
         else:
             module_kwargs = {key: _LayerShardLoader._move_value_to_device(value, target_device) for key, value in input_kwargs.items()}
 
@@ -665,7 +676,9 @@ class ParoQuantProcessor(LoopProcessor):
         supports_position_ids, supports_position_embeddings, supports_attention_mask = cached_signature
 
         if supports_attention_mask:
-            module_kwargs["attention_mask"] = None if attention_mask is None else move_to(attention_mask, device=target_device)
+            module_kwargs["attention_mask"] = None if attention_mask is None else (
+                attention_mask if attention_mask.device == target_device else move_to(attention_mask, device=target_device)
+            )
 
         if x.dim() == 2 and (supports_position_ids or supports_position_embeddings):
             x = x.unsqueeze(0)
@@ -692,11 +705,12 @@ class ParoQuantProcessor(LoopProcessor):
                     module_kwargs["position_ids"] = pos_values
                 pos_for_rotary = pos_values
             else:
-                pos_for_rotary = pos_for_rotary.to(rotary_device or pos_for_rotary.device)
+                if rotary_device is not None and pos_for_rotary.device != rotary_device:
+                    pos_for_rotary = pos_for_rotary.to(rotary_device)
                 if supports_position_ids:
                     module_kwargs["position_ids"] = pos_for_rotary
 
-            x_for_rotary = x if rotary_device is None else x.to(rotary_device)
+            x_for_rotary = x if rotary_device is None or x.device == rotary_device else x.to(rotary_device)
             module_kwargs["position_embeddings"] = rotary(x_for_rotary, pos_for_rotary)
         elif supports_position_ids:
             if position_ids is None or position_ids.shape[-1] != seq_len:
@@ -705,7 +719,7 @@ class ParoQuantProcessor(LoopProcessor):
                     pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
                 module_kwargs["position_ids"] = pos_values
             else:
-                module_kwargs["position_ids"] = move_to(position_ids, device=target_device)
+                module_kwargs["position_ids"] = position_ids if position_ids.device == target_device else move_to(position_ids, device=target_device)
 
         module_kwargs["use_cache"] = False
         if prepared_cache_key is not None and prepared_cache is not None:
@@ -1113,7 +1127,10 @@ class ParoQuantProcessor(LoopProcessor):
         except (StopIteration, RuntimeError):
             layer_device = CPU
 
-        inputs = [move_to(inp, device=layer_device) for inp in replay_batch.inputs]
+        inputs = [
+            inp if inp.device == layer_device else _LayerShardLoader._tensor_to_device(inp, layer_device)
+            for inp in replay_batch.inputs
+        ]
         if not inputs:
             raise RuntimeError("ParoQuant layer replay requires at least one input tensor.")
 

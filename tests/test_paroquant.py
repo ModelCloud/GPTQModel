@@ -1875,6 +1875,50 @@ def test_paroquant_processor_caches_full_group_forward_kwargs(monkeypatch):
     assert torch.allclose(kwargs_a["position_embeddings"], kwargs_b["position_embeddings"])
 
 
+def test_paroquant_processor_streamed_group_forward_kwargs_skip_redundant_moves(monkeypatch):
+    """Guard streamed layer replay against recursively re-moving already device-ready kwargs."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None):
+            del attention_mask, position_ids
+            return self.linear(x)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.gptq_model = None
+    processor.model = None
+    layer = _ToyLayer()
+    moved_values = []
+
+    original_move_value = paroquant_processor_module._LayerShardLoader._move_value_to_device
+
+    def counting_move_value(value, device):
+        moved_values.append((type(value).__name__, str(device)))
+        return original_move_value(value, device)
+
+    monkeypatch.setattr(paroquant_processor_module._LayerShardLoader, "_move_value_to_device", counting_move_value)
+
+    attention_mask = torch.ones(1, 2)
+    position_ids = torch.arange(2).unsqueeze(0)
+    shared_kwargs = {"foo": {"bar": torch.randn(1)}}
+    kwargs = processor._prepare_group_forward_kwargs(
+        layer,
+        x=torch.randn(2, 4),
+        input_kwargs=shared_kwargs,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        cache=False,
+    )
+
+    assert moved_values == []
+    assert kwargs["foo"]["bar"] is shared_kwargs["foo"]["bar"]
+    assert kwargs["attention_mask"] is attention_mask
+    assert kwargs["position_ids"] is position_ids
+
+
 def test_paroquant_processor_caches_group_targets_by_dtype_and_device():
     """Guard grouped replay targets against repeated device/dtype conversions."""
 
