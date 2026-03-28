@@ -700,6 +700,26 @@ class ParoQuantProcessor(LoopProcessor):
             raise TypeError(f"ParoQuant grouped optimization expected tensor targets, got `{type(target_batch).__name__}`.")
         return target_batch
 
+    def _prepare_group_target(
+        self,
+        target_batch: Any,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Cache grouped loss targets after primary-tensor normalization and dtype/device conversion."""
+        target = self._target_primary(target_batch)
+        target_cache = getattr(self, "_group_target_cache", None)
+        if target_cache is None:
+            target_cache = {}
+            self._group_target_cache = target_cache
+        cache_key = (id(target), str(device), str(dtype))
+        cached_target = target_cache.get(cache_key)
+        if cached_target is None:
+            cached_target = target.to(device=device, dtype=dtype)
+            target_cache[cache_key] = cached_target
+        return cached_target
+
     def _group_dataset_from_state(
         self,
         state: _ParoQuantLayerState,
@@ -891,7 +911,7 @@ class ParoQuantProcessor(LoopProcessor):
                         attention_mask=attn_mask,
                         position_ids=pos_ids,
                     )
-                    target = self._target_primary(target_batch).to(device=preds.device, dtype=preds.dtype)
+                    target = self._prepare_group_target(target_batch, device=preds.device, dtype=preds.dtype)
                     total_loss += float(F.smooth_l1_loss(preds, target).item())
         return total_loss / max(1, len(input_batches))
 
@@ -1068,7 +1088,7 @@ class ParoQuantProcessor(LoopProcessor):
                             attention_mask=attn_mask,
                             position_ids=pos_ids,
                         )
-                        target = self._target_primary(target_batch).to(device=preds.device, dtype=preds.dtype)
+                        target = self._prepare_group_target(target_batch, device=preds.device, dtype=preds.dtype)
                         loss = F.smooth_l1_loss(preds, target)
 
                     scaler.scale(loss).backward()
@@ -1315,6 +1335,8 @@ class ParoQuantProcessor(LoopProcessor):
             self._group_forward_kwargs_cache.clear()
         if hasattr(self, "_group_forward_prepared_cache"):
             self._group_forward_prepared_cache.clear()
+        if hasattr(self, "_group_target_cache"):
+            self._group_target_cache.clear()
 
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Register a module for later activation capture and deferred quantization."""

@@ -1806,6 +1806,21 @@ def test_paroquant_processor_caches_full_group_forward_kwargs(monkeypatch):
     assert torch.allclose(kwargs_a["position_embeddings"], kwargs_b["position_embeddings"])
 
 
+def test_paroquant_processor_caches_group_targets_by_dtype_and_device():
+    """Guard grouped replay targets against repeated device/dtype conversions."""
+
+    processor = object.__new__(ParoQuantProcessor)
+    target_batch = [torch.randn(2, 4)]
+
+    first = processor._prepare_group_target(target_batch, device=torch.device("cpu"), dtype=torch.float32)
+    second = processor._prepare_group_target(target_batch, device=torch.device("cpu"), dtype=torch.float32)
+    third = processor._prepare_group_target(target_batch, device=torch.device("cpu"), dtype=torch.float16)
+
+    assert first is second
+    assert third.dtype == torch.float16
+    assert third is not first
+
+
 def test_paroquant_processor_optimize_group_runs_on_toy_layer():
     """Guard the grouped optimizer path on a tiny layer without needing the full looper."""
 
