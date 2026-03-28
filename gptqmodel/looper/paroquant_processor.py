@@ -1252,7 +1252,16 @@ class ParoQuantProcessor(LoopProcessor):
         device: torch.device,
     ) -> torch.optim.Optimizer:
         """Construct the grouped AdamW optimizer after redundant groups are merged away."""
-        del device
+        use_fused = device.type == "cuda" and all(
+            isinstance(param, nn.Parameter) and param.device.type == "cuda" and torch.is_floating_point(param)
+            for group in normalized_groups
+            for param in group.get("params", [])
+        )
+        if use_fused:
+            try:
+                return torch.optim.AdamW(normalized_groups, fused=True)
+            except (RuntimeError, TypeError, ValueError):
+                pass
         return torch.optim.AdamW(normalized_groups)
 
     @staticmethod

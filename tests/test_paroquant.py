@@ -1506,7 +1506,8 @@ def test_paroquant_processor_merges_equivalent_group_optimizer_param_groups():
 def test_paroquant_processor_group_adamw_uses_merged_groups(monkeypatch):
     """Guard grouped optimizer setup against re-expanding merged parameter buckets."""
     processor = object.__new__(ParoQuantProcessor)
-    param = torch.nn.Parameter(torch.randn(4))
+    param_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    param = torch.nn.Parameter(torch.randn(4, device=param_device))
     calls = []
 
     class _FakeOptimizer:
@@ -1524,7 +1525,37 @@ def test_paroquant_processor_group_adamw_uses_merged_groups(monkeypatch):
     )
 
     assert isinstance(optimizer, _FakeOptimizer)
-    assert calls == [{}]
+    expected = [{"fused": True}] if torch.cuda.is_available() else [{}]
+    assert calls == expected
+
+
+def test_paroquant_processor_group_adamw_falls_back_when_fused_cuda_is_unsupported(monkeypatch):
+    """Guard grouped CUDA optimizer setup against fused AdamW support gaps."""
+
+    processor = object.__new__(ParoQuantProcessor)
+    param_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    param = torch.nn.Parameter(torch.randn(4, device=param_device))
+    calls = []
+
+    class _FakeOptimizer:
+        def __init__(self):
+            self.param_groups = [{"params": [param], "lr": 0.05}]
+
+    def fake_adamw(param_groups, **kwargs):
+        calls.append(kwargs.copy())
+        if kwargs.get("fused"):
+            raise TypeError("fused unsupported")
+        return _FakeOptimizer()
+
+    monkeypatch.setattr(torch.optim, "AdamW", fake_adamw)
+    optimizer = processor._build_group_adamw(
+        [{"params": [param], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}],
+        device=torch.device("cuda"),
+    )
+
+    assert isinstance(optimizer, _FakeOptimizer)
+    expected = [{"fused": True}, {}] if torch.cuda.is_available() else [{}]
+    assert calls == expected
 
 
 def test_paroquant_processor_group_stage_skips_redundant_initial_train_eval(monkeypatch):
