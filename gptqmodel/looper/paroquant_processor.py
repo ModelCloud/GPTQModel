@@ -25,7 +25,7 @@ import threading
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -91,11 +91,70 @@ class _ParoQuantLayerState:
     layer_outputs: Optional[List[List[torch.Tensor]]] = None
     grouped_dataset: Optional[Any] = None
     grouped_dataset_by_device: Optional[Dict[str, Any]] = None
+    replay_batches: Optional[Any] = None
     subset_total: Optional[int] = None
     processed_subsets: Set[int] = field(default_factory=set)
     pending_modules: Set[str] = field(default_factory=set)
     quantized: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@dataclass
+class _ParoQuantReplayBatch:
+    """One CPU-owned layer replay batch used by streamed grouped optimization."""
+
+    inputs: List[torch.Tensor]
+    input_kwargs: Dict[str, Any]
+    target: torch.Tensor
+    position_ids: Optional[torch.Tensor]
+    attention_mask: Optional[torch.Tensor]
+    row_count: int
+
+
+class _LayerShardLoader:
+    """Stream replay batches from CPU to one device shard at a time."""
+
+    def __init__(
+        self,
+        batches: list[_ParoQuantReplayBatch],
+        *,
+        target_device: torch.device,
+        shard_batches: int,
+    ) -> None:
+        self.batches = batches
+        self.target_device = torch.device(target_device)
+        self.shard_batches = max(1, int(shard_batches))
+
+    @staticmethod
+    def _move_value_to_device(value: Any, device: torch.device) -> Any:
+        if isinstance(value, torch.Tensor):
+            return move_to(value, device=device)
+        if isinstance(value, dict):
+            return {key: _LayerShardLoader._move_value_to_device(inner, device) for key, inner in value.items()}
+        if isinstance(value, list):
+            return [_LayerShardLoader._move_value_to_device(inner, device) for inner in value]
+        if isinstance(value, tuple):
+            return tuple(_LayerShardLoader._move_value_to_device(inner, device) for inner in value)
+        return value
+
+    def _materialize_batch(self, batch: _ParoQuantReplayBatch) -> _ParoQuantReplayBatch:
+        return _ParoQuantReplayBatch(
+            inputs=[move_to(tensor, device=self.target_device) for tensor in batch.inputs],
+            input_kwargs={
+                key: self._move_value_to_device(value, self.target_device)
+                for key, value in batch.input_kwargs.items()
+            },
+            target=move_to(batch.target, device=self.target_device),
+            position_ids=None if batch.position_ids is None else move_to(batch.position_ids, device=self.target_device),
+            attention_mask=None if batch.attention_mask is None else move_to(batch.attention_mask, device=self.target_device),
+            row_count=batch.row_count,
+        )
+
+    def iter_shards(self) -> Iterator[list[_ParoQuantReplayBatch]]:
+        for start in range(0, len(self.batches), self.shard_batches):
+            end = min(len(self.batches), start + self.shard_batches)
+            shard = [self._materialize_batch(batch) for batch in self.batches[start:end]]
+            yield shard
 
 class ParoQuantProcessor(LoopProcessor):
     """Standalone ParoQuant lifecycle: capture, optimize, export, then pack."""
@@ -536,6 +595,7 @@ class ParoQuantProcessor(LoopProcessor):
         input_kwargs: Dict[str, Any],
         attention_mask: Optional[torch.Tensor],
         position_ids: Optional[torch.Tensor],
+        cache: bool = True,
     ) -> Dict[str, Any]:
         """Refresh grouped replay kwargs so real decoder layers can be replayed safely."""
         try:
@@ -543,12 +603,13 @@ class ParoQuantProcessor(LoopProcessor):
         except (StopIteration, RuntimeError):
             target_device = x.device
 
-        prepared_cache = getattr(self, "_group_forward_prepared_cache", None)
-        if prepared_cache is None:
-            prepared_cache = {}
-            self._group_forward_prepared_cache = prepared_cache
         prepared_cache_key = None
-        if not x.requires_grad:
+        prepared_cache = None
+        if cache and not x.requires_grad:
+            prepared_cache = getattr(self, "_group_forward_prepared_cache", None)
+            if prepared_cache is None:
+                prepared_cache = {}
+                self._group_forward_prepared_cache = prepared_cache
             prepared_cache_key = (
                 id(layer),
                 id(x),
@@ -561,16 +622,19 @@ class ParoQuantProcessor(LoopProcessor):
             if cached_prepared is not None:
                 return dict(cached_prepared)
 
-        kwargs_cache = getattr(self, "_group_forward_kwargs_cache", None)
-        if kwargs_cache is None:
-            kwargs_cache = {}
-            self._group_forward_kwargs_cache = kwargs_cache
-        kwargs_cache_key = (id(input_kwargs), str(target_device))
-        cached_module_kwargs = kwargs_cache.get(kwargs_cache_key)
-        if cached_module_kwargs is None:
-            cached_module_kwargs = {key: nested_move_to(value, device=target_device) for key, value in input_kwargs.items()}
-            kwargs_cache[kwargs_cache_key] = cached_module_kwargs
-        module_kwargs = dict(cached_module_kwargs)
+        if cache:
+            kwargs_cache = getattr(self, "_group_forward_kwargs_cache", None)
+            if kwargs_cache is None:
+                kwargs_cache = {}
+                self._group_forward_kwargs_cache = kwargs_cache
+            kwargs_cache_key = (id(input_kwargs), str(target_device))
+            cached_module_kwargs = kwargs_cache.get(kwargs_cache_key)
+            if cached_module_kwargs is None:
+                cached_module_kwargs = {key: nested_move_to(value, device=target_device) for key, value in input_kwargs.items()}
+                kwargs_cache[kwargs_cache_key] = cached_module_kwargs
+            module_kwargs = dict(cached_module_kwargs)
+        else:
+            module_kwargs = {key: _LayerShardLoader._move_value_to_device(value, target_device) for key, value in input_kwargs.items()}
 
         signature_cache = getattr(self, "_group_forward_signature_cache", None)
         if signature_cache is None:
@@ -637,7 +701,7 @@ class ParoQuantProcessor(LoopProcessor):
                 module_kwargs["position_ids"] = move_to(position_ids, device=target_device)
 
         module_kwargs["use_cache"] = False
-        if prepared_cache_key is not None:
+        if prepared_cache_key is not None and prepared_cache is not None:
             prepared_cache[prepared_cache_key] = dict(module_kwargs)
         return module_kwargs
 
@@ -706,9 +770,12 @@ class ParoQuantProcessor(LoopProcessor):
         *,
         device: torch.device,
         dtype: torch.dtype,
+        cache: bool = True,
     ) -> torch.Tensor:
         """Cache grouped loss targets after primary-tensor normalization and dtype/device conversion."""
         target = self._target_primary(target_batch)
+        if not cache:
+            return target.to(device=device, dtype=dtype)
         target_cache = getattr(self, "_group_target_cache", None)
         if target_cache is None:
             target_cache = {}
@@ -719,6 +786,154 @@ class ParoQuantProcessor(LoopProcessor):
             cached_target = target.to(device=device, dtype=dtype)
             target_cache[cache_key] = cached_target
         return cached_target
+
+    @staticmethod
+    def _move_group_value_to_cpu(value: Any) -> Any:
+        """Recursively normalize replay metadata onto CPU-owned tensors."""
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu() if value.device.type != CPU.type else value.detach()
+        if isinstance(value, dict):
+            return {key: ParoQuantProcessor._move_group_value_to_cpu(inner) for key, inner in value.items()}
+        if isinstance(value, list):
+            return [ParoQuantProcessor._move_group_value_to_cpu(inner) for inner in value]
+        if isinstance(value, tuple):
+            return tuple(ParoQuantProcessor._move_group_value_to_cpu(inner) for inner in value)
+        return value
+
+    def _replay_batches_from_state(
+        self,
+        state: _ParoQuantLayerState,
+    ) -> tuple[list[_ParoQuantReplayBatch], list[_ParoQuantReplayBatch]]:
+        """Build CPU-owned train/validation replay batches for in-place layer optimization."""
+        cached_batches = getattr(state, "replay_batches", None)
+        if cached_batches is not None:
+            return cached_batches
+
+        input_batches = state.layer_inputs or []
+        input_kwargs_batches = state.layer_input_kwargs or []
+        output_batches = state.layer_outputs or []
+        if not input_batches or not output_batches:
+            raise RuntimeError("ParoQuant layer optimization requires captured layer inputs and outputs.")
+        if len(input_batches) != len(output_batches):
+            raise RuntimeError("ParoQuant layer optimization requires aligned input/output batch counts.")
+
+        if not input_kwargs_batches:
+            input_kwargs_batches = [{} for _ in range(len(input_batches))]
+        elif len(input_kwargs_batches) != len(input_batches):
+            raise RuntimeError("ParoQuant layer optimization requires aligned layer-input kwargs.")
+
+        position_ids = list(self.inputs_cache.position_ids or [])
+        attention_masks = list(self.inputs_cache.attention_masks or [])
+        if len(position_ids) < len(input_batches):
+            position_ids.extend([None] * (len(input_batches) - len(position_ids)))
+        if len(attention_masks) < len(input_batches):
+            attention_masks.extend([None] * (len(input_batches) - len(attention_masks)))
+
+        replay_batches: list[_ParoQuantReplayBatch] = []
+        for input_batch, input_kwargs, output_batch, pos_ids, attn_mask in zip(
+            input_batches,
+            input_kwargs_batches,
+            output_batches,
+            position_ids,
+            attention_masks,
+        ):
+            cpu_inputs = [
+                tensor.detach().cpu() if tensor.device.type != CPU.type else tensor.detach()
+                for tensor in input_batch
+            ]
+            replay_batches.append(
+                _ParoQuantReplayBatch(
+                    inputs=cpu_inputs,
+                    input_kwargs={
+                        key: self._move_group_value_to_cpu(value)
+                        for key, value in input_kwargs.items()
+                    },
+                    target=self._target_primary(output_batch).detach().cpu(),
+                    position_ids=None if pos_ids is None else self._move_group_value_to_cpu(pos_ids),
+                    attention_mask=None if attn_mask is None else self._move_group_value_to_cpu(attn_mask),
+                    row_count=self._layer_batch_row_count(cpu_inputs),
+                )
+            )
+
+        train_batch_count = self._prefix_batch_count_for_rows(
+            [batch.inputs for batch in replay_batches],
+            int(self.qcfg.opt_train_samples),
+        )
+        val_batch_count = self._suffix_batch_count_for_rows(
+            [batch.inputs for batch in replay_batches],
+            int(self.qcfg.opt_validation_samples),
+        )
+        val_start = max(0, len(replay_batches) - val_batch_count)
+        replay_split = (replay_batches[:train_batch_count], replay_batches[val_start:])
+        state.replay_batches = replay_split
+        return replay_split
+
+    @staticmethod
+    def _tensor_bytes(value: torch.Tensor) -> int:
+        """Measure one tensor's storage footprint."""
+        return int(value.numel() * value.element_size())
+
+    def _nested_tensor_bytes(self, value: Any) -> int:
+        """Measure nested replay metadata footprint."""
+        if isinstance(value, torch.Tensor):
+            return self._tensor_bytes(value)
+        if isinstance(value, dict):
+            return sum(self._nested_tensor_bytes(inner) for inner in value.values())
+        if isinstance(value, (list, tuple)):
+            return sum(self._nested_tensor_bytes(inner) for inner in value)
+        return 0
+
+    def _replay_batch_bytes(self, batch: _ParoQuantReplayBatch) -> int:
+        """Estimate one replay batch's device footprint."""
+        return (
+            sum(self._tensor_bytes(tensor) for tensor in batch.inputs)
+            + self._tensor_bytes(batch.target)
+            + (0 if batch.position_ids is None else self._tensor_bytes(batch.position_ids))
+            + (0 if batch.attention_mask is None else self._tensor_bytes(batch.attention_mask))
+            + self._nested_tensor_bytes(batch.input_kwargs)
+        )
+
+    def _layer_train_shard_batches(
+        self,
+        layer: torch.nn.Module,
+        *,
+        param_groups: Sequence[dict[str, object]],
+        replay_batches: list[_ParoQuantReplayBatch],
+    ) -> int:
+        """Choose a conservative train-shard size from current free GPU memory."""
+        if not replay_batches:
+            return 1
+
+        try:
+            target_device = next(layer.parameters()).device
+        except (StopIteration, RuntimeError):
+            target_device = CPU
+
+        if target_device.type != "cuda":
+            return len(replay_batches)
+
+        try:
+            free_bytes, _total_bytes = torch.cuda.mem_get_info(target_device)
+        except RuntimeError:
+            return 1
+
+        layer_bytes = sum(self._tensor_bytes(param.detach()) for param in layer.parameters())
+        layer_bytes += sum(self._tensor_bytes(buffer.detach()) for buffer in layer.buffers())
+        active_params = {
+            id(param): param
+            for group in param_groups
+            for param in group.get("params", [])
+            if isinstance(param, nn.Parameter)
+        }
+        optim_bytes = sum(int(param.numel()) * 16 for param in active_params.values())
+        sample_count = min(4, len(replay_batches))
+        avg_batch_bytes = max(
+            1,
+            sum(self._replay_batch_bytes(batch) for batch in replay_batches[:sample_count]) // sample_count,
+        )
+        activation_margin = 256 * 1024 * 1024
+        headroom = max(avg_batch_bytes, int(free_bytes) - layer_bytes - optim_bytes - activation_margin)
+        return max(1, min(len(replay_batches), headroom // avg_batch_bytes))
 
     def _group_dataset_from_state(
         self,
@@ -875,6 +1090,43 @@ class ParoQuantProcessor(LoopProcessor):
             )
         return module_output
 
+    def _forward_replay_batch(
+        self,
+        layer: torch.nn.Module,
+        *,
+        replay_batch: _ParoQuantReplayBatch,
+        cache_kwargs: bool,
+    ) -> torch.Tensor:
+        """Run one streamed replay batch through the live grouped layer."""
+        try:
+            layer_device = next(layer.parameters()).device
+        except (StopIteration, RuntimeError):
+            layer_device = CPU
+
+        inputs = [move_to(inp, device=layer_device) for inp in replay_batch.inputs]
+        if not inputs:
+            raise RuntimeError("ParoQuant layer replay requires at least one input tensor.")
+
+        additional_inputs = self._prepare_group_forward_kwargs(
+            layer,
+            x=inputs[0],
+            input_kwargs=replay_batch.input_kwargs,
+            attention_mask=replay_batch.attention_mask,
+            position_ids=replay_batch.position_ids,
+            cache=cache_kwargs,
+        )
+        module_output = layer(*inputs, **additional_inputs)
+        if module_output is None:
+            raise RuntimeError("ParoQuant grouped optimization forward returned no output.")
+        if isinstance(module_output, tuple):
+            module_output = module_output[0]
+        if not isinstance(module_output, torch.Tensor):
+            raise TypeError(
+                "ParoQuant grouped optimization expected tensor layer outputs, "
+                f"got `{type(module_output).__name__}`."
+            )
+        return module_output
+
     @staticmethod
     def _reset_group_angles(optim_modules: dict[str, _ParoQuantOptimLinear]) -> None:
         """Clamp masked dummy rotations back to zero after each grouped optimizer step."""
@@ -986,10 +1238,15 @@ class ParoQuantProcessor(LoopProcessor):
         layer: torch.nn.Module,
         *,
         active_prefixes: tuple[str, ...],
+        target_device: Optional[torch.device] = None,
     ) -> dict[str, torch.Tensor]:
         """Capture only the mutable grouped module state instead of the whole layer clone."""
         return {
-            key: tensor.detach().clone()
+            key: (
+                tensor.detach().clone()
+                if target_device is None
+                else tensor.detach().to(device=target_device).clone()
+            )
             for key, tensor in layer.state_dict().items()
             if self._group_state_key_matches_prefixes(key, active_prefixes)
         }
@@ -1127,12 +1384,227 @@ class ParoQuantProcessor(LoopProcessor):
             self._reset_group_angles(optim_modules)
             return last_train_loss, best_val_loss
 
+    def _evaluate_group_layer_streamed(
+        self,
+        layer: torch.nn.Module,
+        *,
+        replay_batches: list[_ParoQuantReplayBatch],
+        use_amp: bool,
+        target_device: torch.device,
+    ) -> float:
+        """Measure full-layer reconstruction error while streaming one validation batch at a time."""
+        if not replay_batches:
+            return 0.0
+
+        total_loss = 0.0
+        loader = _LayerShardLoader(replay_batches, target_device=target_device, shard_batches=1)
+        with torch.no_grad():
+            for shard in loader.iter_shards():
+                replay_batch = shard[0]
+                autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
+                with autocast_ctx:
+                    preds = self._forward_replay_batch(
+                        layer,
+                        replay_batch=replay_batch,
+                        cache_kwargs=False,
+                    )
+                    target = self._prepare_group_target(
+                        replay_batch.target,
+                        device=preds.device,
+                        dtype=preds.dtype,
+                        cache=False,
+                    )
+                    total_loss += float(F.smooth_l1_loss(preds, target).item())
+        return total_loss / max(1, len(replay_batches))
+
+    def _run_group_stage_streamed(
+        self,
+        layer: torch.nn.Module,
+        *,
+        optim_modules: dict[str, _ParoQuantOptimLinear],
+        replay_batches_train: list[_ParoQuantReplayBatch],
+        replay_batches_val: list[_ParoQuantReplayBatch],
+        param_groups: List[dict[str, object]],
+        epochs: int,
+    ) -> tuple[float, float]:
+        """Run one grouped layer stage while streaming train shards and validation batches from CPU."""
+        _normalize_opt_impl(self.qcfg.opt_stage_impl, field="stage_impl")
+        normalized_groups = self._normalize_group_optimizer_param_groups(param_groups)
+
+        opt_device = next(layer.parameters()).device
+        use_amp = opt_device.type == "cuda"
+        with _activate_stage_params(layer, normalized_groups):
+            if epochs <= 0 or not normalized_groups:
+                train_loss = self._evaluate_group_layer_streamed(
+                    layer,
+                    replay_batches=replay_batches_train,
+                    use_amp=use_amp,
+                    target_device=opt_device,
+                )
+                val_loss = self._evaluate_group_layer_streamed(
+                    layer,
+                    replay_batches=replay_batches_val,
+                    use_amp=use_amp,
+                    target_device=opt_device,
+                )
+                return train_loss, val_loss
+
+            optimizer = self._build_group_adamw(normalized_groups, device=opt_device)
+            total_steps = max(1, epochs * max(1, len(replay_batches_train)))
+            base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
+            scaler = torch.amp.GradScaler(enabled=use_amp)
+            active_prefixes = tuple(optim_modules.keys())
+            best_state: Optional[dict[str, torch.Tensor]] = None
+            best_val_loss = float("inf")
+            last_train_loss = 0.0
+            global_step = 0
+            shard_batches = self._layer_train_shard_batches(
+                layer,
+                param_groups=normalized_groups,
+                replay_batches=replay_batches_train,
+            )
+
+            for _epoch in range(epochs):
+                epoch_loss = 0.0
+                batch_count = 0
+                optimizer.zero_grad(set_to_none=True)
+                train_loader = _LayerShardLoader(
+                    replay_batches_train,
+                    target_device=opt_device,
+                    shard_batches=shard_batches,
+                )
+
+                for shard in train_loader.iter_shards():
+                    for replay_batch in shard:
+                        autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
+                        with autocast_ctx:
+                            preds = self._forward_replay_batch(
+                                layer,
+                                replay_batch=replay_batch,
+                                cache_kwargs=False,
+                            )
+                            target = self._prepare_group_target(
+                                replay_batch.target,
+                                device=preds.device,
+                                dtype=preds.dtype,
+                                cache=False,
+                            )
+                            loss = F.smooth_l1_loss(preds, target)
+
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad(set_to_none=True)
+
+                        global_step += 1
+                        cosine_ratio = 0.5 * (1.0 + math.cos(math.pi * min(global_step, total_steps) / total_steps))
+                        for group, base_lr in zip(optimizer.param_groups, base_lrs):
+                            group["lr"] = (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio)
+
+                        self._reset_group_angles(optim_modules)
+                        epoch_loss += float(loss.item())
+                        batch_count += 1
+
+                last_train_loss = epoch_loss / max(1, batch_count)
+                val_loss = self._evaluate_group_layer_streamed(
+                    layer,
+                    replay_batches=replay_batches_val,
+                    use_amp=use_amp,
+                    target_device=opt_device,
+                )
+                if best_state is None or val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_state = self._snapshot_group_best_state(
+                        layer,
+                        active_prefixes=active_prefixes,
+                        target_device=CPU,
+                    )
+
+            if best_state is not None:
+                self._restore_group_best_state(layer, best_state=best_state)
+            self._reset_group_angles(optim_modules)
+            return last_train_loss, best_val_loss
+
+    def _optimize_live_layer(
+        self,
+        state: _ParoQuantLayerState,
+        group_modules: list[NamedModule],
+    ) -> tuple[dict[str, object], float]:
+        """Optimize the live layer in place for full-layer ParoQuant scope."""
+        if not group_modules:
+            raise ValueError("ParoQuantProcessor grouped optimization requires at least one module.")
+        if state.layer_module is None:
+            raise RuntimeError("ParoQuantProcessor layer-scope optimization requires the live layer module.")
+
+        layer = state.layer_module
+        target_device = group_modules[0].weight.device
+        layer = layer.to(device=target_device, dtype=torch.float32)
+        replay_batches_train, replay_batches_val = self._replay_batches_from_state(state)
+        optim_modules: dict[str, _ParoQuantOptimLinear] = {}
+
+        for param in layer.parameters():
+            param.requires_grad_(False)
+
+        for named_module in group_modules:
+            optim_module = self._build_group_optim_linear(named_module)
+            recurse_setattr(layer, named_module.name, optim_module)
+            optim_modules[named_module.name] = optim_module
+
+        self._run_group_stage_streamed(
+            layer,
+            optim_modules=optim_modules,
+            replay_batches_train=replay_batches_train,
+            replay_batches_val=replay_batches_val,
+            param_groups=[
+                {"params": [optim_module.channel_scales_opt], "lr": self.qcfg.opt_rotation_lr}
+                for optim_module in optim_modules.values()
+            ] + [
+                {"params": [optim_module.theta], "lr": self.qcfg.opt_rotation_lr}
+                for optim_module in optim_modules.values()
+            ],
+            epochs=int(self.qcfg.opt_rotation_epochs),
+        )
+
+        for optim_module in optim_modules.values():
+            optim_module.init_quantizer()
+
+        train_loss, val_loss = self._run_group_stage_streamed(
+            layer,
+            optim_modules=optim_modules,
+            replay_batches_train=replay_batches_train,
+            replay_batches_val=replay_batches_val,
+            param_groups=[
+                {"params": [optim_module.weight], "lr": self.qcfg.opt_weight_lr}
+                for optim_module in optim_modules.values()
+            ] + [
+                {"params": optim_module.quantizer.optim_params(), "lr": self.qcfg.opt_quantizer_lr}
+                for optim_module in optim_modules.values()
+                if optim_module.quantizer is not None
+            ],
+            epochs=int(self.qcfg.opt_finetune_epochs),
+        )
+
+        results: dict[str, object] = {}
+        for named_module in group_modules:
+            optim_module = optim_modules[named_module.name]
+            results[named_module.name] = _result_from_model(
+                optim_module,
+                train_loss=train_loss,
+                val_loss=val_loss,
+                used_identity=False,
+            )
+        return results, val_loss
+
     def _optimize_group(
         self,
         state: _ParoQuantLayerState,
         group_modules: list[NamedModule],
     ) -> tuple[dict[str, object], float]:
         """Optimize one subsection or whole-layer group against the preserved full-layer target."""
+        if self._opt_scope_mode() == "layer":
+            with torch.inference_mode(False), torch.enable_grad():
+                return self._optimize_live_layer(state, group_modules)
+
         with torch.inference_mode(False), torch.enable_grad():
             layer_clone, optim_modules = self._build_group_optim_layer(state, group_modules)
             for param in layer_clone.parameters():
@@ -1308,6 +1780,8 @@ class ParoQuantProcessor(LoopProcessor):
                     original_weight = self._module_weight_matrix(named_module).detach().clone()
                     result = group_results[named_module.name]
                     self._apply_optimization_result(named_module, result, original_weight)
+                    if mode == "layer":
+                        move_to(named_module.module, device=CPU)
                     feat = input_feat.get(named_module.name)
                     if feat is None:
                         feat = torch.empty(0)
@@ -1330,6 +1804,7 @@ class ParoQuantProcessor(LoopProcessor):
         state.prepared_group_source_module_by_device = None
         state.grouped_dataset = None
         state.grouped_dataset_by_device = None
+        state.replay_batches = None
         state.subset_total = None
         if hasattr(self, "_group_forward_kwargs_cache"):
             self._group_forward_kwargs_cache.clear()
@@ -1430,6 +1905,8 @@ class ParoQuantProcessor(LoopProcessor):
         layer_module: torch.nn.Module,
     ) -> None:
         """Preserve an untouched float layer snapshot for grouped optimization clones."""
+        if self._opt_scope_mode() == "layer":
+            return
         state = self._get_layer_state(layer_index)
         with state.lock:
             if state.pristine_layer_module is None:

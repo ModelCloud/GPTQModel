@@ -964,6 +964,20 @@ def test_paroquant_processor_enables_layer_context_capture_only_for_grouped_scop
     assert processor.execution_config.capture_layer_forward_context is expected_capture
 
 
+def test_paroquant_processor_skips_pristine_layer_clone_for_layer_scope():
+    """Guard layer scope against retaining an unused pristine layer clone on CPU."""
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="layer")
+    processor._layer_states = {}
+    processor._layer_states_lock = threading.Lock()
+
+    layer = torch.nn.Linear(4, 4, bias=False)
+    processor.receive_pristine_layer_module(layer_index=0, layer_module=layer)
+
+    assert processor._layer_states == {}
+
+
 def test_paroquant_processor_routes_non_module_units_through_group_optimizer():
     """Guard that subsection/layer modes now use grouped optimization instead of raising."""
     processor = object.__new__(ParoQuantProcessor)
@@ -1630,6 +1644,36 @@ def test_paroquant_processor_group_dataset_for_device_caches_per_device():
     assert state.grouped_dataset_by_device is not None
     assert state.grouped_dataset_by_device["cpu"] is first
 
+
+def test_paroquant_processor_replay_batches_cache_cpu_splits():
+    """Guard layer-scope replay batches so they stay on CPU and cache their train/val split."""
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_train_samples=4, opt_validation_samples=2)
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[torch.randn(2, 4)] for _ in range(3)],
+        layer_input_kwargs=[{} for _ in range(3)],
+        position_ids=[None, None, None],
+        attention_masks=[None, None, None],
+    )
+    state = SimpleNamespace(
+        layer_inputs=[[torch.randn(2, 4)] for _ in range(3)],
+        layer_input_kwargs=[{} for _ in range(3)],
+        layer_outputs=[[torch.randn(2, 4)] for _ in range(3)],
+        replay_batches=None,
+    )
+
+    first_train, first_val = processor._replay_batches_from_state(state)
+    second_train, second_val = processor._replay_batches_from_state(state)
+
+    assert first_train is second_train
+    assert first_val is second_val
+    assert len(first_train) == 2
+    assert len(first_val) == 1
+    assert all(batch.inputs[0].device.type == "cpu" for batch in first_train + first_val)
+    assert all(batch.target.device.type == "cpu" for batch in first_train + first_val)
+
+
 def test_paroquant_processor_group_best_state_tracks_only_active_prefixes():
     """Guard grouped best-state snapshots against cloning untouched layer state."""
 
@@ -1656,6 +1700,28 @@ def test_paroquant_processor_group_best_state_tracks_only_active_prefixes():
     assert torch.allclose(layer.a.weight, best_state["a.weight"])
     assert torch.allclose(layer.b.weight, torch.full_like(layer.b.weight, 7.0))
     assert not torch.allclose(layer.b.weight, original_b)
+
+
+def test_paroquant_processor_group_best_state_can_snapshot_to_cpu():
+    """Guard streamed layer checkpoints so best-state snapshots can live off device."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.a = torch.nn.Linear(4, 4, bias=False)
+            self.b = torch.nn.Linear(4, 4, bias=False)
+
+    processor = object.__new__(ParoQuantProcessor)
+    layer = _ToyLayer()
+
+    best_state = processor._snapshot_group_best_state(
+        layer,
+        active_prefixes=("a",),
+        target_device=torch.device("cpu"),
+    )
+
+    assert sorted(best_state.keys()) == ["a.weight"]
+    assert all(tensor.device.type == "cpu" for tensor in best_state.values())
 
 
 def test_paroquant_processor_caches_group_forward_signature_flags(monkeypatch):
@@ -1912,6 +1978,107 @@ def test_paroquant_processor_optimize_group_runs_on_toy_layer():
     assert results["self_attn.q_proj"].pseudo_weight.shape == q_proj.weight.shape
     assert results["self_attn.k_proj"].pseudo_weight.shape == k_proj.weight.shape
     assert results["self_attn.v_proj"].pseudo_weight.shape == v_proj.weight.shape
+
+
+def test_paroquant_processor_layer_scope_streams_without_device_dataset(monkeypatch):
+    """Guard layer scope against materializing the full grouped dataset on device."""
+
+    class _ToyAttn(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
+
+    class _ToyMlp(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_proj = torch.nn.Linear(8, 8, bias=False)
+            self.up_proj = torch.nn.Linear(8, 8, bias=False)
+            self.down_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.down_proj(torch.sigmoid(self.gate_proj(x)) * self.up_proj(x))
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = _ToyAttn()
+            self.mlp = _ToyMlp()
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return self.mlp(self.self_attn(x))
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = layer(x).detach()
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="layer",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=0,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    def fail_group_dataset_for_device(*args, **kwargs):
+        raise AssertionError("layer scope should stream replay batches instead of caching a full device dataset")
+
+    monkeypatch.setattr(processor, "_group_dataset_for_device", fail_group_dataset_for_device)
+
+    state = SimpleNamespace(
+        layer_module=layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+        replay_batches=None,
+        grouped_dataset_by_device=None,
+    )
+
+    results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    assert state.grouped_dataset_by_device is None
+    assert state.replay_batches is not None
+    replay_train, replay_val = state.replay_batches
+    assert all(batch.inputs[0].device.type == "cpu" for batch in replay_train + replay_val)
 
 
 def test_paroquant_processor_optimize_group_reenables_grad_inside_inference_mode():
