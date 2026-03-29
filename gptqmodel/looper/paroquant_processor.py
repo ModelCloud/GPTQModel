@@ -558,6 +558,38 @@ class ParoQuantProcessor(LoopProcessor):
                 pass
 
     @staticmethod
+    def _force_layer_eager_attention(layer: torch.nn.Module) -> list[tuple[object, str, object]]:
+        """Temporarily force live-layer grouped optimization onto eager attention kernels."""
+        overrides: list[tuple[object, str, object]] = []
+        seen_configs: set[int] = set()
+        candidate_configs = [
+            getattr(layer, "config", None),
+            getattr(getattr(layer, "self_attn", None), "config", None),
+        ]
+        for config in candidate_configs:
+            if config is None:
+                continue
+            config_id = id(config)
+            if config_id in seen_configs:
+                continue
+            seen_configs.add(config_id)
+            for attr in ("_attn_implementation", "attn_implementation"):
+                if not hasattr(config, attr):
+                    continue
+                original_value = getattr(config, attr)
+                if original_value == "eager":
+                    continue
+                setattr(config, attr, "eager")
+                overrides.append((config, attr, original_value))
+        return overrides
+
+    @staticmethod
+    def _restore_layer_attention_impl(overrides: list[tuple[object, str, object]]) -> None:
+        """Restore any attention implementation overrides after live-layer grouped optimization."""
+        for config, attr, original_value in reversed(overrides):
+            setattr(config, attr, original_value)
+
+    @staticmethod
     def _materialize_live_layer_autograd_tensors(
         layer: torch.nn.Module,
     ) -> tuple[int, int]:
@@ -1825,6 +1857,7 @@ class ParoQuantProcessor(LoopProcessor):
         layer = layer.to(device=target_device, dtype=torch.float32)
         self._strip_hooked_linear_wrappers(layer)
         self._sync_named_modules_to_live_layer(layer, group_modules)
+        attn_impl_overrides = self._force_layer_eager_attention(layer)
         replay_batches_train, replay_batches_val = self._replay_batches_from_state(state)
         metadata_cache: dict[tuple[int, str], torch.Tensor] = {}
         optim_modules: dict[str, _ParoQuantOptimLinear] = {}
@@ -1898,6 +1931,7 @@ class ParoQuantProcessor(LoopProcessor):
             # return to the layer's native dtype so flash-attn and downstream
             # kernels see the original half/bfloat activations again.
             layer.to(device=target_device, dtype=original_layer_dtype)
+            self._restore_layer_attention_impl(attn_impl_overrides)
 
     def _optimize_group(
         self,

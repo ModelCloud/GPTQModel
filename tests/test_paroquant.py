@@ -2241,6 +2241,41 @@ def test_paroquant_processor_group_forward_kwargs_drop_past_key_values():
     assert "cache_position" in kwargs
 
 
+def test_paroquant_processor_force_layer_eager_attention_restores_shared_config():
+    """Live-layer optimization should temporarily switch shared attention config to eager and restore it."""
+
+    class _Config:
+        def __init__(self):
+            self._attn_implementation = "flash_attention_2"
+            self.attn_implementation = "flash_attention_2"
+
+    class _ToyAttention(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self, config):
+            super().__init__()
+            self.config = config
+            self.self_attn = _ToyAttention(config)
+
+    processor = object.__new__(ParoQuantProcessor)
+    shared_config = _Config()
+    layer = _ToyLayer(shared_config)
+
+    overrides = processor._force_layer_eager_attention(layer)
+
+    assert shared_config._attn_implementation == "eager"
+    assert shared_config.attn_implementation == "eager"
+    assert len(overrides) == 2
+
+    processor._restore_layer_attention_impl(overrides)
+
+    assert shared_config._attn_implementation == "flash_attention_2"
+    assert shared_config.attn_implementation == "flash_attention_2"
+
+
 def test_paroquant_processor_prepare_group_forward_kwargs_normalizes_inference_position_embeddings(monkeypatch):
     """Grouped replay kwargs must clone rotary metadata back to normal tensors before live-layer forward."""
 
