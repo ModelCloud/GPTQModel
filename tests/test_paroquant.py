@@ -2599,6 +2599,8 @@ def test_paroquant_processor_layer_scope_skips_angle_reset_when_theta_frozen(mon
     )
     processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
     processor.model = None
+    processor.lock = threading.Lock()
+    processor.calculate_w_wq_diff = False
     processor._batch_tls = threading.local()
     processor.inputs_cache = InputCache(
         layer_inputs=[[x]],
@@ -2773,6 +2775,8 @@ def test_paroquant_processor_layer_scope_strips_hooked_linear_wrappers():
     )
     processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
     processor.model = None
+    processor.lock = threading.Lock()
+    processor.calculate_w_wq_diff = False
     processor._batch_tls = threading.local()
     processor.inputs_cache = InputCache(
         layer_inputs=[[x]],
@@ -2795,6 +2799,22 @@ def test_paroquant_processor_layer_scope_strips_hooked_linear_wrappers():
     assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
     assert val_loss >= 0.0
     assert hooked_layer.self_attn.o_proj.__class__ is torch.nn.Linear
+    assert q_proj.module is hooked_layer.self_attn.q_proj
+    assert k_proj.module is hooked_layer.self_attn.k_proj
+    assert v_proj.module is hooked_layer.self_attn.v_proj
+    assert q_proj.module.__class__ is torch.nn.Linear
+    assert k_proj.module.__class__ is torch.nn.Linear
+    assert v_proj.module.__class__ is torch.nn.Linear
+
+    q_proj_result = results["self_attn.q_proj"]
+    original_weight = processor._module_weight_matrix(q_proj).detach().clone()
+    processor._apply_optimization_result(q_proj, q_proj_result, original_weight)
+    assert torch.allclose(
+        hooked_layer.self_attn.q_proj.weight.detach(),
+        q_proj_result.pseudo_weight.to(dtype=hooked_layer.self_attn.q_proj.weight.dtype),
+        atol=1e-5,
+        rtol=1e-5,
+    )
 
 
 def test_paroquant_processor_layer_scope_restores_live_layer_dtype_after_fp32_training():

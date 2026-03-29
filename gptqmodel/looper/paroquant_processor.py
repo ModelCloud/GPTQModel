@@ -538,6 +538,27 @@ class ParoQuantProcessor(LoopProcessor):
         return replaced
 
     @staticmethod
+    def _sync_named_modules_to_live_layer(
+        layer: torch.nn.Module,
+        named_modules: list[NamedModule],
+    ) -> None:
+        """Retarget NamedModule handles after live-layer wrapper surgery.
+
+        Layer scope temporarily unwraps HookedLinear modules into plain
+        ``nn.Linear`` so autograd can flow through the real decoder layer. The
+        corresponding ``NamedModule`` wrappers must follow those in-place
+        replacements; otherwise later result application and packing will update
+        detached wrapper objects instead of the real live layer modules.
+        """
+        for named_module in named_modules:
+            live_module = recurse_getattr(layer, named_module.name)
+            named_module.module = live_module
+            try:
+                named_module.module_dtype = next(live_module.parameters()).dtype
+            except (StopIteration, AttributeError):
+                pass
+
+    @staticmethod
     def _force_layer_eager_attention(layer: torch.nn.Module) -> list[tuple[object, str, object]]:
         """Temporarily force live-layer grouped optimization onto eager attention kernels."""
         overrides: list[tuple[object, str, object]] = []
@@ -1950,6 +1971,7 @@ class ParoQuantProcessor(LoopProcessor):
         original_layer_dtype = group_modules[0].weight.dtype
         layer = layer.to(device=target_device, dtype=torch.float32)
         self._strip_hooked_linear_wrappers(layer)
+        self._sync_named_modules_to_live_layer(layer, group_modules)
         training_state_overrides = self._enable_live_layer_training(layer)
         attn_impl_overrides = self._force_layer_eager_attention(layer)
         callable_overrides = self._bypass_layer_rotary_func_modules(layer)
