@@ -77,6 +77,51 @@ def _find_last_quantized_layer_index(
     return last_quantized_layer_index
 
 
+def _should_drain_finalize_futures_synchronously(
+    looper: "ModuleLooper",
+    *,
+    finalize_tasks,
+) -> bool:
+    """Decide whether one layer must finish finalization before the next begins.
+
+    ParoQuant layer/group optimization holds substantially more live CUDA state
+    than the weight-only paths. Letting its finalizers overlap the next layer
+    can visibly ratchet active VRAM upward from layer N to N+1, so ParoQuant
+    always drains per-layer finalizers synchronously.
+    """
+    if looper.gptq_model.quantize_config.wait_for_submodule_finalizers:
+        return True
+    return any(isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks)
+
+
+def _should_empty_cache_after_sync_finalize(
+    looper: "ModuleLooper",
+    *,
+    finalize_tasks,
+) -> bool:
+    """Release CUDA cache after synchronous ParoQuant finalization when offload is active.
+
+    Disk offload correctly moves finalized modules out of the live model path,
+    but CUDA's allocator can still hold onto the just-freed pools across layer
+    boundaries. That shows up as a steady nvidia-smi climb even though the
+    previous layer no longer needs those weights on device. A cache release at
+    the synchronous boundary keeps layer-scope memory flat without changing the
+    quantization objective.
+    """
+    if not getattr(looper.gptq_model.quantize_config, "offload_to_disk", False):
+        return False
+    return any(isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks)
+
+
+def _processor_needs_pristine_group_clone(processor) -> bool:
+    """Whether grouped capture needs a dedicated pristine layer clone for this processor."""
+    needs_clone = getattr(processor, "needs_pristine_layer_clone", None)
+    if callable(needs_clone):
+        return bool(needs_clone())
+    uses_grouped_optimization = getattr(processor, "uses_grouped_optimization", None)
+    return callable(uses_grouped_optimization) and bool(uses_grouped_optimization())
+
+
 def _collect_layer_forward_progress(
     looper: "ModuleLooper",
     *,
@@ -376,8 +421,12 @@ def run_layer_stage(
                 callable(getattr(processor, "uses_grouped_optimization", None)) and processor.uses_grouped_optimization()
                 for processor in looper.processors
             )
+            needs_pristine_group_clone = any(
+                _processor_needs_pristine_group_clone(processor)
+                for processor in looper.processors
+            )
             if needs_group_pristine:
-                pristine_group_module = copy.deepcopy(module)
+                pristine_group_module = copy.deepcopy(module) if needs_pristine_group_clone else None
 
             replace_module_with_hooked_legacy(module, quant_lm_head=looper.gptq_model.quantize_config.lm_head)
 
@@ -449,6 +498,7 @@ def run_layer_stage(
                 log=log,
                 region_timer=region_timer,
             )
+            pristine_group_module = None
 
             is_last_module = layer_index == len(pb) - 1
             for subset_plan in subset_plans:
@@ -778,7 +828,11 @@ def run_layer_stage(
                         )
 
                 if finalize_futures_snapshot:
-                    if looper.gptq_model.quantize_config.wait_for_submodule_finalizers:
+                    drain_sync = _should_drain_finalize_futures_synchronously(
+                        looper,
+                        finalize_tasks=finalize_tasks,
+                    )
+                    if drain_sync:
                         # Synchronous: wait for all finalization to complete before proceeding to next layer
                         # This ensures all packing and writing tasks are done
                         _drain_finalize_futures(
@@ -787,8 +841,14 @@ def run_layer_stage(
                             finalize_count,
                             layer_index,
                         )
+                        torch_sync()
                         if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
                             torch_empty_cache()
+                        elif _should_empty_cache_after_sync_finalize(
+                            looper,
+                            finalize_tasks=finalize_tasks,
+                        ):
+                            torch_empty_cache(gc=False)
                     else:
                         # Asynchronous (current/default behavior): drain in background thread
                         # This allows next layer to start while current layer finalizes
