@@ -26,6 +26,7 @@ from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
 from gptqmodel.looper.named_module import NamedModule
 import gptqmodel.looper.paroquant_processor as paroquant_processor_module
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+from gptqmodel.looper.stage_layer import _capture_pristine_group_context
 from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.quantization.config import FORMAT, METHOD, ParoQuantizeConfig, QuantizeConfig
@@ -66,6 +67,7 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
     assert cfg.opt_stage_cudagraph is True
+    assert cfg.opt_noisy_x is False
     assert cfg.opt_channel_scale_clamp_min == 1e-2
     assert cfg.opt_channel_scale_clamp_max == 1e2
     assert cfg.export_quant_method() == METHOD.PAROQUANT
@@ -92,6 +94,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_seed": 0,
                 "opt_fused_rotation": False,
                 "opt_stage_cudagraph": False,
+                "opt_noisy_x": True,
                 "opt_scope": "subsection",
                 "opt_stage_impl": "reference",
                 "opt_pair_impl": "fast",
@@ -118,6 +121,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_seed == 0
     assert cfg.opt_fused_rotation is False
     assert cfg.opt_stage_cudagraph is False
+    assert cfg.opt_noisy_x is True
     assert cfg.opt_scope == "subsection"
     assert cfg.opt_stage_impl == "reference"
     assert cfg.opt_pair_impl == "fast"
@@ -126,6 +130,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_channel_scale_clamp_max == 50.0
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
     assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
+    assert cfg.to_dict()["meta"]["opt_noisy_x"] is True
     assert cfg.to_dict()["meta"]["opt_scope"] == "subsection"
     assert cfg.to_dict()["meta"]["opt_stage_impl"] == "reference"
     assert cfg.to_dict()["meta"]["opt_pair_impl"] == "fast"
@@ -1162,6 +1167,259 @@ def test_paroquant_processor_captures_first_layer_forward_context():
     assert state.layer_input_kwargs is first_kwargs
     assert state.layer_outputs is first_outputs
     assert state.subset_total == 2
+
+
+def test_paroquant_processor_group_clean_inputs_seed_from_input_cache():
+    """Guard grouped clean targets against aliasing the noisy replay cache."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_noisy_x=True)
+    clean_inputs = [[torch.randn(1, 4)]]
+    noisy_inputs = [[torch.randn(1, 4)]]
+    cache = InputCache(
+        layer_inputs=clean_inputs,
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    processor.receive_input_cache(cache)
+
+    assert processor.inputs_cache.layer_inputs is clean_inputs
+    assert processor.clean_group_layer_inputs(layer_index=0, layer_inputs=noisy_inputs) is clean_inputs
+
+
+def test_paroquant_processor_group_clean_inputs_default_to_noisy_stream():
+    """Guard default grouped behavior against enabling noisy-x targets implicitly."""
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_noisy_x=False)
+    clean_inputs = [[torch.randn(1, 4)]]
+    noisy_inputs = [[torch.randn(1, 4)]]
+    processor.receive_input_cache(
+        InputCache(
+            layer_inputs=clean_inputs,
+            layer_input_kwargs=[{}],
+            position_ids=[None],
+            attention_masks=[None],
+        )
+    )
+
+    assert processor.clean_group_layer_inputs(layer_index=0, layer_inputs=noisy_inputs) is noisy_inputs
+
+
+def test_paroquant_processor_group_capture_uses_pristine_module_and_clean_inputs_for_targets():
+    """Guard grouped capture so targets come from the untouched module on the clean stream."""
+
+    class _PristineLayer(torch.nn.Module):
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return x + 1.0
+
+    class _HookedLikeLayer(torch.nn.Module):
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return x + 100.0
+
+    class _DummyPB:
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            del kwargs
+            return self
+
+        def title(self, _value):
+            return self
+
+        def subtitle(self, _value):
+            return self
+
+        def draw(self):
+            return self
+
+        def close(self):
+            return None
+
+    class _DummyLog:
+        def pb(self, _iterable):
+            return _DummyPB()
+
+    class _DummyLooper:
+        def _resolve_batch_total(self, _num_batches, layer_inputs):
+            return len(layer_inputs)
+
+        def _collect_row_counts(self, layer_inputs):
+            return [1 for _ in layer_inputs]
+
+        def _run_forward_batches(
+            self,
+            *,
+            module,
+            processor,
+            layer_inputs,
+            layer_input_kwargs,
+            position_ids,
+            attention_masks,
+            cur_layer_device,
+            is_lm_head_module,
+            shared_kv_cache_dict,
+            layer_index,
+            need_outputs,
+            reuse_kv,
+            progress_pb,
+            progress_title,
+            progress_stage,
+            progress_rows_per_batch,
+            progress_total_rows,
+            force_serial,
+            preserve_module_devices,
+        ):
+            del (
+                processor,
+                position_ids,
+                attention_masks,
+                cur_layer_device,
+                is_lm_head_module,
+                shared_kv_cache_dict,
+                layer_index,
+                need_outputs,
+                reuse_kv,
+                progress_pb,
+                progress_title,
+                progress_stage,
+                progress_rows_per_batch,
+                progress_total_rows,
+                force_serial,
+                preserve_module_devices,
+            )
+            outputs = []
+            for batch_inputs, batch_kwargs in zip(layer_inputs, layer_input_kwargs):
+                outputs.append([module(batch_inputs[0], **batch_kwargs)])
+            return outputs
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_noisy_x=True)
+    processor._layer_states = {}
+    processor._layer_states_lock = threading.Lock()
+
+    clean_inputs = [[torch.tensor([[1.0]])]]
+    noisy_inputs = [[torch.tensor([[3.0]])]]
+    clean_cache = InputCache(
+        layer_inputs=clean_inputs,
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+    processor.receive_input_cache(clean_cache)
+
+    _capture_pristine_group_context(
+        _DummyLooper(),
+        processor=processor,
+        module=_HookedLikeLayer(),
+        pristine_module=_PristineLayer(),
+        subset_plans=[SimpleNamespace()],
+        layer_inputs=noisy_inputs,
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.layers.0",
+        full={},
+        log=_DummyLog(),
+        region_timer=None,
+    )
+
+    state = processor._get_layer_state(0)
+    assert state.layer_inputs is noisy_inputs
+    torch.testing.assert_close(state.layer_outputs[0][0], torch.tensor([[2.0]]))
+    torch.testing.assert_close(processor.clean_group_layer_inputs(layer_index=1, layer_inputs=noisy_inputs)[0][0], torch.tensor([[2.0]]))
+
+
+def test_paroquant_processor_group_capture_advances_clean_stream_without_subset_plans():
+    """Guard clean/noisy replay semantics for grouped layers that are dynamically skipped."""
+
+    class _ToyLayer(torch.nn.Module):
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            return x + 5.0
+
+    class _DummyPB:
+        def manual(self):
+            return self
+
+        def set(self, **kwargs):
+            del kwargs
+            return self
+
+        def title(self, _value):
+            return self
+
+        def subtitle(self, _value):
+            return self
+
+        def draw(self):
+            return self
+
+        def close(self):
+            return None
+
+    class _DummyLog:
+        def pb(self, _iterable):
+            return _DummyPB()
+
+    class _DummyLooper:
+        def _resolve_batch_total(self, _num_batches, layer_inputs):
+            return len(layer_inputs)
+
+        def _collect_row_counts(self, layer_inputs):
+            return [1 for _ in layer_inputs]
+
+        def _run_forward_batches(self, **kwargs):
+            layer_inputs = kwargs["layer_inputs"]
+            module = kwargs["module"]
+            layer_input_kwargs = kwargs["layer_input_kwargs"]
+            return [[module(batch[0], **batch_kwargs)] for batch, batch_kwargs in zip(layer_inputs, layer_input_kwargs)]
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_noisy_x=True)
+    processor._layer_states = {}
+    processor._layer_states_lock = threading.Lock()
+    processor.receive_input_cache(
+        InputCache(
+            layer_inputs=[[torch.tensor([[2.0]])]],
+            layer_input_kwargs=[{}],
+            position_ids=[None],
+            attention_masks=[None],
+        )
+    )
+
+    noisy_inputs = [[torch.tensor([[9.0]])]]
+    _capture_pristine_group_context(
+        _DummyLooper(),
+        processor=processor,
+        module=_ToyLayer(),
+        pristine_module=None,
+        subset_plans=[],
+        layer_inputs=noisy_inputs,
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.layers.0",
+        full={},
+        log=_DummyLog(),
+        region_timer=None,
+    )
+
+    state = processor._get_layer_state(0)
+    assert state.layer_inputs is None
+    assert state.layer_outputs is None
+    torch.testing.assert_close(processor.clean_group_layer_inputs(layer_index=1, layer_inputs=noisy_inputs)[0][0], torch.tensor([[7.0]]))
 
 
 def test_paroquant_quantize_layer_clears_stored_forward_context():

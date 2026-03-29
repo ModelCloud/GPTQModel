@@ -245,24 +245,30 @@ def _capture_pristine_group_context(
     log,
     region_timer,
 ) -> None:
-    """Capture untouched full-layer IO once for ParoQuant grouped optimization modes."""
+    """Capture clean grouped targets while the main layer cache keeps the noisy stream."""
     uses_grouped_optimization = getattr(processor, "uses_grouped_optimization", None)
     if not callable(uses_grouped_optimization) or not uses_grouped_optimization():
         return
-    if not subset_plans:
-        return
+    clean_layer_inputs = layer_inputs
+    resolve_clean_inputs = getattr(processor, "clean_group_layer_inputs", None)
+    if callable(resolve_clean_inputs):
+        clean_layer_inputs = resolve_clean_inputs(
+            layer_index=layer_index,
+            layer_inputs=layer_inputs,
+        )
     capture_pristine_layer_module = getattr(processor, "receive_pristine_layer_module", None)
-    if callable(capture_pristine_layer_module):
+    if subset_plans and callable(capture_pristine_layer_module):
         capture_pristine_layer_module(
             layer_index=layer_index,
             layer_module=pristine_module if pristine_module is not None else module,
         )
 
+    pristine_replay_module = pristine_module if pristine_module is not None else module
     pristine_outputs = _replay_layer_outputs(
         looper,
-        module=module,
+        module=pristine_replay_module,
         processor=processor,
-        layer_inputs=layer_inputs,
+        layer_inputs=clean_layer_inputs,
         layer_input_kwargs=layer_input_kwargs,
         position_ids=position_ids,
         attention_masks=attention_masks,
@@ -276,14 +282,21 @@ def _capture_pristine_group_context(
         region_timer=region_timer,
         replay_plan=None,
     )
-    processor.receive_layer_forward_context(
-        layer_index=layer_index,
-        layer_inputs=layer_inputs,
-        layer_input_kwargs=layer_input_kwargs,
-        layer_outputs=pristine_outputs,
-        subset_index=None,
-        subset_total=len(subset_plans),
-    )
+    receive_clean_layer_inputs = getattr(processor, "receive_clean_layer_inputs", None)
+    if callable(receive_clean_layer_inputs):
+        receive_clean_layer_inputs(
+            layer_index=layer_index,
+            layer_inputs=pristine_outputs,
+        )
+    if subset_plans:
+        processor.receive_layer_forward_context(
+            layer_index=layer_index,
+            layer_inputs=layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            layer_outputs=pristine_outputs,
+            subset_index=None,
+            subset_total=len(subset_plans),
+        )
 
 
 def run_layer_stage(

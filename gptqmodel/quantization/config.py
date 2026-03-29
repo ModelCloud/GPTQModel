@@ -2501,6 +2501,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_seed": "opt_seed",
             "opt_fused_rotation": "opt_fused_rotation",
             "opt_stage_cudagraph": "opt_stage_cudagraph",
+            "opt_noisy_x": "opt_noisy_x",
             "opt_scope": "opt_scope",
             "opt_stage_impl": "opt_stage_impl",
             "opt_pair_impl": "opt_pair_impl",
@@ -2846,6 +2847,7 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_seed: int = field(default=0)
     opt_fused_rotation: bool = field(default=True)
     opt_stage_cudagraph: bool = field(default=True)
+    opt_noisy_x: bool = field(default=False)
     opt_scope: str = field(default="module")
     opt_stage_impl: str = field(default="fast")
     opt_pair_impl: str = field(default="fast")
@@ -2881,6 +2883,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_seed = int(self.opt_seed)
         self.opt_fused_rotation = bool(self.opt_fused_rotation)
         self.opt_stage_cudagraph = bool(self.opt_stage_cudagraph)
+        self.opt_noisy_x = bool(self.opt_noisy_x)
         self.opt_scope = str(self.opt_scope).strip().lower()
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
@@ -2931,6 +2934,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_seed"] = self.opt_seed
         meta_payload["opt_fused_rotation"] = self.opt_fused_rotation
         meta_payload["opt_stage_cudagraph"] = self.opt_stage_cudagraph
+        meta_payload["opt_noisy_x"] = self.opt_noisy_x
         meta_payload["opt_scope"] = self.opt_scope
         meta_payload["opt_stage_impl"] = self.opt_stage_impl
         meta_payload["opt_pair_impl"] = self.opt_pair_impl

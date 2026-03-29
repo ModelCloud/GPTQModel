@@ -247,11 +247,17 @@ class ParoQuantProcessor(LoopProcessor):
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
         self._rotary_source_id: Optional[int] = None
+        self._clean_group_layer_inputs: Optional[List[List[torch.Tensor]]] = None
         self.fallback = qcfg.fallback
 
     def set_calibration_dataset(self, calibration_dataset):
         """Reject runtime dataset swaps because capture state is tied to the processor."""
         raise NotImplementedError("ParoQuantProcessor's calibration_dataset cannot be modified")
+
+    def receive_input_cache(self, input_cache):
+        """Seed grouped calibration with the clean first-layer input stream."""
+        super().receive_input_cache(input_cache)
+        self._clean_group_layer_inputs = input_cache.layer_inputs if self._use_noisy_x_targets() else None
 
     def _select_qlinear_kernel_for_format(self, format_value: FORMAT):
         """Resolve the only supported runtime kernel class for ParoQuant."""
@@ -466,6 +472,34 @@ class ParoQuantProcessor(LoopProcessor):
     def capture_layer_forward_context_during_subset(self) -> bool:
         """ParoQuant captures grouped pristine layer IO outside subset forwards only."""
         return False
+
+    def _use_noisy_x_targets(self) -> bool:
+        """Mirror official clean-target / noisy-input calibration only when explicitly enabled."""
+        qcfg = getattr(self, "qcfg", None)
+        return bool(getattr(qcfg, "opt_noisy_x", False)) and self.uses_grouped_optimization()
+
+    def clean_group_layer_inputs(
+        self,
+        *,
+        layer_index: int,
+        layer_inputs: List[List[torch.Tensor]],
+    ) -> List[List[torch.Tensor]]:
+        """Return the clean calibration stream used to build grouped layer targets."""
+        del layer_index
+        if not self._use_noisy_x_targets():
+            return layer_inputs
+        return getattr(self, "_clean_group_layer_inputs", None) or layer_inputs
+
+    def receive_clean_layer_inputs(
+        self,
+        *,
+        layer_index: int,
+        layer_inputs: List[List[torch.Tensor]],
+    ) -> None:
+        """Advance the clean calibration stream for later-layer noisy-x replay."""
+        del layer_index
+        if self._use_noisy_x_targets():
+            self._clean_group_layer_inputs = layer_inputs
 
     def _build_group_optim_linear(self, module: NamedModule) -> _ParoQuantOptimLinear:
         """Materialize one ParoQuant optimizer wrapper from the current live module state."""
@@ -2258,7 +2292,7 @@ class ParoQuantProcessor(LoopProcessor):
         subset_index: Optional[int] = None,
         subset_total: Optional[int] = None,
     ) -> None:
-        """Preserve the original float layer IO for grouped optimization modes."""
+        """Preserve noisy grouped inputs plus clean float layer targets."""
         del subset_index
         state = self._get_layer_state(layer_index)
         with state.lock:
