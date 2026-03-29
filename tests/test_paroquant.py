@@ -940,6 +940,27 @@ def test_paroquant_processor_grouped_modes_capture_pristine_context_outside_subs
     assert processor.capture_layer_forward_context_during_subset() is False
 
 
+def test_paroquant_processor_layer_scope_live_path_is_dense_only():
+    """Guard the official-like live layer path for dense decoder layers only."""
+    dense_modules = [
+        SimpleNamespace(name="self_attn.q_proj"),
+        SimpleNamespace(name="self_attn.k_proj"),
+        SimpleNamespace(name="self_attn.v_proj"),
+        SimpleNamespace(name="self_attn.o_proj"),
+        SimpleNamespace(name="mlp.gate_proj"),
+        SimpleNamespace(name="mlp.up_proj"),
+        SimpleNamespace(name="mlp.down_proj"),
+    ]
+    moe_modules = [
+        SimpleNamespace(name="self_attn.q_proj"),
+        SimpleNamespace(name="mlp.experts.0.gate_up_proj"),
+        SimpleNamespace(name="mlp.experts.0.down_proj"),
+    ]
+
+    assert ParoQuantProcessor._supports_live_layer_scope(dense_modules) is True
+    assert ParoQuantProcessor._supports_live_layer_scope(moe_modules) is False
+
+
 @pytest.mark.parametrize(
     ("opt_scope", "expected_capture"),
     [
@@ -1044,6 +1065,66 @@ def test_paroquant_processor_routes_non_module_units_through_group_optimizer():
     assert state.modules == {}
     assert state.pending_modules == set()
     assert state.processed_subsets == set()
+
+
+def test_paroquant_processor_layer_scope_falls_back_to_clone_for_expert_like_groups(monkeypatch):
+    """Guard expert-like layer groups against accidentally taking the dense live path."""
+    import gptqmodel.looper.paroquant_processor as paroquant_processor_module
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="layer",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=0,
+        opt_finetune_epochs=0,
+    )
+    state = SimpleNamespace()
+    group_modules = [
+        SimpleNamespace(name="self_attn.q_proj"),
+        SimpleNamespace(name="mlp.experts.0.gate_up_proj"),
+    ]
+
+    live_calls = []
+    clone_calls = []
+
+    def fake_live(_state, _modules):
+        live_calls.append(True)
+        return {}, 0.0
+
+    processor._optimize_live_layer = fake_live  # type: ignore[method-assign]
+
+    def _fake_optim_module():
+        return SimpleNamespace(
+            channel_scales_opt=torch.nn.Parameter(torch.ones(1)),
+            theta=torch.nn.Parameter(torch.zeros(1)),
+            weight=torch.nn.Parameter(torch.ones(1, 1)),
+            quantizer=None,
+            init_quantizer=lambda: None,
+        )
+
+    def fake_build_group_optim_layer(_state, _modules):
+        clone_calls.append(True)
+        return torch.nn.Linear(4, 4, bias=False), {
+            module.name: _fake_optim_module() for module in _modules
+        }
+
+    processor._build_group_optim_layer = fake_build_group_optim_layer  # type: ignore[method-assign]
+    processor._group_dataset_for_device = lambda *_args, **_kwargs: ([], [], [], [], [], [], [], [], [], [])  # type: ignore[method-assign]
+    processor._run_group_stage = lambda *args, **kwargs: (0.0, 0.0)  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        paroquant_processor_module,
+        "_result_from_model",
+        lambda _optim_module, **_kwargs: SimpleNamespace(ok=True),
+    )
+
+    results, val_loss = processor._optimize_group(state, group_modules)
+
+    assert live_calls == []
+    assert clone_calls == [True]
+    assert set(results) == {"self_attn.q_proj", "mlp.experts.0.gate_up_proj"}
+    assert val_loss == 0.0
 
 
 def test_paroquant_processor_captures_first_layer_forward_context():

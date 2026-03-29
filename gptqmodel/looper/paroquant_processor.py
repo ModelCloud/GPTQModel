@@ -1933,13 +1933,44 @@ class ParoQuantProcessor(LoopProcessor):
             layer.to(device=target_device, dtype=original_layer_dtype)
             self._restore_layer_attention_impl(attn_impl_overrides)
 
+    @staticmethod
+    def _supports_live_layer_scope(group_modules: list[NamedModule]) -> bool:
+        """Restrict in-place layer optimization to dense decoder blocks.
+
+        The official apples-to-apples path is one full dense decoder layer at a
+        time. Expert-heavy layers can contain hundreds or thousands of modules,
+        so keep those on the cloned grouped path until a dedicated MoE/shared
+        rotation implementation lands.
+        """
+        if not group_modules:
+            return False
+        expert_markers = (
+            "expert",
+            "experts",
+            "shared_expert",
+            "gate_up_proj",
+        )
+        expert_prefixes = ("experts.", "mlp.experts.", "moe.")
+        expert_like_modules = 0
+        dense_modules = 0
+        for module in group_modules:
+            module_name = getattr(module, "name", "")
+            leaf = module_name.rsplit(".", 1)[-1]
+            if any(marker in module_name for marker in expert_markers) or module_name.startswith(expert_prefixes):
+                expert_like_modules += 1
+                continue
+            dense_modules += 1
+            if leaf not in {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}:
+                return False
+        return dense_modules > 0 and expert_like_modules == 0
+
     def _optimize_group(
         self,
         state: _ParoQuantLayerState,
         group_modules: list[NamedModule],
     ) -> tuple[dict[str, object], float]:
         """Optimize one subsection or whole-layer group against the preserved full-layer target."""
-        if self._opt_scope_mode() == "layer":
+        if self._opt_scope_mode() == "layer" and self._supports_live_layer_scope(group_modules):
             with torch.inference_mode(False), torch.enable_grad():
                 return self._optimize_live_layer(state, group_modules)
 
