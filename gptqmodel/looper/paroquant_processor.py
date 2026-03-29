@@ -438,7 +438,7 @@ class ParoQuantProcessor(LoopProcessor):
                 quantizer_lr=self.qcfg.opt_quantizer_lr,
                 seed=module_seed,
                 fused_rotation=self.qcfg.opt_fused_rotation,
-                stage_cudagraph=self.qcfg.opt_stage_cudagraph,
+                stage_cudagraph=self._module_scope_stage_cudagraph_enabled(),
                 stage_impl=self.qcfg.opt_stage_impl,
                 pair_impl=self.qcfg.opt_pair_impl,
                 quantizer_impl=self.qcfg.opt_quantizer_impl,
@@ -469,6 +469,16 @@ class ParoQuantProcessor(LoopProcessor):
         """Return whether this layer should optimize subsection/layer scopes instead of one linear at a time."""
         return self._opt_scope_mode() != "module"
 
+    def needs_pristine_layer_clone(self) -> bool:
+        """Whether stage-layer orchestration must build a separate pristine layer copy.
+
+        Whole-layer scope replays clean targets before mutating the live layer, so
+        it can use the untouched live layer directly. Subsection scope still needs
+        a dedicated pristine copy because later grouped clone construction may
+        happen after subset-time hooks and wrapper replacement.
+        """
+        return self._opt_scope_mode() != "layer"
+
     def capture_layer_forward_context_during_subset(self) -> bool:
         """ParoQuant captures grouped pristine layer IO outside subset forwards only."""
         return False
@@ -477,6 +487,18 @@ class ParoQuantProcessor(LoopProcessor):
         """Enable official clean-target / noisy-input calibration only when explicitly requested."""
         qcfg = getattr(self, "qcfg", None)
         return bool(getattr(qcfg, "opt_train_on_noisy_inputs", False)) and self.uses_grouped_optimization()
+
+    def _module_scope_stage_cudagraph_enabled(self) -> bool:
+        """Disable per-linear stage CUDA graphs in the full quantization loop.
+
+        Module scope calls the ParoQuant optimizer once per linear across the
+        whole model. The captured train-step graph keeps CUDA graph private-pool
+        allocations alive across calls, which makes active VRAM ratchet upward
+        layer by layer. Grouped/layer scope does not use this path.
+        """
+        if self._opt_scope_mode() == "module":
+            return False
+        return bool(getattr(self.qcfg, "opt_stage_cudagraph", False))
 
     def clean_group_layer_inputs(
         self,

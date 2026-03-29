@@ -945,6 +945,88 @@ def test_paroquant_processor_grouped_modes_capture_pristine_context_outside_subs
     assert processor.capture_layer_forward_context_during_subset() is False
 
 
+def test_paroquant_processor_disables_stage_cudagraph_for_module_scope_loop():
+    """Guard module scope against CUDA-graph private-pool growth across many linear optimizations."""
+    processor = object.__new__(ParoQuantProcessor)
+
+    processor.qcfg = SimpleNamespace(opt_scope="module", opt_stage_cudagraph=True)
+    assert processor._module_scope_stage_cudagraph_enabled() is False
+
+    processor.qcfg = SimpleNamespace(opt_scope="module", opt_stage_cudagraph=False)
+    assert processor._module_scope_stage_cudagraph_enabled() is False
+
+    processor.qcfg = SimpleNamespace(opt_scope="subsection", opt_stage_cudagraph=True)
+    assert processor._module_scope_stage_cudagraph_enabled() is True
+
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_stage_cudagraph=True)
+    assert processor._module_scope_stage_cudagraph_enabled() is True
+
+
+def test_paroquant_processor_module_quantize_forces_stage_cudagraph_off(monkeypatch):
+    """Guard the full model module loop against per-linear CUDA-graph pool retention."""
+    stage_cudagraph_calls = []
+
+    def fake_optimize_paroquant_linear(*, weight, stage_cudagraph=None, **kwargs):
+        del kwargs
+        stage_cudagraph_calls.append(stage_cudagraph)
+        zeros = torch.zeros((weight.shape[0], weight.shape[1] // 128), dtype=weight.dtype)
+        return SimpleNamespace(
+            train_loss=0.0,
+            val_loss=0.0,
+            pseudo_weight=weight.detach().clone(),
+            pack_weight=weight.detach().clone(),
+            q_scales=torch.ones_like(zeros),
+            q_zeros=torch.zeros_like(zeros, dtype=torch.int32),
+            pairs=torch.zeros((1, weight.shape[1]), dtype=torch.int16),
+            theta=torch.zeros((1, weight.shape[1] // 2), dtype=weight.dtype),
+            channel_scales=torch.ones((1, weight.shape[1]), dtype=weight.dtype),
+        )
+
+    monkeypatch.setattr(paroquant_processor_module, "optimize_paroquant_linear", fake_optimize_paroquant_linear)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="module",
+        opt_stage_cudagraph=True,
+        dynamic_get=lambda _name, _field, default=None: default,
+        runtime_bits=4,
+        group_size=128,
+        sym=True,
+        krot=8,
+        opt_pair_ratio=0.25,
+        opt_train_samples=128,
+        opt_validation_samples=32,
+        opt_batch_size=16,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=1,
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_seed=0,
+        opt_fused_rotation=True,
+        opt_stage_impl="fast",
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+    )
+    processor.calculate_w_wq_diff = False
+    processor.lock = threading.Lock()
+
+    module = SimpleNamespace(
+        name="self_attn.q_proj",
+        full_name="model.layers.0.self_attn.q_proj",
+        layer_index=0,
+        weight=torch.nn.Parameter(torch.randn((8, 128), dtype=torch.float32)),
+        bias=None,
+        state={},
+    )
+
+    processor._quantize_one_module(module, torch.randn((32, 128), dtype=torch.float32))
+
+    assert stage_cudagraph_calls == [False]
+
+
 def test_paroquant_processor_layer_scope_live_path_is_dense_only():
     """Guard the official-like live layer path for dense decoder layers only."""
     dense_modules = [
