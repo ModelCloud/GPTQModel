@@ -3122,6 +3122,93 @@ def test_paroquant_processor_optimize_group_reenables_grad_inside_inference_mode
     assert val_loss >= 0.0
 
 
+def test_paroquant_processor_subsection_scope_strips_hooked_linear_wrappers():
+    """Subsection clone optimization must unwrap HookedLinear so backward survives cloned full-layer replay."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = torch.nn.Module()
+            self.self_attn.q_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.k_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.v_proj = torch.nn.Linear(8, 8, bias=False)
+            self.self_attn.o_proj = torch.nn.Linear(8, 8, bias=False)
+
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            del attention_mask, position_ids, use_cache
+            hidden_states = (
+                self.self_attn.q_proj(x)
+                + self.self_attn.k_proj(x)
+                + self.self_attn.v_proj(x)
+            )
+            return self.self_attn.o_proj(hidden_states)
+
+    def _dynamic_get(_module_name, _key, default=None):
+        return default
+
+    float_layer = _ToyLayer()
+    x = torch.randn(1, 2, 8)
+    y = float_layer(x).detach()
+
+    hooked_layer = copy.deepcopy(float_layer)
+    replace_module_with_hooked_legacy(hooked_layer)
+
+    q_proj = NamedModule(hooked_layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(hooked_layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(hooked_layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope="subsection",
+        runtime_bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        opt_seed=0,
+        opt_pair_ratio=0.5,
+        opt_pair_impl="fast",
+        opt_quantizer_impl="reference",
+        opt_fused_rotation=False,
+        opt_channel_scale_clamp_min=1e-2,
+        opt_channel_scale_clamp_max=1e2,
+        opt_train_samples=2,
+        opt_validation_samples=2,
+        opt_stage_impl="fast",
+        opt_rotation_lr=0.05,
+        opt_weight_lr=1e-5,
+        opt_quantizer_lr=1e-6,
+        opt_rotation_epochs=1,
+        opt_finetune_epochs=0,
+        dynamic_get=_dynamic_get,
+    )
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor._batch_tls = threading.local()
+    processor.inputs_cache = InputCache(
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        position_ids=[None],
+        attention_masks=[None],
+    )
+
+    state = SimpleNamespace(
+        layer_module=hooked_layer,
+        layer_inputs=[[x]],
+        layer_input_kwargs=[{}],
+        layer_outputs=[[y]],
+        pristine_layer_module=None,
+        prepared_group_source_module=None,
+    )
+
+    with torch.inference_mode():
+        results, val_loss = processor._optimize_group(state, [q_proj, k_proj, v_proj])
+
+    assert set(results) == {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}
+    assert val_loss >= 0.0
+    assert hooked_layer.self_attn.o_proj.__class__.__name__ == "HookedLinear"
+    assert state.prepared_group_source_module is not None
+    assert state.prepared_group_source_module.self_attn.o_proj.__class__ is torch.nn.Linear
+
+
 def test_paroquant_processor_layer_scope_strips_hooked_linear_wrappers():
     """Layer-scope live optimization must unwrap HookedLinear so training does not re-enter inference mode."""
 

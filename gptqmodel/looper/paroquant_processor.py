@@ -694,6 +694,9 @@ class ParoQuantProcessor(LoopProcessor):
                 raise RuntimeError("ParoQuantProcessor grouped optimization requires the source layer module.")
 
             prepared_source = copy.deepcopy(source_layer).to(device=CPU, dtype=torch.float32)
+            # Subsection/layer clone optimization cannot train through HookedLinear
+            # because its forward is permanently wrapped in inference mode.
+            self._strip_hooked_linear_wrappers(prepared_source)
             # Grouped optimization needs stable, differentiable attention semantics.
             # Keep the cloned calibration-time layer on eager attention even if the
             # live model prefers SDPA/flash kernels for inference throughput.
