@@ -67,7 +67,7 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
     assert cfg.opt_stage_cudagraph is True
-    assert cfg.opt_noisy_x is False
+    assert cfg.opt_train_on_noisy_inputs is False
     assert cfg.opt_channel_scale_clamp_min == 1e-2
     assert cfg.opt_channel_scale_clamp_max == 1e2
     assert cfg.export_quant_method() == METHOD.PAROQUANT
@@ -94,7 +94,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_seed": 0,
                 "opt_fused_rotation": False,
                 "opt_stage_cudagraph": False,
-                "opt_noisy_x": True,
+                "opt_train_on_noisy_inputs": True,
                 "opt_scope": "subsection",
                 "opt_stage_impl": "reference",
                 "opt_pair_impl": "fast",
@@ -121,7 +121,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_seed == 0
     assert cfg.opt_fused_rotation is False
     assert cfg.opt_stage_cudagraph is False
-    assert cfg.opt_noisy_x is True
+    assert cfg.opt_train_on_noisy_inputs is True
     assert cfg.opt_scope == "subsection"
     assert cfg.opt_stage_impl == "reference"
     assert cfg.opt_pair_impl == "fast"
@@ -130,7 +130,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_channel_scale_clamp_max == 50.0
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
     assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
-    assert cfg.to_dict()["meta"]["opt_noisy_x"] is True
+    assert cfg.to_dict()["meta"]["opt_train_on_noisy_inputs"] is True
     assert cfg.to_dict()["meta"]["opt_scope"] == "subsection"
     assert cfg.to_dict()["meta"]["opt_stage_impl"] == "reference"
     assert cfg.to_dict()["meta"]["opt_pair_impl"] == "fast"
@@ -1172,7 +1172,7 @@ def test_paroquant_processor_captures_first_layer_forward_context():
 def test_paroquant_processor_group_clean_inputs_seed_from_input_cache():
     """Guard grouped clean targets against aliasing the noisy replay cache."""
     processor = object.__new__(ParoQuantProcessor)
-    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_noisy_x=True)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=True)
     clean_inputs = [[torch.randn(1, 4)]]
     noisy_inputs = [[torch.randn(1, 4)]]
     cache = InputCache(
@@ -1189,9 +1189,9 @@ def test_paroquant_processor_group_clean_inputs_seed_from_input_cache():
 
 
 def test_paroquant_processor_group_clean_inputs_default_to_noisy_stream():
-    """Guard default grouped behavior against enabling noisy-x targets implicitly."""
+    """Guard default grouped behavior against enabling train-on-noisy-inputs implicitly."""
     processor = object.__new__(ParoQuantProcessor)
-    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_noisy_x=False)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=False)
     clean_inputs = [[torch.randn(1, 4)]]
     noisy_inputs = [[torch.randn(1, 4)]]
     processor.receive_input_cache(
@@ -1297,7 +1297,7 @@ def test_paroquant_processor_group_capture_uses_pristine_module_and_clean_inputs
             return outputs
 
     processor = object.__new__(ParoQuantProcessor)
-    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_noisy_x=True)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=True)
     processor._layer_states = {}
     processor._layer_states_lock = threading.Lock()
 
@@ -1383,7 +1383,7 @@ def test_paroquant_processor_group_capture_advances_clean_stream_without_subset_
             return [[module(batch[0], **batch_kwargs)] for batch, batch_kwargs in zip(layer_inputs, layer_input_kwargs)]
 
     processor = object.__new__(ParoQuantProcessor)
-    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_noisy_x=True)
+    processor.qcfg = SimpleNamespace(opt_scope="layer", opt_train_on_noisy_inputs=True)
     processor._layer_states = {}
     processor._layer_states_lock = threading.Lock()
     processor.receive_input_cache(

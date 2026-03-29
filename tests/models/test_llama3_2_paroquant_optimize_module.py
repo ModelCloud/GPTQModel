@@ -111,7 +111,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
             bits=self.BITS,
             method=METHOD.PAROQUANT,
             format=FORMAT.PAROQUANT,
-            opt_scope="layer",
+            opt_scope="module",
             opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
             opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
             opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
@@ -125,5 +125,6 @@ class TestLlama3_2_ParoQuant(ModelTest):
             moe=self.MOE_CONFIG,
             offload_to_disk=self.OFFLOAD_TO_DISK,
         )
+
     def test_llama3_2_paroquant(self):
         self.quant_lm_eval()

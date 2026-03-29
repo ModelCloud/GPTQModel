@@ -132,6 +132,8 @@ class ModelTest(unittest.TestCase):
     MODEL_TEST_MODE_ENV = "GPTQMODEL_MODEL_TEST_MODE"
     MODEL_TEST_MODE_FAST = "fast"
     MODEL_TEST_MODE_SLOW = "slow"
+    # Shared override for the fast-mode quantized layer prefix across all ModelTest-based tests.
+    FAST_LAYER_COUNT_ENV = "GPTQMODEL_FAST_LAYER_COUNT"
     MODEL_COMPAT_FAST_LAYER_COUNT = None
 
     KERNEL_QUANT = {}  # kernel sets
@@ -337,11 +339,57 @@ class ModelTest(unittest.TestCase):
 
         return sorted(summaries.values(), key=lambda item: item["first_idx"])
 
+    def _resolve_fast_model_layer_count_config(self, layer_count: int) -> Dict[str, Any]:
+        raw_env_value = os.environ.get(self.FAST_LAYER_COUNT_ENV)
+        if raw_env_value is not None:
+            resolved = self._parse_fast_model_layer_count(raw_env_value, field_name=self.FAST_LAYER_COUNT_ENV, layer_count=layer_count)
+            return {
+                "source": "env",
+                "name": self.FAST_LAYER_COUNT_ENV,
+                "raw": raw_env_value,
+                "resolved": resolved,
+            }
+
+        configured_min_layers = self.MODEL_COMPAT_FAST_LAYER_COUNT
+        if configured_min_layers is not None:
+            resolved = self._parse_fast_model_layer_count(
+                configured_min_layers,
+                field_name="MODEL_COMPAT_FAST_LAYER_COUNT",
+                layer_count=layer_count,
+            )
+            return {
+                "source": "class",
+                "name": "MODEL_COMPAT_FAST_LAYER_COUNT",
+                "raw": configured_min_layers,
+                "resolved": resolved,
+            }
+
+        return {
+            "source": "default",
+            "name": "default",
+            "raw": 2,
+            "resolved": min(2, layer_count),
+        }
+
+    @staticmethod
+    def _parse_fast_model_layer_count(raw_value: Any, *, field_name: str, layer_count: int) -> int:
+        normalized = str(raw_value).strip().lower()
+        if normalized == "":
+            return min(2, layer_count)
+        if normalized in {"all", "full"}:
+            return layer_count
+
+        try:
+            return max(int(normalized), 0)
+        except ValueError as exc:
+            raise ValueError(
+                f"{field_name} must be a non-negative integer or `all`, got {raw_value!r}."
+            ) from exc
+
     def _fast_model_layer_limit(self, layers) -> int:
         layer_count = len(layers)
-        configured_min_layers = self.MODEL_COMPAT_FAST_LAYER_COUNT
-        min_layers = int(configured_min_layers) if configured_min_layers is not None else 2
-        min_layers = max(min_layers, 0)
+        config = self._resolve_fast_model_layer_count_config(layer_count)
+        min_layers = config["resolved"]
         if layer_count <= min_layers:
             return layer_count
 
@@ -364,7 +412,20 @@ class ModelTest(unittest.TestCase):
 
         layer_count = len(layers)
         layer_limit = self._fast_model_layer_limit(layers)
+        layer_limit_config = self._resolve_fast_model_layer_count_config(layer_count)
+        log.info(
+            "Fast quant mode layer limit config: %s=%r -> resolved prefix %s/%s layers.",
+            layer_limit_config["name"],
+            layer_limit_config["raw"],
+            layer_limit_config["resolved"],
+            layer_count,
+        )
         if layer_count <= layer_limit:
+            log.info(
+                "Fast quant mode: layer limit covers the full model (%s/%s layers); skipping 0 layers.",
+                layer_count,
+                layer_count,
+            )
             return None
 
         dynamic = {

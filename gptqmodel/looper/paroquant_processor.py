@@ -257,7 +257,7 @@ class ParoQuantProcessor(LoopProcessor):
     def receive_input_cache(self, input_cache):
         """Seed grouped calibration with the clean first-layer input stream."""
         super().receive_input_cache(input_cache)
-        self._clean_group_layer_inputs = input_cache.layer_inputs if self._use_noisy_x_targets() else None
+        self._clean_group_layer_inputs = input_cache.layer_inputs if self._train_on_noisy_inputs_enabled() else None
 
     def _select_qlinear_kernel_for_format(self, format_value: FORMAT):
         """Resolve the only supported runtime kernel class for ParoQuant."""
@@ -473,10 +473,10 @@ class ParoQuantProcessor(LoopProcessor):
         """ParoQuant captures grouped pristine layer IO outside subset forwards only."""
         return False
 
-    def _use_noisy_x_targets(self) -> bool:
-        """Mirror official clean-target / noisy-input calibration only when explicitly enabled."""
+    def _train_on_noisy_inputs_enabled(self) -> bool:
+        """Enable official clean-target / noisy-input calibration only when explicitly requested."""
         qcfg = getattr(self, "qcfg", None)
-        return bool(getattr(qcfg, "opt_noisy_x", False)) and self.uses_grouped_optimization()
+        return bool(getattr(qcfg, "opt_train_on_noisy_inputs", False)) and self.uses_grouped_optimization()
 
     def clean_group_layer_inputs(
         self,
@@ -486,7 +486,7 @@ class ParoQuantProcessor(LoopProcessor):
     ) -> List[List[torch.Tensor]]:
         """Return the clean calibration stream used to build grouped layer targets."""
         del layer_index
-        if not self._use_noisy_x_targets():
+        if not self._train_on_noisy_inputs_enabled():
             return layer_inputs
         return getattr(self, "_clean_group_layer_inputs", None) or layer_inputs
 
@@ -496,9 +496,9 @@ class ParoQuantProcessor(LoopProcessor):
         layer_index: int,
         layer_inputs: List[List[torch.Tensor]],
     ) -> None:
-        """Advance the clean calibration stream for later-layer noisy-x replay."""
+        """Advance the clean calibration stream for later-layer train-on-noisy-inputs replay."""
         del layer_index
-        if self._use_noisy_x_targets():
+        if self._train_on_noisy_inputs_enabled():
             self._clean_group_layer_inputs = layer_inputs
 
     def _build_group_optim_linear(self, module: NamedModule) -> _ParoQuantOptimLinear:

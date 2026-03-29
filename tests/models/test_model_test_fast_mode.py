@@ -40,3 +40,19 @@ def test_fast_model_layer_limit_covers_all_unique_layer_types_with_minimum_prefi
     layers = nn.ModuleList([_TypeA(), _TypeA(), _TypeB(), _TypeB(), _TypeC(), _TypeC(), _TypeC()])
 
     assert test_case._fast_model_layer_limit(layers) == 5
+
+
+def test_fast_model_layer_limit_uses_shared_env_override(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_FAST_LAYER_COUNT", "4")
+    test_case = _build_model_test()
+    layers = nn.ModuleList([_TypeA() for _ in range(8)])
+
+    assert test_case._fast_model_layer_limit(layers) == 4
+
+
+def test_fast_model_layer_limit_shared_env_all_quantizes_all_layers(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_FAST_LAYER_COUNT", "all")
+    test_case = _build_model_test()
+    layers = nn.ModuleList([_TypeA(), _TypeA(), _TypeB(), _TypeB(), _TypeC(), _TypeC(), _TypeC()])
+
+    assert test_case._fast_model_layer_limit(layers) == len(layers)
