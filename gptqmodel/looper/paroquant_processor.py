@@ -74,7 +74,7 @@ from ..utils.model import (
     recurse_setattr,
 )
 from ..utils.module_locks import parent_module_lock
-from ..utils.torch import CPU
+from ..utils.torch import CPU, torch_empty_cache, torch_sync
 
 log = setup_logger()
 
@@ -2214,6 +2214,13 @@ class ParoQuantProcessor(LoopProcessor):
                     if feat is None:
                         feat = torch.empty(0)
                     self._log_quant_result(named_module, feat, group_val_loss, duration_per_module)
+
+                if mode == "subsection" and getattr(self.qcfg, "offload_to_disk", False):
+                    try:
+                        torch_sync()
+                        torch_empty_cache(gc=False)
+                    except Exception:
+                        pass
 
         state.quantized = True
         with self.lock:

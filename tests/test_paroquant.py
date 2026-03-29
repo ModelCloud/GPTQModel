@@ -1154,6 +1154,75 @@ def test_paroquant_processor_routes_non_module_units_through_group_optimizer():
     assert state.processed_subsets == set()
 
 
+def test_paroquant_processor_subsection_scope_flushes_cuda_cache_between_groups(monkeypatch):
+    """Guard subsection scope against carrying allocator cache forward between grouped passes when offload is on."""
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_scope="subsection", offload_to_disk=True)
+    processor.fallback = True
+    processor.lock = threading.Lock()
+    processor.tasks = {}
+    processor.calculate_w_wq_diff = False
+    processor._log_quant_result = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    layer = torch.nn.Module()
+    layer.self_attn = torch.nn.Module()
+    layer.self_attn.q_proj = torch.nn.Linear(8, 8, bias=False)
+    layer.self_attn.k_proj = torch.nn.Linear(8, 8, bias=False)
+    layer.self_attn.v_proj = torch.nn.Linear(8, 8, bias=False)
+
+    q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
+    k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
+    v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+    processor._layer_input_features = lambda _state: {  # type: ignore[method-assign]
+        q_proj.name: torch.randn(4, 8),
+        k_proj.name: torch.randn(4, 8),
+        v_proj.name: torch.randn(4, 8),
+    }
+
+    def fake_optimize_group(state, group_modules):
+        del state
+        results = {}
+        for module in group_modules:
+            weight = module.weight.data.detach()
+            results[module.name] = SimpleNamespace(
+                pseudo_weight=weight + 1.0,
+                pack_weight=weight + 2.0,
+                q_scales=torch.ones((weight.shape[0], max(1, weight.shape[1] // 8)), dtype=weight.dtype),
+                q_zeros=torch.zeros((weight.shape[0], max(1, weight.shape[1] // 8)), dtype=torch.int32),
+                pairs=torch.zeros((1, 8), dtype=torch.int16),
+                theta=torch.zeros((1, weight.shape[1] // 2), dtype=weight.dtype),
+                channel_scales=torch.ones((1, weight.shape[1]), dtype=weight.dtype),
+            )
+        return results, 0.25
+
+    processor._optimize_group = fake_optimize_group  # type: ignore[method-assign]
+
+    sync_calls = []
+    empty_cache_calls = []
+    monkeypatch.setattr(paroquant_processor_module, "torch_sync", lambda: sync_calls.append(True))
+    monkeypatch.setattr(
+        paroquant_processor_module,
+        "torch_empty_cache",
+        lambda gc=False: empty_cache_calls.append(gc),
+    )
+
+    state = SimpleNamespace(
+        quantized=False,
+        modules={q_proj.name: q_proj, k_proj.name: k_proj, v_proj.name: v_proj},
+        layer_inputs=[[torch.randn(1, 2, 8)]],
+        layer_outputs=[[torch.randn(1, 2, 8)]],
+        pending_modules=set(),
+        processed_subsets={0},
+        subset_total=1,
+    )
+
+    processor._quantize_layer(layer_index=0, state=state)
+
+    assert sync_calls == [True]
+    assert empty_cache_calls == [False]
+
+
 def test_paroquant_processor_layer_scope_falls_back_to_clone_for_expert_like_groups(monkeypatch):
     """Guard expert-like layer groups against accidentally taking the dense live path."""
     import gptqmodel.looper.paroquant_processor as paroquant_processor_module
