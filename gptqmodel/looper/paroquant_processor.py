@@ -21,7 +21,6 @@ import copy
 import hashlib
 import inspect
 import math
-import sys
 import threading
 import time
 from contextlib import nullcontext
@@ -557,152 +556,6 @@ class ParoQuantProcessor(LoopProcessor):
                 named_module.module_dtype = next(live_module.parameters()).dtype
             except (StopIteration, AttributeError):
                 pass
-
-    @staticmethod
-    def _force_layer_eager_attention(layer: torch.nn.Module) -> list[tuple[object, str, object]]:
-        """Temporarily force live-layer grouped optimization onto eager attention kernels."""
-        overrides: list[tuple[object, str, object]] = []
-        seen_configs: set[int] = set()
-        candidate_configs = [
-            getattr(layer, "config", None),
-            getattr(getattr(layer, "self_attn", None), "config", None),
-        ]
-        for config in candidate_configs:
-            if config is None:
-                continue
-            config_id = id(config)
-            if config_id in seen_configs:
-                continue
-            seen_configs.add(config_id)
-            for attr in ("_attn_implementation", "attn_implementation"):
-                if not hasattr(config, attr):
-                    continue
-                original_value = getattr(config, attr)
-                if original_value == "eager":
-                    continue
-                setattr(config, attr, "eager")
-                overrides.append((config, attr, original_value))
-        return overrides
-
-    @staticmethod
-    def _restore_layer_attention_impl(overrides: list[tuple[object, str, object]]) -> None:
-        """Restore any attention implementation overrides after live-layer grouped optimization."""
-        for config, attr, original_value in reversed(overrides):
-            setattr(config, attr, original_value)
-
-    @staticmethod
-    def _unwrap_kernel_func_module(func_module: object) -> Optional[Callable[..., Any]]:
-        """Recover the plain callable hidden inside Transformers' `Func()` wrapper modules."""
-        if not isinstance(func_module, nn.Module):
-            return None
-        closure = getattr(func_module.forward, "__closure__", None)
-        if not closure:
-            return None
-        for cell in closure:
-            try:
-                candidate = cell.cell_contents
-            except ValueError:
-                continue
-            if inspect.isfunction(candidate):
-                return candidate
-        return None
-
-    def _bypass_layer_rotary_func_modules(
-        self,
-        layer: torch.nn.Module,
-    ) -> list[tuple[object, str, object]]:
-        """Temporarily replace shared `Func()` rotary wrappers with their plain callables.
-
-        Some recent Transformers builds expose rotary helpers as shared `nn.Module`
-        instances. The live layer optimization path only needs the raw function
-        semantics, and using the plain callable avoids any module-level wrapper
-        behavior leaking inference tensors into the attention path.
-        """
-        overrides: list[tuple[object, str, object]] = []
-        layer_module = sys.modules.get(type(layer).__module__)
-        if layer_module is None:
-            return overrides
-
-        for attr in ("apply_rotary_pos_emb",):
-            wrapped = getattr(layer_module, attr, None)
-            plain_callable = self._unwrap_kernel_func_module(wrapped)
-            if plain_callable is None:
-                continue
-            setattr(layer_module, attr, plain_callable)
-            overrides.append((layer_module, attr, wrapped))
-        return overrides
-
-    @staticmethod
-    def _restore_layer_callable_overrides(overrides: list[tuple[object, str, object]]) -> None:
-        """Restore temporarily bypassed module-level callables after live optimization."""
-        for owner, attr, original_value in reversed(overrides):
-            setattr(owner, attr, original_value)
-
-    def _install_live_layer_input_sanitizers(
-        self,
-        layer: torch.nn.Module,
-    ) -> list[torch.utils.hooks.RemovableHandle]:
-        """Normalize inference-mode tensors again at submodule call boundaries.
-
-        The replay cache already rebuilds tensors outside inference mode, but
-        some HF layer internals can still thread inference tensors through
-        nested module calls. A forward pre-hook lets the live optimization path
-        rebuild those boundary tensors before the next submodule consumes them.
-        """
-
-        def _sanitize_hook(_module: torch.nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]):
-            if not any(_value_has_inference_tensor(value) for value in args) and not _value_has_inference_tensor(kwargs):
-                return None
-            normalized_args = tuple(self._normalize_group_runtime_metadata(value) for value in args)
-            normalized_kwargs = self._normalize_group_runtime_metadata(kwargs)
-            return normalized_args, normalized_kwargs
-
-        handles: list[torch.utils.hooks.RemovableHandle] = []
-        for submodule in layer.modules():
-            if submodule is layer:
-                continue
-            handles.append(submodule.register_forward_pre_hook(_sanitize_hook, with_kwargs=True))
-        return handles
-
-    @staticmethod
-    def _remove_live_layer_hooks(handles: list[torch.utils.hooks.RemovableHandle]) -> None:
-        """Remove temporary live-layer hook handles after grouped optimization."""
-        for handle in handles:
-            handle.remove()
-
-    def _enable_live_layer_training(
-        self,
-        layer: torch.nn.Module,
-    ) -> list[tuple[torch.nn.Module, bool]]:
-        """Temporarily switch the root model and live layer to training mode for grouped optimization.
-
-        The layer-scope path runs real backward passes. Flipping the root model
-        back to training ensures Transformers components that branch on
-        ``module.training`` or rebind instance-level kernels do not stay stuck in
-        inference behavior just because the quantization pipeline loaded the model
-        in eval mode.
-        """
-        modules_to_toggle: list[torch.nn.Module] = []
-        root_model = getattr(self, "model", None)
-        if isinstance(root_model, torch.nn.Module):
-            modules_to_toggle.append(root_model)
-        if layer is not root_model:
-            modules_to_toggle.append(layer)
-
-        original_states = [(module, bool(module.training)) for module in modules_to_toggle]
-        for module, was_training in original_states:
-            if not was_training:
-                module.train(True)
-        return original_states
-
-    @staticmethod
-    def _restore_live_layer_training(
-        original_states: list[tuple[torch.nn.Module, bool]],
-    ) -> None:
-        """Restore model/layer training flags after live-layer grouped optimization."""
-        for module, was_training in original_states:
-            if module.training != was_training:
-                module.train(was_training)
 
     @staticmethod
     def _materialize_live_layer_autograd_tensors(
@@ -1972,10 +1825,6 @@ class ParoQuantProcessor(LoopProcessor):
         layer = layer.to(device=target_device, dtype=torch.float32)
         self._strip_hooked_linear_wrappers(layer)
         self._sync_named_modules_to_live_layer(layer, group_modules)
-        training_state_overrides = self._enable_live_layer_training(layer)
-        attn_impl_overrides = self._force_layer_eager_attention(layer)
-        callable_overrides = self._bypass_layer_rotary_func_modules(layer)
-        input_sanitizer_handles = self._install_live_layer_input_sanitizers(layer)
         replay_batches_train, replay_batches_val = self._replay_batches_from_state(state)
         metadata_cache: dict[tuple[int, str], torch.Tensor] = {}
         optim_modules: dict[str, _ParoQuantOptimLinear] = {}
@@ -2049,10 +1898,6 @@ class ParoQuantProcessor(LoopProcessor):
             # return to the layer's native dtype so flash-attn and downstream
             # kernels see the original half/bfloat activations again.
             layer.to(device=target_device, dtype=original_layer_dtype)
-            self._remove_live_layer_hooks(input_sanitizer_handles)
-            self._restore_layer_callable_overrides(callable_overrides)
-            self._restore_layer_attention_impl(attn_impl_overrides)
-            self._restore_live_layer_training(training_state_overrides)
 
     def _optimize_group(
         self,
