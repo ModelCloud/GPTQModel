@@ -30,8 +30,11 @@ def _env_flag(*names: str, default: bool = False) -> bool:
 class TestLlama3_2_ParoQuant(ModelTest):
     # Keep one stable saved checkpoint so eval-only repro runs can reload the exact post-quant model.
     SAVE_PATH = os.environ.get(
-        "GPTQMODEL_PAROQUANT_SAVE_PATH",
-        "/tmp/paroquant_evalution_saved_ckpt",
+        "GPTQMODEL_PAROQUANT_SUBSECTION_SAVE_PATH",
+        os.environ.get(
+            "GPTQMODEL_PAROQUANT_SAVE_PATH",
+            "/tmp/paroquant_evalution_saved_ckpt_subsection",
+        ),
     )
     DELETE_QUANTIZED_MODEL = False
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
@@ -71,14 +74,6 @@ class TestLlama3_2_ParoQuant(ModelTest):
                 "ceil_pct": 1.0,
             },
         },
-        # "mmlu_stem": {
-        #     "chat_template": False,
-        #     "acc": {
-        #         "value": 0.40120520139549637,
-        #         "floor_pct": 0.04,
-        #         "ceil_pct": 1.0,
-        #     },
-        # },
     }
     EVAL_TASKS_SLOW = {
         "gsm8k_platinum_cot": {
@@ -99,13 +94,6 @@ class TestLlama3_2_ParoQuant(ModelTest):
                 "floor_pct": 0.04,
             },
         },
-        # "mmlu_stem": {
-        #     "chat_template": False,
-        #     "acc": {
-        #         "value": 0.3850301300348874,
-        #         "floor_pct": 0.04,
-        #     },
-        # },
     }
     FORMAT = FORMAT.PAROQUANT
     METHOD = METHOD.PAROQUANT
@@ -124,9 +112,9 @@ class TestLlama3_2_ParoQuant(ModelTest):
 
     @staticmethod
     def _opt_train_on_noisy_inputs() -> bool:
-        """Layer-scope env override for official noisy-input / clean-target replay."""
+        """Subsection-scope env override for official noisy-input / clean-target replay."""
         return _env_flag(
-            "GPTQMODEL_PAROQUANT_LAYER_TRAIN_ON_NOISY_INPUTS",
+            "GPTQMODEL_PAROQUANT_SUBSECTION_TRAIN_ON_NOISY_INPUTS",
             "GPTQMODEL_PAROQUANT_TRAIN_ON_NOISY_INPUTS",
             default=False,
         )
@@ -136,7 +124,7 @@ class TestLlama3_2_ParoQuant(ModelTest):
             bits=self.BITS,
             method=METHOD.PAROQUANT,
             format=FORMAT.PAROQUANT,
-            opt_scope="layer",
+            opt_scope="subsection",
             opt_train_on_noisy_inputs=self._opt_train_on_noisy_inputs(),
             opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
             opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
