@@ -4,7 +4,7 @@
 import os
 
 import torch
-from model_test import ModelTest
+from model_test import ModelTest, _env_choice, _env_int
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
@@ -24,30 +24,6 @@ def _env_flag(*names: str, default: bool = False) -> bool:
             return True
         if value in falsy:
             return False
-    return default
-
-
-def _env_choice(*names: str, default: str) -> str:
-    """Return the first non-empty env override from a prioritized name list."""
-    for name in names:
-        raw = os.environ.get(name)
-        if raw is None:
-            continue
-        value = raw.strip().lower()
-        if value:
-            return value
-    return default
-
-
-def _env_int(*names: str, default: int) -> int:
-    """Return the first parseable integer env override from a prioritized name list."""
-    for name in names:
-        raw = os.environ.get(name)
-        if raw is None:
-            continue
-        value = raw.strip()
-        if value:
-            return int(value)
     return default
 
 

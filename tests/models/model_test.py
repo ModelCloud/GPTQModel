@@ -42,6 +42,30 @@ from collections.abc import Iterable, Mapping  # noqa: E402
 import torch.cuda  # noqa: E402
 
 
+def _env_choice(*names: str, default: str) -> str:
+    """Return the first non-empty env override from a prioritized name list."""
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        value = raw.strip().lower()
+        if value:
+            return value
+    return default
+
+
+def _env_int(*names: str, default: int) -> int:
+    """Return the first parseable integer env override from a prioritized name list."""
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if value:
+            return int(value)
+    return default
+
+
 try:  # noqa: E402
     from datasets import load_dataset as hf_load_dataset  # noqa: E402
 except Exception as exc:  # pragma: no cover - depends on test environment
