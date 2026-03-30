@@ -191,6 +191,8 @@ class BaseQModel(nn.Module):
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     loader = AutoModelForCausalLM
 
+    # Some models only require config during initialization and do not need dtype, e.g., MiniCPMO.
+    loader_requires_dtype = True
 
     # monkey patch api for trust_remote_code=True models that have broken transformer compat
     require_monkeypatch = False

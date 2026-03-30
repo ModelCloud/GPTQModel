@@ -994,7 +994,6 @@ def sanitize_generation_config_file(path: str) -> bool:
 def build_shell_model(
     loader,
     config: Any,
-    dtype: Optional[torch.dtype] = None,
     trust_remote_code: bool = True,
     **model_init_kwargs,
 ):
@@ -1004,7 +1003,6 @@ def build_shell_model(
 
     Args:
         model_id_or_path: Hugging Face model ID or local path.
-        dtype: Target dtype for model parameters (replaces `torch_dtype`).
         trust_remote_code: Allow loading custom model classes.
     """
     init_kwargs = model_init_kwargs.copy()
@@ -1021,7 +1019,6 @@ def build_shell_model(
         with init_empty_weights(include_buffers=True):
             shell = loader.from_config(
                 config,
-                dtype=dtype,
                 trust_remote_code=trust_remote_code,
                 **init_kwargs
             )
