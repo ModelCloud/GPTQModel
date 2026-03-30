@@ -58,4 +58,7 @@ class TestMiniCPMO4_5(ModelTest):
         generated_text = ""
         for new_text in answer:
             generated_text += new_text
-            print(new_text, flush=True, end='')
+
+        print(f'Output:\n{generated_text}')
+
+        self.assertIn("snow", generated_text.lower())
