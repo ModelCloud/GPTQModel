@@ -25,10 +25,10 @@ def test_llama3_2_paroquant_optimize_group_first_2_layers(capsys: pytest.Capture
     resolved = resolve_paroquant_first_layer_case_env(
         env_prefix="GPTQMODEL_PAROQUANT_GROUP_TEST",
         default_num_quant_layers=2,
-        default_opt_scope="subsection",
+        default_opt_scope="compute_block",
     )
     if resolved["opt_scope"] == "module":
-        pytest.skip("Grouped optimize_group integration test requires opt_scope=subsection or opt_scope=layer.")
+        pytest.skip("Grouped optimize_group integration test requires opt_scope=compute_block or opt_scope=layer.")
 
     result = run_paroquant_first_layer_case_from_resolved(resolved)
     gsm8k_metrics = assert_basic_paroquant_first_layer_result(
@@ -36,7 +36,7 @@ def test_llama3_2_paroquant_optimize_group_first_2_layers(capsys: pytest.Capture
         num_quant_layers=resolved["num_quant_layers"],
         opt_scope=resolved["opt_scope"],
     )
-    assert result["opt_scope"] in {"subsection", "layer"}
+    assert result["opt_scope"] in {"compute_block", "layer"}
 
     summary_rows = [
         ["num_quant_layers", str(result["num_quant_layers"])],

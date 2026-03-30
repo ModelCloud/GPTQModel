@@ -130,7 +130,7 @@ class BaseLlama3_2ParoQuantOptimizeTest(ModelTest):
 
     @classmethod
     def _opt_train_on_noisy_inputs(cls) -> bool:
-        if cls.OPT_SCOPE not in {"layer", "subsection"}:
+        if cls.OPT_SCOPE not in {"layer", "compute_block"}:
             return False
         prefix = cls._scope_prefix()
         return _env_flag(

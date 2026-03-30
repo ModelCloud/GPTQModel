@@ -57,7 +57,7 @@ class BenchRow:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare ParoQuant module/subsection/layer modes against official whole-layer optimization."
+        description="Compare ParoQuant module/compute_block/layer modes against official whole-layer optimization."
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--official-repo", default=str(OFFICIAL_REPO))
@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
         "--case",
         dest="cases",
         action="append",
-        choices=("local_module", "local_subsection", "local_layer", "official_layer"),
+        choices=("local_module", "local_compute_block", "local_layer", "official_layer"),
         default=None,
         help="Optional repeated case filter. By default all cases run.",
     )
@@ -563,7 +563,7 @@ def main() -> int:
     requested_cases = set(args.cases or [])
     cases = [
         ("local_module", lambda: _benchmark_local_module(module_names=module_names, device=device, dtype=dtype, args=args, layer_index=args.layer_idx, **captured)),
-        ("local_subsection", lambda: _benchmark_local_group(opt_scope="subsection", module_names=module_names, device=device, dtype=dtype, args=args, layer_index=args.layer_idx, **captured)),
+        ("local_compute_block", lambda: _benchmark_local_group(opt_scope="compute_block", module_names=module_names, device=device, dtype=dtype, args=args, layer_index=args.layer_idx, **captured)),
         ("local_layer", lambda: _benchmark_local_group(opt_scope="layer", module_names=module_names, device=device, dtype=dtype, args=args, layer_index=args.layer_idx, **captured)),
     ]
     if not args.skip_official:

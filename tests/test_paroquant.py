@@ -95,7 +95,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_fused_rotation": False,
                 "opt_stage_cudagraph": False,
                 "opt_train_on_noisy_inputs": True,
-                "opt_scope": "subsection",
+                "opt_scope": "compute_block",
                 "opt_stage_impl": "reference",
                 "opt_pair_impl": "fast",
                 "opt_quantizer_impl": "reference",
@@ -122,7 +122,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_fused_rotation is False
     assert cfg.opt_stage_cudagraph is False
     assert cfg.opt_train_on_noisy_inputs is True
-    assert cfg.opt_scope == "subsection"
+    assert cfg.opt_scope == "compute_block"
     assert cfg.opt_stage_impl == "reference"
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
@@ -131,7 +131,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
     assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
     assert cfg.to_dict()["meta"]["opt_train_on_noisy_inputs"] is True
-    assert cfg.to_dict()["meta"]["opt_scope"] == "subsection"
+    assert cfg.to_dict()["meta"]["opt_scope"] == "compute_block"
     assert cfg.to_dict()["meta"]["opt_stage_impl"] == "reference"
     assert cfg.to_dict()["meta"]["opt_pair_impl"] == "fast"
     assert cfg.to_dict()["meta"]["opt_quantizer_impl"] == "reference"
@@ -170,10 +170,10 @@ def test_paroquant_quantize_config_rejects_invalid_opt_scope():
 
 def test_paroquant_benchmark_config_preserves_opt_scope():
     """Benchmark helpers should propagate the requested optimization scope."""
-    cfg = make_paroquant_config(dynamic={}, opt_scope="subsection")
+    cfg = make_paroquant_config(dynamic={}, opt_scope="compute_block")
 
     assert cfg.quant_method == METHOD.PAROQUANT
-    assert cfg.opt_scope == "subsection"
+    assert cfg.opt_scope == "compute_block"
 
 
 def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch):
@@ -902,10 +902,10 @@ def test_paroquant_processor_resets_reused_module_buckets_per_layer():
     assert processor.tasks["mlp.gate_proj"]["inputs"] == []
 
 
-def test_paroquant_processor_groups_common_llama_subsections():
-    """Guard the planned subsection optimizer buckets for attention and MLP projections."""
+def test_paroquant_processor_groups_common_llama_compute_blocks():
+    """Guard the planned compute_block optimizer buckets for attention and MLP projections."""
     processor = object.__new__(ParoQuantProcessor)
-    processor.qcfg = SimpleNamespace(opt_scope="subsection")
+    processor.qcfg = SimpleNamespace(opt_scope="compute_block")
 
     state = SimpleNamespace(
         modules={
@@ -932,7 +932,7 @@ def test_paroquant_processor_groups_common_llama_subsections():
 def test_paroquant_processor_grouped_modes_capture_pristine_context_outside_subset_forward():
     """Guard grouped modes against treating early-stopped subset forwards as full-layer targets."""
     processor = object.__new__(ParoQuantProcessor)
-    processor.qcfg = SimpleNamespace(opt_scope="subsection")
+    processor.qcfg = SimpleNamespace(opt_scope="compute_block")
     assert processor.uses_grouped_optimization() is True
     assert processor.capture_layer_forward_context_during_subset() is False
 
@@ -955,7 +955,7 @@ def test_paroquant_processor_disables_stage_cudagraph_for_module_scope_loop():
     processor.qcfg = SimpleNamespace(opt_scope="module", opt_stage_cudagraph=False)
     assert processor._module_scope_stage_cudagraph_enabled() is False
 
-    processor.qcfg = SimpleNamespace(opt_scope="subsection", opt_stage_cudagraph=True)
+    processor.qcfg = SimpleNamespace(opt_scope="compute_block", opt_stage_cudagraph=True)
     assert processor._module_scope_stage_cudagraph_enabled() is True
 
     processor.qcfg = SimpleNamespace(opt_scope="layer", opt_stage_cudagraph=True)
@@ -1052,7 +1052,7 @@ def test_paroquant_processor_layer_scope_live_path_is_dense_only():
     ("opt_scope", "expected_capture"),
     [
         ("module", False),
-        ("subsection", True),
+        ("compute_block", True),
         ("layer", True),
     ],
 )
@@ -1088,9 +1088,9 @@ def test_paroquant_processor_skips_pristine_layer_clone_for_layer_scope():
 
 
 def test_paroquant_processor_routes_non_module_units_through_group_optimizer():
-    """Guard that subsection/layer modes now use grouped optimization instead of raising."""
+    """Guard that compute_block/layer modes now use grouped optimization instead of raising."""
     processor = object.__new__(ParoQuantProcessor)
-    processor.qcfg = SimpleNamespace(opt_scope="subsection")
+    processor.qcfg = SimpleNamespace(opt_scope="compute_block")
     processor.fallback = True
     processor.lock = threading.Lock()
     processor.tasks = {}
@@ -1154,11 +1154,11 @@ def test_paroquant_processor_routes_non_module_units_through_group_optimizer():
     assert state.processed_subsets == set()
 
 
-def test_paroquant_processor_subsection_scope_flushes_cuda_cache_between_groups(monkeypatch):
-    """Guard subsection scope against carrying allocator cache forward between grouped passes when offload is on."""
+def test_paroquant_processor_compute_block_scope_flushes_cuda_cache_between_groups(monkeypatch):
+    """Guard compute_block scope against carrying allocator cache forward between grouped passes when offload is on."""
 
     processor = object.__new__(ParoQuantProcessor)
-    processor.qcfg = SimpleNamespace(opt_scope="subsection", offload_to_disk=True)
+    processor.qcfg = SimpleNamespace(opt_scope="compute_block", offload_to_disk=True)
     processor.fallback = True
     processor.lock = threading.Lock()
     processor.tasks = {}
@@ -1624,7 +1624,7 @@ def test_paroquant_quantize_layer_clears_stored_forward_context():
 
 
 def test_paroquant_processor_builds_group_optim_layer_clone():
-    """Guard that subsection/layer modes can swap selected modules into a cloned float layer."""
+    """Guard that compute_block/layer modes can swap selected modules into a cloned float layer."""
 
     class _ToyAttn(torch.nn.Module):
         def __init__(self):
@@ -1657,7 +1657,7 @@ def test_paroquant_processor_builds_group_optim_layer_clone():
 
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = SimpleNamespace(
-        opt_scope="subsection",
+        opt_scope="compute_block",
         runtime_bits=4,
         group_size=8,
         sym=True,
@@ -1734,7 +1734,7 @@ def test_paroquant_processor_builds_group_optim_layer_from_pristine_snapshot():
 
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = SimpleNamespace(
-        opt_scope="subsection",
+        opt_scope="compute_block",
         runtime_bits=4,
         group_size=8,
         sym=True,
@@ -1800,7 +1800,7 @@ def test_paroquant_processor_reuses_cached_group_source_clone():
 
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = SimpleNamespace(
-        opt_scope="subsection",
+        opt_scope="compute_block",
         runtime_bits=4,
         group_size=8,
         sym=True,
@@ -1860,7 +1860,7 @@ def test_paroquant_processor_reuses_cached_group_source_clone_per_device():
 
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = SimpleNamespace(
-        opt_scope="subsection",
+        opt_scope="compute_block",
         runtime_bits=4,
         group_size=8,
         sym=True,
@@ -1890,7 +1890,7 @@ def test_paroquant_processor_reuses_cached_group_source_clone_per_device():
     assert state.prepared_group_source_module_by_device["cpu"] is cached_source
 
 
-def test_paroquant_processor_device_group_source_cache_is_subsection_only():
+def test_paroquant_processor_device_group_source_cache_is_compute_block_only():
     """Guard grouped source-device caching so whole-layer mode keeps the simpler one-shot path."""
 
     class _ToyAttn(torch.nn.Module):
@@ -3190,8 +3190,8 @@ def test_paroquant_processor_optimize_group_reenables_grad_inside_inference_mode
     assert val_loss >= 0.0
 
 
-def test_paroquant_processor_subsection_scope_strips_hooked_linear_wrappers():
-    """Subsection clone optimization must unwrap HookedLinear so backward survives cloned full-layer replay."""
+def test_paroquant_processor_compute_block_scope_strips_hooked_linear_wrappers():
+    """ComputeBlock clone optimization must unwrap HookedLinear so backward survives cloned full-layer replay."""
 
     class _ToyLayer(torch.nn.Module):
         def __init__(self):
@@ -3227,7 +3227,7 @@ def test_paroquant_processor_subsection_scope_strips_hooked_linear_wrappers():
 
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = SimpleNamespace(
-        opt_scope="subsection",
+        opt_scope="compute_block",
         runtime_bits=4,
         group_size=8,
         sym=True,

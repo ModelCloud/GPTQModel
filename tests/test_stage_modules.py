@@ -190,9 +190,9 @@ def test_stage_layer_paroquant_layer_scope_skips_pristine_group_clone():
     assert _processor_needs_pristine_group_clone(processor) is False
 
 
-def test_stage_layer_paroquant_subsection_scope_keeps_pristine_group_clone():
+def test_stage_layer_paroquant_compute_block_scope_keeps_pristine_group_clone():
     processor = object.__new__(ParoQuantProcessor)
-    processor.qcfg = types.SimpleNamespace(opt_scope="subsection")
+    processor.qcfg = types.SimpleNamespace(opt_scope="compute_block")
 
     assert _processor_needs_pristine_group_clone(processor) is True
 

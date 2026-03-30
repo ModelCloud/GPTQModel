@@ -2900,8 +2900,8 @@ class ParoQuantizeConfig(QuantizeConfig):
             raise ValueError("ParoQuantizeConfig: optimization learning rates must be positive.")
         if not (0.0 < self.opt_pair_ratio <= 0.5):
             raise ValueError("ParoQuantizeConfig: `opt_pair_ratio` must be in the interval (0, 0.5].")
-        if self.opt_scope not in {"module", "subsection", "layer"}:
-            raise ValueError("ParoQuantizeConfig: `opt_scope` must be one of {'module', 'subsection', 'layer'}.")
+        if self.opt_scope not in {"module", "compute_block", "layer"}:
+            raise ValueError("ParoQuantizeConfig: `opt_scope` must be one of {'module', 'compute_block', 'layer'}.")
         if self.opt_stage_impl not in {"fast", "reference"}:
             raise ValueError("ParoQuantizeConfig: `opt_stage_impl` must be one of {'fast', 'reference'}.")
         if self.opt_pair_impl not in {"fast", "reference"}:

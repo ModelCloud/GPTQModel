@@ -466,14 +466,14 @@ class ParoQuantProcessor(LoopProcessor):
         return str(getattr(self.qcfg, "opt_scope", "module")).strip().lower()
 
     def uses_grouped_optimization(self) -> bool:
-        """Return whether this layer should optimize subsection/layer scopes instead of one linear at a time."""
+        """Return whether this layer should optimize compute_block/layer scopes instead of one linear at a time."""
         return self._opt_scope_mode() != "module"
 
     def needs_pristine_layer_clone(self) -> bool:
         """Whether stage-layer orchestration must build a separate pristine layer copy.
 
         Whole-layer scope replays clean targets before mutating the live layer, so
-        it can use the untouched live layer directly. Subsection scope still needs
+        it can use the untouched live layer directly. ComputeBlock scope still needs
         a dedicated pristine copy because later grouped clone construction may
         happen after subset-time hooks and wrapper replacement.
         """
@@ -694,7 +694,7 @@ class ParoQuantProcessor(LoopProcessor):
                 raise RuntimeError("ParoQuantProcessor grouped optimization requires the source layer module.")
 
             prepared_source = copy.deepcopy(source_layer).to(device=CPU, dtype=torch.float32)
-            # Subsection/layer clone optimization cannot train through HookedLinear
+            # ComputeBlock/layer clone optimization cannot train through HookedLinear
             # because its forward is permanently wrapped in inference mode.
             self._strip_hooked_linear_wrappers(prepared_source)
             # Grouped optimization needs stable, differentiable attention semantics.
@@ -708,7 +708,7 @@ class ParoQuantProcessor(LoopProcessor):
             state.prepared_group_source_module = prepared_source
 
         target_device = group_modules[0].weight.device
-        if self._opt_scope_mode() == "subsection":
+        if self._opt_scope_mode() == "compute_block":
             device_cache = getattr(state, "prepared_group_source_module_by_device", None)
             if device_cache is None:
                 device_cache = {}
@@ -2028,7 +2028,7 @@ class ParoQuantProcessor(LoopProcessor):
         state: _ParoQuantLayerState,
         group_modules: list[NamedModule],
     ) -> tuple[dict[str, object], float]:
-        """Optimize one subsection or whole-layer group against the preserved full-layer target."""
+        """Optimize one compute_block or whole-layer group against the preserved full-layer target."""
         if self._opt_scope_mode() == "layer" and self._supports_live_layer_scope(group_modules):
             with torch.inference_mode(False), torch.enable_grad():
                 return self._optimize_live_layer(state, group_modules)
@@ -2113,8 +2113,8 @@ class ParoQuantProcessor(LoopProcessor):
             return results, val_loss
 
     @staticmethod
-    def _module_subsection_label(module_name: str) -> str:
-        """Map common projection archetypes to subsection optimization buckets."""
+    def _module_compute_block_label(module_name: str) -> str:
+        """Map common projection archetypes to compute_block optimization buckets."""
         leaf = module_name.rsplit(".", 1)[-1]
         if leaf in {"q_proj", "k_proj", "v_proj"}:
             return "attn_qkv"
@@ -2127,8 +2127,8 @@ class ParoQuantProcessor(LoopProcessor):
         return f"single:{module_name}"
 
     @staticmethod
-    def _module_subsection_order(module_name: str) -> tuple[int, str]:
-        """Keep subsection members in canonical architectural order."""
+    def _module_compute_block_order(module_name: str) -> tuple[int, str]:
+        """Keep compute_block members in canonical architectural order."""
         leaf = module_name.rsplit(".", 1)[-1]
         order = {
             "q_proj": 0,
@@ -2147,7 +2147,7 @@ class ParoQuantProcessor(LoopProcessor):
     ) -> list[tuple[str, list[NamedModule]]]:
         """Resolve the optimization scope for the current layer.
 
-        `module` keeps today's per-linear behavior. `subsection` and `layer`
+        `module` keeps today's per-linear behavior. `compute_block` and `layer`
         are scaffolded here so the lifecycle can switch scopes explicitly once
         their execution paths land.
         """
@@ -2155,12 +2155,12 @@ class ParoQuantProcessor(LoopProcessor):
         named_modules = [state.modules[name] for name in sorted(state.modules)]
         if mode == "module":
             return [(module.name, [module]) for module in named_modules]
-        if mode == "subsection":
+        if mode == "compute_block":
             grouped: Dict[str, list[NamedModule]] = {}
             for module in named_modules:
-                grouped.setdefault(self._module_subsection_label(module.name), []).append(module)
+                grouped.setdefault(self._module_compute_block_label(module.name), []).append(module)
             for label in grouped:
-                grouped[label].sort(key=lambda module: self._module_subsection_order(module.name))
+                grouped[label].sort(key=lambda module: self._module_compute_block_order(module.name))
             return [(label, grouped[label]) for label in sorted(grouped)]
         if mode == "layer":
             return [("layer", named_modules)]
@@ -2215,7 +2215,7 @@ class ParoQuantProcessor(LoopProcessor):
                         feat = torch.empty(0)
                     self._log_quant_result(named_module, feat, group_val_loss, duration_per_module)
 
-                if mode == "subsection" and getattr(self.qcfg, "offload_to_disk", False):
+                if mode == "compute_block" and getattr(self.qcfg, "offload_to_disk", False):
                     flush_device = self._module_weight_matrix(group_modules[0]).device if group_modules else None
                     torch_empty_cache(device=flush_device, gc=False, sync=True)
 
