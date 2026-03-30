@@ -211,6 +211,7 @@ def make_paroquant_config(
     opt_sgd_momentum: float = 0.0,
     opt_sgd_dampening: float = 0.0,
     opt_sgd_nesterov: bool = False,
+    opt_gradient_checkpointing: Optional[bool] = None,
     offload_to_disk: bool = False,
 ) -> QuantizeConfig:
     if sym is not True:
@@ -240,6 +241,7 @@ def make_paroquant_config(
         opt_sgd_momentum=opt_sgd_momentum,
         opt_sgd_dampening=opt_sgd_dampening,
         opt_sgd_nesterov=opt_sgd_nesterov,
+        opt_gradient_checkpointing=opt_gradient_checkpointing,
     )
 
 

@@ -27,6 +27,7 @@ from typing import Iterable, Literal, Optional, Sequence
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from ..config import PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT, PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT
 from ...utils.env import env_flag
@@ -82,6 +83,13 @@ def _quantizer_sym_for_impl(sym: bool, quantizer_impl: str) -> bool:
 def _round_ste(x: torch.Tensor) -> torch.Tensor:
     """Apply a straight-through round so gradients flow through quantization."""
     return (x.round() - x).detach() + x
+
+
+def _checkpointed_forward(function, *args: torch.Tensor, enabled: bool = False) -> torch.Tensor:
+    """Recompute the train forward during backward when the stage opts into checkpointing."""
+    if not enabled:
+        return function(*args)
+    return torch_checkpoint(function, *args, use_reentrant=False)
 
 
 def _clamp_ste(
@@ -1153,6 +1161,7 @@ def _run_stage_gptqmodel_impl(
     epochs: int,
     batch_size: int,
     optimizer_name: str,
+    gradient_checkpointing: bool = False,
 ) -> tuple[float, float]:
     """Run one optimization stage with validation-based best-state selection."""
     normalized_groups = _normalize_optimizer_param_groups(param_groups)
@@ -1187,7 +1196,7 @@ def _run_stage_gptqmodel_impl(
             optimizer.zero_grad(set_to_none=True)
             autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
             with autocast_ctx:
-                preds = model(input_batch)
+                preds = _checkpointed_forward(model, input_batch, enabled=gradient_checkpointing)
                 loss = F.smooth_l1_loss(preds, target_batch)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -1363,13 +1372,14 @@ def _run_stage_gptqmodel(
     batch_size: int,
     stage_cudagraph: Optional[bool] = None,
     optimizer_name: str = "adamw",
+    gradient_checkpointing: bool = False,
 ) -> tuple[float, float]:
     """Run the fast stage, preferring CUDA-graph replay on fused CUDA paths and falling back to eager."""
     if not _should_use_paroquant_stage_cudagraph(
         model,
         inputs_train=inputs_train,
         batch_size=batch_size,
-        stage_cudagraph=stage_cudagraph,
+        stage_cudagraph=False if gradient_checkpointing else stage_cudagraph,
     ):
         return _run_stage_gptqmodel_impl(
             model=model,
@@ -1381,6 +1391,7 @@ def _run_stage_gptqmodel(
             epochs=epochs,
             batch_size=batch_size,
             optimizer_name=optimizer_name,
+            gradient_checkpointing=gradient_checkpointing,
         )
 
     initial_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
@@ -1411,6 +1422,7 @@ def _run_stage_gptqmodel(
             epochs=epochs,
             batch_size=batch_size,
             optimizer_name=optimizer_name,
+            gradient_checkpointing=gradient_checkpointing,
         )
 
 
@@ -1425,6 +1437,7 @@ def _run_stage_reference(
     epochs: int,
     batch_size: int,
     optimizer_name: str,
+    gradient_checkpointing: bool = False,
 ) -> tuple[float, float]:
     """Official-parity stage runner: AMP + GradScaler + cosine LR update."""
     normalized_groups = _normalize_optimizer_param_groups(param_groups)
@@ -1459,7 +1472,7 @@ def _run_stage_reference(
         for input_batch, target_batch in zip(_chunk_rows(inputs_train, batch_size), _chunk_rows(targets_train, batch_size)):
             autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
             with autocast_ctx:
-                preds = model(input_batch)
+                preds = _checkpointed_forward(model, input_batch, enabled=gradient_checkpointing)
                 loss = F.smooth_l1_loss(preds, target_batch)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -1502,6 +1515,7 @@ def _run_stage(
     stage_impl: str,
     stage_cudagraph: Optional[bool] = None,
     optimizer_name: str = "adamw",
+    gradient_checkpointing: bool = False,
 ) -> tuple[float, float]:
     impl = _normalize_opt_impl(stage_impl, field="stage_impl")
     with _activate_stage_params(model, param_groups):
@@ -1516,6 +1530,7 @@ def _run_stage(
                 epochs=epochs,
                 batch_size=batch_size,
                 optimizer_name=optimizer_name,
+                gradient_checkpointing=gradient_checkpointing,
             )
         return _run_stage_gptqmodel(
             model=model,
@@ -1528,6 +1543,7 @@ def _run_stage(
             batch_size=batch_size,
             stage_cudagraph=stage_cudagraph,
             optimizer_name=optimizer_name,
+            gradient_checkpointing=gradient_checkpointing,
         )
 
 
@@ -1634,6 +1650,7 @@ def optimize_paroquant_linear(
     stage_impl: Literal["fast", "reference"] = "fast",
     pair_impl: Literal["fast", "reference"] = "fast",
     quantizer_impl: Literal["fast", "reference"] = "fast",
+    gradient_checkpointing: bool = False,
     scale_clamp_min: float = PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT,
     scale_clamp_max: float = PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT,
 ) -> ParoQuantOptimizationResult:
@@ -1744,6 +1761,7 @@ def optimize_paroquant_linear(
         stage_impl=normalized_stage_impl,
         stage_cudagraph=stage_cudagraph,
         optimizer_name=normalized_optimizer_name,
+        gradient_checkpointing=gradient_checkpointing,
     )
 
     model.init_quantizer()
@@ -1782,6 +1800,7 @@ def optimize_paroquant_linear(
         stage_impl=normalized_stage_impl,
         stage_cudagraph=stage_cudagraph,
         optimizer_name=normalized_optimizer_name,
+        gradient_checkpointing=gradient_checkpointing,
     )
 
     return _result_from_model(

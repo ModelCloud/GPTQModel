@@ -4,7 +4,7 @@
 import os
 
 import torch
-from model_test import ModelTest, _env_choice, _env_flag, _env_int
+from model_test import ModelTest, _env_choice, _env_flag, _env_int, _env_optional_flag
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
@@ -150,6 +150,15 @@ class BaseLlama3_2ParoQuantOptimizeTest(ModelTest):
         )
 
     @classmethod
+    def _opt_gradient_checkpointing(cls):
+        """Allow scoped activation-checkpointing overrides while keeping config defaults meaningful."""
+        prefix = cls._scope_prefix()
+        return _env_optional_flag(
+            f"GPTQMODEL_PAROQUANT_{prefix}_GRADIENT_CHECKPOINTING",
+            "GPTQMODEL_PAROQUANT_GRADIENT_CHECKPOINTING",
+        )
+
+    @classmethod
     def _rotation_epochs(cls) -> int:
         prefix = cls._scope_prefix()
         return _env_int(
@@ -183,6 +192,7 @@ class BaseLlama3_2ParoQuantOptimizeTest(ModelTest):
             format=FORMAT.PAROQUANT,
             opt_scope=self.OPT_SCOPE,
             opt_train_on_noisy_inputs=self._opt_train_on_noisy_inputs(),
+            opt_gradient_checkpointing=self._opt_gradient_checkpointing(),
             opt_rotation_epochs=self._rotation_epochs(),
             opt_finetune_epochs=self._finetune_epochs(),
             opt_train_samples=self._train_samples(),

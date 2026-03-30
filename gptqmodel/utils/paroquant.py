@@ -294,8 +294,9 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):
-        x, pairs, theta, y = ctx.saved_tensors[:4]
-        scale_tensor = ctx.saved_tensors[4] if ctx.has_scale else None
+        saved_tensors = ctx.saved_tensors
+        x, pairs, theta, y = saved_tensors[:4]
+        scale_tensor = saved_tensors[4] if ctx.has_scale else None
         group_size = ctx.group_size
 
         _, hidden = pairs.shape

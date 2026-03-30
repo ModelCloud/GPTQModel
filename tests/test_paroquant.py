@@ -78,10 +78,23 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.opt_pair_impl == "fast"
     assert cfg.opt_quantizer_impl == "reference"
     assert cfg.opt_stage_cudagraph is True
+    assert cfg.opt_gradient_checkpointing is False
     assert cfg.opt_train_on_noisy_inputs is False
     assert cfg.opt_channel_scale_clamp_min == 1e-2
     assert cfg.opt_channel_scale_clamp_max == 1e2
     assert cfg.export_quant_method() == METHOD.PAROQUANT
+
+
+def test_paroquant_quantize_config_enables_gradient_checkpointing_by_default_for_layer_scope():
+    """Layer scope should opt into activation checkpointing by default because it is the only measured memory win."""
+
+    cfg = ParoQuantizeConfig(
+        bits=4,
+        group_size=128,
+        opt_scope="layer",
+    )
+
+    assert cfg.opt_gradient_checkpointing is True
 
 
 def test_paroquant_quantize_config_from_external_payload_round_trips():
@@ -112,6 +125,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_sgd_dampening": 0.0,
                 "opt_sgd_nesterov": True,
                 "opt_fused_rotation": False,
+                "opt_gradient_checkpointing": False,
                 "opt_stage_cudagraph": False,
                 "opt_train_on_noisy_inputs": True,
                 "opt_scope": "compute_block",
@@ -147,6 +161,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_sgd_dampening == pytest.approx(0.0)
     assert cfg.opt_sgd_nesterov is True
     assert cfg.opt_fused_rotation is False
+    assert cfg.opt_gradient_checkpointing is False
     assert cfg.opt_stage_cudagraph is False
     assert cfg.opt_train_on_noisy_inputs is True
     assert cfg.opt_scope == "compute_block"
@@ -156,6 +171,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_channel_scale_clamp_min == 0.02
     assert cfg.opt_channel_scale_clamp_max == 50.0
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
+    assert cfg.to_dict()["meta"]["opt_gradient_checkpointing"] is False
     assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
     assert cfg.to_dict()["meta"]["opt_train_on_noisy_inputs"] is True
     assert cfg.to_dict()["meta"]["opt_scope"] == "compute_block"
@@ -252,6 +268,27 @@ def test_paroquant_benchmark_config_preserves_opt_scope():
 
     assert cfg.quant_method == METHOD.PAROQUANT
     assert cfg.opt_scope == "compute_block"
+    assert cfg.opt_gradient_checkpointing is False
+
+
+def test_paroquant_quantize_config_preserves_explicit_gradient_checkpointing_override():
+    """Explicit checkpointing overrides must win over the scope-derived default."""
+
+    layer_cfg = ParoQuantizeConfig(
+        bits=4,
+        group_size=128,
+        opt_scope="layer",
+        opt_gradient_checkpointing=False,
+    )
+    compute_block_cfg = ParoQuantizeConfig(
+        bits=4,
+        group_size=128,
+        opt_scope="compute_block",
+        opt_gradient_checkpointing=True,
+    )
+
+    assert layer_cfg.opt_gradient_checkpointing is False
+    assert compute_block_cfg.opt_gradient_checkpointing is True
 
 
 def test_paroquant_rotation_toggle_prefers_explicit_config_over_env(monkeypatch):
@@ -1345,6 +1382,7 @@ def test_paroquant_processor_module_quantize_forces_stage_cudagraph_off(monkeypa
     assert forwarded_kwargs["sgd_dampening"] == pytest.approx(0.0)
     assert forwarded_kwargs["sgd_nesterov"] is True
     assert forwarded_kwargs["fused_rotation"] is True
+    assert forwarded_kwargs["gradient_checkpointing"] is False
     assert forwarded_kwargs["stage_impl"] == "fast"
     assert forwarded_kwargs["pair_impl"] == "fast"
     assert forwarded_kwargs["quantizer_impl"] == "reference"
@@ -1396,6 +1434,28 @@ def test_paroquant_processor_enables_layer_context_capture_only_for_grouped_scop
     )
 
     assert processor.execution_config.capture_layer_forward_context is expected_capture
+
+
+@pytest.mark.parametrize(
+    ("opt_scope", "opt_gradient_checkpointing", "expected"),
+    [
+        ("module", None, False),
+        ("compute_block", None, False),
+        ("layer", None, True),
+        ("module", True, True),
+        ("layer", False, False),
+    ],
+)
+def test_paroquant_processor_resolves_gradient_checkpointing_by_scope(opt_scope, opt_gradient_checkpointing, expected):
+    """Processor runtime should mirror the config default and explicit override semantics."""
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(
+        opt_scope=opt_scope,
+        opt_gradient_checkpointing=opt_gradient_checkpointing,
+    )
+
+    assert processor._gradient_checkpointing_enabled() is expected
 
 
 def test_paroquant_processor_skips_pristine_layer_clone_for_layer_scope():
@@ -2678,6 +2738,55 @@ def test_paroquant_processor_layer_shard_loader_normalizes_inference_inputs():
         output = layer(materialized_batch.inputs[0])
 
     assert output.shape == materialized_batch.inputs[0].shape
+
+
+def test_paroquant_processor_group_checkpoint_normalizes_inference_inputs():
+    """Grouped checkpoint training must rebuild inference-mode inputs into autograd-safe tensors."""
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor._gradient_checkpointing_enabled = lambda: True
+
+    captured = {}
+    layer_scale = torch.nn.Parameter(torch.tensor(2.0))
+
+    def _fake_forward_group_batch(
+        layer,
+        *,
+        batch_index,
+        input_batch,
+        input_kwargs,
+        attention_mask,
+        position_ids,
+    ):
+        captured["inputs_inference"] = [tensor.is_inference() for tensor in input_batch]
+        captured["kwargs_inference"] = paroquant_processor_module._value_has_inference_tensor(input_kwargs)
+        captured["mask_inference"] = attention_mask.is_inference() if attention_mask is not None else False
+        captured["pos_inference"] = position_ids.is_inference() if position_ids is not None else False
+        return input_batch[0] * layer_scale
+
+    processor._forward_group_batch = _fake_forward_group_batch
+
+    with torch.inference_mode():
+        input_batch = [torch.randn(2, 4)]
+        input_kwargs = {"cache_position": torch.arange(4)}
+        attention_mask = torch.ones(1, 4)
+        position_ids = torch.arange(4).unsqueeze(0)
+
+    output = processor._forward_group_batch_train(
+        object(),
+        batch_index=0,
+        input_batch=input_batch,
+        input_kwargs=input_kwargs,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+    )
+    output.sum().backward()
+
+    assert captured["inputs_inference"] == [False]
+    assert captured["kwargs_inference"] is False
+    assert captured["mask_inference"] is False
+    assert captured["pos_inference"] is False
+    assert layer_scale.grad is not None
 
 
 def test_paroquant_processor_cached_group_position_ids_are_autograd_safe():

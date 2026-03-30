@@ -188,6 +188,16 @@ Canonical backend names are shown below. Legacy aliases such as `BACKEND.TORCH`,
 
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
 
+### ParoQuant Activation Checkpointing
+
+`ParoQuantizeConfig.opt_gradient_checkpointing` controls activation checkpointing during ParoQuant's train-style optimization stages.
+
+- `opt_scope="layer"` defaults to `opt_gradient_checkpointing=True`
+- `opt_scope="module"` defaults to `opt_gradient_checkpointing=False`
+- `opt_scope="compute_block"` defaults to `opt_gradient_checkpointing=False`
+
+Current internal benchmarks have only shown a clear resource-usage benefit for `layer` scope. `module` and `compute_block` support the toggle, but they are not enabled by default because we have not yet measured a consistent memory win there.
+
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`

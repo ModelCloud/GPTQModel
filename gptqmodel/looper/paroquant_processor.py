@@ -31,6 +31,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.nn import Module
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
 from ..looper.named_module import NamedModule
@@ -469,6 +470,7 @@ class ParoQuantProcessor(LoopProcessor):
                 sgd_dampening=float(getattr(self.qcfg, "opt_sgd_dampening", 0.0)),
                 sgd_nesterov=bool(getattr(self.qcfg, "opt_sgd_nesterov", False)),
                 fused_rotation=self.qcfg.opt_fused_rotation,
+                gradient_checkpointing=bool(getattr(self.qcfg, "opt_gradient_checkpointing", False)),
                 stage_cudagraph=self._module_scope_stage_cudagraph_enabled(),
                 stage_impl=self.qcfg.opt_stage_impl,
                 pair_impl=self.qcfg.opt_pair_impl,
@@ -509,6 +511,13 @@ class ParoQuantProcessor(LoopProcessor):
     def _opt_scope_mode(self) -> str:
         """Normalize the configured ParoQuant optimization scope."""
         return str(getattr(self.qcfg, "opt_scope", "module")).strip().lower()
+
+    def _gradient_checkpointing_enabled(self) -> bool:
+        """Resolve grouped-stage checkpointing from config, defaulting to layer scope only."""
+        configured = getattr(self.qcfg, "opt_gradient_checkpointing", None)
+        if configured is None:
+            return self._opt_scope_mode() == "layer"
+        return bool(configured)
 
     def uses_grouped_optimization(self) -> bool:
         """Return whether this layer should optimize compute_block/layer scopes instead of one linear at a time."""
@@ -1576,6 +1585,78 @@ class ParoQuantProcessor(LoopProcessor):
                     total_loss += float(F.smooth_l1_loss(preds, target).item())
         return total_loss / max(1, len(input_batches))
 
+    def _forward_group_batch_train(
+        self,
+        layer: torch.nn.Module,
+        *,
+        batch_index: int,
+        input_batch: list[torch.Tensor],
+        input_kwargs: dict[str, Any],
+        attention_mask: Optional[torch.Tensor],
+        position_ids: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Optionally checkpoint grouped train forwards to reduce activation residency."""
+        if not self._gradient_checkpointing_enabled() or not input_batch:
+            return self._forward_group_batch(
+                layer,
+                batch_index=batch_index,
+                input_batch=input_batch,
+                input_kwargs=input_kwargs,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
+
+        runtime_inputs = [
+            self._clone_group_runtime_metadata(_LayerShardLoader._tensor_to_device(inp, inp.device))
+            for inp in input_batch
+        ]
+        runtime_kwargs = self._clone_group_runtime_metadata(input_kwargs)
+        runtime_attention_mask = self._clone_group_runtime_metadata(attention_mask)
+        runtime_position_ids = self._clone_group_runtime_metadata(position_ids)
+
+        def _forward(*runtime_inputs: torch.Tensor) -> torch.Tensor:
+            return self._forward_group_batch(
+                layer,
+                batch_index=batch_index,
+                input_batch=list(runtime_inputs),
+                input_kwargs=runtime_kwargs,
+                attention_mask=runtime_attention_mask,
+                position_ids=runtime_position_ids,
+            )
+
+        return torch_checkpoint(_forward, *tuple(runtime_inputs), use_reentrant=False)
+
+    def _forward_replay_batch_train(
+        self,
+        layer: torch.nn.Module,
+        *,
+        replay_batch: _ParoQuantReplayBatch,
+        cache_kwargs: bool,
+    ) -> torch.Tensor:
+        """Optionally checkpoint streamed grouped train forwards to reduce activation residency."""
+        if not self._gradient_checkpointing_enabled() or not replay_batch.inputs:
+            return self._forward_replay_batch(
+                layer,
+                replay_batch=replay_batch,
+                cache_kwargs=cache_kwargs,
+            )
+
+        def _forward(*runtime_inputs: torch.Tensor) -> torch.Tensor:
+            return self._forward_replay_batch(
+                layer,
+                replay_batch=_ParoQuantReplayBatch(
+                    inputs=list(runtime_inputs),
+                    input_kwargs=replay_batch.input_kwargs,
+                    target=replay_batch.target,
+                    position_ids=replay_batch.position_ids,
+                    attention_mask=replay_batch.attention_mask,
+                    row_count=replay_batch.row_count,
+                ),
+                cache_kwargs=cache_kwargs,
+            )
+
+        return torch_checkpoint(_forward, *tuple(replay_batch.inputs), use_reentrant=False)
+
     @staticmethod
     def _normalize_group_optimizer_param_groups(
         param_groups: List[dict[str, object]],
@@ -1778,7 +1859,7 @@ class ParoQuantProcessor(LoopProcessor):
                 ):
                     autocast_ctx = torch.amp.autocast("cuda") if use_amp else nullcontext()
                     with autocast_ctx:
-                        preds = self._forward_group_batch(
+                        preds = self._forward_group_batch_train(
                             layer,
                             batch_index=batch_index,
                             input_batch=input_batch,
@@ -1934,7 +2015,7 @@ class ParoQuantProcessor(LoopProcessor):
                 with autocast_ctx:
                     for shard in train_loader.iter_shards():
                         for replay_batch in shard:
-                            preds = self._forward_replay_batch(
+                            preds = self._forward_replay_batch_train(
                                 layer,
                                 replay_batch=replay_batch,
                                 cache_kwargs=False,

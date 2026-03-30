@@ -2508,6 +2508,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_sgd_dampening": "opt_sgd_dampening",
             "opt_sgd_nesterov": "opt_sgd_nesterov",
             "opt_fused_rotation": "opt_fused_rotation",
+            "opt_gradient_checkpointing": "opt_gradient_checkpointing",
             "opt_stage_cudagraph": "opt_stage_cudagraph",
             "opt_train_on_noisy_inputs": "opt_train_on_noisy_inputs",
             "opt_scope": "opt_scope",
@@ -2862,6 +2863,7 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_sgd_dampening: float = field(default=0.0)
     opt_sgd_nesterov: bool = field(default=False)
     opt_fused_rotation: bool = field(default=True)
+    opt_gradient_checkpointing: Optional[bool] = field(default=None)
     opt_stage_cudagraph: bool = field(default=True)
     opt_train_on_noisy_inputs: bool = field(default=False)
     opt_scope: str = field(default="module")
@@ -2876,6 +2878,11 @@ class ParoQuantizeConfig(QuantizeConfig):
 
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
         return PAROQUANT_EXPORT_FORMATS
+
+    @staticmethod
+    def default_opt_gradient_checkpointing_for_scope(opt_scope: str) -> bool:
+        """Enable activation checkpointing by default only for whole-layer optimization."""
+        return str(opt_scope).strip().lower() == "layer"
 
     def __post_init__(self):
         self.method = _normalize_quant_method(self.method)
@@ -2908,9 +2915,24 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_sgd_dampening = float(self.opt_sgd_dampening)
         self.opt_sgd_nesterov = bool(self.opt_sgd_nesterov)
         self.opt_fused_rotation = bool(self.opt_fused_rotation)
+        self.opt_scope = str(self.opt_scope).strip().lower()
+        checkpointing = self.opt_gradient_checkpointing
+        if isinstance(checkpointing, str):
+            normalized_checkpointing = checkpointing.strip().lower()
+            if normalized_checkpointing in {"1", "true", "yes", "on", "y", "t"}:
+                checkpointing = True
+            elif normalized_checkpointing in {"0", "false", "no", "off", "n", "f"}:
+                checkpointing = False
+            else:
+                raise ValueError(
+                    "ParoQuantizeConfig: `opt_gradient_checkpointing` string values must be one of "
+                    "{'1','0','true','false','yes','no','on','off','y','n','t','f'}."
+                )
+        if checkpointing is None:
+            checkpointing = self.default_opt_gradient_checkpointing_for_scope(self.opt_scope)
+        self.opt_gradient_checkpointing = bool(checkpointing)
         self.opt_stage_cudagraph = bool(self.opt_stage_cudagraph)
         self.opt_train_on_noisy_inputs = bool(self.opt_train_on_noisy_inputs)
-        self.opt_scope = str(self.opt_scope).strip().lower()
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
         self.opt_quantizer_impl = str(self.opt_quantizer_impl).strip().lower()
@@ -2983,6 +3005,7 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_sgd_dampening"] = self.opt_sgd_dampening
         meta_payload["opt_sgd_nesterov"] = self.opt_sgd_nesterov
         meta_payload["opt_fused_rotation"] = self.opt_fused_rotation
+        meta_payload["opt_gradient_checkpointing"] = self.opt_gradient_checkpointing
         meta_payload["opt_stage_cudagraph"] = self.opt_stage_cudagraph
         meta_payload["opt_train_on_noisy_inputs"] = self.opt_train_on_noisy_inputs
         meta_payload["opt_scope"] = self.opt_scope
