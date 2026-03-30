@@ -929,6 +929,20 @@ def test_paroquant_processor_groups_common_llama_compute_blocks():
     ]
 
 
+def test_paroquant_processor_module_scope_seed_uses_full_module_name():
+    """Guard module scope against collapsing different layer linears onto one archetype seed."""
+    full_name_a = "model.layers.0.self_attn.q_proj"
+    full_name_b = "model.layers.0.block.self_attn.q_proj"
+
+    module_scope = object.__new__(ParoQuantProcessor)
+    module_scope.qcfg = SimpleNamespace(opt_scope="module", opt_seed=3141592653)
+    assert module_scope._module_seed(0, full_name_a) != module_scope._module_seed(0, full_name_b)
+
+    grouped_scope = object.__new__(ParoQuantProcessor)
+    grouped_scope.qcfg = SimpleNamespace(opt_scope="compute_block", opt_seed=3141592653)
+    assert grouped_scope._module_seed(0, full_name_a) == grouped_scope._module_seed(0, full_name_b)
+
+
 def test_paroquant_processor_grouped_modes_capture_pristine_context_outside_subset_forward():
     """Guard grouped modes against treating early-stopped subset forwards as full-layer targets."""
     processor = object.__new__(ParoQuantProcessor)

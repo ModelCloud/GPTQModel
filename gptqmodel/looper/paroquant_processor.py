@@ -454,9 +454,23 @@ class ParoQuantProcessor(LoopProcessor):
         """Use the terminal module name as the shared seed key across layers."""
         return full_name.rsplit(".", 1)[-1]
 
+    def _module_seed_key(self, full_name: str) -> str:
+        """Keep module-scope seeds unique per full module while preserving grouped-scope behavior.
+
+        Module scope optimizes every linear independently across the full model.
+        Reusing only the terminal archetype name correlates rotations across layers
+        (`...layers.0.self_attn.q_proj`, `...layers.1.self_attn.q_proj`, etc.),
+        which materially hurts end-to-end recovery on full-model module runs.
+        Grouped scopes keep the existing archetype behavior to avoid disturbing the
+        separately tuned layer/compute-block path.
+        """
+        if self._opt_scope_mode() == "module":
+            return full_name
+        return self._module_archetype(full_name)
+
     def _module_seed(self, layer_index: int, full_name: str) -> int:
         """Derive a deterministic per-module seed from base seed, layer index, and module name."""
-        module_name = self._module_archetype(full_name)
+        module_name = self._module_seed_key(full_name)
         seed_material = f"{int(self.qcfg.opt_seed)}:{int(layer_index)}:{module_name}".encode("utf-8")
         digest = hashlib.blake2b(seed_material, digest_size=8).digest()
         return int.from_bytes(digest, byteorder="big", signed=False)
