@@ -11,11 +11,38 @@ from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, ParoQuantizeConfig
 
 
+def _env_choice(*names: str, default: str) -> str:
+    """Return the first non-empty env override from a prioritized name list."""
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        value = raw.strip().lower()
+        if value:
+            return value
+    return default
+
+
+def _env_int(*names: str, default: int) -> int:
+    """Return the first parseable integer env override from a prioritized name list."""
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if value:
+            return int(value)
+    return default
+
+
 class TestLlama3_2_ParoQuant(ModelTest):
     # Keep one stable saved checkpoint so eval-only repro runs can reload the exact post-quant model.
     SAVE_PATH = os.environ.get(
-        "GPTQMODEL_PAROQUANT_SAVE_PATH",
-        "/tmp/paroquant_evalution_saved_ckpt",
+        "GPTQMODEL_PAROQUANT_MODULE_SAVE_PATH",
+        os.environ.get(
+            "GPTQMODEL_PAROQUANT_SAVE_PATH",
+            "/tmp/paroquant_evalution_saved_ckpt_module",
+        ),
     )
     DELETE_QUANTIZED_MODEL = False
     NATIVE_MODEL_ID = "/monster/data/model/Llama-3.2-1B-Instruct"
@@ -99,12 +126,47 @@ class TestLlama3_2_ParoQuant(ModelTest):
     QUANT_BACKEND = BACKEND.PAROQUANT
     KERNEL_QUANT = {ParoQuantQuantLinear}
     KERNEL_INFERENCE = {ParoQuantQuantLinear}
+    MODEL_COMPAT_FAST_LAYER_COUNT = 4
+    MODEL_COMPAT_FAST_LAYER_POSITION = "last"
 
-    # Mirror benchmark settings: 1+1 epochs on 128 train rows
+    # Accuracy-focused fast-mode defaults: last 4 layers, 2+2 epochs on 4096 train rows.
     PAROQUANT_ROTATION_EPOCHS = 2
     PAROQUANT_FINETUNE_EPOCHS = 2
     PAROQUANT_TRAIN_SAMPLES = 4096
     PAROQUANT_SEED = 3141592653
+
+    @staticmethod
+    def _opt_stage_impl() -> str:
+        """Allow stage-runner A/Bs without changing the default model test behavior."""
+        return _env_choice(
+            "GPTQMODEL_PAROQUANT_MODULE_STAGE_IMPL",
+            "GPTQMODEL_PAROQUANT_STAGE_IMPL",
+            default="fast",
+        )
+
+    @classmethod
+    def _rotation_epochs(cls) -> int:
+        return _env_int(
+            "GPTQMODEL_PAROQUANT_MODULE_ROTATION_EPOCHS",
+            "GPTQMODEL_PAROQUANT_ROTATION_EPOCHS",
+            default=cls.PAROQUANT_ROTATION_EPOCHS,
+        )
+
+    @classmethod
+    def _finetune_epochs(cls) -> int:
+        return _env_int(
+            "GPTQMODEL_PAROQUANT_MODULE_FINETUNE_EPOCHS",
+            "GPTQMODEL_PAROQUANT_FINETUNE_EPOCHS",
+            default=cls.PAROQUANT_FINETUNE_EPOCHS,
+        )
+
+    @classmethod
+    def _train_samples(cls) -> int:
+        return _env_int(
+            "GPTQMODEL_PAROQUANT_MODULE_TRAIN_SAMPLES",
+            "GPTQMODEL_PAROQUANT_TRAIN_SAMPLES",
+            default=cls.PAROQUANT_TRAIN_SAMPLES,
+        )
 
     def _build_quantize_config(self):
         return ParoQuantizeConfig(
@@ -112,11 +174,11 @@ class TestLlama3_2_ParoQuant(ModelTest):
             method=METHOD.PAROQUANT,
             format=FORMAT.PAROQUANT,
             opt_scope="module",
-            opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
-            opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
-            opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
+            opt_rotation_epochs=self._rotation_epochs(),
+            opt_finetune_epochs=self._finetune_epochs(),
+            opt_train_samples=self._train_samples(),
             opt_seed=self.PAROQUANT_SEED,
-            opt_stage_impl="fast",
+            opt_stage_impl=self._opt_stage_impl(),
             opt_pair_impl="fast",
             opt_quantizer_impl="reference",
             adapter=self.EORA,

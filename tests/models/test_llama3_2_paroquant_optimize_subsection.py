@@ -27,6 +27,30 @@ def _env_flag(*names: str, default: bool = False) -> bool:
     return default
 
 
+def _env_choice(*names: str, default: str) -> str:
+    """Return the first non-empty env override from a prioritized name list."""
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        value = raw.strip().lower()
+        if value:
+            return value
+    return default
+
+
+def _env_int(*names: str, default: int) -> int:
+    """Return the first parseable integer env override from a prioritized name list."""
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        value = raw.strip()
+        if value:
+            return int(value)
+    return default
+
+
 class TestLlama3_2_ParoQuant(ModelTest):
     # Keep one stable saved checkpoint so eval-only repro runs can reload the exact post-quant model.
     SAVE_PATH = os.environ.get(
@@ -103,8 +127,10 @@ class TestLlama3_2_ParoQuant(ModelTest):
     QUANT_BACKEND = BACKEND.PAROQUANT
     KERNEL_QUANT = {ParoQuantQuantLinear}
     KERNEL_INFERENCE = {ParoQuantQuantLinear}
+    MODEL_COMPAT_FAST_LAYER_COUNT = 4
+    MODEL_COMPAT_FAST_LAYER_POSITION = "last"
 
-    # Mirror benchmark settings: 1+1 epochs on 128 train rows
+    # Accuracy-focused fast-mode defaults: last 4 layers, 2+2 epochs on 4096 train rows.
     PAROQUANT_ROTATION_EPOCHS = 2
     PAROQUANT_FINETUNE_EPOCHS = 2
     PAROQUANT_TRAIN_SAMPLES = 4096
@@ -112,11 +138,44 @@ class TestLlama3_2_ParoQuant(ModelTest):
 
     @staticmethod
     def _opt_train_on_noisy_inputs() -> bool:
-        """Subsection-scope env override for official noisy-input / clean-target replay."""
+        """Subsection keeps same-stream training by default; noisy-input replay regressed."""
         return _env_flag(
             "GPTQMODEL_PAROQUANT_SUBSECTION_TRAIN_ON_NOISY_INPUTS",
             "GPTQMODEL_PAROQUANT_TRAIN_ON_NOISY_INPUTS",
             default=False,
+        )
+
+    @staticmethod
+    def _opt_stage_impl() -> str:
+        """Allow stage-runner A/Bs without changing the default model test behavior."""
+        return _env_choice(
+            "GPTQMODEL_PAROQUANT_SUBSECTION_STAGE_IMPL",
+            "GPTQMODEL_PAROQUANT_STAGE_IMPL",
+            default="fast",
+        )
+
+    @classmethod
+    def _rotation_epochs(cls) -> int:
+        return _env_int(
+            "GPTQMODEL_PAROQUANT_SUBSECTION_ROTATION_EPOCHS",
+            "GPTQMODEL_PAROQUANT_ROTATION_EPOCHS",
+            default=cls.PAROQUANT_ROTATION_EPOCHS,
+        )
+
+    @classmethod
+    def _finetune_epochs(cls) -> int:
+        return _env_int(
+            "GPTQMODEL_PAROQUANT_SUBSECTION_FINETUNE_EPOCHS",
+            "GPTQMODEL_PAROQUANT_FINETUNE_EPOCHS",
+            default=cls.PAROQUANT_FINETUNE_EPOCHS,
+        )
+
+    @classmethod
+    def _train_samples(cls) -> int:
+        return _env_int(
+            "GPTQMODEL_PAROQUANT_SUBSECTION_TRAIN_SAMPLES",
+            "GPTQMODEL_PAROQUANT_TRAIN_SAMPLES",
+            default=cls.PAROQUANT_TRAIN_SAMPLES,
         )
 
     def _build_quantize_config(self):
@@ -126,11 +185,11 @@ class TestLlama3_2_ParoQuant(ModelTest):
             format=FORMAT.PAROQUANT,
             opt_scope="subsection",
             opt_train_on_noisy_inputs=self._opt_train_on_noisy_inputs(),
-            opt_rotation_epochs=self.PAROQUANT_ROTATION_EPOCHS,
-            opt_finetune_epochs=self.PAROQUANT_FINETUNE_EPOCHS,
-            opt_train_samples=self.PAROQUANT_TRAIN_SAMPLES,
+            opt_rotation_epochs=self._rotation_epochs(),
+            opt_finetune_epochs=self._finetune_epochs(),
+            opt_train_samples=self._train_samples(),
             opt_seed=self.PAROQUANT_SEED,
-            opt_stage_impl="fast",
+            opt_stage_impl=self._opt_stage_impl(),
             opt_pair_impl="fast",
             opt_quantizer_impl="reference",
             adapter=self.EORA,

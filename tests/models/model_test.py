@@ -134,7 +134,9 @@ class ModelTest(unittest.TestCase):
     MODEL_TEST_MODE_SLOW = "slow"
     # Shared override for the fast-mode quantized layer prefix across all ModelTest-based tests.
     FAST_LAYER_COUNT_ENV = "GPTQMODEL_FAST_LAYER_COUNT"
+    FAST_LAYER_POSITION_ENV = "GPTQMODEL_FAST_LAYER_POSITION"
     MODEL_COMPAT_FAST_LAYER_COUNT = None
+    MODEL_COMPAT_FAST_LAYER_POSITION = None
 
     KERNEL_QUANT = {}  # kernel sets
     KERNEL_INFERENCE = {}  # kernel sets
@@ -371,6 +373,20 @@ class ModelTest(unittest.TestCase):
             "resolved": min(2, layer_count),
         }
 
+    def _resolve_fast_model_layer_position(self) -> str:
+        raw = os.environ.get(self.FAST_LAYER_POSITION_ENV)
+        if raw is None:
+            configured = self.MODEL_COMPAT_FAST_LAYER_POSITION
+            raw = "last" if configured is None else configured
+        normalized = str(raw).strip().lower()
+        if normalized in {"", "first", "prefix", "head"}:
+            return "first"
+        if normalized in {"last", "suffix", "tail", "top"}:
+            return "last"
+        raise ValueError(
+            f"{self.FAST_LAYER_POSITION_ENV} must be `first` or `last`, got {raw!r}."
+        )
+
     @staticmethod
     def _parse_fast_model_layer_count(raw_value: Any, *, field_name: str, layer_count: int) -> int:
         normalized = str(raw_value).strip().lower()
@@ -413,10 +429,12 @@ class ModelTest(unittest.TestCase):
         layer_count = len(layers)
         layer_limit = self._fast_model_layer_limit(layers)
         layer_limit_config = self._resolve_fast_model_layer_count_config(layer_count)
+        layer_position = self._resolve_fast_model_layer_position()
         log.info(
-            "Fast quant mode layer limit config: %s=%r -> resolved prefix %s/%s layers.",
+            "Fast quant mode layer limit config: %s=%r -> resolved %s %s/%s layers.",
             layer_limit_config["name"],
             layer_limit_config["raw"],
+            layer_position,
             layer_limit_config["resolved"],
             layer_count,
         )
@@ -428,14 +446,17 @@ class ModelTest(unittest.TestCase):
             )
             return None
 
-        dynamic = {
-            f"-:^{layers_node}\\.{i}\\.": {}
-            for i in range(layer_limit, layer_count)
-        }
+        if layer_position == "last":
+            skipped_layers = range(0, max(0, layer_count - layer_limit))
+        else:
+            skipped_layers = range(layer_limit, layer_count)
+
+        dynamic = {f"-:^{layers_node}\\.{i}\\.": {} for i in skipped_layers}
 
         unique_layer_types = len({self._layer_type_signature(layer) for layer in layers})
         log.info(
-            "Fast quant mode: quantizing first %s/%s layers (%s unique layer type signatures covered), skipping %s layers.",
+            "Fast quant mode: quantizing %s %s/%s layers (%s unique layer type signatures covered), skipping %s layers.",
+            layer_position,
             layer_limit,
             layer_count,
             unique_layer_types,
