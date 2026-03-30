@@ -18,6 +18,7 @@ from gptqmodel.looper.stage_layer import (
     run_layer_stage,
 )
 from gptqmodel.looper.stage_subset import CalibrationCoveragePolicy, SubsetPlan, SubsetStageResult
+import gptqmodel.looper.stage_subset as stage_subset_module
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.pause_resume import PauseResumeController
 
@@ -194,6 +195,24 @@ def test_stage_layer_paroquant_subsection_scope_keeps_pristine_group_clone():
     processor.qcfg = types.SimpleNamespace(opt_scope="subsection")
 
     assert _processor_needs_pristine_group_clone(processor) is True
+
+
+def test_stage_subset_flush_stays_local_when_work_stays_on_cur_layer_device():
+    cur_layer_device = torch.device("cuda:0")
+
+    assert (
+        stage_subset_module._resolve_cache_flush_device(cur_layer_device, [torch.device("cuda:0")])
+        == cur_layer_device
+    )
+
+
+def test_stage_subset_flush_goes_global_when_work_fans_out_across_devices():
+    cur_layer_device = torch.device("cuda:0")
+
+    assert stage_subset_module._resolve_cache_flush_device(
+        cur_layer_device,
+        [torch.device("cuda:0"), torch.device("cuda:1")],
+    ) is None
 
 
 def test_stage_inputs_capture_collects_real_inputs():
