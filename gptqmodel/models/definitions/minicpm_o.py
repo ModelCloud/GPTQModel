@@ -5,8 +5,9 @@
 
 from copy import deepcopy
 from importlib import import_module
-from typing import Dict, Optional, Iterable, List, Tuple, Any
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+import torch
 from transformers import AutoModel, AutoProcessor, ProcessorMixin
 from transformers.generation.utils import GenerationMixin
 
@@ -17,7 +18,6 @@ from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel
-import torch
 
 
 class Cache:
@@ -228,9 +228,8 @@ class MiniCPMOQModel(BaseQModel):
     require_load_processor = True
 
     def before_model_load(self, model_local_path: str, load_quantized_model: bool):
-        from transformers.dynamic_module_utils import get_class_from_dynamic_module
-
         from transformers import cache_utils
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
         from transformers.generation import utils
         cache_utils.Cache = Cache
         cache_utils.DynamicCache = DynamicCache

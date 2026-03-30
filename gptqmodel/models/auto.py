@@ -113,7 +113,6 @@ from .definitions.mimo import MimoQModel  # noqa: E402
 from .definitions.minicpm import MiniCPMGPTQ  # noqa: E402
 from .definitions.minicpm3 import MiniCpm3QModel  # noqa: E402
 from .definitions.minicpm_o import MiniCPMOQModel  # noqa: E402
-from .definitions.minicpm_v import MiniCPMVQModel  # noqa: E402
 from .definitions.minimax_m2 import MiniMaxM2GPTQ  # noqa: E402
 from .definitions.mistral3 import Mistral3GPTQ
 from .definitions.mixtral import MixtralQModel  # noqa: E402

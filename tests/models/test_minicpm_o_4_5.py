@@ -3,16 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import os.path
-import unittest
-from importlib.metadata import PackageNotFoundError, version
 
-import torch
 from model_test import ModelTest
-from packaging.version import Version
 from PIL import Image
-
-from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
 
 
 class TestMiniCPMO4_5(ModelTest):

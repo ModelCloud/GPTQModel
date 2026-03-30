@@ -916,7 +916,7 @@ class ModelTest(unittest.TestCase):
                     trust_remote_code=trust_remote_code,
                     backend=backend,
             )
-            tokenizer = model.tokenizer or self.load_tokenizer(model_path, trust_remote_code=trust_remote_code)
+            model.tokenizer or self.load_tokenizer(model_path, trust_remote_code=trust_remote_code)
             # Pre-lm-eval smoke prompts are intentionally disabled to keep quantization tests
             # focused only on lm_eval task execution.
             # inference_records[backend] = self.run_generic_inference_checks(model, tokenizer, backend)
