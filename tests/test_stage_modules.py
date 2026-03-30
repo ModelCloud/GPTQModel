@@ -1419,6 +1419,7 @@ def test_capture_pristine_group_context_preserves_untouched_layer_io(monkeypatch
         looper=types.SimpleNamespace(),
         processor=DummyProcessor(),
         module=torch.nn.Identity(),
+        pristine_module=None,
         subset_plans=[subset_plan],
         layer_inputs=[[tensor]],
         layer_input_kwargs=[{}],

@@ -1219,7 +1219,7 @@ def test_paroquant_processor_subsection_scope_flushes_cuda_cache_between_groups(
 
     processor._quantize_layer(layer_index=0, state=state)
 
-    assert empty_cache_calls == [{"device": None, "gc": False, "sync": True}]
+    assert empty_cache_calls == [{"device": torch.device("cpu"), "gc": False, "sync": True}]
 
 
 def test_paroquant_processor_layer_scope_falls_back_to_clone_for_expert_like_groups(monkeypatch):

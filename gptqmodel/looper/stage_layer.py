@@ -842,12 +842,18 @@ def run_layer_stage(
                             layer_index,
                         )
                         if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
-                            torch_empty_cache(sync=True)
+                            flush_device = cur_layer_device if any(
+                                isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks
+                            ) else None
+                            torch_empty_cache(device=flush_device, sync=True)
                         elif _should_empty_cache_after_sync_finalize(
                             looper,
                             finalize_tasks=finalize_tasks,
                         ):
-                            torch_empty_cache(gc=False, sync=True)
+                            flush_device = cur_layer_device if any(
+                                isinstance(process, ParoQuantProcessor) for process, *_ in finalize_tasks
+                            ) else None
+                            torch_empty_cache(device=flush_device, gc=False, sync=True)
                     else:
                         # Asynchronous (current/default behavior): drain in background thread
                         # This allows next layer to start while current layer finalizes

@@ -2216,7 +2216,8 @@ class ParoQuantProcessor(LoopProcessor):
                     self._log_quant_result(named_module, feat, group_val_loss, duration_per_module)
 
                 if mode == "subsection" and getattr(self.qcfg, "offload_to_disk", False):
-                    torch_empty_cache(gc=False, sync=True)
+                    flush_device = self._module_weight_matrix(group_modules[0]).device if group_modules else None
+                    torch_empty_cache(device=flush_device, gc=False, sync=True)
 
         state.quantized = True
         with self.lock:

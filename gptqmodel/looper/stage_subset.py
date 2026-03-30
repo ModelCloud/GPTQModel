@@ -623,7 +623,8 @@ def _run_single_subset_pass(
                 subset[name].forward_hook_last = False
 
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
-        torch_empty_cache(sync=True)
+        flush_device = cur_layer_device if isinstance(processor, ParoQuantProcessor) else None
+        torch_empty_cache(device=flush_device, sync=True)
     moe_skip_modules = []
     if calibration_coverage_policy.validate_input_coverage:
         # Coverage validation is a policy decision captured by the plan.
@@ -773,7 +774,8 @@ def _run_single_subset_pass(
             continue
         processed_subset[name] = named_module
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
-        torch_empty_cache(sync=True)
+        flush_device = cur_layer_device if isinstance(processor, ParoQuantProcessor) else None
+        torch_empty_cache(device=flush_device, sync=True)
     else:
         torch_sync()
 
@@ -917,7 +919,8 @@ def run_subset_stage(
 
             # Force cleanup between chunks
             if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
-                 torch_empty_cache()
+                flush_device = cur_layer_device if isinstance(processor, ParoQuantProcessor) else None
+                torch_empty_cache(device=flush_device)
 
         # Close MOE chunks progress bar
         moe_chunk_pb.close()
