@@ -623,8 +623,7 @@ def _run_single_subset_pass(
                 subset[name].forward_hook_last = False
 
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
-        torch_sync()
-        torch_empty_cache()
+        torch_empty_cache(sync=True)
     moe_skip_modules = []
     if calibration_coverage_policy.validate_input_coverage:
         # Coverage validation is a policy decision captured by the plan.
@@ -773,10 +772,10 @@ def _run_single_subset_pass(
             # Capture-only modules should not be finalized or offloaded.
             continue
         processed_subset[name] = named_module
-    torch_sync()
-
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
-        torch_empty_cache()
+        torch_empty_cache(sync=True)
+    else:
+        torch_sync()
 
     if subset_event_cb:
         subset_event_cb(stage="quant_complete", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=list(subset.keys()), processor=getattr(processor, "name", type(processor).__name__))

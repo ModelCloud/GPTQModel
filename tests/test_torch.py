@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+import gptqmodel.utils.torch as torch_utils
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
 from gptqmodel.nn_modules.qlinear.lookahead import configure_default_lookahead
 from gptqmodel.nn_modules.qlinear.torch import TorchQuantLinear
@@ -210,6 +211,18 @@ def test_cached_forward_matches_baseline():
     torch.testing.assert_close(ref, cached)
     assert x.dtype in module._cached_weights
     assert module._cached_weights[x.dtype].device.type == device.type
+
+
+def test_torch_empty_cache_syncs_before_releasing_allocator(monkeypatch):
+    calls = []
+    device = torch.device("cpu")
+
+    monkeypatch.setattr(torch_utils, "timed_gc_collect", lambda: calls.append("gc") or 0)
+    monkeypatch.setattr(torch_utils, "torch_sync", lambda device=None: calls.append(("sync", device)))
+    monkeypatch.setattr(torch_utils, "empty_cache_for_device", lambda device: calls.append(("empty", device)) or True)
+
+    assert torch_utils.torch_empty_cache(device=device, gc=True, sync=True) is True
+    assert calls == ["gc", ("sync", device), ("empty", device)]
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 CUDA devices")

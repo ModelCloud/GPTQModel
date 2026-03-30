@@ -841,14 +841,13 @@ def run_layer_stage(
                             finalize_count,
                             layer_index,
                         )
-                        torch_sync()
                         if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
-                            torch_empty_cache()
+                            torch_empty_cache(sync=True)
                         elif _should_empty_cache_after_sync_finalize(
                             looper,
                             finalize_tasks=finalize_tasks,
                         ):
-                            torch_empty_cache(gc=False)
+                            torch_empty_cache(gc=False, sync=True)
                     else:
                         # Asynchronous (current/default behavior): drain in background thread
                         # This allows next layer to start while current layer finalizes

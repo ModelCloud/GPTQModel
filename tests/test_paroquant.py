@@ -1198,13 +1198,13 @@ def test_paroquant_processor_subsection_scope_flushes_cuda_cache_between_groups(
 
     processor._optimize_group = fake_optimize_group  # type: ignore[method-assign]
 
-    sync_calls = []
     empty_cache_calls = []
-    monkeypatch.setattr(paroquant_processor_module, "torch_sync", lambda: sync_calls.append(True))
     monkeypatch.setattr(
         paroquant_processor_module,
         "torch_empty_cache",
-        lambda gc=False: empty_cache_calls.append(gc),
+        lambda device=None, gc=True, sync=False: empty_cache_calls.append(
+            {"device": device, "gc": gc, "sync": sync}
+        ),
     )
 
     state = SimpleNamespace(
@@ -1219,8 +1219,7 @@ def test_paroquant_processor_subsection_scope_flushes_cuda_cache_between_groups(
 
     processor._quantize_layer(layer_index=0, state=state)
 
-    assert sync_calls == [True]
-    assert empty_cache_calls == [False]
+    assert empty_cache_calls == [{"device": None, "gc": False, "sync": True}]
 
 
 def test_paroquant_processor_layer_scope_falls_back_to_clone_for_expert_like_groups(monkeypatch):
