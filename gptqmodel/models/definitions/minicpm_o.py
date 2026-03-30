@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from copy import deepcopy
-from typing import Dict
+from typing import Dict, Optional
 
 from transformers import AutoModel, AutoProcessor, ProcessorMixin
 
@@ -152,22 +152,11 @@ class MiniCPMOQModel(BaseQModel):
         return AutoProcessor.from_pretrained(self.model_local_path, trust_remote_code=True)
 
     @staticmethod
-    def _image_inputs(conversation: list[dict]):
-        images = []
-        for message in conversation:
-            content = message.get("content", "")
-            if not isinstance(content, list):
-                continue
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "image":
-                    images.append(fetch_image(item))
-        return images
-
-    @staticmethod
     def _normalize_conversation(
         conversation: list[dict],
-    ) -> tuple[list[dict], list[int]]:
+    ) -> tuple[list[dict], list, list[int]]:
         normalized = []
+        images = []
         audio_parts = []
 
         for index, message in enumerate(deepcopy(conversation)):
@@ -177,7 +166,6 @@ class MiniCPMOQModel(BaseQModel):
                 continue
 
             text_parts = []
-            has_audio = False
             for item in content:
                 if isinstance(item, str):
                     text_parts.append(item)
@@ -185,33 +173,66 @@ class MiniCPMOQModel(BaseQModel):
 
                 item_type = item.get("type")
                 if item_type == "image":
+                    images.append(fetch_image(item))
                     text_parts.append("<image>./</image>")
                 elif item_type == "audio":
-                    has_audio = True
+                    audio_parts.append(index)
                     text_parts.append("<audio>./</audio>")
                 elif item_type == "text":
                     text_parts.append(item.get("text", ""))
                 else:
                     raise ValueError(f"Unsupported MiniCPM-o content type: {item_type}")
 
-            if has_audio:
-                audio_parts.append(index)
-
             message["content"] = "\n".join(part for part in text_parts if part)
             normalized.append(message)
 
-        return normalized, audio_parts
+        return normalized, images, audio_parts
 
-    def preprocess_dataset(self, samples: Dict) -> Dict:
-        for sample in samples:
-            print("sss", sample)
-            if isinstance(sample["content"], list):
-                for content in sample["content"]:
-                    if content.get("type") == "image":
-                        content["image"] = fetch_image({"image": content["image"]})
-        return samples
+    @classmethod
+    def prepare_inputs_for_conversations(
+        cls,
+        processor: ProcessorMixin,
+        conversations: list[dict] | list[list[dict]],
+    ):
+        if conversations and isinstance(conversations[0], dict):
+            conversations = [conversations]
+
+        prompts = []
+        images = []
+        audios = []
+        audio_parts = []
+
+        for conversation in conversations:
+            normalized, image_inputs, audio_part_inputs = cls._normalize_conversation(conversation)
+            audio_inputs = process_audio_info(conversation, use_audio_in_video=False) or []
+
+            prompts.append(
+                processor.tokenizer.apply_chat_template(
+                    normalized,
+                    tokenize=False,
+                )
+            )
+            images.append(image_inputs)
+            audios.append(audio_inputs)
+            audio_parts.append(audio_part_inputs)
+
+        inputs = processor(
+            prompts,
+            images,
+            audios,
+            audio_parts,
+            return_tensors="pt",
+        )
+        return inputs
+
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
+        processor = self.processor or self.load_processor()
         calib_data = []
         for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
-            calib_data.append(batch)
+            calib_data.append(
+                self.prepare_inputs_for_conversations(
+                    processor,
+                    batch,
+                )
+            )
         return calib_data
