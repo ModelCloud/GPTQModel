@@ -1491,7 +1491,7 @@ class ModelTest(unittest.TestCase):
 
                     q_tokenizer = q_model.tokenizer or self.load_tokenizer(path, trust_remote_code=trust_remote_code)
                     if need_create_processor:
-                        processor = AutoProcessor.from_pretrained(path)
+                        processor = AutoProcessor.from_pretrained(path, trust_remote_code=trust_remote_code)
             except Exception:
                 if cleanup_callback is not None:
                     try:
