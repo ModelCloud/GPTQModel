@@ -2499,6 +2499,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_quantizer_lr": "opt_quantizer_lr",
             "opt_pair_ratio": "opt_pair_ratio",
             "opt_seed": "opt_seed",
+            "opt_optimizer": "opt_optimizer",
+            "opt_weight_decay": "opt_weight_decay",
+            "opt_betas": "opt_betas",
+            "opt_eps": "opt_eps",
+            "opt_amsgrad": "opt_amsgrad",
+            "opt_sgd_momentum": "opt_sgd_momentum",
+            "opt_sgd_dampening": "opt_sgd_dampening",
+            "opt_sgd_nesterov": "opt_sgd_nesterov",
             "opt_fused_rotation": "opt_fused_rotation",
             "opt_stage_cudagraph": "opt_stage_cudagraph",
             "opt_train_on_noisy_inputs": "opt_train_on_noisy_inputs",
@@ -2845,6 +2853,14 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_quantizer_lr: float = field(default=1e-6)
     opt_pair_ratio: float = field(default=0.5)
     opt_seed: int = field(default=0)
+    opt_optimizer: str = field(default="adamw")
+    opt_weight_decay: float = field(default=0.01)
+    opt_betas: Tuple[float, float] = field(default=(0.9, 0.95))
+    opt_eps: float = field(default=1e-10)
+    opt_amsgrad: bool = field(default=False)
+    opt_sgd_momentum: float = field(default=0.0)
+    opt_sgd_dampening: float = field(default=0.0)
+    opt_sgd_nesterov: bool = field(default=False)
     opt_fused_rotation: bool = field(default=True)
     opt_stage_cudagraph: bool = field(default=True)
     opt_train_on_noisy_inputs: bool = field(default=False)
@@ -2881,6 +2897,16 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_quantizer_lr = float(self.opt_quantizer_lr)
         self.opt_pair_ratio = float(self.opt_pair_ratio)
         self.opt_seed = int(self.opt_seed)
+        self.opt_optimizer = str(self.opt_optimizer).strip().lower()
+        self.opt_weight_decay = float(self.opt_weight_decay)
+        if not isinstance(self.opt_betas, (list, tuple)) or len(self.opt_betas) != 2:
+            raise ValueError("ParoQuantizeConfig: `opt_betas` must be a 2-tuple/list of floats.")
+        self.opt_betas = (float(self.opt_betas[0]), float(self.opt_betas[1]))
+        self.opt_eps = float(self.opt_eps)
+        self.opt_amsgrad = bool(self.opt_amsgrad)
+        self.opt_sgd_momentum = float(self.opt_sgd_momentum)
+        self.opt_sgd_dampening = float(self.opt_sgd_dampening)
+        self.opt_sgd_nesterov = bool(self.opt_sgd_nesterov)
         self.opt_fused_rotation = bool(self.opt_fused_rotation)
         self.opt_stage_cudagraph = bool(self.opt_stage_cudagraph)
         self.opt_train_on_noisy_inputs = bool(self.opt_train_on_noisy_inputs)
@@ -2900,6 +2926,22 @@ class ParoQuantizeConfig(QuantizeConfig):
             raise ValueError("ParoQuantizeConfig: optimization learning rates must be positive.")
         if not (0.0 < self.opt_pair_ratio <= 0.5):
             raise ValueError("ParoQuantizeConfig: `opt_pair_ratio` must be in the interval (0, 0.5].")
+        if self.opt_optimizer not in {"adamw", "adam", "sgd"}:
+            raise ValueError("ParoQuantizeConfig: `opt_optimizer` must be one of {'adamw', 'adam', 'sgd'}.")
+        if self.opt_weight_decay < 0:
+            raise ValueError("ParoQuantizeConfig: `opt_weight_decay` must be non-negative.")
+        if self.opt_eps <= 0:
+            raise ValueError("ParoQuantizeConfig: `opt_eps` must be positive.")
+        if not all(0.0 <= beta < 1.0 for beta in self.opt_betas):
+            raise ValueError("ParoQuantizeConfig: `opt_betas` values must be in the interval [0, 1).")
+        if self.opt_sgd_momentum < 0:
+            raise ValueError("ParoQuantizeConfig: `opt_sgd_momentum` must be non-negative.")
+        if self.opt_sgd_dampening < 0:
+            raise ValueError("ParoQuantizeConfig: `opt_sgd_dampening` must be non-negative.")
+        if self.opt_sgd_nesterov and self.opt_sgd_momentum <= 0:
+            raise ValueError("ParoQuantizeConfig: `opt_sgd_nesterov=True` requires `opt_sgd_momentum > 0`.")
+        if self.opt_sgd_nesterov and self.opt_sgd_dampening != 0:
+            raise ValueError("ParoQuantizeConfig: `opt_sgd_nesterov=True` requires `opt_sgd_dampening == 0`.")
         if self.opt_scope not in {"module", "compute_block", "layer"}:
             raise ValueError("ParoQuantizeConfig: `opt_scope` must be one of {'module', 'compute_block', 'layer'}.")
         if self.opt_stage_impl not in {"fast", "reference"}:
@@ -2932,6 +2974,14 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_quantizer_lr"] = self.opt_quantizer_lr
         meta_payload["opt_pair_ratio"] = self.opt_pair_ratio
         meta_payload["opt_seed"] = self.opt_seed
+        meta_payload["opt_optimizer"] = self.opt_optimizer
+        meta_payload["opt_weight_decay"] = self.opt_weight_decay
+        meta_payload["opt_betas"] = list(self.opt_betas)
+        meta_payload["opt_eps"] = self.opt_eps
+        meta_payload["opt_amsgrad"] = self.opt_amsgrad
+        meta_payload["opt_sgd_momentum"] = self.opt_sgd_momentum
+        meta_payload["opt_sgd_dampening"] = self.opt_sgd_dampening
+        meta_payload["opt_sgd_nesterov"] = self.opt_sgd_nesterov
         meta_payload["opt_fused_rotation"] = self.opt_fused_rotation
         meta_payload["opt_stage_cudagraph"] = self.opt_stage_cudagraph
         meta_payload["opt_train_on_noisy_inputs"] = self.opt_train_on_noisy_inputs

@@ -131,10 +131,14 @@ def apply_paroquant_rotation_reference(
 
 
 def _rotation_sources() -> list[str]:
-    """Return the native extension sources for the fused CUDA rotation op."""
+    """Return the native extension sources for the fused CUDA rotation op.
+
+    Build this as a plain custom-op library instead of a Python extension.
+    The Python-module path pulls in pybind11 initialization that segfaults on
+    this host during ``PyInit_*`` even though the CUDA op itself is fine.
+    """
     root = Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "paroquant"
     return [
-        str(root / "pybind.cpp"),
         str(root / "rotation.cu"),
     ]
 
@@ -217,6 +221,7 @@ def _load_rotation_extension() -> bool:
                 "--use_fast_math",
             ],
             extra_cflags=["-O2", "-std=c++17"],
+            is_python_module=False,
             verbose=False,
         )
         return True

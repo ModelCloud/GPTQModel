@@ -203,6 +203,14 @@ def make_paroquant_config(
     opt_train_samples: int = 2048,
     opt_validation_samples: int = 64,
     opt_batch_size: int = 64,
+    opt_optimizer: str = "adamw",
+    opt_weight_decay: float = 0.01,
+    opt_betas: tuple[float, float] = (0.9, 0.95),
+    opt_eps: float = 1e-10,
+    opt_amsgrad: bool = False,
+    opt_sgd_momentum: float = 0.0,
+    opt_sgd_dampening: float = 0.0,
+    opt_sgd_nesterov: bool = False,
     offload_to_disk: bool = False,
 ) -> QuantizeConfig:
     if sym is not True:
@@ -224,6 +232,14 @@ def make_paroquant_config(
         opt_train_samples=opt_train_samples,
         opt_validation_samples=opt_validation_samples,
         opt_batch_size=opt_batch_size,
+        opt_optimizer=opt_optimizer,
+        opt_weight_decay=opt_weight_decay,
+        opt_betas=opt_betas,
+        opt_eps=opt_eps,
+        opt_amsgrad=opt_amsgrad,
+        opt_sgd_momentum=opt_sgd_momentum,
+        opt_sgd_dampening=opt_sgd_dampening,
+        opt_sgd_nesterov=opt_sgd_nesterov,
     )
 
 

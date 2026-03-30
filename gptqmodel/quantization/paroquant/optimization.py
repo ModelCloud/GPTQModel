@@ -39,6 +39,7 @@ from ...utils.paroquant import (
 
 _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")
 _PAROQUANT_QUANTIZER_IMPLS: tuple[str, ...] = ("fast", "reference")
+_PAROQUANT_OPTIMIZERS: tuple[str, ...] = ("adamw", "adam", "sgd")
 _PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL = 8_000_000
 
 
@@ -57,6 +58,16 @@ def _normalize_quantizer_impl(name: str) -> str:
         raise ValueError(
             "ParoQuant optimization: `quantizer_impl` must be one of "
             f"{_PAROQUANT_QUANTIZER_IMPLS}, got `{name}`."
+        )
+    return normalized
+
+
+def _normalize_opt_optimizer(name: str) -> str:
+    normalized = str(name).strip().lower()
+    if normalized not in _PAROQUANT_OPTIMIZERS:
+        raise ValueError(
+            "ParoQuant optimization: `optimizer_name` must be one of "
+            f"{_PAROQUANT_OPTIMIZERS}, got `{name}`."
         )
     return normalized
 
@@ -1009,6 +1020,128 @@ def _evaluate_model(
         return float(loss.item())
 
 
+def _normalize_optimizer_param_groups(
+    param_groups: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    normalized_groups: list[dict[str, object]] = []
+    for param_group in param_groups:
+        params = [param for param in param_group.get("params", []) if isinstance(param, nn.Parameter) and param.requires_grad]
+        if not params:
+            continue
+        betas_obj = tuple(float(beta) for beta in param_group.get("betas", (0.9, 0.95)))
+        normalized_groups.append(
+            {
+                "params": params,
+                "lr": float(param_group["lr"]),
+                "weight_decay": float(param_group.get("weight_decay", 0.01)),
+                "betas": (betas_obj[0], betas_obj[1]),
+                "eps": float(param_group.get("eps", 1e-10)),
+                "amsgrad": bool(param_group.get("amsgrad", False)),
+                "momentum": float(param_group.get("momentum", 0.0)),
+                "dampening": float(param_group.get("dampening", 0.0)),
+                "nesterov": bool(param_group.get("nesterov", False)),
+            }
+        )
+    return normalized_groups
+
+
+def _optimizer_param_groups_support_fused(
+    normalized_groups: Sequence[dict[str, object]],
+    *,
+    device: torch.device,
+) -> bool:
+    return device.type == "cuda" and all(
+        isinstance(param, nn.Parameter) and param.device.type == "cuda" and torch.is_floating_point(param)
+        for group in normalized_groups
+        for param in group.get("params", [])
+    )
+
+
+def _optimizer_lr_value(
+    lr: float,
+    *,
+    device: torch.device,
+    graph_capture: bool,
+) -> float | torch.Tensor:
+    if not graph_capture:
+        return float(lr)
+    return torch.tensor(float(lr), device=device, dtype=torch.float32)
+
+
+def _set_optimizer_group_lr(param_group: dict[str, object], value: float) -> None:
+    current = param_group.get("lr")
+    if isinstance(current, torch.Tensor):
+        current.fill_(float(value))
+        param_group["lr"] = current
+        return
+    param_group["lr"] = float(value)
+
+
+def build_paroquant_optimizer(
+    normalized_groups: Sequence[dict[str, object]],
+    *,
+    device: torch.device,
+    optimizer_name: str,
+    graph_capture: bool = False,
+) -> torch.optim.Optimizer:
+    normalized_name = _normalize_opt_optimizer(optimizer_name)
+    use_fused = normalized_name in {"adamw", "adam", "sgd"} and _optimizer_param_groups_support_fused(
+        normalized_groups,
+        device=device,
+    )
+
+    def _base_groups() -> list[dict[str, object]]:
+        groups: list[dict[str, object]] = []
+        for group in normalized_groups:
+            groups.append(
+                {
+                    "params": group["params"],
+                    "lr": _optimizer_lr_value(float(group.get("lr", 0.0)), device=device, graph_capture=graph_capture),
+                    "weight_decay": float(group.get("weight_decay", 0.01)),
+                }
+            )
+        return groups
+
+    if normalized_name in {"adamw", "adam"}:
+        groups = _base_groups()
+        for built_group, source_group in zip(groups, normalized_groups):
+            betas_obj = tuple(float(beta) for beta in source_group.get("betas", (0.9, 0.95)))
+            built_group["betas"] = (betas_obj[0], betas_obj[1])
+            built_group["eps"] = float(source_group.get("eps", 1e-10))
+            built_group["amsgrad"] = bool(source_group.get("amsgrad", False))
+
+        optimizer_cls = torch.optim.AdamW if normalized_name == "adamw" else torch.optim.Adam
+        optimizer_kwargs: dict[str, object] = {}
+        if graph_capture:
+            optimizer_kwargs["capturable"] = True
+        if use_fused:
+            optimizer_kwargs["fused"] = True
+        try:
+            return optimizer_cls(groups, **optimizer_kwargs)
+        except (RuntimeError, TypeError, ValueError):
+            if use_fused:
+                optimizer_kwargs.pop("fused", None)
+                return optimizer_cls(groups, **optimizer_kwargs)
+            raise
+
+    if normalized_name == "sgd":
+        groups = _base_groups()
+        for built_group, source_group in zip(groups, normalized_groups):
+            built_group["momentum"] = float(source_group.get("momentum", 0.0))
+            built_group["dampening"] = float(source_group.get("dampening", 0.0))
+            built_group["nesterov"] = bool(source_group.get("nesterov", False))
+
+        optimizer_kwargs = {"fused": True} if use_fused else {}
+        try:
+            return torch.optim.SGD(groups, **optimizer_kwargs)
+        except (RuntimeError, TypeError, ValueError):
+            if use_fused:
+                return torch.optim.SGD(groups)
+            raise
+
+    raise AssertionError(f"Unhandled ParoQuant optimizer `{normalized_name}`.")
+
+
 def _run_stage_gptqmodel_impl(
     *,
     model: nn.Module,
@@ -1019,22 +1152,10 @@ def _run_stage_gptqmodel_impl(
     param_groups: Sequence[dict[str, object]],
     epochs: int,
     batch_size: int,
+    optimizer_name: str,
 ) -> tuple[float, float]:
     """Run one optimization stage with validation-based best-state selection."""
-    normalized_groups = []
-    for param_group in param_groups:
-        params = [param for param in param_group.get("params", []) if param.requires_grad]
-        if not params:
-            continue
-        normalized_groups.append(
-            {
-                "params": params,
-                "lr": float(param_group["lr"]),
-                "weight_decay": float(param_group.get("weight_decay", 0.01)),
-                "betas": tuple(param_group.get("betas", (0.9, 0.95))),
-                "eps": float(param_group.get("eps", 1e-10)),
-            }
-        )
+    normalized_groups = _normalize_optimizer_param_groups(param_groups)
 
     use_amp = inputs_train.device.type == "cuda"
     if epochs <= 0 or not normalized_groups:
@@ -1042,10 +1163,15 @@ def _run_stage_gptqmodel_impl(
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         return train_loss, val_loss
 
-    optimizer = torch.optim.AdamW(normalized_groups)
+    optimizer = build_paroquant_optimizer(
+        normalized_groups,
+        device=inputs_train.device,
+        optimizer_name=optimizer_name,
+        graph_capture=False,
+    )
     steps_per_epoch = max(1, math.ceil(max(1, inputs_train.shape[0]) / max(1, batch_size)))
     total_steps = max(1, epochs * steps_per_epoch)
-    base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
+    base_lrs = [float(group["lr"]) for group in normalized_groups]
     scaler = torch.amp.GradScaler(enabled=use_amp)
     global_step = 0
 
@@ -1069,7 +1195,10 @@ def _run_stage_gptqmodel_impl(
             global_step += 1
             cosine_ratio = 0.5 * (1.0 + math.cos(math.pi * min(global_step, total_steps) / total_steps))
             for group, base_lr in zip(optimizer.param_groups, base_lrs):
-                group["lr"] = (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio)
+                _set_optimizer_group_lr(
+                    group,
+                    (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio),
+                )
 
             model.reset_masked_angles()
             epoch_loss += float(loss.item())
@@ -1117,44 +1246,21 @@ def _run_stage_gptqmodel_cudagraph(
     param_groups: Sequence[dict[str, object]],
     epochs: int,
     batch_size: int,
+    optimizer_name: str,
 ) -> tuple[float, float]:
     """Replay fixed-size CUDA mini-batches through one captured train-step graph with eager tail fallback."""
-    normalized_groups = []
-    for param_group in param_groups:
-        params = [param for param in param_group.get("params", []) if param.requires_grad]
-        if not params:
-            continue
-        normalized_groups.append(
-            {
-                "params": params,
-                "lr": float(param_group["lr"]),
-                "weight_decay": float(param_group.get("weight_decay", 0.01)),
-                "betas": tuple(param_group.get("betas", (0.9, 0.95))),
-                "eps": float(param_group.get("eps", 1e-10)),
-            }
-        )
+    normalized_groups = _normalize_optimizer_param_groups(param_groups)
 
     if epochs <= 0 or not normalized_groups:
         train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
         return train_loss, val_loss
 
-    lr_tensors = [
-        torch.tensor(float(group["lr"]), device=inputs_train.device, dtype=torch.float32)
-        for group in normalized_groups
-    ]
-    optimizer = torch.optim.AdamW(
-        [
-            {
-                "params": group["params"],
-                "lr": lr_tensor,
-                "weight_decay": group["weight_decay"],
-                "betas": group["betas"],
-                "eps": group["eps"],
-            }
-            for group, lr_tensor in zip(normalized_groups, lr_tensors)
-        ],
-        capturable=True,
+    optimizer = build_paroquant_optimizer(
+        normalized_groups,
+        device=inputs_train.device,
+        optimizer_name=optimizer_name,
+        graph_capture=True,
     )
     steps_per_epoch = max(1, math.ceil(max(1, inputs_train.shape[0]) / max(1, batch_size)))
     total_steps = max(1, epochs * steps_per_epoch)
@@ -1211,10 +1317,11 @@ def _run_stage_gptqmodel_cudagraph(
         for input_batch, target_batch in zip(_chunk_rows(inputs_train, batch_size), _chunk_rows(targets_train, batch_size)):
             global_step += 1
             cosine_ratio = 0.5 * (1.0 + math.cos(math.pi * min(global_step, total_steps) / total_steps))
-            for group, lr_tensor, base_lr in zip(optimizer.param_groups, lr_tensors, base_lrs):
-                new_lr = (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio)
-                lr_tensor.fill_(new_lr)
-                group["lr"] = lr_tensor
+            for group, base_lr in zip(optimizer.param_groups, base_lrs):
+                _set_optimizer_group_lr(
+                    group,
+                    (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio),
+                )
 
             if input_batch.shape[0] == batch_size:
                 static_input.copy_(input_batch)
@@ -1255,6 +1362,7 @@ def _run_stage_gptqmodel(
     epochs: int,
     batch_size: int,
     stage_cudagraph: Optional[bool] = None,
+    optimizer_name: str = "adamw",
 ) -> tuple[float, float]:
     """Run the fast stage, preferring CUDA-graph replay on fused CUDA paths and falling back to eager."""
     if not _should_use_paroquant_stage_cudagraph(
@@ -1272,6 +1380,7 @@ def _run_stage_gptqmodel(
             param_groups=param_groups,
             epochs=epochs,
             batch_size=batch_size,
+            optimizer_name=optimizer_name,
         )
 
     initial_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
@@ -1286,6 +1395,7 @@ def _run_stage_gptqmodel(
             param_groups=param_groups,
             epochs=epochs,
             batch_size=batch_size,
+            optimizer_name=optimizer_name,
         )
     except Exception:
         model.load_state_dict(initial_state, strict=True)
@@ -1300,6 +1410,7 @@ def _run_stage_gptqmodel(
             param_groups=param_groups,
             epochs=epochs,
             batch_size=batch_size,
+            optimizer_name=optimizer_name,
         )
 
 
@@ -1313,22 +1424,10 @@ def _run_stage_reference(
     param_groups: Sequence[dict[str, object]],
     epochs: int,
     batch_size: int,
+    optimizer_name: str,
 ) -> tuple[float, float]:
     """Official-parity stage runner: AMP + GradScaler + cosine LR update."""
-    normalized_groups = []
-    for param_group in param_groups:
-        params = [param for param in param_group.get("params", []) if param.requires_grad]
-        if not params:
-            continue
-        normalized_groups.append(
-            {
-                "params": params,
-                "lr": float(param_group["lr"]),
-                "weight_decay": float(param_group.get("weight_decay", 0.01)),
-                "betas": tuple(param_group.get("betas", (0.9, 0.95))),
-                "eps": float(param_group.get("eps", 1e-10)),
-            }
-        )
+    normalized_groups = _normalize_optimizer_param_groups(param_groups)
 
     use_amp = inputs_train.device.type == "cuda"
     if epochs <= 0 or not normalized_groups:
@@ -1336,10 +1435,15 @@ def _run_stage_reference(
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         return train_loss, val_loss
 
-    optimizer = torch.optim.AdamW(normalized_groups)
+    optimizer = build_paroquant_optimizer(
+        normalized_groups,
+        device=inputs_train.device,
+        optimizer_name=optimizer_name,
+        graph_capture=False,
+    )
     steps_per_epoch = max(1, math.ceil(max(1, inputs_train.shape[0]) / max(1, batch_size)))
     total_steps = max(1, epochs * steps_per_epoch)
-    base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
+    base_lrs = [float(group["lr"]) for group in normalized_groups]
     scaler = torch.amp.GradScaler(enabled=use_amp)
     global_step = 0
 
@@ -1365,7 +1469,10 @@ def _run_stage_reference(
             global_step += 1
             cosine_ratio = 0.5 * (1.0 + math.cos(math.pi * min(global_step, total_steps) / total_steps))
             for group, base_lr in zip(optimizer.param_groups, base_lrs):
-                group["lr"] = (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio)
+                _set_optimizer_group_lr(
+                    group,
+                    (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio),
+                )
 
             model.reset_masked_angles()
             epoch_loss += float(loss.item())
@@ -1394,6 +1501,7 @@ def _run_stage(
     batch_size: int,
     stage_impl: str,
     stage_cudagraph: Optional[bool] = None,
+    optimizer_name: str = "adamw",
 ) -> tuple[float, float]:
     impl = _normalize_opt_impl(stage_impl, field="stage_impl")
     with _activate_stage_params(model, param_groups):
@@ -1407,6 +1515,7 @@ def _run_stage(
                 param_groups=param_groups,
                 epochs=epochs,
                 batch_size=batch_size,
+                optimizer_name=optimizer_name,
             )
         return _run_stage_gptqmodel(
             model=model,
@@ -1418,6 +1527,7 @@ def _run_stage(
             epochs=epochs,
             batch_size=batch_size,
             stage_cudagraph=stage_cudagraph,
+            optimizer_name=optimizer_name,
         )
 
 
@@ -1511,6 +1621,14 @@ def optimize_paroquant_linear(
     weight_lr: float,
     quantizer_lr: float,
     seed: int,
+    optimizer_name: str = "adamw",
+    optimizer_weight_decay: float = 0.01,
+    optimizer_betas: tuple[float, float] = (0.9, 0.95),
+    optimizer_eps: float = 1e-10,
+    optimizer_amsgrad: bool = False,
+    sgd_momentum: float = 0.0,
+    sgd_dampening: float = 0.0,
+    sgd_nesterov: bool = False,
     fused_rotation: Optional[bool] = None,
     stage_cudagraph: Optional[bool] = None,
     stage_impl: Literal["fast", "reference"] = "fast",
@@ -1526,6 +1644,8 @@ def optimize_paroquant_linear(
 
     normalized_group_size = _normalize_group_size(group_size, weight.shape[1])
     quantizer_sym = _quantizer_sym_for_impl(sym, quantizer_impl)
+    normalized_optimizer_name = _normalize_opt_optimizer(optimizer_name)
+    normalized_optimizer_betas = (float(optimizer_betas[0]), float(optimizer_betas[1]))
     rows = _sample_activation_rows(inputs, max_rows=max(1, int(train_rows) + int(val_rows)))
     if rows.numel() == 0:
         return _identity_result(
@@ -1596,13 +1716,34 @@ def optimize_paroquant_linear(
         inputs_val=inputs_val,
         targets_val=targets_val,
         param_groups=[
-            {"params": [model.channel_scales_opt], "lr": rotation_lr},
-            {"params": [model.theta], "lr": rotation_lr},
+            {
+                "params": [model.channel_scales_opt],
+                "lr": rotation_lr,
+                "weight_decay": optimizer_weight_decay,
+                "betas": normalized_optimizer_betas,
+                "eps": optimizer_eps,
+                "amsgrad": optimizer_amsgrad,
+                "momentum": sgd_momentum,
+                "dampening": sgd_dampening,
+                "nesterov": sgd_nesterov,
+            },
+            {
+                "params": [model.theta],
+                "lr": rotation_lr,
+                "weight_decay": optimizer_weight_decay,
+                "betas": normalized_optimizer_betas,
+                "eps": optimizer_eps,
+                "amsgrad": optimizer_amsgrad,
+                "momentum": sgd_momentum,
+                "dampening": sgd_dampening,
+                "nesterov": sgd_nesterov,
+            },
         ],
         epochs=rotation_epochs,
         batch_size=batch_size,
         stage_impl=normalized_stage_impl,
         stage_cudagraph=stage_cudagraph,
+        optimizer_name=normalized_optimizer_name,
     )
 
     model.init_quantizer()
@@ -1613,13 +1754,34 @@ def optimize_paroquant_linear(
         inputs_val=inputs_val,
         targets_val=targets_val,
         param_groups=[
-            {"params": [model.weight], "lr": weight_lr},
-            {"params": model.quantizer.optim_params(), "lr": quantizer_lr},
+            {
+                "params": [model.weight],
+                "lr": weight_lr,
+                "weight_decay": optimizer_weight_decay,
+                "betas": normalized_optimizer_betas,
+                "eps": optimizer_eps,
+                "amsgrad": optimizer_amsgrad,
+                "momentum": sgd_momentum,
+                "dampening": sgd_dampening,
+                "nesterov": sgd_nesterov,
+            },
+            {
+                "params": model.quantizer.optim_params(),
+                "lr": quantizer_lr,
+                "weight_decay": optimizer_weight_decay,
+                "betas": normalized_optimizer_betas,
+                "eps": optimizer_eps,
+                "amsgrad": optimizer_amsgrad,
+                "momentum": sgd_momentum,
+                "dampening": sgd_dampening,
+                "nesterov": sgd_nesterov,
+            },
         ],
         epochs=finetune_epochs,
         batch_size=batch_size,
         stage_impl=normalized_stage_impl,
         stage_cudagraph=stage_cudagraph,
+        optimizer_name=normalized_optimizer_name,
     )
 
     return _result_from_model(
@@ -1632,6 +1794,7 @@ def optimize_paroquant_linear(
 
 __all__ = [
     "ParoQuantOptimizationResult",
+    "build_paroquant_optimizer",
     "build_random_rotation_buffers",
     "optimize_paroquant_linear",
     "pseudo_quantize_dequant",

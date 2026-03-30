@@ -54,9 +54,11 @@ from ..quantization.paroquant.optimization import (
     _activate_stage_params,
     _normalize_group_size,
     _normalize_opt_impl,
+    _normalize_opt_optimizer,
     _normalize_quantizer_impl,
     _quantizer_sym_for_impl,
     _result_from_model,
+    build_paroquant_optimizer,
     build_random_rotation_buffers,
     build_random_rotation_buffers_reference,
     optimize_paroquant_linear,
@@ -458,6 +460,14 @@ class ParoQuantProcessor(LoopProcessor):
                 weight_lr=self.qcfg.opt_weight_lr,
                 quantizer_lr=self.qcfg.opt_quantizer_lr,
                 seed=module_seed,
+                optimizer_name=getattr(self.qcfg, "opt_optimizer", "adamw"),
+                optimizer_weight_decay=float(getattr(self.qcfg, "opt_weight_decay", 0.01)),
+                optimizer_betas=tuple(getattr(self.qcfg, "opt_betas", (0.9, 0.95))),
+                optimizer_eps=float(getattr(self.qcfg, "opt_eps", 1e-10)),
+                optimizer_amsgrad=bool(getattr(self.qcfg, "opt_amsgrad", False)),
+                sgd_momentum=float(getattr(self.qcfg, "opt_sgd_momentum", 0.0)),
+                sgd_dampening=float(getattr(self.qcfg, "opt_sgd_dampening", 0.0)),
+                sgd_nesterov=bool(getattr(self.qcfg, "opt_sgd_nesterov", False)),
                 fused_rotation=self.qcfg.opt_fused_rotation,
                 stage_cudagraph=self._module_scope_stage_cudagraph_enabled(),
                 stage_impl=self.qcfg.opt_stage_impl,
@@ -534,6 +544,19 @@ class ParoQuantProcessor(LoopProcessor):
         if self._opt_scope_mode() == "module":
             return False
         return bool(getattr(self.qcfg, "opt_stage_cudagraph", False))
+
+    def _optimizer_param_group_kwargs(self) -> Dict[str, object]:
+        """Return shared optimizer hyperparameters for ParoQuant stage param groups."""
+        qcfg = getattr(self, "qcfg", None)
+        return {
+            "weight_decay": float(getattr(qcfg, "opt_weight_decay", 0.01)),
+            "betas": tuple(getattr(qcfg, "opt_betas", (0.9, 0.95))),
+            "eps": float(getattr(qcfg, "opt_eps", 1e-10)),
+            "amsgrad": bool(getattr(qcfg, "opt_amsgrad", False)),
+            "momentum": float(getattr(qcfg, "opt_sgd_momentum", 0.0)),
+            "dampening": float(getattr(qcfg, "opt_sgd_dampening", 0.0)),
+            "nesterov": bool(getattr(qcfg, "opt_sgd_nesterov", False)),
+        }
 
     def clean_group_layer_inputs(
         self,
@@ -1557,9 +1580,9 @@ class ParoQuantProcessor(LoopProcessor):
     def _normalize_group_optimizer_param_groups(
         param_groups: List[dict[str, object]],
     ) -> List[dict[str, object]]:
-        """Merge equivalent AdamW groups so grouped optimization pays less optimizer overhead."""
+        """Merge equivalent optimizer groups so grouped optimization pays less optimizer overhead."""
         normalized_groups: List[dict[str, object]] = []
-        group_index_by_key: Dict[tuple[float, float, tuple[float, float], float], int] = {}
+        group_index_by_key: Dict[tuple[float, float, tuple[float, float], float, bool, float, float, bool], int] = {}
         seen_param_ids: set[int] = set()
 
         for param_group in param_groups:
@@ -1585,7 +1608,11 @@ class ParoQuantProcessor(LoopProcessor):
             betas_obj = tuple(float(beta) for beta in param_group.get("betas", (0.9, 0.95)))
             betas = (betas_obj[0], betas_obj[1])
             eps = float(param_group.get("eps", 1e-10))
-            key = (lr, weight_decay, betas, eps)
+            amsgrad = bool(param_group.get("amsgrad", False))
+            momentum = float(param_group.get("momentum", 0.0))
+            dampening = float(param_group.get("dampening", 0.0))
+            nesterov = bool(param_group.get("nesterov", False))
+            key = (lr, weight_decay, betas, eps, amsgrad, momentum, dampening, nesterov)
 
             bucket_index = group_index_by_key.get(key)
             if bucket_index is None:
@@ -1597,6 +1624,10 @@ class ParoQuantProcessor(LoopProcessor):
                         "weight_decay": weight_decay,
                         "betas": betas,
                         "eps": eps,
+                        "amsgrad": amsgrad,
+                        "momentum": momentum,
+                        "dampening": dampening,
+                        "nesterov": nesterov,
                     }
                 )
             else:
@@ -1605,23 +1636,32 @@ class ParoQuantProcessor(LoopProcessor):
         return normalized_groups
 
     @staticmethod
+    def _build_group_optimizer(
+        normalized_groups: List[dict[str, object]],
+        *,
+        device: torch.device,
+        optimizer_name: str = "adamw",
+    ) -> torch.optim.Optimizer:
+        """Construct the grouped stage optimizer after redundant groups are merged away."""
+        return build_paroquant_optimizer(
+            normalized_groups,
+            device=device,
+            optimizer_name=optimizer_name,
+            graph_capture=False,
+        )
+
+    @staticmethod
     def _build_group_adamw(
         normalized_groups: List[dict[str, object]],
         *,
         device: torch.device,
     ) -> torch.optim.Optimizer:
-        """Construct the grouped AdamW optimizer after redundant groups are merged away."""
-        use_fused = device.type == "cuda" and all(
-            isinstance(param, nn.Parameter) and param.device.type == "cuda" and torch.is_floating_point(param)
-            for group in normalized_groups
-            for param in group.get("params", [])
+        """Backward-compatible wrapper for tests that still exercise the AdamW path directly."""
+        return ParoQuantProcessor._build_group_optimizer(
+            normalized_groups,
+            device=device,
+            optimizer_name="adamw",
         )
-        if use_fused:
-            try:
-                return torch.optim.AdamW(normalized_groups, fused=True)
-            except (RuntimeError, TypeError, ValueError):
-                pass
-        return torch.optim.AdamW(normalized_groups)
 
     @staticmethod
     def _group_state_key_matches_prefixes(state_key: str, active_prefixes: tuple[str, ...]) -> bool:
@@ -1680,6 +1720,7 @@ class ParoQuantProcessor(LoopProcessor):
     ) -> tuple[float, float]:
         """Run one grouped optimization stage against preserved full-layer outputs."""
         _normalize_opt_impl(self.qcfg.opt_stage_impl, field="stage_impl")
+        optimizer_name = _normalize_opt_optimizer(getattr(self.qcfg, "opt_optimizer", "adamw"))
         normalized_groups = self._normalize_group_optimizer_param_groups(param_groups)
 
         opt_device = next(layer.parameters()).device
@@ -1706,7 +1747,11 @@ class ParoQuantProcessor(LoopProcessor):
                 )
                 return train_loss, val_loss
 
-            optimizer = self._build_group_adamw(normalized_groups, device=opt_device)
+            optimizer = self._build_group_optimizer(
+                normalized_groups,
+                device=opt_device,
+                optimizer_name=optimizer_name,
+            )
             total_steps = max(1, epochs * max(1, len(input_batches_train)))
             base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
             scaler = torch.amp.GradScaler(enabled=use_amp)
@@ -1831,6 +1876,7 @@ class ParoQuantProcessor(LoopProcessor):
     ) -> tuple[float, float]:
         """Run one grouped layer stage while streaming train shards and validation batches from CPU."""
         _normalize_opt_impl(self.qcfg.opt_stage_impl, field="stage_impl")
+        optimizer_name = _normalize_opt_optimizer(getattr(self.qcfg, "opt_optimizer", "adamw"))
         normalized_groups = self._normalize_group_optimizer_param_groups(param_groups)
 
         opt_device = next(layer.parameters()).device
@@ -1853,7 +1899,11 @@ class ParoQuantProcessor(LoopProcessor):
                 )
                 return train_loss, val_loss
 
-            optimizer = self._build_group_adamw(normalized_groups, device=opt_device)
+            optimizer = self._build_group_optimizer(
+                normalized_groups,
+                device=opt_device,
+                optimizer_name=optimizer_name,
+            )
             total_steps = max(1, epochs * max(1, len(replay_batches_train)))
             base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
             scaler = torch.amp.GradScaler(enabled=use_amp)
@@ -1956,6 +2006,7 @@ class ParoQuantProcessor(LoopProcessor):
         metadata_cache: dict[tuple[int, str], torch.Tensor] = {}
         optim_modules: dict[str, _ParoQuantOptimLinear] = {}
         original_modules: dict[str, torch.nn.Module] = {}
+        optimizer_group_kwargs = self._optimizer_param_group_kwargs()
         try:
             for param in layer.parameters():
                 param.requires_grad_(False)
@@ -1974,10 +2025,10 @@ class ParoQuantProcessor(LoopProcessor):
                 replay_batches_train=replay_batches_train,
                 replay_batches_val=replay_batches_val,
                 param_groups=[
-                    {"params": [optim_module.channel_scales_opt], "lr": self.qcfg.opt_rotation_lr}
+                    {"params": [optim_module.channel_scales_opt], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": [optim_module.theta], "lr": self.qcfg.opt_rotation_lr}
+                    {"params": [optim_module.theta], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ],
                 epochs=int(self.qcfg.opt_rotation_epochs),
@@ -1993,10 +2044,10 @@ class ParoQuantProcessor(LoopProcessor):
                 replay_batches_train=replay_batches_train,
                 replay_batches_val=replay_batches_val,
                 param_groups=[
-                    {"params": [optim_module.weight], "lr": self.qcfg.opt_weight_lr}
+                    {"params": [optim_module.weight], "lr": self.qcfg.opt_weight_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": optim_module.quantizer.optim_params(), "lr": self.qcfg.opt_quantizer_lr}
+                    {"params": optim_module.quantizer.optim_params(), "lr": self.qcfg.opt_quantizer_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                     if optim_module.quantizer is not None
                 ],
@@ -2085,6 +2136,7 @@ class ParoQuantProcessor(LoopProcessor):
                 position_ids_val,
                 attention_masks_val,
             ) = self._group_dataset_for_device(state, next(layer_clone.parameters()).device)
+            optimizer_group_kwargs = self._optimizer_param_group_kwargs()
 
             self._run_group_stage(
                 layer_clone,
@@ -2100,10 +2152,10 @@ class ParoQuantProcessor(LoopProcessor):
                 position_ids_val=position_ids_val,
                 attention_masks_val=attention_masks_val,
                 param_groups=[
-                    {"params": [optim_module.channel_scales_opt], "lr": self.qcfg.opt_rotation_lr}
+                    {"params": [optim_module.channel_scales_opt], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": [optim_module.theta], "lr": self.qcfg.opt_rotation_lr}
+                    {"params": [optim_module.theta], "lr": self.qcfg.opt_rotation_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ],
                 epochs=int(self.qcfg.opt_rotation_epochs),
@@ -2126,10 +2178,10 @@ class ParoQuantProcessor(LoopProcessor):
                 position_ids_val=position_ids_val,
                 attention_masks_val=attention_masks_val,
                 param_groups=[
-                    {"params": [optim_module.weight], "lr": self.qcfg.opt_weight_lr}
+                    {"params": [optim_module.weight], "lr": self.qcfg.opt_weight_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                 ] + [
-                    {"params": optim_module.quantizer.optim_params(), "lr": self.qcfg.opt_quantizer_lr}
+                    {"params": optim_module.quantizer.optim_params(), "lr": self.qcfg.opt_quantizer_lr, **optimizer_group_kwargs}
                     for optim_module in optim_modules.values()
                     if optim_module.quantizer is not None
                 ],

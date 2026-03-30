@@ -10,6 +10,7 @@
 import copy
 from contextlib import contextmanager
 import inspect
+from pathlib import Path
 import sys
 import threading
 from types import SimpleNamespace
@@ -64,6 +65,14 @@ def test_paroquant_quantize_config_dispatches_constructor():
     assert cfg.format == FORMAT.PAROQUANT
     assert cfg.krot == 8
     assert cfg.opt_batch_size == 64
+    assert cfg.opt_optimizer == "adamw"
+    assert cfg.opt_weight_decay == pytest.approx(0.01)
+    assert cfg.opt_betas == pytest.approx((0.9, 0.95))
+    assert cfg.opt_eps == pytest.approx(1e-10)
+    assert cfg.opt_amsgrad is False
+    assert cfg.opt_sgd_momentum == pytest.approx(0.0)
+    assert cfg.opt_sgd_dampening == pytest.approx(0.0)
+    assert cfg.opt_sgd_nesterov is False
     assert cfg.opt_scope == "module"
     assert cfg.opt_stage_impl == "fast"
     assert cfg.opt_pair_impl == "fast"
@@ -94,6 +103,14 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_quantizer_lr": 1e-6,
                 "opt_pair_ratio": 0.5,
                 "opt_seed": 0,
+                "opt_optimizer": "sgd",
+                "opt_weight_decay": 0.02,
+                "opt_betas": [0.8, 0.9],
+                "opt_eps": 1e-8,
+                "opt_amsgrad": True,
+                "opt_sgd_momentum": 0.85,
+                "opt_sgd_dampening": 0.0,
+                "opt_sgd_nesterov": True,
                 "opt_fused_rotation": False,
                 "opt_stage_cudagraph": False,
                 "opt_train_on_noisy_inputs": True,
@@ -121,6 +138,14 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_quantizer_lr == 1e-6
     assert cfg.opt_pair_ratio == 0.5
     assert cfg.opt_seed == 0
+    assert cfg.opt_optimizer == "sgd"
+    assert cfg.opt_weight_decay == pytest.approx(0.02)
+    assert cfg.opt_betas == pytest.approx((0.8, 0.9))
+    assert cfg.opt_eps == pytest.approx(1e-8)
+    assert cfg.opt_amsgrad is True
+    assert cfg.opt_sgd_momentum == pytest.approx(0.85)
+    assert cfg.opt_sgd_dampening == pytest.approx(0.0)
+    assert cfg.opt_sgd_nesterov is True
     assert cfg.opt_fused_rotation is False
     assert cfg.opt_stage_cudagraph is False
     assert cfg.opt_train_on_noisy_inputs is True
@@ -139,6 +164,14 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.to_dict()["meta"]["opt_quantizer_impl"] == "reference"
     assert cfg.to_dict()["meta"]["opt_channel_scale_clamp_min"] == 0.02
     assert cfg.to_dict()["meta"]["opt_channel_scale_clamp_max"] == 50.0
+    assert cfg.to_dict()["meta"]["opt_optimizer"] == "sgd"
+    assert cfg.to_dict()["meta"]["opt_weight_decay"] == pytest.approx(0.02)
+    assert cfg.to_dict()["meta"]["opt_betas"] == [0.8, 0.9]
+    assert cfg.to_dict()["meta"]["opt_eps"] == pytest.approx(1e-8)
+    assert cfg.to_dict()["meta"]["opt_amsgrad"] is True
+    assert cfg.to_dict()["meta"]["opt_sgd_momentum"] == pytest.approx(0.85)
+    assert cfg.to_dict()["meta"]["opt_sgd_dampening"] == pytest.approx(0.0)
+    assert cfg.to_dict()["meta"]["opt_sgd_nesterov"] is True
 
 
 def test_paroquant_quantize_config_rejects_invalid_scale_clamp_range():
@@ -167,6 +200,49 @@ def test_paroquant_quantize_config_rejects_invalid_opt_scope():
             bits=4,
             group_size=128,
             opt_scope="block",
+        )
+
+
+def test_paroquant_quantize_config_rejects_invalid_opt_optimizer():
+    """Guard that ParoQuant optimizer selection stays within supported modes."""
+    with pytest.raises(ValueError, match="opt_optimizer"):
+        ParoQuantizeConfig(
+            bits=4,
+            group_size=128,
+            opt_optimizer="lion",
+        )
+
+
+def test_paroquant_quantize_config_rejects_invalid_optimizer_hyperparameters():
+    """Guard optimizer hyperparameter validation against invalid stage settings."""
+    with pytest.raises(ValueError, match="opt_betas"):
+        ParoQuantizeConfig(
+            bits=4,
+            group_size=128,
+            opt_betas=(0.9,),
+        )
+
+    with pytest.raises(ValueError, match="opt_eps"):
+        ParoQuantizeConfig(
+            bits=4,
+            group_size=128,
+            opt_eps=0.0,
+        )
+
+    with pytest.raises(ValueError, match="opt_sgd_nesterov"):
+        ParoQuantizeConfig(
+            bits=4,
+            group_size=128,
+            opt_sgd_nesterov=True,
+        )
+
+    with pytest.raises(ValueError, match="opt_sgd_dampening"):
+        ParoQuantizeConfig(
+            bits=4,
+            group_size=128,
+            opt_sgd_momentum=0.9,
+            opt_sgd_dampening=0.1,
+            opt_sgd_nesterov=True,
         )
 
 
@@ -774,6 +850,89 @@ def test_optimize_paroquant_linear_forwards_stage_cudagraph(monkeypatch):
     assert stage_cudagraph_calls == [False, False]
 
 
+def test_optimize_paroquant_linear_forwards_optimizer_name(monkeypatch):
+    """Guard that the selected stage optimizer is forwarded into both optimization stages."""
+    optimizer_name_calls = []
+    original_run_stage = paroquant_optimization._run_stage
+
+    def spy_run_stage(*, optimizer_name="adamw", **kwargs):
+        optimizer_name_calls.append(optimizer_name)
+        return original_run_stage(optimizer_name=optimizer_name, **kwargs)
+
+    monkeypatch.setattr(paroquant_optimization, "_run_stage", spy_run_stage)
+
+    weight = torch.randn((8, 8), dtype=torch.float32)
+    inputs = torch.randn((64, 8), dtype=torch.float32)
+
+    result = optimize_paroquant_linear(
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        pair_ratio=0.5,
+        train_rows=32,
+        val_rows=16,
+        batch_size=16,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-5,
+        quantizer_lr=1e-6,
+        seed=0,
+        optimizer_name="sgd",
+        fused_rotation=True,
+        stage_cudagraph=False,
+        stage_impl="fast",
+        pair_impl="fast",
+        quantizer_impl="reference",
+    )
+
+    assert result.val_loss >= 0.0
+    assert optimizer_name_calls == ["sgd", "sgd"]
+
+
+def test_optimize_paroquant_linear_supports_sgd_optimizer():
+    """Guard the direct ParoQuant path against rejecting valid SGD hyperparameters."""
+    weight = torch.randn((16, 16), dtype=torch.float32)
+    inputs = torch.randn((96, 16), dtype=torch.float32)
+
+    result = optimize_paroquant_linear(
+        weight=weight,
+        bias=None,
+        inputs=inputs,
+        bits=4,
+        group_size=8,
+        sym=True,
+        krot=1,
+        pair_ratio=0.5,
+        train_rows=64,
+        val_rows=32,
+        batch_size=16,
+        rotation_epochs=1,
+        finetune_epochs=1,
+        rotation_lr=0.05,
+        weight_lr=1e-4,
+        quantizer_lr=1e-4,
+        seed=0,
+        optimizer_name="sgd",
+        optimizer_weight_decay=0.02,
+        sgd_momentum=0.85,
+        sgd_dampening=0.0,
+        sgd_nesterov=True,
+        fused_rotation=False,
+        stage_cudagraph=False,
+        stage_impl="fast",
+        pair_impl="fast",
+        quantizer_impl="reference",
+    )
+
+    assert result.val_loss >= 0.0
+    assert result.pseudo_weight.shape == weight.shape
+
+
 def test_paroquant_run_stage_only_enables_active_gradients(monkeypatch):
     """Guard that each stage only backpropagates through the parameters it optimizes."""
     pairs, theta_mask = build_random_rotation_buffers(
@@ -997,6 +1156,35 @@ def test_paroquant_load_rotation_extension_prefers_cached_binary(monkeypatch, tm
     assert compile_calls == []
 
 
+def test_paroquant_load_rotation_extension_builds_plain_library(monkeypatch, tmp_path):
+    """Guard the fused rotation build path against regressing back to pybind module loading."""
+    build_root = tmp_path / ".cache" / "gptqmodel" / "torch_extensions" / "paroquant"
+    build_root.mkdir(parents=True)
+
+    compile_calls = []
+
+    monkeypatch.setattr(paroquant_utils_module.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(paroquant_utils_module, "_try_load_prebuilt_rotation_extension", lambda _root: False)
+
+    import torch.utils.cpp_extension as cpp_extension
+
+    monkeypatch.setattr(cpp_extension, "load", lambda *args, **kwargs: compile_calls.append((args, kwargs)) or True)
+
+    paroquant_utils_module._load_rotation_extension.cache_clear()
+    try:
+        assert paroquant_utils_module._load_rotation_extension() is True
+    finally:
+        paroquant_utils_module._load_rotation_extension.cache_clear()
+
+    assert len(compile_calls) == 1
+    _args, kwargs = compile_calls[0]
+    assert kwargs["is_python_module"] is False
+    assert kwargs["sources"] == [
+        str((Path(paroquant_utils_module.__file__).resolve().parents[2] / "gptqmodel_ext" / "paroquant" / "rotation.cu"))
+    ]
+
+
 def test_paroquant_processor_prewarm_runtime_runs_once(monkeypatch):
     """Guard startup prewarm so the looper does not retry the fused extension every layer."""
     calls = []
@@ -1058,10 +1246,13 @@ def test_paroquant_processor_disables_stage_cudagraph_for_module_scope_loop():
 def test_paroquant_processor_module_quantize_forces_stage_cudagraph_off(monkeypatch):
     """Guard the full model module loop against per-linear CUDA-graph pool retention."""
     stage_cudagraph_calls = []
+    optimizer_name_calls = []
+    optimizer_kwargs_calls = []
 
-    def fake_optimize_paroquant_linear(*, weight, stage_cudagraph=None, **kwargs):
-        del kwargs
+    def fake_optimize_paroquant_linear(*, weight, stage_cudagraph=None, optimizer_name="adamw", **kwargs):
         stage_cudagraph_calls.append(stage_cudagraph)
+        optimizer_name_calls.append(optimizer_name)
+        optimizer_kwargs_calls.append(kwargs)
         zeros = torch.zeros((weight.shape[0], weight.shape[1] // 128), dtype=weight.dtype)
         return SimpleNamespace(
             train_loss=0.0,
@@ -1096,6 +1287,14 @@ def test_paroquant_processor_module_quantize_forces_stage_cudagraph_off(monkeypa
         opt_weight_lr=1e-5,
         opt_quantizer_lr=1e-6,
         opt_seed=0,
+        opt_optimizer="sgd",
+        opt_weight_decay=0.02,
+        opt_betas=(0.8, 0.9),
+        opt_eps=1e-8,
+        opt_amsgrad=True,
+        opt_sgd_momentum=0.85,
+        opt_sgd_dampening=0.0,
+        opt_sgd_nesterov=True,
         opt_fused_rotation=True,
         opt_stage_impl="fast",
         opt_pair_impl="fast",
@@ -1118,6 +1317,39 @@ def test_paroquant_processor_module_quantize_forces_stage_cudagraph_off(monkeypa
     processor._quantize_one_module(module, torch.randn((32, 128), dtype=torch.float32))
 
     assert stage_cudagraph_calls == [False]
+    assert optimizer_name_calls == ["sgd"]
+    assert len(optimizer_kwargs_calls) == 1
+    forwarded_kwargs = optimizer_kwargs_calls[0]
+    assert forwarded_kwargs["bias"] is None
+    assert isinstance(forwarded_kwargs["inputs"], torch.Tensor)
+    assert tuple(forwarded_kwargs["inputs"].shape) == (32, 128)
+    assert forwarded_kwargs["bits"] == 4
+    assert forwarded_kwargs["group_size"] == 128
+    assert forwarded_kwargs["sym"] is True
+    assert forwarded_kwargs["krot"] == 8
+    assert forwarded_kwargs["pair_ratio"] == pytest.approx(0.25)
+    assert forwarded_kwargs["train_rows"] == 128
+    assert forwarded_kwargs["val_rows"] == 32
+    assert forwarded_kwargs["batch_size"] == 16
+    assert forwarded_kwargs["rotation_epochs"] == 1
+    assert forwarded_kwargs["finetune_epochs"] == 1
+    assert forwarded_kwargs["rotation_lr"] == pytest.approx(0.05)
+    assert forwarded_kwargs["weight_lr"] == pytest.approx(1e-5)
+    assert forwarded_kwargs["quantizer_lr"] == pytest.approx(1e-6)
+    assert isinstance(forwarded_kwargs["seed"], int)
+    assert forwarded_kwargs["optimizer_weight_decay"] == pytest.approx(0.02)
+    assert forwarded_kwargs["optimizer_betas"] == pytest.approx((0.8, 0.9))
+    assert forwarded_kwargs["optimizer_eps"] == pytest.approx(1e-8)
+    assert forwarded_kwargs["optimizer_amsgrad"] is True
+    assert forwarded_kwargs["sgd_momentum"] == pytest.approx(0.85)
+    assert forwarded_kwargs["sgd_dampening"] == pytest.approx(0.0)
+    assert forwarded_kwargs["sgd_nesterov"] is True
+    assert forwarded_kwargs["fused_rotation"] is True
+    assert forwarded_kwargs["stage_impl"] == "fast"
+    assert forwarded_kwargs["pair_impl"] == "fast"
+    assert forwarded_kwargs["quantizer_impl"] == "reference"
+    assert forwarded_kwargs["scale_clamp_min"] == pytest.approx(1e-2)
+    assert forwarded_kwargs["scale_clamp_max"] == pytest.approx(1e2)
 
 
 def test_paroquant_processor_layer_scope_live_path_is_dense_only():
@@ -2098,7 +2330,7 @@ def test_paroquant_processor_group_adamw_uses_merged_groups(monkeypatch):
             self.param_groups = [{"params": [param], "lr": 0.05}]
 
     def fake_adamw(param_groups, **kwargs):
-        calls.append(kwargs.copy())
+        calls.append((param_groups, kwargs.copy()))
         return _FakeOptimizer()
 
     monkeypatch.setattr(torch.optim, "AdamW", fake_adamw)
@@ -2108,8 +2340,16 @@ def test_paroquant_processor_group_adamw_uses_merged_groups(monkeypatch):
     )
 
     assert isinstance(optimizer, _FakeOptimizer)
-    expected = [{"fused": True}] if torch.cuda.is_available() else [{}]
-    assert calls == expected
+    expected_kwargs = {"fused": True} if torch.cuda.is_available() else {}
+    expected_param_group = {
+        "params": [param],
+        "lr": 0.05,
+        "weight_decay": 0.01,
+        "betas": (0.9, 0.95),
+        "eps": 1e-10,
+        "amsgrad": False,
+    }
+    assert calls == [([expected_param_group], expected_kwargs)]
 
 
 def test_paroquant_processor_group_adamw_falls_back_when_fused_cuda_is_unsupported(monkeypatch):
@@ -2138,6 +2378,77 @@ def test_paroquant_processor_group_adamw_falls_back_when_fused_cuda_is_unsupport
 
     assert isinstance(optimizer, _FakeOptimizer)
     expected = [{"fused": True}, {}] if torch.cuda.is_available() else [{}]
+    assert calls == expected
+
+
+def test_paroquant_processor_group_optimizer_uses_selected_sgd(monkeypatch):
+    """Guard grouped optimizer setup against ignoring the selected stage optimizer."""
+    processor = object.__new__(ParoQuantProcessor)
+    param_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    param = torch.nn.Parameter(torch.randn(4, device=param_device))
+    calls = []
+
+    class _FakeOptimizer:
+        def __init__(self):
+            self.param_groups = [{"params": [param], "lr": 0.05}]
+
+    def fake_sgd(param_groups, **kwargs):
+        calls.append((param_groups, kwargs.copy()))
+        return _FakeOptimizer()
+
+    monkeypatch.setattr(torch.optim, "SGD", fake_sgd)
+    optimizer = processor._build_group_optimizer(
+        [
+            {
+                "params": [param],
+                "lr": 0.05,
+                "weight_decay": 0.01,
+                "momentum": 0.85,
+                "dampening": 0.0,
+                "nesterov": True,
+            }
+        ],
+        device=torch.device("cuda"),
+        optimizer_name="sgd",
+    )
+
+    assert isinstance(optimizer, _FakeOptimizer)
+    expected_kwargs = {"fused": True} if torch.cuda.is_available() else {}
+    expected_param_group = {
+        "params": [param],
+        "lr": 0.05,
+        "weight_decay": 0.01,
+        "momentum": 0.85,
+        "dampening": 0.0,
+        "nesterov": True,
+    }
+    assert calls == [([expected_param_group], expected_kwargs)]
+
+
+def test_paroquant_processor_group_adamw_passes_amsgrad(monkeypatch):
+    """Guard grouped AdamW setup against dropping optimizer-specific hyperparameters."""
+    processor = object.__new__(ParoQuantProcessor)
+    param_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    param = torch.nn.Parameter(torch.randn(4, device=param_device))
+    calls = []
+
+    class _FakeOptimizer:
+        def __init__(self):
+            self.param_groups = [{"params": [param], "lr": 0.05}]
+
+    def fake_adamw(param_groups, **kwargs):
+        calls.append(kwargs.copy())
+        return _FakeOptimizer()
+
+    monkeypatch.setattr(torch.optim, "AdamW", fake_adamw)
+    optimizer = processor._build_group_optimizer(
+        [{"params": [param], "lr": 0.05, "weight_decay": 0.01, "amsgrad": True}],
+        device=torch.device("cuda"),
+        optimizer_name="adamw",
+    )
+
+    assert isinstance(optimizer, _FakeOptimizer)
+    expected = [{"fused": True}] if torch.cuda.is_available() else [{}]
     assert calls == expected
 
 
