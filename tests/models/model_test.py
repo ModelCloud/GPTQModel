@@ -66,6 +66,22 @@ def _env_int(*names: str, default: int) -> int:
     return default
 
 
+def _env_flag(*names: str, default: bool = False) -> bool:
+    """Return the first parseable boolean env override from a prioritized name list."""
+    truthy = {"1", "true", "yes", "on", "y", "t"}
+    falsy = {"0", "false", "no", "off", "n", "f"}
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        value = raw.strip().lower()
+        if value in truthy:
+            return True
+        if value in falsy:
+            return False
+    return default
+
+
 try:  # noqa: E402
     from datasets import load_dataset as hf_load_dataset  # noqa: E402
 except Exception as exc:  # pragma: no cover - depends on test environment

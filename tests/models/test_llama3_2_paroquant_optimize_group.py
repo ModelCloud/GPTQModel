@@ -7,7 +7,11 @@ import pytest
 import torch
 from tabulate import tabulate
 
-from gptqmodel.utils.paroquant_benchmark import run_paroquant_first_layer_case
+from paroquant_first_layer_case_helper import (
+    assert_basic_paroquant_first_layer_result,
+    resolve_paroquant_first_layer_case_env,
+    run_paroquant_first_layer_case_from_resolved,
+)
 
 
 @pytest.mark.cuda
@@ -18,52 +22,21 @@ def test_llama3_2_paroquant_optimize_group_first_2_layers(capsys: pytest.Capture
     if os.environ.get("GPTQMODEL_RUN_PAROQUANT_OPTIMIZE_GROUP_TEST") != "1":
         pytest.skip("Set GPTQMODEL_RUN_PAROQUANT_OPTIMIZE_GROUP_TEST=1 to run this grouped integration test.")
 
-    num_quant_layers = int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_NUM_LAYERS", "2"))
-    opt_scope = os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_OPT_SCOPE", "subsection").strip().lower()
-    if opt_scope == "module":
+    resolved = resolve_paroquant_first_layer_case_env(
+        env_prefix="GPTQMODEL_PAROQUANT_GROUP_TEST",
+        default_num_quant_layers=2,
+        default_opt_scope="subsection",
+    )
+    if resolved["opt_scope"] == "module":
         pytest.skip("Grouped optimize_group integration test requires opt_scope=subsection or opt_scope=layer.")
 
-    eval_max_rows = os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_MAX_ROWS")
-    eval_batch = os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_EVAL_BATCH", "auto").strip().lower()
-    eval_batch_size: int | str = "auto" if eval_batch == "auto" else int(eval_batch)
-    resolved_eval_max_rows = 128 if eval_max_rows in {None, ""} else int(eval_max_rows)
-
-    result = run_paroquant_first_layer_case(
-        num_quant_layers=num_quant_layers,
-        calibration_rows=int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_CAL_ROWS", "32")),
-        eval_batch_size=eval_batch_size,
-        eval_max_rows=resolved_eval_max_rows,
-        eval_model_args={
-            "dtype": os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_EVAL_DTYPE", "bfloat16"),
-            "attn_implementation": os.environ.get(
-                "GPTQMODEL_PAROQUANT_GROUP_TEST_ATTN_IMPL",
-                "paged|flash_attention_2",
-            ),
-            "device": os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_EVAL_DEVICE", "cuda:0"),
-        },
-        eval_suite_kwargs={
-            "batch_size": int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_SUITE_BATCH", "24")),
-            "max_new_tokens": int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_MAX_NEW_TOKENS", "96")),
-            "stream": os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_STREAMING", "1") != "0",
-            "max_rows": resolved_eval_max_rows,
-        },
-        sym=True,
-        fused_opt_rotation=os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_FUSED", "1") != "0",
-        opt_scope=opt_scope,
-        opt_rotation_epochs=int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_ROT_EPOCHS", "4")),
-        opt_finetune_epochs=int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_FT_EPOCHS", "4")),
-        opt_train_samples=int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_TRAIN_ROWS", "512")),
-        opt_validation_samples=int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_VAL_ROWS", "64")),
-        opt_batch_size=int(os.environ.get("GPTQMODEL_PAROQUANT_GROUP_TEST_OPT_BATCH", "16")),
+    result = run_paroquant_first_layer_case_from_resolved(resolved)
+    gsm8k_metrics = assert_basic_paroquant_first_layer_result(
+        result,
+        num_quant_layers=resolved["num_quant_layers"],
+        opt_scope=resolved["opt_scope"],
     )
-
-    assert result["module_time_rows"], "expected per-module quantization timings"
-    assert result["num_quant_layers"] == num_quant_layers
-    assert result["opt_scope"] == opt_scope
     assert result["opt_scope"] in {"subsection", "layer"}
-    assert "gsm8k_platinum_cot" in result["eval_metrics"], "expected gsm8k platinum metrics"
-    gsm8k_metrics = result["eval_metrics"]["gsm8k_platinum_cot"]
-    assert "acc,num" in gsm8k_metrics, "expected gsm8k_platinum_cot acc,num metric"
 
     summary_rows = [
         ["num_quant_layers", str(result["num_quant_layers"])],

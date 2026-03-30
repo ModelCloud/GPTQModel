@@ -4,28 +4,11 @@
 import os
 
 import torch
-from model_test import ModelTest, _env_choice, _env_int
+from model_test import ModelTest, _env_choice, _env_flag, _env_int
 
 from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, ParoQuantizeConfig
-
-
-def _env_flag(*names: str, default: bool = False) -> bool:
-    """Parse the first present boolean env var from a prioritized name list."""
-    truthy = {"1", "true", "yes", "on", "y", "t"}
-    falsy = {"0", "false", "no", "off", "n", "f"}
-    for name in names:
-        raw = os.environ.get(name)
-        if raw is None:
-            continue
-        value = raw.strip().lower()
-        if value in truthy:
-            return True
-        if value in falsy:
-            return False
-    return default
-
 
 def _resolve_save_path(scope_env: str, default: str) -> str:
     """Resolve a scope-specific saved checkpoint path with global fallback."""
