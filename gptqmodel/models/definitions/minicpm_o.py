@@ -24,6 +24,8 @@ class MiniCPMOQModel(BaseQModel):
 
     require_trust_remote_code = True
 
+    loader_requires_dtype = False
+
     module_tree = [
         "llm",
         "model",
