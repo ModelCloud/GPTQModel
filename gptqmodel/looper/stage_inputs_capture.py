@@ -185,6 +185,7 @@ class StageInputsCapture:
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
         is_ovis = self.gptq_model.model.config.model_type == "ovis"
+        is_minicpmo = self.gptq_model.model.config.model_type == "minicpmo"
 
         self.gptq_model.pre_quantize_generate_hook_start()
 
@@ -199,21 +200,22 @@ class StageInputsCapture:
                         if "pixel_values" in example.keys()
                         else cur_layer_device
                     )
-                for k, v in example.items():
-                    if isinstance(v, list):
-                        for index in range(len(v)):
-                            if len(v[index].shape) == 1:
-                                v[index] = v[index].unsqueeze(0)
-                            v[index] = move_to(
-                                v[index].to(self.gptq_model.model.visual_tokenizer.dtype)
-                                if is_ovis
-                                else v[index],
-                                device=data_device,
-                            )
-                    else:
-                        if len(v.shape) == 1:
-                            v = v.unsqueeze(0)
-                        example[k] = move_to(v, device=data_device)
+                if not is_minicpmo:
+                    for k, v in example.items():
+                        if isinstance(v, list):
+                            for index in range(len(v)):
+                                if len(v[index].shape) == 1:
+                                    v[index] = v[index].unsqueeze(0)
+                                v[index] = move_to(
+                                    v[index].to(self.gptq_model.model.visual_tokenizer.dtype)
+                                    if is_ovis
+                                    else v[index],
+                                    device=data_device,
+                                )
+                        else:
+                            if len(v.shape) == 1:
+                                v = v.unsqueeze(0)
+                            example[k] = move_to(v, device=data_device)
                 try:
                     if self.gptq_model.ATTENTION_MASKS_DTYPE is torch.long:
                         example["attention_mask"] = example["attention_mask"].long()
@@ -229,6 +231,14 @@ class StageInputsCapture:
                             )
                         elif is_ovis:
                             self.gptq_model.model.generate(inputs=example.pop("input_ids"), **example)
+                        elif is_minicpmo:
+                            for k, v in example.items():
+                                example[k] = nested_move_to(v, device=data_device)
+
+                            generation_config = self.gptq_model.model.prepare_generation_config(do_sample=True)
+                            generation_config["use_cache"] = use_cache
+
+                            self.gptq_model.model.generate(**example, tokenizer=self.gptq_model.model.tokenizer, **generation_config)
                         else:
                             self.gptq_model.model(**example, use_cache=use_cache)
                 except StopForward:
