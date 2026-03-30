@@ -18,6 +18,8 @@ def test_setup_logger_suppresses_live_renderables_under_pytest_capture(monkeypat
 
     assert list(progress) == [0, 1, 2]
     assert len(progress) == 3
+    assert progress.next().current_iter_step == 1
+    assert progress.next(2).current_iter_step == 3
     assert list(int_progress) == [0, 1]
     assert len(int_progress) == 2
     spinner.close()

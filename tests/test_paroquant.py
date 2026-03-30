@@ -41,9 +41,11 @@ from gptqmodel.quantization.paroquant.optimization import (
 )
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend
+import gptqmodel.utils.paroquant as paroquant_utils_module
 from gptqmodel.utils.paroquant import (
     apply_paroquant_rotation_reference,
     build_identity_rotation_buffers,
+    prewarm_paroquant_rotation_extension,
 )
 from gptqmodel.utils.paroquant_benchmark import make_paroquant_config
 
@@ -941,6 +943,83 @@ def test_paroquant_processor_module_scope_seed_uses_full_module_name():
     grouped_scope = object.__new__(ParoQuantProcessor)
     grouped_scope.qcfg = SimpleNamespace(opt_scope="compute_block", opt_seed=3141592653)
     assert grouped_scope._module_seed(0, full_name_a) == grouped_scope._module_seed(0, full_name_b)
+
+
+def test_paroquant_prewarm_rotation_extension_skips_unsupported_configs(monkeypatch):
+    """Guard the explicit prewarm helper so startup only pays for real fused-kernel cases."""
+    calls = []
+
+    monkeypatch.setattr("gptqmodel.utils.paroquant._load_rotation_extension", lambda: calls.append("load") or True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    assert prewarm_paroquant_rotation_extension(fused_rotation=False, group_size=128, krot=8) is False
+    assert prewarm_paroquant_rotation_extension(fused_rotation=True, group_size=64, krot=8) is False
+    assert prewarm_paroquant_rotation_extension(fused_rotation=True, group_size=128, krot=4) is False
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device=torch.device("cpu"),
+        )
+        is False
+    )
+    assert prewarm_paroquant_rotation_extension(fused_rotation=True, group_size=128, krot=8) is True
+    assert calls == ["load"]
+
+
+def test_paroquant_load_rotation_extension_prefers_cached_binary(monkeypatch, tmp_path):
+    """Guard against stale cpp_extension lock waits once the fused library already exists."""
+    build_root = tmp_path / ".cache" / "gptqmodel" / "torch_extensions" / "paroquant"
+    build_root.mkdir(parents=True)
+    library_path = build_root / "gptqmodel_paroquant_rotation.so"
+    library_path.write_bytes(b"placeholder")
+    (build_root / "lock").write_text("", encoding="utf-8")
+
+    load_library_calls = []
+    compile_calls = []
+
+    monkeypatch.setattr(paroquant_utils_module.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.ops, "load_library", lambda path: load_library_calls.append(path))
+
+    import torch.utils.cpp_extension as cpp_extension
+
+    monkeypatch.setattr(cpp_extension, "load", lambda *args, **kwargs: compile_calls.append((args, kwargs)) or True)
+
+    paroquant_utils_module._load_rotation_extension.cache_clear()
+    try:
+        assert paroquant_utils_module._load_rotation_extension() is True
+    finally:
+        paroquant_utils_module._load_rotation_extension.cache_clear()
+
+    assert load_library_calls == [str(library_path)]
+    assert compile_calls == []
+
+
+def test_paroquant_processor_prewarm_runtime_runs_once(monkeypatch):
+    """Guard startup prewarm so the looper does not retry the fused extension every layer."""
+    calls = []
+
+    monkeypatch.setattr(
+        paroquant_processor_module,
+        "prewarm_paroquant_rotation_extension",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = SimpleNamespace(opt_fused_rotation=True, group_size=128, krot=8)
+    processor._runtime_prewarmed = False
+
+    processor.prewarm_runtime()
+    processor.prewarm_runtime()
+
+    assert len(calls) == 1
+    assert calls[0] == {
+        "fused_rotation": True,
+        "group_size": 128,
+        "krot": 8,
+    }
 
 
 def test_paroquant_processor_grouped_modes_capture_pristine_context_outside_subset_forward():

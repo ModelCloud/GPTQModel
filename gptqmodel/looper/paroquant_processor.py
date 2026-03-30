@@ -74,6 +74,7 @@ from ..utils.model import (
     recurse_setattr,
 )
 from ..utils.module_locks import parent_module_lock
+from ..utils.paroquant import prewarm_paroquant_rotation_extension
 from ..utils.torch import CPU, torch_empty_cache
 
 log = setup_logger()
@@ -248,6 +249,7 @@ class ParoQuantProcessor(LoopProcessor):
         self._rotary_cache: Dict[str, nn.Module] = {}
         self._rotary_source_id: Optional[int] = None
         self._clean_group_layer_inputs: Optional[List[List[torch.Tensor]]] = None
+        self._runtime_prewarmed = False
         self.fallback = qcfg.fallback
 
     def set_calibration_dataset(self, calibration_dataset):
@@ -265,6 +267,25 @@ class ParoQuantProcessor(LoopProcessor):
         if fmt != FORMAT.PAROQUANT:
             raise ValueError(f"METHOD.PAROQUANT does not support this FORMAT: {format_value}")
         return ParoQuantQuantLinear
+
+    def prewarm_runtime(self) -> None:
+        """Build optional fused ParoQuant runtime pieces before timed layer work starts."""
+        if getattr(self, "_runtime_prewarmed", False):
+            return
+
+        self._runtime_prewarmed = True
+        fused_rotation = bool(getattr(self.qcfg, "opt_fused_rotation", False))
+        group_size = int(getattr(self.qcfg, "group_size", 128))
+        krot = int(getattr(self.qcfg, "krot", 8))
+        if fused_rotation and group_size in {128} and krot in {1, 8}:
+            log.info("ParoQuant: prewarming fused rotation extension...")
+        if not prewarm_paroquant_rotation_extension(
+            fused_rotation=fused_rotation,
+            group_size=group_size,
+            krot=krot,
+        ):
+            return
+        log.info("ParoQuant: prewarmed fused rotation extension.")
 
     def _resolve_qlinear_kernel(self, module_name: Optional[str] = None):
         """Resolve per-module dynamic overrides while enforcing ParoQuant format."""

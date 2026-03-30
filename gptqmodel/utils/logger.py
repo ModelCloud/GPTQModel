@@ -52,6 +52,10 @@ class _SilentProgress:
     def refresh(self):
         return self
 
+    def next(self, step: int = 1):
+        self.current_iter_step += int(step)
+        return self
+
     def close(self):
         return None
 
