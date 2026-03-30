@@ -34,7 +34,7 @@ from ..looper.named_module import NamedModule
 from ..looper.paroquant_processor import ParoQuantProcessor
 from ..looper.qqq_processor import QQQProcessor
 from ..utils.device import get_device, get_device_new
-from ..utils.logger import log_time_block, setup_logger
+from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
 from ..utils.model import find_modules, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
@@ -370,6 +370,7 @@ def run_layer_stage(
     )
 
     log = logger or setup_logger()
+    durable_progress_logs = live_renderables_suppressed()
     for layer_index in pb:
         # Iterate over every transformer layer (plus lm_head when enabled) as
         # progress-bar controlled units of work.
@@ -402,6 +403,13 @@ def run_layer_stage(
             pristine_group_module = None
 
         looper.pause_controller.register_and_draw_progress_bar(pb, title=layer_title, subtitle="")
+        if durable_progress_logs:
+            log.info(
+                "StageLayer: start layer=%s/%s title=`%s`",
+                layer_index if not is_lm_head_module else "lm_head",
+                layer_count - 1 if not is_lm_head_module else "lm_head",
+                layer_title,
+            )
 
         if module.__class__.__name__.lower() == "MllamaCrossAttentionDecoderLayer".lower():
             # TODO FIXME: currently we not support quantizing cross attention layer (pixel_values)
@@ -478,6 +486,13 @@ def run_layer_stage(
                 layers_prefix=layers_prefix,
                 fallback=fallback,
             )
+            if durable_progress_logs:
+                log.info(
+                    "StageLayer: layer=%s processor=%s begin subsets=%s",
+                    layer_index if not is_lm_head_module else "lm_head",
+                    processor.name(),
+                    len(subset_plans),
+                )
 
             _capture_pristine_group_context(
                 looper,
@@ -556,6 +571,15 @@ def run_layer_stage(
                     # The most recent subset plan defines the replay contract
                     # for the outputs that flow into the next layer.
                     last_subset_plan = subset_result.plan
+                if durable_progress_logs:
+                    log.info(
+                        "StageLayer: layer=%s processor=%s subset=%s/%s complete modules=%s",
+                        layer_index if not is_lm_head_module else "lm_head",
+                        processor.name(),
+                        subset_plan.subset_index + 1,
+                        subset_plan.subset_total,
+                        len(subset_plan.modules),
+                    )
 
             layer_outputs: List[List[torch.Tensor]] = []
             replay_plan = last_subset_plan
@@ -832,6 +856,13 @@ def run_layer_stage(
                         looper,
                         finalize_tasks=finalize_tasks,
                     )
+                    if durable_progress_logs:
+                        log.info(
+                            "StageLayer: layer=%s finalize queued modules=%s mode=%s",
+                            layer_index if not is_lm_head_module else "lm_head",
+                            finalize_count,
+                            "sync" if drain_sync else "async",
+                        )
                     if drain_sync:
                         # Synchronous: wait for all finalization to complete before proceeding to next layer
                         # This ensures all packing and writing tasks are done
@@ -870,6 +901,11 @@ def run_layer_stage(
                         submodule_finalized=True,
                         raise_in_place=True,
                     )
+                    if durable_progress_logs:
+                        log.info(
+                            "StageLayer: layer=%s complete (no finalize tasks)",
+                            layer_index if not is_lm_head_module else "lm_head",
+                        )
 
         # Check for pause after completing each layer
         layer_info = f"layer {layer_index}" if not is_lm_head_module else "lm_head"
@@ -877,3 +913,8 @@ def run_layer_stage(
 
         # Unregister progress bar when moving to next layer
         looper.pause_controller.unregister_progress_bar(pb)
+        if durable_progress_logs:
+            log.info(
+                "StageLayer: handoff complete for layer=%s",
+                layer_index if not is_lm_head_module else "lm_head",
+            )

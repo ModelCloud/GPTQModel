@@ -22,7 +22,14 @@ class _SilentProgress:
         self.current_iter_step = 0
 
     def __iter__(self):
+        if isinstance(self._iterable, int):
+            return iter(range(self._iterable))
         return iter(self._iterable)
+
+    def __len__(self):
+        if isinstance(self._iterable, int):
+            return self._iterable
+        return len(self._iterable)
 
     def attach(self, *_args, **_kwargs):
         return self
@@ -79,6 +86,12 @@ def _suppress_live_renderables() -> bool:
         return not sys.stdout.isatty()
     except Exception:
         return True
+
+
+def live_renderables_suppressed() -> bool:
+    """Report whether redraw-based progress should be replaced by durable logs."""
+
+    return _suppress_live_renderables()
 
 
 def setup_logger():
