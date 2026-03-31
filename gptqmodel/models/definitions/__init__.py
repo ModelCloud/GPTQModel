@@ -41,6 +41,7 @@ from .llama4 import Llama4QModel
 from .mimo import MimoQModel
 from .minicpm3 import MiniCpm3QModel
 from .minicpm_o import MiniCPMOQModel
+from .minicpm_v import MiniCPMVQModel
 from .minimax_m2 import MiniMaxM2GPTQ
 from .mixtral import MixtralQModel
 from .mllama import MLlamaQModel

@@ -2,19 +2,20 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-import os
+
+import os.path
 
 from model_test import ModelTest
 from PIL import Image
 
 
-class TestMiniCPMO4_5(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/MiniCPM-o-4_5" # openbmb/MiniCPM-o-4_5
+class TestMiniCPMV4_5(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/MiniCPM-V-4_5"
     TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 1
 
-    def test_minicpm_o_4_5(self):
-        # Evalution does not support minicpmo, and will throw an error during execution:
+    def test_minicpm_v_4_5(self):
+        # Evalution does not support minicpmv, and will throw an error during execution:
         # E TypeError: MiniCPMO.forward() missing 1 required positional argument: 'data
         with self.model_compat_test_context():
             model, tokenizer, processor = self.quantModel(
