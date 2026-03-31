@@ -12,7 +12,7 @@
 template <typename scalar_t> struct RotateAccess;
 
 template <> struct RotateAccess<float> {
-  template <int CTA_M, int GROUP_SIZE, bool USE_SCALE>
+  template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE, bool USE_SCALE>
   __device__ static void load_group(float *__restrict__ x_grp, const float *__restrict__ x,
                                     const float *__restrict__ scales, const int s, const int h,
                                     const int j, const int g, const int t) {
@@ -24,8 +24,8 @@ template <> struct RotateAccess<float> {
     for (int i = 0; i < CTA_M; i++) {
       int row = j * CTA_M + i;
       if (row < s) {
-        x_grp[t * CTA_M + i] = x[row * h + base0] * scale0;
-        x_grp[(t + GROUP_SIZE / 2) * CTA_M + i] = x[row * h + base1] * scale1;
+        x_grp[t * ROW_STRIDE + i] = x[row * h + base0] * scale0;
+        x_grp[(t + GROUP_SIZE / 2) * ROW_STRIDE + i] = x[row * h + base1] * scale1;
       }
     }
   }
@@ -41,21 +41,21 @@ template <> struct RotateAccess<float> {
     }
   }
 
-  template <int CTA_M>
+  template <int CTA_M, int ROW_STRIDE>
   __device__ static void apply_one(float *__restrict__ x_grp, const int ij, const float theta) {
     int16_t i = ij & 0xFFFF, j = ij >> 16;
     float s_, c_;
     __sincosf(theta, &s_, &c_);
 #pragma unroll
     for (int m = 0; m < CTA_M; m++) {
-      float xi = x_grp[i * CTA_M + m];
-      float xj = x_grp[j * CTA_M + m];
-      x_grp[i * CTA_M + m] = xi * c_ + xj * s_;
-      x_grp[j * CTA_M + m] = xi * (-s_) + xj * c_;
+      float xi = x_grp[i * ROW_STRIDE + m];
+      float xj = x_grp[j * ROW_STRIDE + m];
+      x_grp[i * ROW_STRIDE + m] = xi * c_ + xj * s_;
+      x_grp[j * ROW_STRIDE + m] = xi * (-s_) + xj * c_;
     }
   }
 
-  template <int CTA_M, int GROUP_SIZE>
+  template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE>
   __device__ static void store_group(float *__restrict__ out, const float *__restrict__ x_grp,
                                      const int s, const int h, const int j, const int g,
                                      const int t) {
@@ -65,18 +65,19 @@ template <> struct RotateAccess<float> {
     for (int i = 0; i < CTA_M; i++) {
       int row = j * CTA_M + i;
       if (row < s) {
-        out[row * h + base0] = x_grp[t * CTA_M + i];
-        out[row * h + base1] = x_grp[(t + GROUP_SIZE / 2) * CTA_M + i];
+        out[row * h + base0] = x_grp[t * ROW_STRIDE + i];
+        out[row * h + base1] = x_grp[(t + GROUP_SIZE / 2) * ROW_STRIDE + i];
       }
     }
   }
 };
 
 template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessHalf {
-  template <int CTA_M, int GROUP_SIZE, bool USE_SCALE>
+  template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE, bool USE_SCALE>
   __device__ static void load_group(HalfT *__restrict__ x_grp, const HalfT *__restrict__ x,
                                     const HalfT *__restrict__ scales, const int s, const int h,
                                     const int j, const int g, const int t) {
+    static_assert((ROW_STRIDE % 2) == 0, "ROW_STRIDE must be even for vectorized half access");
     const int offset = GROUP_SIZE * g + 2 * t;
     HalfT scale_i, scale_j;
     if constexpr (USE_SCALE) {
@@ -95,8 +96,8 @@ template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessH
         Half2T x2 = *reinterpret_cast<const Half2T *>(x + row * h + offset);
         HalfT lo = Traits::hmul(Traits::low(x2), scale_i);
         HalfT hi = Traits::hmul(Traits::high(x2), scale_j);
-        x_grp[(2 * t) * CTA_M + i] = lo;
-        x_grp[(2 * t + 1) * CTA_M + i] = hi;
+        x_grp[(2 * t) * ROW_STRIDE + i] = lo;
+        x_grp[(2 * t + 1) * ROW_STRIDE + i] = hi;
       }
     }
   }
@@ -112,16 +113,17 @@ template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessH
     }
   }
 
-  template <int CTA_M>
+  template <int CTA_M, int ROW_STRIDE>
   __device__ static void apply_one(HalfT *__restrict__ x_grp, const int ij, const float theta) {
+    static_assert((ROW_STRIDE % 2) == 0, "ROW_STRIDE must be even for vectorized half access");
     int16_t i = ij & 0xFFFF, j = ij >> 16;
     float s_, c_;
     __sincosf(theta, &s_, &c_);
 
 #pragma unroll
     for (int m = 0; m < CTA_M / 2; ++m) {
-      Half2T *pi2 = reinterpret_cast<Half2T *>(x_grp + i * CTA_M + m * 2);
-      Half2T *pj2 = reinterpret_cast<Half2T *>(x_grp + j * CTA_M + m * 2);
+      Half2T *pi2 = reinterpret_cast<Half2T *>(x_grp + i * ROW_STRIDE + m * 2);
+      Half2T *pj2 = reinterpret_cast<Half2T *>(x_grp + j * ROW_STRIDE + m * 2);
 
       float2 xi = Traits::to_float2(*pi2);
       float2 xj = Traits::to_float2(*pj2);
@@ -137,18 +139,19 @@ template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessH
     }
   }
 
-  template <int CTA_M, int GROUP_SIZE>
+  template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE>
   __device__ static void store_group(HalfT *__restrict__ out, const HalfT *__restrict__ x_grp,
                                      const int s, const int h, const int j, const int g,
                                      const int t) {
+    static_assert((ROW_STRIDE % 2) == 0, "ROW_STRIDE must be even for vectorized half access");
     const int base = GROUP_SIZE * g + 2 * t;
 #pragma unroll
     for (int i = 0; i < CTA_M; i++) {
       int row = j * CTA_M + i;
       if (row < s) {
         Half2T out2;
-        out2.x = x_grp[(2 * t) * CTA_M + i];
-        out2.y = x_grp[(2 * t + 1) * CTA_M + i];
+        out2.x = x_grp[(2 * t) * ROW_STRIDE + i];
+        out2.y = x_grp[(2 * t + 1) * ROW_STRIDE + i];
         *reinterpret_cast<Half2T *>(out + row * h + base) = out2;
       }
     }

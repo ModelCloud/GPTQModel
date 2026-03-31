@@ -187,6 +187,9 @@ def _rotation_kernel_ready(
 
 
 def _rotation_extension_build_root() -> Path:
+    override = os.getenv("GPTQMODEL_PAROQUANT_BUILD_ROOT")
+    if override:
+        return Path(override).expanduser()
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / "paroquant"
 
 
@@ -209,8 +212,6 @@ def _load_rotation_extension() -> bool:
         return False
 
     build_root = _rotation_extension_build_root()
-    if _rotation_force_rebuild_enabled():
-        clear_paroquant_rotation_extension_cache()
     build_root.mkdir(parents=True, exist_ok=True)
 
     # Prefer a previously built shared object so stale cpp_extension lock files

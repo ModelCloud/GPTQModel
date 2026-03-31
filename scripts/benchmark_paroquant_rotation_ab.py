@@ -21,6 +21,7 @@ from gptqmodel.utils.paroquant import (
     apply_paroquant_rotation,
     apply_paroquant_rotation_reference,
     clear_paroquant_rotation_extension_cache,
+    prewarm_paroquant_rotation_extension,
 )
 
 
@@ -238,11 +239,26 @@ def main() -> int:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for the ParoQuant rotation benchmark.")
 
+    device = torch.device(f"cuda:{args.device}")
     if args.force_rebuild_extension:
+        build_root = Path("/tmp") / (
+            f"paroquant_ext_{os.getpid()}_dev{args.device}_shard{args.shard_index}_of_{args.num_shards}"
+        )
+        os.environ["GPTQMODEL_PAROQUANT_BUILD_ROOT"] = str(build_root)
         os.environ["GPTQMODEL_PAROQUANT_FORCE_REBUILD"] = "1"
         clear_paroquant_rotation_extension_cache()
+    else:
+        os.environ.pop("GPTQMODEL_PAROQUANT_BUILD_ROOT", None)
+        os.environ.pop("GPTQMODEL_PAROQUANT_FORCE_REBUILD", None)
 
-    device = torch.device(f"cuda:{args.device}")
+    if not prewarm_paroquant_rotation_extension(
+        fused_rotation=True,
+        group_size=128,
+        krot=8,
+        device=device,
+    ):
+        raise RuntimeError("Failed to build/load the fused ParoQuant CUDA rotation extension.")
+
     results = run(
         device=device,
         dtype=_resolve_dtype(args.dtype),
