@@ -51,7 +51,6 @@ from os.path import isdir, join  # noqa: E402
 from typing import Dict, List, Optional, Union  # noqa: E402
 
 import torch  # noqa: E402
-from huggingface_hub import list_repo_files  # noqa: E402
 from packaging.version import Version  # noqa: E402
 from transformers import AutoConfig, PreTrainedTokenizerBase  # noqa: E402
 from transformers import __version__ as TRANSFORMERS_VERSION
@@ -62,6 +61,7 @@ from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa
 from ..utils import BACKEND  # noqa: E402
 from ..utils.backend import normalize_backend  # noqa: E402
 from ..utils.hf import normalize_torch_dtype_kwarg, resolve_trust_remote_code  # noqa: E402
+from ..utils.hub import create_repo, list_repo_files, repo_info, upload_large_folder  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import CPU, torch_empty_cache  # noqa: E402
 from .base import BaseQModel  # noqa: E402
@@ -536,7 +536,22 @@ class GPTQModel:
         # load gptq model
         gptq_model = GPTQModel.load(model_id_or_path, backend=backend)
 
-        if format == "hf":
+        if format == "mlx":
+            try:
+                from mlx_lm.utils import save_config, save_model
+
+                from ..utils.mlx import convert_gptq_to_mlx_weights
+            except ImportError:
+                raise ValueError(
+                    "MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
+
+            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config,
+                                                                  gptq_model.lm_head)
+
+            save_model(target_path, mlx_weights, donate_model=True)
+
+            save_config(mlx_config, config_path=target_path + "/config.json")
+        elif format == "hf":
             from ..nn_modules.qlinear.torch import dequantize_model
 
             dequantized_model = dequantize_model(gptq_model.model)
@@ -545,6 +560,34 @@ class GPTQModel:
         # save tokenizer to target path
         gptq_model.tokenizer.save_pretrained(target_path)
 
+    # Use HfAPI and not Transformers to do upload
+    @staticmethod
+    def push_to_hub(repo_id: str,
+                    quantized_path: str,  # saved local directory path
+                    private: bool = False,
+                    exists_ok: bool = False,  # set to true if repo already exists
+                    token: Optional[str] = None,
+                    ):
+
+        if not quantized_path:
+            raise RuntimeError("You must pass quantized model path as str to push_to_hub.")
+
+        if not repo_id:
+            raise RuntimeError("You must pass repo_id as str to push_to_hub.")
+
+        repo_type = "model"
+        # if repo does not exist, create it
+        try:
+            repo_info(repo_id=repo_id, repo_type=repo_type, token=token)
+        except Exception:
+            create_repo(repo_id=repo_id, repo_type=repo_type, token=token, private=private, exist_ok=exists_ok)
+
+        # upload the quantized save folder
+        upload_large_folder(
+            folder_path=quantized_path,
+            repo_id=repo_id,
+            repo_type=repo_type,
+        )
     class adapter:
         @classmethod
         def generate(

@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from huggingface_hub.utils import disable_progress_bars
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.utils import logging as hf_logging
 
@@ -74,7 +73,7 @@ def _skip_unavailable_environment(dtype: torch.dtype) -> torch.device:
 
 def _load_llama(dtype: torch.dtype):
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    disable_progress_bars()
+    hf_logging.disable_progress_bar()
     hf_logging.set_verbosity_error()
 
     sink = io.StringIO()

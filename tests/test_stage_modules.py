@@ -4,11 +4,20 @@ from typing import Dict
 
 import torch
 
+import gptqmodel.looper.stage_subset as stage_subset_module
 from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
-from gptqmodel.looper.stage_layer import _replay_layer_outputs, run_layer_stage
+from gptqmodel.looper.stage_layer import (
+    _capture_pristine_group_context,
+    _processor_needs_pristine_group_clone,
+    _replay_layer_outputs,
+    _should_drain_finalize_futures_synchronously,
+    _should_empty_cache_after_sync_finalize,
+    run_layer_stage,
+)
 from gptqmodel.looper.stage_subset import CalibrationCoveragePolicy, SubsetPlan, SubsetStageResult
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.pause_resume import PauseResumeController
@@ -84,7 +93,10 @@ class _TinyGptqModel:
     def __init__(self):
         self.layer = _TinyLayer()
         self.model = _TinyModel(self.layer)
-        self.quantize_config = types.SimpleNamespace(device=torch.device("cpu"))
+        self.quantize_config = types.SimpleNamespace(
+            device=torch.device("cpu"),
+            calibration_data_device=None,
+        )
         self._hook_started = False
         self._hook_finished = False
 
@@ -111,6 +123,96 @@ class _TinyLooper:
             return 0
         tensor = batch_inputs[0]
         return int(tensor.shape[0]) if tensor.ndim > 0 else int(tensor.numel())
+
+
+def test_stage_layer_forces_sync_finalizers_for_paroquant():
+    looper = types.SimpleNamespace(
+        gptq_model=types.SimpleNamespace(
+            quantize_config=QuantizeConfig(
+                bits=4,
+                group_size=128,
+                wait_for_submodule_finalizers=False,
+            )
+        )
+    )
+    paro_processor = object.__new__(ParoQuantProcessor)
+
+    assert _should_drain_finalize_futures_synchronously(
+        looper,
+        finalize_tasks=[(paro_processor, None, None, None, None)],
+    ) is True
+
+
+def test_stage_layer_keeps_async_finalizers_for_non_paroquant_when_unset():
+    looper = types.SimpleNamespace(
+        gptq_model=types.SimpleNamespace(
+            quantize_config=QuantizeConfig(
+                bits=4,
+                group_size=128,
+                wait_for_submodule_finalizers=False,
+            )
+        )
+    )
+
+    assert _should_drain_finalize_futures_synchronously(
+        looper,
+        finalize_tasks=[(types.SimpleNamespace(), None, None, None, None)],
+    ) is False
+
+
+def test_stage_layer_empties_cache_after_sync_paroquant_finalize_only_with_offload():
+    looper = types.SimpleNamespace(
+        gptq_model=types.SimpleNamespace(
+            quantize_config=QuantizeConfig(
+                bits=4,
+                group_size=128,
+                offload_to_disk=True,
+            )
+        )
+    )
+    paro_processor = object.__new__(ParoQuantProcessor)
+
+    assert _should_empty_cache_after_sync_finalize(
+        looper,
+        finalize_tasks=[(paro_processor, None, None, None, None)],
+    ) is True
+
+    looper.gptq_model.quantize_config.offload_to_disk = False
+    assert _should_empty_cache_after_sync_finalize(
+        looper,
+        finalize_tasks=[(paro_processor, None, None, None, None)],
+    ) is False
+
+def test_stage_layer_paroquant_layer_scope_skips_pristine_group_clone():
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = types.SimpleNamespace(opt_scope="layer")
+
+    assert _processor_needs_pristine_group_clone(processor) is False
+
+
+def test_stage_layer_paroquant_compute_block_scope_keeps_pristine_group_clone():
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = types.SimpleNamespace(opt_scope="compute_block")
+
+    assert _processor_needs_pristine_group_clone(processor) is True
+
+
+def test_stage_subset_flush_stays_local_when_work_stays_on_cur_layer_device():
+    cur_layer_device = torch.device("cuda:0")
+
+    assert (
+        stage_subset_module._resolve_cache_flush_device(cur_layer_device, [torch.device("cuda:0")])
+        == cur_layer_device
+    )
+
+
+def test_stage_subset_flush_goes_global_when_work_fans_out_across_devices():
+    cur_layer_device = torch.device("cuda:0")
+
+    assert stage_subset_module._resolve_cache_flush_device(
+        cur_layer_device,
+        [torch.device("cuda:0"), torch.device("cuda:1")],
+    ) is None
 
 
 def test_stage_inputs_capture_collects_real_inputs():
@@ -1291,6 +1393,72 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
     assert torch.allclose(layers[0].forward_inputs[0], input_tensor)
     assert layer1_inputs
     assert all(torch.allclose(layer_input, expected_layer0_output) for layer_input in layer1_inputs)
+
+
+def test_capture_pristine_group_context_preserves_untouched_layer_io(monkeypatch):
+    observed = {}
+    sentinel_outputs = [[torch.randn(1, 1, 1)]]
+
+    def fake_replay_layer_outputs(*_args, **kwargs):
+        observed["replay_kwargs"] = kwargs
+        return sentinel_outputs
+
+    monkeypatch.setattr("gptqmodel.looper.stage_layer._replay_layer_outputs", fake_replay_layer_outputs)
+
+    class DummyProcessor:
+        def uses_grouped_optimization(self):
+            return True
+
+        def receive_layer_forward_context(self, **kwargs):
+            observed["receive_kwargs"] = kwargs
+
+    tensor = torch.randn(1, 1, 1)
+    subset_plan = SubsetPlan(
+        modules={},
+        subset_index=0,
+        subset_total=1,
+        execute_forward=True,
+        replay_after_process=True,
+        forward_mode="serial",
+        batch_count=1,
+        forward_row_counts=[1],
+        forward_total_rows=1,
+        moe_groups={},
+        forward_device_map={},
+        calibration_coverage_policy=CalibrationCoveragePolicy(
+            validate_input_coverage=False,
+            fallback_enabled=True,
+            prune_uncovered_modules=False,
+            record_dynamic_exclusions=False,
+        ),
+        module_chunks=[{}],
+    )
+
+    _capture_pristine_group_context(
+        looper=types.SimpleNamespace(),
+        processor=DummyProcessor(),
+        module=torch.nn.Identity(),
+        pristine_module=None,
+        subset_plans=[subset_plan],
+        layer_inputs=[[tensor]],
+        layer_input_kwargs=[{}],
+        position_ids=[],
+        attention_masks=[],
+        cur_layer_device=torch.device("cpu"),
+        is_lm_head_module=False,
+        shared_kv_cache_dict={},
+        layer_index=0,
+        layer_descriptor="model.layers.0",
+        full={},
+        log=None,
+        region_timer=None,
+    )
+
+    assert observed["replay_kwargs"]["replay_plan"] is None
+    assert observed["receive_kwargs"]["layer_outputs"] is sentinel_outputs
+    assert observed["receive_kwargs"]["layer_inputs"] == [[tensor]]
+    assert observed["receive_kwargs"]["layer_input_kwargs"] == [{}]
+    assert observed["receive_kwargs"]["subset_total"] == 1
 
 
 def test_masked_hook_wrapper_trims_left_padded_inputs_before_add_batch():

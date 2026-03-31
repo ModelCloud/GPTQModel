@@ -4,6 +4,8 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
+import os
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -12,8 +14,92 @@ from typing import Dict, Iterator, Optional
 from logbar import LogBar
 
 
+class _SilentProgress:
+    """Minimal no-op progress handle for non-interactive test sessions."""
+
+    def __init__(self, iterable=None):
+        self._iterable = iterable if iterable is not None else ()
+        self.current_iter_step = 0
+
+    def __iter__(self):
+        if isinstance(self._iterable, int):
+            return iter(range(self._iterable))
+        return iter(self._iterable)
+
+    def __len__(self):
+        if isinstance(self._iterable, int):
+            return self._iterable
+        return len(self._iterable)
+
+    def attach(self, *_args, **_kwargs):
+        return self
+
+    def manual(self):
+        return self
+
+    def set(self, **_kwargs):
+        return self
+
+    def title(self, *_args, **_kwargs):
+        return self
+
+    def subtitle(self, *_args, **_kwargs):
+        return self
+
+    def draw(self):
+        return self
+
+    def refresh(self):
+        return self
+
+    def next(self, step: int = 1):
+        self.current_iter_step += int(step)
+        return self
+
+    def close(self):
+        return None
+
+
+class _AdaptiveLoggerProxy:
+    """Proxy that keeps structured logs while adapting live rendering at call time."""
+
+    def __init__(self, logger: LogBar):
+        self._logger = logger
+
+    def pb(self, iterable, *, output_interval: Optional[int] = None):
+        if _suppress_live_renderables():
+            return _SilentProgress(iterable)
+        return self._logger.pb(iterable, output_interval=output_interval)
+
+    def spinner(self, title: str = "", *, interval: float = 0.5, tail_length: int = 4):
+        if _suppress_live_renderables():
+            return _SilentProgress()
+        return self._logger.spinner(title=title, interval=interval, tail_length=tail_length)
+
+    def __getattr__(self, name):
+        return getattr(self._logger, name)
+
+
+def _suppress_live_renderables() -> bool:
+    """Disable live progress redraws under non-interactive pytest capture."""
+
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        return False
+
+    try:
+        return not sys.stdout.isatty()
+    except Exception:
+        return True
+
+
+def live_renderables_suppressed() -> bool:
+    """Report whether redraw-based progress should be replaced by durable logs."""
+
+    return _suppress_live_renderables()
+
+
 def setup_logger():
-    return LogBar.shared()
+    return _AdaptiveLoggerProxy(LogBar.shared())
 
 
 class QuantizationRegionTimer:

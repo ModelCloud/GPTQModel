@@ -25,7 +25,6 @@ import pcre as re
 import torch
 import torch.nn as nn
 import transformers
-from huggingface_hub import HfApi, hf_hub_download
 from packaging import version
 from safetensors import safe_open
 from torch.nn.modules.conv import _ConvNd
@@ -66,6 +65,7 @@ from .backend import BACKEND, normalize_backend
 from .ctx import ctx
 from .device import get_device
 from .hf import get_hf_config_dtype
+from .hub import hf_hub_download, model_info
 from .importer import select_quant_linear
 from .logger import log_time_block, setup_logger
 from .torch import HAS_CUDA, torch_empty_cache
@@ -1286,12 +1286,15 @@ def copy_py_files(save_dir, file_extension=".py", model_id_or_path=""):
         for file in py_files:
             shutil.copy2(os.path.join(model_id_or_path, file), save_dir)
     else:
-        api = HfApi()
-        model_info = api.model_info(model_id_or_path)
-        for file in model_info.siblings:
+        remote_model_info = model_info(model_id_or_path)
+        for file in remote_model_info.siblings:
             if file.rfilename.endswith(file_extension):
-                _ = hf_hub_download(repo_id=model_id_or_path, filename=file.rfilename,
-                                                  local_dir=save_dir)
+                _ = hf_hub_download(
+                    repo_id=model_id_or_path,
+                    filename=file.rfilename,
+                    local_dir=save_dir,
+                )
+
 
 def get_model_files_size(pre_quantized_model_path, file_extension=['.bin', '.safetensors', '.pth', '.pt', '.ckpt', '.h5', '.pb', '.onnx']):
     if os.path.isdir(pre_quantized_model_path):
@@ -1302,15 +1305,12 @@ def get_model_files_size(pre_quantized_model_path, file_extension=['.bin', '.saf
                 1] in file_extension
         )
     else:
-        api = HfApi()
-        files_data = api.list_repo_files(pre_quantized_model_path)
-        pre_quantized_size_bytes = 0
-        for file_info in files_data:
-            if any(file_info.endswith(ext) for ext in file_extension):
-                file_metadata = api.model_info(pre_quantized_model_path, files_metadata=True)
-                for file_data in file_metadata.siblings:
-                    if file_data.rfilename == file_info:
-                        pre_quantized_size_bytes += file_data.size
+        remote_model_info = model_info(pre_quantized_model_path, files_metadata=True)
+        pre_quantized_size_bytes = sum(
+            (file_data.size or 0)
+            for file_data in remote_model_info.siblings
+            if any(file_data.rfilename.endswith(ext) for ext in file_extension)
+        )
     pre_quantized_size_mb = pre_quantized_size_bytes / (1024 * 1024)
     return pre_quantized_size_mb
 

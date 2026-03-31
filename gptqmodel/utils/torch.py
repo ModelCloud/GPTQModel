@@ -313,11 +313,18 @@ def empty_cache_for_device(device: torch.device) -> bool:
     return False
 
 
-def torch_empty_cache_any(device: Union[torch.device, str, int, None] = None, gc: bool = True) -> bool:
+def torch_empty_cache_any(
+    device: Union[torch.device, str, int, None] = None,
+    gc: bool = True,
+    sync: bool = False,
+) -> bool:
     normalized = _normalize_device(device)
 
     if gc:
         timed_gc_collect()
+
+    if sync:
+        torch_sync(device=normalized)
 
     success = False
 
@@ -350,8 +357,8 @@ def torch_empty_cache_any(device: Union[torch.device, str, int, None] = None, gc
     return empty_cache_for_device(normalized)
 
 
-def torch_empty_cache(device: torch.device = None, gc: bool = True) -> bool:
-    return torch_empty_cache_any(device=device, gc=gc)
+def torch_empty_cache(device: torch.device = None, gc: bool = True, sync: bool = False) -> bool:
+    return torch_empty_cache_any(device=device, gc=gc, sync=sync)
 
 def auto_select_torch_device(index: int = 0):
     assert index >= 0, f"device index should be a positive integer: actual = `{index}`"

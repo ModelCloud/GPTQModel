@@ -1613,6 +1613,31 @@ def _normalize_pack_dtype(pack_dtype: Optional[Union[str, torch.dtype]]) -> torc
     raise ValueError(f"QuantizeConfig: Unsupported `pack_dtype`: {pack_dtype}")
 
 
+def _normalize_paroquant_best_state_dtype(best_state_dtype: Optional[Union[str, torch.dtype]]) -> str:
+    """Canonicalize the ParoQuant best-state snapshot dtype into a serialized string."""
+    if best_state_dtype is None:
+        return "fp32"
+    if isinstance(best_state_dtype, str):
+        normalized = best_state_dtype.strip().lower()
+        if normalized in {"fp16", "float16"}:
+            return "fp16"
+        if normalized in {"bf16", "bfloat16"}:
+            return "bf16"
+        if normalized in {"fp32", "float32"}:
+            return "fp32"
+    elif isinstance(best_state_dtype, torch.dtype):
+        if best_state_dtype == torch.float16:
+            return "fp16"
+        if best_state_dtype == torch.bfloat16:
+            return "bf16"
+        if best_state_dtype == torch.float32:
+            return "fp32"
+    raise ValueError(
+        "ParoQuantizeConfig: `opt_best_state_dtype` must be one of {'fp16', 'bf16', 'fp32'} "
+        "or torch.float16/torch.bfloat16/torch.float32."
+    )
+
+
 def _normalize_fallback(fallback: Optional[Union[Fallback, Dict[str, Any], str, int, float]]) -> Optional[Fallback]:
     if fallback is None:
         return None
@@ -2499,8 +2524,20 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "opt_quantizer_lr": "opt_quantizer_lr",
             "opt_pair_ratio": "opt_pair_ratio",
             "opt_seed": "opt_seed",
+            "opt_optimizer": "opt_optimizer",
+            "opt_weight_decay": "opt_weight_decay",
+            "opt_betas": "opt_betas",
+            "opt_eps": "opt_eps",
+            "opt_amsgrad": "opt_amsgrad",
+            "opt_sgd_momentum": "opt_sgd_momentum",
+            "opt_sgd_dampening": "opt_sgd_dampening",
+            "opt_sgd_nesterov": "opt_sgd_nesterov",
             "opt_fused_rotation": "opt_fused_rotation",
+            "opt_gradient_checkpointing": "opt_gradient_checkpointing",
             "opt_stage_cudagraph": "opt_stage_cudagraph",
+            "opt_best_state_dtype": "opt_best_state_dtype",
+            "opt_train_on_noisy_inputs": "opt_train_on_noisy_inputs",
+            "opt_scope": "opt_scope",
             "opt_stage_impl": "opt_stage_impl",
             "opt_pair_impl": "opt_pair_impl",
             "opt_quantizer_impl": "opt_quantizer_impl",
@@ -2843,8 +2880,20 @@ class ParoQuantizeConfig(QuantizeConfig):
     opt_quantizer_lr: float = field(default=1e-6)
     opt_pair_ratio: float = field(default=0.5)
     opt_seed: int = field(default=0)
+    opt_optimizer: str = field(default="adamw")
+    opt_weight_decay: float = field(default=0.01)
+    opt_betas: Tuple[float, float] = field(default=(0.9, 0.95))
+    opt_eps: float = field(default=1e-10)
+    opt_amsgrad: bool = field(default=False)
+    opt_sgd_momentum: float = field(default=0.0)
+    opt_sgd_dampening: float = field(default=0.0)
+    opt_sgd_nesterov: bool = field(default=False)
     opt_fused_rotation: bool = field(default=True)
+    opt_gradient_checkpointing: Optional[bool] = field(default=None)
     opt_stage_cudagraph: bool = field(default=True)
+    opt_best_state_dtype: Union[str, torch.dtype] = field(default="fp32")
+    opt_train_on_noisy_inputs: bool = field(default=False)
+    opt_scope: str = field(default="module")
     opt_stage_impl: str = field(default="fast")
     opt_pair_impl: str = field(default="fast")
     opt_quantizer_impl: str = field(default="reference")
@@ -2856,6 +2905,11 @@ class ParoQuantizeConfig(QuantizeConfig):
 
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
         return PAROQUANT_EXPORT_FORMATS
+
+    @staticmethod
+    def default_opt_gradient_checkpointing_for_scope(opt_scope: str) -> bool:
+        """Enable activation checkpointing by default only for whole-layer optimization."""
+        return str(opt_scope).strip().lower() == "layer"
 
     def __post_init__(self):
         self.method = _normalize_quant_method(self.method)
@@ -2877,8 +2931,36 @@ class ParoQuantizeConfig(QuantizeConfig):
         self.opt_quantizer_lr = float(self.opt_quantizer_lr)
         self.opt_pair_ratio = float(self.opt_pair_ratio)
         self.opt_seed = int(self.opt_seed)
+        self.opt_optimizer = str(self.opt_optimizer).strip().lower()
+        self.opt_weight_decay = float(self.opt_weight_decay)
+        if not isinstance(self.opt_betas, (list, tuple)) or len(self.opt_betas) != 2:
+            raise ValueError("ParoQuantizeConfig: `opt_betas` must be a 2-tuple/list of floats.")
+        self.opt_betas = (float(self.opt_betas[0]), float(self.opt_betas[1]))
+        self.opt_eps = float(self.opt_eps)
+        self.opt_amsgrad = bool(self.opt_amsgrad)
+        self.opt_sgd_momentum = float(self.opt_sgd_momentum)
+        self.opt_sgd_dampening = float(self.opt_sgd_dampening)
+        self.opt_sgd_nesterov = bool(self.opt_sgd_nesterov)
         self.opt_fused_rotation = bool(self.opt_fused_rotation)
+        self.opt_scope = str(self.opt_scope).strip().lower()
+        checkpointing = self.opt_gradient_checkpointing
+        if isinstance(checkpointing, str):
+            normalized_checkpointing = checkpointing.strip().lower()
+            if normalized_checkpointing in {"1", "true", "yes", "on", "y", "t"}:
+                checkpointing = True
+            elif normalized_checkpointing in {"0", "false", "no", "off", "n", "f"}:
+                checkpointing = False
+            else:
+                raise ValueError(
+                    "ParoQuantizeConfig: `opt_gradient_checkpointing` string values must be one of "
+                    "{'1','0','true','false','yes','no','on','off','y','n','t','f'}."
+                )
+        if checkpointing is None:
+            checkpointing = self.default_opt_gradient_checkpointing_for_scope(self.opt_scope)
+        self.opt_gradient_checkpointing = bool(checkpointing)
         self.opt_stage_cudagraph = bool(self.opt_stage_cudagraph)
+        self.opt_best_state_dtype = _normalize_paroquant_best_state_dtype(self.opt_best_state_dtype)
+        self.opt_train_on_noisy_inputs = bool(self.opt_train_on_noisy_inputs)
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
         self.opt_pair_impl = str(self.opt_pair_impl).strip().lower()
         self.opt_quantizer_impl = str(self.opt_quantizer_impl).strip().lower()
@@ -2894,6 +2976,24 @@ class ParoQuantizeConfig(QuantizeConfig):
             raise ValueError("ParoQuantizeConfig: optimization learning rates must be positive.")
         if not (0.0 < self.opt_pair_ratio <= 0.5):
             raise ValueError("ParoQuantizeConfig: `opt_pair_ratio` must be in the interval (0, 0.5].")
+        if self.opt_optimizer not in {"adamw", "adam", "sgd"}:
+            raise ValueError("ParoQuantizeConfig: `opt_optimizer` must be one of {'adamw', 'adam', 'sgd'}.")
+        if self.opt_weight_decay < 0:
+            raise ValueError("ParoQuantizeConfig: `opt_weight_decay` must be non-negative.")
+        if self.opt_eps <= 0:
+            raise ValueError("ParoQuantizeConfig: `opt_eps` must be positive.")
+        if not all(0.0 <= beta < 1.0 for beta in self.opt_betas):
+            raise ValueError("ParoQuantizeConfig: `opt_betas` values must be in the interval [0, 1).")
+        if self.opt_sgd_momentum < 0:
+            raise ValueError("ParoQuantizeConfig: `opt_sgd_momentum` must be non-negative.")
+        if self.opt_sgd_dampening < 0:
+            raise ValueError("ParoQuantizeConfig: `opt_sgd_dampening` must be non-negative.")
+        if self.opt_sgd_nesterov and self.opt_sgd_momentum <= 0:
+            raise ValueError("ParoQuantizeConfig: `opt_sgd_nesterov=True` requires `opt_sgd_momentum > 0`.")
+        if self.opt_sgd_nesterov and self.opt_sgd_dampening != 0:
+            raise ValueError("ParoQuantizeConfig: `opt_sgd_nesterov=True` requires `opt_sgd_dampening == 0`.")
+        if self.opt_scope not in {"module", "compute_block", "layer"}:
+            raise ValueError("ParoQuantizeConfig: `opt_scope` must be one of {'module', 'compute_block', 'layer'}.")
         if self.opt_stage_impl not in {"fast", "reference"}:
             raise ValueError("ParoQuantizeConfig: `opt_stage_impl` must be one of {'fast', 'reference'}.")
         if self.opt_pair_impl not in {"fast", "reference"}:
@@ -2924,8 +3024,20 @@ class ParoQuantizeConfig(QuantizeConfig):
         meta_payload["opt_quantizer_lr"] = self.opt_quantizer_lr
         meta_payload["opt_pair_ratio"] = self.opt_pair_ratio
         meta_payload["opt_seed"] = self.opt_seed
+        meta_payload["opt_optimizer"] = self.opt_optimizer
+        meta_payload["opt_weight_decay"] = self.opt_weight_decay
+        meta_payload["opt_betas"] = list(self.opt_betas)
+        meta_payload["opt_eps"] = self.opt_eps
+        meta_payload["opt_amsgrad"] = self.opt_amsgrad
+        meta_payload["opt_sgd_momentum"] = self.opt_sgd_momentum
+        meta_payload["opt_sgd_dampening"] = self.opt_sgd_dampening
+        meta_payload["opt_sgd_nesterov"] = self.opt_sgd_nesterov
         meta_payload["opt_fused_rotation"] = self.opt_fused_rotation
+        meta_payload["opt_gradient_checkpointing"] = self.opt_gradient_checkpointing
         meta_payload["opt_stage_cudagraph"] = self.opt_stage_cudagraph
+        meta_payload["opt_best_state_dtype"] = self.opt_best_state_dtype
+        meta_payload["opt_train_on_noisy_inputs"] = self.opt_train_on_noisy_inputs
+        meta_payload["opt_scope"] = self.opt_scope
         meta_payload["opt_stage_impl"] = self.opt_stage_impl
         meta_payload["opt_pair_impl"] = self.opt_pair_impl
         meta_payload["opt_quantizer_impl"] = self.opt_quantizer_impl

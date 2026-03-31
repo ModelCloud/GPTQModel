@@ -197,11 +197,21 @@ def make_paroquant_config(
     bits: int = 4,
     group_size: int = 128,
     krot: int = 8,
+    opt_scope: str = "module",
     opt_rotation_epochs: int = 10,
     opt_finetune_epochs: int = 10,
     opt_train_samples: int = 2048,
     opt_validation_samples: int = 64,
     opt_batch_size: int = 64,
+    opt_optimizer: str = "adamw",
+    opt_weight_decay: float = 0.01,
+    opt_betas: tuple[float, float] = (0.9, 0.95),
+    opt_eps: float = 1e-10,
+    opt_amsgrad: bool = False,
+    opt_sgd_momentum: float = 0.0,
+    opt_sgd_dampening: float = 0.0,
+    opt_sgd_nesterov: bool = False,
+    opt_gradient_checkpointing: Optional[bool] = None,
     offload_to_disk: bool = False,
 ) -> QuantizeConfig:
     if sym is not True:
@@ -217,11 +227,21 @@ def make_paroquant_config(
         dynamic=dynamic,
         offload_to_disk=offload_to_disk,
         device="cuda:0" if torch.cuda.is_available() else "cpu",
+        opt_scope=opt_scope,
         opt_rotation_epochs=opt_rotation_epochs,
         opt_finetune_epochs=opt_finetune_epochs,
         opt_train_samples=opt_train_samples,
         opt_validation_samples=opt_validation_samples,
         opt_batch_size=opt_batch_size,
+        opt_optimizer=opt_optimizer,
+        opt_weight_decay=opt_weight_decay,
+        opt_betas=opt_betas,
+        opt_eps=opt_eps,
+        opt_amsgrad=opt_amsgrad,
+        opt_sgd_momentum=opt_sgd_momentum,
+        opt_sgd_dampening=opt_sgd_dampening,
+        opt_sgd_nesterov=opt_sgd_nesterov,
+        opt_gradient_checkpointing=opt_gradient_checkpointing,
     )
 
 
@@ -564,6 +584,7 @@ def _run_paroquant_case(
     eval_suite_kwargs: Optional[dict[str, Any]],
     sym: bool,
     fused_opt_rotation: bool,
+    opt_scope: str,
     opt_rotation_epochs: int,
     opt_finetune_epochs: int,
     opt_train_samples: int,
@@ -586,6 +607,7 @@ def _run_paroquant_case(
     qcfg = make_paroquant_config(
         dynamic=dynamic,
         sym=sym,
+        opt_scope=opt_scope,
         opt_rotation_epochs=opt_rotation_epochs,
         opt_finetune_epochs=opt_finetune_epochs,
         opt_train_samples=opt_train_samples,
@@ -633,6 +655,7 @@ def _run_paroquant_case(
             "device": _visible_cuda_device_name(),
             "dtype": _dtype_label(normalized_dtype),
             "fused_opt_rotation": fused_opt_rotation,
+            "opt_scope": opt_scope,
             "sym": sym,
             "quant_wall_s": quant_wall_s,
             "save_wall_s": save_wall_s,
@@ -666,6 +689,7 @@ def run_paroquant_first_layer_case(
     eval_suite_kwargs: Optional[dict[str, Any]] = None,
     sym: bool = True,
     fused_opt_rotation: bool = True,
+    opt_scope: str = "module",
     opt_rotation_epochs: int = 10,
     opt_finetune_epochs: int = 10,
     opt_train_samples: int = 2048,
@@ -696,6 +720,7 @@ def run_paroquant_first_layer_case(
         eval_suite_kwargs=eval_suite_kwargs,
         sym=sym,
         fused_opt_rotation=fused_opt_rotation,
+        opt_scope=opt_scope,
         opt_rotation_epochs=opt_rotation_epochs,
         opt_finetune_epochs=opt_finetune_epochs,
         opt_train_samples=opt_train_samples,
@@ -706,6 +731,7 @@ def run_paroquant_first_layer_case(
         result_meta={
             "mode": "paroquant_prefix_layers",
             "num_quant_layers": int(num_quant_layers),
+            "opt_scope": opt_scope,
         },
     )
 
@@ -725,6 +751,7 @@ def run_paroquant_single_module_case(
     eval_suite_kwargs: Optional[dict[str, Any]] = None,
     sym: bool = True,
     fused_opt_rotation: bool = True,
+    opt_scope: str = "module",
     opt_rotation_epochs: int = 10,
     opt_finetune_epochs: int = 10,
     opt_train_samples: int = 2048,
@@ -745,6 +772,7 @@ def run_paroquant_single_module_case(
         eval_suite_kwargs=eval_suite_kwargs,
         sym=sym,
         fused_opt_rotation=fused_opt_rotation,
+        opt_scope=opt_scope,
         opt_rotation_epochs=opt_rotation_epochs,
         opt_finetune_epochs=opt_finetune_epochs,
         opt_train_samples=opt_train_samples,
@@ -768,6 +796,7 @@ def run_paroquant_selected_modules_case(
     eval_suite_kwargs: Optional[dict[str, Any]] = None,
     sym: bool = True,
     fused_opt_rotation: bool = True,
+    opt_scope: str = "module",
     opt_rotation_epochs: int = 10,
     opt_finetune_epochs: int = 10,
     opt_train_samples: int = 2048,
@@ -798,6 +827,7 @@ def run_paroquant_selected_modules_case(
         eval_suite_kwargs=eval_suite_kwargs,
         sym=sym,
         fused_opt_rotation=fused_opt_rotation,
+        opt_scope=opt_scope,
         opt_rotation_epochs=opt_rotation_epochs,
         opt_finetune_epochs=opt_finetune_epochs,
         opt_train_samples=opt_train_samples,
@@ -810,6 +840,7 @@ def run_paroquant_selected_modules_case(
             "layer_idx": int(layer_idx),
             "module_name": ",".join(str(name) for name in module_names),
             "module_names": [str(name) for name in module_names],
+            "opt_scope": opt_scope,
         },
     )
 
@@ -824,6 +855,7 @@ def comparison_rows(*cases: dict[str, Any]) -> list[list[str]]:
         rows.append(
             [
                 label,
+                str(case.get("opt_scope", "")),
                 str(case.get("sym", "")),
                 str(case.get("fused_opt_rotation", "")),
                 "" if score is None else f"{float(score):.6f}",
@@ -838,7 +870,7 @@ def render_case_tables(case: dict[str, Any]) -> dict[str, str]:
     return {
         "comparison": tabulate(
             comparison_rows(case),
-            headers=["case", "sym", "fused_opt", "gsm8k_platinum_cot", "quant_wall_s", "eval_wall_s"],
+            headers=["case", "opt_scope", "sym", "fused_opt", "gsm8k_platinum_cot", "quant_wall_s", "eval_wall_s"],
             tablefmt="grid",
         ),
         "module_times": tabulate(

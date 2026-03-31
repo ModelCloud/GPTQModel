@@ -34,6 +34,7 @@ from ..looper.named_module import NamedModule
 from ..quantization.config import VramStrategy, GcMode, ExpertsRoutingBypass
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
+from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.torch import torch_empty_cache, torch_sync
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -127,6 +128,56 @@ class SubsetStageResult:
     processed_subset: Dict[str, NamedModule]
     layer_inputs: List[List[torch.Tensor]]
     plan: Optional[SubsetPlan]
+
+
+def _resolve_cache_flush_device(
+    cur_layer_device: Optional[torch.device],
+    used_devices,
+) -> Optional[torch.device]:
+    """Keep cache flush local unless the preceding work fanned out across devices."""
+
+    current = normalize_device_like(cur_layer_device)
+    if current is None:
+        return None
+
+    accelerator_devices = set()
+    for device in used_devices:
+        normalized = normalize_device_like(device)
+        if normalized is None or normalized.type == "cpu":
+            continue
+        accelerator_devices.add(str(normalized))
+
+    if not accelerator_devices:
+        return current
+    if accelerator_devices == {str(current)}:
+        return current
+    return None
+
+
+def _resolve_forward_flush_device(
+    plan: SubsetPlan,
+    cur_layer_device: Optional[torch.device],
+) -> Optional[torch.device]:
+    used_devices = list(plan.forward_device_map.values())
+
+    if not plan.subset_forward_serial:
+        selected_devices = select_forward_devices(cur_layer_device)
+        active_forward_devices = {
+            str(normalize_device_like(device))
+            for device in selected_devices
+            if normalize_device_like(device) is not None and normalize_device_like(device).type != "cpu"
+        }
+        if len(active_forward_devices) > 1:
+            used_devices.extend(selected_devices)
+
+    return _resolve_cache_flush_device(cur_layer_device, used_devices)
+
+
+def _resolve_quant_flush_device(
+    cur_layer_device: Optional[torch.device],
+    quant_target_devices: Dict[str, torch.device],
+) -> Optional[torch.device]:
+    return _resolve_cache_flush_device(cur_layer_device, quant_target_devices.values())
 
 
 def _resolve_subset_calibration_coverage_policy(
@@ -407,7 +458,7 @@ def _run_single_subset_pass(
     return_outputs: bool = False,
     disable_moe_hooks: bool = False,
     execute_forward: Optional[bool] = None,
-) -> Tuple[Dict[str, NamedModule], Optional[List[List[torch.Tensor]]]]:
+) -> Tuple[Dict[str, NamedModule], Optional[List[List[torch.Tensor]]], bool]:
     """Execute forward and quantization for a specific subset/chunk.
 
     This function assumes planning is already done. Apart from the optional
@@ -502,7 +553,12 @@ def _run_single_subset_pass(
                 len(subset),
             )
 
-    need_outputs = execute_forward and plan.need_forward_outputs
+    capture_layer_forward_context = execute_forward and execution_config.capture_layer_forward_context
+    if capture_layer_forward_context:
+        subset_capture_override = getattr(processor, "capture_layer_forward_context_during_subset", None)
+        if callable(subset_capture_override):
+            capture_layer_forward_context = bool(subset_capture_override())
+    need_outputs = execute_forward and (plan.need_forward_outputs or capture_layer_forward_context)
     fwd_start = None
     forward_source = f"{layer_descriptor}:subset{subset_index + 1}/{subset_total}"
     if execute_forward:
@@ -575,7 +631,17 @@ def _run_single_subset_pass(
                 forward_pb.close()
 
     returned_outputs = None
-    if execute_forward and need_outputs:
+    if execute_forward and capture_layer_forward_context:
+        processor.receive_layer_forward_context(
+            layer_index=layer_index,
+            layer_inputs=layer_inputs,
+            layer_input_kwargs=layer_input_kwargs,
+            layer_outputs=forward_outputs,
+            subset_index=subset_index,
+            subset_total=subset_total,
+        )
+
+    if execute_forward and plan.need_forward_outputs:
         # For pre-process consumers, the next stage needs the forward outputs
         # immediately rather than after the later layer replay step.
         processor.receive_layer_inputs(forward_outputs)
@@ -607,9 +673,9 @@ def _run_single_subset_pass(
                 subset[name].forward_hook = None
                 subset[name].forward_hook_last = False
 
+    forward_flush_device = _resolve_forward_flush_device(plan, cur_layer_device)
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
-        torch_sync()
-        torch_empty_cache()
+        torch_empty_cache(device=forward_flush_device, sync=True)
     moe_skip_modules = []
     if calibration_coverage_policy.validate_input_coverage:
         # Coverage validation is a policy decision captured by the plan.
@@ -660,6 +726,8 @@ def _run_single_subset_pass(
             setattr(named_module.module, "target_device", target_device)
 
         quant_target_devices[name] = target_device
+
+    quant_flush_device = _resolve_quant_flush_device(cur_layer_device, quant_target_devices)
 
     processed_subset: Dict[str, NamedModule] = {}
     futures = []
@@ -758,15 +826,21 @@ def _run_single_subset_pass(
             # Capture-only modules should not be finalized or offloaded.
             continue
         processed_subset[name] = named_module
-    torch_sync()
-
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
-        torch_empty_cache()
+        torch_empty_cache(device=quant_flush_device, sync=True)
+    else:
+        torch_sync()
 
     if subset_event_cb:
         subset_event_cb(stage="quant_complete", layer_idx=layer_index, subset_index=subset_index, subset_total=subset_total, module_names=list(subset.keys()), processor=getattr(processor, "name", type(processor).__name__))
 
-    return processed_subset, returned_outputs
+    used_data_parallel = False
+    if execute_forward and forward_flush_device is None:
+        used_data_parallel = True
+    if quant_target_devices and quant_flush_device is None:
+        used_data_parallel = True
+
+    return processed_subset, returned_outputs, used_data_parallel
 
 
 def run_subset_stage(
@@ -893,7 +967,7 @@ def run_subset_stage(
                     len(chunk_plan.modules),
                 )
 
-            chunk_result, _ = _run_single_subset_pass(
+            chunk_result, _, chunk_used_data_parallel = _run_single_subset_pass(
                 **common_args,
                 plan=chunk_plan,
                 subset_event_cb=None,
@@ -903,7 +977,8 @@ def run_subset_stage(
 
             # Force cleanup between chunks
             if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
-                 torch_empty_cache()
+                flush_device = None if chunk_used_data_parallel else cur_layer_device
+                torch_empty_cache(device=flush_device)
 
         # Close MOE chunks progress bar
         moe_chunk_pb.close()
@@ -914,7 +989,7 @@ def run_subset_stage(
         # rebuild the real layer outputs.
         if not plan.replay_after_process:
              replay_plan = plan.for_modules({})
-             _, new_layer_inputs = _run_single_subset_pass(
+             _, new_layer_inputs, _ = _run_single_subset_pass(
                  **common_args,
                  plan=replay_plan,  # Empty modules prevent quant hooks during replay.
                  subset_event_cb=None,
@@ -926,7 +1001,7 @@ def run_subset_stage(
 
     elif plan.execute_forward:
         # Single pass
-        processed_results, new_layer_inputs = _run_single_subset_pass(
+        processed_results, new_layer_inputs, _ = _run_single_subset_pass(
             **common_args,
             plan=plan,
             subset_event_cb=subset_event_cb,
@@ -946,7 +1021,7 @@ def run_subset_stage(
             )
         emit_subset_event("forward_start")
         emit_subset_event("forward_end")
-        processed_results, _ = _run_single_subset_pass(
+        processed_results, _, _ = _run_single_subset_pass(
             **common_args,
             plan=plan,
             subset_event_cb=subset_event_cb,

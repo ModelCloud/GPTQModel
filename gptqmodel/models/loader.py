@@ -22,7 +22,7 @@ from ..utils.structure import print_module_tree
 if ensure_modelscope_available():
     from modelscope import snapshot_download
 else:
-    from huggingface_hub import snapshot_download
+    from ..utils.hub import snapshot_download
 
 import defuser
 from packaging.version import InvalidVersion, Version
@@ -75,6 +75,22 @@ from ._const import DEVICE, normalize_device
 log = setup_logger()
 
 ATTN_IMPLEMENTATION = "attn_implementation"
+
+
+def _should_print_module_tree() -> bool:
+    """Keep expensive module-tree dumps opt-in during model loading."""
+
+    raw = os.environ.get("GPTQMODEL_PRINT_MODULE_TREE")
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+
+def _maybe_print_module_tree(model) -> None:
+    """Print the module tree only when explicitly requested for debugging."""
+
+    if _should_print_module_tree():
+        print_module_tree(model=model)
 
 
 def parse_version_string(version_str: str):
@@ -224,7 +240,7 @@ def ModelLoader(cls):
             # Load a non-quantized model, but do not perform quantization. For example, for evaluation.
             model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
             model._model_init_kwargs = model_init_kwargs
-            print_module_tree(model=model)
+            _maybe_print_module_tree(model=model)
 
             turtle_model = None
 
@@ -319,7 +335,7 @@ def ModelLoader(cls):
                     model_local_path,
                     exc,
                 )
-                print("loading model directly to CPU (meta shell unsupported; turtle_model disabled)-----------")
+                log.info("Loader: loading model directly to CPU (meta shell unsupported; turtle_model disabled)")
                 fallback_init_kwargs = model_init_kwargs.copy()
                 fallback_init_kwargs.pop("device_map", None)
                 fallback_init_kwargs["low_cpu_mem_usage"] = False
@@ -328,12 +344,12 @@ def ModelLoader(cls):
                     model.config = copy.deepcopy(config)
                 defuser.convert_model(model, cleanup_original=False)
                 model._model_init_kwargs = fallback_init_kwargs
-                print_module_tree(model=model)
+                _maybe_print_module_tree(model=model)
                 turtle_model = None
             else:
                 defuser.convert_model(model, cleanup_original=False)
                 model._model_init_kwargs = model_init_kwargs
-                print_module_tree(model=model)
+                _maybe_print_module_tree(model=model)
 
                 # enable mmap with low_cpu_mem_usage
                 turtle_spinner = log.spinner(title="Turtle model loading...", interval=0.1)
@@ -355,13 +371,13 @@ def ModelLoader(cls):
                 # print("actual turtle model-----------")
                 # print_module_tree(model=turtle_model)
         else:
-            print("loading model directly to CPU (not using meta device or turtle_model)-----------")
+            log.info("Loader: loading model directly to CPU (not using meta device or turtle_model)")
             model = cls.loader.from_pretrained(model_local_path, config=config, **model_init_kwargs)
             if getattr(model, "config", None) is config:
                 model.config = copy.deepcopy(config)
             defuser.convert_model(model, cleanup_original=False)
             model._model_init_kwargs = model_init_kwargs
-            print_module_tree(model=model)
+            _maybe_print_module_tree(model=model)
 
             turtle_model = None
 

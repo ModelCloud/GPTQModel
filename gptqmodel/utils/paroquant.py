@@ -131,12 +131,38 @@ def apply_paroquant_rotation_reference(
 
 
 def _rotation_sources() -> list[str]:
-    """Return the native extension sources for the fused CUDA rotation op."""
+    """Return the native extension sources for the fused CUDA rotation op.
+
+    Build this as a plain custom-op library instead of a Python extension.
+    The Python-module path pulls in pybind11 initialization that segfaults on
+    this host during ``PyInit_*`` even though the CUDA op itself is fine.
+    """
     root = Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "paroquant"
     return [
-        str(root / "pybind.cpp"),
         str(root / "rotation.cu"),
     ]
+
+
+def _rotation_extension_binary_paths(build_root: Path) -> list[Path]:
+    """Return any prebuilt ParoQuant extension binaries in the build directory."""
+    return [
+        build_root / "gptqmodel_paroquant_rotation.so",
+        build_root / "gptqmodel_paroquant_rotation.pyd",
+        build_root / "gptqmodel_paroquant_rotation.dylib",
+    ]
+
+
+def _try_load_prebuilt_rotation_extension(build_root: Path) -> bool:
+    """Load a previously built ParoQuant extension without re-entering cpp_extension."""
+    for library_path in _rotation_extension_binary_paths(build_root):
+        if not library_path.is_file():
+            continue
+        try:
+            torch.ops.load_library(str(library_path))
+            return True
+        except Exception as exc:  # pragma: no cover - binary/runtime mismatch depends on host
+            log.debug("ParoQuant: failed to load cached rotation library %s: %s", library_path, exc)
+    return False
 
 
 def _rotation_kernel_ready(
@@ -164,14 +190,19 @@ def _load_rotation_extension() -> bool:
     if not torch.cuda.is_available():
         return False
 
+    build_root = Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / "paroquant"
+    build_root.mkdir(parents=True, exist_ok=True)
+
+    # Prefer a previously built shared object so stale cpp_extension lock files
+    # cannot stall startup once the kernel has already been compiled successfully.
+    if _try_load_prebuilt_rotation_extension(build_root):
+        return True
+
     try:
         from torch.utils.cpp_extension import load
     except Exception as exc:  # pragma: no cover - import depends on runtime
         log.debug("ParoQuant: torch cpp_extension unavailable: %s", exc)
         return False
-
-    build_root = Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / "paroquant"
-    build_root.mkdir(parents=True, exist_ok=True)
 
     try:
         load(
@@ -190,12 +221,36 @@ def _load_rotation_extension() -> bool:
                 "--use_fast_math",
             ],
             extra_cflags=["-O2", "-std=c++17"],
+            is_python_module=False,
             verbose=False,
         )
         return True
     except Exception as exc:  # pragma: no cover - build depends on runtime
         log.debug("ParoQuant: rotation kernel build failed, using reference path: %s", exc)
         return False
+
+
+def prewarm_paroquant_rotation_extension(
+    *,
+    fused_rotation: bool,
+    group_size: int,
+    krot: int,
+    device: Optional[torch.device | str] = None,
+) -> bool:
+    """Eagerly build the fused rotation extension before timed quantization starts."""
+    if not fused_rotation:
+        return False
+    if int(group_size) not in {128}:
+        return False
+    if int(krot) not in {1, 8}:
+        return False
+
+    if device is not None and torch.device(device).type != "cuda":
+        return False
+    if device is None and not torch.cuda.is_available():
+        return False
+
+    return _load_rotation_extension()
 
 
 def apply_paroquant_rotation(
@@ -239,8 +294,9 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):
-        x, pairs, theta, y = ctx.saved_tensors[:4]
-        scale_tensor = ctx.saved_tensors[4] if ctx.has_scale else None
+        saved_tensors = ctx.saved_tensors
+        x, pairs, theta, y = saved_tensors[:4]
+        scale_tensor = saved_tensors[4] if ctx.has_scale else None
         group_size = ctx.group_size
 
         _, hidden = pairs.shape
@@ -327,4 +383,5 @@ __all__ = [
     "apply_paroquant_rotation_reference",
     "build_identity_rotation_buffers",
     "is_identity_rotation",
+    "prewarm_paroquant_rotation_extension",
 ]
