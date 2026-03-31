@@ -186,6 +186,8 @@ class StageInputsCapture:
 
         is_ovis = self.gptq_model.model.config.model_type == "ovis"
         is_minicpmo = self.gptq_model.model.config.model_type == "minicpmo"
+        is_minicpmv = self.gptq_model.model.config.model_type == "minicpmv"
+        use_nested_input_move = is_minicpmo or is_minicpmv
 
         self.gptq_model.pre_quantize_generate_hook_start()
 
@@ -200,7 +202,7 @@ class StageInputsCapture:
                         if "pixel_values" in example.keys()
                         else cur_layer_device
                     )
-                if not is_minicpmo:
+                if not use_nested_input_move:
                     for k, v in example.items():
                         if isinstance(v, list):
                             for index in range(len(v)):
@@ -237,6 +239,15 @@ class StageInputsCapture:
 
                             generation_config = self.gptq_model.model.prepare_generation_config(do_sample=True)
                             generation_config["use_cache"] = use_cache
+
+                            self.gptq_model.model.generate(**example, tokenizer=self.gptq_model.model.tokenizer, **generation_config)
+                        elif is_minicpmv:
+                            # TODO Move the `generate` code section into `MiniCPMVQModel`.
+                            for k, v in example.items():
+                                example[k] = nested_move_to(v, device=data_device)
+
+                            generation_config = {"temperature": 0.7, "do_sample": True, "top_p": 0.8, "top_k": 100,
+                                                 "repetition_penalty": 1.03, "use_cache": use_cache}
 
                             self.gptq_model.model.generate(**example, tokenizer=self.gptq_model.model.tokenizer, **generation_config)
                         else:

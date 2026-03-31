@@ -6,6 +6,7 @@
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
 from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
+from gptqmodel.models.definitions.minicpm_v import MiniCPMVQModel
 from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.qwen3_vl import Qwen3_VLQModel
@@ -91,7 +92,7 @@ def get_calib_dataset(model):
     if isinstance(model, Ovis2QModel):
         return prepare_dataset(format_ovis2_dataset, n_sample=20)
 
-    if isinstance(model, BaseQwen2VLGPTQ) or isinstance(model, Qwen3_VLQModel) or isinstance(model, MiniCPMOQModel):
+    if isinstance(model, BaseQwen2VLGPTQ) or isinstance(model, Qwen3_VLQModel) or isinstance(model, MiniCPMOQModel) or isinstance(model, MiniCPMVQModel):
         return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)
 
     if isinstance(model, BaseQwen2_5_OmniGPTQ):

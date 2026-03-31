@@ -6,6 +6,7 @@
 # -- do not touch
 import os
 
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # -- end do not touch
 
@@ -21,7 +22,9 @@ from gptqmodel import GPTQModel, QuantizeConfig  # noqa: E402
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
 from tests.eval import evaluate, get_eval_task_metrics, import_evalution  # noqa: E402
+
 from .models.model_test import ModelTest  # noqa: E402
+
 
 pytestmark = [pytest.mark.model, pytest.mark.slow]
 
