@@ -10,6 +10,7 @@ from gptqmodel import BACKEND
 from gptqmodel.nn_modules.qlinear.paroquant import ParoQuantQuantLinear
 from gptqmodel.quantization import FORMAT, METHOD, ParoQuantizeConfig
 
+
 def _resolve_save_path(scope_env: str, default: str) -> str:
     """Resolve a scope-specific saved checkpoint path with global fallback."""
     return os.environ.get(

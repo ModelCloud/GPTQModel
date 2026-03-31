@@ -5,7 +5,6 @@ import os
 
 import pytest
 import torch
-
 from paroquant_first_layer_case_helper import (
     assert_basic_paroquant_first_layer_result,
     run_paroquant_first_layer_case_from_env,

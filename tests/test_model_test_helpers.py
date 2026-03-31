@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-import torch
 import model_test as model_test_module
+import torch
 from model_test import ModelTest
 
 from gptqmodel import BACKEND

@@ -4,7 +4,6 @@
 from types import SimpleNamespace
 
 import torch.nn as nn
-
 from model_test import ModelTest
 
 
@@ -34,7 +33,7 @@ def test_model_test_fast_mode_defaults_to_last_layers(monkeypatch):
     with case.model_compat_test_context():
         dynamic = case._build_fast_model_compat_dynamic(model)
 
-    assert list(sorted(dynamic)) == [
+    assert sorted(dynamic) == [
         "-:^layers\\.0\\.",
         "-:^layers\\.1\\.",
         "-:^layers\\.2\\.",
@@ -50,7 +49,7 @@ def test_model_test_fast_mode_first_layers_remain_configurable(monkeypatch):
     with case.model_compat_test_context():
         dynamic = case._build_fast_model_compat_dynamic(model)
 
-    assert list(sorted(dynamic)) == [
+    assert sorted(dynamic) == [
         "-:^layers\\.2\\.",
         "-:^layers\\.3\\.",
         "-:^layers\\.4\\.",

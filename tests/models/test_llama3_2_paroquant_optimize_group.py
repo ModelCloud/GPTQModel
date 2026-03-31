@@ -5,13 +5,12 @@ import os
 
 import pytest
 import torch
-from tabulate import tabulate
-
 from paroquant_first_layer_case_helper import (
     assert_basic_paroquant_first_layer_result,
     resolve_paroquant_first_layer_case_env,
     run_paroquant_first_layer_case_from_resolved,
 )
+from tabulate import tabulate
 
 
 @pytest.mark.cuda

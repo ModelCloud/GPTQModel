@@ -4,6 +4,7 @@ from typing import Dict
 
 import torch
 
+import gptqmodel.looper.stage_subset as stage_subset_module
 from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.module_looper import FinalizeProgressInfo, ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
@@ -13,12 +14,11 @@ from gptqmodel.looper.stage_layer import (
     _capture_pristine_group_context,
     _processor_needs_pristine_group_clone,
     _replay_layer_outputs,
-    _should_empty_cache_after_sync_finalize,
     _should_drain_finalize_futures_synchronously,
+    _should_empty_cache_after_sync_finalize,
     run_layer_stage,
 )
 from gptqmodel.looper.stage_subset import CalibrationCoveragePolicy, SubsetPlan, SubsetStageResult
-import gptqmodel.looper.stage_subset as stage_subset_module
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.utils.pause_resume import PauseResumeController
 

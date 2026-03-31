@@ -6,9 +6,9 @@
 from types import SimpleNamespace
 
 import pytest
+
 from gptqmodel import BACKEND
 from tests import eval as eval_module
-from tests.eval import evaluate
 
 
 def test_eval_string_model_load_filters_eval_only_keys(monkeypatch):

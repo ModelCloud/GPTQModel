@@ -9,10 +9,10 @@
 
 import copy
 import inspect
-from pathlib import Path
 import sys
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -21,11 +21,12 @@ import torch.nn.functional as F
 from transformers.quantizers.auto import AutoQuantizationConfig
 from transformers.utils.quantization_config import GPTQConfig
 
+import gptqmodel.looper.paroquant_processor as paroquant_processor_module
+import gptqmodel.utils.paroquant as paroquant_utils_module
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.input_cache import InputCache
 from gptqmodel.looper.module_looper import _restrict_quant_devices_for_method
 from gptqmodel.looper.named_module import NamedModule
-import gptqmodel.looper.paroquant_processor as paroquant_processor_module
 from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
 from gptqmodel.looper.stage_layer import _capture_pristine_group_context
 from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
@@ -42,7 +43,6 @@ from gptqmodel.quantization.paroquant.optimization import (
 )
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend
-import gptqmodel.utils.paroquant as paroquant_utils_module
 from gptqmodel.utils.paroquant import (
     apply_paroquant_rotation_reference,
     build_identity_rotation_buffers,
