@@ -14,6 +14,7 @@ from tabulate import tabulate
 
 from gptqmodel.utils.backend import BACKEND
 
+
 _MMLU_LOCAL_DATASET = Path("/monster/data/model/dataset/hails-mmlu_no_train")
 _GSM8K_LOCAL_DATASET = Path("/monster/data/model/dataset/gsm8k")
 _ENGINE_OPTION_KEYS = {
@@ -36,7 +37,6 @@ _ENGINE_OPTION_KEYS = {
     "padding_side",
     "pp_size",
     "quantization",
-    "random_seed",
     "sampling_backend",
     "sampling_params",
     "seed",
@@ -493,7 +493,7 @@ def _build_evalution_runtime(
                 engine_dtype=engine_dtype,
             )
             engine = evalution.SGLang(**sglang_config)
-        print("load_kwargs",load_kwargs)
+
         model_config = evalution.Model(
             path=model_path,
             tokenizer_path=tokenizer_path,
@@ -749,11 +749,6 @@ def _build_sglang_engine_kwargs(
         "max_total_tokens": (
             int(engine_options["max_total_tokens"])
             if engine_options.get("max_total_tokens") is not None
-            else None
-        ),
-        "random_seed": (
-            int(engine_options["random_seed"])
-            if engine_options.get("random_seed") is not None
             else None
         ),
         "sampling_params": dict(engine_options.get("sampling_params", {}) or {}),

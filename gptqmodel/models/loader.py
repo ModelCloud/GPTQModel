@@ -18,6 +18,7 @@ import transformers
 from ..utils.modelscope import ensure_modelscope_available
 from ..utils.structure import print_module_tree
 
+
 if ensure_modelscope_available():
     from modelscope import snapshot_download
 else:
@@ -317,6 +318,9 @@ def ModelLoader(cls):
         if not cls.support_offload_to_disk:
             quantize_config.offload_to_disk = False
             log.warn(f"{cls} doesn't support offload_to_disk, set quantize_config.offload_to_disk to False.")
+
+        if not cls.loader_requires_dtype:
+            model_init_kwargs.pop("dtype")
 
         if quantize_config.offload_to_disk:
             shell_config = copy.deepcopy(config)
@@ -690,9 +694,12 @@ def ModelLoader(cls):
                 elif is_flash_attn_2_available():
                     args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
                     log.info("Loader: Auto enabling flash attention2")
+            args["dtype"] = dtype
+            if not cls.loader_requires_dtype:
+                args.pop("dtype")
 
             model = cls.loader.from_config(
-                config, trust_remote_code=trust_remote_code, dtype=dtype, **args
+                config, trust_remote_code=trust_remote_code, **args
             )
             defuser.convert_model(model, cleanup_original=True)
             model.checkpoint_file_name = model_save_name

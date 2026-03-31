@@ -44,10 +44,10 @@ class Qwen3NextGPTQ(BaseQModel):
                 # MoE router + shared expert (Qwen3NextSparseMoeBlock)
                 "gate": ("gate:!",),  # router gate linear
                 "shared_expert_gate": ("shared_expert_gate:!",), # <-- single (1, N) logic projections should not be quantized
-                "shared_expert": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
 
                 # Experts list with dynamic index
-                "experts": {
+                "experts:0": {
                     "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },

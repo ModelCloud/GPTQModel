@@ -8,11 +8,11 @@
 """Unit tests for ParoQuant config, optimizer, and lifecycle invariants."""
 
 import copy
-from contextlib import contextmanager
 import inspect
 from pathlib import Path
 import sys
 import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest

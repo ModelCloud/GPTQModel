@@ -28,6 +28,7 @@ from transformers import (
     modeling_utils,
 )
 
+
 try:  # Optional dependency for huggingface datasets support
     from datasets import Dataset as HFDataset
     from datasets import IterableDataset as HFIterableDataset
@@ -191,6 +192,9 @@ class BaseQModel(nn.Module):
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     loader = AutoModelForCausalLM
 
+    # Some models only require config during initialization and do not need dtype, e.g., MiniCPMO.
+    loader_requires_dtype = True
+
     # monkey patch api for trust_remote_code=True models that have broken transformer compat
     require_monkeypatch = False
 
@@ -304,7 +308,7 @@ class BaseQModel(nn.Module):
         self.quant_log = []
 
         if self.require_load_processor:
-            self.processor = AutoProcessor.from_pretrained(model_local_path)
+            self.processor = AutoProcessor.from_pretrained(model_local_path, trust_remote_code=self.require_trust_remote_code)
 
         # apply patching of broken trust_remote_code models here
         if self.require_monkeypatch:
@@ -1194,16 +1198,6 @@ class BaseQModel(nn.Module):
     def prepare_inputs_for_generation(self, *args, **kwargs):
         """shortcut for model.prepare_inputs_for_generation"""
         return self.model.prepare_inputs_for_generation(*args, **kwargs)
-
-    # placeholder, noop, and alert users to correct static api
-    def push_to_hub(self,
-                    repo_id: str,
-                    quantized_path: str,  # saved local directory path
-                    private: bool = False,
-                    exists_ok: bool = False,  # set to true if repo already exists
-                    token: Optional[str] = None):
-
-        log.error("`push_to_hub()` api cannot be used on the model instance. Please use `GPTQModel.push_to_hub()` static api instead.")
 
     def save(
             self,

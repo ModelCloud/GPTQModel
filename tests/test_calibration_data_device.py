@@ -18,8 +18,6 @@ This feature allows specifying where calibration data is stored during quantizat
 import os
 import types
 import unittest
-from typing import Dict, List, Optional
-from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -185,7 +183,6 @@ def test_stage_capture_cpu_device_stores_inputs_on_cpu(monkeypatch):
     Tests: stage_inputs_capture.py lines 85-108, 132-165
     """
     from gptqmodel.looper.stage_inputs_capture import StageInputsCapture
-    from gptqmodel.nn_modules.hooked_linear import StopForward
 
     # Create a minimal model where calling model(input_ids=...) triggers the hooked layer
     class MinimalModel(nn.Module):
@@ -369,7 +366,7 @@ def test_stage_capture_balanced_mode_applies_compute_device_filter(monkeypatch):
 
     # Track which devices are actually used
     used_devices = []
-    original_move_to = __import__('gptqmodel.utils.model', fromlist=['move_to']).move_to
+    __import__('gptqmodel.utils.model', fromlist=['move_to']).move_to
 
     def tracking_move_to(obj, device, **kwargs):
         if isinstance(obj, torch.Tensor):

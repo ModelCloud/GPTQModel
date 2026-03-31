@@ -29,13 +29,13 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
-from ..config import PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT, PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT
 from ...utils.env import env_flag
 from ...utils.paroquant import (
     apply_paroquant_rotation,
     apply_paroquant_rotation_autograd,
     build_identity_rotation_buffers,
 )
+from ..config import PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT, PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT
 
 
 _PAROQUANT_STAGE_PAIR_IMPLS: tuple[str, ...] = ("fast", "reference")

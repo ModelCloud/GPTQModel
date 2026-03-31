@@ -1054,7 +1054,7 @@ class ModelTest(unittest.TestCase):
                     trust_remote_code=trust_remote_code,
                     backend=backend,
             )
-            tokenizer = model.tokenizer or self.load_tokenizer(model_path, trust_remote_code=trust_remote_code)
+            model.tokenizer or self.load_tokenizer(model_path, trust_remote_code=trust_remote_code)
             # Pre-lm-eval smoke prompts are intentionally disabled to keep quantization tests
             # focused only on lm_eval task execution.
             # inference_records[backend] = self.run_generic_inference_checks(model, tokenizer, backend)
@@ -1629,7 +1629,7 @@ class ModelTest(unittest.TestCase):
 
                     q_tokenizer = q_model.tokenizer or self.load_tokenizer(path, trust_remote_code=trust_remote_code)
                     if need_create_processor:
-                        processor = AutoProcessor.from_pretrained(path)
+                        processor = AutoProcessor.from_pretrained(path, trust_remote_code=trust_remote_code)
             except Exception:
                 if cleanup_callback is not None:
                     try:
