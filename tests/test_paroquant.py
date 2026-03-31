@@ -4233,6 +4233,7 @@ def test_paroquant_cuda_awq_kernel_preserves_bf16(monkeypatch):
     assert seen["input_dtype"] == torch.bfloat16
     assert seen["scales_dtype"] == torch.bfloat16
     assert seen["split_k_iters"] == 4
+    assert module.scales.dtype == torch.bfloat16
     assert out is not None
     assert out.dtype == torch.bfloat16
 
