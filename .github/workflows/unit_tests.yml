@@ -260,7 +260,7 @@ jobs:
       #        continue-on-error: true
       #        run: |
       ##         curl -s -F "runid=${{ github.run_id }}" -F "repo=${{ env.repo }}" -F "ref=${{ env.ref }}" -F "sha256=${{ env.SOURCE_HASH }}" -F "file=@dist/gptqmodel_source.tar.gz" http://$RUNNER/gpu/whl/upload
-      #          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
+      #          DIR=/opt/dist/GPTQModel/${{ needs.check-vm.outputs.run_id }}
       #          [ -d $DIR ] || mkdir -p $DIR
       #          cp dist/gptqmodel_source.tar.gz $DIR/
 
@@ -282,7 +282,7 @@ jobs:
           python --version
           echo "::endgroup::"
 
-          log_dir=/opt/dist/${{ github.run_id }}/logs
+          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
           [ -d $log_dir ] || mkdir -p $log_dir
           log_file=$log_dir/build.log
 
@@ -329,7 +329,7 @@ jobs:
           WHEEL="$(readlink -f dist/*.whl)"
           SHA256="$(sha256sum "$WHEEL" | awk '{print $1}')"
 
-          DIR=/opt/dist/${{ github.run_id }}
+          DIR=/opt/dist/GPTQModel/${{ github.run_id }}
           [ -d $DIR ] || mkdir -p $DIR
           cp $WHEEL $DIR/
 
@@ -339,7 +339,7 @@ jobs:
         run: |
           ls -ahl dist
           
-          log_dir=/opt/dist/${{ github.run_id }}/logs
+          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
           log_file=$log_dir/build.log
           grep -nE "ptxas fatal|nvcc fatal|error:|fatal error|ninja: build stopped" $log_file | head -n 50 || true
 
@@ -488,7 +488,7 @@ jobs:
       - name: Download wheel from local
         continue-on-error: true
         run: |
-          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
+          DIR=/opt/dist/GPTQModel/${{ needs.check-vm.outputs.run_id }}
           [ -d $DIR ] || exit 1
           echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
 
@@ -705,7 +705,7 @@ jobs:
           }
           trap cleanup EXIT
 
-          log_dir=/opt/dist/${{ github.run_id }}/logs
+          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
           log_file=$log_dir/${{ matrix.test_script }}.log
 
           mkdir -p "$(dirname "$log_file")"
@@ -732,7 +732,7 @@ jobs:
         if: ${{ !cancelled() &&  failure() }}
         continue-on-error: true
         run: |
-          log_dir=/opt/dist/${{ github.run_id }}/logs
+          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
           log_file=$log_dir/${{ matrix.test_script }}.log
 
           grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
@@ -828,7 +828,7 @@ jobs:
       - name: Download wheel from local
         continue-on-error: true
         run: |
-          DIR=/opt/dist/${{ needs.check-vm.outputs.run_id }}
+          DIR=/opt/dist/GPTQModel/${{ needs.check-vm.outputs.run_id }}
           [ -d $DIR ] || exit 1
           echo "WHL_DOWNLOADED=1" >> $GITHUB_ENV
 
@@ -994,7 +994,7 @@ jobs:
           }
           trap cleanup EXIT
 
-          log_dir=/opt/dist/${{ github.run_id }}/logs
+          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
           log_file=$log_dir/${{ matrix.test_script }}.log
 
           mkdir -p "$(dirname "$log_file")"
@@ -1021,7 +1021,7 @@ jobs:
         if: ${{ !cancelled() && failure() }}
         continue-on-error: true
         run: |
-          log_dir=/opt/dist/${{ github.run_id }}/logs
+          log_dir=/opt/dist/GPTQModel/${{ github.run_id }}/logs
           log_file=$log_dir/${{ matrix.test_script }}.log
 
           grep -nE "nvcc fatal|error:|fatal error|ModuleNotFoundError|ImportError|AssertionError|Exception|is the correct path|No such file or directory|Repo id must be in" "$log_file" | head -n 50 || true
