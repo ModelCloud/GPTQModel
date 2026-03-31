@@ -27,6 +27,7 @@ from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.stage_subset import build_subset_plan, run_subset_stage
 from gptqmodel.models.definitions.qwen2_moe import Qwen2MoeQModel
+from gptqmodel.models.definitions.qwen3_5_moe import Qwen3_5_MoeQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from gptqmodel.quantization import FORMAT, METHOD
@@ -100,6 +101,20 @@ def test_mlp_capture_flag_propagates_to_layer_modules():
 def test_qwen2_moe_shared_expert_merges_with_experts():
     blocks = Qwen2MoeQModel.build_layer_modules(Qwen2MoeQModel.module_tree)
 
+    gate_block = next(block for block in blocks if "mlp.shared_expert.gate_proj" in block)
+    assert "mlp.experts.{expert_index}.gate_proj" in gate_block
+    assert "mlp.experts.{expert_index}.up_proj" in gate_block
+
+    down_block = next(block for block in blocks if "mlp.shared_expert.down_proj" in block)
+    assert "mlp.experts.{expert_index}.down_proj" in down_block
+
+    expert_gate_blocks = [block for block in blocks if "mlp.experts.{expert_index}.gate_proj" in block]
+    assert len(expert_gate_blocks) == 1
+
+
+def test_qwen3_5_moe_shared_expert_merges_with_experts():
+    blocks = Qwen3_5_MoeQModel.build_layer_modules(Qwen3_5_MoeQModel.module_tree)
+    print("blocks",blocks)
     gate_block = next(block for block in blocks if "mlp.shared_expert.gate_proj" in block)
     assert "mlp.experts.{expert_index}.gate_proj" in gate_block
     assert "mlp.experts.{expert_index}.up_proj" in gate_block
