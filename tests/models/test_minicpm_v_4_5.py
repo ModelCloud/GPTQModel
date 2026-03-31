@@ -16,7 +16,7 @@ class TestMiniCPMV4_5(ModelTest):
 
     def test_minicpm_v_4_5(self):
         # Evalution does not support minicpmv, and will throw an error during execution:
-        # E TypeError: MiniCPMO.forward() missing 1 required positional argument: 'data
+        # E TypeError: MiniCPMV.forward() missing 1 required positional argument: 'data
         with self.model_compat_test_context():
             model, tokenizer, processor = self.quantModel(
                 self.NATIVE_MODEL_ID,
